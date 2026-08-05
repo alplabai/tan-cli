@@ -43,6 +43,7 @@ from tan.commands.bootstrap_cmd import (
     load_facts,
     reconcile_west_manifest_path,
     resolve_python_floor,
+    workspace_orphan_refusal,
 )
 from tan.core.bootstrap import (
     INCOMPATIBLE,
@@ -707,10 +708,169 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     assert env["data"]["sdkRoot"] == bootstrap_cmd._native(str(new_sdk))
     assert env["data"]["workspaceDir"] == bootstrap_cmd._native(str(target))
     # tan-cli#185 (shared with the explicit `--workspace` path): the global
-    # default SDK now points at the new location.
+    # default SDK now points at the new location, AND (tan-cli#464) records
+    # which directory's bootstrap wrote it -- the ONLY record of a relocation
+    # (tan-cli#464 review): a directory-scoped project pin was tried and
+    # reverted (see `bootstrap_cmd._run`'s own comment at the relocation
+    # write) -- this cwd is the workspace PARENT, not a project, and a
+    # bootstrap from `$HOME` would have pinned inside tan's own machine-global
+    # config dir.
     pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
     assert pointer.exists()
-    assert json.loads(pointer.read_text(encoding="utf-8"))["sdkPath"] == str(new_sdk)
+    global_doc = json.loads(pointer.read_text(encoding="utf-8"))
+    assert global_doc["sdkPath"] == str(new_sdk)
+    assert global_doc["writtenFor"] == str(sdk.parent).replace("\\", "/")
+    assert not (sdk.parent / ".alp" / "sdk-path").exists()  # not a project pin
+
+
+def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):
+    """tan-cli#463: the test above proves the pointer FILE is written; this
+    proves a *second, independent* `tan doctor` process -- run later, from the
+    same directory, the way a customer's next terminal command actually would
+    -- can still resolve the SDK from nothing but that file. The gap #463
+    reported was never "the write is missing" so much as "no test ever drove
+    the read side through a real subprocess boundary": `resolve_sdk_tiered`'s
+    `globalDefault` tier reads `~/.alp/sdk-default` fresh on every invocation,
+    so a bug in THAT read (wrong `_home_alp_dir()`, a JSON-shape mismatch
+    between writer and reader, `.alp/sdk-path` wrongly outranking it) would
+    pass every check above and still leave a customer's `tan doctor` reporting
+    `sdk.root: None` right after a bootstrap that just told them otherwise.
+
+    `proj/`, the workspace PARENT bootstrap ran in, is deliberately never a
+    tan project of its own (no `.alp/sdk-path` is ever written there by this
+    flow) -- so the tier that must answer here is the GLOBAL default, not a
+    project pin `resolve_sdk_tiered` would also have checked first.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    new_sdk = sdk.parent / "alp-workspace" / sdk.name
+
+    bootstrap_env = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
+        )
+    )
+    assert bootstrap_env["exitCode"] == 0
+    assert bootstrap_env["sdk"]["root"] == str(new_sdk).replace("\\", "/")
+    assert not (sdk.parent / ".alp" / "sdk-path").exists()  # not a project pin
+
+    # A FRESH process, same cwd, nothing carried over but the filesystem --
+    # exactly `tan doctor` typed into the same shell a moment later.
+    doctor_env = envelope(run_tan("doctor", "--format", "json", cwd=sdk.parent))
+    assert "sdk" in doctor_env, "doctor lost the SDK after a relocating bootstrap"
+    assert doctor_env["sdk"]["root"] == bootstrap_env["sdk"]["root"]
+    assert doctor_env["sdk"]["sourceTier"] == "globalDefault"
+
+
+def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_path):
+    """tan-cli#464, the maintainer's own repro shape, driven through real,
+    independent subprocesses (never by inspecting pointer bytes -- that
+    coverage already existed and did not catch this):
+
+        A, right after A       sdk.root=<A's own checkout> tier=globalDefault
+        (project B bootstraps and relocates)
+        A (the earlier one)    sdk.root=<B's checkout!>     tier=globalDefault
+
+    `~/.alp/sdk-default` is machine-global and last-writer-wins, so before
+    this fix project A silently started resolving project B's checkout the
+    moment B bootstrapped -- `ok: true`, `issues: []`, identical to the
+    correct case.
+
+    A per-project pin at bootstrap time (`.alp/sdk-path` written in the
+    directory bootstrap ran in) was tried and reverted on review: that
+    directory is bootstrap's cwd, the workspace PARENT in the quickstart, not
+    a project -- a bootstrap run from `$HOME` would have pinned inside tan's
+    OWN machine-global config dir, silencing this exact warning for
+    essentially every project the user owns. The fix that ships is
+    disclosure, not prevention: A's `sdk current` STILL resolves B's checkout
+    after B relocates -- that is what "last-writer-wins" means and stays true
+    -- but it now carries `sdk.global-default-foreign-project` naming whose
+    bootstrap actually decided the answer, closing the `issues: []` silence
+    without touching resolution.
+
+    ONE shared HOME across the whole sequence (tan-cli#463's own lesson: an
+    "isolated HOME" control that resets between calls never lets the
+    precondition -- a SECOND project's relocation -- actually land, and a
+    probe that never triggers its own precondition proves nothing).
+    """
+    home = tmp_path / "shared-home"
+    env_extra = {"HOME": str(home), "USERPROFILE": str(home)}
+
+    sdk_a = make_sdk(tmp_path / "projA", tools=[PRESENT_TOOL])
+    sdk_b = make_sdk(tmp_path / "projB", tools=[PRESENT_TOOL])
+    proj_a, proj_b = sdk_a.parent, sdk_b.parent
+    # tan-cli#302's own trigger: something besides the clone beside it (here,
+    # standing in for `relocprobe4.sh`'s own `<project>/tan` wrapper) is what
+    # makes the dirty-parent guard auto-relocate each checkout.
+    (proj_a / "unrelated.txt").write_text("x", encoding="utf-8")
+    (proj_b / "unrelated.txt").write_text("x", encoding="utf-8")
+    new_sdk_a = proj_a / "alp-workspace" / sdk_a.name
+    new_sdk_b = proj_b / "alp-workspace" / sdk_b.name
+
+    bootstrap_a = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk_a), cwd=proj_a, env_extra=env_extra,
+        )
+    )
+    relocated_a = "bootstrap.workspace-relocated" in codes(bootstrap_a)
+    print(f"RELOCATED? {'YES' if relocated_a else 'NO'} (project A)")
+    assert bootstrap_a["exitCode"] == 0
+    assert relocated_a, "precondition unmet: A's bootstrap must actually relocate"
+
+    # Right after A's own bootstrap: A resolves its own checkout via the
+    # global default, `writtenFor` naming A itself -- no cross-project
+    # warning. Compared through the envelope's top-level `sdk.root` (ALWAYS
+    # posix, `SdkInfo.as_dict`), not `data.sdkPath` (raw/native on both
+    # sides).
+    current_a1 = envelope(
+        run_tan("sdk", "current", "--format", "json", cwd=proj_a, env_extra=env_extra)
+    )
+    print(
+        f"  A, right after A       sdk.root={current_a1['sdk']['root']!r} "
+        f"tier={current_a1['data']['sourceTier']}"
+    )
+    assert current_a1["sdk"]["root"] == str(new_sdk_a).replace("\\", "/")
+    assert current_a1["data"]["sourceTier"] == "globalDefault"
+    assert "sdk.global-default-foreign-project" not in codes(current_a1)
+
+    bootstrap_b = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk_b), cwd=proj_b, env_extra=env_extra,
+        )
+    )
+    relocated_b = "bootstrap.workspace-relocated" in codes(bootstrap_b)
+    print(f"RELOCATED? {'YES' if relocated_b else 'NO'} (project B)")
+    assert bootstrap_b["exitCode"] == 0
+    assert relocated_b, "precondition unmet: B's bootstrap must actually relocate"
+    pointer = home / ".alp" / "sdk-default"
+    print(f"  pointer now: {pointer.read_text(encoding='utf-8').strip()}")
+
+    # A, queried again from the SAME directory: the shared global default now
+    # points at B, so A DOES resolve B's checkout -- the defect this test
+    # pins is not that resolution changed (it did not, and should not: layer
+    # 2 is a disclosure fix, not a prevention one), but that this is no
+    # longer SILENT. Pre-fix code has no `sdk.global-default-foreign-project`
+    # code at all, so this assertion fails against it.
+    current_a2 = envelope(
+        run_tan("sdk", "current", "--format", "json", cwd=proj_a, env_extra=env_extra)
+    )
+    print(
+        f"  A (the earlier one)    sdk.root={current_a2['sdk']['root']!r} "
+        f"tier={current_a2['data']['sourceTier']}"
+    )
+    assert current_a2["sdk"]["root"] == str(new_sdk_b).replace("\\", "/")
+    assert current_a2["data"]["sourceTier"] == "globalDefault"
+    assert "sdk.global-default-foreign-project" in codes(current_a2), (
+        "DEFECT: project A silently resolved project B's SDK with no warning"
+    )
+    message = next(
+        i["message"] for i in current_a2["issues"]
+        if i["code"] == "sdk.global-default-foreign-project"
+    )
+    assert str(proj_b).replace("\\", "/") in message
 
 
 def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_path):
@@ -747,6 +907,95 @@ def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_pa
     # tan-cli#284: the stale "re-run interactively" advice is gone -- this
     # port never prompts, on any run, TTY or not.
     assert "interactively" not in message
+
+
+def test_print_env_agrees_with_dry_run_on_a_dirty_parent(tmp_path):
+    """tan-cli#459: `--print-env` used to answer BEFORE the workspace-parent
+    guard above ever ran, so on the exact dirty-parent host that guard
+    relocates off of (the fixture above -- tan's own binary beside a freshly
+    cloned alp-sdk, per the documented quickstart), it reported
+    `data.workspaceDir`/`sdkRoot`/`zephyrBase` as the checkout's raw,
+    unrelocated parent -- three exported paths a real `tan bootstrap` would
+    never create -- at `ok: true`, `issues: []`: silent success for advice
+    that cannot work. `--dry-run` over the IDENTICAL input already got this
+    right, so this pins agreement between the two rather than a hardcoded
+    path: a future change to `default_relocation_target`'s own choice must
+    move both together or this test catches the divergence."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    target = sdk.parent / "alp-workspace"
+
+    print_env = envelope(
+        run_tan(
+            "bootstrap", "--print-env", "--format", "json", "--sdk-root", str(sdk),
+            cwd=sdk.parent,
+        )
+    )
+    dry_run = envelope(
+        run_tan(
+            "bootstrap", "--dry-run", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
+        )
+    )
+
+    assert print_env["data"]["workspaceDir"] == bootstrap_cmd._native(str(target))
+    assert print_env["data"]["sdkRoot"] == bootstrap_cmd._native(str(target / sdk.name))
+    assert print_env["data"]["zephyrBase"] == bootstrap_cmd._native(str(target / "zephyr"))
+    assert print_env["data"]["workspaceDir"] == dry_run["data"]["workspaceDir"]
+    assert print_env["data"]["sdkRoot"] == dry_run["data"]["sdkRoot"]
+    assert print_env["data"]["zephyrBase"] == dry_run["data"]["zephyrBase"]
+    assert "bootstrap.workspace-relocated" in codes(print_env)
+    # `--print-env`'s own contract (the --workspace conflict refusal's own
+    # wording): "prints what an already-resolved workspace exports and moves
+    # nothing". Nothing on disk may move just because the reported paths did.
+    assert sdk.exists()
+    assert not target.exists()
+    assert not (tmp_path / "fake-home" / ".alp" / "sdk-default").exists()
+
+
+def test_print_env_agrees_with_dry_run_on_an_adopted_zephyr_base(tmp_path):
+    """tan-cli#459 was only HALF fixed by projecting `--print-env` through the
+    relocation guard: on the ADOPTION branch (an ambient `$ZEPHYR_BASE` this
+    run would REUSE, `_select_workspace`'s own call) the guard never applies
+    at all -- `guard_applies` is False exactly when adoption applies -- so
+    nothing relocates, but `--print-env` still named the checkout's own,
+    unrelocated `ws`, a workspace a real run never builds; `--dry-run` over
+    the identical input already named the adopted `other` topdir."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])  # <tmp_path>/ws/alp-sdk
+    other = tmp_path / "other"
+    zephyr = other / "zephyr"
+    zephyr.mkdir(parents=True)
+    (zephyr / "VERSION").write_text(
+        "VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = 1\nEXTRAVERSION =\n",
+        encoding="utf-8",
+    )
+    (other / ".west").mkdir()
+    (other / ".west" / "config").write_text(
+        "[manifest]\npath = ../ws/alp-sdk\nfile = west.yml\n", encoding="utf-8"
+    )
+
+    print_env = envelope(
+        run_tan(
+            "bootstrap", "--print-env", "--format", "json", "--sdk-root", str(sdk),
+            cwd=sdk.parent, env_extra={"ZEPHYR_BASE": str(zephyr)},
+        )
+    )
+    dry_run = envelope(
+        run_tan(
+            "bootstrap", "--dry-run", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent, env_extra={"ZEPHYR_BASE": str(zephyr)},
+        )
+    )
+
+    assert print_env["data"]["workspaceDir"] == bootstrap_cmd._native(str(other))
+    assert print_env["data"]["workspaceDir"] == dry_run["data"]["workspaceDir"]
+    assert print_env["data"]["zephyrBase"] == dry_run["data"]["zephyrBase"]
+    assert print_env["data"]["sdkRoot"] == dry_run["data"]["sdkRoot"]
+    # Adoption never moves the checkout -- only `--print-env`'s reported
+    # `workspaceDir`/`zephyrBase` change; `sdkRoot` stays the checkout itself.
+    assert print_env["data"]["sdkRoot"] == bootstrap_cmd._native(str(sdk))
+    assert sdk.exists()
+    assert not (tmp_path / "fake-home" / ".alp" / "sdk-default").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -943,6 +1192,52 @@ def test_the_enclosing_west_guard_does_not_fire_when_the_topdir_reuses_its_own_w
     )
     env = envelope(proc)
     assert "bootstrap.enclosing-west-workspace" not in codes(env)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#469 -- `workspace-orphan-refused` never names a stringified `None`
+# or advises dropping a `--workspace` the invocation never carried.
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_orphan_refusal_names_the_real_destination_when_workspace_was_given(
+    tmp_path,
+):
+    """`target is not None` only when `--workspace` was passed explicitly --
+    currently the ONLY way this refusal is reached at all (`default_
+    relocation_target` returns `None` the instant the parent already holds a
+    `.west/config`, tan-cli#389/#390). The destination is real here, so
+    "drop --workspace" is applicable advice and must stay."""
+    repo_root = tmp_path / "ws" / "alp-sdk"
+    source_topdir = tmp_path / "ws"
+    target = tmp_path / "newhome"
+
+    message = workspace_orphan_refusal(repo_root, source_topdir, target)
+
+    assert "None" not in message
+    assert str(target) in message
+    assert "moving it to" in message
+    assert "drop --workspace" in message
+
+
+def test_workspace_orphan_refusal_has_no_destination_and_no_unreachable_advice(tmp_path):
+    """tan-cli#469: `target is None` is the shape of call the bug was filed
+    against -- no `--workspace` was passed, so there is no real destination.
+    The message must say that instead of interpolating a stringified `None`,
+    and must not send the reader to drop a flag they never carried."""
+    repo_root = tmp_path / "ws" / "alp-sdk"
+    source_topdir = tmp_path / "ws"
+
+    message = workspace_orphan_refusal(repo_root, source_topdir, None)
+
+    assert "None" not in message
+    assert str(repo_root) in message
+    assert str(source_topdir) in message
+    assert "cannot be relocated" in message
+    assert "This workspace is already bootstrapped" in message
+    assert "re-run without --sdk-root pointing into it" in message
+    assert "clone a SECOND alp-sdk checkout elsewhere" in message
+    assert "drop --workspace" not in message
 
 
 def test_a_relocation_is_rolled_back_when_a_later_step_fails(tmp_path):

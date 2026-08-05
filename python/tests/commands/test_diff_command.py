@@ -34,6 +34,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from tan.commands import diff_cmd
 from tan.commands.diff_cmd import (
     ParseFailure,
     _inference_is_empty,
@@ -320,15 +321,30 @@ def test_inference_default_arena_kib_wrong_type_is_a_schema_violation(tmp_path: 
     assert envelope["issues"][0]["code"] == "diff.schema-violation"
 
 
+def _stub_sdk(tmp_path: Path, *, validator_body: str | None) -> Path:
+    """A stand-in alp-sdk checkout: the loader marker `resolve_sdk` (via
+    `resolve_sdk_tiered`) validates a `--sdk-root` against, plus (when given)
+    the `validate_board_yaml.py` the new cross-check spawns. Passing `None`
+    reproduces a stub/incomplete SDK with no validator script at all -- the
+    exact shape `test_diff_sdk_root_populates_sdk_block_on_success` hands
+    `diff`, which the SDK cross-check must leave passing unmodified."""
+    sdk = tmp_path / "alp-sdk"
+    scripts = sdk / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "alp_project.py").write_text("", encoding="utf-8")
+    if validator_body is not None:
+        (scripts / "validate_board_yaml.py").write_text(validator_body, encoding="utf-8")
+    return sdk
+
+
 def test_diff_sdk_root_populates_sdk_block_on_success(tmp_path: Path) -> None:
     """BLOCKER regression: `--sdk-root` used to be accepted and silently
     dropped -- `diff` now resolves it and echoes `sdk.root`/`sdk.sourceTier`
     on the success envelope, matching the oracle (byte-matched, including the
     `"sdkRootFlag"` source tier spelling `resolve_sdk` already shares with
-    `pinmux`)."""
-    sdk = tmp_path / "sdk"
-    (sdk / "scripts").mkdir(parents=True)
-    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    `pinmux`). Also the "no validate_board_yaml.py at all" shape
+    `_reject_if_sdk_validator_disagrees` must leave a no-op."""
+    sdk = _stub_sdk(tmp_path, validator_body=None)
     proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
@@ -345,9 +361,7 @@ def test_diff_sdk_root_populates_sdk_block_on_board_yaml_missing_failure(tmp_pat
     """The same fix, on the FAILURE envelope -- measured against the oracle:
     `diff --sdk-root <path>` against a missing board.yaml still reports the
     `sdk` block on the exit-2 envelope, not just on success."""
-    sdk = tmp_path / "sdk"
-    (sdk / "scripts").mkdir(parents=True)
-    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    sdk = _stub_sdk(tmp_path, validator_body=None)
     empty = tmp_path / "empty"
     empty.mkdir()
     result = runner.invoke(
@@ -360,6 +374,203 @@ def test_diff_sdk_root_populates_sdk_block_on_board_yaml_missing_failure(tmp_pat
         "sourceTier": "sdkRootFlag",
     }
     assert envelope["issues"][0]["code"] == "diff.board-yaml-missing"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#455: `diff` must refuse a board.yaml the SDK's own validator
+# rejects, rather than reporting a normalization comparison it could not
+# meaningfully perform. Reproduced directly against a real alp-sdk checkout
+# before this fix (measured): `som.sku: E1M-NOSUCHSKU` + `preset:
+# not-a-real-preset` + a `notaperipheral` peripheral token -- `tan validate`
+# refuses at exit 2 with four `jsonschema` violations, `tan diff` on the
+# IDENTICAL project/`--sdk-root` reported exit 0 `unchanged: true`. These
+# tests drive a STAND-IN `scripts/validate_board_yaml.py`, mirroring
+# `test_validate_command.py`'s own precedent, so they need no real alp-sdk
+# checkout to run in CI.
+# ---------------------------------------------------------------------------
+
+
+def test_sdk_schema_violation_refuses_the_diff_instead_of_reporting_clean(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """THE regression: before this fix, `compute_diff_entries` never asked
+    whether the SDK's own validator considers the board usable at all, so a
+    board.yaml well-SHAPED enough for `diff`'s own structural checks (every
+    field it reads is the right YAML type) but semantically invalid per the
+    SDK's schema sailed through as a clean, meaningless comparison. On the
+    pre-fix tree this stand-in reproduces that exactly: exit 0, `ok: true`,
+    `unchanged: true` -- contradicting a `validate` run against the same
+    stand-in, which would refuse. Post-fix: `diff` reuses `validate_cmd`'s own
+    spawn-and-analyze functions and refuses too, at the SAME exit code
+    `validate` would report for this outcome.
+    """
+    proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
+    sdk = _stub_sdk(
+        tmp_path,
+        validator_body=(
+            "import sys\n"
+            "sys.stderr.write(\"FAIL board.yaml: 'notaperipheral' is not one of the "
+            "known peripherals\\n\")\n"
+            "sys.exit(1)\n"
+        ),
+    )
+    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["data"]["unchanged"] is False
+    assert envelope["data"]["changes"] == []
+    assert envelope["issues"][0]["code"] == "diff.schema-violation"
+    assert "notaperipheral" in envelope["issues"][0]["message"]
+    # The `sdk` block is still carried through to the failure envelope, the
+    # same guarantee `board-yaml-missing` already gives (see the test above).
+    assert envelope["sdk"]["sourceTier"] == "sdkRootFlag"
+
+
+def test_sdk_clean_verdict_leaves_a_real_comparison_untouched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other half: an SDK-validated CLEAN board must still get diff's own
+    comparison, not a false refusal just because the cross-check ran."""
+    proj = _project(tmp_path, "libraries: []\n")
+    sdk = _stub_sdk(
+        tmp_path, validator_body="import sys\nsys.stdout.write('board.yaml: clean\\n')\n"
+    )
+    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    assert envelope["data"]["changes"] == [{"path": "libraries", "kind": "removed", "before": []}]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#455 review round: three MAJOR findings against the cross-check
+# above. All three shared one root shape -- a spawn that STARTS and then
+# fails to reach a verdict (or must never be allowed to start at all) used to
+# either report a clean diff (reopening #455 for a narrower trigger) or get
+# flattened into `diff.schema-violation` (misreporting a broken validator
+# ENVIRONMENT as an invalid board). Mirrors `test_validate_command.py`'s own
+# precedent for the identical guards (`test_a_wedged_validator_times_out_...`,
+# `test_a_validator_that_cannot_be_started_is_runtime_failure`,
+# `test_validate_refuses_before_spawning_a_too_old_interpreter` -- see that
+# file for the exact names).
+# ---------------------------------------------------------------------------
+
+
+def test_sdk_validator_timeout_refuses_instead_of_reporting_clean(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MAJOR (finding 1): the first cut's blanket `except (OSError, ValueError,
+    subprocess.SubprocessError): return` also caught `TimeoutExpired` (a
+    `SubprocessError` subclass), so a wedged validator silently fell back to
+    a clean diff -- reopening #455 for a narrower trigger. Post-fix: a
+    timeout refuses as `diff.failed`, matching `validate.failed`'s own
+    tan-cli#262 shape (exit 2, not a launch failure)."""
+    proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
+    sdk = _stub_sdk(tmp_path, validator_body="import time\ntime.sleep(30)\n")
+    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(diff_cmd, "VALIDATOR_TIMEOUT_S", 1)
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["data"]["unchanged"] is False
+    assert envelope["issues"][0]["code"] == "diff.failed"
+    assert "did not finish within 1s" in envelope["issues"][0]["message"]
+
+
+def test_sdk_validator_unstartable_interpreter_refuses_instead_of_reporting_clean(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MAJOR (finding 1): the same blanket `except` also caught a plain
+    `OSError` (no interpreter at the resolved path), so this reached a clean
+    diff too. Post-fix: `diff.spawn-failed` at `RUNTIME_FAILURE` (exit 1),
+    mirroring `validate.spawn-failed` -- never a clean verdict from a spawn
+    that never started."""
+    proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
+    sdk = _stub_sdk(tmp_path, validator_body="import sys\nsys.exit(0)\n")
+    absent = str(tmp_path / "no-such-interpreter")
+    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: absent)
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 1, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["data"]["unchanged"] is False
+    assert envelope["issues"][0]["code"] == "diff.spawn-failed"
+    assert absent in envelope["issues"][0]["message"]
+
+
+def test_sdk_validator_crash_is_reported_as_failed_not_schema_violation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MAJOR (finding 2): the first cut hardcoded
+    `ParseFailure("schema-violation", ...)` for EVERY non-clean outcome, so a
+    validator ENVIRONMENT crash (exit 1 WITH a Python traceback --
+    `analyze_validator_output` already reclassifies this off
+    `schema-violation` to `failed`, exactly to stop a broken environment
+    reading as a board defect) still reached the wire as
+    `diff.schema-violation`. Post-fix: `_reject_if_sdk_validator_disagrees`
+    raises `ParseFailure(result.outcome, ...)`, so the real outcome
+    (`failed`) is what reaches the wire."""
+    proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
+    sdk = _stub_sdk(
+        tmp_path,
+        validator_body=(
+            "raise TypeError(\"dataclass() got an unexpected keyword argument "
+            "'slots'\")\n"
+        ),
+    )
+    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "diff.failed"
+    assert "unexpected keyword argument 'slots'" in envelope["issues"][0]["message"]
+
+
+def test_sdk_validator_below_the_floor_refuses_before_spawning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MAJOR (finding 3): the first cut never ported `validate_cmd`'s guard 3
+    (`resolve_manifest_python_floor` + `_python_too_old`), so an interpreter
+    below the SDK's declared floor reached the spawn and crashed inside
+    alp-sdk instead of getting the friendly `python-too-old` refusal --
+    exactly the traceback finding 2's test reproduces directly. Post-fix:
+    the guard refuses BEFORE the spawn. `_python_too_old` is stubbed rather
+    than a real old interpreter being hunted for on the host, mirroring
+    `test_validate_command.py`'s own precedent for the identical guard; the
+    validator writes a marker file if it ever actually runs, which it must
+    not."""
+    proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
+    marker = tmp_path / "validator-ran"
+    sdk = _stub_sdk(tmp_path, validator_body=f"open({str(marker)!r}, 'w').close()\n")
+    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd,
+        "_python_too_old",
+        lambda _python, _floor: "Python 3.9 found at `python`, but alp-sdk requires "
+        "Python 3.10+. Put a newer `python` first on PATH.",
+    )
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "diff.python-too-old"
+    assert "requires Python 3.10+" in envelope["issues"][0]["message"]
+    assert not marker.exists(), "guard 3 must refuse BEFORE the spawn"
 
 
 def test_text_mode_reports_no_differences(tmp_path: Path) -> None:

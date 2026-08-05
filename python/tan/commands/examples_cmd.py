@@ -59,7 +59,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
-from tan.commands.sdk_cmd import project_pin_issue
+from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -330,30 +330,43 @@ def render_examples_text(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_sdk(
-    sdk_root: str | None, workspace_root: Path
-) -> tuple[Path, str, str, str | None] | None:
-    """`(path, display, sourceTier, brokenProjectPin)` for the resolved
-    checkout, or `None`.
+@dataclass(frozen=True)
+class _ResolvedSdk:
+    """`_resolve_sdk`'s own return shape -- a named result, not a growing
+    tuple (the same reasoning `build_cmd.SdkRootResolution` documents): a fact
+    one caller needs (`foreign_global_default_for`, tan-cli#464) must not
+    force every field before it to be re-counted by position."""
+
+    path: Path
+    display: str
+    tier: str
+    broken_project_pin: str | None = None
+    foreign_global_default_for: str | None = None
+
+
+def _resolve_sdk(sdk_root: str | None, workspace_root: Path) -> _ResolvedSdk | None:
+    """The resolved checkout as a [`_ResolvedSdk`], or `None`.
 
     `--sdk-root` is TERMINAL (I-31): a value that is not a real checkout resolves
     to nothing rather than falling through to discovery, so a typo'd flag yields
     an empty catalogue instead of silently listing some other checkout's
     examples.
 
-    `display` is separate from `path` because they are not interchangeable:
+    `.display` is separate from `.path` because they are not interchangeable:
     `Path("./sdk")` stringifies to `sdk`, dropping the `./` the caller typed,
     while Rust records `--sdk-root` as-is -- and `sdk.root` is on the wire.
 
-    `brokenProjectPin` (tan-cli#263 review) is `None` on the `--sdk-root`
+    `.broken_project_pin` (tan-cli#263 review) is `None` on the `--sdk-root`
     branch (nothing to fall through from), else whatever
     `resolve_sdk_root_wide` carried through -- `examples()` turns it into the
-    shared `sdk.project-pin-unresolved` warning.
+    shared `sdk.project-pin-unresolved` warning. `.foreign_global_default_for`
+    (tan-cli#464) is the same carry-through for the `globalDefault` tier's own
+    silence; `examples()` turns it into `sdk.global-default-foreign-project`.
     """
     if sdk_root:
         path = Path(sdk_root)
         if (path / "scripts" / "alp_project.py").is_file():
-            return path, sdk_root, "sdkRootFlag", None
+            return _ResolvedSdk(path, sdk_root, "sdkRootFlag")
         return None
     # `.alp/sdk-path` project pin > the machine-global default
     # (`~/.alp/sdk-default`) > the WIDE positional walk
@@ -363,10 +376,14 @@ def _resolve_sdk(
     # child `<ws>/alp-sdk`'s catalogue over a competing `../alp-sdk`'s
     # (tan-cli#263). No `ALP_SDK_ROOT` tier (tried and reverted -- see
     # `resolve_sdk_root_ladder`'s own docstring).
-    found, tier, broken_pin = resolve_sdk_root_wide(None, workspace_root)
+    resolution = resolve_sdk_root_wide(None, workspace_root)
+    found = resolution.path
     if found is None:
         return None
-    return found, str(found).replace("\\", "/"), tier, broken_pin
+    return _ResolvedSdk(
+        found, str(found).replace("\\", "/"), resolution.tier,
+        resolution.broken_project_pin, resolution.foreign_global_default_for,
+    )
 
 
 def examples(
@@ -383,7 +400,7 @@ def examples(
     """List the SDK's ready-made example projects."""
     json_mode = output_format == "json"
 
-    sdk: tuple[Path, str, str, str | None] | None = None
+    sdk: _ResolvedSdk | None = None
     found: list[Example] = []
     issues: list[Issue] = []
     exit_code = ExitCode.SUCCESS
@@ -394,14 +411,21 @@ def examples(
         workspace_root = Path.cwd() / project if project else Path.cwd()
         sdk = _resolve_sdk(sdk_root, workspace_root)
         if sdk is not None:
-            found = discover_examples(sdk[0] / "examples")
-            pin_issue = project_pin_issue(sdk[3], sdk[2])
+            found = discover_examples(sdk.path / "examples")
+            pin_issue = project_pin_issue(sdk.broken_project_pin, sdk.tier)
             if pin_issue is not None:
                 issues.append(pin_issue)
+            # tan-cli#464: the catalogue this command just listed can come from
+            # a `globalDefault` pointer a DIFFERENT project's bootstrap
+            # relocation actually wrote -- the same silence `sdk.project-
+            # pin-unresolved` above closes one tier up.
+            foreign_issue = global_default_foreign_project_issue(sdk.foreign_global_default_for)
+            if foreign_issue is not None:
+                issues.append(foreign_issue)
             # tan-cli#407: the catalogue this command just listed can come from
             # a different checkout than `tan build` plans against, with both
             # envelopes reporting `sourceTier: "discovery"`. `sdk_root` is the
-            # RAW flag, not `sdk[1]`'s resolved text -- naming a root
+            # RAW flag, not `sdk.display`'s resolved text -- naming a root
             # explicitly puts both ladders on the same terminal tier, and the
             # helper returns `None` there rather than warning about a collision
             # the user never reached.
@@ -452,7 +476,7 @@ def examples(
                 },
                 issues,
                 exit_code,
-                sdk=SdkInfo(sdk[1], sdk[2]) if sdk is not None else None,
+                sdk=SdkInfo(sdk.display, sdk.tier) if sdk is not None else None,
             )
         )
     else:

@@ -71,25 +71,182 @@ _FUNCTION_CAP = 50
 #: module" number so a split that shrinks one file cannot be spent widening
 #: another.
 _MODULE_BUDGET: dict[str, int] = {
-    "tan/commands/doctor_cmd.py": 3114,
-    "tan/commands/bootstrap_cmd.py": 2781,
+    # 3127, not 3114: the 27-camelCase-issue-code fix added `kebab_check_name`
+    # (+ its `_CAMEL_BOUNDARY` regex), the one shared place a `Check.name`
+    # becomes a kebab issue-code suffix, used by both `checks_to_issues()` here
+    # and `support_bundle_cmd._doctor_issues()`.
+    # 3135, not 3127, as of the tan-cli#464 rework: `doctor` now threads
+    # `resolve_sdk_root_ladder`'s `SdkRootResolution` through named fields
+    # instead of a tuple unpack, and appends `sdk.global-default-foreign-
+    # project` alongside `sdk.project-pin-unresolved` -- the same warning
+    # `sdk current`/`tan build` already disclose, wired into the "0 issues"
+    # report doctor exists to be honest about.
+    "tan/commands/doctor_cmd.py": 3135,
+    # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
+    # `--dry-run` about which workspace a real run would build, on both the
+    # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
+    # -- fixing both moved real logic into a new module-level
+    # `_print_env_outcome` (extracted specifically to keep `_run` AT, not
+    # over, its own 679-line ceiling below -- extraction cannot shrink the
+    # MODULE total, only move lines off the worst function), plus the
+    # one-line `target is not None` gate on the tan-cli#389 orphan refusal
+    # (was refusing every in-place re-run of an already-bootstrapped
+    # workspace, naming its own non-existent relocation target "None").
+    #
+    # 2886, not 2953, as of the tan-cli#464 REWORK (measured majors, then an
+    # independent design review, against the 2953-line shape immediately
+    # above): the directory-scoped `.alp/sdk-path` project pin a relocation
+    # used to also write (`_write_project_sdk_pointer`/
+    # `_read_project_sdk_pointer`, `RelocationUndo.previous_project_pointer`,
+    # `_undo_relocation`'s matching rollback branch) is REMOVED outright --
+    # that directory is bootstrap's cwd, the workspace PARENT in the
+    # quickstart, not a project, and a bootstrap run from `$HOME` pinned
+    # inside tan's own machine-global config dir, silencing the layer-2
+    # warning below for essentially every project the user owns. Only layer 2
+    # (`writtenFor` + `sdk.global-default-foreign-project`) ships; the
+    # removal gives back more lines than the small amount `_print_env_outcome`
+    # threading a `foreign_issue` alongside `pin_issue` adds back.
+    # 2917, not 2886, as of tan-cli#469: the inline `workspace-orphan-refused`
+    # message (three string-literal list items, spliced together by `_refusal`)
+    # is now `workspace_orphan_refusal`, a standalone function alongside its two
+    # siblings (`workspace_guard_target_occupied_refusal`,
+    # `enclosing_west_workspace_refusal`) that already had that shape -- it was
+    # the one of the three still inlined. Branches on `target is None` instead
+    # of interpolating it unconditionally: unreachable today (`target is not
+    # None` already gates the call site, tan-cli#389/#390), but the inline
+    # f-string was the exact shape that printed a stringified `None` and then
+    # advised dropping a `--workspace` the invocation never carried, and
+    # nothing stopped that gate from being loosened again.
+    "tan/commands/bootstrap_cmd.py": 2917,
     "tan/core/bootstrap.py": 1890,
     "tan/core/flash_plan.py": 1808,
-    "tan/commands/flash_cmd.py": 1781,
+    # 1829, not 1808, as of the tan-cli#464 stage-2 review round: `_resolve_sdk`/
+    # `resolve_sdk_root_ladder_safe` now return a named `_SdkResolution`
+    # instead of a growing tuple, and `flash` appends
+    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
+    # -- flashing real hardware against the silently-wrong SDK is the highest
+    # cost of any command on this ladder. Grew again when review found the
+    # manifest-not-found gate returned through `_error` BEFORE either warning
+    # was computed, so the dominant refusal reported neither -- `_error` now
+    # takes the resolution facts and calls the shared `sdk_cmd.
+    # sdk_resolution_issues` itself, so no future early return can skip them.
+    "tan/commands/flash_cmd.py": 1829,
     "tan/planner/kconfig.py": 1639,
-    "tan/commands/build_cmd.py": 1559,
-    "tan/commands/renode_cmd.py": 1440,
-    "tan/commands/debug_config_cmd.py": 1296,
+    # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
+    # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
+    # tuple that would need a fourth positional slot for
+    # `foreign_global_default_for` -- the exact silent-drop shape #464 exists
+    # to close -- and `build` appends `sdk.global-default-foreign-project`
+    # beside `sdk.project-pin-unresolved`.
+    "tan/commands/build_cmd.py": 1607,
+    # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
+    # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
+    # entry points (`_run`, `--sim-mode`) append
+    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`.
+    #
+    # 1501, not 1476, as of tan-cli#470: `--project PATH` used to be accepted
+    # and silently dropped for the default build root (resolved from the CWD
+    # instead), matching every OTHER command's `--project` handling except
+    # this one. `app_path` is now resolved through the same
+    # `build_output.resolve_app_base` ladder `size`/`image` already call,
+    # fed a native-separator workspace dir and renormalised after (this
+    # command does not POSIX-normalise its paths, unlike those two) -- the
+    # extra lines are the routing plus the docstring bullet documenting the
+    # divergence this fix removes.
+    "tan/commands/renode_cmd.py": 1501,
+    # 1402, not 1296, as of tan-cli#462 (both rounds): four new `_failure`
+    # callers (`_build_manifest_missing_failure`/`_core_unknown_failure`,
+    # then the review round's `_target_kind_ambiguous_failure`/
+    # `_no_debuggable_target_class_failure`) split `--target-kind`
+    # inference's four user-fixable refusals off the old blanket
+    # `internal-failure` verdict into their own `VALIDATION_FAILURE` (2)
+    # issue codes, plus the call-site branches that pick between them and the
+    # pre-#462 `internal-failure` fallback. Raised rather than collapsed into
+    # one shared `_validation_failure(generated_at, code, ...)` helper:
+    # `test_every_issue_code_is_registered.py` resolves this file's `_failure`
+    # calls by requiring a LITERAL `code=` keyword at every call site (it
+    # reconstructs `debug-config.<code>` by parsing the AST, not by running
+    # the code), so collapsing the four wrappers into one parameterised
+    # helper reddens that gate with "N code-position argument(s) could not be
+    # resolved to a literal ... a 'code=' keyword argument is not a
+    # resolvable code literal" -- each wrapper's own literal is the only
+    # shape the gate can verify against the registry.
+    "tan/commands/debug_config_cmd.py": 1402,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
-    "tan/commands/generate_cmd.py": 1147,
-    "tan/commands/sdk_cmd.py": 1096,
+    # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
+    # `--all` re-run fix had to become content-aware -- reading the existing
+    # overlay and comparing it against the banner every tan-emitted one
+    # carries -- to tell tan's own prior output from a real hand edit, which
+    # the previous 1-line `destination.exists()` check could not. Raised
+    # rather than extracted: `_overlay_would_overwrite` is five body lines
+    # including its own read-error handling; there is nothing left to split.
+    #
+    # 1186, not 1150, as of the tan-cli#464 rework: `_resolve_sdk_root` returns
+    # a named `_ResolvedSdkRoot` instead of a tuple, and `generate` appends
+    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
+    # -- this command WRITES `build/generated/alp.conf` and the DTS overlays
+    # out of whichever checkout resolved.
+    "tan/commands/generate_cmd.py": 1186,
+    # 1215, not 1096, as of tan-cli#464 (measured majors, then an independent
+    # design review): the `globalDefault` tier gained a `writtenFor`-vs-caller
+    # check (`_workspace_under`, `global_default_foreign_project_issue`) and a
+    # shared `_read_pointer_json` (`_pointer_target`/`_pointer_written_for`
+    # now both read through it, rather than duplicating the same
+    # parse-and-degrade logic a second time). `_pointer_written_for` grew
+    # again in the same rework's review round: a non-absolute `writtenFor`
+    # (measured: an empty string resolved `Path("")` to the process's OWN
+    # cwd) is now rejected at the source rather than reaching
+    # `_workspace_under` at all.
+    #
+    # 1265, not 1228, as of the tan-cli#464 stage-2 review round:
+    # `_pointer_written_for`'s `Path(value).is_absolute()` was platform-native
+    # (`PureWindowsPath` needs a drive, `PurePosixPath` needs a leading `/`),
+    # so a legitimate absolute `writtenFor` written by the OTHER platform's tan
+    # degraded to "no opinion" -- now accepted when EITHER `PurePosixPath` or
+    # `PureWindowsPath` calls it absolute. Also adds `sdk_resolution_issues`,
+    # the one shared point `flash`/`size`/`image` now call (from `_error`/
+    # `_error_outcome` themselves) instead of each hand-copying the
+    # pin-issue/foreign-issue pair only on their happy path.
+    "tan/commands/sdk_cmd.py": 1265,
     "tan/commands/validate_cmd.py": 1093,
-    "tan/commands/new_som_cmd.py": 1047,
-    "tan/commands/clean_cmd.py": 1000,
+    # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
+    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
+    # -- this command writes metadata skeletons into whichever checkout
+    # resolved, the same cost `project_pin_issue` above already justified.
+    "tan/commands/new_som_cmd.py": 1057,
+    # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
+    # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
+    # and `clean` appends `sdk.global-default-foreign-project` beside
+    # `sdk.project-pin-unresolved`.
+    "tan/commands/clean_cmd.py": 1013,
     "tan/planner/loader.py": 996,
-    "tan/commands/init_cmd.py": 974,
-    "tan/core/debug_launch.py": 923,
+    # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
+    # carries `foreign_global_default_for` through into `_Sdk`, and `init`
+    # surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk` writes
+    # -- this is the command a foreign `globalDefault` hurts most, since the
+    # pin it is about to write is PERMANENT, unlike one build silently using
+    # the wrong SDK once.
+    "tan/commands/init_cmd.py": 1009,
+    # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
+    # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
+    # slice reader, and the `--target-kind` inference decision itself
+    # (`infer_target_kind`, its message-building split into four small
+    # helpers to keep it under the FUNCTION ratchet too) all moved here from
+    # `debug_config_cmd.py`, which was over ITS OWN budget after the same
+    # review's bugfix -- "move the decision, don't just extract a helper" was
+    # the review's own suggested fix, since `support_bundle_cmd.py` needs the
+    # identical decision and both commands already import this module.
+    # Raised rather than split further: the alternative was leaving the
+    # shared decision duplicated per command, the exact drift this move
+    # exists to prevent.
+    # 1068, not 1060, as of tan-cli#462: `infer_target_kind` now returns a
+    # `(target, code, message)` 3-tuple instead of `(target, message)`, so its
+    # two user-fixable refusals (a pre-build hardware project, a `--core`
+    # matching nothing) carry a bare reason code the caller maps to a new
+    # issue code -- and `_core_not_in_manifest_message` grew a `slices`
+    # parameter to name the cores the build actually produced.
+    "tan/core/debug_launch.py": 1068,
     "tan/commands/build/execute.py": 941,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
@@ -132,8 +289,23 @@ _MIRRORED = ("tan/planner/",)
 # crossed 50 lines carrying the alp-sdk#1069 disjoint-slot0 branch. It is a
 # line-for-line port of alp-sdk's own function, which is the same size --
 # extracting here would make the next port a hand-merge instead of a diff.
-_FUNCTION_COUNT_BUDGET = 201
-_FUNCTION_WORST_BUDGET = 679
+# 202, not 203, as of the tan-cli#464 REWORK: `_undo_relocation` dropped back
+# under 50 lines once its project-pin rollback branch (added, then reverted
+# on review, by the same issue) came back out -- `resolve_sdk_tiered` (61
+# lines, `sdk_cmd.py`, the `writtenFor`-vs-caller check) stays over.
+#
+# 707, not 700, same rework: `bootstrap_cmd._run` gave back the removed
+# project-pin write/read/rollback lines but took on more than that back in
+# disclosure plumbing -- `resolve_sdk_root_ladder`'s named `SdkRootResolution`
+# unpacked into local variables (rather than a tuple, per review) and a
+# `foreign_issue` threaded alongside `pin_issue` into both the `--print-env`
+# short-circuit and the final issues list. Not extracted further: `_run` is
+# already the one long linear refusal ladder tan-cli#408's own `# noqa:
+# PLR0911, PLR0912, PLR0915` stands in front of, and splitting the
+# resolution-and-disclosure lines out would not shrink the MODULE total below,
+# only move them off this ratchet onto that one.
+_FUNCTION_COUNT_BUDGET = 202
+_FUNCTION_WORST_BUDGET = 707
 
 
 def _modules() -> list[Path]:

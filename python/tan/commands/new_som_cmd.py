@@ -108,6 +108,7 @@ from tan.commands.doctor_cmd import probe
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     SDK_MARKER,
+    global_default_foreign_project_issue,
     project_pin_issue,
     resolve_sdk_tiered,
 )
@@ -761,6 +762,15 @@ def new_som(
     issues: list[Issue] = [] if pin_issue is None else [pin_issue]
     if pin_issue is not None and not json_mode:
         typer.echo(f"new-som: warning: {pin_issue.message}", err=True)
+    # tan-cli#464: same reasoning -- this command writes metadata skeletons
+    # into `resolved_sdk`, and a `globalDefault` answer a DIFFERENT project's
+    # bootstrap relocation actually decided is exactly as dangerous here as a
+    # silently-missed project pin.
+    foreign_issue = global_default_foreign_project_issue(active.foreign_global_default_for)
+    if foreign_issue is not None:
+        issues.append(foreign_issue)
+        if not json_mode:
+            typer.echo(f"new-som: warning: {foreign_issue.message}", err=True)
 
     # -- 1. Gather inputs.  Interactive prompts need a real terminal; in a
     # pipe / CI, fail fast naming exactly what is missing instead of an

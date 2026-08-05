@@ -322,6 +322,128 @@ def test_manifest_unavailable_names_the_build_command(tmp_path: Path):
     assert "tan build --project" in envelope["issues"][0]["message"]
 
 
+def test_manifest_unavailable_names_the_project_root_not_the_cwd(tmp_path: Path):
+    """tan-cli#470: the refusal must name the root `--project` resolved to,
+    not the CWD it was invoked from -- both in the searched path and in the
+    `tan build --project` remedy it prints (a remedy naming the wrong
+    directory would build the wrong project). `proj` here is unbuilt (no
+    `build/system-manifest.yaml`), and `--project proj` is driven from the
+    sibling `elsewhere` directory. FAILS against pre-fix code: it named
+    `elsewhere` (the CWD) in both places instead."""
+    proj = tmp_path / "proj"
+    elsewhere = tmp_path / "elsewhere"
+    proj.mkdir()
+    elsewhere.mkdir()
+    _scaffold(proj, manifest=None)
+
+    inherited = os.environ.get("PYTHONPATH")
+    child_env = {
+        **os.environ,
+        "HOME": str(elsewhere),
+        "USERPROFILE": str(elsewhere),
+        "PATH": "",
+        "PYTHONPATH": os.pathsep.join(
+            [str(PACKAGE_ROOT), *([inherited] if inherited else [])]
+        ),
+    }
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _HARNESS,
+            "--project",
+            str(proj),
+            "--sdk-root",
+            str(proj / "sdk"),
+            "--format",
+            "json",
+        ],
+        cwd=elsewhere,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    envelope = json.loads(proc.stdout)
+    assert envelope["issues"][0]["code"] == "renode.manifest-unavailable"
+    message = envelope["issues"][0]["message"].replace("\\", "/")
+    expected_root = str(proj).replace("\\", "/")
+    assert f"no system-manifest.yaml at {expected_root}/build/system-manifest.yaml" in message
+    assert f"tan build --project {expected_root}" in message
+    wrong_root = str(elsewhere).replace("\\", "/")
+    assert wrong_root not in message
+
+
+def test_project_flag_resolves_the_build_root_from_a_different_cwd(tmp_path: Path):
+    """tan-cli#470: `--project PATH` must set the default build root exactly
+    like every sibling command (`size`/`image`/`build`/`validate`/
+    `generate`) -- not be silently dropped in favour of the CWD.
+
+    Driven from a cwd that is NOT the built project, pointing `--project` at
+    the real one. FAILS against pre-fix code: the pre-fix command resolved
+    the build root from `elsewhere` (the cwd) instead of `proj`, so this
+    reached `renode.manifest-unavailable` naming `elsewhere/build/system-
+    manifest.yaml` -- never `renode.binary-missing` -- and `envelope
+    ["project"]["root"]`/`envelope["data"]["elf"]` named `elsewhere`, not
+    `proj`. Asserting the PRESENCE of the right (`proj`-rooted) paths, not
+    merely the absence of the wrong (`elsewhere`-rooted) ones.
+    """
+    proj = tmp_path / "proj"
+    elsewhere = tmp_path / "elsewhere"
+    proj.mkdir()
+    elsewhere.mkdir()
+    _scaffold(proj, with_elf=True, with_descriptors=True)
+
+    inherited = os.environ.get("PYTHONPATH")
+    child_env = {
+        **os.environ,
+        "HOME": str(elsewhere),
+        "USERPROFILE": str(elsewhere),
+        "PATH": "",
+        "PYTHONPATH": os.pathsep.join(
+            [str(PACKAGE_ROOT), *([inherited] if inherited else [])]
+        ),
+    }
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _HARNESS,
+            "--project",
+            str(proj),
+            "--sdk-root",
+            str(proj / "sdk"),
+            "--core",
+            "m55_hp",
+            "--format",
+            "json",
+        ],
+        cwd=elsewhere,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    envelope = json.loads(proc.stdout)
+    # The manifest + elf under --project's build root WERE found: the run
+    # gets all the way to the (renode-not-installed) binary gate rather than
+    # refusing on a missing manifest under the cwd.
+    assert envelope["issues"][0]["code"] == "renode.binary-missing", envelope
+    assert envelope["data"]["sku"] == "E1M-AEN801"
+    resolved_root = envelope["project"]["root"].replace("\\", "/")
+    resolved_elf = envelope["data"]["elf"].replace("\\", "/")
+    expected_root = str(proj).replace("\\", "/")
+    expected_elf = str(proj / "build" / "m55_hp-zephyr" / "zephyr" / "zephyr.elf").replace(
+        "\\", "/"
+    )
+    assert resolved_root == expected_root
+    assert resolved_elf == expected_elf
+
+
 def test_schema_version_mismatch_is_validation_failure_exit_2(tmp_path: Path):
     _scaffold(
         tmp_path,

@@ -113,11 +113,11 @@ def test_the_two_ladders_answer_different_checkouts_under_one_tier_string(tmp_pa
     `resolve_sdk_root_ladder`'s own docstring)."""
     workspace, child, lateral = _divergent_layout(tmp_path)
 
-    narrow_path, narrow_tier, _ = resolve_sdk_root_ladder(None, workspace)
-    wide_path, wide_tier, _ = resolve_sdk_root_wide(None, workspace)
+    narrow = resolve_sdk_root_ladder(None, workspace)
+    wide = resolve_sdk_root_wide(None, workspace)
 
-    assert (narrow_path, wide_path) == (lateral, child)
-    assert narrow_tier == wide_tier == "discovery"
+    assert (narrow.path, wide.path) == (lateral, child)
+    assert narrow.tier == wide.tier == "discovery"
 
 
 # ──────────────────────── sdk_ladder_divergence_issue ────────────────────────

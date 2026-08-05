@@ -331,10 +331,10 @@
       "status": "reserved",
       "severity": "error",
       "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
-      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal of an invalid `--target-kind`/`--server` combination, or a malformed existing `.vscode/launch.json` the merge could not parse -- exits `InternalFailure` (5) with a `zephyr-mcu`/`none` placeholder target rather than the resolved one.",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal of an invalid `--target-kind`/`--server` combination, a malformed existing `.vscode/launch.json` the merge could not parse, or (Python-only, tan-cli#456) an omitted `--target-kind` this project's own `build/system-manifest.yaml`/`board.yaml` cannot resolve to one target class -- exits `InternalFailure` (5) with a `zephyr-mcu`/`none` placeholder target rather than the resolved one.",
       "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
       "literal": "\"internal-failure\"",
-      "note": "tan-cli#111 registry audit: routed through the shared `failure_envelope` (the same `debug-config.<code>` formatting `write-failure` uses); its sibling reserved codes (`legacy-entry-migrated`, `legacy-entry-untouched`, `comments-dropped`) are all `info`-severity success-path notices, not failures -- this registry had no `error`-severity debug-config entry at all before this audit."
+      "note": "tan-cli#111 registry audit: routed through the shared `failure_envelope` (the same `debug-config.<code>` formatting `write-failure` uses); its sibling reserved codes (`legacy-entry-migrated`, `legacy-entry-untouched`, `comments-dropped`) are all `info`-severity success-path notices, not failures -- this registry had no `error`-severity debug-config entry at all before this audit. tan-cli#456 review: widened `consumerEffect` to cover the inference-refusal shapes `_run` added under this SAME code (`tan/commands/debug_config_cmd.py::_internal_failure`, still the shared `_failure` prefix site already counted below) rather than minting a new one -- both are still `--target-kind`-shaped refusals at the same exit code, and no consumer binds to this code yet to be broken by the wording change."
     },
     {
       "code": "debug-config.write-failure",
@@ -345,6 +345,42 @@
       "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
       "literal": "\"write-failure\"",
       "note": "tan-cli#111 registry audit: same shared `failure_envelope` path as `internal-failure`; the two are distinguished only by which exit code and text lines `debug_config.rs` passes in, matching the write-vs-internal split `crates/tan-cli/src/exit.rs` documents."
+    },
+    {
+      "code": "debug-config.build-manifest-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--target-kind` is omitted, `board.yaml` declares a real SoM (`som.sku`), and `build/system-manifest.yaml` does not exist yet -- exits `ValidationFailure` (2): the caller's own precondition (run `tan build` first, or pass `--target-kind` explicitly), never a tan-side crash.",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the wrong verdict for a precondition the command can name and the caller can fix, the same distinction tan-cli#262 settled for `tan validate`. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
+    },
+    {
+      "code": "debug-config.core-unknown",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--target-kind` is omitted and an explicit `--core` names no slice in this project's own `build/system-manifest.yaml` -- exits `ValidationFailure` (2), naming the cores the build actually produced.",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the caller's own typo or a stale `--core` value, not a tan-side crash. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
+    },
+    {
+      "code": "debug-config.target-kind-ambiguous",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--target-kind` is omitted and this project's own `build/system-manifest.yaml` names more than one target class (a mixed-core board, e.g. E1M-V2N101/V2M101's `a55_cluster`+`m33_sm`) with no `--core` to narrow them -- exits `ValidationFailure` (2), naming the target classes in play.",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#462 review round: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- worse than the pre-build/bad-`--core` cases split off first, since it hits a fully built, CORRECT project and never stops, not just one command early. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
+    },
+    {
+      "code": "debug-config.no-debuggable-target-class",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--target-kind` is omitted, hardware slices exist in this project's own `build/system-manifest.yaml`, but none of their `os` values maps to a known target class (e.g. a lone `os: linux` slice) -- exits `ValidationFailure` (2), naming the unmapped `os` value(s).",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#462 review round: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- a knowledge/version skew between tan and the SDK, not a crash: no invariant was violated and the command still produces a coherent verdict with a working remedy (`--target-kind` explicit). Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
     },
     {
       "code": "build.manifest-write-failed",
@@ -786,7 +822,7 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "The `bootstrap.` prefix is applied by `Log.warn`; announces that a venv in a workspace bootstrap OWNS was removed and recreated because its pip ran and reported itself broken. Was a `log.line` before tan-cli#390, so the deletion never reached `issues[]` and was invisible to a `--format json` consumer. Registered by tan-cli#390, which stopped `ensure_venv` from deleting a venv it did not create. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `bootstrap.` prefix is applied by `Log.warn`; announces that a venv in a workspace bootstrap OWNS was removed and recreated because its pip ran and reported itself broken -- the one delete path that SURVIVED tan-cli#390's fix (the ADOPTED case is `bootstrap.adopted-venv-unusable`, a refusal instead of a delete). Was a `log.line` before tan-cli#390, so the deletion never reached `issues[]` and was invisible to a `--format json` consumer. Registered by tan-cli#390, which stopped `ensure_venv` from deleting a venv it did not create. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "bootstrap.workspace-orphan-refused",
@@ -803,22 +839,6 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/bootstrap_cmd.py",
       "note": "tan-cli#284: fires from `rollback_relocation_after()` when a LATER phase (venv/west) fails after the checkout was already relocated, and the rollback itself is reported -- whether the move-back and the pointer restore both succeeded, only the pointer restore failed, or the move-back itself could not complete. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "bootstrap.adopted-venv-unusable",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "tan-cli#390: a literal `Issue(\"bootstrap.adopted-venv-unusable\", \"error\", ...)` at the `ensure_venv` call site, built from `adopted_venv_unusable_refusal()`. Fires when the workspace was ADOPTED from `$ZEPHYR_BASE` (REUSE or STALE) and its `.venv` cannot run pip -- `uv venv` and `python -m venv --without-pip` both produce exactly that shape -- where bootstrap previously deleted and recreated the venv, announced only as a `log.line` no JSON consumer could see. Distinct from `bootstrap.venv-unusable`, which is the HOST `python3-venv`/`ensurepip` refusal. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "bootstrap.venv-recreated",
-      "status": "reserved",
-      "severity": "warning",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "tan-cli#390: prefixed by `Log.warn(\"venv-recreated\", ...)` in `ensure_venv`. The one delete path that SURVIVED the fix -- tan's own (non-adopted) workspace venv, whose interpreter runs but whose pip is proven absent -- reported as a warning rather than the `log.line` it used to be, so `--format json` carries the fact that a directory's contents were removed. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "cli.command-deferred",
@@ -1147,6 +1167,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/sdk_cmd.py",
       "note": "tan-cli#263: shared by every caller of `resolve_sdk_tiered` (not just `sdk current`) when `.alp/sdk-path` names a checkout that no longer resolves and the ladder fell through to another tier. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.global-default-foreign-project",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "note": "tan-cli#464: `sdk current` warns when the `globalDefault` tier answers for a caller that is under neither the `writtenFor` project the machine-global `~/.alp/sdk-default` pointer was last written for, nor the SDK path it names -- the pointer is shared and last-writer-wins across every project that ever relocates a checkout on the host, so a second project's bootstrap used to silently repoint an earlier project's `sdk current`/`tan build` at the wrong checkout, `ok: true`, `issues: []`. Resolution is unchanged by this warning; only the silence about WHOSE answer it is closes. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "sdk.unknown-subcommand",
@@ -1837,44 +1865,44 @@
       "note": "Constructed as the whole literal at a `_error_outcome` call site in `size_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.boardYaml",
+      "code": "doctor.board-yaml",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.bootstrapManifest",
+      "code": "doctor.bootstrap-manifest",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.homePath",
+      "code": "doctor.home-path",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.hostPrerequisites",
+      "code": "doctor.host-prerequisites",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.hostPython",
+      "code": "doctor.host-python",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.jlink",
@@ -1882,23 +1910,23 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.longPaths",
+      "code": "doctor.long-paths",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.pythonFloor",
+      "code": "doctor.python-floor",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.sdk",
@@ -1906,15 +1934,15 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.sdkProvenance",
+      "code": "doctor.sdk-provenance",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.setools",
@@ -1922,23 +1950,23 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.sevenZip",
+      "code": "doctor.seven-zip",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.venvProvenance",
+      "code": "doctor.venv-provenance",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.west",
@@ -1946,15 +1974,15 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.westResolved",
+      "code": "doctor.west-resolved",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.workspace",
@@ -1962,39 +1990,39 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.zephyrSdk",
+      "code": "doctor.zephyr-sdk",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.zephyrSdkAvailableForHost",
+      "code": "doctor.zephyr-sdk-available-for-host",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.zephyrVersion",
+      "code": "doctor.zephyr-version",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "doctor.zephyrWorkspace",
+      "code": "doctor.zephyr-workspace",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
-      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "migrate.failed",
@@ -2019,6 +2047,22 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/west_forward_cmd.py",
       "note": "The mirrored `f\"{subcommand}.failed\"` shape (family substituted, suffix fixed) at `python/tan/commands/west_forward_cmd.py`'s `_run_forward` -- the reverse of `bootstrap.`-style prefixing, and a second live call site of the exact defect tan-cli#224 reports (a code assembled by interpolation no literal scan can see) found while remediating that issue's own review. `subcommand` is closed to the three literal strings `tan quality`'s own Typer command passes (`migrate`/`lock`/`quality`, `cli.py`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "quality.profile-required",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/west_forward_cmd.py",
+      "note": "NEW, tan-cli#454: `scripts/west_commands/alp_quality.py` declares `--profile {quick,pr,full,release}` REQUIRED, with no default tan could pick on a caller's behalf, and this flag was never declared on tan's own Typer surface -- every realistic `tan quality` without it reached `west` and died on the CHILD's own argparse usage error, forwarded back opaquely as `quality.failed`, indistinguishable from `west` itself failing, and undiscoverable from `tan quality --help`. `_refuse_required` in `west_forward_cmd.py` now catches the omission BEFORE `west` is ever spawned and reports this code instead. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "migrate.mode-required",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/west_forward_cmd.py",
+      "note": "NEW, tan-cli#454: `scripts/west_commands/alp_migrate.py` declares a REQUIRED mutually-exclusive `(--check | --preview | --apply)` group, with no default tan could pick on a caller's behalf (reporting drift, previewing a diff and rewriting board.yaml are not interchangeable), and none of the three was ever declared on tan's own Typer surface -- every realistic `tan migrate` without one reached `west` and died on the CHILD's own argparse usage error, forwarded back opaquely as `migrate.failed`, indistinguishable from `west` itself failing, and undiscoverable from `tan migrate --help`. `_refuse_required` in `west_forward_cmd.py` now catches the omission BEFORE `west` is ever spawned and reports this code instead. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "diff.board-yaml-missing",
@@ -2050,7 +2094,47 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/diff_cmd.py",
-      "note": "board.yaml is not valid YAML, or a field normalize_board_model needs is the wrong shape (a live false-refusal exists here for YAML-1.1-only bool spellings PyYAML's SafeLoader has already collapsed -- see the module docstring). Reaches the wire as `diff.schema-violation` via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "board.yaml is not valid YAML, or a field normalize_board_model needs is the wrong shape (a live false-refusal exists here for YAML-1.1-only bool spellings PyYAML's SafeLoader has already collapsed -- see the module docstring). Also the outcome `_reject_if_sdk_validator_disagrees` (tan-cli#455) raises when the resolved SDK's own `validate_board_yaml.py` rejects the same board.yaml with a real schema violation -- see `diff.failed`/`diff.missing-preset`/`diff.hardware-revision` for that cross-check's other possible outcomes. Reaches the wire as `diff.schema-violation` via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.python-too-old",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: `_reject_if_sdk_validator_disagrees`'s own guard 3, ported from `validate_cmd`'s (`resolve_manifest_python_floor` + `_python_too_old`) -- refuses BEFORE spawning the SDK's `validate_board_yaml.py` when the resolved interpreter is below the SDK's declared `pythonMinVersion`, rather than let that spawn crash with a `dataclass() got an unexpected keyword argument 'slots'` traceback the outcome-mapping below would otherwise have to reclassify. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.spawn-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: the SDK validator subprocess could not even be started (no interpreter on PATH, the script unreadable) -- nothing validated anything, so a clean diff must not be reported either. Mirrors `validate.spawn-failed`'s own RUNTIME_FAILURE (exit 1) split from every other outcome; this module used to swallow the same failure silently via a blanket `except (OSError, ValueError, subprocess.SubprocessError): return`. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: the SDK validator ran but produced no usable verdict -- a crash (exit 1 WITH a Python traceback, reclassified off `schema-violation` by `analyze_validator_output` so a broken validator ENVIRONMENT is never reported as a board defect) or a run past `VALIDATOR_TIMEOUT_S` (300s). This module used to flatten both into `diff.schema-violation`, misreporting an environment failure as an invalid board.yaml; `_reject_if_sdk_validator_disagrees` now raises `ParseFailure(result.outcome, ...)` so the real outcome reaches the wire. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.missing-preset",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: same outcome-vocabulary parity as `validate.missing-preset` (validator exit 2) -- today's `scripts/validate_board_yaml.py` only ever exits 0 or 1, so this is unreachable against a current SDK and kept only because `diff` now reuses the same `analyze_validator_output`/`_STATUS_OUTCOME` machinery `validate` does. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.hardware-revision",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: same outcome-vocabulary parity as `validate.hardware-revision` (validator exit 3) -- unreachable against today's `scripts/validate_board_yaml.py` (only ever exits 0 or 1), kept for the same shared-vocabulary reason `diff.missing-preset` is. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "pinmux.internal-failure",
@@ -2093,20 +2177,20 @@
       "note": "Assembled by the nested fail() helper's `f\"trace.{code}\"` (prefix template) when resolve_trace_targets raises TraceTargetError. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.boardYaml",
+      "code": "support-bundle.board-yaml",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): the DEBUG-focused report's own `boardYaml` check (tan-cli#357), built by `_board_yaml_check` in support_bundle_cmd.py directly -- reports the resolved board.yaml PATH as its detail, unlike the build-checklist's `doctor.boardYaml`, which reports \"board.yaml found\" instead. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): the DEBUG-focused report's own `boardYaml` check (tan-cli#357), built by `_board_yaml_check` in support_bundle_cmd.py directly -- reports the resolved board.yaml PATH as its detail, unlike the build-checklist's `doctor.board-yaml`, which reports \"board.yaml found\" instead. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.bootstrapManifest",
+      "code": "support-bundle.bootstrap-manifest",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.bootstrapManifest` verbatim. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). tan-cli#374 finding 5: the oracle has no `bootstrapManifest` CHECK at all -- it folds a rejected metadata/bootstrap.json into `hostPrerequisites`'s own detail instead -- so this code is a documented port-only divergence with no oracle counterpart, always `warn` (never `fail`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.bootstrap-manifest` verbatim. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). tan-cli#374 finding 5: the oracle has no `bootstrapManifest` CHECK at all -- it folds a rejected metadata/bootstrap.json into `hostPrerequisites`'s own detail instead -- so this code is a documented port-only divergence with no oracle counterpart, always `warn` (never `fail`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "support-bundle.gdb",
@@ -2114,87 +2198,87 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): the DEBUG-focused report's `yocto-userspace` tool check (tan-cli#357), built by `_target_checks` in support_bundle_cmd.py -- `warn` when no local gdb/arm-none-eabi-gdb is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): the DEBUG-focused report's `yocto-userspace` tool check (tan-cli#357), built by `_target_checks` in support_bundle_cmd.py -- `warn` when no local gdb/arm-none-eabi-gdb is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.gdbserverBackend",
+      "code": "support-bundle.gdbserver-backend",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"gdbserver\". NOT reachable through today's target/server pairing (debug_launch._SERVER_CHOICES only pairs gdbserver with yocto-userspace, which uses the separate `gdb` check instead), but `server` is a plain str parameter with nothing narrower enforcing that at this call site -- registered now (tan-cli#374 finding 3) so a future widening of that pairing table cannot put an unregistered code on the wire with nothing here to catch it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"gdbserver\". NOT reachable through today's target/server pairing (debug_launch._SERVER_CHOICES only pairs gdbserver with yocto-userspace, which uses the separate `gdb` check instead), but `server` is a plain str parameter with nothing narrower enforcing that at this call site -- registered now (tan-cli#374 finding 3) so a future widening of that pairing table cannot put an unregistered code on the wire with nothing here to catch it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.homePath",
+      "code": "support-bundle.home-path",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.homePath` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.home-path` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.hostPrerequisites",
+      "code": "support-bundle.host-prerequisites",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.hostPrerequisites` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.host-prerequisites` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.jlinkBackend",
+      "code": "support-bundle.jlink-backend",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"jlink\", when --target-kind zephyr-mcu/baremetal-mcu --server jlink -- `warn` when no JLinkGDBServerCL/JLinkGDBServer is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"jlink\", when --target-kind zephyr-mcu/baremetal-mcu --server jlink -- `warn` when no JLinkGDBServerCL/JLinkGDBServer is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.longPaths",
+      "code": "support-bundle.long-paths",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357). tan-cli#306 widened doctor_cmd.long_paths_check with a Windows-only `fail` arm the oracle cannot reach at all (its own long_paths_check takes only the registry axis and never returns worse than warn); tan-cli#374 finding 1 found that arm reaching THIS command's verdict made a first-run customer host (registry LongPathsEnabled on, no global .gitconfig) exit 4 where the oracle exits 0. `support_bundle_cmd._demote_long_paths_fail` now caps it at `warn` before it is ever harvested here, so `error` severity is structurally unreachable from support-bundle (unlike from `tan doctor`, which keeps the real fail arm -- see the sibling doctor.longPaths entry). Severity corrected warning<-error here for that reason (tan-cli#374). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357). tan-cli#306 widened doctor_cmd.long_paths_check with a Windows-only `fail` arm the oracle cannot reach at all (its own long_paths_check takes only the registry axis and never returns worse than warn); tan-cli#374 finding 1 found that arm reaching THIS command's verdict made a first-run customer host (registry LongPathsEnabled on, no global .gitconfig) exit 4 where the oracle exits 0. `support_bundle_cmd._demote_long_paths_fail` now caps it at `warn` before it is ever harvested here, so `error` severity is structurally unreachable from support-bundle (unlike from `tan doctor`, which keeps the real fail arm -- see the sibling doctor.long-paths entry). Severity corrected warning<-error here for that reason (tan-cli#374). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.noneBackend",
+      "code": "support-bundle.none-backend",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"none\". NOT reachable through today's target/server pairing (debug_launch._SERVER_CHOICES only pairs none with native-host, which uses the separate `lldb` check instead, always `pass`, #131), but `server` is a plain str parameter with nothing narrower enforcing that at this call site -- registered now (tan-cli#374 finding 3) so a future widening of that pairing table cannot put an unregistered code on the wire with nothing here to catch it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"none\". NOT reachable through today's target/server pairing (debug_launch._SERVER_CHOICES only pairs none with native-host, which uses the separate `lldb` check instead, always `pass`, #131), but `server` is a plain str parameter with nothing narrower enforcing that at this call site -- registered now (tan-cli#374 finding 3) so a future widening of that pairing table cannot put an unregistered code on the wire with nothing here to catch it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.openocdBackend",
+      "code": "support-bundle.openocd-backend",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"openocd\", when --target-kind zephyr-mcu/baremetal-mcu --server openocd -- `warn` when no openocd is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"openocd\", when --target-kind zephyr-mcu/baremetal-mcu --server openocd -- `warn` when no openocd is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.pyocdBackend",
+      "code": "support-bundle.pyocd-backend",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"pyocd\", when --target-kind zephyr-mcu/baremetal-mcu --server pyocd -- `warn` when no pyocd is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"pyocd\", when --target-kind zephyr-mcu/baremetal-mcu --server pyocd -- `warn` when no pyocd is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.sdkRoot",
+      "code": "support-bundle.sdk-root",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): the DEBUG-focused report's own `sdkRoot` check (tan-cli#357), built directly in `_debug_doctor_report` -- `fail` when no alp-sdk checkout resolved, mirroring the oracle's `status_pass_fail(has_sdk)`. tan-cli#374 finding 3: reachable and emitted at ERROR severity on the wire before this code existed in the registry -- the exact gap that finding names (measured: a fresh project with no resolvable SDK put this code on the wire with `pytest tests/gates/ -q` reporting all green). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): the DEBUG-focused report's own `sdkRoot` check (tan-cli#357), built directly in `_debug_doctor_report` -- `fail` when no alp-sdk checkout resolved, mirroring the oracle's `status_pass_fail(has_sdk)`. tan-cli#374 finding 3: reachable and emitted at ERROR severity on the wire before this code existed in the registry -- the exact gap that finding names (measured: a fresh project with no resolvable SDK put this code on the wire with `pytest tests/gates/ -q` reporting all green). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.zephyrSdkAvailableForHost",
+      "code": "support-bundle.zephyr-sdk-available-for-host",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.zephyrSdkAvailableForHost` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.zephyr-sdk-available-for-host` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.fix-needs-sudo",

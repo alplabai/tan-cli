@@ -359,6 +359,44 @@ def test_sdk_root_pointing_at_a_regular_file(tmp_path):
     assert payload["data"]["buildRoot"] == ""
 
 
+def test_sdk_root_ladder_broken_pin_discloses_on_the_not_found_refusal(tmp_path):
+    """tan-cli#464 review: the fourth `_run` refusal (`flash.sdk-root-not-
+    found`, the LADDER finding nothing at all -- no `--sdk-root`, unlike the
+    test above) used to return bare `['flash.sdk-root-not-found']` even when
+    the workspace's OWN `.alp/sdk-path` named a broken pin, where the
+    identical state already made `size`/`image` report
+    `sdk.project-pin-unresolved` alongside their own not-found code. No
+    `~/.alp/sdk-default` and nothing on the positional walk, so this is the
+    one ladder outcome where `foreign_global_default_for` cannot also fire
+    (only the `globalDefault` tier ever sets it) -- `flash.manifest-not-
+    found`/`flash.manifest-invalid` cover that half elsewhere."""
+    workspace = tmp_path / "ws"
+    (workspace / ".alp").mkdir(parents=True)
+    gone = tmp_path / "gone-sdk"
+    (workspace / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(gone), "updatedAt": "1970-01-01T00:00:00Z"}),
+        encoding="utf-8",
+        newline="",
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "tan", "flash", "--format", "json", "."],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT), "HOME": str(tmp_path),
+             "USERPROFILE": str(tmp_path)},
+        timeout=180,
+    )
+    payload = envelope(proc.stdout)
+    assert proc.returncode == 1
+    assert codes(payload) == ["sdk.project-pin-unresolved", "flash.sdk-root-not-found"]
+    assert payload["issues"][0]["severity"] == "warning"
+    assert str(gone) in payload["issues"][0]["message"]
+    assert "sdk" not in payload
+
+
 @pytest.mark.parametrize("value", ["0", "", "true", "TRUE", " 1", "1 ", "yes", "2"])
 def test_alp_flash_force_is_exactly_the_string_1(tmp_path, value):
     """The hardware-write gate (I-30) is armed by `ALP_FLASH_FORCE=1` and by

@@ -83,7 +83,7 @@ import typer
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import SDK_MARKER, project_pin_issue
+from tan.commands.sdk_cmd import SDK_MARKER, global_default_foreign_project_issue, project_pin_issue
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -682,11 +682,11 @@ def sdk_root_resolves(sdk_root: str | None, workspace_root: Path) -> bool:
     reports through `resolve_sdk_tiered` alone, so a bootstrap-child workspace
     gates open here while reporting no `sdk` at all.
     """
-    resolved, tier, _broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
-    if resolved is None:
+    resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    if resolution.path is None:
         return False
-    if tier == "sdkRootFlag":
-        return resolved.joinpath(*SDK_MARKER).exists()
+    if resolution.tier == "sdkRootFlag":
+        return resolution.path.joinpath(*SDK_MARKER).exists()
     return True
 
 
@@ -735,8 +735,17 @@ def _run(
     # tan-cli#236: `boardYaml` reported only when the file really exists.
     project = Project.resolved(workspace_root, board_yaml)
     resolved_sdk = resolve_sdk(sdk_root_arg, workspace_root)
-    sdk = SdkInfo(resolved_sdk[0], resolved_sdk[1]) if resolved_sdk else None
-    pin_issue = project_pin_issue(resolved_sdk[2], resolved_sdk[1]) if resolved_sdk else None
+    sdk = SdkInfo(resolved_sdk.path, resolved_sdk.tier) if resolved_sdk else None
+    pin_issue = (
+        project_pin_issue(resolved_sdk.broken_project_pin, resolved_sdk.tier)
+        if resolved_sdk
+        else None
+    )
+    foreign_issue = (
+        global_default_foreign_project_issue(resolved_sdk.foreign_global_default_for)
+        if resolved_sdk
+        else None
+    )
 
     # App base: a non-`.` positional roots the removal at that app dir,
     # overriding `--project`; `.` falls back to the resolved workspace.
@@ -796,6 +805,10 @@ def _run(
         # DID resolve), so the pin's silent fallthrough belongs in the same
         # place every other non-fatal notice here lands.
         issues.append(pin_issue)
+    if foreign_issue is not None:
+        # tan-cli#464: same reasoning, for a `globalDefault` answer a
+        # DIFFERENT project's bootstrap relocation actually decided.
+        issues.append(foreign_issue)
 
     # Best-effort, manifest-aware sweep. Absence (or an unreadable file) is
     # silent; a parse/version error is a warning, NEVER fatal -- clean must not

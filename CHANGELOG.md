@@ -5,6 +5,349 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.5.1] — 2026-08-04
+
+### Fixed
+
+- **`tan renode` accepted `--project PATH` but silently dropped it, resolving
+  the build root from the CWD instead.** Every sibling command
+  (`build`/`size`/`image`/`validate`/`generate`) honours `--project`; pointed at
+  a built project from elsewhere, `tan renode --project <proj>` looked for --
+  and failed to find -- `<cwd>/build/system-manifest.yaml`, and its own
+  `tan build --project <cwd>` remedy would have built the wrong directory.
+  `app_path` now resolves through the same `build_output.resolve_app_base`
+  ladder `size`/`image` already call: an explicit `APP_PATH` positional wins,
+  otherwise `--project`, then cwd. Every downstream string (`manifest_path`,
+  `elf`, the remedy, `project.root`) derives from `app_path`, so the refusal now
+  names the resolved project root rather than the CWD. (#470)
+- **`bootstrap.workspace-orphan-refused` named a stringified Python `None` for
+  its destination, and advised dropping a `--workspace` flag the invocation
+  never carried.** Already unreachable in practice on this branch -- the
+  `target is not None` gate added by tan-cli#389/#390 means the no-`--workspace`
+  shape this was filed against no longer refuses at all, so the report
+  reproduces against the published `v0.5.0` rather than `dev` -- but the inline
+  message still interpolated `target` unconditionally, and would print `None`
+  again the moment that gate is loosened. Split into
+  `workspace_orphan_refusal()`, alongside the two sibling refusals that already
+  had this shape, with a dedicated no-destination branch: "...so it cannot be
+  relocated -- its .west/config would still name this checkout. ... This
+  workspace is already bootstrapped; re-run without --sdk-root pointing into
+  it, or clone a SECOND alp-sdk checkout elsewhere and pass --sdk-root at that
+  one." The `--workspace`-supplied branch is unchanged. (#469)
+- **`contract/issue-codes.json` registered two codes twice, one pair
+  disagreeing on severity.** `bootstrap.adopted-venv-unusable` carried a
+  `warning` entry (matching `ensure_venv`'s live `log.warn` call site) and a
+  stale `error` entry describing a superseded
+  `adopted_venv_unusable_refusal()` / literal `Issue(..., "error", ...)`
+  implementation that no longer exists in `bootstrap_cmd.py` -- a leftover from
+  a second, independently-merged implementation of the same tan-cli#390 fix.
+  `bootstrap.venv-recreated` was a straight duplicate. JSON duplicate-key
+  semantics are last-wins, so the published severity depended on file order,
+  with no code diff to notice. Kept the `warning` entries:
+  `adopted-venv-unusable` is not in `WORKSPACE_BLOCKING`, so
+  `Log.take_issues()` never escalates it, and the run's failing verdict travels
+  separately via `bootstrap.failed` at `error`. Both stale entries removed;
+  `venv-recreated`'s two notes merged into the survivor. (#467)
+- **New gate**: `tests/gates/test_issue_code_registry_has_no_duplicate_codes.py`
+  parses `contract/issue-codes.json` through a duplicate-key-rejecting
+  `object_pairs_hook` AND a second pass over the parsed `issueCodes` array. The
+  real defect was two well-formed array entries sharing one `code`, which an
+  `object_pairs_hook` alone cannot see -- and which was invisible to
+  `test_every_issue_code_is_registered.py`'s `set` comprehension and to
+  `test_issue_code_registry_shape.py`'s plain list. Now fails loudly, naming
+  every duplicate. (#467)
+- **27 `contract/issue-codes.json` issue codes shipped camelCase in v0.5.0,
+  breaking every consumer's kebab-case convention.** `doctor_cmd.py`'s
+  `checks_to_issues()` and `support_bundle_cmd.py`'s `_doctor_issues()` both
+  derived an issue code straight from `Check.name`, which is camelCase (it
+  doubles as a JSON data key and a display string, and stays that way —
+  `name` itself is unchanged by this fix). alp-sdk-vscode's contract gate
+  encodes `ISSUE_CODE_SHAPE = /^[a-z][a-z0-9-]*\.[a-z0-9-]+$/`, and its
+  `findFrozenCodes` hard-asserts every published `issueCodes[]` entry against
+  it, so a code shaped otherwise REDS the consumer's contract gate outright —
+  loud, not silent — which is exactly what blocked the pin to v0.5.0. All 27
+  are `"status": "reserved"`,
+  `"consumer": "none"` — nothing consumed the old spelling, so the rename is
+  free, exactly as the v0.5.0 entry above already said of the sibling
+  `support-bundle.<checkName>` batch ("costing nothing to rename later").
+  - `doctor.boardYaml` → `doctor.board-yaml`, `doctor.bootstrapManifest` →
+    `doctor.bootstrap-manifest`, `doctor.homePath` → `doctor.home-path`,
+    `doctor.hostPrerequisites` → `doctor.host-prerequisites`,
+    `doctor.hostPython` → `doctor.host-python`, `doctor.longPaths` →
+    `doctor.long-paths`, `doctor.pythonFloor` → `doctor.python-floor`,
+    `doctor.sdkProvenance` → `doctor.sdk-provenance`, `doctor.sevenZip` →
+    `doctor.seven-zip`, `doctor.venvProvenance` → `doctor.venv-provenance`,
+    `doctor.westResolved` → `doctor.west-resolved`, `doctor.zephyrSdk` →
+    `doctor.zephyr-sdk`, `doctor.zephyrSdkAvailableForHost` →
+    `doctor.zephyr-sdk-available-for-host`, `doctor.zephyrVersion` →
+    `doctor.zephyr-version`, `doctor.zephyrWorkspace` →
+    `doctor.zephyr-workspace`; `support-bundle.boardYaml` →
+    `support-bundle.board-yaml`, `support-bundle.bootstrapManifest` →
+    `support-bundle.bootstrap-manifest`, `support-bundle.gdbserverBackend` →
+    `support-bundle.gdbserver-backend`, `support-bundle.homePath` →
+    `support-bundle.home-path`, `support-bundle.hostPrerequisites` →
+    `support-bundle.host-prerequisites`, `support-bundle.jlinkBackend` →
+    `support-bundle.jlink-backend`, `support-bundle.longPaths` →
+    `support-bundle.long-paths`, `support-bundle.noneBackend` →
+    `support-bundle.none-backend`, `support-bundle.openocdBackend` →
+    `support-bundle.openocd-backend`, `support-bundle.pyocdBackend` →
+    `support-bundle.pyocd-backend`, `support-bundle.sdkRoot` →
+    `support-bundle.sdk-root`, `support-bundle.zephyrSdkAvailableForHost` →
+    `support-bundle.zephyr-sdk-available-for-host`.
+- **Fixed at the derivation, not by hand-editing the 27 outputs**: both
+  commands now route their fallback issue-code suffix through a new
+  `doctor_cmd.kebab_check_name()` helper (`check.code or
+  f"doctor.{kebab_check_name(check.name)}"` /
+  `f"support-bundle.{doctor_cmd.kebab_check_name(c.name)}"`), so a future
+  `Check` with a camelCase `name` and no explicit `code=` override cannot
+  reintroduce this. An explicit `code=` override still wins, unchanged.
+- **New gate**: `tests/gates/test_issue_code_registry_shape.py` fails if any
+  `contract/issue-codes.json` code does not match
+  `^[a-z][a-z0-9-]*\.[a-z0-9-]+$` (the exact alp-sdk-vscode consumer regex,
+  duplicated verbatim since that repo isn't a Python import here), and
+  separately asserts the regex itself still rejects the 27 pre-fix
+  camelCase spellings — non-vacuity, so this cannot regress to a gate that
+  would have waved the original defect through.
+- **`tan kconfig` could not reach the workspace an ordinary `tan bootstrap`
+  had just built** (tan-cli#453) — the `prj.conf` LSP feed for
+  alp-sdk-vscode, so this was a dead symbol menu by default on any host with
+  another Zephyr checkout around. Two compounding defects: `west` was spawned
+  bare, depending on PATH having it, which `tan bootstrap` deliberately never
+  does (it installs `west` only inside the workspace-local venv); and
+  `ZEPHYR_BASE` resolution carried a private, weaker 3-tier ladder instead of
+  the shared, manifest-verified `tan.core.venv.west_workspace_dir` that
+  `build`/`flash`/`west_forward` already use, so an unrelated ambient
+  `$ZEPHYR_BASE` was accepted over the workspace `tan bootstrap` had just
+  built for the very `--sdk-root` in play. `kconfig` now delegates to that
+  same shared resolver rather than a third, driftable copy, and the bare
+  `west` spawn is fixed at its real site,
+  `tan/planner/kconfig_symbols.py`'s `_load_board_symbols`, which now
+  resolves `west_program(...)` and spawns that absolute path.
+- **`tan quality` and `tan migrate` could never succeed under any input**
+  (tan-cli#454) — both shell a `west` extension that declares an argument
+  REQUIRED (`alp_quality.py`'s `--profile`, `alp_migrate.py`'s mutually
+  exclusive `--check`/`--preview`/`--apply`), and neither flag existed on
+  tan's own surface, so every real run died on the child's own argparse usage
+  error (`quality.failed` / `migrate.failed`) before doing any work. Both
+  commands now declare the flag(s) for real and refuse BEFORE spawning `west`
+  when absent (`quality.profile-required` / `migrate.mode-required`, exit 2)
+  rather than round-tripping through a child process to find out. No default
+  is guessed for either: `quality`'s profile and `migrate`'s mode (`--apply`
+  mutates the customer's `board.yaml`) are both left to the caller.
+- **`tan generate` bare/`--all` refused every re-run once
+  `boards/native_sim_native_64.overlay` existed, even against its own prior
+  output.** `_overlay_would_overwrite`'s guard was existence-only, so a
+  routine edit-board.yaml / generate / build loop's second `generate --all`
+  refused the WHOLE run forever after the first (`data` empty, exit 3) purely
+  because the overlay was already there (tan-cli#457). The guard is now
+  content-aware: an existing overlay carrying the banner every
+  `native-sim-overlay` emit writes is tan's own prior output and is freely
+  rewritten, in `--all` or an explicit `--target native-sim-overlay` alike; one
+  that lacks it is a real hand edit and still refuses with
+  `generate.would-overwrite` (exit 3) unless `--force` is passed — the
+  truncation the guard exists for is unchanged.
+- **`tan debug-config` defaulted a hardware project to `native-host`,
+  writing a `launch.json` naming a binary the build never produces**
+  (tan-cli#456). `_select_slice`'s `or hw_slices` fallback silently
+  discarded an explicit `--core` that matched no hardware slice in the
+  built manifest, falling through to the native-sim/host branch instead of
+  refusing — a J-Link `cortex-debug` session pointed at a binary that never
+  gets built. Fixed in `50b9456`: `--core native_sim` now correctly infers
+  `targetKind=native-host` / `server=none` / `type=lldb`, and a `--core`
+  matching no slice refuses outright rather than guessing a target class.
+  New test: `test_an_omitted_target_kind_with_a_core_matching_nothing_refuses`.
+- **`tan debug-config` reported two USER-ACTIONABLE preconditions as
+  `ExitCode.INTERNAL_FAILURE` (5)** — an omitted `--target-kind` on a real
+  hardware project (`som.sku` set) whose `build/system-manifest.yaml` does
+  not exist yet, and an explicit `--core` matching no slice in an existing
+  one — reporting a one-command-early user as a tan CRASH to any consumer
+  that classifies by exit code, alp-sdk-vscode included (tan-cli#462). Both
+  now exit `ExitCode.VALIDATION_FAILURE` (2), matching the distinction
+  tan-cli#262 already settled for `tan validate`: a verdict the command CAN
+  produce about the caller's own input is exit 2, and exit 5 stays reserved
+  for a genuine tan-side crash. Two new registry codes replace the shared
+  `debug-config.internal-failure` for these two cases —
+  `debug-config.build-manifest-missing` (message unchanged) and
+  `debug-config.core-unknown` (message now names the cores the build
+  actually produced, e.g. `its cores: m55_hp, m55_he`, instead of only
+  saying the passed one does not match). The `except Exception` catch-all
+  backstop is unaffected — that one is a genuine internal failure and exit 5
+  is still correct there. `infer_target_kind` now returns a
+  `(target, code, message)` 3-tuple instead of `(target, message)`; its two
+  still-ambiguous shapes (more than one target class, or none at all) are
+  unchanged and keep exit 5. Not a breaking wire change: every
+  `debug-config.*` code in the registry is still `"status": "reserved"`/
+  `"consumer": "none"`.
+- **The other two `infer_target_kind` refusals were the SAME defect as the
+  pair above and got left at exit 5.** Review round on tan-cli#462: a
+  mixed-core board's `build/system-manifest.yaml` naming more than one
+  target class with no `--core` to narrow them, and a manifest naming hardware
+  slices whose `os` maps to no known target class at all (e.g. a lone
+  `os: linux` slice), both hit a WELL-FORMED, tan-produced manifest — the
+  first is worse than the pair already fixed, since it hits every run against
+  a fully built, CORRECT project forever, not just one command early — and
+  both have a working remedy the message itself names (`--target-kind`
+  explicit). Both now exit `ExitCode.VALIDATION_FAILURE` (2) via two more
+  registry codes, `debug-config.target-kind-ambiguous` and
+  `debug-config.no-debuggable-target-class`, replacing the shared
+  `debug-config.internal-failure` for these two cases too (messages
+  unchanged). `infer_target_kind` returns a reason code for all four
+  refusals now, none left unclassified. Not a breaking wire change: every
+  `debug-config.*` code in the registry is still `"status": "reserved"`/
+  `"consumer": "none"`.
+- **A relocating `tan bootstrap` had no test proving the very next `tan
+  doctor` could still find the checkout it just moved (tan-cli#463).** The
+  tan-cli#185 auto-relocation into `<parent>/alp-workspace/alp-sdk` already
+  repoints `~/.alp/sdk-default` at the new location (`_write_global_sdk_pointer`,
+  gated on an actual relocation and skipped under `--dry-run`, both
+  unchanged) — but nothing exercised the READ side through a real subprocess
+  boundary: a *second*, independent `tan doctor` invocation, the way a
+  customer's next terminal command actually works, reading nothing but that
+  file. A regression there (`resolve_sdk_tiered`'s `globalDefault` tier, a
+  `_home_alp_dir()` mismatch, or a writer/reader JSON-shape drift) would have
+  passed every existing check. `.alp/sdk-path` (a PROJECT pin) is
+  deliberately not what carries this: bootstrap runs in the workspace
+  PARENT, which is not itself a tan project, so the pin that must answer is
+  the machine-global default, not a project-scoped one that flow never
+  writes. New test:
+  `test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk`.
+- **The e2e harness's tan-cli#407 assertion was path-form-blind on
+  Windows.** `scripts/e2e-full.sh`'s two-checkout divergence check grepped
+  doctor's text report for its own `$D407` in Git Bash's MSYS mount form
+  (`/c/v06/...`), but doctor renders that path through `_abs_posix()` —
+  always the drive-letter form (`C:/v06/...`, via
+  `os.path.abspath().replace('\\','/')`) — even under Git Bash. Same
+  directory, different spelling, so the grep never matched and the harness
+  reported `#407: doctor's text report is silent about the second checkout`
+  on a report that named it plainly. The comparison now normalises through
+  `cygpath -m` (a no-op on POSIX hosts, where the two forms already agree)
+  before matching; the negative control (silent on a genuine single-checkout
+  host) is unchanged and stays strict.
+- **`tan diff` reported `no effective-config differences` on a board.yaml
+  `tan validate` rejects with four errors** — the two commands read the same
+  file and disagreed about whether it was usable at all (tan-cli#455). `diff`
+  only ever checked whether it could PARSE `board.yaml` well enough to
+  normalize it; it had no notion of the SDK's own semantic rules (a SoM SKU
+  pattern, whether a preset exists, the closed `peripherals:` enum). Fixed by
+  reusing `validate`'s own spawn-and-analyze machinery
+  (`analyze_validator_output`, the same `scripts/validate_board_yaml.py`
+  argv) whenever an SDK has resolved: a non-clean verdict now becomes a
+  `diff.<outcome>` refusal — `diff.schema-violation`/`diff.failed`/
+  `diff.missing-preset`/`diff.hardware-revision`/`diff.spawn-failed`/
+  `diff.python-too-old` — at the same exit code `validate` would report for
+  that outcome, instead of a clean, meaningless comparison. `diff` still
+  never requires an SDK on its own; with none resolved it falls back to the
+  structural checks alone, exactly as before.
+- **`tan pinmux`'s text renderer dropped the envelope's `issues[]`, so an
+  exit-2 error printed no error at all** — a user saw a plausible
+  `pinmux: family=v2n pads=0` and nothing else, including on a hard failure
+  (tan-cli#458). Text mode now follows the summary line with one
+  `pinmux: <issue.message>` line per issue on stderr, matching the
+  text-mode convention `generate`/`monitor`/`build`/`doctor`/`examples`
+  already use for their own issues. `size`/`image` build a separate text
+  list that drops issues the same way — a distinct, still-open gap, out of
+  scope here.
+- **`tan bootstrap --print-env` reported a workspace `bootstrap` would never
+  create, before the first real bootstrap ever ran** (tan-cli#459). It
+  assumed the checkout's PARENT was the west workspace — exactly the
+  assumption a dirty parent makes `bootstrap` itself reject in favour of
+  auto-relocating into `<parent>/alp-workspace` (tan-cli#302/#185) — so on
+  that same host `--print-env` and `--dry-run` disagreed: one printed
+  `ZEPHYR_BASE=<parent>/zephyr`, three paths verified absent on disk and that
+  no future run would ever create, at `ok: true`, `issues: []`; the other
+  correctly named `<parent>/alp-workspace/zephyr`. Fixed by
+  `_print_env_outcome`, which now projects `--print-env`'s reported paths
+  through the SAME write-time decision the real run would make — the
+  relocation guard or a `$ZEPHYR_BASE` adoption — so it can no longer diverge
+  from `--dry-run` over identical input. New test:
+  `test_print_env_agrees_with_dry_run_on_a_dirty_parent`.
+- **A second project's `tan bootstrap` could silently repoint a FIRST
+  project's SDK at the wrong checkout, `ok: true`, no warning** (tan-cli#464).
+  A relocating bootstrap recorded the move only in the machine-global
+  `~/.alp/sdk-default` — one pointer, last-writer-wins across every project on
+  the host — so the moment a second project bootstrapped and relocated, the
+  first project's `tan sdk current`/`tan build` silently started resolving
+  the SECOND project's checkout instead of its own, with `issues` identical
+  to the correct case. **This entry replaces an earlier same-cycle attempt at
+  this fix**, measured to carry five majors on review (an independent design
+  review separately confirmed the shape) and reworked before ever shipping in
+  a tagged release:
+  - **Reverted**: an actual relocation also writing a directory-scoped
+    `.alp/sdk-path` in the directory `bootstrap` ran in, at the
+    higher-precedence `projectPin` tier. That directory is bootstrap's own
+    cwd — the workspace PARENT in the documented quickstart, not a project —
+    so a bootstrap run from `$HOME` pinned `~/.alp/sdk-path` *inside tan's own
+    machine-global config dir*, silencing the warning below for essentially
+    every project the user owns on that host; it also silently overwrote an
+    existing pin `tan init` had written, with no issue and no log line, and
+    it only ever helped at the exact directory bootstrap ran in — one `cd`
+    into a subdirectory and the silence returned. `tan init`'s own
+    `_pin_sdk` remains the only writer of a project's `.alp/sdk-path`.
+  - **Kept and now disclosed everywhere, not just `sdk current`**:
+    `~/.alp/sdk-default` still records `writtenFor` — which project's
+    bootstrap last wrote it. Resolution through the `globalDefault` tier is
+    unchanged (the same root still answers; this is a disclosure fix, not a
+    prevention one — a machine-global default exists to answer for projects
+    anywhere on the host, so refusing would exit 2 for every legitimate
+    out-of-tree project on a one-SDK machine). A caller resolving through it
+    from a workspace under neither `writtenFor` nor the SDK path itself gets
+    `sdk.global-default-foreign-project`, a WARNING never a refusal. Reaching
+    only `sdk current` was itself a defect this rework closes:
+    `resolve_sdk_root_ladder`/`resolve_sdk_root_wide` (`build_cmd.py`) now
+    return a named `SdkRootResolution` instead of a 3-element tuple — a
+    fourth positional element would have reproduced the exact silent-drop
+    shape this issue exists to close at the next field the ladder needs to
+    carry — and `build`, `flash`, `generate`, `image`, `run`, `size`, `doctor`,
+    `clean`, `examples`, `bootstrap`, `presets`, `new-som` and `renode` all
+    append the warning beside their existing `sdk.project-pin-unresolved`
+    now — `size`/`image` unconditionally, on every manifest-gate refusal too
+    (including `image.bundle-write-failed`, not just its `manifest-
+    unavailable`/`manifest-invalid` siblings), from one shared
+    `sdk_cmd.sdk_resolution_issues`. `flash`'s equivalent, `_error`, reached
+    the SAME shared helper in a first pass at this rework but one early
+    return — its OWN `flash.sdk-root-not-found`, the SDK failing to resolve
+    at all — bypassed `_error` and stayed gated to the happy path until a
+    review round closed it too; `flash` is unconditional as of this same
+    section. `tan init` surfaces it BEFORE `_pin_sdk` writes — the pin `init`
+    makes is PERMANENT, so silently baking a foreign checkout into a brand
+    new project is worse than one build using the wrong SDK once.
+  - **Fixed**: `writtenFor: ""` used to pass `_pointer_written_for`'s bare
+    `isinstance(value, str)` check and reach `_workspace_under(ws, "")`,
+    which resolves `Path("")` to the process's own cwd — so whether the
+    warning fired depended on where the caller happened to be standing, not
+    on anything the pointer recorded. `_pointer_written_for` now rejects a
+    non-absolute value at the source; every other malformed shape (an int, a
+    list, a dict, `null`) already returned `None` safely and still does.
+    Also widened, in the same fix and **user-visible**: absoluteness used to
+    be judged by the READER's own `pathlib` flavour, so a legitimate
+    POSIX-absolute `writtenFor` (`/home/u/projB`) silently read as "no
+    opinion" on a Windows reader, and symmetrically for a Windows-absolute
+    one (`C:/projB`) read on POSIX — accepted now when EITHER
+    `PurePosixPath` or `PureWindowsPath` calls it absolute, so a pointer one
+    platform's `tan` legitimately wrote no longer goes silent purely because
+    a DIFFERENT platform's `tan` is the one reading the shared file.
+  - `_undo_relocation`'s rollback is back to restoring (or clearing) exactly
+    the one pointer it overwrote — the second, project-pin restore path this
+    rework's first attempt added (and its own risk of misattributing a
+    pointer-restore failure to the wrong file, the tan-cli#284 shape its
+    docstring warned against) is gone along with the write it guarded.
+  New/updated tests:
+  `test_a_second_projects_relocation_does_not_silently_repoint_the_first`
+  (two real bootstraps, one shared HOME, driven through subprocesses — never
+  by inspecting pointer bytes, which already had coverage and did not catch
+  this; now pins that A's later `sdk current` DOES resolve B's checkout, with
+  the warning present, rather than pinning the reverted per-project pin),
+  `test_build_command.py`'s new two-project scenario proving `tan build`
+  itself — not just `sdk current` — emits the warning,
+  `test_sdk_command.py` coverage for the empty-string, wrong-type, and (both
+  directions of) cross-platform-absolute `writtenFor` shapes, and
+  `test_flash_command.py::test_sdk_root_ladder_broken_pin_discloses_on_the_not_found_refusal`,
+  which pins `flash`'s own last gap: a broken `.alp/sdk-path` pin with
+  nothing lower on the ladder to fall through to used to return bare
+  `['flash.sdk-root-not-found']`, unlike the identical state on `size`/
+  `image`; it now returns `['sdk.project-pin-unresolved',
+  'flash.sdk-root-not-found']`, matching them.
+
 ## [0.5.0] — 2026-08-04
 
 *This section was headed `## [0.6.0]` until tan-cli#377. **0.5.0 has never been

@@ -34,6 +34,17 @@ from pathlib import Path
 
 import pytest
 
+# Reused rather than re-derived (`test_sdk_onboarding_dead_end.py` already
+# sets this precedent): the exact real-bootstrap, real-relocation, one-shared-
+# HOME two-project sequence `test_a_second_projects_relocation_does_not_
+# silently_repoint_the_first` uses to make a SECOND project's bootstrap
+# actually overwrite the shared `~/.alp/sdk-default`. `run_tan` is aliased --
+# this module already defines its own module-level `run_tan` below, with a
+# narrower signature (no `env_extra`) that every OTHER case here relies on;
+# `envelope_of` (this module's own) parses the bootstrap helper's output fine.
+from tests.commands.test_bootstrap_command import PRESENT_TOOL, codes, make_sdk
+from tests.commands.test_bootstrap_command import run_tan as run_tan_with_env
+
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``.
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -1213,3 +1224,106 @@ def test_a_real_typo_still_exits_2(project):
     # name for every mistyped option.
     proc = run_tan("build", "--pristien", "--format", "json", cwd=project)
     assert proc.returncode == 2, proc.stdout + proc.stderr
+
+
+# --- tan-cli#464: a command OTHER than `sdk current` discloses the same fact -
+
+
+def test_build_also_warns_when_the_global_default_was_written_for_another_project(tmp_path):
+    """`sdk current` was the ONLY command that used to carry
+    `sdk.global-default-foreign-project` -- `resolve_sdk_root_ladder`
+    (`build_cmd.py`) dropped the fact on the floor, so `tan build`, the
+    command that actually COMPILES against whichever checkout resolved, said
+    nothing while silently building against a different project's SDK.
+
+    The exact two-project sequence
+    `test_a_second_projects_relocation_does_not_silently_repoint_the_first`
+    (`test_bootstrap_command.py`) proves for `sdk current`, replayed here for
+    `tan build`: project A bootstraps and relocates first, project B
+    bootstraps and relocates second (the SAME machine-global
+    `~/.alp/sdk-default`, last-writer-wins), then `tan build` from A's own
+    directory -- no board.yaml there, so the build itself still refuses with
+    `build.plan-unavailable` -- must ALSO carry the foreign-project warning
+    naming B, prepended ahead of that refusal exactly as
+    `sdk.project-pin-unresolved` already is (tan-cli#263 review).
+
+    Queried from a SUBdirectory of `proj_a`, deliberately, not `proj_a`
+    itself: the tan-cli#464 rework REMOVES the directory-scoped project pin
+    an earlier attempt at this fix wrote at bootstrap's own cwd (see the
+    CHANGELOG entry), so with that change alone this distinction no longer
+    matters -- but this test must also demonstrate the pre-fix DEFECT
+    against `8c320ff` (which still HAD that pin), and there `proj_a` itself
+    would resolve through its own `projectPin` tier and never reach the
+    `globalDefault` collision this warning exists for at all. A subdirectory
+    carries no pin either way, so it is the one location both codebases
+    resolve through `globalDefault` -- the input this test must hold fixed
+    for the assertion below to isolate exactly the one variable the tan-cli
+    #464 rework changes: whether `tan build` (not just `sdk current`)
+    discloses it.
+
+    Before this fix, `resolve_sdk_root_ladder` returned a 3-element tuple
+    with no slot for this fact at all, so `build_cmd.build` could not append
+    it regardless of what happened at the two-project sequence above --
+    `codes(env)` never contained `sdk.global-default-foreign-project` for
+    ANY input. That is an absence, not a wrong value, so it is pinned here as
+    an assertion on the envelope's own `issues[]`/`sdk` fields, never by
+    catching an `AttributeError`/`TypeError` from calling code that did not
+    exist yet (which would prove only that the code was missing, not that
+    the behaviour was wrong).
+    """
+    home = tmp_path / "shared-home"
+    env_extra = {"HOME": str(home), "USERPROFILE": str(home)}
+
+    sdk_a = make_sdk(tmp_path / "projA", tools=[PRESENT_TOOL])
+    sdk_b = make_sdk(tmp_path / "projB", tools=[PRESENT_TOOL])
+    proj_a, proj_b = sdk_a.parent, sdk_b.parent
+    # tan-cli#302's own trigger: something besides the clone beside it is what
+    # makes the dirty-parent guard auto-relocate each checkout.
+    (proj_a / "unrelated.txt").write_text("x", encoding="utf-8")
+    (proj_b / "unrelated.txt").write_text("x", encoding="utf-8")
+    new_sdk_b = proj_b / "alp-workspace" / sdk_b.name
+
+    bootstrap_a = envelope_of(
+        run_tan_with_env(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk_a), cwd=proj_a, env_extra=env_extra,
+        )
+    )
+    assert bootstrap_a["exitCode"] == 0
+    assert "bootstrap.workspace-relocated" in codes(bootstrap_a), (
+        "precondition unmet: A's bootstrap must actually relocate"
+    )
+
+    bootstrap_b = envelope_of(
+        run_tan_with_env(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk_b), cwd=proj_b, env_extra=env_extra,
+        )
+    )
+    assert bootstrap_b["exitCode"] == 0
+    assert "bootstrap.workspace-relocated" in codes(bootstrap_b), (
+        "precondition unmet: B's bootstrap must actually relocate"
+    )
+
+    # A SUBdirectory of A, via `tan build` this time, not `sdk current`: the
+    # shared global default now names B, and nothing at THIS directory
+    # shadows it.
+    sub_a = proj_a / "sub"
+    sub_a.mkdir()
+    build_env = envelope_of(
+        run_tan_with_env("build", "--format", "json", cwd=sub_a, env_extra=env_extra)
+    )
+    print(f"  tan build from A/sub: sdk={build_env.get('sdk')!r} codes={codes(build_env)}")
+    assert build_env["sdk"]["root"] == str(new_sdk_b).replace("\\", "/"), (
+        "precondition unmet: A's tan build must resolve B's checkout via the "
+        "shared global default"
+    )
+    assert build_env["sdk"]["sourceTier"] == "globalDefault"
+    assert "sdk.global-default-foreign-project" in codes(build_env), (
+        "DEFECT: tan build silently compiled against a different project's SDK"
+    )
+    message = next(
+        i["message"] for i in build_env["issues"]
+        if i["code"] == "sdk.global-default-foreign-project"
+    )
+    assert str(proj_b).replace("\\", "/") in message

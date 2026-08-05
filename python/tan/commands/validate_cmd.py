@@ -870,9 +870,9 @@ def validate(
     resolved_sdk: Path | None = None
     sdk_info: SdkInfo | None = None
     if not offline:
-        resolved_sdk, sdk_tier, _broken_pin = resolve_sdk_root_ladder(
-            sdk_root, Path(os.path.abspath(root))
-        )
+        sdk_resolution = resolve_sdk_root_ladder(sdk_root, Path(os.path.abspath(root)))
+        resolved_sdk = sdk_resolution.path
+        sdk_tier = sdk_resolution.tier
         # tan-cli#257/#258, at this call site because `resolve_sdk_root_ladder`
         # deliberately does not do it: an explicit `--sdk-root` comes back
         # verbatim and unvalidated, which is right for a caller that only

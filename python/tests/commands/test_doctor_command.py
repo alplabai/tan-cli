@@ -421,7 +421,7 @@ def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_pa
     # `{ok, exitCode, issues}` shape `alp-sdk-vscode` actually consumes.
     issues = doctor_cmd.checks_to_issues(checks)
     assert any(
-        i.code == "doctor.westResolved" and i.severity == "error" for i in issues
+        i.code == "doctor.west-resolved" and i.severity == "error" for i in issues
     ), issues
 
 
@@ -1691,13 +1691,13 @@ def test_collect_names_the_global_default_tier_and_the_unselected_child_checkout
     global_sdk = _make_sdk_root(tmp_path / "elsewhere" / "alp-sdk")
     _write_global_default_pointer(global_sdk)
 
-    resolved_root, tier, broken_pin = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
-    assert tier == "globalDefault"
-    assert str(resolved_root) == str(global_sdk)
-    assert broken_pin is None
+    resolution = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    assert resolution.tier == "globalDefault"
+    assert str(resolution.path) == str(global_sdk)
+    assert resolution.broken_project_pin is None
 
     checks = doctor_cmd._collect(
-        str(resolved_root), workspace_root=str(workspace), sdk_tier=tier
+        str(resolution.path), workspace_root=str(workspace), sdk_tier=resolution.tier
     )
     sdk = next(c for c in checks if c.name == "sdk")
     assert sdk.status == "pass"
@@ -1791,15 +1791,15 @@ def test_collect_names_a_broken_global_default_end_to_end(tmp_path):
     broken_target = tmp_path / "gone"
     _write_global_default_pointer(broken_target)
 
-    resolved_root, tier, broken_pin = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
-    assert resolved_root is None
-    assert tier == "none"
-    assert broken_pin is None  # this is the GLOBAL default, not the project pin
+    resolution = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    assert resolution.path is None
+    assert resolution.tier == "none"
+    assert resolution.broken_project_pin is None  # the GLOBAL default, not the project pin
 
     checks = doctor_cmd._collect(
         None,
         workspace_root=str(workspace),
-        sdk_tier=tier,
+        sdk_tier=resolution.tier,
         broken_global_default=doctor_cmd._broken_global_default(),
     )
     sdk = next(c for c in checks if c.name == "sdk")

@@ -94,6 +94,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
+from tan.commands.sdk_cmd import global_default_foreign_project_issue
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import (
@@ -380,6 +381,18 @@ class _Sdk:
 
     path: Path
     display: str
+    #: `SdkRootResolution.foreign_global_default_for` carried through
+    #: (tan-cli#464). `None` on the `--sdk-root` branch (an explicit flag is
+    #: never "foreign" -- there is nothing to fall through from) and on every
+    #: tier above `globalDefault`; set only when THIS run resolved through the
+    #: machine-global `~/.alp/sdk-default` pointer and it was last written for
+    #: a DIFFERENT project. `init` is the command this fact matters most for
+    #: (more than `tan build`'s own tan-cli#464 fix): a pin written here is
+    #: PERMANENT, so silently baking a foreign checkout's path into a brand
+    #: new project's `.alp/sdk-path` is worse than one build silently using
+    #: the wrong SDK once -- every later command in the new project inherits
+    #: it until someone notices and re-pins by hand.
+    foreign_global_default_for: str | None = None
 
 
 def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None:
@@ -416,9 +429,17 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     # pin already sitting in the parent workspace is superseded by this run's
     # own resolution rather than something for `init` itself to disclose --
     # `sdk current`/`build`/`doctor` (tan-cli#263 review) are what customers
-    # see it through after the fact.
-    found, _tier, _broken_pin = resolve_sdk_root_wide(None, workspace_root)
-    return _Sdk(found, posix(found)) if found is not None else None
+    # see it through after the fact. `foreign_global_default_for` is NOT
+    # dropped the same way (tan-cli#464 review): unlike a broken pin, which
+    # this run's own resolution supersedes, a foreign `globalDefault` is
+    # exactly what THIS run is about to resolve through and permanently pin
+    # -- `init()` surfaces it via `global_default_foreign_project_issue`
+    # before `_pin_sdk` ever writes.
+    resolution = resolve_sdk_root_wide(None, workspace_root)
+    found = resolution.path
+    if found is None:
+        return None
+    return _Sdk(found, posix(found), resolution.foreign_global_default_for)
 
 
 def _is_sdk_checkout(root: Path) -> bool:
@@ -896,6 +917,18 @@ def init(
         # the pin), so this is the last moment the fact is observable at all.
         # Computed BEFORE `_finish` for exactly that reason.
         divergence_issue = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=True)
+        # tan-cli#464 review: `init` is the command a foreign `globalDefault`
+        # hurts most of all -- `_pin_sdk` below is about to bake whatever
+        # `resolved_sdk` names into `<project>/.alp/sdk-path` PERMANENTLY, so
+        # a caller resolving a checkout a DIFFERENT project's bootstrap
+        # relocation actually wrote must be told before that pin lands, not
+        # after. Computed here, alongside `divergence_issue`, for the same
+        # reason: this is the last moment the fact is cheap to disclose --
+        # once pinned, every later command in the new project reads the pin
+        # tier instead and this warning never fires again.
+        foreign_issue = global_default_foreign_project_issue(
+            resolved_sdk.foreign_global_default_for if resolved_sdk is not None else None
+        )
 
         if from_example is not None:
             template_id, files = _plan_from_example(from_example, som, resolved_sdk)
@@ -946,6 +979,8 @@ def init(
             outcome.issues.append(missing_board_yaml_issue)
         if divergence_issue is not None:
             outcome.issues.append(divergence_issue)
+        if foreign_issue is not None:
+            outcome.issues.append(foreign_issue)
     except InitError as err:
         _emit_error(json_mode, err)
         return

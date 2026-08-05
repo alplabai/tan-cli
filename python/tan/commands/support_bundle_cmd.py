@@ -498,14 +498,14 @@ def _target_checks(target: str, server: str) -> list[doctor_cmd.Check]:
 
 
 def _doctor_issues(checks: list[doctor_cmd.Check]) -> list[Issue]:
-    """Warn/fail checks become `support-bundle.<name>` issues -- port of
+    """Warn/fail checks become `support-bundle.<kebab-name>` issues -- port of
     `support_bundle.rs::doctor_checks_to_issues`, with THIS port's own
     `doctor_cmd.Check` shape (`name`/`status`/`detail`) instead of Rust's
     `DoctorCheck`. `unknown` raises nothing: the question was not askable,
     not a problem."""
     return [
         Issue(
-            f"support-bundle.{c.name}",
+            f"support-bundle.{doctor_cmd.kebab_check_name(c.name)}",
             "error" if c.status == "fail" else "warning",
             c.detail,
         )

@@ -192,6 +192,17 @@ args:
 """
 
 
+#: The flag(s) tan-cli#454 made REQUIRED, with no tan-side default, on
+#: `quality`/`migrate`'s own surface -- `lock`'s `alp-lock` has no required
+#: flag at all, so it stays empty. See the argv comment inside
+#: `test_west_forward_matches_rust` for why this must be supplied here.
+_REQUIRED_MODE_ARGS: dict[str, list[str]] = {
+    "quality": ["--profile", "quick"],
+    "migrate": ["--check"],
+    "lock": [],
+}
+
+
 @LIVE_GATE
 @pytest.mark.parametrize("verb", ["migrate", "lock", "quality"])
 def test_west_forward_matches_rust(verb, work_dir, tmp_path):
@@ -221,12 +232,38 @@ def test_west_forward_matches_rust(verb, work_dir, tmp_path):
     # documented divergence). Ordered this way both sides land in JSON mode
     # and the envelope, including `data.westCwd`/`args`, is directly
     # comparable.
+    #
+    # `_REQUIRED_MODE_ARGS[verb]`: tan-cli#454 made `alp-quality --profile`
+    # and `alp-migrate`'s one-of `--check`/`--preview`/`--apply` REQUIRED on
+    # tan's own surface too -- omitting it now refuses BEFORE `west` is ever
+    # spawned (`test_west_forward_command.py`'s own tan-cli#454 tests cover
+    # that refusal), which would short-circuit this test before it ever
+    # reaches the `westCwd`-computation branch it exists to exercise: the
+    # refusal envelope's own `data` is `{"schemaVersion": "1"}` only, with no
+    # `westCwd` at all, and its exit code (`VALIDATION_FAILURE`, 2) would
+    # diverge from the frozen fixture's `1` -- a divergence on `exitCode`,
+    # which line 284's waiver does NOT cover.
+    #
+    # This does NOT make the frozen fixture below argv-accurate, though: that
+    # fixture was captured BEFORE tan-cli#454 and still records `args` with no
+    # `--profile`/`--check` in it (`oracle_fixtures/test_oracle_parity.json`).
+    # Supplying `_REQUIRED_MODE_ARGS[verb]` here only changes the PYTHON
+    # side's computed `data.args`; the frozen rust side is unaffected (fixture
+    # lookup is keyed by pytest node id, not argv -- see
+    # `oracle_fixtures.resolve`), so the two sides now diff on `data.args`
+    # too. That new mismatch is harmless only because line 284 already waives
+    # ANY divergence inside `data` wholesale (tan-cli#395's `westExitCode`/
+    # `stdout`/`stderr` were the reason it exists) -- it does not verify that
+    # `data.args` itself matches. If `data` ever stops being waived outright,
+    # this fixture must be re-captured against the current argv first, or this
+    # case will fail for a stale-fixture reason that reads as a port bug.
     argv = [
         "--project",
         str(work_dir),
         verb,
         "--format",
         "json",
+        *_REQUIRED_MODE_ARGS[verb],
         "--core",
         "m55_hp",
         "-b",

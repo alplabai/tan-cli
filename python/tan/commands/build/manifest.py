@@ -154,9 +154,7 @@ def write_post_build_manifest(
         # review, already reported) the project pin at its own call site
         # before ever reaching here, and `PostBuildManifest` has no issues
         # channel to carry a second copy through.
-        discovered, _tier, _broken_pin = resolve_sdk_root_ladder(
-            None, Path(effective_board_yaml).parent
-        )
+        discovered = resolve_sdk_root_ladder(None, Path(effective_board_yaml).parent).path
         effective_sdk_root = str(discovered) if discovered else None
 
     if effective_sdk_root is None or not effective_board_yaml:
