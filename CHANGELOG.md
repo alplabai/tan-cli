@@ -99,6 +99,16 @@ All notable changes to `tan` are documented here. Format follows
   that lacks it is a real hand edit and still refuses with
   `generate.would-overwrite` (exit 3) unless `--force` is passed — the
   truncation the guard exists for is unchanged.
+- **`tan debug-config` defaulted a hardware project to `native-host`,
+  writing a `launch.json` naming a binary the build never produces**
+  (tan-cli#456). `_select_slice`'s `or hw_slices` fallback silently
+  discarded an explicit `--core` that matched no hardware slice in the
+  built manifest, falling through to the native-sim/host branch instead of
+  refusing — a J-Link `cortex-debug` session pointed at a binary that never
+  gets built. Fixed in `50b9456`: `--core native_sim` now correctly infers
+  `targetKind=native-host` / `server=none` / `type=lldb`, and a `--core`
+  matching no slice refuses outright rather than guessing a target class.
+  New test: `test_an_omitted_target_kind_with_a_core_matching_nothing_refuses`.
 - **`tan debug-config` reported two USER-ACTIONABLE preconditions as
   `ExitCode.INTERNAL_FAILURE` (5)** — an omitted `--target-kind` on a real
   hardware project (`som.sku` set) whose `build/system-manifest.yaml` does
@@ -211,35 +221,63 @@ All notable changes to `tan` are documented here. Format follows
   the host — so the moment a second project bootstrapped and relocated, the
   first project's `tan sdk current`/`tan build` silently started resolving
   the SECOND project's checkout instead of its own, with `issues` identical
-  to the correct case. Two changes, `sdk_cmd.py` + `bootstrap_cmd.py`:
-  1. An actual (non-`--dry-run`) relocation now ALSO writes a directory-scoped
-     `.alp/sdk-path` in the directory `bootstrap` ran in
-     (`_write_project_sdk_pointer`), at the higher-precedence `projectPin`
-     tier — so a project that has bootstrapped once keeps resolving its OWN
-     checkout regardless of what any later bootstrap, anywhere else, does to
-     the shared default. Gated identically to the existing global-pointer
-     write (`target is not None`, never under `--dry-run`, tan-cli#323).
-     `_undo_relocation`/`RelocationUndo` roll this pin back in lockstep with
-     the checkout move and the global pointer if a LATER step in the same run
-     fails, so a rolled-back relocation cannot leave it naming a vacated
-     location.
-  2. `~/.alp/sdk-default` now also records `writtenFor` — which project's
-     bootstrap last wrote it. `resolve_sdk_tiered`'s `globalDefault` tier
-     resolution is UNCHANGED (the same root still answers), but a caller
-     resolving through it from a workspace that is under neither
-     `writtenFor` nor the SDK path itself now gets a new
-     `sdk.global-default-foreign-project` WARNING naming the project the
-     pointer was actually written for. A pointer written by an older tan with
-     no `writtenFor` field is absorbed as UNKNOWN, never as a false positive.
-     Wired into `sdk current` (`resolve_sdk_tiered`'s one caller inside
-     `sdk_cmd.py`); resolution behaviour anywhere else that reads
-     `resolve_sdk_tiered` is unaffected. New tests:
-     `test_a_second_projects_relocation_does_not_silently_repoint_the_first`
-     (two real bootstraps, one shared HOME, driven through subprocesses —
-     never by inspecting pointer bytes, which already had coverage and did
-     not catch this) plus unit coverage in `test_sdk_command.py` for the
-     `writtenFor` precedence rules and `_undo_relocation`'s project-pin
-     rollback.
+  to the correct case. **This entry replaces an earlier same-cycle attempt at
+  this fix**, measured to carry five majors on review (an independent design
+  review separately confirmed the shape) and reworked before ever shipping in
+  a tagged release:
+  - **Reverted**: an actual relocation also writing a directory-scoped
+    `.alp/sdk-path` in the directory `bootstrap` ran in, at the
+    higher-precedence `projectPin` tier. That directory is bootstrap's own
+    cwd — the workspace PARENT in the documented quickstart, not a project —
+    so a bootstrap run from `$HOME` pinned `~/.alp/sdk-path` *inside tan's own
+    machine-global config dir*, silencing the warning below for essentially
+    every project the user owns on that host; it also silently overwrote an
+    existing pin `tan init` had written, with no issue and no log line, and
+    it only ever helped at the exact directory bootstrap ran in — one `cd`
+    into a subdirectory and the silence returned. `tan init`'s own
+    `_pin_sdk` remains the only writer of a project's `.alp/sdk-path`.
+  - **Kept and now disclosed everywhere, not just `sdk current`**:
+    `~/.alp/sdk-default` still records `writtenFor` — which project's
+    bootstrap last wrote it. Resolution through the `globalDefault` tier is
+    unchanged (the same root still answers; this is a disclosure fix, not a
+    prevention one — a machine-global default exists to answer for projects
+    anywhere on the host, so refusing would exit 2 for every legitimate
+    out-of-tree project on a one-SDK machine). A caller resolving through it
+    from a workspace under neither `writtenFor` nor the SDK path itself gets
+    `sdk.global-default-foreign-project`, a WARNING never a refusal. Reaching
+    only `sdk current` was itself a defect this rework closes:
+    `resolve_sdk_root_ladder`/`resolve_sdk_root_wide` (`build_cmd.py`) now
+    return a named `SdkRootResolution` instead of a 3-element tuple — a
+    fourth positional element would have reproduced the exact silent-drop
+    shape this issue exists to close at the next field the ladder needs to
+    carry — and `build`, `flash`, `generate`, `run`, `size`, `doctor`,
+    `clean`, `examples`, `bootstrap`, `presets`, `new-som` and `renode` all
+    append the warning beside their existing `sdk.project-pin-unresolved`
+    now. `tan init` surfaces it BEFORE `_pin_sdk` writes — the pin `init`
+    makes is PERMANENT, so silently baking a foreign checkout into a brand
+    new project is worse than one build using the wrong SDK once.
+  - **Fixed**: `writtenFor: ""` used to pass `_pointer_written_for`'s bare
+    `isinstance(value, str)` check and reach `_workspace_under(ws, "")`,
+    which resolves `Path("")` to the process's own cwd — so whether the
+    warning fired depended on where the caller happened to be standing, not
+    on anything the pointer recorded. `_pointer_written_for` now rejects a
+    non-absolute value at the source; every other malformed shape (an int, a
+    list, a dict, `null`) already returned `None` safely and still does.
+  - `_undo_relocation`'s rollback is back to restoring (or clearing) exactly
+    the one pointer it overwrote — the second, project-pin restore path this
+    rework's first attempt added (and its own risk of misattributing a
+    pointer-restore failure to the wrong file, the tan-cli#284 shape its
+    docstring warned against) is gone along with the write it guarded.
+  New/updated tests:
+  `test_a_second_projects_relocation_does_not_silently_repoint_the_first`
+  (two real bootstraps, one shared HOME, driven through subprocesses — never
+  by inspecting pointer bytes, which already had coverage and did not catch
+  this; now pins that A's later `sdk current` DOES resolve B's checkout, with
+  the warning present, rather than pinning the reverted per-project pin),
+  `test_build_command.py`'s new two-project scenario proving `tan build`
+  itself — not just `sdk current` — emits the warning, plus
+  `test_sdk_command.py` coverage for the empty-string and wrong-type
+  `writtenFor` shapes.
 
 ## [0.5.0] — 2026-08-04
 

@@ -692,7 +692,7 @@ def diff(
 
     root, board_path = resolve_project_paths(project, board_yaml)
     sdk = resolve_sdk(sdk_root, root)
-    sdk_info = SdkInfo(sdk[0], sdk[1]) if sdk is not None else None
+    sdk_info = SdkInfo(sdk.path, sdk.tier) if sdk is not None else None
     board_file = Path(board_path)
 
     if not board_file.exists():

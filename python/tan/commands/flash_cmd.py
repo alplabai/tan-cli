@@ -58,7 +58,7 @@ import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import on_path
-from tan.commands.sdk_cmd import project_pin_issue
+from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
 from tan.core.flash_plan import (
     FAIL,
     FLOW_D_METHOD,
@@ -237,10 +237,22 @@ def _resolve_project(root: str, board_yaml: str | None) -> Project:
     )
 
 
-def _resolve_sdk(
-    sdk_root: str | None, workspace_root: str
-) -> tuple[str | None, str | None, str | None]:
-    """`(sdk_root, sourceTier, brokenProjectPin)` -- `util.rs::resolve_sdk_root`:
+@dataclass(frozen=True)
+class _SdkResolution:
+    """The local shape both `_resolve_sdk` and [`resolve_sdk_root_ladder_safe`]
+    return -- a named result, not a growing tuple (the same reasoning
+    `build_cmd.SdkRootResolution` documents): a fact one caller needs
+    (`foreign_global_default_for`, tan-cli#464) must not force every field
+    before it to be re-counted by position."""
+
+    path: str | None
+    tier: str | None
+    broken_project_pin: str | None = None
+    foreign_global_default_for: str | None = None
+
+
+def _resolve_sdk(sdk_root: str | None, workspace_root: str) -> _SdkResolution:
+    """`util.rs::resolve_sdk_root`:
     `--sdk-root` (terminal) > the project's own `.alp/sdk-path` pin > the
     machine-global default (`~/.alp/sdk-default`) > the wide positional walk --
     the oracle's closed five-value `SdkSourceTier` (`SdkRootFlag`, `ProjectPin`,
@@ -257,13 +269,13 @@ def _resolve_sdk(
     for the pointer files when this comment was written; `tan init` writes
     `.alp/sdk-path`, so skipping them silently ignored it).
 
-    `brokenProjectPin` (tan-cli#263 review): `None` on the `--sdk-root` branch
-    (nothing to fall through from), else whatever
-    [`resolve_sdk_root_ladder_safe`] carried through."""
+    `.broken_project_pin` (tan-cli#263 review): `None` on the `--sdk-root`
+    branch (nothing to fall through from), else whatever
+    [`resolve_sdk_root_ladder_safe`] carried through. Same for
+    `.foreign_global_default_for` (tan-cli#464)."""
     if sdk_root is not None:
-        return (sdk_root if _is_sdk_root(sdk_root) else None), "sdkRootFlag", None
-    found, tier, broken_pin = resolve_sdk_root_ladder_safe(workspace_root)
-    return found, tier, broken_pin
+        return _SdkResolution(sdk_root if _is_sdk_root(sdk_root) else None, "sdkRootFlag")
+    return resolve_sdk_root_ladder_safe(workspace_root)
 
 
 #: tan-cli#408: one implementation, in `tan.core.shapes`, imported under the
@@ -273,19 +285,25 @@ def _resolve_sdk(
 _is_sdk_root = is_sdk_root
 
 
-def resolve_sdk_root_ladder_safe(
-    workspace_root: str,
-) -> tuple[str | None, str | None, str | None]:
+def resolve_sdk_root_ladder_safe(workspace_root: str) -> _SdkResolution:
     """`build_cmd.resolve_sdk_root_ladder(None, ...)`, made incapable of
     raising -- an unreadable `.alp/sdk-path` pin, an unreadable global-default
     pointer (`~/.alp/sdk-default`), or an unreadable ancestor on the
     positional walk must not become a traceback in a command whose whole job
     is to report an envelope."""
     try:
-        found, tier, broken_pin = resolve_sdk_root_ladder(None, Path(workspace_root))
+        resolution = resolve_sdk_root_ladder(None, Path(workspace_root))
     except (OSError, ValueError):
-        return None, None, None
-    return (str(found), tier, broken_pin) if found is not None else (None, None, broken_pin)
+        return _SdkResolution(None, None)
+    found = resolution.path
+    if found is None:
+        return _SdkResolution(None, None, resolution.broken_project_pin)
+    return _SdkResolution(
+        str(found),
+        resolution.tier,
+        resolution.broken_project_pin,
+        resolution.foreign_global_default_for,
+    )
 
 
 def _tool_available(tool: str, venv_bin: Path | None = None) -> bool:
@@ -1485,7 +1503,11 @@ def _run(
         build_root = _abs_join(app_dir, "build")
 
     # Anchored on the WORKSPACE root, never on `app_dir` -- see `workspace_root`.
-    resolved_sdk, tier, sdk_broken_pin = _resolve_sdk(sdk_root_arg, cwd)
+    sdk_resolution = _resolve_sdk(sdk_root_arg, cwd)
+    resolved_sdk = sdk_resolution.path
+    tier = sdk_resolution.tier
+    sdk_broken_pin = sdk_resolution.broken_project_pin
+    sdk_foreign_default = sdk_resolution.foreign_global_default_for
     sdk = SdkInfo(resolved_sdk, tier) if resolved_sdk is not None else None
     if resolved_sdk is None:
         # Faithful to the Python `find_sdk_root() is None` die: `buildRoot` is
@@ -1537,6 +1559,11 @@ def _run(
         # real hardware, programmed with an image built against metadata for
         # a checkout that was never the one `.alp/sdk-path` named.
         issues.append(pin_issue)
+    foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
+    if foreign_issue is not None:
+        # tan-cli#464: same cost, for a `globalDefault` answer a DIFFERENT
+        # project's bootstrap relocation actually decided.
+        issues.append(foreign_issue)
     entries: list[dict[str, Any]] = []
     # Seeded with the status-refused slices: they never become a target, so they
     # cannot increment `failed` in the loop -- but a slice `tan build` reports

@@ -251,7 +251,10 @@ def test_a_valid_sdk_root_flag_keeps_the_path_as_typed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # `./sdk`, not `sdk`: a `Path` round-trip drops the `./` the user typed and
     # `sdk.root`/`data.sdkRoot` are both on the wire.
-    assert resolve_sdk("./sdk", str(tmp_path)) == ("./sdk", "sdkRootFlag", None)
+    resolved = resolve_sdk("./sdk", str(tmp_path))
+    assert (resolved.path, resolved.tier, resolved.broken_project_pin) == (
+        "./sdk", "sdkRootFlag", None,
+    )
 
 
 # --------------------------------------------------------------------------

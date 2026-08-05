@@ -68,7 +68,7 @@ from tan.commands.build_cmd import (
     _is_sdk_root,
     resolve_sdk_root_ladder,
 )
-from tan.commands.sdk_cmd import project_pin_issue
+from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
 from tan.core.flash_plan import resolve_artefact_path
 from tan.core.global_flags import accept_global_flags
 from tan.core.plan_exec import normalize_path
@@ -372,7 +372,11 @@ def run(
     # engine, so it must agree with `build` on which checkout that is. No
     # `ALP_SDK_ROOT` tier (tried and reverted -- see `resolve_sdk_root_ladder`'s
     # own docstring).
-    resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    resolved_sdk_root = sdk_resolution.path
+    sdk_tier = sdk_resolution.tier
+    sdk_broken_pin = sdk_resolution.broken_project_pin
+    sdk_foreign_default = sdk_resolution.foreign_global_default_for
     # tan-cli#257/#258 -- the exact guard `build_cmd.build` applies, for the
     # exact same reason: this line was a VERBATIM COPY of the one that carried
     # the defect, so fixing only `build` would have left its twin here.
@@ -427,6 +431,12 @@ def run(
     pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
     if pin_issue is not None:
         issues = [pin_issue, *issues]
+    # tan-cli#464: same argument, one tier down -- `run` must disclose a
+    # `globalDefault` answer a DIFFERENT project's bootstrap relocation
+    # actually decided, the same as `build` now does.
+    foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
+    if foreign_issue is not None:
+        issues = [foreign_issue, *issues]
 
     if json_mode:
         emit(Envelope("run", project_obj, data, issues, exit_code, sdk=sdk))

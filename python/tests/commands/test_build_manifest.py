@@ -26,6 +26,7 @@ from tan.commands.build.manifest import (
 )
 from tan.commands import build_cmd
 from tan.commands.build_cmd import (
+    SdkRootResolution,
     _abs_posix,
     discover_sdk_root,
     resolve_sdk_root_ladder,
@@ -165,7 +166,9 @@ def test_ladder_takes_the_lateral_checkout_over_a_competing_child(tmp_path):
     _make_sdk(workspace / "alp-sdk")
     _make_sdk(tmp_path / "alp-sdk")
 
-    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path / "alp-sdk", "discovery", None)
+    assert resolve_sdk_root_ladder(None, workspace) == SdkRootResolution(
+        tmp_path / "alp-sdk", "discovery"
+    )
 
 
 def test_ladder_takes_the_enclosing_checkout_over_a_competing_child(tmp_path):
@@ -176,7 +179,7 @@ def test_ladder_takes_the_enclosing_checkout_over_a_competing_child(tmp_path):
     _make_sdk(tmp_path)
     _make_sdk(workspace / "alp-sdk")
 
-    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path, "discovery", None)
+    assert resolve_sdk_root_ladder(None, workspace) == SdkRootResolution(tmp_path, "discovery")
 
 
 def test_ladder_falls_through_to_the_wide_walk_for_a_bootstrap_child(tmp_path):
@@ -187,7 +190,9 @@ def test_ladder_falls_through_to_the_wide_walk_for_a_bootstrap_child(tmp_path):
     workspace.mkdir()
     _make_sdk(workspace / "alp-sdk")
 
-    assert resolve_sdk_root_ladder(None, workspace) == (workspace / "alp-sdk", "discovery", None)
+    assert resolve_sdk_root_ladder(None, workspace) == SdkRootResolution(
+        workspace / "alp-sdk", "discovery"
+    )
 
 
 def test_ladder_project_pin_outranks_every_discovery_candidate(tmp_path):
@@ -200,7 +205,9 @@ def test_ladder_project_pin_outranks_every_discovery_candidate(tmp_path):
     _make_sdk(tmp_path / "pinned")
     _write_pin(workspace, tmp_path / "pinned")
 
-    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path / "pinned", "projectPin", None)
+    assert resolve_sdk_root_ladder(None, workspace) == SdkRootResolution(
+        tmp_path / "pinned", "projectPin"
+    )
 
 
 def test_ladder_sdk_root_flag_is_terminal_and_unvalidated(tmp_path):
@@ -211,10 +218,8 @@ def test_ladder_sdk_root_flag_is_terminal_and_unvalidated(tmp_path):
     workspace.mkdir()
     _make_sdk(tmp_path / "alp-sdk")
 
-    assert resolve_sdk_root_ladder(str(tmp_path / "nope"), workspace) == (
-        tmp_path / "nope",
-        "sdkRootFlag",
-        None,
+    assert resolve_sdk_root_ladder(str(tmp_path / "nope"), workspace) == SdkRootResolution(
+        tmp_path / "nope", "sdkRootFlag"
     )
 
 
@@ -236,7 +241,9 @@ def test_wide_ladder_takes_the_bootstrap_child(tmp_path):
     workspace.mkdir()
     _make_sdk(workspace / "alp-sdk")
 
-    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery", None)
+    assert resolve_sdk_root_wide(None, workspace) == SdkRootResolution(
+        workspace / "alp-sdk", "discovery"
+    )
 
 
 def test_wide_ladder_takes_the_child_over_a_competing_lateral(tmp_path):
@@ -249,7 +256,9 @@ def test_wide_ladder_takes_the_child_over_a_competing_lateral(tmp_path):
     _make_sdk(workspace / "alp-sdk")
     _make_sdk(tmp_path / "alp-sdk")
 
-    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery", None)
+    assert resolve_sdk_root_wide(None, workspace) == SdkRootResolution(
+        workspace / "alp-sdk", "discovery"
+    )
 
 
 def test_wide_ladder_takes_the_child_over_an_enclosing_checkout(tmp_path):
@@ -260,7 +269,9 @@ def test_wide_ladder_takes_the_child_over_an_enclosing_checkout(tmp_path):
     _make_sdk(tmp_path)
     _make_sdk(workspace / "alp-sdk")
 
-    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery", None)
+    assert resolve_sdk_root_wide(None, workspace) == SdkRootResolution(
+        workspace / "alp-sdk", "discovery"
+    )
 
 
 def test_wide_ladder_project_pin_outranks_the_child(tmp_path):
@@ -274,7 +285,9 @@ def test_wide_ladder_project_pin_outranks_the_child(tmp_path):
     _make_sdk(tmp_path / "pinned")
     _write_pin(workspace, tmp_path / "pinned")
 
-    assert resolve_sdk_root_wide(None, workspace) == (tmp_path / "pinned", "projectPin", None)
+    assert resolve_sdk_root_wide(None, workspace) == SdkRootResolution(
+        tmp_path / "pinned", "projectPin"
+    )
 
 
 # ------------------------------------------------------ write_post_build_manifest
@@ -502,8 +515,9 @@ def test_native_sim_target_survives_a_write_failure(tmp_path, monkeypatch):
 #
 # The issue is the one taken. A sixth tier value is a wire-contract change the
 # vscode extension does not expect, and the tests above pin the exact
-# `(path, "discovery", None)` tuples because those are the oracle's own answers
-# -- changing them would trade a reporting gap for a parity break.
+# `SdkRootResolution(path, "discovery", None, None)` values because those are
+# the oracle's own answers -- changing them would trade a reporting gap for a
+# parity break.
 
 
 def test_both_ladders_answer_discovery_for_two_different_checkouts(tmp_path):
@@ -516,11 +530,11 @@ def test_both_ladders_answer_discovery_for_two_different_checkouts(tmp_path):
     _make_sdk(workspace / "alp-sdk")
     _make_sdk(tmp_path / "alp-sdk")
 
-    narrow_path, narrow_tier, _ = resolve_sdk_root_ladder(None, workspace)
-    wide_path, wide_tier, _ = resolve_sdk_root_wide(None, workspace)
+    narrow = resolve_sdk_root_ladder(None, workspace)
+    wide = resolve_sdk_root_wide(None, workspace)
 
-    assert narrow_path != wide_path
-    assert narrow_tier == wide_tier == "discovery"
+    assert narrow.path != wide.path
+    assert narrow.tier == wide.tier == "discovery"
 
 
 def test_a_two_checkout_layout_is_named_by_both_sides(tmp_path):

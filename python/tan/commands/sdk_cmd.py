@@ -258,10 +258,23 @@ def _pointer_written_for(pointer: Path) -> str | None:
     a claim that no other project wrote the pointer -- it is the absence of
     evidence, and `resolve_sdk_tiered` must never manufacture a warning out of
     it.
+
+    A non-`str`, empty, or non-absolute value is ALSO `None` (measured
+    tan-cli#464 review regression): `writtenFor: ""` used to pass the bare
+    `isinstance(value, str)` check here and reach `_workspace_under(ws, "")`,
+    which resolves `Path("")` to the process's cwd -- so whether the foreign
+    warning fired depended on where the caller happened to be standing, not
+    on anything the pointer actually recorded. Every OTHER project root this
+    field can legitimately hold is written by `bootstrap_cmd._run` as an
+    already-absolute `root` (`Project.resolved`'s own contract), so rejecting
+    a relative or blank one here is not narrowing real coverage, only closing
+    the malformed-input gap.
     """
     parsed = _read_pointer_json(pointer)
     value = parsed.get("writtenFor") if parsed is not None else None
-    return value if isinstance(value, str) else None
+    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+        return None
+    return value
 
 
 def _workspace_under(workspace_root: Path, root: str) -> bool:

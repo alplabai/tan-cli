@@ -249,6 +249,44 @@ def test_global_default_does_not_warn_from_inside_the_sdk_checkout_it_names(
     assert resolve_sdk_tiered(None, global_target).foreign_global_default_for is None
 
 
+def test_global_default_written_for_empty_string_reads_as_unknown(tmp_path, isolated_home):
+    """tan-cli#464 review regression: `writtenFor: ""` used to pass the bare
+    `isinstance(value, str)` check in `_pointer_written_for` and reach
+    `_workspace_under(ws, "")`, which resolves `Path("")` to the process's OWN
+    cwd -- so whether the foreign warning fired depended on where the caller
+    happened to be standing, not on anything the pointer actually recorded.
+    `workspace` is a `tmp_path` descendant, never the test runner's cwd, so
+    the pre-fix bug reports "foreign" here."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(isolated_home / ".alp" / "sdk-default", global_target, written_for="")
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
+
+
+@pytest.mark.parametrize(
+    "written_for", [123, ["a"], {"x": 1}, None], ids=["int", "list", "dict", "null"]
+)
+def test_global_default_written_for_wrong_type_reads_as_unknown(
+    tmp_path, isolated_home, written_for
+):
+    """Every non-`str` shape already fell through to `None` safely before the
+    tan-cli#464 review closed the empty-string gap above; this pins that it
+    still does -- a malformed `writtenFor` must degrade to "no opinion", the
+    same as a pointer that predates the field entirely, never a crash."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    pointer = isolated_home / ".alp" / "sdk-default"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(
+        json.dumps({"sdkPath": str(global_target), "writtenFor": written_for}),
+        encoding="utf-8",
+        newline="",
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
+
+
 def test_discovery_prefers_the_workspace_itself_and_refuses_ambiguity(tmp_path):
     """`discover_workspace_sdk` is exactly-one-or-none, unlike the build path's
     wider first-match-wins `discover_sdk_root`. Two candidates is ambiguous, so

@@ -74,6 +74,7 @@ from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     SDK_MARKER,
     _home_alp_dir,
+    global_default_foreign_project_issue,
     global_default_pointer_fix_hint,
     project_pin_issue,
 )
@@ -125,9 +126,7 @@ from tan.core.bootstrap import (
     yocto_only_refusal,
     zephyr_requirements_hint,
 )
-from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
-from tan.core.scaffold import sdk_pointer_json
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -1852,8 +1851,8 @@ def _select_workspace(
 
 def _print_env_outcome(
     *, paths: RunPaths, sdk_root: str, facts: BootstrapFacts, pin: str,
-    pin_issue: Issue | None, flags: dict[str, bool], is_windows: bool,
-    guard_applies: bool, target: Path | None, zephyr_base_adopts: bool,
+    pin_issue: Issue | None, foreign_issue: Issue | None, flags: dict[str, bool],
+    is_windows: bool, guard_applies: bool, target: Path | None, zephyr_base_adopts: bool,
     root: str | None, board_path: str | None, reported_project: Project,
     active_tier: str, sdk: SdkInfo | None,
 ) -> tuple[Outcome, Project, SdkInfo | None]:
@@ -1864,7 +1863,7 @@ def _print_env_outcome(
     -- so this can no longer disagree with `--dry-run` over identical input."""
     print_paths = paths
     print_sdk_root = sdk_root
-    print_env_issues = [pin_issue] if pin_issue is not None else []
+    print_env_issues = [i for i in (pin_issue, foreign_issue) if i is not None]
     if guard_applies and target is not None:
         projected_root, _ = relocate_checkout(paths.repo_root, target, dry_run=True)
         if projected_root is not None and str(projected_root) != str(paths.repo_root):
@@ -1915,18 +1914,8 @@ class RelocationUndo:
     #: `~/.alp/sdk-default`'s bytes before this run overwrote it; `None` when
     #: it did not exist yet (the common first-bootstrap-ever case).
     previous_pointer: bytes | None
-    #: `<project>/.alp/sdk-path`'s bytes before this run wrote it (tan-cli#464);
-    #: `None` when it did not exist yet -- the common case, since bootstrap's
-    #: own project pin write is new. Read at the SAME (already-rebased) project
-    #: root the write below targets, so a project nested INSIDE the relocated
-    #: checkout is snapshotted AFTER the move already carried its `.alp`
-    #: directory along, not at a path the move just vacated.
-    previous_project_pointer: bytes | None
     #: The envelope `project` this run would have reported had it never
-    #: relocated anything. Doubles as the restore location for
-    #: `previous_project_pointer`: once `_undo_relocation` moves the checkout
-    #: back, `.root` is where that directory (nested project or not) exists
-    #: again.
+    #: relocated anything.
     project: Project
     workspace_dir: Path
     venv_dir: Path
@@ -1975,9 +1964,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # bootstrap calling the narrower resolver alone did not. A second,
     # bootstrap-only copy of that fallback would be the very drift this
     # fixes: one resolver, consulted by both.
-    active_path, active_tier, broken_project_pin = resolve_sdk_root_ladder(
-        sdk_root_flag, Path(root)
-    )
+    active_resolution = resolve_sdk_root_ladder(sdk_root_flag, Path(root))
+    active_path = active_resolution.path
+    active_tier = active_resolution.tier
+    broken_project_pin = active_resolution.broken_project_pin
+    foreign_global_default_for = active_resolution.foreign_global_default_for
     active_is_sdk = active_path is not None and active_path.joinpath(*SDK_MARKER).exists()
     resolved = str(active_path) if active_is_sdk else None
     if resolved is None:
@@ -2030,6 +2021,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # command reports; not `log.warn`, which always prefixes `bootstrap.` and
     # would misname this shared code.
     pin_issue = project_pin_issue(broken_project_pin, active_tier)
+    # tan-cli#464: `bootstrap` itself can resolve a `globalDefault` a
+    # DIFFERENT project's earlier relocation wrote -- worth disclosing before
+    # this run sets up a whole venv/west workspace against it, the same as
+    # every other command on this ladder.
+    foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
 
     # `west init -l <alp-sdk>` always makes the topdir the checkout's PARENT and
     # alp-sdk itself the manifest repo, which is what registers the `alp-*`
@@ -2259,7 +2255,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     if print_env:
         return _print_env_outcome(
             paths=paths, sdk_root=sdk_root, facts=facts, pin=pin, pin_issue=pin_issue,
-            flags=flags, is_windows=is_windows, guard_applies=guard_applies, target=target,
+            foreign_issue=foreign_issue, flags=flags, is_windows=is_windows,
+            guard_applies=guard_applies, target=target,
             zephyr_base_adopts=zephyr_base_adopts, root=root, board_path=board_path,
             reported_project=reported_project, active_tier=active_tier, sdk=sdk,
         )
@@ -2377,26 +2374,30 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             root = _rebase(root, old_root, sdk_root)
             board_path = _rebase(board_path, old_root, sdk_root)
             reported_project = Project.resolved(root, board_path)
-            # Snapshotted AFTER the rebase, at the SAME path the write below
-            # targets (tan-cli#464): a project nested inside the checkout has
-            # its `.alp` directory carried along by the move `relocate_checkout`
-            # already performed above, so reading at the pre-rebase `root`
-            # would find nothing there any more.
             relocation_undo = RelocationUndo(
                 old_root=old_root,
                 previous_pointer=previous_pointer,
-                previous_project_pointer=_read_project_sdk_pointer(Path(root)),
                 project=old_project,
                 workspace_dir=old_workspace_dir,
                 venv_dir=old_venv_dir,
             )
             if not dry_run:
+                # `written_for=root` closes tan-cli#464: this pointer is
+                # machine-global and last-writer-wins across every project
+                # that ever relocates a checkout here, so recording which one
+                # wrote it lets a LATER caller under a different project be
+                # warned it is reading someone else's answer
+                # (`sdk_cmd.global_default_foreign_project_issue`), rather
+                # than silently resolving it at `ok: true`, `issues: []`. A
+                # directory-scoped project pin here (tried and reverted,
+                # tan-cli#464 review) is NOT the fix: this directory is
+                # bootstrap's cwd, the workspace PARENT in the quickstart --
+                # not a project -- and a bootstrap from `$HOME` would have
+                # pinned `~/.alp/sdk-path` inside tan's OWN machine-global
+                # config dir, silencing the warning for essentially every
+                # project the user owns. `tan init`'s `_pin_sdk` remains the
+                # one place that writes a real project's `.alp/sdk-path`.
                 _write_global_sdk_pointer(sdk_root, written_for=root)
-                # tan-cli#464 layer 1: a directory-scoped pin at the
-                # higher-precedence `projectPin` tier, so THIS project keeps
-                # its own answer even after a different project's later
-                # bootstrap overwrites the shared global default.
-                _write_project_sdk_pointer(Path(root), sdk_root)
 
     log.line(f"Repo root:       {_native(paths.repo_root)}")
     if is_windows:
@@ -2443,15 +2444,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         if relocation_undo is None:
             return
         moved_to = paths.repo_root
-        # `.project.root` is always a real path here: `relocation_undo` is
-        # only ever constructed after `reported_project = Project.resolved
-        # (root, board_path)` above, which never leaves `root` `None`.
         undo = _undo_relocation(
-            relocation_undo.old_root,
-            moved_to,
-            relocation_undo.previous_pointer,
-            Path(relocation_undo.project.root),
-            relocation_undo.previous_project_pointer,
+            relocation_undo.old_root, moved_to, relocation_undo.previous_pointer
         )
         if undo.moved_back:
             # The checkout itself is back; anything the failed step already
@@ -2627,6 +2621,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     bootstrap_issues = log.take_issues(escalate_blocking=not ok)
     if pin_issue is not None:
         bootstrap_issues = [pin_issue, *bootstrap_issues]
+    if foreign_issue is not None:
+        bootstrap_issues = [foreign_issue, *bootstrap_issues]
     return (
         Outcome(exit_code, planned_payload(), bootstrap_issues, text),
         reported_project,
@@ -2653,13 +2649,13 @@ def _global_sdk_pointer_json(sdk_root: str, written_for: str) -> str:
     """`~/.alp/sdk-default`'s contents after a relocation: `sdkPath` plus
     `writtenFor` -- which project's bootstrap wrote it (tan-cli#464). A
     SEPARATE shape from `tan.core.scaffold.sdk_pointer_json` (the `.alp/
-    sdk-path` PROJECT pin this same relocation also writes, via
-    `_write_project_sdk_pointer` -- a pin never needs to name a project of its
-    own), mirroring how `tan.core.bootstrap.workspace_sdk_record_json` is its
-    own function rather than growing `sdk_pointer_json`'s shape for a
-    different record with a different reader. `sdk_cmd._pointer_written_for`
-    reads `writtenFor` back and warns when a caller resolving through the
-    `globalDefault` tier sits outside both it and `sdkPath`.
+    sdk-path` PROJECT pin `tan init`'s `_pin_sdk` writes -- a pin never needs
+    to name a project of its own), mirroring how
+    `tan.core.bootstrap.workspace_sdk_record_json` is its own function rather
+    than growing `sdk_pointer_json`'s shape for a different record with a
+    different reader. `sdk_cmd._pointer_written_for` reads `writtenFor` back
+    and warns when a caller resolving through the `globalDefault` tier sits
+    outside both it and `sdkPath`.
     """
     payload = {"sdkPath": sdk_root, "writtenFor": written_for, "updatedAt": generated_at_iso()}
     return json.dumps(payload, indent=2) + "\n"
@@ -2689,52 +2685,6 @@ def _write_global_sdk_pointer(sdk_root: str, *, written_for: str) -> None:
         pointer.write_text(_global_sdk_pointer_json(sdk_root, written_for), encoding="utf-8")
     except Exception:  # noqa: BLE001 -- best-effort by contract
         pass
-
-
-def _write_project_sdk_pointer(project_root: Path, sdk_root: str) -> None:
-    """Repoint `<project_root>/.alp/sdk-path` at the checkout's new location
-    after a relocation (tan-cli#464 layer 1).
-
-    Without this, the ONLY record of a relocation is the machine-global
-    `~/.alp/sdk-default` -- last-writer-wins across every project on the host,
-    so a SECOND project's bootstrap silently repoints the FIRST at the wrong
-    SDK the moment it relocates, with no per-project memory anywhere. Writing
-    the higher-precedence `projectPin` tier here means THIS project keeps
-    resolving its own checkout regardless of what any later bootstrap,
-    anywhere else, does to the shared default.
-
-    Same shape (`tan.core.scaffold.sdk_pointer_json`) and same containment
-    guard (`tan.core.fs_confine.resolve_confined`) as `tan init`'s own
-    `.alp/sdk-path` write (`init_cmd._pin_sdk`, tan-cli#325) -- this is the
-    identical file, written by a second producer, and must not drift from how
-    the first one protects it: a symlinked (or junctioned) pre-existing `.alp`
-    under `project_root` must not carry the write outside the project while
-    the pointer still looks like it landed in the logical place. Best-effort,
-    like the global pointer this mirrors: a project pin that could not be
-    written degrades to the project falling through to the (now correctly
-    warned-about) global default, not a failed bootstrap.
-    """
-    try:
-        pointer = resolve_confined(project_root, project_root / ".alp" / "sdk-path")
-        pointer.parent.mkdir(parents=True, exist_ok=True)
-        with pointer.open("w", encoding="utf-8", newline="") as handle:
-            handle.write(sdk_pointer_json(sdk_root))
-    except (OSError, ValueError, PathEscapeError):
-        pass
-
-
-def _read_project_sdk_pointer(project_root: Path) -> bytes | None:
-    """`<project_root>/.alp/sdk-path`'s current bytes, or `None` when absent
-    (tan-cli#464). Snapshotted immediately before `_write_project_sdk_pointer`
-    overwrites it, so a later rollback (`_undo_relocation`) can put back
-    exactly what was there -- including "nothing was there", the common case
-    since this write is new. Best-effort, like the write it guards.
-    """
-    try:
-        pointer = resolve_confined(project_root, project_root / ".alp" / "sdk-path")
-        return pointer.read_bytes() if pointer.is_file() else None
-    except (OSError, ValueError, PathEscapeError):
-        return None
 
 
 def _read_global_sdk_pointer() -> bytes | None:
@@ -2779,34 +2729,23 @@ class RelocationUndoResult:
 
 
 def _undo_relocation(
-    old_root: str,
-    current_repo_root: Path,
-    previous_pointer: bytes | None,
-    project_root: Path,
-    previous_project_pointer: bytes | None,
+    old_root: str, current_repo_root: Path, previous_pointer: bytes | None
 ) -> RelocationUndoResult:
     """Rollback of a relocation THIS run performed, for when a step after it
     -- `ensure_venv` or `west_phase` -- turns out to be the fallible one
     after all (tan-cli#284): move the checkout back to where it was, and
-    restore (or remove) the global default-SDK pointer AND the project pin
-    (tan-cli#464) this run overwrote.
+    restore (or remove) the global default-SDK pointer this run overwrote.
 
     `moved_back=False` means `relocate_checkout` itself refused -- e.g.
     because the vacated original path was recreated in the meantime, which
     `relocate_checkout`'s own already-exists guard reports as an error, not a
     silent no-op -- and the checkout is still at `current_repo_root`.
     `moved_back=True` means the checkout IS back at `old_root`, whether or
-    not the pointer restores that follow it (attempted only once the move
+    not the pointer restore that follows it (attempted only once the move
     itself succeeded, since a pointer aimed at a checkout that did NOT
     actually move back would be worse than leaving it alone) also succeeded.
     The caller (`rollback_relocation_after`) uses `moved_back` to decide
     which location to keep reporting, and `detail` only to word WHAT failed.
-
-    `project_root` is the PRE-relocation project directory (`relocation_undo.
-    project.root`): once `relocate_checkout` above puts the checkout back at
-    `old_root`, a project nested inside it is back there too, so that is where
-    `previous_project_pointer` belongs -- not the (now vacated) rebased root
-    this run had been reporting.
     """
     _new_root, move_error = relocate_checkout(current_repo_root, Path(old_root).parent)
     if move_error is not None:
@@ -2817,13 +2756,7 @@ def _undo_relocation(
             pointer.unlink(missing_ok=True)
         else:
             pointer.write_bytes(previous_pointer)
-        project_pointer = resolve_confined(project_root, project_root / ".alp" / "sdk-path")
-        if previous_project_pointer is None:
-            project_pointer.unlink(missing_ok=True)
-        else:
-            project_pointer.parent.mkdir(parents=True, exist_ok=True)
-            project_pointer.write_bytes(previous_project_pointer)
-    except (OSError, ValueError, PathEscapeError) as err:
+    except OSError as err:
         return RelocationUndoResult(
             moved_back=True,
             detail=f"the default SDK pointer could not be restored: {err}",

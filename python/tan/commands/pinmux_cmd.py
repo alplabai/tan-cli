@@ -84,6 +84,7 @@ from typing import Any
 import typer
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
+from tan.commands.sdk_cmd import ActiveSdk
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -257,9 +258,8 @@ def parse_pinmux_table_checked(text: str) -> PinmuxTable:
     )
 
 
-_ResolvedSdk = tuple[str, str, str | None]
 _ResolveResult = tuple[
-    _ResolvedSdk | None, str | None, str | None, list[PinmuxPad], list[Issue], ExitCode
+    ActiveSdk | None, str | None, str | None, list[PinmuxPad], list[Issue], ExitCode
 ]
 
 
@@ -334,7 +334,7 @@ def _resolve(
         return sdk, resolved_family, None, [], issues, ExitCode.VALIDATION_FAILURE
 
     if sdk is not None and resolved_family is not None:
-        table_dir = Path(sdk[0]) / "metadata" / "pinmux"
+        table_dir = Path(sdk.path) / "metadata" / "pinmux"
         try:
             # `resolve_confined` resolves BOTH sides and compares components,
             # so it is correct where a `str.startswith` prefix test is not
@@ -497,7 +497,7 @@ def pinmux(
 
     data: dict[str, Any] = {
         "schemaVersion": DATA_SCHEMA_VERSION,
-        "sdkRoot": sdk[0] if sdk is not None else None,
+        "sdkRoot": sdk.path if sdk is not None else None,
     }
     if sku is not None:
         data["sku"] = sku
@@ -522,7 +522,7 @@ def pinmux(
         data,
         issues,
         exit_code,
-        sdk=SdkInfo(sdk[0], sdk[1]) if sdk is not None else None,
+        sdk=SdkInfo(sdk.path, sdk.tier) if sdk is not None else None,
     )
     if json_mode:
         emit(envelope)

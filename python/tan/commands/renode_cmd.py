@@ -119,13 +119,14 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
-from tan.commands.sdk_cmd import project_pin_issue
+from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
 from tan.commands.build_output import ManifestInvalid, ManifestUnavailable, load_manifest
 from tan.commands.doctor_cmd import on_path
 from tan.core.global_flags import accept_global_flags
@@ -186,9 +187,23 @@ def _resolve_root_arg(raw: str | None, cwd: str, default: str) -> str:
 _is_sdk_root = is_sdk_root
 
 
+@dataclass(frozen=True)
+class _SdkRootAndTier:
+    """`_resolve_sdk_root_and_tier`'s own return shape -- a named result, not
+    a growing tuple (the same reasoning `build_cmd.SdkRootResolution`
+    documents): a fact one caller needs (`foreign_global_default_for`,
+    tan-cli#464) must not force every field before it to be re-counted by
+    position."""
+
+    path: str | None
+    tier: str | None
+    broken_project_pin: str | None = None
+    foreign_global_default_for: str | None = None
+
+
 def _resolve_sdk_root_and_tier(
     sdk_root_arg: str | None, workspace_root: str
-) -> tuple[str | None, str | None, str | None]:
+) -> _SdkRootAndTier:
     """`--sdk-root` (TERMINAL -- returned AS TYPED when it has the loader
     script, `None` otherwise, never falling through to a lower tier) > the
     project's own `.alp/sdk-path` pin > the machine-global default
@@ -199,15 +214,22 @@ def _resolve_sdk_root_and_tier(
     (tan-cli#263). No `ALP_SDK_ROOT` tier (tried and reverted -- see
     `resolve_sdk_root_ladder`'s own docstring).
 
-    Third element (tan-cli#263 review): the broken project pin carried through
-    from `resolve_sdk_root_wide`, `None` on the `--sdk-root` branch.
+    `.broken_project_pin` (tan-cli#263 review) is the broken project pin
+    carried through from `resolve_sdk_root_wide`, `None` on the `--sdk-root`
+    branch. Same for `.foreign_global_default_for` (tan-cli#464).
     """
     if sdk_root_arg is not None:
-        return (
-            (sdk_root_arg, "sdkRootFlag", None) if _is_sdk_root(sdk_root_arg) else (None, None, None)
-        )
-    found, tier, broken_pin = resolve_sdk_root_wide(None, Path(workspace_root))
-    return (str(found), tier, broken_pin) if found is not None else (None, None, broken_pin)
+        if _is_sdk_root(sdk_root_arg):
+            return _SdkRootAndTier(sdk_root_arg, "sdkRootFlag")
+        return _SdkRootAndTier(None, None)
+    resolution = resolve_sdk_root_wide(None, Path(workspace_root))
+    found = resolution.path
+    if found is None:
+        return _SdkRootAndTier(None, None, resolution.broken_project_pin)
+    return _SdkRootAndTier(
+        str(found), resolution.tier, resolution.broken_project_pin,
+        resolution.foreign_global_default_for,
+    )
 
 
 def _data(**overrides: Any) -> dict[str, Any]:
@@ -839,7 +861,11 @@ def _run(
     # (the GLOBAL flag) -- NOT `app_path`. See the module docstring for why
     # these two deliberately diverge in the oracle.
     workspace_root = os.path.join(cwd, project_arg) if project_arg else cwd
-    sdk_root, sdk_tier, sdk_broken_pin = _resolve_sdk_root_and_tier(sdk_root_arg, workspace_root)
+    sdk_resolution = _resolve_sdk_root_and_tier(sdk_root_arg, workspace_root)
+    sdk_root = sdk_resolution.path
+    sdk_tier = sdk_resolution.tier
+    sdk_broken_pin = sdk_resolution.broken_project_pin
+    sdk_foreign_default = sdk_resolution.foreign_global_default_for
     if sdk_root is None:
         return fail("renode.sdk-root-not-found", "Cannot locate alp-sdk root.")
     sdk = SdkInfo(sdk_root, sdk_tier or "none")
@@ -857,6 +883,9 @@ def _run(
     pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier or "none")
     if pin_issue is not None:
         sdk_context_issues.append(pin_issue)
+    foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
+    if foreign_issue is not None:
+        sdk_context_issues.append(foreign_issue)
     # tan-cli#407. `sdk_root_arg` is the RAW flag -- `sdk_root` above is the
     # resolved text, and an explicit root puts both ladders on the terminal
     # `sdkRootFlag` tier, where the helper correctly returns `None`.
@@ -1069,7 +1098,11 @@ def _run_sim(
     # uses -- the oracle's `sim::run` calls the identical `resolve_sdk_root`
     # the plain `mod.rs::run` does, with no sim-specific branching.
     workspace_root = os.path.join(cwd, project_arg) if project_arg else cwd
-    sdk_root, sdk_tier, sdk_broken_pin = _resolve_sdk_root_and_tier(sdk_root_arg, workspace_root)
+    sdk_resolution = _resolve_sdk_root_and_tier(sdk_root_arg, workspace_root)
+    sdk_root = sdk_resolution.path
+    sdk_tier = sdk_resolution.tier
+    sdk_broken_pin = sdk_resolution.broken_project_pin
+    sdk_foreign_default = sdk_resolution.foreign_global_default_for
     if sdk_root is None:
         return fail("renode.sdk-root-not-found", "Cannot locate alp-sdk root.")
     sdk = SdkInfo(sdk_root, sdk_tier or "none")
@@ -1081,6 +1114,9 @@ def _run_sim(
     pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier or "none")
     if pin_issue is not None:
         sdk_context_issues.append(pin_issue)
+    foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
+    if foreign_issue is not None:
+        sdk_context_issues.append(foreign_issue)
     divergence = sdk_ladder_divergence_issue(sdk_root_arg, Path(workspace_root), wide=True)
     if divergence is not None:
         sdk_context_issues.append(divergence)

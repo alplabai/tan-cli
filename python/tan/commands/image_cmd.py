@@ -69,7 +69,7 @@ from tan.commands.build_output import (
     resolve_build_root,
     resolve_project_context,
 )
-from tan.commands.sdk_cmd import project_pin_issue
+from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
 from tan.core.global_flags import accept_global_flags
 from tan.core.image_bundle import (
     BUNDLE_DIR,
@@ -459,6 +459,9 @@ def _run(
     pin_issue = project_pin_issue(context.broken_project_pin, context.sdk_source_tier)
     if pin_issue is not None:
         issues.append(pin_issue)
+    foreign_issue = global_default_foreign_project_issue(context.foreign_global_default_for)
+    if foreign_issue is not None:
+        issues.append(foreign_issue)
     return _Outcome(
         exit_code,
         bundle,

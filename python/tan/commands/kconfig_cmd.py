@@ -409,7 +409,7 @@ def _run_kconfig(
             json_mode=json_mode,
         )
         return
-    sdk_info = SdkInfo(sdk[0], sdk[1])
+    sdk_info = SdkInfo(sdk.path, sdk.tier)
 
     try:
         resolved_core = _resolve_core(core, board_path)
@@ -428,7 +428,7 @@ def _run_kconfig(
 
     # Setup-class check #2: no bootstrapped Zephyr workspace (needs
     # ZEPHYR_BASE for the real Kconfig solver).
-    zephyr_base = _resolve_zephyr_base(root, sdk[0])
+    zephyr_base = _resolve_zephyr_base(root, sdk.path)
     if zephyr_base is None:
         _fail(
             root=root,
@@ -456,7 +456,7 @@ def _run_kconfig(
     try:
         try:
             stdout_text = _plan_emit(
-                "kconfig", root=sdk[0], board_yaml=Path(board_path), core=resolved_core
+                "kconfig", root=sdk.path, board_yaml=Path(board_path), core=resolved_core
             )
         except SystemExit as err:
             _fail(

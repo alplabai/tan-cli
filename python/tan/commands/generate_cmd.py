@@ -85,6 +85,7 @@ import contextlib
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
@@ -99,7 +100,11 @@ from tan.commands.build_cmd import (
     resolve_sdk_root_wide,
     sdk_ladder_divergence_issue,
 )
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, project_pin_issue
+from tan.commands.sdk_cmd import (
+    NO_SDK_NEXT_STEPS,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+)
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
@@ -769,10 +774,25 @@ def _resolve_board_path(board_yaml: str | None, workspace_root: Path) -> Path:
     return workspace_root / "board.yaml"
 
 
+@dataclass(frozen=True)
+class _ResolvedSdkRoot:
+    """`_resolve_sdk_root`'s own return shape -- a named result, not a
+    growing tuple (the same reasoning `build_cmd.SdkRootResolution`
+    documents): a fact one caller needs (`foreign_global_default_for`,
+    tan-cli#464) must not force every field before it to be re-counted by
+    position."""
+
+    path: Path
+    tier: str
+    reported: str
+    broken_project_pin: str | None = None
+    foreign_global_default_for: str | None = None
+
+
 def _resolve_sdk_root(
     sdk_root: str | None, workspace_root: Path
-) -> tuple[Path, str, str, str | None] | None:
-    """`(path, sourceTier, reported, brokenProjectPin)` -- or `None` when
+) -> _ResolvedSdkRoot | None:
+    """The resolved checkout as a [`_ResolvedSdkRoot`], or `None` when
     unresolved. `--sdk-root`
     is TERMINAL: an explicit path that is not an SDK checkout fails loudly here
     rather than silently falling through to discovery and generating against a
@@ -797,10 +817,16 @@ def _resolve_sdk_root(
     if sdk_root:
         candidate = Path(sdk_root)
         if (candidate / "scripts" / "alp_project.py").is_file():
-            return candidate, "sdkRootFlag", sdk_root, None
+            return _ResolvedSdkRoot(candidate, "sdkRootFlag", sdk_root)
         return None
-    found, tier, broken_pin = resolve_sdk_root_wide(None, workspace_root)
-    return (found, tier, str(found), broken_pin) if found is not None else None
+    resolution = resolve_sdk_root_wide(None, workspace_root)
+    found = resolution.path
+    if found is None:
+        return None
+    return _ResolvedSdkRoot(
+        found, resolution.tier, str(found), resolution.broken_project_pin,
+        resolution.foreign_global_default_for,
+    )
 
 
 def _finish(
@@ -986,7 +1012,11 @@ def generate(
                 f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
                 ExitCode.VALIDATION_FAILURE,
             )
-        resolved_sdk, sdk_tier, sdk_reported, sdk_broken_pin = resolved
+        resolved_sdk = resolved.path
+        sdk_tier = resolved.tier
+        sdk_reported = resolved.reported
+        sdk_broken_pin = resolved.broken_project_pin
+        sdk_foreign_default = resolved.foreign_global_default_for
         # Set only now: every guard from here on runs with a resolved SDK, so
         # the envelope carries `sdk` on both success and a later refusal
         # (`--target`/`--core` mistakes, an overlay guard, ...), matching the
@@ -1106,6 +1136,12 @@ def generate(
         pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
         if pin_issue is not None:
             issues.append(pin_issue)
+        foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
+        if foreign_issue is not None:
+            # tan-cli#464: same silence, one tier down -- a `globalDefault`
+            # answer a DIFFERENT project's bootstrap relocation actually
+            # decided.
+            issues.append(foreign_issue)
         # tan-cli#407: this command just wrote `build/generated/alp.conf`, the
         # DTS overlays and `alp_hw_info_build.h` out of one checkout's
         # `metadata/`, and `tan build` may plan the very same tree against

@@ -1691,7 +1691,8 @@ def test_collect_names_the_global_default_tier_and_the_unselected_child_checkout
     global_sdk = _make_sdk_root(tmp_path / "elsewhere" / "alp-sdk")
     _write_global_default_pointer(global_sdk)
 
-    resolved_root, tier, broken_pin = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    resolution = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    resolved_root, tier, broken_pin = resolution.path, resolution.tier, resolution.broken_project_pin
     assert tier == "globalDefault"
     assert str(resolved_root) == str(global_sdk)
     assert broken_pin is None
@@ -1791,7 +1792,8 @@ def test_collect_names_a_broken_global_default_end_to_end(tmp_path):
     broken_target = tmp_path / "gone"
     _write_global_default_pointer(broken_target)
 
-    resolved_root, tier, broken_pin = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    resolution = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    resolved_root, tier, broken_pin = resolution.path, resolution.tier, resolution.broken_project_pin
     assert resolved_root is None
     assert tier == "none"
     assert broken_pin is None  # this is the GLOBAL default, not the project pin
