@@ -748,6 +748,7 @@ def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_p
     # A FRESH process, same cwd, nothing carried over but the filesystem --
     # exactly `tan doctor` typed into the same shell a moment later.
     doctor_env = envelope(run_tan("doctor", "--format", "json", cwd=sdk.parent))
+    assert "sdk" in doctor_env, "doctor lost the SDK after a relocating bootstrap"
     assert doctor_env["sdk"]["root"] == bootstrap_env["sdk"]["root"]
     assert doctor_env["sdk"]["sourceTier"] == "globalDefault"
 

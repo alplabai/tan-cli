@@ -14,6 +14,13 @@ set -uo pipefail
 SRC_BIN="${1:?usage: e2e-full.sh <tan-binary> <workdir>}"
 WORK="${2:?usage: e2e-full.sh <tan-binary> <workdir>}"
 
+# Captured BEFORE `export HOME="$WORK/home"` sandboxes it below. Some later
+# assertions need to tell "this host already had it" apart from "this run's
+# own debris" -- a candidate found under the sandboxed $HOME could just be
+# something THIS run extracted a moment earlier, so they must scan the REAL
+# home, never the sandbox.
+REAL_HOME="${HOME:-}"
+
 PASS=0; FAIL=0; FAILED_NAMES=""
 ok()   { PASS=$((PASS+1)); printf '  PASS  %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); FAILED_NAMES="$FAILED_NAMES|$1"; printf '  FAIL  %s\n' "$1"; }
@@ -62,8 +69,11 @@ for cand in \
 do
   if [ -f "$cand/sdk_version" ]; then export ZEPHYR_SDK_INSTALL_DIR="$cand"; break; fi
 done
-# `west sdk install` records the location in ~/.cmake/packages/Zephyr-sdk; on
-# Windows that is the only place it lands, so a hardcoded path list misses it.
+# `west sdk install` records the location via CMake's user package registry.
+# On POSIX that channel is a dot-file tree, ~/.cmake/packages/Zephyr-sdk; on
+# Windows CMake does NOT use that path at all -- the registry is the channel,
+# HKCU\Software\Kitware\CMake\Packages\Zephyr-sdk, probed separately below
+# where a Scenario-B build's success is judged against a pre-existing SDK.
 if [ -z "${ZEPHYR_SDK_INSTALL_DIR:-}" ]; then
   for reg in "$HOME/.cmake/packages/Zephyr-sdk"/*; do
     [ -f "$reg" ] || continue
@@ -312,9 +322,20 @@ grep -q "would move\|would set" "$WORK/bsdry.out" && ok "#323: conditional wordi
 #
 # Scenario A stays honest: on a Windows host that really does have its set, A
 # reports "not applicable" rather than inventing a refusal to score.
+#
+# The set had ALSO been wrong on non-Windows: it checked only `cmake ninja xz
+# wget` (four), silently dropping `git` and `python3` -- so a Linux host
+# missing everything but `git` scored Scenario A "not applicable", the same
+# false-bare-becomes-skipped shape the Windows fix above exists to catch. And
+# macOS fell into that same `*)` arm and inherited `xz wget`, which tan's own
+# macOS tuple never asks for and a stock Mac ships neither of (see the note at
+# ~line 490): a fully provisioned Mac scored "bare" and silently skipped
+# Scenario B. macOS is a shipped target (install.sh, apple-darwin), so it gets
+# its own arm rather than falling through to the POSIX-with-xz/wget default.
 case "$(uname -s 2>/dev/null || echo unknown)" in
   MINGW*|MSYS*|CYGWIN*) HOST_PREREQS="git cmake ninja" ; HOST_IS_WINDOWS=1 ;;
-  *)                    HOST_PREREQS="cmake ninja xz wget" ; HOST_IS_WINDOWS=0 ;;
+  Darwin)                HOST_PREREQS="git cmake python3 ninja" ; HOST_IS_WINDOWS=0 ;;
+  *)                     HOST_PREREQS="git cmake python3 ninja xz wget" ; HOST_IS_WINDOWS=0 ;;
 esac
 hdr "prerequisite scan ($(echo "$HOST_PREREQS" | tr ' ' ','))"
 have_prereqs() {
@@ -332,7 +353,11 @@ CAN_APT=0
 if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && command -v apt-get >/dev/null 2>&1; then
   CAN_APT=1
 fi
-have_prereqs && note "cmake/ninja/xz/wget already present" || note "cmake/ninja/xz/wget NOT present"
+# Interpolated, not a hardcoded "cmake/ninja/xz/wget": that literal is only
+# true for the old always-POSIX-four set this section replaces, and would
+# misreport what was actually probed on Windows or macOS.
+HOST_PREREQS_LABEL="$(echo "$HOST_PREREQS" | tr ' ' '/')"
+have_prereqs && note "$HOST_PREREQS_LABEL already present" || note "$HOST_PREREQS_LABEL NOT present"
 note "root + apt-get available (can self-provision): $CAN_APT"
 
 # What follows used to be one unconditional "real bootstrap -> #299 doctor ->
@@ -405,9 +430,14 @@ PY
 ########################  SCENARIO A: bare host refuses precisely  ########################
 echo; echo "############ SCENARIO A: bare host (no build toolchain) ############"
 if have_prereqs; then
-  note "A: not applicable -- host already has cmake/ninja/xz/wget, nothing to refuse"
+  note "A: not applicable -- host already has $HOST_PREREQS_LABEL, nothing to refuse"
 else
-  check_bootstrap_refusal bsA1 prerequisites-missing cmake ninja xz wget
+  # The tools asserted here MUST be the ones `have_prereqs` just found missing
+  # -- i.e. this host's own $HOST_PREREQS -- not a hardcoded POSIX four: on a
+  # Windows host missing only `ninja`, the old literal asserted the refusal
+  # message named `xz` and `wget`, which tan's Windows prerequisite list never
+  # even asks for, so it went red for a reason unrelated to the actual gap.
+  check_bootstrap_refusal bsA1 prerequisites-missing $HOST_PREREQS
   if [ "$CAN_APT" -eq 1 ]; then
     note "A: installing exactly what tan named: cmake ninja-build xz-utils wget"
     apt-get install -y -qq --no-install-recommends cmake ninja-build xz-utils wget \
@@ -426,7 +456,7 @@ echo; echo "############ SCENARIO B: provisioned host ############"
 HAVE_PROJECT=0
 SDK_OK=0
 if ! have_prereqs && [ "$CAN_APT" -ne 1 ]; then
-  note "B: NOT RUN -- host lacks cmake/ninja/xz/wget and cannot self-provision (no root apt-get)"
+  note "B: NOT RUN -- host lacks $HOST_PREREQS_LABEL and cannot self-provision (no root apt-get)"
 else
   if [ "$CAN_APT" -eq 1 ]; then
     # `file` is NOT one tan names, and it is required anyway: the Zephyr SDK's
@@ -570,10 +600,36 @@ PY
       # and `tan build` finding it and succeeding is CORRECT, not a defect.
       # Scoring that as "build unexpectedly succeeded" is the harness asserting
       # its own assumption over the observed host.
+      #
+      # The candidate set is REAL_HOME (captured at the very top of the script,
+      # BEFORE `export HOME=` sandboxed it) plus system-wide install dirs --
+      # NEVER the sandboxed $HOME. A `west sdk install` that times out mid-
+      # extract (the `timeout "$SDK_TIMEOUT"` above) leaves a PARTIAL
+      # `$HOME/zephyr-sdk-<ver>/` behind as THIS run's own debris; scanning the
+      # sandbox would treat that empty directory as "pre-existing" and
+      # permanently disarm the very assertion below for the rest of the run.
+      # `-f "$_z/sdk_version"` is required, not just `-d`, matching the
+      # top-of-script search (which already requires it) -- a directory alone
+      # proves nothing, a half-extracted SDK has one too.
       HOST_ZSDK=no
-      for _z in "$HOME"/zephyr-sdk-* /opt/zephyr-sdk-* "${ZEPHYR_SDK_INSTALL_DIR:-}"; do
-        [ -n "$_z" ] && [ -d "$_z" ] && HOST_ZSDK=yes && break
+      for _z in "$REAL_HOME"/zephyr-sdk-* /opt/zephyr-sdk-* /usr/local/zephyr-sdk-* "${ZEPHYR_SDK_INSTALL_DIR:-}"; do
+        [ -n "$_z" ] && [ -f "$_z/sdk_version" ] && HOST_ZSDK=yes && break
       done
+      # `west sdk install` also registers via CMake's user package registry,
+      # and on Windows that channel IS the registry -- HKCU\Software\Kitware\
+      # CMake\Packages\Zephyr-sdk -- not a dot-file the $HOME redirect could
+      # neutralise. A build that resolves an SDK through THAT channel is just
+      # as legitimate as one found by path, so it has to be probed too before
+      # concluding "no host SDK". `reg` is absent on POSIX and the key is
+      # absent on a Windows host that never ran `west sdk install`; both are
+      # tolerated, not treated as a script error.
+      if [ "$HOST_ZSDK" = no ] && command -v reg >/dev/null 2>&1; then
+        while IFS= read -r _z; do
+          _z=$(printf '%s' "$_z" | tr -d '\r')
+          [ -n "$_z" ] && [ -f "$_z/sdk_version" ] && HOST_ZSDK=yes && break
+        done < <(reg query "HKCU\Software\Kitware\CMake\Packages\Zephyr-sdk" 2>/dev/null \
+                    | grep REG_SZ | sed -E 's/^.*REG_SZ[[:space:]]+//')
+      fi
       if [ "$RC" -eq 0 ] && [ "$HOST_ZSDK" = yes ]; then
         note "B: build succeeded using a Zephyr SDK already present on this host"
         note "   (not installed by this run) -- correct behaviour, not scored as"
