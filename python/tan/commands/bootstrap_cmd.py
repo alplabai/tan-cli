@@ -51,6 +51,7 @@ stray byte there breaks the extension silently.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -73,6 +74,7 @@ from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     SDK_MARKER,
     _home_alp_dir,
+    global_default_foreign_project_issue,
     global_default_pointer_fix_hint,
     project_pin_issue,
 )
@@ -125,7 +127,7 @@ from tan.core.bootstrap import (
     zephyr_requirements_hint,
 )
 from tan.core.global_flags import accept_global_flags
-from tan.core.scaffold import sdk_pointer_json
+from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -1275,6 +1277,43 @@ def enclosing_west_workspace_refusal(intended_topdir: Path, ancestor: Path) -> s
     )
 
 
+def workspace_orphan_refusal(repo_root: Path, source_topdir: Path, target: Path | None) -> str:
+    """`bootstrap.workspace-orphan-refused`: `repo_root` is the manifest repo of
+    the live west workspace at `source_topdir`, so relocating it would orphan
+    that workspace -- its `.west/config` would still name this checkout.
+
+    `target` is the real destination only when `--workspace` was given
+    explicitly: that is currently the ONLY way this refusal is reached at all,
+    since `default_relocation_target` (the no-`--workspace` auto-relocation
+    path) returns `None` the instant the parent already holds a `.west/config`
+    -- the same fact this refusal itself is gated on -- so an in-place re-run
+    with no `--workspace` never gets this far (tan-cli#389/#390). `target`
+    stays typed `Path | None` anyway, not narrowed to `Path` at the call site:
+    interpolating it unconditionally is exactly how tan-cli#469 printed a
+    stringified `None` in the prose and then advised dropping a `--workspace`
+    the invocation never carried, for the shape of call this guards against
+    ever recurring even if that gating changes.
+    """
+    if target is None:
+        return (
+            f"{_native(repo_root)} is the manifest repository of the west workspace at "
+            f"{_native(source_topdir)}, so it cannot be relocated -- its .west/config "
+            f"would still name this checkout. Nothing was moved and the default SDK was "
+            f"not changed. This workspace is already bootstrapped; re-run without "
+            f"--sdk-root pointing into it, or clone a SECOND alp-sdk checkout elsewhere "
+            f"and pass --sdk-root at that one."
+        )
+    return (
+        f"{_native(repo_root)} is the manifest repository of the west workspace at "
+        f"{_native(source_topdir)}, so moving it to {_native(target)} would leave that "
+        f"workspace pointing at nothing -- its .west/config would still name this "
+        f"checkout. Nothing was moved and the default SDK was not changed. Bootstrap "
+        f"that workspace in place (drop --workspace), or clone a SECOND alp-sdk "
+        f"checkout under the directory you want and pass --sdk-root pointing at that "
+        f"one."
+    )
+
+
 def find_enclosing_west(start: Path) -> Path | None:
     """Walk from `start`'s PARENT upward -- never `start` itself, whose own
     `.west` is the ordinary "already initialised, reuse" case `west_phase`
@@ -1847,6 +1886,58 @@ def _select_workspace(
     return WorkspacePlan(clear_zephyr_base=True)
 
 
+def _print_env_outcome(
+    *, paths: RunPaths, sdk_root: str, facts: BootstrapFacts, pin: str,
+    pin_issue: Issue | None, foreign_issue: Issue | None, flags: dict[str, bool],
+    is_windows: bool, guard_applies: bool, target: Path | None, zephyr_base_adopts: bool,
+    root: str | None, board_path: str | None, reported_project: Project,
+    active_tier: str, sdk: SdkInfo | None,
+) -> tuple[Outcome, Project, SdkInfo | None]:
+    """`--print-env`'s short-circuit (tan-cli#459): project `paths` through
+    whichever write-time decision the caller already made -- the relocation
+    guard (`guard_applies`/`target`) or a `$ZEPHYR_BASE` adoption
+    (`zephyr_base_adopts`, mutually exclusive with the guard by construction)
+    -- so this can no longer disagree with `--dry-run` over identical input."""
+    print_paths = paths
+    print_sdk_root = sdk_root
+    print_env_issues = [i for i in (pin_issue, foreign_issue) if i is not None]
+    if guard_applies and target is not None:
+        projected_root, _ = relocate_checkout(paths.repo_root, target, dry_run=True)
+        if projected_root is not None and str(projected_root) != str(paths.repo_root):
+            print_paths = RunPaths(projected_root, target, target / facts.venv_dir_name)
+            print_sdk_root = str(projected_root)
+            print_env_issues.append(Issue(
+                "bootstrap.workspace-relocated", "warning",
+                f"a real run would move the alp-sdk checkout from "
+                f"{_native(paths.repo_root)} to {_native(projected_root)} so the "
+                f"west workspace stays out of {_native(paths.workspace_dir)} -- the "
+                f"paths below already reflect that (tan-cli#185).",
+            ))
+    elif zephyr_base_adopts:
+        # Mirrors `_select_workspace`'s adopted topdir, read-only (that call
+        # also LOGS, which a short-circuit must not trigger).
+        zephyr_base = _env("ZEPHYR_BASE")
+        if zephyr_base is not None:
+            top = Path(zephyr_base).parent
+            print_paths = RunPaths(paths.repo_root, top, top / facts.venv_dir_name)
+    text = print_env_block(facts, print_paths.tokens(), facts.venv_bin_dir(is_windows), is_windows)
+    print_project = reported_project
+    if print_paths is not paths:
+        print_project = Project.resolved(
+            _rebase(root, str(paths.repo_root), print_sdk_root),
+            _rebase(board_path, str(paths.repo_root), print_sdk_root),
+        )
+    return (
+        Outcome(
+            ExitCode.SUCCESS,
+            _data(args=flags, sdk_root=print_sdk_root, paths=print_paths, facts=facts, pin=pin),
+            print_env_issues, text,
+        ),
+        print_project,
+        SdkInfo(print_sdk_root, active_tier) if print_paths is not paths else sdk,
+    )
+
+
 @dataclass(frozen=True)
 class RelocationUndo:
     """Everything `rollback_relocation_after` needs to put a checkout
@@ -1910,9 +2001,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # bootstrap calling the narrower resolver alone did not. A second,
     # bootstrap-only copy of that fallback would be the very drift this
     # fixes: one resolver, consulted by both.
-    active_path, active_tier, broken_project_pin = resolve_sdk_root_ladder(
-        sdk_root_flag, Path(root)
-    )
+    active_resolution = resolve_sdk_root_ladder(sdk_root_flag, Path(root))
+    active_path = active_resolution.path
+    active_tier = active_resolution.tier
+    broken_project_pin = active_resolution.broken_project_pin
+    foreign_global_default_for = active_resolution.foreign_global_default_for
     active_is_sdk = active_path is not None and active_path.joinpath(*SDK_MARKER).exists()
     resolved = str(active_path) if active_is_sdk else None
     if resolved is None:
@@ -1965,6 +2058,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # command reports; not `log.warn`, which always prefixes `bootstrap.` and
     # would misname this shared code.
     pin_issue = project_pin_issue(broken_project_pin, active_tier)
+    # tan-cli#464: `bootstrap` itself can resolve a `globalDefault` a
+    # DIFFERENT project's earlier relocation wrote -- worth disclosing before
+    # this run sets up a whole venv/west workspace against it, the same as
+    # every other command on this ladder.
+    foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
 
     # `west init -l <alp-sdk>` always makes the topdir the checkout's PARENT and
     # alp-sdk itself the manifest repo, which is what registers the `alp-*`
@@ -2043,19 +2141,6 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 sdk,
             )
 
-    # `--print-env` short-circuits before any prerequisite check or venv work, so
-    # it answers on a machine that is still missing cmake or ninja.
-    if print_env:
-        text = print_env_block(
-            facts, paths.tokens(), facts.venv_bin_dir(is_windows), is_windows
-        )
-        print_env_issues = [pin_issue] if pin_issue is not None else []
-        return (
-            Outcome(ExitCode.SUCCESS, payload(), print_env_issues, text),
-            reported_project,
-            sdk,
-        )
-
     # Workspace-parent guard, BEFORE any write below, so a refusal -- the one
     # case that still is one, see below -- leaves nothing on disk. A
     # `$ZEPHYR_BASE` workspace about to be ADOPTED repoints the write target
@@ -2091,6 +2176,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # still no question asked. `--format json` says so explicitly; a piped or
     # redirected stdin says so just as loudly, and the oracle hung forever on
     # exactly that before the terminal term was added.
+    #
+    # Computed BEFORE `--print-env` below (tan-cli#459, `_print_env_outcome`).
     # Evaluated UNCONDITIONALLY, not short-circuited past (tan-cli#389). Python
     # skips the right operand of `or` once the left is true, so with
     # `--workspace` set the adoption probe never ran at all -- and the two
@@ -2175,29 +2262,35 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # Checked before the host and prerequisite gates below for the same
         # reason they sit before the relocation: a refusal knowable from
         # filesystem facts alone must not depend on having got that far.
+        # Gated on `target is not None`: with no relocation planned there is
+        # nothing to orphan, so an in-place re-run over an already-bootstrapped
+        # workspace must fall through rather than refuse (tan-cli#389/#390) --
+        # `workspace_orphan_refusal` stays `None`-safe regardless, since that
+        # is the shape of call tan-cli#469 was filed against.
         source_topdir = paths.repo_root.parent
-        if _is_file(source_topdir / ".west" / "config") and _manifest_points_at(
-            source_topdir, paths.repo_root
-        ):
+        if target is not None and _is_file(
+            source_topdir / ".west" / "config"
+        ) and _manifest_points_at(source_topdir, paths.repo_root):
             return (
                 _refusal(
                     ExitCode.VALIDATION_FAILURE,
                     "workspace-orphan-refused",
-                    [
-                        f"{_native(paths.repo_root)} is the manifest repository of the "
-                        f"west workspace at {_native(source_topdir)}, so moving it to "
-                        f"{_native(target)} would leave that workspace pointing at "
-                        f"nothing -- its .west/config would still name this checkout.",
-                        "Nothing was moved and the default SDK was not changed.",
-                        "Bootstrap that workspace in place (drop --workspace), or clone a "
-                        "SECOND alp-sdk checkout under the directory you want and pass "
-                        "--sdk-root pointing at that one.",
-                    ],
+                    [workspace_orphan_refusal(paths.repo_root, source_topdir, target)],
                     payload(),
                 ),
                 reported_project,
                 sdk,
             )
+
+    # `--print-env` short-circuits here (tan-cli#459, `_print_env_outcome`).
+    if print_env:
+        return _print_env_outcome(
+            paths=paths, sdk_root=sdk_root, facts=facts, pin=pin, pin_issue=pin_issue,
+            foreign_issue=foreign_issue, flags=flags, is_windows=is_windows,
+            guard_applies=guard_applies, target=target,
+            zephyr_base_adopts=zephyr_base_adopts, root=root, board_path=board_path,
+            reported_project=reported_project, active_tier=active_tier, sdk=sdk,
+        )
 
     # Host gate + prerequisite gate, AFTER the write-avoiding checks above
     # (whose relative order the existing test suite already pins) but BEFORE
@@ -2283,13 +2376,10 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             # RE-DERIVING them (e.g. `workspace_dir` as `repo_root.parent`
             # is wrong for a `--workspace` run over an ADOPTED
             # `$ZEPHYR_BASE` topdir -- see `rollback_relocation_after`).
-            undo = RelocationUndo(
-                old_root=old_root,
-                previous_pointer=_read_global_sdk_pointer(),
-                project=reported_project,
-                workspace_dir=paths.workspace_dir,
-                venv_dir=paths.venv_dir,
-            )
+            old_workspace_dir = paths.workspace_dir
+            old_venv_dir = paths.venv_dir
+            old_project = reported_project
+            previous_pointer = _read_global_sdk_pointer()
             paths.repo_root = new_root
             paths.workspace_dir = target
             paths.venv_dir = target / facts.venv_dir_name
@@ -2315,9 +2405,30 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             root = _rebase(root, old_root, sdk_root)
             board_path = _rebase(board_path, old_root, sdk_root)
             reported_project = Project.resolved(root, board_path)
-            relocation_undo = undo
+            relocation_undo = RelocationUndo(
+                old_root=old_root,
+                previous_pointer=previous_pointer,
+                project=old_project,
+                workspace_dir=old_workspace_dir,
+                venv_dir=old_venv_dir,
+            )
             if not dry_run:
-                _write_global_sdk_pointer(sdk_root)
+                # `written_for=root` closes tan-cli#464: this pointer is
+                # machine-global and last-writer-wins across every project
+                # that ever relocates a checkout here, so recording which one
+                # wrote it lets a LATER caller under a different project be
+                # warned it is reading someone else's answer
+                # (`sdk_cmd.global_default_foreign_project_issue`), rather
+                # than silently resolving it at `ok: true`, `issues: []`. A
+                # directory-scoped project pin here (tried and reverted,
+                # tan-cli#464 review) is NOT the fix: this directory is
+                # bootstrap's cwd, the workspace PARENT in the quickstart --
+                # not a project -- and a bootstrap from `$HOME` would have
+                # pinned `~/.alp/sdk-path` inside tan's OWN machine-global
+                # config dir, silencing the warning for essentially every
+                # project the user owns. `tan init`'s `_pin_sdk` remains the
+                # one place that writes a real project's `.alp/sdk-path`.
+                _write_global_sdk_pointer(sdk_root, written_for=root)
 
     log.line(f"Repo root:       {_native(paths.repo_root)}")
     if is_windows:
@@ -2541,6 +2652,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     bootstrap_issues = log.take_issues(escalate_blocking=not ok)
     if pin_issue is not None:
         bootstrap_issues = [pin_issue, *bootstrap_issues]
+    if foreign_issue is not None:
+        bootstrap_issues = [foreign_issue, *bootstrap_issues]
     return (
         Outcome(exit_code, planned_payload(), bootstrap_issues, text),
         reported_project,
@@ -2563,21 +2676,44 @@ def _rebase(value: str | None, old_root: str, new_root: str) -> str | None:
     return value
 
 
-def _write_global_sdk_pointer(sdk_root: str) -> None:
-    """Repoint `~/.alp/sdk-default` at the checkout's new location after a
-    relocation.
+def _global_sdk_pointer_json(sdk_root: str, written_for: str) -> str:
+    """`~/.alp/sdk-default`'s contents after a relocation: `sdkPath` plus
+    `writtenFor` -- which project's bootstrap wrote it (tan-cli#464). A
+    SEPARATE shape from `tan.core.scaffold.sdk_pointer_json` (the `.alp/
+    sdk-path` PROJECT pin `tan init`'s `_pin_sdk` writes -- a pin never needs
+    to name a project of its own), mirroring how
+    `tan.core.bootstrap.workspace_sdk_record_json` is its own function rather
+    than growing `sdk_pointer_json`'s shape for a different record with a
+    different reader. `sdk_cmd._pointer_written_for` reads `writtenFor` back
+    and warns when a caller resolving through the `globalDefault` tier sits
+    outside both it and `sdkPath`.
+    """
+    payload = {"sdkPath": sdk_root, "writtenFor": written_for, "updatedAt": generated_at_iso()}
+    return json.dumps(payload, indent=2) + "\n"
 
-    Without it the Quickstart's very next documented step -- `tan init` from the
-    same shell, or a fresh one tomorrow -- has no sibling `../alp-sdk` left to
-    auto-discover and `tan build` fails with "alp-sdk root is unresolved". A
-    printed "next command" would not survive past the terminal it was printed
-    into; a written pointer does. Best-effort: every resolver already tolerates
-    a stale or missing pointer by falling through to the next tier.
+
+def _write_global_sdk_pointer(sdk_root: str, *, written_for: str) -> None:
+    """Repoint `~/.alp/sdk-default` at the checkout's new location after a
+    relocation, and record `written_for` -- the project this run bootstrapped
+    (tan-cli#464).
+
+    Without the pointer write, the Quickstart's very next documented step --
+    `tan init` from the same shell, or a fresh one tomorrow -- has no sibling
+    `../alp-sdk` left to auto-discover and `tan build` fails with "alp-sdk
+    root is unresolved". A printed "next command" would not survive past the
+    terminal it was printed into; a written pointer does. `written_for` closes
+    a DIFFERENT silence: this pointer is machine-global and last-writer-wins
+    across every project that ever relocates a checkout here, so recording
+    which one wrote it lets `sdk_cmd.resolve_sdk_tiered` warn a LATER caller
+    from a different project that it is reading someone else's answer, rather
+    than reporting `ok: true`, `issues: []` the way it silently did before.
+    Best-effort: every resolver already tolerates a stale or missing pointer
+    by falling through to the next tier.
     """
     try:
         pointer = _home_alp_dir() / "sdk-default"
         pointer.parent.mkdir(parents=True, exist_ok=True)
-        pointer.write_text(sdk_pointer_json(sdk_root), encoding="utf-8")
+        pointer.write_text(_global_sdk_pointer_json(sdk_root, written_for), encoding="utf-8")
     except Exception:  # noqa: BLE001 -- best-effort by contract
         pass
 

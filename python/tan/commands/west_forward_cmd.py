@@ -6,15 +6,19 @@ retired; `tan build` is native now -- see `build_cmd.py`'s module doc). Port of
 now-narrowed, "legacy west forward" entry) and its `west_argv`/
 `west_workspace_dir`/`west_program` helpers.
 
-Every flag NOT declared on the command below (`--check`, `--preview`,
-`--profile quick`, `--no-verify`, ...) belongs to the underlying `west
+Every flag NOT declared on the command below (`--workspace`, `--no-verify`,
+`--json`, `--junit`, `--sarif`, ...) belongs to the underlying `west
 alp-<verb>` extension command, not to `tan` -- it is forwarded verbatim,
 mirroring the oracle's own `[ARGS]...` catch-all
 (`crates/tan-cli/src/cli.rs`'s `WestForwardArgs`). `ignore_unknown_options` in
 each command's `context_settings` is what lets an unrecognised flag fall
-through to that catch-all instead of Click rejecting it outright.
+through to that catch-all instead of Click rejecting it outright. `--check`/
+`--preview`/`--apply` (`migrate`) and `--profile` (`quality`) used to be in
+that undeclared set too, until tan-cli#454 (see below) made them real,
+declared options for the one reason a flag in this file ever needs to be:
+each is REQUIRED by its child with no default `tan` could supply.
 
-Three defects this module shipped with, and what each fix costs:
+Four defects this module shipped with, and what each fix costs:
 
 **tan-cli#391 -- no child takes a positional.** `_run_forward` used to insert
 the resolved app path as `argv[1]` whenever every forwarded token began with a
@@ -68,6 +72,28 @@ forwards it back to the child after consuming it -- a bare
 `accept_global_flags(migrate)` would swallow it, which is what the v0.4.1
 oracle does.
 
+**tan-cli#454 -- `quality` and `migrate` could never succeed.**
+`alp_quality.py` declares `--profile {quick,pr,full,release}` REQUIRED;
+`alp_migrate.py` declares a REQUIRED mutually-exclusive `(--check | --preview
+| --apply)` group. Neither was ever declared on tan's own Typer surface --
+both fell into the `ARGS...` catch-all like every other undeclared flag, which
+happened to still work for a caller who typed the exact right token, but meant
+`tan quality --help` never named `--profile` and `tan migrate --help` never
+named any of the three modes, so a caller relying on `--help` (the entire
+point of a documented CLI surface) had no way to discover what to pass. On a
+correctly bootstrapped workspace, every invocation that omitted the required
+flag reached `west`, which rejected it with its own argparse usage error --
+forwarded back as the opaque `quality.failed` / `migrate.failed`, indistinguishable
+from `west` itself failing for an unrelated reason. Fixed by declaring
+`--profile` (`quality`) and `--check`/`--preview`/`--apply` (`migrate`) for
+real -- their choice lists and mutual-exclusion read from
+`scripts/west_commands/alp_quality.py` / `alp_migrate.py` verbatim, forwarded
+back through `extra_args` exactly like `migrate`'s pre-existing `--all`
+(tan-cli#405) -- and refusing EARLY, before `west` is ever spawned, with a
+coded `quality.profile-required` / `migrate.mode-required` issue naming the
+missing flag when none of the required ones was supplied. See
+`_refuse_required`.
+
 Text mode inherits stdio -- `alp-migrate`/`alp-lock`/`alp-quality` may prompt
 or stream their own progress, exactly like the oracle's `west`-delegating path
 (its own module doc: "Text mode inherits stdio so the build streams live"), so
@@ -81,6 +107,7 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 
@@ -113,6 +140,13 @@ _BOARD_TARGETED = frozenset({"migrate", "lock"})
 #: the payload; this caps only the one-line summary, so a child that dumps a
 #: megabyte on one line cannot turn a single issue into an unreadable envelope.
 _MAX_MESSAGE_DETAIL = 500
+
+#: Verbatim copy of `scripts/west_commands/alp_quality.py`'s own
+#: `choices=("quick", "pr", "full", "release")` (tan-cli#454) -- read from the
+#: SDK checkout the resolver points at, not guessed. Kept as one tuple so the
+#: `--help` metavar, the `--profile <value>` validation and the "which one is
+#: missing" refusal message can never drift apart from each other.
+_QUALITY_PROFILES = ("quick", "pr", "full", "release")
 
 
 def _west_argv(subcommand: str, passthrough: list[str]) -> list[str]:
@@ -295,6 +329,53 @@ def _run_text(plan: _Forward) -> None:
     raise typer.Exit(int(ExitCode.RUNTIME_FAILURE))
 
 
+def _refuse_required(
+    subcommand: str, code: str, message: str, context: ProjectContext, output_format: OutputFormat
+) -> NoReturn:
+    """tan-cli#454: `alp-quality --profile` and `alp-migrate`'s one-of
+    `--check`/`--preview`/`--apply` are REQUIRED by the child's own argparse,
+    with no default tan could pick on a caller's behalf (guessing a quality
+    profile, or guessing whether to write board.yaml, is guessing wrong for
+    someone). Neither was ever declared on tan's own Typer surface, so
+    `tan quality --help` never named `--profile` and every realistic run
+    without it reached `west`, which rejected it with its OWN argparse usage
+    error -- forwarded back to the caller as an opaque `<verb>.failed`,
+    indistinguishable from `west` itself failing, and undiscoverable from
+    `--help`. Refusing HERE, before `west` is ever spawned, fixes both: no
+    child process runs, and the coded issue below names the exact missing
+    flag. `VALIDATION_FAILURE` (2), matching what a Click-level required
+    option would report, but under the REAL command name and a real code --
+    the same "no generic `cli.parse-error` fallback" precedent
+    `new_som_cmd.py`'s own `new-som.failed` sets, not `command: "cli"`.
+
+    This refusal's own `data` -- `{"schemaVersion": "1"}` only -- is
+    deliberately narrower than `_run_forward`'s JSON branches below, which
+    fill in `westCommand`/`westCwd`/`args`/`westExitCode`/`stdout`/`stderr`
+    for every path that actually reaches `_plan()`. No `west` invocation was
+    ever planned here -- there is no `westCommand` to name, no `westCwd` to
+    resolve, no child argv to report -- so there is nothing to backfill;
+    `faultdecode_cmd.py`'s own `data: None` refusal is the established
+    precedent for a bare payload on this exact kind of pre-spawn refusal.
+    Annotated `NoReturn`, not `None`: every caller ends its own function at
+    this call (`raise typer.Exit` always fires), and an accurate signature is
+    what lets a type checker prove the return type of a caller like
+    `_resolve_quality_profile` sound instead of just trusting the docstring."""
+    if output_format == "json":
+        emit(
+            Envelope(
+                subcommand,
+                context.project(),
+                {"schemaVersion": "1"},
+                [Issue(code, "error", message)],
+                ExitCode.VALIDATION_FAILURE,
+                sdk=context.sdk,
+            )
+        )
+    else:
+        typer.echo(f"{subcommand}: {message}", err=True)
+    raise typer.Exit(int(ExitCode.VALIDATION_FAILURE))
+
+
 def _run_forward(
     subcommand: str,
     passthrough: list[str],
@@ -320,7 +401,10 @@ def _run_forward(
     except OSError as err:
         # No child ran, so there is no code to report -- `null`, not a
         # fabricated 1. The keys stay present so a consumer sees ONE shape on
-        # every branch (tan-cli#395).
+        # every branch THAT REACHES A PLAN (tan-cli#395) -- `_refuse_required`'s
+        # own, earlier refusal never computes one and carries none of these
+        # keys; see that function's own docstring for why that is a separate,
+        # narrower shape rather than an omission here.
         data = {**plan.data(), "westExitCode": None, "stdout": "", "stderr": ""}
         exit_code = ExitCode.RUNTIME_FAILURE
         issues = [Issue(f"{subcommand}.failed", "error", _launch_error(err))]
@@ -351,6 +435,57 @@ def _run_forward(
 #: so nothing about the CLI surface or the help text moves with the rename.
 
 
+def _resolve_migrate_extra_args(
+    check: bool,
+    preview: bool,
+    apply_changes: bool,
+    all_boards: bool,
+    west_args: Sequence[str],
+    project: str | None,
+    board_yaml: str | None,
+    sdk_root: str | None,
+    output_format: OutputFormat,
+) -> list[str]:
+    """The `alp-migrate` argv `migrate()` forwards past its own required-flag
+    check -- split out so `migrate()` stays a short dispatcher (the module
+    size gate's own per-function budget counts a docstring's lines too).
+    `--all` is declared on `migrate()` for real -- BOTH a tan global and an
+    `alp-migrate` flag (tan-cli#405); folded in here, after the mode(s), to
+    keep the child's own meaning.
+
+    `--check`/`--preview`/`--apply` (tan-cli#454) are a REQUIRED mutually-
+    exclusive group on the child's own argparse. NONE selected refuses EARLY
+    via `_refuse_required` -- unless `_has_flag` (see `_target_args`) finds
+    one already in `west_args`, the documented escape hatch
+    (`tan migrate -- --check`), in which case `modes` is left empty rather
+    than duplicating the caller's own token. MORE than one selected on tan's
+    own surface (`tan migrate --check --preview`) used to build the
+    contradictory argv itself and spawn `west`, reporting the opaque
+    `migrate.failed` the absence-refusal exists to remove -- refused the same
+    way, with the same code, naming the other failure.
+    """
+    mode_flags = (("--check", check), ("--preview", preview), ("--apply", apply_changes))
+    modes = [flag for flag, chosen in mode_flags if chosen]
+    if len(modes) > 1:
+        _refuse_required(
+            "migrate",
+            "migrate.mode-required",
+            "only one of `--check`, `--preview`, `--apply` may be given "
+            "(`west alp-migrate`).",
+            resolve_project_context(project, board_yaml, sdk_root),
+            output_format,
+        )
+    if not modes and not any(_has_flag(west_args, flag) for flag, _chosen in mode_flags):
+        _refuse_required(
+            "migrate",
+            "migrate.mode-required",
+            "one of `--check`, `--preview`, `--apply` is required (`west alp-migrate`).",
+            resolve_project_context(project, board_yaml, sdk_root),
+            output_format,
+        )
+    return [*modes, *(["--all"] if all_boards else [])]
+
+
 def migrate(
     west_args: list[str] = typer.Argument(None, metavar="ARGS..."),
     project: str = typer.Option(
@@ -368,21 +503,34 @@ def migrate(
         "--all",
         help="Migrate every board in the workspace (`west alp-migrate --all`).",
     ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Report version drift; nonzero on drift (`west alp-migrate --check`).",
+    ),
+    preview: bool = typer.Option(
+        False,
+        "--preview",
+        help="Unified diff + diagnostic-v1 JSON, no writes (`west alp-migrate --preview`).",
+    ),
+    apply_changes: bool = typer.Option(
+        False, "--apply", help="Rewrite board.yaml in place (`west alp-migrate --apply`)."
+    ),
 ) -> None:
     """Migrate board.yaml to the current schema (`west alp-migrate`)."""
-    # `--all` is declared here for real -- it is BOTH a tan global and an
-    # `alp-migrate` flag (tan-cli#405). Declaring it stops `accept_global_flags`
-    # from injecting a second, silently-dropped `--all` behind it (that
-    # function keys on the flag STRING), and forwarding it back through
-    # `extra_args` is what keeps the child's own meaning.
+    resolved_args = list(west_args or [])
+    extra_args = _resolve_migrate_extra_args(
+        check, preview, apply_changes, all_boards, resolved_args,
+        project, board_yaml, sdk_root, output_format,
+    )
     _run_forward(
         "migrate",
-        list(west_args or []),
+        resolved_args,
         project,
         board_yaml,
         sdk_root,
         output_format,
-        extra_args=["--all"] if all_boards else [],
+        extra_args=extra_args,
     )
 
 
@@ -403,6 +551,52 @@ def lock(
     _run_forward("lock", list(west_args or []), project, board_yaml, sdk_root, output_format)
 
 
+def _resolve_quality_profile(
+    profile: str | None,
+    west_args: Sequence[str],
+    project: str | None,
+    board_yaml: str | None,
+    sdk_root: str | None,
+    output_format: OutputFormat,
+) -> str | None:
+    """The `--profile` value `quality()` forwards past its own required-flag
+    check -- split out so `quality()` itself stays a short dispatcher (see
+    `_resolve_migrate_extra_args`'s own docstring for why this split exists).
+
+    tan-cli#454: `alp_quality.py` declares `--profile` REQUIRED with a fixed
+    choice list (`_QUALITY_PROFILES`, mirrored verbatim), and no default tan
+    could pick on a caller's behalf. Absence refuses EARLY via
+    `_refuse_required` -- unless `_has_flag` (see `_target_args`) finds
+    `--profile` already sitting in `west_args`, the documented escape hatch
+    (`tan quality -- --profile quick`), in which case this returns `None`
+    rather than refusing: `quality()` never parsed that copy, so it is not
+    THIS function's own value, only proof the flag already reaches `west`
+    unaided -- appending a second, tan-supplied `--profile` behind it would
+    duplicate the flag. An out-of-list VALUE (not absence) still raises the
+    standard Click usage error via `typer.BadParameter`, the established
+    pattern `new_som_cmd.py` uses for its own choice-shaped flags
+    (`click_type=click.Choice(...)` crashes under this repo's pinned
+    typer/click pair -- see that module's own comment).
+    """
+    if profile is not None and profile not in _QUALITY_PROFILES:
+        raise typer.BadParameter(
+            f"{profile!r} is not one of {', '.join(repr(c) for c in _QUALITY_PROFILES)}.",
+            param_hint="'--profile'",
+        )
+    if profile is None:
+        if _has_flag(west_args, "--profile"):
+            return None
+        _refuse_required(
+            "quality",
+            "quality.profile-required",
+            "`--profile` is required (`west alp-quality --profile "
+            f"{{{','.join(_QUALITY_PROFILES)}}}`).",
+            resolve_project_context(project, board_yaml, sdk_root),
+            output_format,
+        )
+    return profile
+
+
 def quality(
     west_args: list[str] = typer.Argument(None, metavar="ARGS..."),
     project: str = typer.Option(
@@ -415,9 +609,30 @@ def quality(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
+    profile: str = typer.Option(
+        None,
+        "--profile",
+        metavar="{quick,pr,full,release}",
+        help="Quality profile to run (`west alp-quality --profile`; REQUIRED).",
+    ),
 ) -> None:
     """Run the board.yaml quality checks (`west alp-quality`)."""
-    _run_forward("quality", list(west_args or []), project, board_yaml, sdk_root, output_format)
+    resolved_args = list(west_args or [])
+    profile = _resolve_quality_profile(
+        profile, resolved_args, project, board_yaml, sdk_root, output_format
+    )
+    _run_forward(
+        "quality",
+        resolved_args,
+        project,
+        board_yaml,
+        sdk_root,
+        output_format,
+        # `None`: the caller already supplied `--profile` through the
+        # `ARGS...` escape hatch, and it is already in `resolved_args` --
+        # appending it again would duplicate the flag argparse then rejects.
+        extra_args=["--profile", profile] if profile is not None else [],
+    )
 
 
 # tan-cli#405: these were the last three commands not to accept the oracle's

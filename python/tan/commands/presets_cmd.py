@@ -63,7 +63,13 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.sdk_cmd import SDK_MARKER, project_pin_issue, resolve_sdk_tiered
+from tan.commands.sdk_cmd import (
+    SDK_MARKER,
+    ActiveSdk,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_tiered,
+)
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -510,11 +516,8 @@ def resolve_project_paths(project: str | None, board_yaml: str | None) -> tuple[
     return root, f"{root}{sep}{_posix(leaf)}"
 
 
-def resolve_sdk(
-    sdk_root: str | None, workspace_root: str
-) -> tuple[str, str, str | None] | None:
-    """`(root, sourceTier, brokenProjectPin)` for the resolved checkout, or
-    `None`.
+def resolve_sdk(sdk_root: str | None, workspace_root: str) -> ActiveSdk | None:
+    """The resolved checkout as an `ActiveSdk` (posix `.path`), or `None`.
 
     `resolve_sdk_tiered` walks the four tiers (`--sdk-root` > project pin >
     global default > discovery) and is TERMINAL on `--sdk-root` (I-31): a typo'd
@@ -524,15 +527,33 @@ def resolve_sdk(
     (empty lists + the frozen warning), which is the oracle's behaviour and NOT
     the same as "resolved something else".
 
-    `brokenProjectPin` (tan-cli#263 review) is `active.broken_project_pin`,
-    carried through even when this call returns `None` overall -- both callers
-    (`presets`, `clean_cmd.resolve_sdk`) surface it as `sdk.project-pin-
-    unresolved` alongside whatever else they already report.
+    `.broken_project_pin` (tan-cli#263 review) and `.foreign_global_default_for`
+    (tan-cli#464) both carry through onto the returned `ActiveSdk` -- but ONLY
+    when this call resolves to a usable checkout. When it does not (`active.path`
+    is `None`, or the loader marker is missing) this returns a bare `None`
+    instead, which drops both facts on the floor: neither caller can surface a
+    fact it was never given. `presets` and `clean_cmd._run` both guard on this
+    return (`if sdk is not None` / `if resolved_sdk`), so a workspace with,
+    say, a broken `.alp/sdk-path` pin AND no OTHER tier resolving anything
+    reports `presets.sdk-root-unresolved` / `clean.sdk-root-not-found` alone,
+    with no `sdk.project-pin-unresolved` alongside it -- the same silent-drop
+    shape tan-cli#263/#464 exist to close, just on the "resolved to nothing at
+    all" branch rather than the "resolved to something else" one those issues
+    named. Left as-is rather than fixed here: closing it needs `resolve_sdk`
+    to distinguish "nothing to report" from "a usable checkout", which changes
+    this function's return contract for both callers, not a one-line fix.
+    Returned as `ActiveSdk` itself when it DOES resolve, not a growing tuple: a
+    fact one caller needs must not force every other caller's unpacking to
+    grow a matching positional slot (the same reasoning
+    `build_cmd.SdkRootResolution` documents).
     """
     active = resolve_sdk_tiered(sdk_root, Path(workspace_root))
     if active.path is None or not Path(active.path).joinpath(*SDK_MARKER).exists():
         return None
-    return _posix(active.path), active.tier, active.broken_project_pin
+    return ActiveSdk(
+        _posix(active.path), active.tier, active.broken_project_pin,
+        active.foreign_global_default_for,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +593,7 @@ def presets(
     json_mode = output_format == "json"
 
     root, board_path = ".", "./board.yaml"
-    sdk: tuple[str, str, str | None] | None = None
+    sdk: ActiveSdk | None = None
     soms: list[Som] = []
     board_libraries: list[str] = []
     issues: list[Issue] = []
@@ -581,11 +602,16 @@ def presets(
         root, board_path = resolve_project_paths(project, board_yaml)
         sdk = resolve_sdk(sdk_root, root)
         if sdk is not None:
-            soms = read_soms(sdk[0])
-            board_libraries = read_board_libraries(sdk[0])
-            pin_issue = project_pin_issue(sdk[2], sdk[1])
-            if pin_issue is not None:
-                issues = [pin_issue]
+            soms = read_soms(sdk.path)
+            board_libraries = read_board_libraries(sdk.path)
+            issues = [
+                issue
+                for issue in (
+                    project_pin_issue(sdk.broken_project_pin, sdk.tier),
+                    global_default_foreign_project_issue(sdk.foreign_global_default_for),
+                )
+                if issue is not None
+            ]
         else:
             issues = [Issue(SDK_UNRESOLVED_CODE, "warning", SDK_UNRESOLVED_MESSAGE)]
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring
@@ -616,7 +642,7 @@ def presets(
                     "schemaVersion": DATA_SCHEMA_VERSION,
                     # `null`, not omitted, when unresolved: the wizard reads this
                     # key directly and the golden pins the null.
-                    "sdkRoot": sdk[0] if sdk is not None else None,
+                    "sdkRoot": sdk.path if sdk is not None else None,
                     "skus": skus,
                     "soms": [s.as_dict() for s in soms],
                     "libraries": LIBRARIES,
@@ -627,7 +653,7 @@ def presets(
                 },
                 issues,
                 exit_code,
-                sdk=SdkInfo(sdk[0], sdk[1]) if sdk is not None else None,
+                sdk=SdkInfo(sdk.path, sdk.tier) if sdk is not None else None,
             )
         )
     else:

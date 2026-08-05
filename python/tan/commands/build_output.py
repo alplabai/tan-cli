@@ -78,6 +78,11 @@ class ProjectContext:
     #: the shape `project_pin_issue` needs: a broken pin with NO working
     #: fallback still has a real tier (`"none"`) to name in its message.
     sdk_source_tier: str = "none"
+    #: `ActiveSdk.foreign_global_default_for` carried through (tan-cli#464) --
+    #: `size`/`image`'s own `_run` turns this into
+    #: `sdk_cmd.global_default_foreign_project_issue`, the sibling warning to
+    #: `broken_project_pin` above.
+    foreign_global_default_for: str | None = None
 
     def project(self) -> Project:
         return Project.resolved(self.workspace_root, self.board_yaml)
@@ -112,11 +117,12 @@ def resolve_project_context(
         else None
     )
     return ProjectContext(
-        to_posix(workspace_root),
-        to_posix(board_yaml),
-        sdk,
-        active.broken_project_pin,
-        active.tier,
+        workspace_root=to_posix(workspace_root),
+        board_yaml=to_posix(board_yaml),
+        sdk=sdk,
+        broken_project_pin=active.broken_project_pin,
+        sdk_source_tier=active.tier,
+        foreign_global_default_for=active.foreign_global_default_for,
     )
 
 
@@ -150,8 +156,7 @@ def resolve_metadata_sdk_root(
     # pin's own status via `ProjectContext.broken_project_pin`; this walk is
     # the deliberately SEPARATE metadata-budget resolution the module
     # docstring describes, not a second envelope-facing resolution.
-    found, _tier, _broken_pin = resolve_sdk_root_ladder(None, Path(workspace_root))
-    return found
+    return resolve_sdk_root_ladder(None, Path(workspace_root)).path
 
 
 def read_sdk_som_and_soc(

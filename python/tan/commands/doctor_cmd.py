@@ -122,6 +122,7 @@ from tan.commands.sdk_cmd import (
     _has_loader_script,
     _home_alp_dir,
     _pointer_target,
+    global_default_foreign_project_issue,
     global_default_pointer_fix_hint,
     parse_sdk_version_yaml,
     project_pin_issue,
@@ -1821,14 +1822,27 @@ def next_steps(checks: list[Check]) -> list[str]:
     return steps
 
 
+_CAMEL_BOUNDARY = re.compile(r"(?<!^)(?=[A-Z])")
+
+
+def kebab_check_name(name: str) -> str:
+    """`Check.name` (camelCase, also a JSON data key/display string -- left
+    alone) -> the kebab-case slug an issue *code* uses, e.g. `'sevenZip'` ->
+    `'seven-zip'`. `contract/issue-codes.json`'s registry gate
+    (`^[a-z][a-z0-9-]*\\.[a-z0-9-]+$`) rejects camelCase; 27 issue codes
+    derived straight from `check.name` shipped camelCase in v0.5.0 before this
+    existed."""
+    return _CAMEL_BOUNDARY.sub("-", name).lower()
+
+
 def checks_to_issues(checks: list[Check]) -> list[Issue]:
     """Warn/fail checks become issues; `unknown` raises none (it is not a
     problem, the question was simply not askable). The code is the check's own
     when it has one -- the frozen `bootstrap.*` spellings -- else Rust's
-    `doctor.<checkName>` convention."""
+    `doctor.<checkName>` convention, kebab-cased (`kebab_check_name`)."""
     return [
         Issue(
-            check.code or f"doctor.{check.name}",
+            check.code or f"doctor.{kebab_check_name(check.name)}",
             "error" if check.status == "fail" else "warning",
             check.detail,
         )
@@ -2646,7 +2660,7 @@ def _collect(
     # `resolve_sdk_root_wide` itself would reach, never a scan of its own.
     divergent_candidate: str | None = None
     if sdk_root is not None and sdk_tier == "discovery":
-        wide, _wide_tier, _wide_pin = resolve_sdk_root_wide(None, Path(workspace_root))
+        wide = resolve_sdk_root_wide(None, Path(workspace_root)).path
         # `normcase` both sides, for the reason spelled out in the #301 block
         # above: `_abs_posix` does not resolve, so on Windows one directory
         # under two spellings would be reported as two checkouts.
@@ -2962,7 +2976,11 @@ def doctor(
     # docstring). Previously this skipped straight from `--sdk-root` to the
     # positional walk, silently ignoring `tan init`'s own pointer in the same
     # directory.
-    resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    resolved_sdk_root = sdk_resolution.path
+    sdk_tier = sdk_resolution.tier
+    sdk_broken_pin = sdk_resolution.broken_project_pin
+    sdk_foreign_default = sdk_resolution.foreign_global_default_for
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # tan-cli#344: a dangling `~/.alp/sdk-default` is a distinct fact from
@@ -3064,6 +3082,9 @@ def doctor(
     pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
     if pin_issue is not None:
         issues = [pin_issue, *issues]
+    foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
+    if foreign_issue is not None:
+        issues = [foreign_issue, *issues]
 
     if json_mode:
         emit(Envelope("doctor", project, data, issues, exit_code, sdk=sdk))
@@ -3095,7 +3116,7 @@ def doctor(
             # Printed AFTER every check line and BEFORE the summary: findable
             # without being buried mid-report, and the report still ends on
             # the summary line.
-            checked_codes = {c.code or f"doctor.{c.name}" for c in checks}
+            checked_codes = {c.code or f"doctor.{kebab_check_name(c.name)}" for c in checks}
             for issue in issues:
                 if issue.code not in checked_codes:
                     print(f"{issue.severity}: {issue.message}", file=sys.stderr)

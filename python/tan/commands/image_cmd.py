@@ -69,7 +69,7 @@ from tan.commands.build_output import (
     resolve_build_root,
     resolve_project_context,
 )
-from tan.commands.sdk_cmd import project_pin_issue
+from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.image_bundle import (
     BUNDLE_DIR,
@@ -382,18 +382,30 @@ def _empty_bundle() -> dict[str, Any]:
 
 def _error_outcome(
     project: Project,
-    sdk: SdkInfo | None,
+    context: ProjectContext,
     exit_code: ExitCode,
     code: str,
     message: str,
 ) -> _Outcome:
+    """tan-cli#464 review: took a bare `sdk: SdkInfo | None` and reported only
+    the `code`/`message` issue -- so the manifest gate (the dominant refusal
+    path, reached before `_run`'s own `sdk_resolution_issues` call further
+    down) reported neither `sdk.project-pin-unresolved` nor
+    `sdk.global-default-foreign-project`, even with `sdk.sourceTier` naming a
+    tier that should have triggered one. Takes the whole `context` so every
+    caller -- including a bundle-write failure, past the manifest gate -- gets
+    the same pair from the one shared `sdk_resolution_issues`."""
+    issues = sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
+    )
+    issues.append(Issue(code, "error", message))
     return _Outcome(
         exit_code,
         _empty_bundle(),
         project,
-        [Issue(code, "error", message)],
+        issues,
         [f"image: {message}"],
-        sdk,
+        context.sdk,
     )
 
 
@@ -420,7 +432,7 @@ def _run(
         # here too (the read fails before the parser ever sees it).
         return _error_outcome(
             project,
-            context.sdk,
+            context,
             ExitCode.RUNTIME_FAILURE,
             "image.manifest-unavailable",
             f"system-manifest.yaml not found at {err.path}; run `tan build` first.",
@@ -428,7 +440,7 @@ def _run(
     except ManifestInvalid as err:
         return _error_outcome(
             project,
-            context.sdk,
+            context,
             ExitCode.RUNTIME_FAILURE,
             "image.manifest-invalid",
             f"{err.path}: {err.detail}",
@@ -440,7 +452,7 @@ def _run(
     except BundleWriteError as err:
         return _error_outcome(
             project,
-            context.sdk,
+            context,
             ExitCode.WRITE_FAILURE,
             "image.bundle-write-failed",
             err.message,
@@ -456,9 +468,13 @@ def _run(
         else ExitCode.SUCCESS
     )
     issues = [Issue(n.code, n.severity, n.message) for n in notices]
-    pin_issue = project_pin_issue(context.broken_project_pin, context.sdk_source_tier)
-    if pin_issue is not None:
-        issues.append(pin_issue)
+    # The same pair `_error_outcome` above computes for a manifest/bundle-write
+    # refusal, from the same shared `sdk_resolution_issues`.
+    issues.extend(
+        sdk_resolution_issues(
+            context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
+        )
+    )
     return _Outcome(
         exit_code,
         bundle,

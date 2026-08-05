@@ -83,13 +83,12 @@ def make_sdk_root(path: Path, *, metadata: bool = True, version: str | None = No
     return path
 
 
-def write_pointer(path: Path, sdk_path: Path) -> None:
+def write_pointer(path: Path, sdk_path: Path, *, written_for: Path | str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"sdkPath": str(sdk_path), "updatedAt": "1970-01-01T00:00:00Z"}),
-        encoding="utf-8",
-        newline="",
-    )
+    doc = {"sdkPath": str(sdk_path), "updatedAt": "1970-01-01T00:00:00Z"}
+    if written_for is not None:
+        doc["writtenFor"] = str(written_for)
+    path.write_text(json.dumps(doc), encoding="utf-8", newline="")
 
 
 @pytest.fixture
@@ -170,6 +169,185 @@ def test_a_malformed_pointer_is_a_fallthrough_not_a_crash(
     pointer.parent.mkdir(parents=True)
     pointer.write_text(contents, encoding="utf-8", newline="")
     assert resolve_sdk_tiered(None, workspace).tier == "none"
+
+
+# ── tan-cli#464: the shared, last-writer-wins global default pointer ────────
+
+
+def test_global_default_written_for_is_absent_on_an_older_pointer(tmp_path, isolated_home):
+    """A pointer written by a tan that predates `writtenFor` carries no
+    opinion -- absent must read as UNKNOWN, never as "foreign", or every
+    upgrade would start warning on a pointer nobody wrote wrong."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(isolated_home / ".alp" / "sdk-default", global_target)  # no writtenFor
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.foreign_global_default_for is None
+
+
+def test_global_default_names_the_project_it_was_written_for(tmp_path, isolated_home):
+    """The maintainer's #464 repro shape: a caller resolving through
+    `globalDefault` from a workspace that is neither the project the pointer
+    was written for nor under the SDK it names gets the fact on `ActiveSdk`,
+    without the resolved root changing at all."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    other_project = tmp_path / "other-project"
+    other_project.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for=other_project
+    )
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.path == str(global_target)
+    assert active.foreign_global_default_for == str(other_project)
+
+
+def test_global_default_does_not_warn_for_the_project_it_was_written_for(tmp_path, isolated_home):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for=workspace
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
+
+
+def test_global_default_does_not_warn_for_a_subdirectory_of_the_written_for_project(
+    tmp_path, isolated_home
+):
+    """Closing the SUBdirectory silence #464 names explicitly: a caller
+    beneath the project the pointer was written for is still that project,
+    not a foreign one."""
+    project = tmp_path / "proj"
+    sub = project / "firmware" / "app"
+    sub.mkdir(parents=True)
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(isolated_home / ".alp" / "sdk-default", global_target, written_for=project)
+
+    assert resolve_sdk_tiered(None, sub).foreign_global_default_for is None
+
+
+def test_global_default_does_not_warn_from_inside_the_sdk_checkout_it_names(
+    tmp_path, isolated_home
+):
+    """A caller working FROM the SDK checkout the pointer resolves to is not
+    "foreign", even when `writtenFor` names a different project entirely --
+    resolution behaviour (returning that checkout) is unchanged by this fix,
+    so the warning must not contradict it."""
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default",
+        global_target,
+        written_for=tmp_path / "unrelated-project",
+    )
+    assert resolve_sdk_tiered(None, global_target).foreign_global_default_for is None
+
+
+def test_global_default_written_for_empty_string_reads_as_unknown(tmp_path, isolated_home):
+    """tan-cli#464 review regression: `writtenFor: ""` used to pass the bare
+    `isinstance(value, str)` check in `_pointer_written_for` and reach
+    `_workspace_under(ws, "")`, which resolves `Path("")` to the process's OWN
+    cwd -- so whether the foreign warning fired depended on where the caller
+    happened to be standing, not on anything the pointer actually recorded.
+    `workspace` is a `tmp_path` descendant, never the test runner's cwd, so
+    the pre-fix bug reports "foreign" here."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(isolated_home / ".alp" / "sdk-default", global_target, written_for="")
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
+
+
+def test_global_default_written_for_relative_path_reads_as_unknown(tmp_path, isolated_home):
+    """The `is_absolute()` clause itself had zero coverage: every existing
+    case above (`""`, a non-`str` shape) is already caught by the bare
+    `isinstance(value, str) and value` check, so a mutant that dropped the
+    absolute check entirely still passed every one of them. A bare relative
+    segment is a shape no real writer ever produces (`bootstrap_cmd._run`
+    only ever writes an already-absolute `Project.resolved` root), but must
+    degrade the same safe way, not warn from wherever `_workspace_under`
+    happens to resolve it relative to."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for="projB/ws"
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
+
+
+def test_global_default_written_for_cross_platform_absolute_path_is_recognised(
+    tmp_path, isolated_home
+):
+    """tan-cli#464 stage-2 review: `Path(value).is_absolute()` is answered by
+    whichever pathlib flavour the READER's OS picked -- a POSIX-absolute
+    `writtenFor` a Linux/macOS tan legitimately wrote (`/home/u/projB`) is NOT
+    absolute under `PureWindowsPath` (no drive letter), so it used to degrade
+    to "no opinion" here on a Windows reader, exactly the silent drop
+    tan-cli#464 exists to close -- just triggered by which OS is reading the
+    shared pointer rather than by which project wrote it. Accepted now
+    because `PurePosixPath("/home/u/projB").is_absolute()` is `True`
+    regardless of host OS."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    foreign_root = "/home/u/projB"
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for=foreign_root
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for == foreign_root
+
+
+def test_global_default_written_for_cross_platform_windows_path_is_recognised(
+    tmp_path, isolated_home
+):
+    """The symmetric direction from the test above, and the one that actually
+    kills the single-platform mutant: `/home/u/projB` above is ALREADY
+    absolute under a bare `Path(value).is_absolute()` on whichever POSIX
+    runner this suite happens to run on (`ubuntu-latest`/`macos-latest`), so
+    that test alone passes against the pre-fix, reader-OS-native check too --
+    it only proves something on a Windows runner. A Windows-written
+    `writtenFor` (`C:/projB`) is NOT absolute under a bare `Path(...)` on
+    POSIX (no leading `/`), so THIS direction is the one newly accepted on
+    Linux/macOS by checking `PureWindowsPath` too, and had no coverage at
+    all before this fix."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    foreign_root = "C:/projB"
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for=foreign_root
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for == foreign_root
+
+
+@pytest.mark.parametrize(
+    "written_for", [123, ["a"], {"x": 1}, None], ids=["int", "list", "dict", "null"]
+)
+def test_global_default_written_for_wrong_type_reads_as_unknown(
+    tmp_path, isolated_home, written_for
+):
+    """Every non-`str` shape already fell through to `None` safely before the
+    tan-cli#464 review closed the empty-string gap above; this pins that it
+    still does -- a malformed `writtenFor` must degrade to "no opinion", the
+    same as a pointer that predates the field entirely, never a crash."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    pointer = isolated_home / ".alp" / "sdk-default"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(
+        json.dumps({"sdkPath": str(global_target), "writtenFor": written_for}),
+        encoding="utf-8",
+        newline="",
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
 
 
 def test_discovery_prefers_the_workspace_itself_and_refuses_ambiguity(tmp_path):

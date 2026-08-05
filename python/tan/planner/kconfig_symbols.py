@@ -61,6 +61,18 @@ from typing import Any, Optional
 
 from .models import BoardProject, OrchestratorError
 
+# RELOCATED divergence from alp-sdk's own scripts/alp_orchestrate/
+# kconfig_symbols.py (tan-cli#459 review): `west_program` resolves the
+# ABSOLUTE `west` inside `tan bootstrap`'s workspace venv, the same helper
+# `build`/`flash`/`west_forward_cmd` already spawn `west` through -- alp-sdk's
+# own copy runs AS a `west` extension, so a bare `"west"` on PATH is always
+# already the one that found it; tan's frozen binary has no such shell, and a
+# literal `"west"` here resolved to nothing (tan-cli#453's actual defect --
+# the caller's PATH-prepend was a per-command mitigation for this, not a fix
+# of it). `tan.core.venv` is importable here: this file, unlike alp-sdk's, is
+# `tan/planner/kconfig_symbols.py`, part of the `tan` package.
+from tan.core.venv import west_program
+
 SCHEMA_VERSION = 1
 
 # ---------------------------------------------------------------------
@@ -330,8 +342,14 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
         # as the final token itself (kconfig.cmake:238).
         target_cmd = f"{dumper_path};--output;{output_json}"
 
+        # `zephyr_base.parent` IS the workspace topdir (this function's own
+        # docstring above), already the one `west_workspace_dir` verified
+        # before `ZEPHYR_BASE` was ever set -- so `sdk_root=None` here is not
+        # a second, unverified guess, just skipping a manifest re-check the
+        # caller already made.
+        west = west_program(str(zephyr_base.parent), None)
         configure_cmd = [
-            "west", "build", "--cmake-only",
+            west, "build", "--cmake-only",
             "-b", board_triple,
             "-d", str(build_dir),
             str(app_dir),
@@ -348,7 +366,7 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
 
         # `add_custom_target` never runs at configure time -- `-t` builds
         # it explicitly (a second, separate `west build`).
-        build_cmd = ["west", "build", "-d", str(build_dir), "-t", _KCONFIG_TARGET]
+        build_cmd = [west, "build", "-d", str(build_dir), "-t", _KCONFIG_TARGET]
         proc = subprocess.run(build_cmd, cwd=zephyr_base.parent,
                               capture_output=True, text=True)
         if proc.returncode != 0:

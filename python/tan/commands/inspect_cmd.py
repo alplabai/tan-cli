@@ -126,9 +126,9 @@ def resolve_debug_project_context(
         board_yaml_path = _abs_posix(os.path.join(str(workspace_root_path), configured))
     board_yaml_exists = os.path.isfile(board_yaml_path)
 
-    resolved_sdk, sdk_tier, _broken_pin = resolve_sdk_root_ladder(
-        sdk_root_arg, workspace_root_path
-    )
+    sdk_resolution = resolve_sdk_root_ladder(sdk_root_arg, workspace_root_path)
+    resolved_sdk = sdk_resolution.path
+    sdk_tier = sdk_resolution.tier
     sdk_root = _abs_posix(str(resolved_sdk)) if resolved_sdk is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
 

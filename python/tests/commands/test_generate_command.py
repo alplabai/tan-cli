@@ -26,6 +26,7 @@ from tan.commands.generate_cmd import (
     GenerateError,
     _ensure_writable,
     _output_path,
+    _OVERLAY_BANNER,
     _overlay_would_overwrite,
     _resolve_output_override,
     _scan_som_sku,
@@ -199,6 +200,21 @@ def test_overlay_guard_fires_only_on_an_existing_unforced_overlay(tmp_path):
     assert _overlay_would_overwrite(tmp_path, ("native-sim-overlay",), False)
     assert not _overlay_would_overwrite(tmp_path, ("native-sim-overlay",), True)
     assert not _overlay_would_overwrite(tmp_path, ("cmake-args",), False)
+
+
+def test_overlay_guard_is_content_aware(tmp_path):
+    """tan-cli#457: existence alone used to fire the guard, so a re-run
+    against the overlay THIS command itself just wrote refused forever. The
+    banner every emitted overlay opens with is the free provenance marker
+    that tells them apart."""
+    overlay = tmp_path / "boards" / "native_sim_native_64.overlay"
+    overlay.parent.mkdir()
+
+    overlay.write_text(f"/* {_OVERLAY_BANNER} */\nsome content\n", encoding="utf-8")
+    assert not _overlay_would_overwrite(tmp_path, ("native-sim-overlay",), False)
+
+    overlay.write_text("hand tuned, no banner\n", encoding="utf-8")
+    assert _overlay_would_overwrite(tmp_path, ("native-sim-overlay",), False)
 
 
 # --------------------------------------------------------------------------
@@ -826,6 +842,87 @@ def test_the_engine_split_is_reported_per_target(tmp_path, monkeypatch, capsys):
     for name in ("alp.conf", "alp.overlay", "alp_hw_info_build.h",
                  "alp-west-libs.yml", "carrier-netlist.json"):
         assert (project / "build" / "generated" / name).read_bytes() == b"in-process\n"
+
+
+def _project_with_echo_sdk_that_writes_a_real_overlay_banner(tmp_path):
+    """Like `_project_with_echo_sdk`, except its `--emit native-sim-overlay`
+    writes the same banner the real `native_sim.py` renderer opens every
+    overlay with, so a re-run through the subprocess engine can be told apart
+    from a hand edit exactly as it would against the real SDK."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "mode = sys.argv[sys.argv.index('--emit') + 1]\n"
+        "banner = '/* --emit native-sim-overlay -- do not edit by hand. */\\n'\n"
+        "out.write_text(banner if mode == 'native-sim-overlay' else 'emitted\\n', "
+        "encoding='utf-8', newline='')\n",
+        encoding="utf-8",
+    )
+    return project, sdk
+
+
+def test_all_is_rerunnable_when_the_overlay_already_exists(tmp_path, monkeypatch, capsys):
+    """tan-cli#457: `tan generate --all` used to succeed once (`wrote 9/9`,
+    exit 0) and then refuse the WHOLE run forever after (exit 3, `data`
+    empty) -- purely because `boards/native_sim_native_64.overlay` existed
+    from the first run. Nothing was hand-edited; the other eight default
+    targets were always freely rewritten on a re-run. `--all` must treat all
+    nine the same way -- re-runnable, not a permanent refusal after the first
+    lap of the normal edit-board.yaml / generate / build loop.
+    """
+    project, sdk = _project_with_echo_sdk_that_writes_a_real_overlay_banner(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    first = _call_generate(all_targets=True, sdk_root=str(sdk), output_format="json")
+    env1 = json.loads(capsys.readouterr().out.strip())
+    assert first == 0
+    assert len(env1["data"]["written"]) == 9
+    assert env1["data"]["failed"] == []
+
+    # Nothing touched in between -- the exact tan-cli#457 reproduce shape.
+    second = _call_generate(all_targets=True, sdk_root=str(sdk), output_format="json")
+    env2 = json.loads(capsys.readouterr().out.strip())
+    assert second == 0
+    assert env2["data"]["failed"] == []
+    assert len(env2["data"]["written"]) == 9
+    assert env2["issues"] == []
+    # The overlay itself was really rewritten again, not silently skipped --
+    # it agrees with the other eight rather than being left stale forever.
+    assert _OVERLAY_BANNER in (
+        project / "boards" / "native_sim_native_64.overlay"
+    ).read_text(encoding="utf-8")
+
+
+def test_all_refuses_when_the_overlay_is_hand_edited(tmp_path, monkeypatch, capsys):
+    """The flip side, pinned so the tan-cli#457 fix cannot silently widen into
+    the regression it would otherwise reintroduce: a `boards/
+    native_sim_native_64.overlay` that lacks tan's own banner is a real hand
+    edit, and `--all` refuses the WHOLE run for it exactly as an explicit
+    `--target native-sim-overlay` already does (`test_overlay_overwrite_is_
+    exit_3`) -- it is not silently truncated."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    (project / "boards").mkdir()
+    (project / "boards" / "native_sim_native_64.overlay").write_text(
+        "tuned", encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(all_targets=True, sdk_root=str(sdk), output_format="json")
+    env = json.loads(capsys.readouterr().out.strip())
+    assert code == 3
+    assert env["issues"][0]["code"] == "generate.would-overwrite"
+    assert env["data"]["written"] == []
+    # The hand-tuned file is untouched, not truncated.
+    assert (project / "boards" / "native_sim_native_64.overlay").read_text() == "tuned"
 
 
 def test_every_reachable_target_renders_in_process():
