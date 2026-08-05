@@ -58,11 +58,20 @@ with (already documented for) the plain smoke:
     commands (`flash`, `doctor`, `build`). This is the oracle's own behaviour
     (`Path::to_string_lossy`, no `to_posix`), reproduced faithfully rather
     than "fixed" to match the other commands' convention.
-  * `project.root` anchors on the `APP_PATH` positional (default `.`), NOT on
-    the global `--project` flag -- another oracle divergence from `flash`/
-    `doctor`/`build`, which all anchor `project.root` on `--project`. The
-    alp-sdk checkout resolution (`--sdk-root`'s fallback chain) DOES honour
-    `--project`, exactly as the oracle's own `cli_workspace_root(g)` does.
+  * FIXED (tan-cli#470): `project.root` -- and, with it, the default build
+    root `<project.root>/build` and the `tan build --project ...` remedy in
+    every manifest/elf-missing message -- used to anchor on the `APP_PATH`
+    positional alone, silently dropping a supplied `--project` and resolving
+    against the CWD instead. It now anchors on `--project` exactly like
+    `flash`/`doctor`/`build`/`size`/`image`, via the SAME
+    `build_output.resolve_app_base` ladder those two already call (an
+    explicit `APP_PATH` positional wins; otherwise `--project`, then cwd) --
+    fed a native-separator workspace dir and renormalised after, since
+    `resolve_app_base` itself is separator-agnostic and this command still
+    does not POSIX-normalise (previous bullet). The alp-sdk checkout
+    resolution (`--sdk-root`'s fallback chain) already honoured `--project`
+    before this fix, exactly as the oracle's own `cli_workspace_root(g)`
+    does.
   * `sdk.root` in the envelope is the RAW `--sdk-root` value as typed, never
     absolutised -- verified: `tan renode --sdk-root ./sdk --format json`
     reports `"sdk":{"root":"./sdk", ...}`.
@@ -127,7 +136,12 @@ import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
 from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
-from tan.commands.build_output import ManifestInvalid, ManifestUnavailable, load_manifest
+from tan.commands.build_output import (
+    ManifestInvalid,
+    ManifestUnavailable,
+    load_manifest,
+    resolve_app_base,
+)
 from tan.commands.doctor_cmd import on_path
 from tan.core.global_flags import accept_global_flags
 from tan.core.renode_plan import (
@@ -812,7 +826,18 @@ def _run(
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None, Project]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk, project)`."""
-    app_path = _normalize_join(cwd, app_path_arg)
+    # tan-cli#470: the SAME ladder `size`/`image` resolve through
+    # `resolve_app_base` -- an explicit APP_PATH positional wins (anchored on
+    # cwd); otherwise the default build root falls back to `--project`, then
+    # cwd. Routed through the shared function itself rather than re-derived a
+    # third time (a parallel derivation is how tan-cli#289/#291 happened).
+    # `resolve_app_base` is separator-agnostic (it only ever returns one of
+    # the two strings handed to it), so feeding it a native-separator
+    # workspace dir and renormalising the result keeps this command's own
+    # native-path-style convention (see the module docstring) even though
+    # `size`/`image` feed it a POSIX one.
+    workspace_dir = _normalize_join(cwd, project_arg or ".")
+    app_path = os.path.normpath(resolve_app_base(app_path_arg, workspace_dir))
     board_yaml_path = os.path.join(app_path, "board.yaml")
     # tan-cli#236: routed through the shared seam, though this site already
     # existence-checked by hand.
