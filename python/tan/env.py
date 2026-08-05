@@ -5,6 +5,7 @@ hand-rolled copy can drift from it (tan-cli#288).
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 
 
@@ -25,6 +26,19 @@ def no_color_requested() -> bool:
     return os.environ.get("NO_COLOR") is not None
 
 
+def _stderr_is_tty() -> bool:
+    """The one place that probes `sys.stderr.isatty()` -- `AttributeError`
+    when stderr has been replaced by something that doesn't implement it,
+    `ValueError` when it has been closed. Shared by `use_color` and
+    `wrap_width` below so neither hand-rolls its own copy of this
+    try/except (tan-cli#288, the exact drift this module's own docstring
+    exists to prevent)."""
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def use_color(no_color: bool, ci: bool) -> bool:
     """`Theme::from_args`: human text goes to stderr, so the TTY probe is
     against stderr. Shared by every command's `--no-color`/`--ci` handling
@@ -33,7 +47,40 @@ def use_color(no_color: bool, ci: bool) -> bool:
     now delegates here."""
     if no_color or ci or no_color_requested():
         return False
-    try:
-        return sys.stderr.isatty()
-    except (AttributeError, ValueError):
-        return False
+    return _stderr_is_tty()
+
+
+#: The floor a resolved terminal width may never drop below, moved here from
+#: `doctor_cmd._DOCTOR_TEXT_MIN_WIDTH` (tan-cli's `doctor` wrap-seam adoption,
+#: PR #480) so `wrap_width` below and `doctor_cmd.doctor` can share the one
+#: number instead of drifting into two: a real terminal narrower than this
+#: (or a redirected/piped run whose `shutil.get_terminal_size` fallback would
+#: otherwise apply) must not be left to wrap one word per line. `doctor_cmd`
+#: imports this name rather than keeping its own copy.
+TEXT_WRAP_MIN_WIDTH = 60
+
+
+def wrap_width() -> int | None:
+    """The column budget for hard-wrapping prose to stderr, or `None` when
+    stderr is not a terminal.
+
+    `None` is not "80 columns", it is "do not wrap at all" -- a caller must
+    print each logical line as one physical line. This is the design point
+    `explain`/`sdk current` adopt this seam for: `tan explain | grep` (or any
+    pipe) wants one record per line, and inserting a hard newline into a
+    piped stream breaks that in a way a real terminal's own non-destructive
+    soft-wrap never would. So the probe here is narrower than `use_color`'s:
+    a redirected/piped stream (not a tty) always returns `None`, full stop.
+
+    Deliberately takes no `no_color`/`ci` arguments, unlike `use_color`
+    above, and must not gain them: `--no-color` asks only to drop ANSI
+    colour, and `--ci` asks only to skip interactive prompts (`can_prompt`)
+    -- neither says anything about whether stderr is a pipe, and a user who
+    passed `--no-color` on a real terminal still wants readable line breaks.
+    Folding either flag in here would silently also turn off wrapping for
+    every `--no-color` invocation, which is a second, unrelated behaviour
+    change riding on a flag that never asked for it.
+    """
+    if not _stderr_is_tty():
+        return None
+    return max(shutil.get_terminal_size(fallback=(100, 24)).columns, TEXT_WRAP_MIN_WIDTH)

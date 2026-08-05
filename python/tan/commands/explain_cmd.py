@@ -59,6 +59,8 @@ import typer
 
 from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import TemplateDataError, vendored_library_names_for
+from tan.core.text_layout import wrap_lines
+from tan.env import wrap_width
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -420,6 +422,18 @@ def _generation_target_details(target: GenerationTarget) -> list[str]:
     ]
 
 
+def _print_detail_lines(details: list[str], width: int | None) -> None:
+    """`- <detail>` per entry, to stderr -- hard-wrapped past `width` when it
+    is not `None` (a real terminal; see `tan.env.wrap_width`), unwrapped
+    verbatim off one (piped/redirected, or non-interactive) -- the property
+    `tan explain | grep` and every existing golden depend on. Every detail
+    wraps the same way; see `tan.core.text_layout.wrap_lines` for why there
+    is no longer a "record-shaped" exemption here.
+    """
+    for line in wrap_lines([f"- {detail}" for detail in details], width):
+        print(line, file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
@@ -662,9 +676,12 @@ def explain(
     if not json_mode:
         # stderr, in both formats: stdout is the envelope channel and nothing
         # else. Matches Rust's `emit()`, which `eprintln!`s every text line.
+        # The summary header is a short, bounded "<label> (<id>)" -- never
+        # observed over any real width, so it is never run through
+        # `wrap_block`; `_print_detail_lines` is where the actual wrap
+        # decision lives.
         print(f"explain: {result.summary}", file=sys.stderr)
-        for detail in result.details:
-            print(f"- {detail}", file=sys.stderr)
+        _print_detail_lines(result.details, wrap_width())
     _emit(
         json_mode,
         _data(
@@ -684,7 +701,14 @@ def _fail(json_mode: bool, err: ExplainError) -> None:
     EMPTY even though the caller named a selector, because nothing was
     explained. `data.available` stays populated."""
     if not json_mode:
-        print(err.text_line, file=sys.stderr)
+        # A refusal sentence, not a record -- `--template`/`--target` echo
+        # the CALLER's own (unbounded-length) input back into it (e.g.
+        # "unknown template '<whatever was typed>'"), so this is the one
+        # `explain` text line genuinely able to run long on a hostile or
+        # just-long argument, not only in the two catalogue commands this
+        # task is scoped to.
+        for line in wrap_lines([err.text_line], wrap_width()):
+            print(line, file=sys.stderr)
     _emit(
         json_mode,
         _data(kind="overview", value=err.selector_value, summary="", details=[]),

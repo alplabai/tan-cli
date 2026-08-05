@@ -45,3 +45,29 @@ def wrap_block(body: str, width: int, initial_indent: str, hanging_indent: str) 
         break_long_words=False,
     )
     return wrapped or [initial_indent]
+
+
+def wrap_lines(lines: list[str], width: int | None, hanging_indent: str = "  ") -> list[str]:
+    """Wrap every line in `lines` independently through `wrap_block`, no
+    prefix added to a first line (a caller that wants a bullet or label puts
+    it in the line's own text before calling this) and `hanging_indent` on
+    any continuation line it produces.
+
+    `width is None` -- stderr is not a terminal, see `tan.env.wrap_width` --
+    returns `lines` UNCHANGED: piped/redirected output must reproduce a
+    command's report byte-for-byte, which is what every existing
+    subprocess/golden test for `explain`/`sdk current` depends on. There is
+    no per-line classification here (an earlier version of this seam kept a
+    table of "record-shaped" lines exempt from wrapping, on the theory that
+    a piped reader might grep them) -- that reader can never observe a
+    wrapped line in the first place, since a pipe makes stderr not a tty and
+    this function returns `lines` verbatim in that case. Wrapping applies
+    uniformly instead; `break_long_words=False` on `wrap_block` already
+    keeps a long path/id/SKU intact on its own line rather than mangled.
+    """
+    if width is None:
+        return lines
+    out: list[str] = []
+    for line in lines:
+        out.extend(wrap_block(line, width, "", hanging_indent))
+    return out
