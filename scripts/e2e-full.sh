@@ -69,7 +69,12 @@ git config --global core.longpaths true 2>/dev/null || true
 # matters: a `timeout` mid-extract leaves an EMPTY toolchain directory that a
 # bare `-d` test would wave through.
 _sdk_has_toolchain() {
-  [ -f "$1/sdk_version" ] || return 1
+  # `${1:-}`, not a bare `$1`: under `set -u` a call with NO argument aborts
+  # the whole harness (`$1: unbound variable`, rc=1, nothing after it runs)
+  # instead of returning a status. Unreachable today -- every call site quotes
+  # an argument -- but this is the shared choke point for every SDK scan in
+  # this script, so a future caller's typo would take the whole run down.
+  [ -f "${1:-}/sdk_version" ] || return 1
   local _g
   for _g in "$1"/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc* "$1"/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc*; do
     [ -f "$_g" ] && return 0
@@ -380,24 +385,43 @@ esac
 # non-empty else prerequisites.posix; else -> prerequisites.posix. ALP_SDK_REF
 # (:267) is a documented knob, so the manifest content can legitimately vary
 # by ref -- an argument FOR reading it live, not against.
-HOST_PREREQS=$(python3 - "$HOST_KIND" ./alp-sdk/metadata/bootstrap.json <<'PY' 2>/dev/null
-import json, sys
+HOST_PREREQS_RESULT=$(python3 - "$HOST_KIND" ./alp-sdk/metadata/bootstrap.json <<'PY' 2>/dev/null
+import json, os, sys
+
 host, path = sys.argv[1], sys.argv[2]
+EXPECTED_SCHEMA = 1  # mirrors BOOTSTRAP_MANIFEST_SCHEMA_VERSION (bootstrap.py:89)
+
+
+def reason(kind, detail):
+    print(f"REASON:{kind}:{detail}")
+    raise SystemExit(0)
+
+
+# ABSENT is a first-class SUPPORTED path, not a defect: metadata/bootstrap.json
+# was only added to alp-sdk on 2026-07-25 (alp-sdk#928 / v0.13.0) -- v0.12.0,
+# v0.11.1, v0.11.0, v0.10.1, v0.10.0 all lack it -- and tan's own
+# load_facts() (bootstrap_cmd.py:1660-1666) falls back to fallback_facts()
+# for exactly this case, no error, no issue emitted. ALP_SDK_REF is a
+# documented knob (used above at the clone), so a run legitimately pins a
+# pre-#928 SDK on purpose.
+if not os.path.exists(path):
+    reason("absent", f"{path} does not exist")
 try:
-    doc = json.load(open(path))
-    # Refuse in this SAME try block, exactly as tan's own
-    # parse_bootstrap_manifest does (tan/core/bootstrap.py:513-535):
-    # schemaVersion is read FIRST there and a mismatch is a hard refusal, not
-    # "fall through and hope the shape still matches". Reading past a
-    # schemaVersion this harness does not understand would hand back a tuple
-    # tan itself refuses to parse, producing
-    # `bada "...envelope missing issue bootstrap.prerequisites-missing"` --
-    # blaming tan for a manifest-shape mismatch that was never tan's fault.
-    # 1 mirrors BOOTSTRAP_MANIFEST_SCHEMA_VERSION (bootstrap.py:89).
-    EXPECTED_SCHEMA = 1
-    version = doc.get("schemaVersion")
-    if not isinstance(version, int) or isinstance(version, bool) or version != EXPECTED_SCHEMA:
-        raise ValueError(f"schemaVersion {version!r} unsupported")
+    doc = json.load(open(path, encoding="utf-8"))
+except Exception as e:
+    reason("unparseable", f"{path}: {e}")
+# Refuse in this SAME try block, exactly as tan's own parse_bootstrap_manifest
+# does (tan/core/bootstrap.py:513-535): schemaVersion is read FIRST there and
+# a mismatch is a hard refusal, not "fall through and hope the shape still
+# matches". Unlike ABSENT above, a manifest that EXISTS but is unusable is the
+# shape tan itself hard-errors on (BootstrapManifestError,
+# bootstrap_cmd.py:1662) rather than silently falling back for -- so this
+# harness scores it too, instead of blaming tan for a manifest-shape mismatch
+# that was never tan's fault.
+version = doc.get("schemaVersion") if isinstance(doc, dict) else None
+if not isinstance(version, int) or isinstance(version, bool) or version != EXPECTED_SCHEMA:
+    reason("schema", f"schemaVersion {version!r} unsupported (tan needs {EXPECTED_SCHEMA})")
+try:
     p = doc["prerequisites"]
     if host == "windows":
         lst = p["windows"]
@@ -405,32 +429,53 @@ try:
         lst = p.get("macos") or p["posix"]
     else:
         lst = p["posix"]
-    if not isinstance(lst, list):
-        raise ValueError("empty")
-    # Filter shell-unsplittable entries (empty / whitespace-only strings):
-    # the schema only requires {"type": "string"}, no minLength, so a
-    # whitespace-only entry is schema-VALID and would otherwise survive both
-    # this check and `[ -z "$HOST_PREREQS" ]` below, making `have_prereqs`
-    # vacuously true -- a host wrongly declared provisioned.
-    lst = [t.strip() for t in lst if isinstance(t, str) and t.strip()]
-    if not lst:
-        raise ValueError("empty")
-    print(" ".join(lst))
-except Exception:
-    raise SystemExit(1)
+except Exception as e:
+    reason("schema", f"prerequisites.{host}: {e}")
+if not isinstance(lst, list):
+    reason("schema", f"prerequisites.{host} is not a list")
+# Reject any entry CONTAINING whitespace (leading, trailing, OR internal)
+# rather than only trimming it: `[t.strip() for t in lst if t.strip()]` let an
+# entry like "cmake ninja" (one JSON string) survive as-is -- schema-valid,
+# no minLength -- and `" ".join` below plus the unquoted `for _t in
+# $HOST_PREREQS` in have_prereqs/missing_prereqs then WORD-SPLITS it into two
+# bogus tool names, producing exactly the
+# "provisioned host scored bare, Scenario B silently skipped" outcome
+# documented at :350-360.
+clean = [t for t in lst if isinstance(t, str) and t and not any(c.isspace() for c in t)]
+if not clean:
+    reason("empty", f"prerequisites.{host} has no usable (non-whitespace) tool name")
+print(" ".join(clean))
 PY
 )
+case "$HOST_PREREQS_RESULT" in
+  REASON:absent:*)
+    # NOT scored: see the python block above -- an absent manifest is the
+    # documented legacy path, and ALP_SDK_REF is how an operator legitimately
+    # selects a pre-#928 SDK. Scoring this `bad` would fail a run like
+    # `ALP_SDK_REF=v0.13.0 scripts/e2e-full.sh <bin> <work>` for an input tan
+    # fully supports.
+    note "prereq-manifest: ${HOST_PREREQS_RESULT#REASON:absent:} -- using hand-ported FALLBACK tuples (legacy-SDK path, not a defect)"
+    HOST_PREREQS=""
+    ;;
+  REASON:*)
+    _reason_kind="${HOST_PREREQS_RESULT#REASON:}"; _reason_kind="${_reason_kind%%:*}"
+    _reason_detail="${HOST_PREREQS_RESULT#REASON:$_reason_kind:}"
+    # SCORED: the manifest EXISTS and is a shape tan itself refuses to use
+    # (unsupported schemaVersion, unparseable JSON, or no usable tool name) --
+    # never a silent fallback for load_facts() either. May drift from the
+    # live SDK; the block above is preferred.
+    bad "prereq-manifest: alp-sdk/metadata/bootstrap.json $_reason_kind -- $_reason_detail -- using hand-ported FALLBACK tuples, may drift from the live SDK"
+    HOST_PREREQS=""
+    ;;
+  "")
+    bad "prereq-manifest: alp-sdk/metadata/bootstrap.json read failed with no diagnosable reason -- using hand-ported FALLBACK tuples, may drift from the live SDK"
+    HOST_PREREQS=""
+    ;;
+  *)
+    HOST_PREREQS="$HOST_PREREQS_RESULT"
+    ;;
+esac
 if [ -z "$HOST_PREREQS" ]; then
-  # FALLBACK ONLY -- the manifest is absent, unparseable, an unsupported
-  # schemaVersion, or entirely whitespace-only tools (the clone at :268 can
-  # fail, or an ALP_SDK_REF can predate metadata/bootstrap.json's shape).
-  # Hand-ported and may drift from the live SDK; the block above is
-  # preferred. SCORED (not just a `note`) below because a silent fallback is
-  # otherwise byte-indistinguishable, in the final tally, from a run that
-  # read the manifest -- this box's own alp-sdk checkout has been seen on a
-  # ref whose prerequisites.posix carries no `macos` key at all, against a
-  # fallback that hardcodes six POSIX tools.
-  bad "prereq-manifest: alp-sdk/metadata/bootstrap.json unreadable -- using hand-ported FALLBACK tuples, may drift from the live SDK"
   case "$HOST_KIND" in
     windows) HOST_PREREQS="git cmake python ninja" ;;
     macos)   HOST_PREREQS="git cmake python3 ninja" ;;
@@ -737,18 +782,35 @@ PY
     # (build_cmd.py:1097-1102 refuses only when NO slice succeeded), so
     # "exit 0" alone is never proof of a real ELF on ANY arm.
     ELF=""
+    ELF_FOUND=no
+    ELF_IS_ARM=no
     if [ "$RC" -eq 0 ]; then
       ELF=$(find . -name "zephyr.elf" 2>/dev/null | head -1)
       if [ -n "$ELF" ]; then
-        # `file -b`: the BARE description, no leading filename. Without `-b`
-        # the match below is unanchored against `file`'s path-prefixed
-        # output, so path text alone can satisfy it --
-        # `./self-test/arm-zephyr-eabi/build/zephyr.elf` would score "a real
-        # ARM ELF" even while holding a genuine x86-64 binary.
-        DESC=$(file -b "$ELF" 2>/dev/null || echo "file(1) unavailable")
-        note "$ELF: $DESC"
-        echo "$DESC" | grep -qi "ELF.*ARM" && okb "B: build produced a real ARM ELF" \
-                                            || badb "B: artefact is not an ARM ELF"
+        ELF_FOUND=yes
+        if command -v file >/dev/null 2>&1; then
+          # `file -b`: the BARE description, no leading filename. Without `-b`
+          # the match below is unanchored against `file`'s path-prefixed
+          # output, so path text alone can satisfy it --
+          # `./self-test/arm-zephyr-eabi/build/zephyr.elf` would score "a real
+          # ARM ELF" even while holding a genuine x86-64 binary.
+          DESC=$(file -b "$ELF" 2>/dev/null)
+          note "$ELF: $DESC"
+          if echo "$DESC" | grep -qi "ELF.*ARM"; then
+            okb "B: build produced a real ARM ELF"; ELF_IS_ARM=yes
+          else
+            badb "B: artefact is not an ARM ELF"
+          fi
+        else
+          # file(1) absent is a HOST gap, not an artefact defect -- reachable
+          # on a non-Debian/minimal POSIX host (CAN_APT=0, since :587 below
+          # only apt-installs `file` when root+apt-get are both available)
+          # that still carries a working toolchain of its own. The old code
+          # fed "file(1) unavailable" into the same `grep -qi "ELF.*ARM"`,
+          # which can never match, scoring a genuine ARM ELF as
+          # `badb "artefact is not an ARM ELF"`.
+          note "$ELF: exists, but file(1) is unavailable -- artefact type not checked"
+        fi
       else
         badb "B: build exited 0 but no zephyr.elf was produced"
       fi
@@ -833,6 +895,24 @@ PY
         note "   in place, even though the install itself did not finish clean"
         note "   (host-tools step / timeout) -- the no-SDK refusal path is NOT"
         note "   exercised here; the artefact check above already scored the ELF."
+      elif [ "$RC" -eq 0 ] && [ "$ELF_IS_ARM" = yes ]; then
+        # Neither scan above found an SDK, but the hoisted block already
+        # confirmed a real ARM ELF -- that IS positive evidence a toolchain
+        # was found (e.g. an inherited ZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb +
+        # GNUARMEMB_TOOLCHAIN_PATH, which neither scan above knows how to
+        # detect), not a contradiction of it. Deferring to the artefact is
+        # what keeps this from scoring BOTH "produced a real ARM ELF" AND
+        # "unexpectedly succeeded with no Zephyr SDK" for the same build.
+        note "B: build succeeded and produced a real ARM ELF (already scored above)"
+        note "   despite no Zephyr SDK found by this harness's scans -- the ELF"
+        note "   itself is the stronger evidence; not scored as unexpected."
+      elif [ "$RC" -eq 0 ] && [ "$ELF_FOUND" = no ]; then
+        # Already scored above as "build exited 0 but no zephyr.elf was
+        # produced" -- a partial build where every Zephyr slice was skipped
+        # but some other slice succeeded (exit 0 either way). Scoring
+        # "unexpectedly succeeded with no Zephyr SDK" too would double-file
+        # the same underlying defect (no SDK -> no Zephyr artefact).
+        note "B: no ARM ELF and no Zephyr SDK found -- already scored above, not double-scored here"
       elif [ "$RC" -eq 0 ]; then
         badb "B: build unexpectedly succeeded with no Zephyr SDK installed"
       else
@@ -928,6 +1008,12 @@ print(",".join(f"{s.get('coreId')}={s.get('status')}"
                                 key=lambda x: x.get("coreId") or "")))
 PY
 }
+  # Wire vocabulary is `ok` / `skipped` / `failed` (build_cmd.py's
+  # _WIRE_STATUS -- `succeeded` internally, `ok` on the wire), matching what
+  # slices_of() prints above verbatim, no translation needed here.
+  slice_list_has_ok() {
+    printf '%s' "$1" | grep -qE '(^|,)[^,=]+=ok(,|$)'
+  }
   DIRTY_SLICES=$(slices_of "$WORK/dbuild.out")
   ( unset ZEPHYR_BASE; "$TAN" build --project blinky-e2e --format json >"$WORK/cleanbuild.out" 2>/dev/null )
   CLEAN_SLICES=$(slices_of "$WORK/cleanbuild.out")
@@ -951,7 +1037,28 @@ PY
   # Only assert exit 0 when the SDK was actually usable, mirroring the same
   # fix applied to the main build leg above.
   if [ "$SDK_OK" -eq 1 ]; then
-    [ "$RC" -eq 0 ] && ok "dirty build: exit 0" || { bad "dirty build: exit $RC"; note "$(head -c 400 "$WORK/dbuild.out")"; }
+    if [ "$RC" -ne 0 ]; then
+      bad "dirty build: exit $RC"; note "$(head -c 400 "$WORK/dbuild.out")"
+    elif [ "$DIRTY_SLICES" = "UNREADABLE" ] || [ "$CLEAN_SLICES" = "UNREADABLE" ]; then
+      # Already scored above (#336) -- an unreadable slice list means nothing
+      # was compared, so asserting slice success again here would double-score
+      # the same defect.
+      note "dirty build: exit 0, but slice success not checked -- slices already scored UNREADABLE above (#336)"
+    elif slice_list_has_ok "$DIRTY_SLICES" && slice_list_has_ok "$CLEAN_SLICES"; then
+      ok "dirty build: exit 0 and at least one slice succeeded on both sides"
+    else
+      # #336 above only requires the two slice lists to be EQUAL, never that
+      # either one contains a success -- a run where every Zephyr slice is
+      # SKIPPED on both sides (e.g. this container's Zephyr toolchain vanished
+      # mid-run) still passes that equality check and can still exit 0 (a
+      # partial build, some other slice succeeding), scoring two PASSes for a
+      # run with no real ARM ELF on either side. The comment above this build
+      # ("exit 0 alone is never proof of a real ELF on ANY arm") applies here
+      # too; NOT re-running the hoisted ELF-file block, since the ELF it would
+      # find is stale from the earlier :727 Scenario-B build -- slice status
+      # is the check that actually asks about THIS build.
+      bad "dirty build: exit 0 but no slice succeeded on both sides (dirty=$DIRTY_SLICES clean=$CLEAN_SLICES)"
+    fi
   else
     note "dirty build: exit $RC (no Zephyr SDK in this container -- consistent with Scenario B, not scored again)"
   fi
