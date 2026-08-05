@@ -304,6 +304,29 @@ def test_global_default_written_for_cross_platform_absolute_path_is_recognised(
     assert resolve_sdk_tiered(None, workspace).foreign_global_default_for == foreign_root
 
 
+def test_global_default_written_for_cross_platform_windows_path_is_recognised(
+    tmp_path, isolated_home
+):
+    """The symmetric direction from the test above, and the one that actually
+    kills the single-platform mutant: `/home/u/projB` above is ALREADY
+    absolute under a bare `Path(value).is_absolute()` on whichever POSIX
+    runner this suite happens to run on (`ubuntu-latest`/`macos-latest`), so
+    that test alone passes against the pre-fix, reader-OS-native check too --
+    it only proves something on a Windows runner. A Windows-written
+    `writtenFor` (`C:/projB`) is NOT absolute under a bare `Path(...)` on
+    POSIX (no leading `/`), so THIS direction is the one newly accepted on
+    Linux/macOS by checking `PureWindowsPath` too, and had no coverage at
+    all before this fix."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    foreign_root = "C:/projB"
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for=foreign_root
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for == foreign_root
+
+
 @pytest.mark.parametrize(
     "written_for", [123, ["a"], {"x": 1}, None], ids=["int", "list", "dict", "null"]
 )

@@ -253,9 +253,15 @@ All notable changes to `tan` are documented here. Format follows
     carry — and `build`, `flash`, `generate`, `image`, `run`, `size`, `doctor`,
     `clean`, `examples`, `bootstrap`, `presets`, `new-som` and `renode` all
     append the warning beside their existing `sdk.project-pin-unresolved`
-    now — `flash`/`size` unconditionally, on every manifest-gate refusal too,
-    not only the happy path a first pass at this rework left them gated
-    behind. `tan init` surfaces it BEFORE `_pin_sdk` writes — the pin `init`
+    now — `size`/`image` unconditionally, on every manifest-gate refusal too
+    (including `image.bundle-write-failed`, not just its `manifest-
+    unavailable`/`manifest-invalid` siblings), from one shared
+    `sdk_cmd.sdk_resolution_issues`. `flash`'s equivalent, `_error`, reached
+    the SAME shared helper in a first pass at this rework but one early
+    return — its OWN `flash.sdk-root-not-found`, the SDK failing to resolve
+    at all — bypassed `_error` and stayed gated to the happy path until a
+    review round closed it too; `flash` is unconditional as of this same
+    section. `tan init` surfaces it BEFORE `_pin_sdk` writes — the pin `init`
     makes is PERMANENT, so silently baking a foreign checkout into a brand
     new project is worse than one build using the wrong SDK once.
   - **Fixed**: `writtenFor: ""` used to pass `_pointer_written_for`'s bare
@@ -265,6 +271,14 @@ All notable changes to `tan` are documented here. Format follows
     on anything the pointer recorded. `_pointer_written_for` now rejects a
     non-absolute value at the source; every other malformed shape (an int, a
     list, a dict, `null`) already returned `None` safely and still does.
+    Also widened, in the same fix and **user-visible**: absoluteness used to
+    be judged by the READER's own `pathlib` flavour, so a legitimate
+    POSIX-absolute `writtenFor` (`/home/u/projB`) silently read as "no
+    opinion" on a Windows reader, and symmetrically for a Windows-absolute
+    one (`C:/projB`) read on POSIX — accepted now when EITHER
+    `PurePosixPath` or `PureWindowsPath` calls it absolute, so a pointer one
+    platform's `tan` legitimately wrote no longer goes silent purely because
+    a DIFFERENT platform's `tan` is the one reading the shared file.
   - `_undo_relocation`'s rollback is back to restoring (or clearing) exactly
     the one pointer it overwrote — the second, project-pin restore path this
     rework's first attempt added (and its own risk of misattributing a
@@ -277,9 +291,15 @@ All notable changes to `tan` are documented here. Format follows
   this; now pins that A's later `sdk current` DOES resolve B's checkout, with
   the warning present, rather than pinning the reverted per-project pin),
   `test_build_command.py`'s new two-project scenario proving `tan build`
-  itself — not just `sdk current` — emits the warning, plus
-  `test_sdk_command.py` coverage for the empty-string and wrong-type
-  `writtenFor` shapes.
+  itself — not just `sdk current` — emits the warning,
+  `test_sdk_command.py` coverage for the empty-string, wrong-type, and (both
+  directions of) cross-platform-absolute `writtenFor` shapes, and
+  `test_flash_command.py::test_sdk_root_ladder_broken_pin_discloses_on_the_not_found_refusal`,
+  which pins `flash`'s own last gap: a broken `.alp/sdk-path` pin with
+  nothing lower on the ladder to fall through to used to return bare
+  `['flash.sdk-root-not-found']`, unlike the identical state on `size`/
+  `image`; it now returns `['sdk.project-pin-unresolved',
+  'flash.sdk-root-not-found']`, matching them.
 
 ## [0.5.0] — 2026-08-04
 

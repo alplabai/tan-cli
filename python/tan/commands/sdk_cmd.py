@@ -662,16 +662,16 @@ def sdk_resolution_issues(
     broken_project_pin: str | None, tier: str, foreign_global_default_for: str | None
 ) -> list[Issue]:
     """`project_pin_issue` + `global_default_foreign_project_issue`, together,
-    in the order every existing call site already appends them -- the ONE
-    shared point tan-cli#464 review asks for instead of the two-line pair
-    being hand-copied at every caller (`flash_cmd._error`/`size_cmd.
-    _error_outcome`, in particular, used to compute this pair only on the
-    HAPPY path and skip it on a manifest-gate early return, so the exact same
-    `sdk.sourceTier: "globalDefault"` envelope that should have carried
-    `sdk.global-default-foreign-project` carried neither warning instead).
-    `[]` when neither fires, so a caller can `issues.extend(sdk_resolution_
-    issues(...))` unconditionally, on every return path, not just the one
-    that reaches the end of the function."""
+    in the order `flash`/`size`/`image` -- the three callers this actually
+    has -- append them: each used to compute this pair only on the happy
+    path and skip it on a manifest-gate early return.
+
+    **Not the only copy.** Twelve other modules still hand-copy the pair
+    directly rather than through here -- most fold in a third, caller-
+    specific issue or use a different order, not the mechanical swap it
+    looks like; left as-is (tan-cli#464 review).
+
+    `[]` when neither fires -- a caller can `issues.extend(...)` unconditionally."""
     issues: list[Issue] = []
     pin_issue = project_pin_issue(broken_project_pin, tier)
     if pin_issue is not None:

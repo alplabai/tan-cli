@@ -243,10 +243,15 @@ class _SdkResolution:
     return -- a named result, not a growing tuple (the same reasoning
     `build_cmd.SdkRootResolution` documents): a fact one caller needs
     (`foreign_global_default_for`, tan-cli#464) must not force every field
-    before it to be re-counted by position."""
+    before it to be re-counted by position.
+
+    `tier` is always a real tier string, never Python `None` -- `"none"` is
+    the oracle's own spelling for "nothing resolved" (`project_pin_issue`
+    interpolates it into its message; a bare `None` would have read
+    "falling through to the None tier instead")."""
 
     path: str | None
-    tier: str | None
+    tier: str
     broken_project_pin: str | None = None
     foreign_global_default_for: str | None = None
 
@@ -294,10 +299,13 @@ def resolve_sdk_root_ladder_safe(workspace_root: str) -> _SdkResolution:
     try:
         resolution = resolve_sdk_root_ladder(None, Path(workspace_root))
     except (OSError, ValueError):
-        return _SdkResolution(None, None)
+        return _SdkResolution(None, "none")
     found = resolution.path
     if found is None:
-        return _SdkResolution(None, None, resolution.broken_project_pin)
+        # `resolution.tier` is already "none" here -- carried through, not
+        # dropped, so a broken pin with no working fallback still names a
+        # real tier in `project_pin_issue`'s message.
+        return _SdkResolution(None, resolution.tier, resolution.broken_project_pin)
     return _SdkResolution(
         str(found),
         resolution.tier,
@@ -1503,11 +1511,12 @@ def _run(
         build_root = _abs_join(app_dir, "build")
 
     # Anchored on the WORKSPACE root, never on `app_dir` -- see `workspace_root`.
+    # `broken_project_pin`/`foreign_global_default_for` no longer travel past
+    # `sdk` here -- `flash` resolves the SAME pair again and turns it into
+    # issues ONCE, after every return this function can take (tan-cli#464).
     sdk_resolution = _resolve_sdk(sdk_root_arg, cwd)
     resolved_sdk = sdk_resolution.path
     tier = sdk_resolution.tier
-    sdk_broken_pin = sdk_resolution.broken_project_pin
-    sdk_foreign_default = sdk_resolution.foreign_global_default_for
     sdk = SdkInfo(resolved_sdk, tier) if resolved_sdk is not None else None
     if resolved_sdk is None:
         # Faithful to the Python `find_sdk_root() is None` die: `buildRoot` is
@@ -1527,26 +1536,17 @@ def _run(
             f"system-manifest.yaml not found at {manifest_path}; run "
             f"`tan build --project {app_path}` first."
         )
-        return _error(
-            build_root, "flash.manifest-not-found", message, sdk,
-            sdk_broken_pin, tier, sdk_foreign_default,
-        )
+        return _error(build_root, "flash.manifest-not-found", message, sdk)
     try:
         text = _read(manifest_path)
     except OSError as err:
         # Unreadable, a DIRECTORY where a file was expected, a permission
         # denial. Same issue code the oracle uses for a read failure.
-        return _error(
-            build_root, "flash.manifest-not-found", f"{manifest_path}: {err}", sdk,
-            sdk_broken_pin, tier, sdk_foreign_default,
-        )
+        return _error(build_root, "flash.manifest-not-found", f"{manifest_path}: {err}", sdk)
     try:
         manifest = parse_system_manifest(text)
     except ManifestError as err:
-        return _error(
-            build_root, "flash.manifest-invalid", f"{manifest_path}: {err}", sdk,
-            sdk_broken_pin, tier, sdk_foreign_default,
-        )
+        return _error(build_root, "flash.manifest-invalid", f"{manifest_path}: {err}", sdk)
 
     force_confirm = os.environ.get("ALP_FLASH_FORCE") == "1"
     plan = plan_flash_targets(manifest, core, helper)
@@ -1560,14 +1560,9 @@ def _run(
     workspace = str(workspace_dir) if workspace_dir is not None else None
 
     text_lines: list[str] = []
-    # tan-cli#263/#464: of every command in this ladder, flashing against the
-    # silently-wrong SDK is the one with the highest cost -- real hardware,
-    # programmed with an image built against metadata for a checkout that was
-    # never the one `.alp/sdk-path` named, or that a DIFFERENT project's
-    # bootstrap relocation actually decided. `sdk_resolution_issues` is the
-    # ONE place this pair is computed -- `_error` below calls it too, so a
-    # manifest-gate refusal that returns before this line still carries both.
-    issues: list[Issue] = sdk_resolution_issues(sdk_broken_pin, tier, sdk_foreign_default)
+    # No longer `sdk_resolution_issues(...)` here -- see the note above and
+    # `flash`'s own call, the one place that pair is built now.
+    issues: list[Issue] = []
     entries: list[dict[str, Any]] = []
     # Seeded with the status-refused slices: they never become a target, so they
     # cannot increment `failed` in the loop -- but a slice `tan build` reports
@@ -1681,29 +1676,18 @@ def _data(build_root: str, entries: list[dict[str, Any]] | None = None) -> dict[
 
 
 def _error(
-    build_root: str,
-    code: str,
-    message: str,
-    sdk: SdkInfo | None,
-    sdk_broken_pin: str | None,
-    tier: str | None,
-    sdk_foreign_default: str | None,
+    build_root: str, code: str, message: str, sdk: SdkInfo | None
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
-    """tan-cli#464 review: a manifest-gate refusal used to build its issues
-    list from just `code`/`message`, computed BEFORE `sdk_resolution_issues`
-    ran further down `_run` -- so the dominant refusal path
-    (`flash.manifest-not-found`) returned first and reported neither
-    `sdk.project-pin-unresolved` nor `sdk.global-default-foreign-project`,
-    even though `sdk.sourceTier` in the same envelope could still read
-    `"globalDefault"` for a checkout a DIFFERENT project's bootstrap picked.
-    Computed here instead, so every current and future early return through
-    `_error` carries both warnings without having to remember to."""
-    issues = sdk_resolution_issues(sdk_broken_pin, tier, sdk_foreign_default)
-    issues.append(Issue(code, "error", message))
+    """A manifest-gate refusal: exit 1, an empty `data`, one issue.
+
+    tan-cli#464 review: no longer also takes `sdk_broken_pin`/`tier`/
+    `sdk_foreign_default` to rebuild the pin/foreign-default pair itself --
+    three same-typed `str | None` positionals a caller could transpose
+    unnoticed. `flash` computes that pair once now, after every return."""
     return (
         ExitCode.RUNTIME_FAILURE,
         _data(build_root),
-        issues,
+        [Issue(code, "error", message)],
         [f"flash: {message}"],
         sdk,
     )
@@ -1790,6 +1774,12 @@ def flash(
     cwd = workspace_root(project)
     project_obj = _resolve_project(cwd, board_yaml)
 
+    # Resolved OUTSIDE the guard, like `project_obj` above: the same
+    # `(sdk_root, cwd)` `_run` resolves for itself, so the pair below covers
+    # every one of `_run`'s returns including `flash.internal-failure`
+    # (`build_cmd.build`'s own placement, tan-cli#464 review).
+    sdk_resolution = _resolve_sdk(sdk_root, cwd)
+
     sdk: SdkInfo | None = None
     try:
         exit_code, data, issues, text_lines, sdk = _run(
@@ -1813,6 +1803,16 @@ def flash(
         data = _data("")
         issues = [Issue("flash.internal-failure", "error", f"{type(err).__name__}: {err}")]
         text_lines = ["flash: internal failure"]
+
+    # The ONE `sdk_resolution_issues` call left in this file (tan-cli#464
+    # review) -- covers every return above, guard included.
+    resolution_issues = sdk_resolution_issues(
+        sdk_resolution.broken_project_pin,
+        sdk_resolution.tier,
+        sdk_resolution.foreign_global_default_for,
+    )
+    if resolution_issues:
+        issues = [*resolution_issues, *issues]
 
     if json_mode:
         emit(Envelope("flash", project_obj, data, issues, exit_code, sdk=sdk))
