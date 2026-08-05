@@ -317,7 +317,18 @@ _MIRRORED = ("tan/planner/",)
 # PLR0911, PLR0912, PLR0915` stands in front of, and splitting the
 # resolution-and-disclosure lines out would not shrink the MODULE total below,
 # only move them off this ratchet onto that one.
-_FUNCTION_COUNT_BUDGET = 202
+#
+# 203, not 202, as of the UX polish sweep task 4:
+# `tan/commands/examples_cmd.py:render_examples_text` crossed 50 lines (47 ->
+# 61) adding `--category`, from three separate additions, not one: the
+# signature grew from 3 to 7 lines (+4) once `category: str | None` forced
+# one-parameter-per-line wrapping; a new `if category is not None:` empty-
+# result branch added 5 lines; and the trailing "categories: ..." /
+# "narrow with --category ..." hint appended after the entry loop on an
+# unfiltered run added another 5 lines. It stacks on top of the #464 count
+# above rather than replacing it -- the two crossings are different
+# functions.
+_FUNCTION_COUNT_BUDGET = 203
 _FUNCTION_WORST_BUDGET = 707
 
 

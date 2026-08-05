@@ -276,8 +276,23 @@ def example_matches_filter(entry: Example, needle: str) -> bool:
     return lowered in entry.id.lower() or lowered in entry.title.lower()
 
 
+def example_category(entry: Example) -> str:
+    """The catalogue's top-level directory -- `ai` for `ai/cold-chain-monitor`.
+    Derived from the id rather than carried as a field: the SDK emits no
+    category, and the id prefix IS the tree it came from."""
+    return entry.id.split("/", 1)[0]
+
+
+def example_matches_category(entry: Example, category: str) -> bool:
+    return example_category(entry).lower() == category.lower()
+
+
 def render_examples_text(
-    examples: list[Example], filter_: str | None, verbose: bool, sdk_resolved: bool
+    examples: list[Example],
+    filter_: str | None,
+    category: str | None,
+    verbose: bool,
+    sdk_resolved: bool,
 ) -> list[str]:
     """One `id  title` line per example, `id` column aligned to the longest id in
     THIS (possibly filtered) result set; `--verbose` appends the description.
@@ -312,6 +327,11 @@ def render_examples_text(
                 f"examples: no example projects match --filter "
                 f"{json.dumps(filter_, ensure_ascii=False)}."
             ]
+        if category is not None:
+            return [
+                f"examples: no example projects in category "
+                f"{json.dumps(category, ensure_ascii=False)}."
+            ]
         return ["examples: the resolved alp-sdk checkout ships no example projects."]
     id_width = max(len(e.id) for e in examples)
     lines = [f"examples: {len(examples)} example project(s) available"]
@@ -322,6 +342,11 @@ def render_examples_text(
             if description:
                 line += f"   -- {description}"
         lines.append(line)
+    if filter_ is None and category is None:
+        categories = sorted({example_category(e) for e in examples})
+        lines.append("")
+        lines.append(f"categories: {' '.join(categories)}")
+        lines.append("narrow with --category <NAME>, or --filter <TEXT> to search.")
     return lines
 
 
@@ -390,6 +415,13 @@ def examples(
     filter_: str = typer.Option(
         None, "--filter", metavar="TEXT", help="Only examples whose id or title contains TEXT."
     ),
+    category: str = typer.Option(
+        None,
+        "--category",
+        metavar="NAME",
+        help="Only examples in this catalogue category (a bare `tan examples` "
+        "prints the list).",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="Append each example's description."),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
@@ -444,6 +476,8 @@ def examples(
             issues.append(Issue(SDK_UNRESOLVED_CODE, "warning", SDK_UNRESOLVED_MESSAGE))
         if filter_ is not None:
             found = [e for e in found if example_matches_filter(e, filter_)]
+        if category is not None:
+            found = [e for e in found if example_matches_category(e, category)]
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring
         # No registry entry applies (`contract/issue-codes.json` covers
         # `bootstrap.*`/`debug-config.*` only), so this follows the port's
@@ -480,7 +514,7 @@ def examples(
             )
         )
     else:
-        for line in render_examples_text(found, filter_, verbose, sdk is not None):
+        for line in render_examples_text(found, filter_, category, verbose, sdk is not None):
             print(line, file=sys.stderr)
         for issue in issues:
             print(f"examples: {issue.message}", file=sys.stderr)
