@@ -396,3 +396,30 @@ def test_envelope_shape_gate_still_covers_the_full_registered_surface():
         f"{set(_ENVELOPE_SHAPE_EXEMPT) - set(_ALL_COMMANDS)} is exempted but no "
         "longer a registered command -- stale entry."
     )
+
+
+def test_every_registered_command_declares_a_help_panel():
+    """Drift guard: a command registered without a panel silently falls into
+    Typer's default "Commands" box, which is the flat 32-item list this
+    grouping exists to replace. Derived from the registration table rather
+    than a hand-kept name list, for the same reason `_SUBCOMMAND_NAMES` is."""
+    from tan.cli import app
+
+    unpanelled = sorted(
+        info.name for info in app.registered_commands if not info.rich_help_panel
+    )
+    assert unpanelled == []
+
+
+def test_help_renders_the_six_panels():
+    p = run("--help")
+    assert p.returncode == 0
+    for panel in (
+        "Setup",
+        "Start a project",
+        "Configure",
+        "Build & run",
+        "Hardware",
+        "Inspect & author",
+    ):
+        assert panel in p.stdout, f"missing panel: {panel}"

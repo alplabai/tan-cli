@@ -75,39 +75,48 @@ app = typer.Typer(add_completion=False)
 # source and produces a frozen `tan` that cannot find its own commands (see
 # `tan.commands.__init__`). Registering here rather than with a decorator in
 # the command module keeps `tan.commands.*` free of any `tan.cli` import,
-# which would otherwise be a cycle.
-app.command("bootstrap")(bootstrap)
-app.command("build")(build)
-app.command("clean")(clean)
-app.command("completion")(completion)
-app.command("debug-config")(debug_config)
-app.command("diff")(diff)
-app.command("doctor")(doctor)
-app.command("examples")(examples)
-app.command("explain")(explain)
-app.command("faultdecode")(faultdecode)
-app.command("flash")(flash)
-app.command("generate")(generate)
-app.command("image")(image)
-app.command("init")(init)
-app.command("inspect")(inspect)
-app.command("kconfig")(kconfig)
-app.command("lock", context_settings=FORWARD_CONTEXT_SETTINGS)(lock)
-app.command("migrate", context_settings=FORWARD_CONTEXT_SETTINGS)(migrate)
-app.command("model")(model)
-app.command("monitor")(monitor)
-app.command("new-som")(new_som)
-app.command("pinmux")(pinmux)
-app.command("presets")(presets)
-app.command("quality", context_settings=FORWARD_CONTEXT_SETTINGS)(quality)
-app.command("renode")(renode)
-app.command("run")(run)
-app.command("scaffold")(scaffold)
-app.command("sdk")(sdk)
-app.command("size")(size)
-app.command("support-bundle")(support_bundle)
-app.command("trace")(trace)
-app.command("validate")(validate)
+# which would otherwise be a cycle. Each registration also carries a
+# `rich_help_panel` keyword that groups commands into six titled panels on
+# `--help`; a new command gains grouping with the same one-line edit that
+# registers it.
+app.command("bootstrap", rich_help_panel="Setup")(bootstrap)
+app.command("build", rich_help_panel="Build & run")(build)
+app.command("clean", rich_help_panel="Build & run")(clean)
+app.command("completion", rich_help_panel="Setup")(completion)
+app.command("debug-config", rich_help_panel="Hardware")(debug_config)
+app.command("diff", rich_help_panel="Inspect & author")(diff)
+app.command("doctor", rich_help_panel="Setup")(doctor)
+app.command("examples", rich_help_panel="Start a project")(examples)
+app.command("explain", rich_help_panel="Start a project")(explain)
+app.command("faultdecode", rich_help_panel="Hardware")(faultdecode)
+app.command("flash", rich_help_panel="Hardware")(flash)
+app.command("generate", rich_help_panel="Configure")(generate)
+app.command("image", rich_help_panel="Build & run")(image)
+app.command("init", rich_help_panel="Start a project")(init)
+app.command("inspect", rich_help_panel="Inspect & author")(inspect)
+app.command("kconfig", rich_help_panel="Configure")(kconfig)
+app.command(
+    "lock", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
+)(lock)
+app.command(
+    "migrate", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
+)(migrate)
+app.command("model", rich_help_panel="Configure")(model)
+app.command("monitor", rich_help_panel="Hardware")(monitor)
+app.command("new-som", rich_help_panel="Inspect & author")(new_som)
+app.command("pinmux", rich_help_panel="Inspect & author")(pinmux)
+app.command("presets", rich_help_panel="Start a project")(presets)
+app.command(
+    "quality", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
+)(quality)
+app.command("renode", rich_help_panel="Build & run")(renode)
+app.command("run", rich_help_panel="Build & run")(run)
+app.command("scaffold", rich_help_panel="Start a project")(scaffold)
+app.command("sdk", rich_help_panel="Setup")(sdk)
+app.command("size", rich_help_panel="Build & run")(size)
+app.command("support-bundle", rich_help_panel="Inspect & author")(support_bundle)
+app.command("trace", rich_help_panel="Inspect & author")(trace)
+app.command("validate", rich_help_panel="Configure")(validate)
 
 #: Every registered subcommand name, DERIVED from the `app.command(...)` table
 #: above rather than retyped beside it (tan-cli#378). Used only to find the
