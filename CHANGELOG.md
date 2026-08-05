@@ -9,6 +9,28 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`contract/issue-codes.json` registered two codes twice, one pair
+  disagreeing on severity.** `bootstrap.adopted-venv-unusable` carried a
+  `warning` entry (matching `ensure_venv`'s live `log.warn` call site) and a
+  stale `error` entry describing a superseded
+  `adopted_venv_unusable_refusal()` / literal `Issue(..., "error", ...)`
+  implementation that no longer exists in `bootstrap_cmd.py` -- a leftover from
+  a second, independently-merged implementation of the same tan-cli#390 fix.
+  `bootstrap.venv-recreated` was a straight duplicate. JSON duplicate-key
+  semantics are last-wins, so the published severity depended on file order,
+  with no code diff to notice. Kept the `warning` entries:
+  `adopted-venv-unusable` is not in `WORKSPACE_BLOCKING`, so
+  `Log.take_issues()` never escalates it, and the run's failing verdict travels
+  separately via `bootstrap.failed` at `error`. Both stale entries removed;
+  `venv-recreated`'s two notes merged into the survivor. (#467)
+- **New gate**: `tests/gates/test_issue_code_registry_has_no_duplicate_codes.py`
+  parses `contract/issue-codes.json` through a duplicate-key-rejecting
+  `object_pairs_hook` AND a second pass over the parsed `issueCodes` array. The
+  real defect was two well-formed array entries sharing one `code`, which an
+  `object_pairs_hook` alone cannot see -- and which was invisible to
+  `test_every_issue_code_is_registered.py`'s `set` comprehension and to
+  `test_issue_code_registry_shape.py`'s plain list. Now fails loudly, naming
+  every duplicate. (#467)
 - **27 `contract/issue-codes.json` issue codes shipped camelCase in v0.5.0,
   breaking every consumer's kebab-case convention.** `doctor_cmd.py`'s
   `checks_to_issues()` and `support_bundle_cmd.py`'s `_doctor_issues()` both
