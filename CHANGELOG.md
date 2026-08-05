@@ -5,6 +5,18 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.5.2] — Unreleased
+
+### Fixed
+
+- **Two release gates went red on every open PR the moment `v0.5.1` was
+  tagged.** `version-identity` refused a tree still claiming `0.5.1` once
+  that became a published tag (the state `version_check.py --not-released`
+  exists to catch), and `test_installer_release_layout.py`'s bare-`latest`
+  tests failed because `latest` began resolving to a tag its hardcoded
+  `RELEASES` snapshot did not carry. Both are the checks working as
+  designed; both needed the post-release follow-up they describe.
+
 ## [0.5.1] — 2026-08-04
 
 ### Fixed
