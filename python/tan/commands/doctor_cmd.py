@@ -106,7 +106,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -2262,8 +2262,11 @@ def resolve_manifest_python_floor(sdk_root: str | None) -> tuple[tuple[int, int]
 #: Generous on purpose: a real install can pull a package over the network,
 #: unlike every OTHER timeout in this file (`PROBE_TIMEOUT_S`), which only
 #: ever waits on a local `--version` banner. `ponytail`: one fixed ceiling,
-#: no live progress reporting -- raise it, or stream output, if a real
-#: install exceeds it before this is revisited.
+#: no live progress WITHIN a single install -- `run_fix`'s `on_check` streams
+#: a Check the MOMENT one tool's own outcome is known, which closes the blank
+#: window BETWEEN tools, not the window a single slow install itself still
+#: opens; raise this ceiling, or stream that install's own output, if one
+#: exceeds it before this is revisited.
 FIX_INSTALL_TIMEOUT_S = 300
 
 
@@ -2434,7 +2437,10 @@ def fix_installer_not_found_check(installer: str, tools: list[str]) -> Check:
     )
 
 
-def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
+def run_fix(
+    missing: list[dict[str, str | None]],
+    on_check: Callable[[Check], None] | None = None,
+) -> list[Check]:
     """`--fix`'s ADR 0021 executor (tan-cli#91): for each tool
     `hostPrerequisites` already reported missing, either run its manifest
     install command (no elevation needed -- Tier A) or refuse and name it
@@ -2459,11 +2465,20 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
     fixing" from "tan tried and silently gave up": a spawn error, a non-zero
     exit, a `FIX_INSTALL_TIMEOUT_S` (300s) timeout, or an install command
     whose own program is not on PATH each used to `continue` with no trace at
-    all, and text-mode output only prints after the WHOLE report completes --
-    up to 20 minutes of silent terminal across four tools with nothing to
-    show for it. `hostPrerequisites`'s own Fail still names the tool and its
-    command either way; these Checks add the ONE fact it structurally cannot
-    carry -- what `--fix` itself did about it.
+    all. `hostPrerequisites`'s own Fail still names the tool and its command
+    either way; these Checks add the ONE fact it structurally cannot carry --
+    what `--fix` itself did about it.
+
+    `on_check` -- same shape, same job as `_collect`'s parameter of that
+    name: fired the MOMENT one tool's own outcome is known, not after every
+    tool has been tried. Before this, `--fix`'s checks streamed only once
+    `run_fix` returned IN FULL -- the LARGEST blank-terminal window in the
+    whole command, `FIX_INSTALL_TIMEOUT_S` (300s) times up to 4 tools,
+    against `PROBE_TIMEOUT_S` (15s) for the probes `_collect` already
+    streamed. `doctor()` passes it the SAME `_print_check` it gives
+    `_collect`, so a `--fix` outcome prints through the identical guarded
+    `_print_stream_lines` path (see its docstring) as every other check in
+    this report.
 
     Only ever called from `doctor()`'s `--fix` branch, itself gated on
     `can_prompt` (`tan.core.consent`) -- the one place in this module that
@@ -2472,6 +2487,15 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
     docstring).
     """
     results: list[Check] = []
+
+    def _add(check: Check) -> None:
+        # Mirrors `_collect`'s own `_add` closure exactly -- append, then
+        # stream, so a caller with no `on_check` (every direct unit-test
+        # caller of this function) sees no behaviour change at all.
+        results.append(check)
+        if on_check is not None:
+            on_check(check)
+
     # installer -> every tool whose install command starts with it and that
     # therefore went unrepaired (tan-cli#360). Insertion-ordered, so the
     # grouped Checks appended below come out in `missing` order rather than
@@ -2483,7 +2507,7 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
         if not tool or not command:
             continue
         if command.strip().startswith("sudo "):
-            results.append(fix_needs_sudo_check(tool, command))
+            _add(fix_needs_sudo_check(tool, command))
             continue
         argv = shlex.split(command)
         if not argv:
@@ -2518,19 +2542,18 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            results.append(fix_timed_out_check(tool, command))
+            _add(fix_timed_out_check(tool, command))
             continue
         except (OSError, ValueError, subprocess.SubprocessError) as err:
-            results.append(fix_spawn_failed_check(tool, command, err))
+            _add(fix_spawn_failed_check(tool, command, err))
             continue
         if result.returncode == 0:
-            results.append(fix_installed_check(tool, command))
+            _add(fix_installed_check(tool, command))
         else:
-            results.append(fix_failed_check(tool, command, result.returncode))
-    return [
-        *results,
-        *(fix_installer_not_found_check(i, t) for i, t in unresolved.items()),
-    ]
+            _add(fix_failed_check(tool, command, result.returncode))
+    for installer, tools in unresolved.items():
+        _add(fix_installer_not_found_check(installer, tools))
+    return results
 
 
 def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) -> Issue:
@@ -2587,9 +2610,19 @@ def _collect(
     broken_global_default: str | None = None,
     on_check: Callable[[Check], None] | None = None,
 ) -> list[Check]:
-    """Every probe, in report order. Nothing here may raise -- see the module
-    docstring; `probe`/`on_path`/`_read_text` are the only three ways this
-    module touches the outside world and none of them can.
+    """Every probe, in report order. `probe`/`on_path`/`_read_text` are the
+    three ways THIS function's own body touches the outside world, and none
+    of them can raise (see the module docstring).
+
+    `on_check`, when given, is a FOURTH path out -- `_collect` does not
+    control what it does, only that it fires, so this function's "nothing
+    here may raise" promise is only as strong as whatever callback the
+    caller supplies. `doctor()`'s real callback (`_print_check`) prints
+    through `_print_stream_lines`, which guards exactly that failure and
+    explains why (see its docstring for the mechanism -- not restated here)
+    rather than letting it unwind back through here and discard every check
+    already collected. A direct test caller that passes a callback of its
+    own is responsible for the same guarantee.
 
     `on_check` (tan-cli streaming, change 3) fires the MOMENT each check is
     added, in the exact same order -- `doctor()`'s text branch passes a
@@ -2933,6 +2966,58 @@ def _generated_at() -> str:
     return generated_at_iso()
 
 
+def _print_stream_lines(lines: Iterable[str], label: str) -> None:
+    """The ONE guarded stderr-print path `doctor()`'s two streaming call
+    sites both go through -- once per finished check (`_print_check`) and
+    once more for the footer (summary / failed-checks / extra-issue lines)
+    -- neither prints via a bare `print()` loop of its own any more.
+
+    Measured, not inferred (this repo's own oracle rule -- established by
+    RUNNING, never by reasoning about it): `tan.cli.main` calls
+    `_reconfigure_stdio()` before any command runs, which puts `sys.stderr`
+    in utf-8/`errors="strict"` -- a legacy-codepage stream (`cp1252`) never
+    reaches this function on the real CLI path, and `cp1252` can encode `…`
+    (U+2026) anyway (`"\\u2026".encode("cp1252")` == `b"\\x85"`), so that was
+    never the actual risk. What DOES raise `UnicodeEncodeError` on a strict
+    utf-8 stream is a lone surrogate (e.g. `\\udcff`) -- a filesystem path
+    that reached Python via `surrogateescape` (`on_path`'s `shutil.which`
+    result, resolved off `PATH`) and that a check's `detail`/`fix` text goes
+    on to print verbatim; utf-8 cannot encode a lone surrogate no matter what
+    decoded it. `OSError` (its subclass `BrokenPipeError` in particular)
+    covers a closed PIPE (`tan doctor | head`); `ValueError` covers a stream
+    closed OUTRIGHT (`I/O operation on closed file` -- the object itself is
+    gone, not merely refusing writes at the far end) -- included
+    deliberately, because the one thing this guard exists to prevent,
+    discarding an already-finished diagnosis over how the stream died, does
+    not care which of the three killed it, and the `try` body here is
+    nothing but `print()` calls to a fixed stream, so a bare `ValueError`
+    catch has no wider blast radius to worry about.
+
+    Unguarded, any of the three propagates out of `_collect` (as `on_check`)
+    into `doctor()`'s own `except Exception`, discarding every check this
+    run already completed as a fabricated `doctor.internal-failure`; from
+    the footer call site (never inside that `try`) it would instead escape
+    `doctor()` outright as a raw, unhandled traceback. Caught here instead,
+    and never silently: a second, INDEPENDENT `try` wraps the failure note
+    itself, since it prints through the SAME `sys.stderr` that just failed.
+    Nothing left to do if even that fails -- the diagnosis behind it already
+    made it back to `doctor()` (or, for the footer, was already fully
+    rendered) regardless.
+    """
+    try:
+        for line in lines:
+            print(line, file=sys.stderr)
+    except (UnicodeError, OSError, ValueError) as err:
+        try:
+            print(
+                f"doctor: could not print the '{label}' block "
+                f"({type(err).__name__}: {err}).",
+                file=sys.stderr,
+            )
+        except (UnicodeError, OSError, ValueError):
+            pass
+
+
 def doctor(
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
@@ -3030,20 +3115,27 @@ def doctor(
     # v2, change 3): `_collect` runs up to 15 subprocess probes at
     # `PROBE_TIMEOUT_S` each, and the old code printed nothing until every
     # one of them had answered -- on a host where one wedges, a blank
-    # terminal names nothing. `width`/`color` are resolved ONCE, here, before
-    # the first check can print, never re-resolved per check; JSON mode
-    # streams nothing; still exactly one envelope, at the end. Width floored
-    # at `_DOCTOR_TEXT_MIN_WIDTH` -- a 20-column terminal must not fall to
-    # one word per line -- and the fallback (piped/redirected stdout) matches
-    # `build_cmd`'s own `shutil.get_terminal_size` convention.
+    # terminal names nothing. Width floored at `_DOCTOR_TEXT_MIN_WIDTH` -- a
+    # 20-column terminal must not fall to one word per line -- and the
+    # fallback (piped/redirected stdout) matches `build_cmd`'s own
+    # `shutil.get_terminal_size` convention. `width`/`color` are resolved
+    # unconditionally, even under `--format json` where neither is ever
+    # read: both calls are cheap and emit nothing, so gating them behind
+    # `if stream` bought nothing but a second, held-together-by-an-11-line-
+    # comment invariant (`_print_check` closes over both) for no benefit.
     stream = not json_mode
-    if stream:
-        width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, _DOCTOR_TEXT_MIN_WIDTH)
-        color = use_color(no_color, ci)
+    width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, _DOCTOR_TEXT_MIN_WIDTH)
+    color = use_color(no_color, ci)
 
     def _print_check(check: Check) -> None:
-        for line in render_check_lines(check.as_dict(), width, color):
-            print(line, file=sys.stderr)
+        """`on_check`'s real, streaming callback: render one check's block
+        and print it through `_print_stream_lines` -- the FOURTH way
+        `_collect` reaches the outside world (see its docstring), and the
+        only one of the four that can raise. See `_print_stream_lines`'s own
+        docstring for the guard and why it is shaped the way it is; not
+        restated here.
+        """
+        _print_stream_lines(render_check_lines(check.as_dict(), width, color), check.name)
 
     try:
         checks = _collect(
@@ -3080,16 +3172,15 @@ def doctor(
             )
             if missing_for_fix:
                 # These checks stream too, same as every check `_collect`
-                # produced above -- gated on `stream` directly (never on
+                # produced above -- `run_fix` takes the SAME `on_check`
+                # `_collect` does, gated on `stream` directly (never on
                 # "`fix_allowed` already implies `not json_mode`": that
                 # inference only holds for the REAL `can_prompt`, and a test
                 # double stubbing `can_prompt` can make `fix_allowed` true
-                # under `--format json`, where `width`/`color` were never
-                # resolved).
-                fix_checks = run_fix(missing_for_fix)
-                if stream:
-                    for fix_check in fix_checks:
-                        _print_check(fix_check)
+                # under `--format json`, where printing a check block to
+                # stderr would be wrong regardless of `width`/`color` being
+                # bound -- both are resolved unconditionally now, see above).
+                fix_checks = run_fix(missing_for_fix, on_check=_print_check if stream else None)
                 checks = [*checks, *fix_checks]
         exit_code = exit_code_for(checks)
         issues = checks_to_issues(checks)
@@ -3125,10 +3216,14 @@ def doctor(
     except Exception as err:  # noqa: BLE001
         # The port's most-repeated defect class: an uncaught exception escapes as
         # a raw traceback, stdout stays empty, and the extension renders nothing
-        # with no error on either side. Every probe above is already guarded, so
-        # anything reaching here is a tan bug -- reported as one, with an
-        # envelope. INTERNAL_FAILURE, not DOCTOR_FAILURE: the host was never
-        # diagnosed, and claiming it is unhealthy would be a fabricated verdict.
+        # with no error on either side. Every probe above is already guarded, and
+        # so is the one thing `_collect` calls that is not a probe: its `on_check`
+        # callback prints through `_print_stream_lines`, which guards its own
+        # failures (see its docstring) instead of letting them unwind here and
+        # discard a diagnosis that already finished -- so anything still reaching
+        # here is a tan bug -- reported as one, with an envelope. INTERNAL_FAILURE,
+        # not DOCTOR_FAILURE: the host was never diagnosed, and claiming it is
+        # unhealthy would be a fabricated verdict.
         exit_code = ExitCode.INTERNAL_FAILURE
         data = None
         issues = [Issue("doctor.internal-failure", "error", f"{type(err).__name__}: {err}")]
@@ -3179,8 +3274,10 @@ def doctor(
             for issue in issues
             if issue.code not in checked_codes
         ]
-        for line in render_doctor_footer(data["checks"], data["summary"], extra_issue_lines):
-            print(line, file=sys.stderr)
+        _print_stream_lines(
+            render_doctor_footer(data["checks"], data["summary"], extra_issue_lines, width),
+            "footer",
+        )
 
     raise typer.Exit(int(exit_code))
 

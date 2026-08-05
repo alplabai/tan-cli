@@ -7,7 +7,7 @@ here -- the function takes `width`/`color` as plain arguments."""
 from __future__ import annotations
 
 from tan.core import doctor_render
-from tan.core.doctor_render import render_doctor_lines
+from tan.core.doctor_render import render_doctor_footer, render_doctor_lines
 
 
 def test_fail_status_is_colored_when_requested_and_plain_when_not():
@@ -132,12 +132,21 @@ def test_continuation_indent_is_fixed_for_both_detail_and_fix_across_name_length
 def test_footer_row_truncates_a_long_fix_to_the_budget_on_a_word_boundary():
     """No sentence break to lean on (`sdk`'s own real fix is exactly this
     shape: one long comma-joined clause) -- a plain character budget, cut
-    back to the last word boundary inside it, with a single trailing `…`."""
+    back to the last word boundary inside it, with a single trailing `…`.
+
+    Width 100, not 80: `"  - sdk: "` plus a `_FOOTER_FIX_BUDGET`-truncated
+    (75) fix plus `"…"` can run to 85 columns on its own, and THIS test is
+    about truncation, not wrapping -- see
+    `test_footer_lines_never_exceed_width_with_a_long_fix_and_a_long_check_
+    name` below for the wrapping contract. A width narrow enough to also
+    wrap this particular row would land the trailing `…` on a continuation
+    line instead of the one row this test inspects, which is a real,
+    already-covered behaviour (wrapping), not a broken truncation."""
     long_fix = "install " * 20  # > 75 chars, no punctuation at all
     checks = [{"name": "sdk", "status": "fail", "detail": "d", "fix": long_fix}]
     summary = {"pass": 0, "warn": 0, "fail": 1}
 
-    lines = render_doctor_lines(checks, summary, [], 80, color=False)
+    lines = render_doctor_lines(checks, summary, [], 100, color=False)
     footer_row = next(line for line in lines if line.startswith("  - sdk"))
 
     assert footer_row.startswith("  - sdk: "), footer_row
@@ -162,3 +171,77 @@ def test_footer_row_keeps_a_short_fix_verbatim_with_no_ellipsis():
 
     lines = render_doctor_lines(checks, summary, [], 80, color=False)
     assert "  - sdk: --sdk-root <path>" in lines
+
+
+# --------------------------------------------------------------------------
+# Review finding 1: `render_doctor_footer` used to take no `width` at all --
+# everything AFTER the check blocks (`extra_issue_lines`, the failed-checks
+# rows) printed unwrapped, inside the very report this whole task exists to
+# wrap. Measured: a real `doctor.fix-suppressed` line ran to 262 columns; a
+# failed check's own footer row -- `"  - " + name + ": " + truncated fix` --
+# reached `4 + len(name) + 2 + 76` = 107 for `zephyrSdkAvailableForHost`
+# (25 chars). Fails red against the pre-fix `render_doctor_footer` two ways:
+# it takes no fourth `width` argument at all, and even patched to accept and
+# ignore one, the two fixtures below would come back unwrapped.
+# --------------------------------------------------------------------------
+
+
+def test_footer_lines_fit_width_except_a_single_overlong_token_left_intact():
+    """`render_doctor_footer` wraps through `wrap_block`, which deliberately
+    lets a single TOKEN that alone (plus whatever indent frames it) exceeds
+    `width` overflow its own line rather than break it mid-character -- the
+    identifier-fidelity fix this branch exists for (see `wrap_block`'s own
+    docstring). So "every line fits `width`" is a STRONGER invariant than
+    this function actually provides -- asserting it would invite someone to
+    "fix" correct behaviour. The true invariant, proven here with a real
+    Windows toolchain path (no spaces, so it survives as one token) in
+    `extra_issue_lines`, plus the long-name/long-fix failed-checks row from
+    the truncation test above: every returned line fits `width`, except one
+    that is a single token, on its own line, over-length, and printed
+    verbatim."""
+    long_path = (
+        r"C:\Users\dev\AppData\Local\Programs\zephyr-sdk-0.17.4"
+        r"\arm-zephyr-eabi\bin\arm-zephyr-eabi-gcc.exe"
+    )
+    long_warning = f"warning: toolchain not found at {long_path}"
+    long_fix = " ".join(["install"] * 20)
+    checks = [
+        {
+            "name": "zephyrSdkAvailableForHost",
+            "status": "fail",
+            "detail": "d",
+            "fix": long_fix,
+        }
+    ]
+    summary = {"pass": 0, "warn": 1, "fail": 1}
+    width = 60
+
+    lines = render_doctor_footer(checks, summary, [long_warning], width)
+
+    def _leading_spaces(line: str) -> int:
+        return len(line) - len(line.lstrip(" "))
+
+    overlong = [line for line in lines if len(line) > width]
+    assert overlong, lines  # the fixture must actually exercise the exception
+    for line in overlong:
+        indent = _leading_spaces(line)
+        token = line[indent:]
+        assert " " not in token, (width, line)  # a single token, not a wrapped sentence
+        assert len(token) > width - indent, (width, line)  # genuinely could not have fit
+
+    for line in lines:
+        if line not in overlong:
+            assert len(line) <= width, (width, line)
+
+    # Continuations of both shapes land on the SAME rail every check's own
+    # detail/fix continuation already uses -- one column for the whole
+    # report, not a second one invented for the tail. A continuation's
+    # leading-space count is exactly `_CONTINUATION_INDENT` (10); the
+    # `"  - "`-prefixed first line of a footer row has only 2, which is what
+    # keeps this check from also matching that line.
+    continuations = [
+        line
+        for line in lines
+        if line and _leading_spaces(line) == doctor_render._CONTINUATION_INDENT
+    ]
+    assert continuations, lines  # both fixtures actually needed to wrap

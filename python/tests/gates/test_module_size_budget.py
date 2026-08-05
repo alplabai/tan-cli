@@ -98,7 +98,30 @@ _MODULE_BUDGET: dict[str, int] = {
     # a wedged probe is now named by the last line on screen rather than
     # leaving a blank terminal. Plus the `--fix`/`--no-color` plumbing and the
     # `_DOCTOR_TEXT_MIN_WIDTH` floor the renderer is called with.
-    "tan/commands/doctor_cmd.py": 3192,
+    #
+    # 3289, not 3192, as of the five-finding review pass on that same doctor
+    # work, PLUS the correction pass on the review's own written rationale
+    # (measured, not inferred: a legacy-codepage stderr never reaches this
+    # stream -- `_reconfigure_stdio()` already forces utf-8/strict before any
+    # command runs -- see `_print_stream_lines`'s docstring for the real
+    # mechanism): `run_fix` gained its own `on_check` (mirroring `_collect`'s
+    # `_add` closure) so `--fix`'s checks stream per-tool instead of only
+    # after all four tools finish -- previously the single largest blank-
+    # terminal window in the command. BOTH stderr-print call sites
+    # (`_print_check`'s per-check block and the footer, which used to sit
+    # outside the `try` entirely) now route through the ONE guarded
+    # `_print_stream_lines`, catching `UnicodeError`/`OSError`/`ValueError`
+    # (a lone-surrogate filesystem path, a closed pipe, a stream closed
+    # outright) instead of discarding an already-completed diagnosis or, for
+    # the footer, escaping `doctor()` as a raw traceback; the standalone
+    # `_note_print_failure` helper (one call site) is gone, inlined into that
+    # same guard. `width`/`color` moved out of the `if stream:` guard
+    # `_print_check` closed over, which let the docstrings this module and
+    # `_collect` carry state their invariants honestly again instead of via
+    # an 11-line comment. None of this is the width-wrapping fix itself --
+    # that grew `doctor_render.py` (well under its own 800-line cap), not
+    # this file.
+    "tan/commands/doctor_cmd.py": 3289,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -360,6 +383,22 @@ _MIRRORED = ("tan/planner/",)
 # unfiltered run added another 5 lines. It stacks on top of the #464 count
 # above rather than replacing it -- the two crossings are different
 # functions.
+#
+# Still 203, not 204, after the five-finding review pass on the doctor work:
+# the wrapping fix for that pass's MAJOR finding (a `--fix`-suppressed
+# warning measured at 262 columns, unwrapped, inside the very report this
+# task wraps) pushed `tan/core/doctor_render.py:render_doctor_footer` to 62
+# lines (39 -> 62), of which the BODY grew by only 1 line (18 -> 19) --
+# the DOCSTRING grew by 22 (18 -> 40), and `_long_functions` spans
+# `lineno`..`end_lineno`, so the docstring is what crossed the cap, not the
+# wrapping code itself. Trimmed back to a 26-line docstring (48 lines total)
+# instead of paying the ratchet for prose. `_print_stream_lines`
+# (`doctor_cmd.py`, the guarded print path both `_print_check` and the
+# footer route through as of the same pass) measures exactly 50 lines --
+# AT the cap, not over it -- for the same reason: trimmed on purpose rather
+# than left to bump this budget a second time. `run_fix` (`doctor_cmd.py`)
+# also grew this pass, but it was already over 50 lines before it, so it
+# never moved the COUNT either way.
 _FUNCTION_COUNT_BUDGET = 203
 _FUNCTION_WORST_BUDGET = 707
 

@@ -2590,7 +2590,7 @@ def test_doctor_fix_invokes_run_fix_and_folds_its_checks_into_the_report_when_co
 
     calls = []
 
-    def _spy_run_fix(missing_arg):
+    def _spy_run_fix(missing_arg, on_check=None):  # noqa: ARG001 -- streaming covered elsewhere
         calls.append(missing_arg)
         return [doctor_cmd.fix_installed_check("ninja", missing[0]["command"])]
 
@@ -2862,3 +2862,127 @@ def test_checks_stream_incrementally_not_in_one_final_flush(monkeypatch, tmp_pat
     marker_at = events.index("MARKER-still-probing")
     beta_at = next(i for i, e in enumerate(events) if "beta" in e)
     assert alpha_at < marker_at < beta_at, events
+
+
+# --------------------------------------------------------------------------
+# Review finding 2: `_print_check`'s own `print` (via `_print_stream_lines`)
+# is a FOURTH way `_collect` touches the outside world, and unlike
+# `probe`/`on_path`/`_read_text` it CAN raise. Measured -- see
+# `_print_stream_lines`'s docstring for the mechanism, not restated here --
+# it is NOT a legacy-codepage stderr (`_reconfigure_stdio()` already forces
+# utf-8/strict before any command runs); it is a lone surrogate in a printed
+# filesystem path, a closed pipe, or a stream closed outright. This test
+# forces the failure directly (a monkeypatched `print`) rather than
+# reproducing any one specific trigger, so it covers the GUARD regardless of
+# which of the three tripped it. Unguarded, that exception used to unwind
+# through `_collect` into `doctor()`'s own `except Exception`, converting an
+# ALREADY-COMPLETED diagnosis into `doctor.internal-failure` -- discarding
+# real information (the probe genuinely ran and answered) over a print-layer
+# hiccup.
+# --------------------------------------------------------------------------
+
+
+def test_a_print_failure_does_not_discard_an_already_completed_diagnosis(monkeypatch, tmp_path):
+    """`builtins.print` is made to fail on exactly the rendered check-block
+    line (it always starts with `"["`, see `render_check_lines`'s `prefix`),
+    so the guard's own fallback note -- plain text, no leading `"["` -- still
+    goes through the real `print`. Proves both halves finding 2 asks for:
+    the finished `west` verdict survives (exit 0, no internal-failure), and
+    the guard is not silent about WHY that check's own block did not print."""
+    stub_checks = [doctor_cmd.Check("west", "pass", "west 1.2.0 found")]
+
+    def stub_collect(*a, on_check=None, **k):
+        if on_check is not None:
+            for check in stub_checks:
+                on_check(check)
+        return stub_checks
+
+    monkeypatch.setattr(doctor_cmd, "_collect", stub_collect)
+    monkeypatch.chdir(tmp_path)
+
+    real_print = print
+
+    def flaky_print(*args, **kwargs):
+        text = str(args[0]) if args else ""
+        if text.startswith("["):
+            raise UnicodeEncodeError("cp1252", text, 0, 1, "ordinal not in range(128)")
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.print", flaky_print)
+
+    result = runner.invoke(app, ["doctor", "--no-color"])
+
+    # The real verdict (`west` passed) survives -- exit 0, not the fabricated
+    # `INTERNAL_FAILURE` a discarded diagnosis would produce.
+    assert result.exit_code == 0, result.stderr
+    assert "doctor.internal-failure" not in result.stderr
+    assert "could not print the 'west' block" in result.stderr
+
+
+# --------------------------------------------------------------------------
+# Review finding 3: `--fix`'s checks used to stream only after `run_fix`
+# returned IN FULL -- the largest blank-terminal window in the whole command
+# (`FIX_INSTALL_TIMEOUT_S` (300s) times up to 4 tools, against
+# `PROBE_TIMEOUT_S` (15s) for the probes that already streamed). `run_fix`
+# now takes the same `on_check` shape `_collect` does.
+# --------------------------------------------------------------------------
+
+
+def test_run_fix_streams_each_outcome_via_on_check_as_it_happens(monkeypatch, tmp_path):
+    """Proves ORDERING, the same way
+    `test_checks_stream_incrementally_not_in_one_final_flush` proves it for
+    `_collect`: a marker recorded between two tools' `subprocess.run` calls
+    must land between their two `on_check` firings, not before both (the old,
+    print-after-`run_fix`-returns shape) or after both."""
+    fake_exe = tmp_path / "tool.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: str(fake_exe))
+
+    events: list[str] = []
+
+    def fake_run(argv, **k):  # noqa: ARG001
+        events.append(f"RUN-{argv[-1].lstrip('-')}")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", fake_run)
+
+    def on_check(check):
+        events.append(f"CHECK-{check.name}")
+
+    missing = [
+        {"tool": "ninja", "command": "installer --ninja"},
+        {"tool": "dtc", "command": "installer --dtc"},
+    ]
+    results = doctor_cmd.run_fix(missing, on_check=on_check)
+
+    assert events == ["RUN-ninja", "CHECK-fix:ninja", "RUN-dtc", "CHECK-fix:dtc"], events
+    assert [c.name for c in results] == ["fix:ninja", "fix:dtc"]
+
+
+def test_doctor_fix_passes_a_real_on_check_to_run_fix_in_text_mode_and_none_under_json(
+    monkeypatch, tmp_path
+):
+    """Wiring, not `run_fix`'s own streaming internals (covered above):
+    `doctor()` must actually PASS a callable into `run_fix` when text mode is
+    streaming (never just accept the parameter and leave it unused), and
+    must NOT print `--fix` checks under `--format json` -- the same `stream`
+    gate `_collect` is given, applied consistently to the second caller."""
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+    monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
+
+    seen_on_check = []
+
+    def _spy_run_fix(missing_arg, on_check=None):  # noqa: ARG001
+        seen_on_check.append(on_check)
+        return []
+
+    monkeypatch.setattr(doctor_cmd, "run_fix", _spy_run_fix)
+    monkeypatch.chdir(tmp_path)
+
+    runner.invoke(app, ["doctor", "--fix", "--no-color"])
+    runner.invoke(app, ["doctor", "--fix", "--format", "json"])
+
+    assert callable(seen_on_check[0]), seen_on_check  # text mode: a real callback
+    assert seen_on_check[1] is None, seen_on_check  # json mode: never streamed

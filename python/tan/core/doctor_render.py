@@ -111,27 +111,38 @@ def render_check_lines(check: dict, width: int, color: bool) -> list[str]:
 
 
 def render_doctor_footer(
-    checks: list[dict], summary: dict, extra_issue_lines: list[str]
+    checks: list[dict], summary: dict, extra_issue_lines: list[str], width: int
 ) -> list[str]:
     """Everything AFTER the per-check blocks, in order:
 
     1. `extra_issue_lines` verbatim (already filtered by the caller against
-       `checked_codes`, tan-cli#375 -- this function does not re-derive that
-       filter).
+       `checked_codes`, tan-cli#375), each wrapped through `wrap_block` at
+       `width` -- the same seam every check block above already goes
+       through. Measured before this wrapping existed: a real
+       `doctor.fix-suppressed` line ran to 262 columns, unwrapped, inside
+       the very report this whole task exists to wrap.
     2. A failures-only footer, omitted entirely when nothing failed -- each
-       row now names the START of its own fix, truncated to
-       `_FOOTER_FIX_BUDGET` (change 2), so a customer with several failures
-       gets an action list without scrolling back up to read each one's
-       block in full. A failing check with no `fix` key falls back to the
-       bare `- <name>` row.
-    3. The summary line, last, wording unchanged.
+       row names the START of its own fix, truncated to
+       `_FOOTER_FIX_BUDGET`, then wrapped the same way as (1): truncation
+       keeps the row SHORT, wrapping keeps whatever survives that cut
+       actually on screen. Measured unwrapped: `4 + len(name) + 2 +
+       _FOOTER_FIX_BUDGET + 1` (the trailing `+ 1` is `_truncate_fix`'s own
+       `…`) = 107 columns for `zephyrSdkAvailableForHost` (25 chars). A
+       failing check with no `fix` falls back to the bare `- <name>` row.
+    3. The summary line, last, never wrapped -- one short, fixed sentence.
 
-    Split out from `render_doctor_lines` so `doctor_cmd`'s streaming path can
-    print each check via `render_check_lines` as it completes and call this
-    once, for the tail, after every check -- never re-rendering a check
-    block itself.
+    `width` is the SAME value `doctor_cmd.doctor` resolves for the per-check
+    blocks above -- never a second, independently floored number. Every
+    continuation in (1)/(2) lands at `_CONTINUATION_INDENT`, the same rail
+    check `detail`/`fix` continuations already use.
+
+    Split out from `render_doctor_lines` so `doctor_cmd`'s streaming path
+    can print each check as it completes and call this once, for the tail.
     """
-    lines: list[str] = list(extra_issue_lines)
+    hanging = " " * _CONTINUATION_INDENT
+    lines: list[str] = []
+    for issue_line in extra_issue_lines:
+        lines.extend(wrap_block(issue_line, width, "", hanging))
 
     failed = [c for c in checks if c["status"] == "fail"]
     if failed:
@@ -139,10 +150,8 @@ def render_doctor_footer(
         lines.append("Failed checks:")
         for c in failed:
             fix = c.get("fix")
-            if fix:
-                lines.append(f"  - {c['name']}: {_truncate_fix(fix)}")
-            else:
-                lines.append(f"  - {c['name']}")
+            body = f"{c['name']}: {_truncate_fix(fix)}" if fix else c["name"]
+            lines.extend(wrap_block(body, width, "  - ", hanging))
 
     lines.append("")
     lines.append(
@@ -172,5 +181,5 @@ def render_doctor_lines(
     lines: list[str] = []
     for check in checks:
         lines.extend(render_check_lines(check, width, color))
-    lines.extend(render_doctor_footer(checks, summary, extra_issue_lines))
+    lines.extend(render_doctor_footer(checks, summary, extra_issue_lines, width))
     return lines

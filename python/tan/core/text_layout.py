@@ -18,6 +18,13 @@ def wrap_block(body: str, width: int, initial_indent: str, hanging_indent: str) 
     line and `hanging_indent` every continuation line -- so a continuation
     never starts at column 0 and reads as subordinate to the line above it.
 
+    `width` is a target, not a hard ceiling: `break_long_words=False` (see
+    below) means a single token that, plus whichever indent frames it, is
+    alone longer than `width` -- a SKU, a long flag, a path -- comes back
+    over-length and intact on its own line rather than being cut mid-
+    character. Every OTHER line this returns does fit `width`; a caller that
+    needs a hard cap on every line cannot assume that of this one.
+
     Always returns at least one line (`[initial_indent]` for an empty
     `body`), so a caller building `"{prefix}{first_wrapped_chunk}"` never has
     to special-case an empty result.
@@ -26,10 +33,9 @@ def wrap_block(body: str, width: int, initial_indent: str, hanging_indent: str) 
     # this seam: this repo's house rule is that SKUs, part numbers, flags and
     # paths are reproduced verbatim, and stdlib's defaults mangle exactly
     # those -- `arm-zephyr-eabi` splits into `arm-` / `zephyr-eabi`,
-    # `--sdk-root` into `--sdk-` / `root`. Both off means a single token
-    # longer than `width` overflows its line instead of being chopped mid-
-    # character; an over-long but intact line is readable and copy-pasteable,
-    # a silently corrupted identifier is not.
+    # `--sdk-root` into `--sdk-` / `root`. Both off trades a hard `width`
+    # ceiling for that guarantee -- see the docstring above for the resulting
+    # overflow contract.
     wrapped = textwrap.wrap(
         body,
         width=width,
