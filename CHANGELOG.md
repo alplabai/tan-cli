@@ -9,6 +9,17 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan renode` accepted `--project PATH` but silently dropped it, resolving
+  the build root from the CWD instead.** Every sibling command
+  (`build`/`size`/`image`/`validate`/`generate`) honours `--project`; pointed at
+  a built project from elsewhere, `tan renode --project <proj>` looked for --
+  and failed to find -- `<cwd>/build/system-manifest.yaml`, and its own
+  `tan build --project <cwd>` remedy would have built the wrong directory.
+  `app_path` now resolves through the same `build_output.resolve_app_base`
+  ladder `size`/`image` already call: an explicit `APP_PATH` positional wins,
+  otherwise `--project`, then cwd. Every downstream string (`manifest_path`,
+  `elf`, the remedy, `project.root`) derives from `app_path`, so the refusal now
+  names the resolved project root rather than the CWD. (#470)
 - **`bootstrap.workspace-orphan-refused` named a stringified Python `None` for
   its destination, and advised dropping a `--workspace` flag the invocation
   never carried.** Already unreachable in practice on this branch -- the
