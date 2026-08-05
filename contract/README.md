@@ -54,7 +54,12 @@ contract belongs to whoever owns the envelope: this repo.
 `issue-codes.json` is the single source. Python's
 `test_every_issue_code_is_registered.py` scans shipping emit sites in the
 source→registry direction, and `test_frozen_issue_codes.py` checks every
-Python-owned registry entry in the registry→source direction. The Rust
+Python-owned registry entry in the registry→source direction.
+`test_issue_code_registry_shape.py` checks a third, orthogonal thing: every
+registered `code` matches alp-sdk-vscode's `ISSUE_CODE_SHAPE`,
+`^[a-z][a-z0-9-]*\.[a-z0-9-]+$` (lowercase-kebab) — the shape the consumer's
+`findFrozenCodes` hard-asserts on every published entry, so a code shaped
+otherwise reds that gate outright. The Rust
 `contract.rs` gate retains responsibility only for entries owned by the frozen
 oracle. The release workflow publishes the combined registry. Renaming or
 removing a

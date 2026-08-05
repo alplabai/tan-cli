@@ -5,7 +5,13 @@ Port of `crates/tan-cli/src/commands/debug_config.rs`. Build a launch draft for
 the target class + server, resolve what this project's own build already knows
 (#66), then either preview it (`--preview`) or merge it into
 `<workspace>/.vscode/launch.json`. Invalid kind / unsupported backend /
-malformed existing file -> exit 5; a failed write -> exit 3.
+malformed existing file -> exit 5; a failed write -> exit 3; an omitted
+`--target-kind` this project cannot yet resolve to one target class --
+pre-build, an explicit `--core` matching no slice, more than one target class
+with no `--core` to narrow them, or no slice whose `os` maps to a target class
+at all -- is the CALLER's own precondition to fix, not a tan crash, so all
+four exit `VALIDATION_FAILURE` (2) instead (tan-cli#462, matching the
+distinction tan-cli#262 settled for `tan validate`).
 
 **The debug profile follows from the target CLASS; the customer never selects an
 OS or a backend.** `--target-kind` names one of four classes, each of which
@@ -51,7 +57,9 @@ import typer
 from tan.commands.build_output import read_sdk_som_and_soc, resolve_project_context
 from tan.core.debug_launch import (
     BAREMETAL_MCU,
+    GDBSERVER,
     JLINK,
+    MANIFEST_OS_BY_TARGET,
     NATIVE_HOST,
     OPENOCD,
     PYOCD,
@@ -64,16 +72,18 @@ from tan.core.debug_launch import (
     create_launch_draft,
     create_launch_json_write_plan,
     fill_debug_probe_identity_gaps,
+    infer_target_kind,
     is_unresolved_placeholder,
     launch_preview_document,
     launch_preview_notes,
+    manifest_slices,
     parse_server_kind,
     parse_target_kind,
     sdk_identity_overwrites,
 )
 from tan.core.global_flags import accept_global_flags
 from tan.core.jsonc_splice import pretty_json
-from tan.core.run import native_sim_exe_beside
+from tan.core.run import is_native_sim_board, native_sim_exe_beside
 from tan.core.size import resolve_variant
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, emit
@@ -83,34 +93,25 @@ from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
 
-#: The manifest `os` a debug target class runs on, or absent for a target with
-#: no per-core build slice keyed by `os`. `native-host` is exactly that case --
-#: its slice is selected by BOARD target instead, in [`_select_slice`].
-_MANIFEST_OS = {
-    ZEPHYR_MCU: "zephyr",
-    BAREMETAL_MCU: "baremetal",
-    YOCTO_USERSPACE: "yocto",
-}
-
 #: The `runners.yaml` runner id a debug server reads its arguments from.
 #: `gdbserver`/`none` have no runner: neither is a Zephyr probe runner.
 _RUNNER_ID = {JLINK: "jlink", OPENOCD: "openocd", PYOCD: "pyocd"}
+
+#: `--server`'s default when this run just INFERRED `--target-kind` itself
+#: (tan-cli#456) -- never applied over an explicit target, so the pre-existing
+#: "no --server given" refusal there is unchanged.
+_DEFAULT_SERVER_FOR_TARGET = {
+    ZEPHYR_MCU: JLINK,
+    BAREMETAL_MCU: JLINK,
+    YOCTO_USERSPACE: GDBSERVER,
+    NATIVE_HOST: SERVER_NONE,
+}
 
 #: The launch-configuration JSON key the SDK's debug-probe identity
 #: (`variants[].debug`) resolves for a given server -- absent for a server the
 #: identity has no concept of at all (`gdbserver`/`none`, neither of which
 #: `create_launch_draft` ever pairs with a `variants[].debug` field).
 _SERVER_IDENTITY_FIELD = {JLINK: "device", OPENOCD: "configFiles", PYOCD: "targetId"}
-
-#: The Zephyr board target naming the host simulator. Verbatim from
-#: `tan_core::run`. The sibling runnable's swap (`zephyr.elf` ->
-#: `zephyr.exe`) is `tan.core.run.native_sim_exe_beside` -- THE one spelling
-#: of that rule (#83); this module calls it rather than carrying its own copy.
-_NATIVE_SIM_BOARD = "native_sim"
-
-#: The system-manifest schema major this command consumes. A different value is
-#: ignored (nothing resolves) rather than silently mis-applied.
-_SYSTEM_MANIFEST_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -248,46 +249,6 @@ def _load_yaml(path: Path) -> Any | None:
         return None
 
 
-def _slices(manifest: Any) -> list[dict[str, Any]]:
-    """The manifest's slices, or `[]` when the document is not a v1 manifest.
-
-    The schema-major guard mirrors `parse_system_manifest`, which REFUSES a
-    manifest whose `schema_version` is not 1 rather than reading it as if it
-    were. A slice missing `core_id` or `os` also disqualifies the whole document:
-    both fields are non-`Option` in the Rust struct, so serde fails the entire
-    parse, and a partial read here would resolve against a manifest the oracle
-    rejects.
-    """
-    if not isinstance(manifest, dict):
-        return []
-    if manifest.get("schema_version") != _SYSTEM_MANIFEST_SCHEMA_VERSION:
-        return []
-    raw = manifest.get("slices")
-    if not isinstance(raw, list):
-        return []
-    slices = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            return []
-        if not isinstance(entry.get("core_id"), str) or not isinstance(
-            entry.get("os"), str
-        ):
-            return []
-        slices.append(entry)
-    return slices
-
-
-def _is_native_sim_board(board: Any) -> bool:
-    """True for the bare `native_sim` board AND Zephyr's qualified board form
-    (`native_sim/native/64`). Exact-matching only the bare name let a qualified
-    board name defeat the host-vs-hardware discriminator on a perfectly fresh
-    manifest; `"native_simulated_foo"` deliberately does NOT match -- the
-    required `/` anchors it to Zephyr's actual board-qualifier syntax."""
-    return isinstance(board, str) and (
-        board == _NATIVE_SIM_BOARD or board.startswith(f"{_NATIVE_SIM_BOARD}/")
-    )
-
-
 def _select_slice(
     slices: list[dict[str, Any]], target: str, core: str | None
 ) -> dict[str, Any] | None:
@@ -304,10 +265,10 @@ def _select_slice(
     """
     if target == NATIVE_HOST:
         return next(
-            (s for s in slices if _is_native_sim_board(s.get("board"))),
+            (s for s in slices if is_native_sim_board(s.get("board"))),
             None,
         )
-    manifest_os = _MANIFEST_OS.get(target)
+    manifest_os = MANIFEST_OS_BY_TARGET.get(target)
     if manifest_os is None:
         return None
     # `--core` names the slice outright; otherwise the first slice of this
@@ -386,7 +347,7 @@ def _resolve_from_build(
     """
     resolution = LaunchResolution()
     manifest = _load_yaml(Path(workspace_root, "build", "system-manifest.yaml"))
-    slice_ = _select_slice(_slices(manifest), target, core)
+    slice_ = _select_slice(manifest_slices(manifest), target, core)
     if slice_ is None:
         return resolution, [], None
     core_id = slice_.get("core_id")
@@ -822,6 +783,93 @@ def _internal_failure(
     )
 
 
+def _build_manifest_missing_failure(
+    generated_at: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#462: a real hardware project (`som.sku` set) has not been built
+    yet, so `--target-kind` cannot be inferred from a `build/system-
+    manifest.yaml` that does not exist -- a precondition the CALLER can fix
+    (`tan build` first, or an explicit `--target-kind`), not a tan-side
+    crash. Exit 2, matching the sibling distinction tan-cli#262 settled for
+    `tan validate`: a verdict the command CAN produce about the caller's own
+    input is `VALIDATION_FAILURE`, never `INTERNAL_FAILURE` -- that exit
+    stays reserved for the `except Exception` backstop below and an
+    unreadable/malformed existing launch.json."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="build-manifest-missing",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
+def _core_unknown_failure(generated_at: str, message: str, launch_json_path: str) -> _Outcome:
+    """tan-cli#462: an explicit `--core` (with `--target-kind` omitted) names
+    no slice this project's own build produced -- the caller's own typo or a
+    stale flag, not a tan-side crash. Exit 2, same reasoning as
+    [`_build_manifest_missing_failure`] above."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="core-unknown",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
+def _target_kind_ambiguous_failure(
+    generated_at: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#462 review round: `--target-kind` omitted, and this project's
+    own `build/system-manifest.yaml` -- well-formed, fully built, tan's own
+    output -- names more than one target class (a mixed-core board, e.g.
+    E1M-V2N101/V2M101's `a55_cluster`+`m33_sm`) with no `--core` to narrow
+    them. Worse than the two refusals above: it hits every run against a
+    CORRECT project forever, not just a pre-build one, and the remedy the
+    message itself names (`--target-kind` + `--core`) works. Still the
+    caller's own precondition, not a tan crash -- exit 2, same reasoning as
+    [`_build_manifest_missing_failure`] above."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="target-kind-ambiguous",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
+def _no_debuggable_target_class_failure(
+    generated_at: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#462 review round: `--target-kind` omitted, hardware slices
+    exist, but none of their `os` values is one `MANIFEST_OS_BY_TARGET` maps
+    (e.g. a lone `os: linux` slice) -- a knowledge/version skew between tan
+    and the SDK, not a crash: no invariant was violated and the command still
+    produced a coherent verdict with a working remedy (`--target-kind`
+    explicit). Exit 2, same reasoning as [`_build_manifest_missing_failure`]
+    above."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="no-debuggable-target-class",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
 def _write_failure(
     generated_at: str, target: str, server: str, launch_json_path: str, message: str
 ) -> _Outcome:
@@ -904,16 +952,9 @@ def _run(
     `typer.Exit`.
     """
     generated_at = _generated_at()
-    # Errors before workspace resolution report a cwd-based launch.json path and
-    # a zephyr-mcu/none placeholder (matches the TS catch block).
+    # Errors before target/server are even known report a cwd-based launch.json
+    # path and a zephyr-mcu/none placeholder (matches the TS catch block).
     cwd_launch_path = os.path.join(os.getcwd(), ".vscode", "launch.json")
-
-    try:
-        target = parse_target_kind(target_kind)
-        server = parse_server_kind(server_arg)
-        draft = create_launch_draft(target, server, pre_launch_task)
-    except DebugConfigError as err:
-        return _internal_failure(generated_at, str(err), cwd_launch_path)
 
     workspace_root = _normalise(project_arg)
     launch_json_path = os.path.join(workspace_root, ".vscode", "launch.json")
@@ -923,6 +964,59 @@ def _run(
     # tan-cli#236, the pair of #170 above: `boardYaml` reported only when a
     # file is really at the resolved path.
     project = Project.resolved(project_root, board_yaml)
+
+    # tan-cli#456: an omitted --target-kind must never silently default to
+    # native-host on a project whose own build cannot produce that binary --
+    # infer it from the project instead, and pick a matching --server default
+    # too (leaving it at the literal "none" default would only trade one
+    # broken draft for `create_launch_draft`'s "Unsupported debug backend
+    # 'none'" refusal). Never overrides a target/server the caller named
+    # explicitly. `infer_target_kind` itself is pure and shared (`tan.core.
+    # debug_launch`); this is just its IO, the same best-effort reads as
+    # everything else in this module.
+    effective_target_kind = target_kind
+    effective_server_arg = server_arg
+    inferred: str | None = None
+    if target_kind is None:
+        manifest = _load_yaml(Path(workspace_root, "build", "system-manifest.yaml"))
+        board = _load_yaml(Path(board_yaml))
+        som = board.get("som") if isinstance(board, dict) else None
+        sku = som.get("sku") if isinstance(som, dict) else None
+        inferred, reason_code, ambiguous = infer_target_kind(manifest, core, sku)
+        if ambiguous is not None:
+            # `launch_json_path` -- this project's own -- not `cwd_launch_path`:
+            # unlike the pre-#456 catch-all below, it is already resolved by
+            # this point, so a cwd-based path here would just name whatever
+            # directory the shell happened to be in.
+            #
+            # tan-cli#462: `reason_code`, when set, names which of
+            # `infer_target_kind`'s refusals the caller can fix themselves --
+            # VALIDATION_FAILURE (2), not INTERNAL_FAILURE (5). Review round:
+            # its other two ambiguity shapes (more than one target class, or
+            # none at all) are the SAME defect, not "unclassified" -- both
+            # now carry their own code too, so this dispatches all four.
+            if reason_code == "build-manifest-missing":
+                return _build_manifest_missing_failure(generated_at, ambiguous, launch_json_path)
+            if reason_code == "core-unknown":
+                return _core_unknown_failure(generated_at, ambiguous, launch_json_path)
+            if reason_code == "target-kind-ambiguous":
+                return _target_kind_ambiguous_failure(generated_at, ambiguous, launch_json_path)
+            if reason_code == "no-debuggable-target-class":
+                return _no_debuggable_target_class_failure(
+                    generated_at, ambiguous, launch_json_path
+                )
+            return _internal_failure(generated_at, ambiguous, launch_json_path)
+        if inferred is not None:
+            effective_target_kind = inferred
+            if server_arg is None:
+                effective_server_arg = _DEFAULT_SERVER_FOR_TARGET.get(inferred)
+
+    try:
+        target = parse_target_kind(effective_target_kind)
+        server = parse_server_kind(effective_server_arg)
+        draft = create_launch_draft(target, server, pre_launch_task)
+    except DebugConfigError as err:
+        return _internal_failure(generated_at, str(err), cwd_launch_path)
 
     # Fill the `<resolved-...>` placeholders from what this project's own build
     # recorded (#66). Nothing here fails the command: pre-build, or against a
@@ -992,13 +1086,25 @@ def _run(
         if field is not None and _has_placeholder(draft.get(field)):
             identity_issues.append(_sdk_identity_key_absent_issue(field))
     notes = _preview_notes_for(draft, registered_runners, server)
+    # tan-cli#456 review: say when target/server were DERIVED, not requested --
+    # otherwise silent, unlike the --svd/--gdbserver-address no-op notes right
+    # below. Never fires for the no-signal native-host default (no manifest to
+    # name).
+    if target_kind is None and inferred is not None:
+        server_clause = f" and --server '{effective_server_arg}'" if server_arg is None else ""
+        notes.append(
+            f"--target-kind was not given; inferred '{inferred}'{server_clause} from "
+            "this project's build/system-manifest.yaml."
+        )
     # A non-MCU draft carries no `svdFile` key at all, and
     # `apply_launch_resolution` only replaces keys that already exist -- so a
     # `--svd` here is a no-op. Say so rather than accepting the flag in silence
     # and leaving the user to wonder why no peripheral view appeared.
     if svd is not None and "svdFile" not in draft:
         notes.append(
-            f"--svd was given, but target kind '{target_kind or ZEPHYR_MCU}' emits "
+            # `target`, the RESOLVED target -- `target_kind` is `None` on
+            # every tan-cli#456 inference path and would mis-name it.
+            f"--svd was given, but target kind '{target}' emits "
             "no svdFile field, so it had no effect: the Cortex Peripherals view "
             "is a cortex-debug (MCU) feature."
         )
@@ -1007,7 +1113,7 @@ def _run(
     if gdbserver_address is not None and "miDebuggerServerAddress" not in draft:
         notes.append(
             f"--gdbserver-address was given, but target kind "
-            f"'{target_kind or ZEPHYR_MCU}' emits no miDebuggerServerAddress "
+            f"'{target}' emits no miDebuggerServerAddress "
             "field, so it had no effect: that field is a yocto-userspace "
             "(cppdbg) feature."
         )

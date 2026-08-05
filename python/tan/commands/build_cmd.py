@@ -75,7 +75,7 @@ import shutil
 import sys
 import threading
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import typer
@@ -94,7 +94,11 @@ from tan.commands.build.token_substitution import (
     apply_plan_token_substitution,
 )
 from tan.commands.deferred_cmd import DEFERRED_ISSUE_CODE, DEFERRED_ISSUE_URL
-from tan.commands.sdk_cmd import project_pin_issue, resolve_sdk_tiered
+from tan.commands.sdk_cmd import (
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_tiered,
+)
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
 from tan.core.shapes import SDK_MARKER, is_sdk_root
@@ -394,11 +398,31 @@ def discover_sdk_root(workspace_root: Path) -> Path | None:
     return None
 
 
-def resolve_sdk_root_ladder(
-    sdk_root_arg: str | None, workspace_root: Path
-) -> tuple[Path | None, str, str | None]:
-    """`(path, sourceTier, brokenProjectPin)` -- the NARROW of this port's TWO
-    discovery ladders,
+@dataclass(frozen=True)
+class SdkRootResolution:
+    """`resolve_sdk_root_ladder`/`resolve_sdk_root_wide`'s own return type --
+    a NAMED result rather than a tuple, so a fact one caller needs (e.g.
+    `foreign_global_default_for`, tan-cli#464) never forces every OTHER
+    caller's unpacking to grow a matching positional slot. A four-element
+    tuple was tried here first and rejected on review: it would have
+    reproduced the exact silent-drop shape tan-cli#464 exists to close, at
+    the next field this ladder needs to carry.
+
+    Mirrors `sdk_cmd.ActiveSdk`'s same four facts (this IS `ActiveSdk` for the
+    two tiers it cannot see -- `discovery`/`none` -- carried through as a
+    distinct type only because `.path` here stays `Path`, the shape every
+    filesystem-touching caller of these two ladders already expects, where
+    `ActiveSdk.path` is the raw `str` its own callers compare and serialize
+    verbatim)."""
+
+    path: Path | None
+    tier: str
+    broken_project_pin: str | None = None
+    foreign_global_default_for: str | None = None
+
+
+def resolve_sdk_root_ladder(sdk_root_arg: str | None, workspace_root: Path) -> SdkRootResolution:
+    """The NARROW of this port's TWO discovery ladders,
     shared by the thirteen commands the oracle resolves narrowly (`build`,
     `doctor`, `clean`, `run`, `flash`, `size`, `image`, `kconfig`, `validate`,
     `presets`, `inspect`, `trace`, `sdk current`). The other four -- `init`,
@@ -452,37 +476,43 @@ def resolve_sdk_root_ladder(
     the real gap; they now have their own helper below, which is why this one
     stays exactly as it is.
 
-    The third element (tan-cli#263 review) is `ActiveSdk.broken_project_pin`
-    carried straight through: the raw `.alp/sdk-path` target when that file
-    exists but its target failed the loader check, `None` otherwise -- even
-    when a LOWER tier (global default, discovery, or nothing) is what this
-    call actually returns. `sdk_cmd.project_pin_issue` turns it into the
-    shared `sdk.project-pin-unresolved` warning; every caller here should
-    surface it, not just `sdk current` -- `tan build` is the one that matters
-    most, since it is the command that silently builds against whichever SDK
-    the pin's fallthrough landed on.
+    `SdkRootResolution.broken_project_pin` (tan-cli#263 review) is
+    `ActiveSdk.broken_project_pin` carried straight through: the raw
+    `.alp/sdk-path` target when that file exists but its target failed the
+    loader check, `None` otherwise -- even when a LOWER tier (global default,
+    discovery, or nothing) is what this call actually returns.
+    `sdk_cmd.project_pin_issue` turns it into the shared
+    `sdk.project-pin-unresolved` warning; every caller here should surface it,
+    not just `sdk current` -- `tan build` is the one that matters most, since
+    it is the command that silently builds against whichever SDK the pin's
+    fallthrough landed on. `foreign_global_default_for` (tan-cli#464) is the
+    same carry-through for `ActiveSdk.foreign_global_default_for`, and
+    `sdk_cmd.global_default_foreign_project_issue` is its sibling warning.
     """
     flag = (sdk_root_arg or "").strip()
     if flag:
-        return Path(flag), "sdkRootFlag", None
+        return SdkRootResolution(Path(flag), "sdkRootFlag")
 
     tiered = resolve_sdk_tiered(None, workspace_root)
     if tiered.path is not None:
-        return Path(tiered.path), tiered.tier, tiered.broken_project_pin
+        return SdkRootResolution(
+            Path(tiered.path),
+            tiered.tier,
+            tiered.broken_project_pin,
+            tiered.foreign_global_default_for,
+        )
 
     found = discover_sdk_root(workspace_root)
     if found is not None:
-        return found, "discovery", tiered.broken_project_pin
-    return None, "none", tiered.broken_project_pin
+        return SdkRootResolution(found, "discovery", tiered.broken_project_pin)
+    return SdkRootResolution(None, "none", tiered.broken_project_pin)
 
 
-def resolve_sdk_root_wide(
-    sdk_root_arg: str | None, workspace_root: Path
-) -> tuple[Path | None, str, str | None]:
-    """`(path, sourceTier, brokenProjectPin)` -- the WIDE ladder, for the four
-    commands the oracle routes through `util.rs`'s `resolve_sdk_root`: `init`,
-    `generate`, `examples`, `renode`. `brokenProjectPin` is
-    [`resolve_sdk_root_ladder`]'s own third element, same meaning.
+def resolve_sdk_root_wide(sdk_root_arg: str | None, workspace_root: Path) -> SdkRootResolution:
+    """The WIDE ladder, for the four commands the oracle routes through
+    `util.rs`'s `resolve_sdk_root`: `init`, `generate`, `examples`, `renode`.
+    Same [`SdkRootResolution`] shape as [`resolve_sdk_root_ladder`], same
+    field meanings.
 
     Same tiers and the same five `SdkSourceTier` values as
     [`resolve_sdk_root_ladder`] above -- `--sdk-root` > project pin > global
@@ -508,16 +538,21 @@ def resolve_sdk_root_wide(
     """
     flag = (sdk_root_arg or "").strip()
     if flag:
-        return Path(flag), "sdkRootFlag", None
+        return SdkRootResolution(Path(flag), "sdkRootFlag")
 
     tiered = resolve_sdk_tiered(None, workspace_root)
     if tiered.path is not None and tiered.tier != "discovery":
-        return Path(tiered.path), tiered.tier, tiered.broken_project_pin
+        return SdkRootResolution(
+            Path(tiered.path),
+            tiered.tier,
+            tiered.broken_project_pin,
+            tiered.foreign_global_default_for,
+        )
 
     found = discover_sdk_root(workspace_root)
     if found is not None:
-        return found, "discovery", tiered.broken_project_pin
-    return None, "none", tiered.broken_project_pin
+        return SdkRootResolution(found, "discovery", tiered.broken_project_pin)
+    return SdkRootResolution(None, "none", tiered.broken_project_pin)
 
 
 #: tan-cli#407's warning code. Namespaced `sdk.` and not `build.`/`generate.`
@@ -565,9 +600,10 @@ def sdk_ladder_divergence_issue(
     rejected upstream for the same reason [`resolve_sdk_root_ladder`] rejects
     an `ALP_SDK_ROOT` tier: the closed enum is a wire contract no consumer
     expects to grow, and `test_build_manifest.py` pins the exact
-    `(path, "discovery", None)` tuple both ladders return here because that is
-    the oracle's own answer. An `issues[]` entry adds a fact without moving a
-    reported one -- the same trade `broken_project_pin` already makes.
+    `SdkRootResolution(path, "discovery", None, None)` both ladders return
+    here because that is the oracle's own answer. An `issues[]` entry adds a
+    fact without moving a reported one -- the same trade `broken_project_pin`
+    already makes.
 
     `wide` only picks which side of the pair is labelled "this command"; both
     sides name both checkouts, in the same order, so two envelopes describing
@@ -582,8 +618,8 @@ def sdk_ladder_divergence_issue(
     global default) are shared verbatim, so they can never be the pair that
     differs.
     """
-    narrow_path, _narrow_tier, _narrow_pin = resolve_sdk_root_ladder(sdk_root_arg, workspace_root)
-    wide_path, _wide_tier, _wide_pin = resolve_sdk_root_wide(sdk_root_arg, workspace_root)
+    narrow_path = resolve_sdk_root_ladder(sdk_root_arg, workspace_root).path
+    wide_path = resolve_sdk_root_wide(sdk_root_arg, workspace_root).path
     # One side unresolved is not a collision to disambiguate: the two
     # envelopes already differ by `sourceTier` (`none` vs something), which is
     # the very signal this warning exists to supply.
@@ -1406,7 +1442,11 @@ def build(
     # previously this skipped straight from `--sdk-root` to the positional
     # walk, so `tan init`'s own pointer went unread the moment `tan build` ran
     # in the same directory.
-    resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    resolved_sdk_root = sdk_resolution.path
+    sdk_tier = sdk_resolution.tier
+    sdk_broken_pin = sdk_resolution.broken_project_pin
+    sdk_foreign_default = sdk_resolution.foreign_global_default_for
     # tan-cli#407: computed HERE, while `sdk_root` still holds the raw
     # `--sdk-root` flag -- it is reassigned to the RESOLVED root a few lines
     # below, and a bogus flag is blanked to `None` in between, which would
@@ -1482,19 +1522,27 @@ def build(
         data = None
         issues = [Issue("build.internal-failure", "error", f"{type(err).__name__}: {err}")]
 
-    # Both facts are about how the SDK ROOT was RESOLVED, so both are prepended
-    # ahead of whatever the build itself reported, and both survive a run that
-    # never planned anything -- a refusal is exactly when knowing which
-    # checkout answered matters most.
+    # These facts are all about how the SDK ROOT was RESOLVED, so all are
+    # prepended ahead of whatever the build itself reported, and all survive a
+    # run that never planned anything -- a refusal is exactly when knowing
+    # which checkout answered matters most.
     #
     # tan-cli#263 review: `tan build` is the command a silently-missed
     # `.alp/sdk-path` pin hurts most -- it builds against whichever tier the
     # ladder fell through to and says nothing, where `sdk current` alone only
     # helps someone already suspicious enough to run it. tan-cli#407 is the
-    # same argument for the two-checkout collision one tier below it.
+    # same argument for the two-checkout collision one tier below it, and
+    # tan-cli#464 the same again for a `globalDefault` answer a DIFFERENT
+    # project's bootstrap relocation actually decided -- `sdk current` was the
+    # only place this warning reached before; `tan build` is the one that
+    # silently compiles against the wrong checkout because of it.
     resolution_issues = [
         issue
-        for issue in (project_pin_issue(sdk_broken_pin, sdk_tier), sdk_divergence)
+        for issue in (
+            project_pin_issue(sdk_broken_pin, sdk_tier),
+            sdk_divergence,
+            global_default_foreign_project_issue(sdk_foreign_default),
+        )
         if issue is not None
     ]
     if resolution_issues:

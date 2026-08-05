@@ -260,6 +260,8 @@ import ast
 import json
 import pathlib
 
+from tan.commands.doctor_cmd import kebab_check_name
+
 #: `contract/` lives at the repo root, one level above `python/` -- the same
 #: resolution `test_frozen_issue_codes.py` uses, reused rather than
 #: reinvented so there is exactly one place that path is computed.
@@ -394,6 +396,11 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/commands/image_cmd.py", "_Notice"): 0,
     ("tan/commands/size_cmd.py", "_error_outcome"): 2,
     ("tan/commands/scaffold_cmd.py", "ScaffoldError"): 0,
+    # tan-cli#454: `_refuse_required(subcommand, code, message, context,
+    # output_format)` -- `code` is its 2nd positional (index 1). Its two call
+    # sites (`quality`'s `quality.profile-required`, `migrate`'s
+    # `migrate.mode-required`) are what this index resolves.
+    ("tan/commands/west_forward_cmd.py", "_refuse_required"): 1,
 }
 
 #: `(file, exact unparsed expression)` -> declared as a KNOWN forward, never
@@ -442,6 +449,9 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
         ("tan/commands/renode_cmd.py", "code"),  # `_issue(code, ...)` inside `fail`/`fail_sdk`'s OWN
         # bodies, forwarding THEIR OWN `code` parameter -- `fail`/`fail_sdk`
         # are themselves in `_FULL_CODE_CALLABLES`, so their call sites carry it.
+        ("tan/commands/west_forward_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse_required`'s
+        # OWN body (tan-cli#454) -- `_refuse_required` is itself in
+        # `_FULL_CODE_CALLABLES`, so its two call sites carry the literal.
         ("tan/commands/scaffold_cmd.py", "err.code"),  # <- ScaffoldError
         ("tan/commands/diff_cmd.py", "failure.code"),  # <- ParseFailure. NOT a whole code (it is a
         # bare suffix, e.g. "schema-violation" -- ParseFailure is deliberately
@@ -764,7 +774,16 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         name="_failure",
         arg_keyword="code",
-        expected_calls=2,
+        # 6, not 2, as of tan-cli#462: `_build_manifest_missing_failure` and
+        # `_core_unknown_failure` each add their own literal `code=` call to
+        # `_failure`, splitting their two refusals off `_internal_failure`'s
+        # blanket `internal-failure` at `VALIDATION_FAILURE` (2) (4). Review
+        # round: `_target_kind_ambiguous_failure` and
+        # `_no_debuggable_target_class_failure` do the same for
+        # `infer_target_kind`'s other two refusal shapes -- the SAME defect,
+        # not a distinct one -- bringing this to 6. All four split-off codes
+        # checked against the registry before each bump.
+        expected_calls=6,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(
@@ -801,20 +820,28 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         sites=1,
     ),
     ("tan/commands/doctor_cmd.py", "checks_to_issues"): dict(
-        # `check.code or f"doctor.{check.name}"` in `checks_to_issues()` --
-        # the ceiling this bucket used to acknowledge instead of resolving
-        # (tan-cli#224 review): MEASURED at 48 `Check(...)` constructions,
-        # every one passing its `name` positionally and literally, zero
-        # non-literal, 20 distinct camelCase names (`_is_code_suffix` admits
-        # camelCase for exactly this reason -- see its own docstring).
+        # `check.code or f"doctor.{kebab_check_name(check.name)}"` in
+        # `checks_to_issues()` -- the ceiling this bucket used to acknowledge
+        # instead of resolving (tan-cli#224 review): MEASURED at 48
+        # `Check(...)` constructions, every one passing its `name` positionally
+        # and literally, zero non-literal, 20 distinct camelCase names
+        # (`_is_code_suffix` admits camelCase for exactly this reason -- see
+        # its own docstring). The camelCase `name` is still what's scanned off
+        # each `Check(...)` call (`_resolve_helper`'s own literal scan, below,
+        # is unchanged); `kebab=True` tells it to run `kebab_check_name` over
+        # each scanned literal before combining with `prefix` -- the 27
+        # camelCase issue codes this shipped in v0.5.0, since `check.name` is
+        # ALSO a JSON data key/display string and stays camelCase there
+        # deliberately (see `Check.as_dict` / `Check`'s own docstring).
         # 54, not 48, as of tan-cli#91's `--fix` consent-gate work: 9 of the
         # 54 also passed an explicit `code=` override (the frozen
         # `bootstrap.*` spellings this class's own docstring documents, plus
         # five NEW `doctor.fix-*` checks whose `name` is a dynamic
         # `f"fix:{tool}"`, never a code-shaped literal at all) --
         # `skip_if_keyword="code"` excludes exactly those from this scan,
-        # since `check.code or f"doctor.{check.name}"` never evaluates their
-        # `name` for the code position at runtime; their real codes are
+        # since `check.code or f"doctor.{kebab_check_name(check.name)}"` never
+        # evaluates their `name` for the code position at runtime; their real
+        # codes are
         # captured separately by the plain `code=` keyword scan, the same
         # mechanism every other literal `code=` site in this file already
         # goes through.
@@ -831,10 +858,11 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # count moves anyway, because what it pins is how many `Check(...)`
         # sites exist, not how many of them this spec classifies.
         prefix="doctor.",
-        expr="check.name",
+        expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
+        kebab=True,
         expected_calls=56,
         sites=1,
     ),
@@ -939,14 +967,33 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     # (see its docstring), not from a direct f-string occurrence
     # `_prefix_templates` finds -- `failure.code` never appears in an f-string
     # at all, it is a plain `code=` keyword value at one of `_emit_failure`'s
-    # 4 call sites. `sites=1` counts that one call site. The two suffixes are
-    # every literal `ParseFailure(...)` is raised with, read from source
-    # (diff_cmd.py's `_load_document`/`_parse_fields` raise sites).
+    # 4 call sites. `sites=1` counts that one call site. The suffixes are
+    # every literal (or, for `_reject_if_sdk_validator_disagrees`'s
+    # `ParseFailure(outcome, ...)`, every value `outcome` can hold)
+    # `ParseFailure(...)` is raised with, read from source: `pyyaml-
+    # unavailable`/`schema-violation` from `_load_document`/`_parse_fields`;
+    # `python-too-old`/`spawn-failed` from `_reject_if_sdk_validator_disagrees`'s
+    # own two direct refusals; `schema-violation`/`missing-preset`/
+    # `hardware-revision`/`failed` (the fifth, `clean`, never reaches a raise)
+    # from `_spawn_validator`'s outcome, the same `_STATUS_OUTCOME` +
+    # `OUTCOME_FAILED` vocabulary `validate_cmd`'s own `result.outcome` entry
+    # below declares (tan-cli#455 review round).
     ("tan/commands/diff_cmd.py", "failure.code"): dict(
-        suffixes=frozenset({"pyyaml-unavailable", "schema-violation"}), sites=1
+        suffixes=frozenset(
+            {
+                "pyyaml-unavailable",
+                "schema-violation",
+                "python-too-old",
+                "spawn-failed",
+                "failed",
+                "missing-preset",
+                "hardware-revision",
+            }
+        ),
+        sites=1,
     ),
-    # `Issue(f"support-bundle.{c.name}", ...)` in `_doctor_issues()` -- tan-cli
-    # #374 findings 3/4 rewrote this entry. `checks` there is
+    # `Issue(f"support-bundle.{doctor_cmd.kebab_check_name(c.name)}", ...)` in
+    # `_doctor_issues()` -- tan-cli #374 findings 3/4 rewrote this entry. `checks` there is
     # `_debug_doctor_report(...)`'s own output (tan-cli#357; `_doctor_section`,
     # the function this comment used to cite, was DELETED by that same diff),
     # not `doctor_cmd._collect(...)`'s whole build/flash-readiness list -- so
@@ -985,7 +1032,14 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     #     because `_HOST_CHECK_ORDER` -- support_bundle_cmd.py's own tuple --
     #     is the thing that actually bounds what this command can harvest, and
     #     is the one artefact a reviewer changing that tuple will see.
-    ("tan/commands/support_bundle_cmd.py", "c.name"): dict(
+    ("tan/commands/support_bundle_cmd.py", "doctor_cmd.kebab_check_name(c.name)"): dict(
+        # `suffixes` stays the raw camelCase `c.name` value space -- what
+        # `_debug_doctor_report`'s `Check(...)` sites actually pass, unchanged
+        # by the kebab fix (`Check.name` is also a JSON data key/display
+        # string and stays camelCase there deliberately). `kebab=True` tells
+        # the reconstruction below to run `kebab_check_name` over each of
+        # these before combining with the `support-bundle.` literal, mirroring
+        # the runtime `Issue(f"support-bundle.{doctor_cmd.kebab_check_name(c.name)}", ...)`.
         suffixes=frozenset(
             {
                 "sdkRoot",
@@ -1003,6 +1057,7 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
                 "homePath",
             }
         ),
+        kebab=True,
         sites=1,
     ),
     # `Issue(f"validate.{result.outcome}", ...)` -- ONE template, fed by BOTH
@@ -1087,6 +1142,7 @@ def _resolve_helper(
     arg_index: int | None = None,
     arg_keyword: str | None = None,
     skip_if_keyword: str | None = None,
+    kebab: bool = False,
     expected_calls: int,
 ) -> tuple[set[str], list[str], dict[tuple[str, str], list[int]]]:
     """Scan every call to the declared helper in `path`, read the code
@@ -1094,7 +1150,11 @@ def _resolve_helper(
     `(reconstructed codes, unresolved-descriptions, forwarder-hit linenos)`.
     `kind="prefix"` (default) reconstructs `prefix + <scanned suffix>`;
     `kind="family"` reconstructs `<scanned family> + suffix`
-    (`west_forward_cmd.py`'s mirrored shape).
+    (`west_forward_cmd.py`'s mirrored shape). `kebab=True` runs
+    `kebab_check_name` over the scanned suffix before combining -- the
+    `doctor_cmd.py` entry's shape, where the SCANNED literal is still
+    `Check(...)`'s raw camelCase `name` argument (unchanged: `name` is also a
+    JSON data key/display string) but the emitted CODE is the kebab slug.
 
     `expected_calls` is asserted EXACTLY, mirroring `PREFIXING_SITES`'s own
     pinned per-file counts (`contract.rs:663-682`) for the identical reason:
@@ -1186,6 +1246,8 @@ def _resolve_helper(
             f"elsewhere, resolve the value space by hand and add it to "
             f"_FORWARDER_SUFFIXES."
         )
+    if kebab:
+        parts = {kebab_check_name(s) for s in parts}
     if kind == "prefix":
         assert prefix is not None
         return {prefix + s for s in parts}, unresolved, forwarder_hits
@@ -1321,6 +1383,8 @@ def _classify_and_resolve(
             if fwd is not None:
                 seen_forwarder_lines.setdefault(fwd_key, []).append(lineno)
                 suffixes = fwd["suffixes"]
+                if fwd.get("kebab"):
+                    suffixes = {kebab_check_name(s) for s in suffixes}
                 codes |= {literal + s for s in suffixes} if kind == "prefix" else {s + literal for s in suffixes}
                 continue
             shape = f'f"{literal}{{{expr}}}"' if kind == "prefix" else f'f"{{{expr}}}{literal}"'
@@ -1342,6 +1406,7 @@ def _classify_and_resolve(
             arg_index=spec.get("arg_index"),
             arg_keyword=spec.get("arg_keyword"),
             skip_if_keyword=spec.get("skip_if_keyword"),
+            kebab=spec.get("kebab", False),
             expected_calls=spec["expected_calls"],
         )
         codes |= site_codes

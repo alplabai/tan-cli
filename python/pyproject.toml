@@ -14,7 +14,7 @@ name = "alp-tan"
 # source of truth -- never edited alone. `0.5.0-rc5.dev0` -> `0.5.0rc5.dev0`
 # (the two spellings are not interchangeable and cannot be string-compared);
 # `python/scripts/version_check.py` owns that mapping and CI runs it.
-version = "0.5.0"
+version = "0.5.1"
 description = "The Alp Lab build CLI: one board.yaml to firmware, across MCU and MPU cores."
 readme = "README.md"
 # PEP 639 SPDX-expression form, NOT the `{ text = ... }` table -- and it is

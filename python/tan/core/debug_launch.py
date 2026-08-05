@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from tan.core import jsonc_splice
+from tan.core.run import is_native_sim_board
+from tan.core.system_manifest import SYSTEM_MANIFEST_SCHEMA_VERSION
 
 ZEPHYR_MCU = "zephyr-mcu"
 BAREMETAL_MCU = "baremetal-mcu"
@@ -105,6 +107,149 @@ def server_choices_for_target(target: str) -> tuple[str, ...]:
 
 def is_server_supported_for_target(target: str, server: str) -> bool:
     return server in server_choices_for_target(target)
+
+
+#: The ``build/system-manifest.yaml`` slice ``os`` a debug target class runs
+#: on, or absent for a target with no per-core build slice keyed by ``os``.
+#: ``native-host`` is exactly that case -- its slice is picked by BOARD target
+#: instead (:func:`tan.core.run.is_native_sim_board`), never by this map.
+MANIFEST_OS_BY_TARGET = {
+    ZEPHYR_MCU: "zephyr",
+    BAREMETAL_MCU: "baremetal",
+    YOCTO_USERSPACE: "yocto",
+}
+
+
+def manifest_slices(manifest: Any) -> list[dict[str, Any]]:
+    """``build/system-manifest.yaml``'s slices, or ``[]`` when the document is
+    not a v1 manifest. A TOLERANT reader, deliberately distinct from
+    :func:`tan.core.system_manifest.parse_system_manifest`'s strict one:
+    every caller here treats the file as a best-effort enrichment (pre-build,
+    or against a reshaped manifest, nothing resolves rather than the command
+    failing), so a structurally wrong document degrades to "no slices" rather
+    than raising.
+
+    The schema-major guard mirrors the strict reader, which REFUSES a
+    manifest whose ``schema_version`` is not 1 rather than reading it as if it
+    were. A slice missing ``core_id`` or ``os`` also disqualifies the whole
+    document: both fields are non-``Option`` in the Rust struct, so serde
+    fails the entire parse there, and a partial read here would resolve
+    against a manifest the oracle rejects.
+    """
+    if not isinstance(manifest, dict):
+        return []
+    if manifest.get("schema_version") != SYSTEM_MANIFEST_SCHEMA_VERSION:
+        return []
+    raw = manifest.get("slices")
+    if not isinstance(raw, list):
+        return []
+    slices = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            return []
+        if not isinstance(entry.get("core_id"), str) or not isinstance(entry.get("os"), str):
+            return []
+        slices.append(entry)
+    return slices
+
+
+def _core_not_in_manifest_message(core: str, slices: list[dict[str, Any]]) -> str:
+    """tan-cli#462 review: names the cores this build DID produce, the
+    obvious next question once told the one passed does not exist. `slices`
+    is the manifest's own core list at the point this fires (before `--core`
+    narrows it to nothing), so it is never empty here."""
+    cores = ", ".join(dict.fromkeys(s["core_id"] for s in slices))
+    return (
+        f"--target-kind was not given, and --core {core} does not match any "
+        f"slice in this project's build/system-manifest.yaml (its cores: {cores}); "
+        "pass --target-kind explicitly, or a --core value this project's build "
+        "actually produced."
+    )
+
+
+def _ambiguous_target_classes_message(targets: set[str]) -> str:
+    # The mapped --target-kind SPELLINGS (`zephyr-mcu`), never the raw
+    # manifest `os` value (`zephyr`) -- pasting the bare `os` value into
+    # --target-kind fails with "Unsupported --target-kind 'zephyr'".
+    classes = ", ".join(sorted(targets))
+    return (
+        "--target-kind was not given, and this project's "
+        f"build/system-manifest.yaml names more than one target class ({classes}); "
+        "pass --target-kind (and --core, on a mixed-core board) to say which "
+        "one to debug."
+    )
+
+
+def _no_debuggable_class_message(oses: set[Any]) -> str:
+    # Distinct from `_ambiguous_target_classes_message`: a single unrecognised
+    # `os` (e.g. a `linux` slice) is not "more than one" of anything.
+    unmapped = ", ".join(sorted(oses))
+    return (
+        "--target-kind was not given, and this project's "
+        f"build/system-manifest.yaml names no debuggable target class for os: "
+        f"{unmapped}; pass --target-kind explicitly."
+    )
+
+
+def _pre_build_hardware_message(som_sku: str) -> str:
+    return (
+        f"--target-kind was not given, and board.yaml declares som.sku: {som_sku} (a "
+        "real hardware project), but no build/system-manifest.yaml exists yet to say "
+        "which target class it builds. Run `tan build` first, or pass --target-kind "
+        "explicitly."
+    )
+
+
+def infer_target_kind(
+    manifest: Any, core: str | None, som_sku: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """tan-cli#456: the default ``--target-kind`` when the flag is omitted, so
+    a hardware project never silently gets a native-host draft its build
+    cannot produce. Shared, not duplicated per command: ``debug_config_cmd``
+    and (once routed through this rather than its own bare
+    ``parse_target_kind(None)``) ``support_bundle_cmd`` face the identical
+    question. Pure -- ``manifest``/``som_sku`` are already read; no file IO.
+
+    Returns ``(target, None, None)`` once confidently derived; ``(None, None,
+    None)`` with no signal at all (native-host survives, the pre-#456
+    default); ``(None, code, reason)`` on a refusal. ``code`` is a
+    `debug-config.<code>` suffix, tan-cli#462's split of the old blanket
+    ``internal-failure`` into one code per CALLER-fixable precondition --
+    pre-build hardware, a bad ``--core``, ambiguous target classes, or none
+    debuggable at all -- so ``code`` is never ``None`` once ``reason`` is.
+
+    ``--core`` filters the WHOLE slice list first, before native_sim is
+    excluded -- never only the hardware slices: that was the review-round bug,
+    where ``--core <the native_sim slice's own core id>`` on a mixed manifest
+    silently fell back to the OTHER core's class and wrote a J-Link session
+    pointed at the native_sim binary. Hardware also outvotes a CO-BUILT
+    native_sim slice whenever ``--core`` is absent -- the #83
+    ``_select_slice`` NATIVE_HOST arm needs an explicit ``--target-kind
+    native-host`` (or ``--core`` naming the native_sim slice) to reach.
+    """
+    all_slices = manifest_slices(manifest)
+    if core is not None and all_slices:
+        matched = [s for s in all_slices if s.get("core_id") == core]
+        if not matched:
+            return None, "core-unknown", _core_not_in_manifest_message(core, all_slices)
+        all_slices = matched
+
+    hw_slices = [s for s in all_slices if not is_native_sim_board(s.get("board"))]
+    if hw_slices:
+        by_os = {v: k for k, v in MANIFEST_OS_BY_TARGET.items()}
+        oses = {s.get("os") for s in hw_slices}
+        targets = {by_os[o] for o in oses if o in by_os}
+        if len(targets) == 1:
+            return next(iter(targets)), None, None
+        if targets:
+            return None, "target-kind-ambiguous", _ambiguous_target_classes_message(targets)
+        return None, "no-debuggable-target-class", _no_debuggable_class_message(oses)
+    if all_slices:
+        return NATIVE_HOST, None, None  # every (matching) slice built is native_sim -- a real default.
+
+    if isinstance(som_sku, str) and som_sku != "":
+        return None, "build-manifest-missing", _pre_build_hardware_message(som_sku)
+    return None, None, None
 
 
 #: The v0.3.1 default ``preLaunchTask``, restored per tan-cli#138. Keyed by

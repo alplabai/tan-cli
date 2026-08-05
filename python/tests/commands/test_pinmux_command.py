@@ -440,6 +440,79 @@ def test_text_mode_no_target_shows_a_dash(tmp_path: Path) -> None:
     assert "pinmux: family=- pads=0" in result.output
 
 
+def test_text_mode_renders_the_issue_on_a_hard_failure(tmp_path: Path) -> None:
+    """tan-cli#458: the reproduce, verbatim. `--sdk-root <sdk> --family v2n`
+    against an all-`TBD` table used to print only the unconditional summary
+    line (`pinmux: family=v2n pads=0`) at exit 2, with the envelope's own
+    `pinmux.table-empty` issue never reaching a terminal -- a user saw a
+    plausible `pads=0` and no error at all. FAILS against the pre-fix code:
+    the old text branch wrote the summary line and returned, so
+    `issue.message` never appeared in `result.output`."""
+    all_tbd = (
+        "schemaVersion: pinmux-capability-v1\nfamily: v2n\npads:\n"
+        '  - { e1m_pad: "TBD", e1m_function: "TBD", owner: "renesas", '
+        'silicon_peripheral: "X", silicon_pad: "PA2" }\n'
+    )
+    sdk = _sdk_root(tmp_path, {"v2n": all_tbd})
+    proj = _project(tmp_path)
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--family", "v2n"]
+    )
+    assert result.exit_code == 2
+    assert "pinmux: family=v2n pads=0" in result.output
+    assert (
+        "pinmux: Pinmux capability table for family 'v2n' parsed with zero pads "
+        "(metadata/pinmux/v2n.yaml)." in result.output
+    )
+
+
+def test_text_mode_renders_a_warning_issue_too(tmp_path: Path) -> None:
+    """The no-target case is `warning`-severity at exit 0, not the `error`
+    case above -- pinned separately so a fix that renders only `error`-
+    severity issues (matching just the reported repro) still shows as a gap."""
+    proj = _project(tmp_path)
+    result = runner.invoke(app, ["--project", str(proj)])
+    assert result.exit_code == 0
+    assert "pinmux: Provide --sku <sku> or --family <family>." in result.output
+
+
+def _marker_sdk(root: Path) -> Path:
+    """The one file `discover_workspace_sdk` keys on -- no `metadata/`
+    needed, matching `tests/commands/test_sdk_discovery_ladders.py`'s own
+    `_make_sdk`: this reproduces the tan-cli#407 divergence layout, not a
+    pinmux read."""
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    return root
+
+
+def test_text_mode_renders_the_sdk_divergence_warning(tmp_path: Path) -> None:
+    """Review finding, re-verified: `Envelope.__init__` appends
+    `sdk.discovery-divergent` (tan-cli#407) to a NEW issues list
+    (`_with_sdk_divergence`), not the one `_resolve` returned -- so a text
+    branch iterating the pre-envelope `issues` local never sees it.
+    Reproduces the exact layout `_with_sdk_divergence` gates on: a child
+    `<project>/alp-sdk` AND a lateral `<project's parent>/alp-sdk`, no
+    `--sdk-root`, so BOTH SDK ladders answer `sourceTier: discovery` for
+    different checkouts. FAILS against the pre-fix code: the old text branch
+    iterated `issues` (never `envelope.issues`), so the divergence warning
+    reached the JSON envelope but never a terminal."""
+    proj = _project(tmp_path)
+    _marker_sdk(proj / "alp-sdk")  # the wide ladder's answer
+    lateral = _marker_sdk(tmp_path / "alp-sdk")  # the narrow ladder's answer
+
+    result = runner.invoke(app, ["--project", str(proj)])
+    assert result.exit_code == 0
+    assert "pinmux: Provide --sku <sku> or --family <family>." in result.output
+    assert "pinmux: two alp-sdk checkouts resolve from this directory" in result.output
+    assert lateral.as_posix() in result.output
+
+    json_result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    envelope = json.loads(json_result.stdout)
+    codes = {issue["code"] for issue in envelope["issues"]}
+    assert "sdk.discovery-divergent" in codes
+
+
 # ---------------------------------------------------------------------------
 # tan-cli#359 -- `--family` may not escape `<sdkRoot>/metadata/pinmux`
 # ---------------------------------------------------------------------------

@@ -304,6 +304,25 @@ def test_the_orphan_guard_does_not_fire_on_an_ordinary_checkout(tmp_path):
     assert "bootstrap.workspace-orphan-refused" not in codes(envelope(proc))
 
 
+def test_an_in_place_rerun_over_an_already_bootstrapped_workspace_does_not_refuse(tmp_path):
+    """The orphan guard's own two conditions (`.west/config` at the SOURCE
+    names THIS checkout) are true of every ordinary in-place re-run too, not
+    just a RELOCATION about to orphan the workspace -- with no `--workspace`
+    and a parent that is already nothing but the checkout + its own live
+    workspace, `default_relocation_target` leaves `target` `None` (nothing to
+    relocate), so the fix gates the refusal on `target is not None`."""
+    sdk, topdir = _live_workspace(tmp_path)
+
+    proc = run_tan(
+        "bootstrap", "--dry-run", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), cwd=topdir,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0
+    assert "bootstrap.workspace-orphan-refused" not in codes(env)
+
+
 def test_a_west_config_naming_a_different_repo_is_not_this_checkouts_workspace(tmp_path):
     """`_manifest_points_at` is the discriminator: a `.west/config` in the
     parent that names SOME OTHER directory is not a workspace this checkout is
