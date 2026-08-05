@@ -263,7 +263,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # leading `--format` outside `text`/`json`). Raised rather than
     # extracted: the growth is the explanation of a shipped regression,
     # which is the last thing to move out of the file it explains.
-    "tan/cli.py": 842,
+    # 851, not 842, as of the UX polish sweep task 1: all 32 command
+    # registrations now carry `rich_help_panel=` keywords grouping them
+    # into six titled panels on `--help` (instead of a flat "Commands"
+    # list). The ~9 lines reflect wrapping context_settings arguments
+    # onto separate lines for readability.
+    "tan/cli.py": 851,
 }
 
 #: Some of these are `tan/planner/**`, which is a hash-audited MIRROR of
