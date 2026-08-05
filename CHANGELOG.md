@@ -140,6 +140,30 @@ All notable changes to `tan` are documented here. Format follows
   `cygpath -m` (a no-op on POSIX hosts, where the two forms already agree)
   before matching; the negative control (silent on a genuine single-checkout
   host) is unchanged and stays strict.
+- **`tan diff` reported `no effective-config differences` on a board.yaml
+  `tan validate` rejects with four errors** — the two commands read the same
+  file and disagreed about whether it was usable at all (tan-cli#455). `diff`
+  only ever checked whether it could PARSE `board.yaml` well enough to
+  normalize it; it had no notion of the SDK's own semantic rules (a SoM SKU
+  pattern, whether a preset exists, the closed `peripherals:` enum). Fixed by
+  reusing `validate`'s own spawn-and-analyze machinery
+  (`analyze_validator_output`, the same `scripts/validate_board_yaml.py`
+  argv) whenever an SDK has resolved: a non-clean verdict now becomes a
+  `diff.<outcome>` refusal — `diff.schema-violation`/`diff.failed`/
+  `diff.missing-preset`/`diff.hardware-revision`/`diff.spawn-failed`/
+  `diff.python-too-old` — at the same exit code `validate` would report for
+  that outcome, instead of a clean, meaningless comparison. `diff` still
+  never requires an SDK on its own; with none resolved it falls back to the
+  structural checks alone, exactly as before.
+- **`tan pinmux`'s text renderer dropped the envelope's `issues[]`, so an
+  exit-2 error printed no error at all** — a user saw a plausible
+  `pinmux: family=v2n pads=0` and nothing else, including on a hard failure
+  (tan-cli#458). Text mode now follows the summary line with one
+  `pinmux: <issue.message>` line per issue on stderr, matching the
+  text-mode convention `generate`/`monitor`/`build`/`doctor`/`examples`
+  already use for their own issues. `size`/`image` build a separate text
+  list that drops issues the same way — a distinct, still-open gap, out of
+  scope here.
 
 ## [0.5.0] — 2026-08-04
 
