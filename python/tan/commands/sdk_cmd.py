@@ -213,15 +213,12 @@ def _home_alp_dir() -> Path:
     return Path(home or ".") / ".alp"
 
 
-def _pointer_target(pointer: Path) -> str | None:
-    """The `sdkPath` out of a `{"sdkPath": ..., "updatedAt": ...}` pointer file.
-
-    One function for both pointers -- `tan_core`'s `resolve_active_sdk`
-    (`<workspace>/.alp/sdk-path`) and `resolve_global_default_sdk`
-    (`~/.alp/sdk-default`) are the same read of the same shape at two paths.
-    Every failure is `None`, matching the Rust's `.ok()?` chain: a hand-edited
-    pointer holding invalid JSON, a list, or no `sdkPath` at all must fall
-    through to the next tier, not abort the command.
+def _read_pointer_json(pointer: Path) -> dict[str, Any] | None:
+    """Parse a pointer file (`.alp/sdk-path`, `~/.alp/sdk-default`) into its
+    dict, or `None` on ANY failure -- missing, unreadable, invalid JSON, or a
+    non-dict shape (a list). Shared by every field reader over this shape so
+    `_pointer_target` and `_pointer_written_for` can never disagree about what
+    counts as an unreadable pointer.
     """
     if not pointer.exists():
         return None
@@ -232,10 +229,53 @@ def _pointer_target(pointer: Path) -> str | None:
         parsed = json.loads(raw)
     except ValueError:
         return None
-    if not isinstance(parsed, dict):
-        return None
-    value = parsed.get("sdkPath")
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _pointer_target(pointer: Path) -> str | None:
+    """The `sdkPath` out of a `{"sdkPath": ..., "updatedAt": ...}` pointer file.
+
+    One function for both pointers -- `tan_core`'s `resolve_active_sdk`
+    (`<workspace>/.alp/sdk-path`) and `resolve_global_default_sdk`
+    (`~/.alp/sdk-default`) are the same read of the same shape at two paths.
+    Every failure is `None`, matching the Rust's `.ok()?` chain: a hand-edited
+    pointer holding invalid JSON, a list, or no `sdkPath` at all must fall
+    through to the next tier, not abort the command.
+    """
+    parsed = _read_pointer_json(pointer)
+    value = parsed.get("sdkPath") if parsed is not None else None
     return value if isinstance(value, str) else None
+
+
+def _pointer_written_for(pointer: Path) -> str | None:
+    """The optional `writtenFor` field alongside `sdkPath`/`updatedAt` in
+    `~/.alp/sdk-default` -- which project's bootstrap relocation last wrote
+    this machine-global pointer (tan-cli#464).
+
+    `None` covers both "no opinion" cases the same way, on purpose: a pointer
+    written by an older tan that predates this field, and one this tan wrote
+    for a run that never relocated a checkout FOR a project at all. Neither is
+    a claim that no other project wrote the pointer -- it is the absence of
+    evidence, and `resolve_sdk_tiered` must never manufacture a warning out of
+    it.
+    """
+    parsed = _read_pointer_json(pointer)
+    value = parsed.get("writtenFor") if parsed is not None else None
+    return value if isinstance(value, str) else None
+
+
+def _workspace_under(workspace_root: Path, root: str) -> bool:
+    """Whether `workspace_root` IS `root`, or sits somewhere below it --
+    resolved on both sides so a `..`, a symlink, or Windows' case-folding
+    cannot spoof a match (mirrors `tan.core.fs_confine.resolve_confined`'s own
+    reasoning for the same comparison). Any resolution failure (a path shape
+    the host rejects outright) reads as "not under it" -- the caller treats
+    that as grounds for a WARNING, never a hard failure.
+    """
+    try:
+        return workspace_root.resolve().is_relative_to(Path(root).resolve())
+    except (OSError, ValueError):
+        return False
 
 
 def global_default_pointer_fix_hint(native_path: str) -> str:
@@ -387,11 +427,25 @@ class ActiveSdk:
     workspace that was never pinned in the first place. Distinct from a
     SIXTH `sourceTier` value on purpose -- the tier that actually supplied
     `path` stays accurate; this is a supplementary fact about a REJECTED
-    candidate, reported by the caller via `issues[]` instead."""
+    candidate, reported by the caller via `issues[]` instead.
+
+    `foreign_global_default_for` (tan-cli#464) is the SAME shape of fact for a
+    different silence: `~/.alp/sdk-default` is machine-global and
+    last-writer-wins across every project that ever relocated a checkout on
+    this host, so a caller resolving through the `globalDefault` tier from a
+    workspace that is neither the project the pointer was last written for
+    nor under the SDK it names is reading an answer left behind by SOMEONE
+    ELSE'S bootstrap -- silently, before this. Set only on the `globalDefault`
+    tier (the only one this ambiguity can apply to); `None` covers both "the
+    pointer was written for (or covers) this workspace" and "the pointer
+    predates `writtenFor` and carries no opinion at all" -- deliberately the
+    same as `broken_project_pin`'s "no pointer" case, since neither is
+    evidence of a mismatch."""
 
     path: str | None
     tier: str
     broken_project_pin: str | None = None
+    foreign_global_default_for: str | None = None
 
 
 def _nearest_ancestor_sdk(start: Path) -> str | None:
@@ -480,6 +534,17 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
     that was never pinned at all -- exactly what let a `tan init` run under a
     since-moved project silently re-resolve a DIFFERENT alp-sdk checkout with
     `ok: true`, `issues: []`.
+
+    The `globalDefault` tier carries the SAME kind of silence one tier down
+    (tan-cli#464): it is one pointer shared by every project on the host, so a
+    caller resolving through it from a workspace the pointer was not written
+    for -- and that is not even under the SDK it names -- gets no signal that
+    a DIFFERENT project's bootstrap relocation is what actually decided this
+    answer. `foreign_global_default_for` names that project when this run hit
+    exactly that case; `None` when the pointer covers this caller, or predates
+    `writtenFor` and has no opinion. Resolution is unaffected either way --
+    the same root that would have been returned before this field existed
+    still is.
     """
     flag = (sdk_root or "").strip()
     if flag:
@@ -492,9 +557,18 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
             return ActiveSdk(pin, "projectPin")
         broken_project_pin = pin
 
-    default = _pointer_target(_home_alp_dir() / "sdk-default")
+    default_pointer = _home_alp_dir() / "sdk-default"
+    default = _pointer_target(default_pointer)
     if default is not None and _has_loader_script(Path(default)):
-        return ActiveSdk(default, "globalDefault", broken_project_pin)
+        written_for = _pointer_written_for(default_pointer)
+        foreign = (
+            written_for
+            if written_for is not None
+            and not _workspace_under(workspace_root, written_for)
+            and not _workspace_under(workspace_root, default)
+            else None
+        )
+        return ActiveSdk(default, "globalDefault", broken_project_pin, foreign)
 
     discovered = discover_workspace_sdk(workspace_root)
     if discovered is not None:
@@ -524,6 +598,37 @@ def project_pin_issue(broken_project_pin: str | None, tier: str) -> Issue | None
         f'.alp/sdk-path names "{broken_project_pin}", which does not resolve '
         f"to an alp-sdk checkout from the current directory -- falling "
         f"through to the {tier} tier instead.",
+    )
+
+
+def global_default_foreign_project_issue(foreign_global_default_for: str | None) -> Issue | None:
+    """The tan-cli#464 warning for a `globalDefault` answer that a DIFFERENT
+    project's bootstrap relocation actually decided: `~/.alp/sdk-default` is
+    one pointer, shared and last-writer-wins across every project that ever
+    relocates a checkout on this host, so the earlier of two projects can
+    silently start resolving the later one's SDK the moment the later one
+    bootstraps -- `ok: true`, `issues: []`, same as a caller that was never
+    pinned at all (the maintainer's own #464 repro).
+
+    `None` when `resolve_sdk_tiered` found nothing to warn about -- the
+    pointer covers this caller, or it predates `writtenFor` and carries no
+    opinion -- so every call site can do `issue =
+    global_default_foreign_project_issue(active.foreign_global_default_for);
+    if issue: issues.append(issue)` unconditionally, exactly like
+    `project_pin_issue`. Resolution itself is unchanged by this warning: the
+    root `sdk current` reports is the same root it would have reported before
+    this fix existed."""
+    if foreign_global_default_for is None:
+        return None
+    return Issue(
+        "sdk.global-default-foreign-project",
+        "warning",
+        f'The machine-global default SDK (~/.alp/sdk-default) was last set by '
+        f'a bootstrap relocation in "{foreign_global_default_for}", not by one '
+        f"here -- this workspace is falling through to that project's SDK, "
+        f"which may not be the checkout you expect. Pin this workspace "
+        f"explicitly with `--sdk-root <path>`, or bootstrap here, to stop "
+        f"relying on the shared default.",
     )
 
 
@@ -836,6 +941,20 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
             *text,
         ]
         issues.append(pin_issue)
+    foreign_issue = global_default_foreign_project_issue(active.foreign_global_default_for)
+    if foreign_issue is not None:
+        # tan-cli#464: the shared, last-writer-wins `~/.alp/sdk-default` used
+        # to answer here with no signal that a DIFFERENT project's bootstrap
+        # relocation was what actually decided it -- `ok: true`, `issues: []`,
+        # identical to the correct case. `warning`, matching `pin_issue`
+        # above: the tier still answers the question asked; it is the silence
+        # about WHOSE answer this is that was the defect.
+        text = [
+            f'The global default SDK was last set for '
+            f'"{active.foreign_global_default_for}", not this workspace.',
+            *text,
+        ]
+        issues.append(foreign_issue)
     # tan-cli#407 names THIS command in particular: `sdk current` is what a
     # user runs to ask "which SDK am I on?", and in a workspace holding both a
     # child `<ws>/alp-sdk` and a lateral `../alp-sdk` it answers with the

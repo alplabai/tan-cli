@@ -701,35 +701,52 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     assert not sdk.exists()
     assert (new_sdk / "scripts" / "alp_project.py").is_file()
     assert (sdk.parent / "unrelated.txt").exists()
-    assert sorted(p.name for p in sdk.parent.iterdir()) == ["alp-workspace", "unrelated.txt"]
+    # `.alp` is new (tan-cli#464 layer 1): bootstrap's own project pin.
+    assert sorted(p.name for p in sdk.parent.iterdir()) == [
+        ".alp", "alp-workspace", "unrelated.txt",
+    ]
     # The envelope's own paths agree with where the checkout actually ended up
     # (tan-cli#284's review majors, re-applying to the auto-relocated case).
     assert env["data"]["sdkRoot"] == bootstrap_cmd._native(str(new_sdk))
     assert env["data"]["workspaceDir"] == bootstrap_cmd._native(str(target))
     # tan-cli#185 (shared with the explicit `--workspace` path): the global
-    # default SDK now points at the new location.
+    # default SDK now points at the new location, AND (tan-cli#464) records
+    # which directory's bootstrap wrote it.
     pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
     assert pointer.exists()
-    assert json.loads(pointer.read_text(encoding="utf-8"))["sdkPath"] == str(new_sdk)
+    global_doc = json.loads(pointer.read_text(encoding="utf-8"))
+    assert global_doc["sdkPath"] == str(new_sdk)
+    assert global_doc["writtenFor"] == str(sdk.parent).replace("\\", "/")
+    # tan-cli#464 layer 1: THIS project's own directory-scoped pin, at the
+    # higher-precedence `projectPin` tier -- so this workspace keeps its own
+    # answer even after a different project's later bootstrap overwrites the
+    # shared global default.
+    project_pin = sdk.parent / ".alp" / "sdk-path"
+    assert project_pin.exists()
+    assert json.loads(project_pin.read_text(encoding="utf-8"))["sdkPath"] == str(new_sdk)
 
 
 def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):
     """tan-cli#463: the test above proves the pointer FILE is written; this
-    proves a *second, independent* `tan doctor` process -- run later, from the
-    same directory, the way a customer's next terminal command actually would
-    -- can still resolve the SDK from nothing but that file. The gap #463
-    reported was never "the write is missing" so much as "no test ever drove
-    the read side through a real subprocess boundary": `resolve_sdk_tiered`'s
-    `globalDefault` tier reads `~/.alp/sdk-default` fresh on every invocation,
-    so a bug in THAT read (wrong `_home_alp_dir()`, a JSON-shape mismatch
-    between writer and reader, `.alp/sdk-path` wrongly outranking it) would
-    pass every check above and still leave a customer's `tan doctor` reporting
-    `sdk.root: None` right after a bootstrap that just told them otherwise.
+    proves a *second, independent* `tan doctor` process -- run later, from a
+    directory that carries no pin of its own, the way a customer's next
+    terminal command actually would -- can still resolve the SDK from nothing
+    but that file. The gap #463 reported was never "the write is missing" so
+    much as "no test ever drove the read side through a real subprocess
+    boundary": `resolve_sdk_tiered`'s `globalDefault` tier reads
+    `~/.alp/sdk-default` fresh on every invocation, so a bug in THAT read
+    (wrong `_home_alp_dir()`, a JSON-shape mismatch between writer and reader,
+    `.alp/sdk-path` wrongly outranking it) would pass every check above and
+    still leave a customer's `tan doctor` reporting `sdk.root: None` right
+    after a bootstrap that just told them otherwise.
 
-    `proj/`, the workspace PARENT bootstrap ran in, is deliberately never a
-    tan project of its own (no `.alp/sdk-path` is ever written there by this
-    flow) -- so the tier that must answer here is the GLOBAL default, not a
-    project pin `resolve_sdk_tiered` would also have checked first.
+    Queried from a SUBdirectory of `proj/`, not `proj/` itself: tan-cli#464
+    now ALSO writes a project pin directly in `proj/` on this same
+    relocation (proven separately, in the sibling `--no-west --no-pip` test
+    above), which would resolve through the higher-precedence `projectPin`
+    tier and never exercise this read path at all. A subdirectory carries no
+    pin of its own, so the tier that must still answer here is the GLOBAL
+    default.
     """
     sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
     (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
@@ -743,14 +760,138 @@ def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_p
     )
     assert bootstrap_env["exitCode"] == 0
     assert bootstrap_env["sdk"]["root"] == str(new_sdk).replace("\\", "/")
-    assert not (sdk.parent / ".alp" / "sdk-path").exists()  # not a project pin
 
-    # A FRESH process, same cwd, nothing carried over but the filesystem --
-    # exactly `tan doctor` typed into the same shell a moment later.
-    doctor_env = envelope(run_tan("doctor", "--format", "json", cwd=sdk.parent))
+    sub = sdk.parent / "sub"
+    sub.mkdir()
+    # A FRESH process, a subdirectory of the same cwd, nothing carried over
+    # but the filesystem -- exactly `tan doctor` typed into a nested project
+    # directory a moment later. `run_tan`'s default HOME is derived from
+    # `cwd.parent`, which is a DIFFERENT (empty) directory one level deeper
+    # than the one `bootstrap` above actually wrote to -- pin it explicitly so
+    # this queries the SAME `~/.alp`, not a fresh one (tan-cli#463's own
+    # lesson: a HOME that quietly moves under the probe proves nothing).
+    home = tmp_path / "fake-home"
+    doctor_env = envelope(
+        run_tan(
+            "doctor", "--format", "json", cwd=sub,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
     assert "sdk" in doctor_env, "doctor lost the SDK after a relocating bootstrap"
     assert doctor_env["sdk"]["root"] == bootstrap_env["sdk"]["root"]
     assert doctor_env["sdk"]["sourceTier"] == "globalDefault"
+
+
+def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_path):
+    """tan-cli#464, the maintainer's own repro shape, driven through real,
+    independent subprocesses (never by inspecting pointer bytes -- that
+    coverage already existed and did not catch this):
+
+        A, right after A       sdk.root=<A's own checkout> tier=globalDefault
+        (project B bootstraps and relocates)
+        A (the earlier one)    sdk.root=<B's checkout!>     tier=globalDefault
+
+    `~/.alp/sdk-default` is machine-global and last-writer-wins, so before
+    this fix project A silently started resolving project B's checkout the
+    moment B bootstrapped -- `ok: true`, `issues: []`, identical to the
+    correct case.
+
+    ONE shared HOME across the whole sequence (tan-cli#463's own lesson: an
+    "isolated HOME" control that resets between calls never lets the
+    precondition -- a SECOND project's relocation -- actually land, and a
+    probe that never triggers its own precondition proves nothing).
+    """
+    home = tmp_path / "shared-home"
+    env_extra = {"HOME": str(home), "USERPROFILE": str(home)}
+
+    sdk_a = make_sdk(tmp_path / "projA", tools=[PRESENT_TOOL])
+    sdk_b = make_sdk(tmp_path / "projB", tools=[PRESENT_TOOL])
+    proj_a, proj_b = sdk_a.parent, sdk_b.parent
+    # tan-cli#302's own trigger: something besides the clone beside it (here,
+    # standing in for `relocprobe4.sh`'s own `<project>/tan` wrapper) is what
+    # makes the dirty-parent guard auto-relocate each checkout.
+    (proj_a / "unrelated.txt").write_text("x", encoding="utf-8")
+    (proj_b / "unrelated.txt").write_text("x", encoding="utf-8")
+    new_sdk_a = proj_a / "alp-workspace" / sdk_a.name
+    new_sdk_b = proj_b / "alp-workspace" / sdk_b.name
+
+    bootstrap_a = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk_a), cwd=proj_a, env_extra=env_extra,
+        )
+    )
+    relocated_a = "bootstrap.workspace-relocated" in codes(bootstrap_a)
+    print(f"RELOCATED? {'YES' if relocated_a else 'NO'} (project A)")
+    assert bootstrap_a["exitCode"] == 0
+    assert relocated_a, "precondition unmet: A's bootstrap must actually relocate"
+
+    # Right after A's own bootstrap: A resolves its own checkout via its OWN
+    # project pin (tan-cli#464 layer 1) -- no cross-project warning. Compared
+    # through the envelope's top-level `sdk.root` (ALWAYS posix,
+    # `SdkInfo.as_dict`), not `data.sdkPath` (raw/native on both sides) --
+    # this pointer-sourced tier's `data.sdkPath` is whatever the writer put in
+    # the file verbatim, which is native-slash on Windows.
+    current_a1 = envelope(
+        run_tan("sdk", "current", "--format", "json", cwd=proj_a, env_extra=env_extra)
+    )
+    print(
+        f"  A, right after A       sdk.root={current_a1['sdk']['root']!r} "
+        f"tier={current_a1['data']['sourceTier']}"
+    )
+    assert current_a1["sdk"]["root"] == str(new_sdk_a).replace("\\", "/")
+    assert current_a1["data"]["sourceTier"] == "projectPin"
+    assert "sdk.global-default-foreign-project" not in codes(current_a1)
+
+    bootstrap_b = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk_b), cwd=proj_b, env_extra=env_extra,
+        )
+    )
+    relocated_b = "bootstrap.workspace-relocated" in codes(bootstrap_b)
+    print(f"RELOCATED? {'YES' if relocated_b else 'NO'} (project B)")
+    assert bootstrap_b["exitCode"] == 0
+    assert relocated_b, "precondition unmet: B's bootstrap must actually relocate"
+    pointer = home / ".alp" / "sdk-default"
+    print(f"  pointer now: {pointer.read_text(encoding='utf-8').strip()}")
+
+    # A, queried again from the SAME directory: layer 1 closes the defect
+    # outright here -- A's own project pin outranks the (now B-pointing)
+    # global default, so A keeps resolving its OWN checkout.
+    current_a2 = envelope(
+        run_tan("sdk", "current", "--format", "json", cwd=proj_a, env_extra=env_extra)
+    )
+    print(
+        f"  A (the earlier one)    sdk.root={current_a2['sdk']['root']!r} "
+        f"tier={current_a2['data']['sourceTier']}"
+    )
+    assert current_a2["sdk"]["root"] == str(new_sdk_a).replace("\\", "/"), (
+        "DEFECT: project A silently resolved project B's SDK"
+    )
+    assert current_a2["data"]["sourceTier"] == "projectPin"
+    assert "sdk.global-default-foreign-project" not in codes(current_a2)
+
+    # A caller under A's project but with no pin of its own (layer 1 alone
+    # cannot help this one -- there is nothing at THIS directory to shadow
+    # the shared global default) still falls through to B's checkout, exactly
+    # as before. Layer 2's job is to stop that landing at `ok: true`,
+    # `issues: []`: it must now carry a WARNING naming which project the
+    # global default was actually written for.
+    sub_a = proj_a / "sub"
+    sub_a.mkdir()
+    current_sub_a = envelope(
+        run_tan("sdk", "current", "--format", "json", cwd=sub_a, env_extra=env_extra)
+    )
+    assert current_sub_a["data"]["sourceTier"] == "globalDefault"
+    assert current_sub_a["sdk"]["root"] == str(new_sdk_b).replace("\\", "/")
+    assert "sdk.global-default-foreign-project" in codes(current_sub_a)
+    message = next(
+        i["message"]
+        for i in current_sub_a["issues"]
+        if i["code"] == "sdk.global-default-foreign-project"
+    )
+    assert str(proj_b).replace("\\", "/") in message
 
 
 def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_path):
@@ -1145,7 +1286,9 @@ def test_a_blocked_rollback_reports_the_checkout_as_still_relocated(tmp_path):
     # rollback ran.
     old_root.mkdir()
 
-    result = bootstrap_cmd._undo_relocation(str(old_root), moved_to, None)
+    result = bootstrap_cmd._undo_relocation(
+        str(old_root), moved_to, None, tmp_path / "proj", None
+    )
 
     assert result.moved_back is False
     assert result.detail is not None
@@ -1179,7 +1322,9 @@ def test_a_successful_move_back_with_a_failed_pointer_restore_is_not_reported_as
         bootstrap_cmd, "_home_alp_dir", lambda: tmp_path / "no-such-parent" / "deep"
     )
 
-    result = bootstrap_cmd._undo_relocation(str(old_root), moved_to, b"previous-pointer-bytes")
+    result = bootstrap_cmd._undo_relocation(
+        str(old_root), moved_to, b"previous-pointer-bytes", tmp_path / "proj", None
+    )
 
     # The checkout DID move back -- callers must trust `moved_back`, never
     # infer "still relocated" from `detail` being non-`None`.
@@ -1189,6 +1334,51 @@ def test_a_successful_move_back_with_a_failed_pointer_restore_is_not_reported_as
     assert old_root.is_dir()
     assert (old_root / "marker").exists()
     assert not moved_to.exists()
+
+
+def test_undo_relocation_removes_a_project_pin_that_did_not_exist_before(tmp_path):
+    """tan-cli#464: `_undo_relocation` must undo the project-scoped `.alp/
+    sdk-path` this run wrote in lockstep with the checkout move and the global
+    pointer -- a rolled-back relocation must not leave the project pin naming
+    a location the checkout no longer occupies. The common case is
+    `previous_project_pointer=None` (this write is new), so the undo REMOVES
+    the file rather than restoring stale bytes."""
+    old_root = tmp_path / "ws" / "alp-sdk"
+    old_root.parent.mkdir(parents=True)
+    moved_to = tmp_path / "elsewhere" / "alp-sdk"
+    moved_to.parent.mkdir(parents=True)
+    moved_to.mkdir()
+    project_root = tmp_path / "ws"
+    (project_root / ".alp").mkdir(parents=True)
+    (project_root / ".alp" / "sdk-path").write_text(
+        '{"sdkPath": "the-new-location"}', encoding="utf-8"
+    )
+
+    result = bootstrap_cmd._undo_relocation(str(old_root), moved_to, None, project_root, None)
+
+    assert result.moved_back is True
+    assert not (project_root / ".alp" / "sdk-path").exists()
+
+
+def test_undo_relocation_restores_a_pre_existing_project_pin_verbatim(tmp_path):
+    """The rarer case: a project pin already named SOMETHING before this run's
+    relocation overwrote it. The rollback must restore exactly those bytes,
+    not merely remove the file -- the same "restore what was snapshotted"
+    contract `previous_pointer` already gets for the global default."""
+    old_root = tmp_path / "ws" / "alp-sdk"
+    old_root.parent.mkdir(parents=True)
+    moved_to = tmp_path / "elsewhere" / "alp-sdk"
+    moved_to.parent.mkdir(parents=True)
+    moved_to.mkdir()
+    project_root = tmp_path / "ws"
+    previous = b'{"sdkPath": "the-original-checkout"}'
+
+    result = bootstrap_cmd._undo_relocation(
+        str(old_root), moved_to, None, project_root, previous
+    )
+
+    assert result.moved_back is True
+    assert (project_root / ".alp" / "sdk-path").read_bytes() == previous
 
 
 def test_a_yocto_only_project_is_refused_off_linux_and_a_mixed_one_only_warns(tmp_path):

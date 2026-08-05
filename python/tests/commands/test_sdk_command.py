@@ -83,13 +83,12 @@ def make_sdk_root(path: Path, *, metadata: bool = True, version: str | None = No
     return path
 
 
-def write_pointer(path: Path, sdk_path: Path) -> None:
+def write_pointer(path: Path, sdk_path: Path, *, written_for: Path | str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"sdkPath": str(sdk_path), "updatedAt": "1970-01-01T00:00:00Z"}),
-        encoding="utf-8",
-        newline="",
-    )
+    doc = {"sdkPath": str(sdk_path), "updatedAt": "1970-01-01T00:00:00Z"}
+    if written_for is not None:
+        doc["writtenFor"] = str(written_for)
+    path.write_text(json.dumps(doc), encoding="utf-8", newline="")
 
 
 @pytest.fixture
@@ -170,6 +169,84 @@ def test_a_malformed_pointer_is_a_fallthrough_not_a_crash(
     pointer.parent.mkdir(parents=True)
     pointer.write_text(contents, encoding="utf-8", newline="")
     assert resolve_sdk_tiered(None, workspace).tier == "none"
+
+
+# ── tan-cli#464: the shared, last-writer-wins global default pointer ────────
+
+
+def test_global_default_written_for_is_absent_on_an_older_pointer(tmp_path, isolated_home):
+    """A pointer written by a tan that predates `writtenFor` carries no
+    opinion -- absent must read as UNKNOWN, never as "foreign", or every
+    upgrade would start warning on a pointer nobody wrote wrong."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(isolated_home / ".alp" / "sdk-default", global_target)  # no writtenFor
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.foreign_global_default_for is None
+
+
+def test_global_default_names_the_project_it_was_written_for(tmp_path, isolated_home):
+    """The maintainer's #464 repro shape: a caller resolving through
+    `globalDefault` from a workspace that is neither the project the pointer
+    was written for nor under the SDK it names gets the fact on `ActiveSdk`,
+    without the resolved root changing at all."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    other_project = tmp_path / "other-project"
+    other_project.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for=other_project
+    )
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.path == str(global_target)
+    assert active.foreign_global_default_for == str(other_project)
+
+
+def test_global_default_does_not_warn_for_the_project_it_was_written_for(tmp_path, isolated_home):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for=workspace
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
+
+
+def test_global_default_does_not_warn_for_a_subdirectory_of_the_written_for_project(
+    tmp_path, isolated_home
+):
+    """Closing the SUBdirectory silence #464 names explicitly: a caller
+    beneath the project the pointer was written for is still that project,
+    not a foreign one."""
+    project = tmp_path / "proj"
+    sub = project / "firmware" / "app"
+    sub.mkdir(parents=True)
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(isolated_home / ".alp" / "sdk-default", global_target, written_for=project)
+
+    assert resolve_sdk_tiered(None, sub).foreign_global_default_for is None
+
+
+def test_global_default_does_not_warn_from_inside_the_sdk_checkout_it_names(
+    tmp_path, isolated_home
+):
+    """A caller working FROM the SDK checkout the pointer resolves to is not
+    "foreign", even when `writtenFor` names a different project entirely --
+    resolution behaviour (returning that checkout) is unchanged by this fix,
+    so the warning must not contradict it."""
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default",
+        global_target,
+        written_for=tmp_path / "unrelated-project",
+    )
+    assert resolve_sdk_tiered(None, global_target).foreign_global_default_for is None
 
 
 def test_discovery_prefers_the_workspace_itself_and_refuses_ambiguity(tmp_path):

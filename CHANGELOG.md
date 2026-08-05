@@ -190,6 +190,56 @@ All notable changes to `tan` are documented here. Format follows
   already use for their own issues. `size`/`image` build a separate text
   list that drops issues the same way — a distinct, still-open gap, out of
   scope here.
+- **`tan bootstrap --print-env` reported a workspace `bootstrap` would never
+  create, before the first real bootstrap ever ran** (tan-cli#459). It
+  assumed the checkout's PARENT was the west workspace — exactly the
+  assumption a dirty parent makes `bootstrap` itself reject in favour of
+  auto-relocating into `<parent>/alp-workspace` (tan-cli#302/#185) — so on
+  that same host `--print-env` and `--dry-run` disagreed: one printed
+  `ZEPHYR_BASE=<parent>/zephyr`, three paths verified absent on disk and that
+  no future run would ever create, at `ok: true`, `issues: []`; the other
+  correctly named `<parent>/alp-workspace/zephyr`. Fixed by
+  `_print_env_outcome`, which now projects `--print-env`'s reported paths
+  through the SAME write-time decision the real run would make — the
+  relocation guard or a `$ZEPHYR_BASE` adoption — so it can no longer diverge
+  from `--dry-run` over identical input. New test:
+  `test_print_env_agrees_with_dry_run_on_a_dirty_parent`.
+- **A second project's `tan bootstrap` could silently repoint a FIRST
+  project's SDK at the wrong checkout, `ok: true`, no warning** (tan-cli#464).
+  A relocating bootstrap recorded the move only in the machine-global
+  `~/.alp/sdk-default` — one pointer, last-writer-wins across every project on
+  the host — so the moment a second project bootstrapped and relocated, the
+  first project's `tan sdk current`/`tan build` silently started resolving
+  the SECOND project's checkout instead of its own, with `issues` identical
+  to the correct case. Two changes, `sdk_cmd.py` + `bootstrap_cmd.py`:
+  1. An actual (non-`--dry-run`) relocation now ALSO writes a directory-scoped
+     `.alp/sdk-path` in the directory `bootstrap` ran in
+     (`_write_project_sdk_pointer`), at the higher-precedence `projectPin`
+     tier — so a project that has bootstrapped once keeps resolving its OWN
+     checkout regardless of what any later bootstrap, anywhere else, does to
+     the shared default. Gated identically to the existing global-pointer
+     write (`target is not None`, never under `--dry-run`, tan-cli#323).
+     `_undo_relocation`/`RelocationUndo` roll this pin back in lockstep with
+     the checkout move and the global pointer if a LATER step in the same run
+     fails, so a rolled-back relocation cannot leave it naming a vacated
+     location.
+  2. `~/.alp/sdk-default` now also records `writtenFor` — which project's
+     bootstrap last wrote it. `resolve_sdk_tiered`'s `globalDefault` tier
+     resolution is UNCHANGED (the same root still answers), but a caller
+     resolving through it from a workspace that is under neither
+     `writtenFor` nor the SDK path itself now gets a new
+     `sdk.global-default-foreign-project` WARNING naming the project the
+     pointer was actually written for. A pointer written by an older tan with
+     no `writtenFor` field is absorbed as UNKNOWN, never as a false positive.
+     Wired into `sdk current` (`resolve_sdk_tiered`'s one caller inside
+     `sdk_cmd.py`); resolution behaviour anywhere else that reads
+     `resolve_sdk_tiered` is unaffected. New tests:
+     `test_a_second_projects_relocation_does_not_silently_repoint_the_first`
+     (two real bootstraps, one shared HOME, driven through subprocesses —
+     never by inspecting pointer bytes, which already had coverage and did
+     not catch this) plus unit coverage in `test_sdk_command.py` for the
+     `writtenFor` precedence rules and `_undo_relocation`'s project-pin
+     rollback.
 
 ## [0.5.0] — 2026-08-04
 

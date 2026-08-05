@@ -86,7 +86,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # one-line `target is not None` gate on the tan-cli#389 orphan refusal
     # (was refusing every in-place re-run of an already-bootstrapped
     # workspace, naming its own non-existent relocation target "None").
-    "tan/commands/bootstrap_cmd.py": 2833,
+    #
+    # 2953, not 2833, as of tan-cli#464: a relocation now writes a SECOND
+    # pointer (`_write_project_sdk_pointer`/`_read_project_sdk_pointer`, the
+    # directory-scoped `.alp/sdk-path` pin, mirroring `init_cmd._pin_sdk`'s
+    # own confinement guard) alongside the existing global-default write
+    # (`_global_sdk_pointer_json`, `writtenFor`), and `_undo_relocation`/
+    # `RelocationUndo` grew the matching rollback path so a LATER step's
+    # failure cannot leave that new pin naming a vacated location.
+    "tan/commands/bootstrap_cmd.py": 2953,
     "tan/core/bootstrap.py": 1890,
     "tan/core/flash_plan.py": 1808,
     "tan/commands/flash_cmd.py": 1781,
@@ -121,7 +129,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # rather than extracted: `_overlay_would_overwrite` is five body lines
     # including its own read-error handling; there is nothing left to split.
     "tan/commands/generate_cmd.py": 1150,
-    "tan/commands/sdk_cmd.py": 1096,
+    # 1215, not 1096, as of tan-cli#464: the `globalDefault` tier gained a
+    # `writtenFor`-vs-caller check (`_workspace_under`,
+    # `global_default_foreign_project_issue`) and a shared `_read_pointer_json`
+    # (`_pointer_target`/`_pointer_written_for` now both read through it,
+    # rather than duplicating the same parse-and-degrade logic a second time).
+    "tan/commands/sdk_cmd.py": 1215,
     "tan/commands/validate_cmd.py": 1093,
     "tan/commands/new_som_cmd.py": 1047,
     "tan/commands/clean_cmd.py": 1000,
@@ -188,8 +201,17 @@ _MIRRORED = ("tan/planner/",)
 # crossed 50 lines carrying the alp-sdk#1069 disjoint-slot0 branch. It is a
 # line-for-line port of alp-sdk's own function, which is the same size --
 # extracting here would make the next port a hand-merge instead of a diff.
-_FUNCTION_COUNT_BUDGET = 201
-_FUNCTION_WORST_BUDGET = 679
+# 203, and 700 not 679, as of tan-cli#464: `bootstrap_cmd._run`'s own
+# relocation block grew the two pointer writes (already ratcheted above) and
+# `resolve_sdk_tiered` (61 lines, `sdk_cmd.py`) and `_undo_relocation` (51
+# lines, `bootstrap_cmd.py`) each crossed 50 for the first time -- the
+# `writtenFor`-vs-caller check and the matching project-pin rollback,
+# respectively. Both are inline in the SAME control flow their pre-existing
+# neighbour statements already live in; splitting either into a helper here
+# would not shrink the module total, only move lines off this ratchet onto
+# the module one above.
+_FUNCTION_COUNT_BUDGET = 203
+_FUNCTION_WORST_BUDGET = 700
 
 
 def _modules() -> list[Path]:
