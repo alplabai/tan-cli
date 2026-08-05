@@ -112,6 +112,34 @@ All notable changes to `tan` are documented here. Format follows
   refusals now, none left unclassified. Not a breaking wire change: every
   `debug-config.*` code in the registry is still `"status": "reserved"`/
   `"consumer": "none"`.
+- **A relocating `tan bootstrap` had no test proving the very next `tan
+  doctor` could still find the checkout it just moved (tan-cli#463).** The
+  tan-cli#185 auto-relocation into `<parent>/alp-workspace/alp-sdk` already
+  repoints `~/.alp/sdk-default` at the new location (`_write_global_sdk_pointer`,
+  gated on an actual relocation and skipped under `--dry-run`, both
+  unchanged) — but nothing exercised the READ side through a real subprocess
+  boundary: a *second*, independent `tan doctor` invocation, the way a
+  customer's next terminal command actually works, reading nothing but that
+  file. A regression there (`resolve_sdk_tiered`'s `globalDefault` tier, a
+  `_home_alp_dir()` mismatch, or a writer/reader JSON-shape drift) would have
+  passed every existing check. `.alp/sdk-path` (a PROJECT pin) is
+  deliberately not what carries this: bootstrap runs in the workspace
+  PARENT, which is not itself a tan project, so the pin that must answer is
+  the machine-global default, not a project-scoped one that flow never
+  writes. New test:
+  `test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk`.
+- **The e2e harness's tan-cli#407 assertion was path-form-blind on
+  Windows.** `scripts/e2e-full.sh`'s two-checkout divergence check grepped
+  doctor's text report for its own `$D407` in Git Bash's MSYS mount form
+  (`/c/v06/...`), but doctor renders that path through `_abs_posix()` —
+  always the drive-letter form (`C:/v06/...`, via
+  `os.path.abspath().replace('\\','/')`) — even under Git Bash. Same
+  directory, different spelling, so the grep never matched and the harness
+  reported `#407: doctor's text report is silent about the second checkout`
+  on a report that named it plainly. The comparison now normalises through
+  `cygpath -m` (a no-op on POSIX hosts, where the two forms already agree)
+  before matching; the negative control (silent on a genuine single-checkout
+  host) is unchanged and stays strict.
 
 ## [0.5.0] — 2026-08-04
 

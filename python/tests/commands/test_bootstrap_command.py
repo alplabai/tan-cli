@@ -713,6 +713,45 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     assert json.loads(pointer.read_text(encoding="utf-8"))["sdkPath"] == str(new_sdk)
 
 
+def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):
+    """tan-cli#463: the test above proves the pointer FILE is written; this
+    proves a *second, independent* `tan doctor` process -- run later, from the
+    same directory, the way a customer's next terminal command actually would
+    -- can still resolve the SDK from nothing but that file. The gap #463
+    reported was never "the write is missing" so much as "no test ever drove
+    the read side through a real subprocess boundary": `resolve_sdk_tiered`'s
+    `globalDefault` tier reads `~/.alp/sdk-default` fresh on every invocation,
+    so a bug in THAT read (wrong `_home_alp_dir()`, a JSON-shape mismatch
+    between writer and reader, `.alp/sdk-path` wrongly outranking it) would
+    pass every check above and still leave a customer's `tan doctor` reporting
+    `sdk.root: None` right after a bootstrap that just told them otherwise.
+
+    `proj/`, the workspace PARENT bootstrap ran in, is deliberately never a
+    tan project of its own (no `.alp/sdk-path` is ever written there by this
+    flow) -- so the tier that must answer here is the GLOBAL default, not a
+    project pin `resolve_sdk_tiered` would also have checked first.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    new_sdk = sdk.parent / "alp-workspace" / sdk.name
+
+    bootstrap_env = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
+        )
+    )
+    assert bootstrap_env["exitCode"] == 0
+    assert bootstrap_env["sdk"]["root"] == str(new_sdk).replace("\\", "/")
+    assert not (sdk.parent / ".alp" / "sdk-path").exists()  # not a project pin
+
+    # A FRESH process, same cwd, nothing carried over but the filesystem --
+    # exactly `tan doctor` typed into the same shell a moment later.
+    doctor_env = envelope(run_tan("doctor", "--format", "json", cwd=sdk.parent))
+    assert doctor_env["sdk"]["root"] == bootstrap_env["sdk"]["root"]
+    assert doctor_env["sdk"]["sourceTier"] == "globalDefault"
+
+
 def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_path):
     """tan-cli#302 non-negotiable: auto-relocating into
     `default_relocation_target`'s own `alp-workspace` choice is safe only into

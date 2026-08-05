@@ -298,10 +298,35 @@ hdr "#323 --dry-run MUTATES NOTHING"
 [ ! -e "$HOME/.alp" ]  && ok "#323: no ~/.alp written"         || bad "#323: dry run wrote the global pointer"
 grep -q "would move\|would set" "$WORK/bsdry.out" && ok "#323: conditional wording (\"would\")" || note "no 'would' verb (no relocation planned)"
 
-hdr "prerequisite scan (cmake, ninja, xz, wget)"
+# The prerequisite set is PER HOST, exactly as metadata/bootstrap.json declares
+# it -- posix: git cmake python3 ninja xz wget; windows: git cmake python ninja.
+# `xz` and `wget` are POSIX-only entries; tan never asks a Windows host for them.
+#
+# Checking the POSIX four on every platform is what made SCENARIO B unrunnable
+# on Windows: a fully provisioned Windows box (cmake, ninja, git, python all on
+# PATH, and `xz` shipped by Git Bash at /mingw64/bin/xz) was scored "bare"
+# purely because `wget` was absent, so the harness skipped the real-ARM-ELF leg
+# and reported `scenario B: 0 passed, 0 failed`. Measured on
+# MINGW64_NT-10.0-26200. No workflow invokes this script, so that meant the
+# Windows provisioned-host path had never been exercised by anyone.
+#
+# Scenario A stays honest: on a Windows host that really does have its set, A
+# reports "not applicable" rather than inventing a refusal to score.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*) HOST_PREREQS="git cmake ninja" ; HOST_IS_WINDOWS=1 ;;
+  *)                    HOST_PREREQS="cmake ninja xz wget" ; HOST_IS_WINDOWS=0 ;;
+esac
+hdr "prerequisite scan ($(echo "$HOST_PREREQS" | tr ' ' ','))"
 have_prereqs() {
-  command -v cmake >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1 \
-    && command -v xz >/dev/null 2>&1 && command -v wget >/dev/null 2>&1
+  for _t in $HOST_PREREQS; do
+    command -v "$_t" >/dev/null 2>&1 || return 1
+  done
+  # Windows accepts the interpreter as `python` OR the `py` launcher, matching
+  # tan's own _prereq_present() (bootstrap_cmd.py:415).
+  if [ "$HOST_IS_WINDOWS" -eq 1 ]; then
+    command -v python >/dev/null 2>&1 || command -v py >/dev/null 2>&1 || return 1
+  fi
+  return 0
 }
 CAN_APT=0
 if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && command -v apt-get >/dev/null 2>&1; then
@@ -438,9 +463,20 @@ else
     note "$(head -c 400 "$WORK/bsB.out")"
   fi
   WS=$(jget "$WORK/bsB.out" data.workspaceDir); note "workspace=$WS"
-  WEST_BIN="$WS/.venv/bin/west"
+  # The venv layout is per-platform: POSIX puts console scripts in `bin/`,
+  # Windows in `Scripts/` with a `.exe` suffix. tan itself gets this right --
+  # facts.venv_bin_dir(is_windows), bootstrap_cmd.py:649 -- but this check
+  # hardcoded the POSIX shape, so on Windows it reported
+  # `no west at <ws>/.venv/bin/west` while bootstrap had correctly produced
+  # <ws>\.venv\Scripts\west.exe. Measured on MINGW64_NT-10.0-26200.
+  if [ "$HOST_IS_WINDOWS" -eq 1 ]; then
+    WEST_REL=".venv/Scripts/west.exe"
+  else
+    WEST_REL=".venv/bin/west"
+  fi
+  WEST_BIN="$WS/$WEST_REL"
   if [ "$WS" != "NONE" ] && [ -x "$WEST_BIN" ]; then
-    okb "B: west exists at \$workspaceDir/.venv/bin/west"
+    okb "B: west exists at \$workspaceDir/$WEST_REL"
   else
     badb "B: no west at $WEST_BIN"
   fi
@@ -526,7 +562,23 @@ PY
       # the build is EXPECTED to fail, and must name the missing Zephyr SDK --
       # an unnamed failure, or a build that unexpectedly succeeds anyway, is
       # itself a finding.
-      if [ "$RC" -eq 0 ]; then
+      #
+      # UNLESS the host already carries a Zephyr SDK of its own. This harness
+      # not attempting an install does NOT mean the host has none: a developer
+      # box commonly has ~/zephyr-sdk-<ver> from unrelated work (measured:
+      # /c/Users/<user>/zephyr-sdk-1.0.1 on the Windows box where this fired),
+      # and `tan build` finding it and succeeding is CORRECT, not a defect.
+      # Scoring that as "build unexpectedly succeeded" is the harness asserting
+      # its own assumption over the observed host.
+      HOST_ZSDK=no
+      for _z in "$HOME"/zephyr-sdk-* /opt/zephyr-sdk-* "${ZEPHYR_SDK_INSTALL_DIR:-}"; do
+        [ -n "$_z" ] && [ -d "$_z" ] && HOST_ZSDK=yes && break
+      done
+      if [ "$RC" -eq 0 ] && [ "$HOST_ZSDK" = yes ]; then
+        note "B: build succeeded using a Zephyr SDK already present on this host"
+        note "   (not installed by this run) -- correct behaviour, not scored as"
+        note "   a pass or a failure: the no-SDK refusal path is NOT exercised here."
+      elif [ "$RC" -eq 0 ]; then
         badb "B: build unexpectedly succeeded with no Zephyr SDK installed"
       else
         NAMED_BUILD=no
@@ -716,7 +768,17 @@ fi
 # internal name it was written against, and reported a silent doctor while
 # doctor was in fact naming both roots. An e2e assertion has to survive that.
 "$TAN" doctor >"$WORK/div-doctor.txt" 2>&1
-if grep -q "resolve a DIFFERENT checkout" "$WORK/div-doctor.txt"    && grep -q "$D407/ws/alp-sdk" "$WORK/div-doctor.txt"; then
+# doctor renders this path through `_abs_posix()` (build_cmd.py:333):
+# `os.path.abspath().replace("\\","/")`, which on Windows is always the
+# drive-letter form `C:/...` -- even under Git Bash, where THIS script's own
+# $D407 is the MSYS mount form `/c/...`. Same directory, different spelling:
+# a literal grep for "$D407/ws/alp-sdk" therefore never matches on Windows and
+# always misreports the divergence warning as silent. cygpath -m renders the
+# same drive-letter/forward-slash form doctor does; on a host with no cygpath
+# (plain POSIX), $D407 is already in that form, so the fallback is a no-op.
+divpath() { command -v cygpath >/dev/null 2>&1 && cygpath -m "$1" || printf '%s\n' "$1"; }
+D407_WS_ALP_SDK="$(divpath "$D407/ws/alp-sdk")"
+if grep -q "resolve a DIFFERENT checkout" "$WORK/div-doctor.txt"    && grep -qF "$D407_WS_ALP_SDK" "$WORK/div-doctor.txt"; then
   ok "#407: doctor's text report names the second checkout"
   note "$(grep -o "warn\] sdk: .*resolve a DIFFERENT checkout" "$WORK/div-doctor.txt" | head -1)"
 else
