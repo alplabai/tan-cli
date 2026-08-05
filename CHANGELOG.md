@@ -9,6 +9,20 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`bootstrap.workspace-orphan-refused` named a stringified Python `None` for
+  its destination, and advised dropping a `--workspace` flag the invocation
+  never carried.** Already unreachable in practice on this branch -- the
+  `target is not None` gate added by tan-cli#389/#390 means the no-`--workspace`
+  shape this was filed against no longer refuses at all, so the report
+  reproduces against the published `v0.5.0` rather than `dev` -- but the inline
+  message still interpolated `target` unconditionally, and would print `None`
+  again the moment that gate is loosened. Split into
+  `workspace_orphan_refusal()`, alongside the two sibling refusals that already
+  had this shape, with a dedicated no-destination branch: "...so it cannot be
+  relocated -- its .west/config would still name this checkout. ... This
+  workspace is already bootstrapped; re-run without --sdk-root pointing into
+  it, or clone a SECOND alp-sdk checkout elsewhere and pass --sdk-root at that
+  one." The `--workspace`-supplied branch is unchanged. (#469)
 - **`contract/issue-codes.json` registered two codes twice, one pair
   disagreeing on severity.** `bootstrap.adopted-venv-unusable` carried a
   `warning` entry (matching `ensure_venv`'s live `log.warn` call site) and a
