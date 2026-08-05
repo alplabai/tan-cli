@@ -47,7 +47,10 @@ def test_hyphenated_identifiers_straddling_the_wrap_boundary_are_not_split():
 def test_a_single_overlong_token_overflows_its_own_line_instead_of_being_chopped():
     """A long path-like token with no spaces, wider than the wrap width: it
     must come out complete, even past `width`, never chopped mid-character."""
-    token = "C:/Users/example/very/long/nested/sdk/path/arm-zephyr-eabi/bin"
+    # `dev`, not a made-up-looking name: `test_no_leaked_host_paths` judges a
+    # `C:/Users/<home>` by SHAPE, and anything outside its placeholder set --
+    # `example` included -- reads as a real account on a public repo.
+    token = "C:/Users/dev/very/long/nested/sdk/path/arm-zephyr-eabi/bin"
     body = f"toolchain not found at {token} check your install"
 
     lines = wrap_block(body, 20, "  ", "  ")
