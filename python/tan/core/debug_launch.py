@@ -214,9 +214,9 @@ def infer_target_kind(
     None)`` with no signal at all (native-host survives, the pre-#456
     default); ``(None, code, reason)`` on a refusal. ``code`` is a
     `debug-config.<code>` suffix, tan-cli#462's split of the old blanket
-    ``internal-failure`` for a CALLER-fixable precondition (pre-build
-    hardware, or a bad ``--core``); or ``None`` on its two unclassified
-    shapes (more than one target class, or none at all).
+    ``internal-failure`` into one code per CALLER-fixable precondition --
+    pre-build hardware, a bad ``--core``, ambiguous target classes, or none
+    debuggable at all -- so ``code`` is never ``None`` once ``reason`` is.
 
     ``--core`` filters the WHOLE slice list first, before native_sim is
     excluded -- never only the hardware slices: that was the review-round bug,
@@ -242,8 +242,8 @@ def infer_target_kind(
         if len(targets) == 1:
             return next(iter(targets)), None, None
         if targets:
-            return None, None, _ambiguous_target_classes_message(targets)
-        return None, None, _no_debuggable_class_message(oses)
+            return None, "target-kind-ambiguous", _ambiguous_target_classes_message(targets)
+        return None, "no-debuggable-target-class", _no_debuggable_class_message(oses)
     if all_slices:
         return NATIVE_HOST, None, None  # every (matching) slice built is native_sim -- a real default.
 

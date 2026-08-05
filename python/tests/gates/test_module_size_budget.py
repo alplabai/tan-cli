@@ -93,17 +93,24 @@ _MODULE_BUDGET: dict[str, int] = {
     "tan/planner/kconfig.py": 1639,
     "tan/commands/build_cmd.py": 1559,
     "tan/commands/renode_cmd.py": 1440,
-    # 1348, not 1296, as of tan-cli#462: two new `_failure` callers
-    # (`_build_manifest_missing_failure`/`_core_unknown_failure`) split
-    # `--target-kind` inference's two user-fixable refusals off the old
-    # blanket `internal-failure` verdict into their own `VALIDATION_FAILURE`
-    # (2) issue codes, plus the call-site branch that picks between them and
-    # the pre-#462 `internal-failure` fallback. Raised rather than extracted:
-    # both new functions are five-line mirrors of the existing
-    # `_internal_failure`/`_write_failure` pair right beside them: splitting
-    # them elsewhere would separate four near-identical siblings instead of
-    # keeping the shared shape visible in one place.
-    "tan/commands/debug_config_cmd.py": 1348,
+    # 1402, not 1296, as of tan-cli#462 (both rounds): four new `_failure`
+    # callers (`_build_manifest_missing_failure`/`_core_unknown_failure`,
+    # then the review round's `_target_kind_ambiguous_failure`/
+    # `_no_debuggable_target_class_failure`) split `--target-kind`
+    # inference's four user-fixable refusals off the old blanket
+    # `internal-failure` verdict into their own `VALIDATION_FAILURE` (2)
+    # issue codes, plus the call-site branches that pick between them and the
+    # pre-#462 `internal-failure` fallback. Raised rather than collapsed into
+    # one shared `_validation_failure(generated_at, code, ...)` helper:
+    # `test_every_issue_code_is_registered.py` resolves this file's `_failure`
+    # calls by requiring a LITERAL `code=` keyword at every call site (it
+    # reconstructs `debug-config.<code>` by parsing the AST, not by running
+    # the code), so collapsing the four wrappers into one parameterised
+    # helper reddens that gate with "N code-position argument(s) could not be
+    # resolved to a literal ... a 'code=' keyword argument is not a
+    # resolvable code literal" -- each wrapper's own literal is the only
+    # shape the gate can verify against the registry.
+    "tan/commands/debug_config_cmd.py": 1402,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's

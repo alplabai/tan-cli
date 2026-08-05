@@ -95,6 +95,23 @@ All notable changes to `tan` are documented here. Format follows
   unchanged and keep exit 5. Not a breaking wire change: every
   `debug-config.*` code in the registry is still `"status": "reserved"`/
   `"consumer": "none"`.
+- **The other two `infer_target_kind` refusals were the SAME defect as the
+  pair above and got left at exit 5.** Review round on tan-cli#462: a
+  mixed-core board's `build/system-manifest.yaml` naming more than one
+  target class with no `--core` to narrow them, and a manifest naming hardware
+  slices whose `os` maps to no known target class at all (e.g. a lone
+  `os: linux` slice), both hit a WELL-FORMED, tan-produced manifest — the
+  first is worse than the pair already fixed, since it hits every run against
+  a fully built, CORRECT project forever, not just one command early — and
+  both have a working remedy the message itself names (`--target-kind`
+  explicit). Both now exit `ExitCode.VALIDATION_FAILURE` (2) via two more
+  registry codes, `debug-config.target-kind-ambiguous` and
+  `debug-config.no-debuggable-target-class`, replacing the shared
+  `debug-config.internal-failure` for these two cases too (messages
+  unchanged). `infer_target_kind` returns a reason code for all four
+  refusals now, none left unclassified. Not a breaking wire change: every
+  `debug-config.*` code in the registry is still `"status": "reserved"`/
+  `"consumer": "none"`.
 
 ## [0.5.0] — 2026-08-04
 

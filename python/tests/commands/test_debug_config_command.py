@@ -1127,7 +1127,14 @@ def test_an_omitted_target_kind_refuses_on_a_mixed_manifest(tmp_path):
     `"zephyr"` -- those substrings also match the OLD, wrong message (which
     printed the raw manifest `os` values `yocto`/`zephyr`, not a value
     `--target-kind` actually accepts), so the old assertion never would have
-    caught that bug."""
+    caught that bug.
+
+    tan-cli#462 review round: this hits a fully built, CORRECT project (a
+    mixed-core board with no `--core` to narrow it) and never stops -- worse
+    than the pre-build refusal above, since it fires on every run, not just
+    one command early. `VALIDATION_FAILURE` (2), not `INTERNAL_FAILURE` (5),
+    same reasoning. FAILS against the pre-fix code, which reported this exact
+    refusal at exit 5 with issue code `debug-config.internal-failure`."""
     pytest.importorskip("yaml")
     Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-V2N101\n", encoding="utf-8")
     root = str(tmp_path).replace("\\", "/")
@@ -1135,8 +1142,8 @@ def test_an_omitted_target_kind_refuses_on_a_mixed_manifest(tmp_path):
 
     env = envelope(run_cli(tmp_path, "--format", "json"))
 
-    assert env["exitCode"] == 5
-    assert env["issues"][0]["code"] == "debug-config.internal-failure"
+    assert env["exitCode"] == 2, env
+    assert env["issues"][0]["code"] == "debug-config.target-kind-ambiguous"
     message = env["issues"][0]["message"]
     assert "yocto-userspace" in message and "zephyr-mcu" in message, message
     assert not launch_json(tmp_path).exists()
@@ -1146,7 +1153,14 @@ def test_an_omitted_target_kind_refuses_with_its_own_message_for_a_single_unmapp
     """Review round on tan-cli#456: a lone slice whose `os` maps to no
     `--target-kind` at all (e.g. `linux`) is NOT "more than one target
     class" -- the shared ambiguous-manifest message said so anyway, which is
-    false with only one slice in play. This gets its own, honest message."""
+    false with only one slice in play. This gets its own, honest message.
+
+    tan-cli#462 review round: this is a knowledge/version skew between tan
+    and the SDK, not a crash -- no invariant was violated and the command
+    still produces a coherent verdict with a working remedy (`--target-kind`
+    explicit). `VALIDATION_FAILURE` (2), not `INTERNAL_FAILURE` (5). FAILS
+    against the pre-fix code, which reported this exact refusal at exit 5
+    with issue code `debug-config.internal-failure`."""
     pytest.importorskip("yaml")
     Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-UNKNOWN\n", encoding="utf-8")
     write_manifest(
@@ -1157,7 +1171,8 @@ def test_an_omitted_target_kind_refuses_with_its_own_message_for_a_single_unmapp
 
     env = envelope(run_cli(tmp_path, "--format", "json"))
 
-    assert env["exitCode"] == 5
+    assert env["exitCode"] == 2, env
+    assert env["issues"][0]["code"] == "debug-config.no-debuggable-target-class"
     message = env["issues"][0]["message"]
     assert "no debuggable target class for os: linux" in message, message
     assert "more than one" not in message, message

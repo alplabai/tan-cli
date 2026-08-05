@@ -365,6 +365,24 @@
       "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the caller's own typo or a stale `--core` value, not a tan-side crash. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
     },
     {
+      "code": "debug-config.target-kind-ambiguous",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--target-kind` is omitted and this project's own `build/system-manifest.yaml` names more than one target class (a mixed-core board, e.g. E1M-V2N101/V2M101's `a55_cluster`+`m33_sm`) with no `--core` to narrow them -- exits `ValidationFailure` (2), naming the target classes in play.",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#462 review round: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- worse than the pre-build/bad-`--core` cases split off first, since it hits a fully built, CORRECT project and never stops, not just one command early. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
+    },
+    {
+      "code": "debug-config.no-debuggable-target-class",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--target-kind` is omitted, hardware slices exist in this project's own `build/system-manifest.yaml`, but none of their `os` values maps to a known target class (e.g. a lone `os: linux` slice) -- exits `ValidationFailure` (2), naming the unmapped `os` value(s).",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#462 review round: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- a knowledge/version skew between tan and the SDK, not a crash: no invariant was violated and the command still produces a coherent verdict with a working remedy (`--target-kind` explicit). Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
+    },
+    {
       "code": "build.manifest-write-failed",
       "status": "reserved",
       "severity": "warning",

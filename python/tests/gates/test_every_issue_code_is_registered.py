@@ -774,12 +774,16 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         name="_failure",
         arg_keyword="code",
-        # 4, not 2, as of tan-cli#462: `_build_manifest_missing_failure` and
+        # 6, not 2, as of tan-cli#462: `_build_manifest_missing_failure` and
         # `_core_unknown_failure` each add their own literal `code=` call to
         # `_failure`, splitting their two refusals off `_internal_failure`'s
-        # blanket `internal-failure` at `VALIDATION_FAILURE` (2). Both codes
-        # checked against the registry before the bump.
-        expected_calls=4,
+        # blanket `internal-failure` at `VALIDATION_FAILURE` (2) (4). Review
+        # round: `_target_kind_ambiguous_failure` and
+        # `_no_debuggable_target_class_failure` do the same for
+        # `infer_target_kind`'s other two refusal shapes -- the SAME defect,
+        # not a distinct one -- bringing this to 6. All four split-off codes
+        # checked against the registry before each bump.
+        expected_calls=6,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(

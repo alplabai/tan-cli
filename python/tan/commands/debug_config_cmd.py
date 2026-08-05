@@ -7,10 +7,11 @@ the target class + server, resolve what this project's own build already knows
 `<workspace>/.vscode/launch.json`. Invalid kind / unsupported backend /
 malformed existing file -> exit 5; a failed write -> exit 3; an omitted
 `--target-kind` this project cannot yet resolve to one target class --
-pre-build, or an explicit `--core` matching no slice -- is the CALLER's own
-precondition to fix, not a tan crash, so it exits `VALIDATION_FAILURE` (2)
-instead (tan-cli#462, matching the distinction tan-cli#262 settled for
-`tan validate`).
+pre-build, an explicit `--core` matching no slice, more than one target class
+with no `--core` to narrow them, or no slice whose `os` maps to a target class
+at all -- is the CALLER's own precondition to fix, not a tan crash, so all
+four exit `VALIDATION_FAILURE` (2) instead (tan-cli#462, matching the
+distinction tan-cli#262 settled for `tan validate`).
 
 **The debug profile follows from the target CLASS; the customer never selects an
 OS or a backend.** `--target-kind` names one of four classes, each of which
@@ -823,6 +824,52 @@ def _core_unknown_failure(generated_at: str, message: str, launch_json_path: str
     )
 
 
+def _target_kind_ambiguous_failure(
+    generated_at: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#462 review round: `--target-kind` omitted, and this project's
+    own `build/system-manifest.yaml` -- well-formed, fully built, tan's own
+    output -- names more than one target class (a mixed-core board, e.g.
+    E1M-V2N101/V2M101's `a55_cluster`+`m33_sm`) with no `--core` to narrow
+    them. Worse than the two refusals above: it hits every run against a
+    CORRECT project forever, not just a pre-build one, and the remedy the
+    message itself names (`--target-kind` + `--core`) works. Still the
+    caller's own precondition, not a tan crash -- exit 2, same reasoning as
+    [`_build_manifest_missing_failure`] above."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="target-kind-ambiguous",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
+def _no_debuggable_target_class_failure(
+    generated_at: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#462 review round: `--target-kind` omitted, hardware slices
+    exist, but none of their `os` values is one `MANIFEST_OS_BY_TARGET` maps
+    (e.g. a lone `os: linux` slice) -- a knowledge/version skew between tan
+    and the SDK, not a crash: no invariant was violated and the command still
+    produced a coherent verdict with a working remedy (`--target-kind`
+    explicit). Exit 2, same reasoning as [`_build_manifest_missing_failure`]
+    above."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="no-debuggable-target-class",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
 def _write_failure(
     generated_at: str, target: str, server: str, launch_json_path: str, message: str
 ) -> _Outcome:
@@ -944,13 +991,20 @@ def _run(
             #
             # tan-cli#462: `reason_code`, when set, names which of
             # `infer_target_kind`'s refusals the caller can fix themselves --
-            # VALIDATION_FAILURE (2), not INTERNAL_FAILURE (5). Its two
-            # ambiguity shapes left unclassified (more than one target class,
-            # or none at all) keep the pre-#462 verdict.
+            # VALIDATION_FAILURE (2), not INTERNAL_FAILURE (5). Review round:
+            # its other two ambiguity shapes (more than one target class, or
+            # none at all) are the SAME defect, not "unclassified" -- both
+            # now carry their own code too, so this dispatches all four.
             if reason_code == "build-manifest-missing":
                 return _build_manifest_missing_failure(generated_at, ambiguous, launch_json_path)
             if reason_code == "core-unknown":
                 return _core_unknown_failure(generated_at, ambiguous, launch_json_path)
+            if reason_code == "target-kind-ambiguous":
+                return _target_kind_ambiguous_failure(generated_at, ambiguous, launch_json_path)
+            if reason_code == "no-debuggable-target-class":
+                return _no_debuggable_target_class_failure(
+                    generated_at, ambiguous, launch_json_path
+                )
             return _internal_failure(generated_at, ambiguous, launch_json_path)
         if inferred is not None:
             effective_target_kind = inferred
