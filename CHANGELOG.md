@@ -250,10 +250,12 @@ All notable changes to `tan` are documented here. Format follows
     return a named `SdkRootResolution` instead of a 3-element tuple — a
     fourth positional element would have reproduced the exact silent-drop
     shape this issue exists to close at the next field the ladder needs to
-    carry — and `build`, `flash`, `generate`, `run`, `size`, `doctor`,
+    carry — and `build`, `flash`, `generate`, `image`, `run`, `size`, `doctor`,
     `clean`, `examples`, `bootstrap`, `presets`, `new-som` and `renode` all
     append the warning beside their existing `sdk.project-pin-unresolved`
-    now. `tan init` surfaces it BEFORE `_pin_sdk` writes — the pin `init`
+    now — `flash`/`size` unconditionally, on every manifest-gate refusal too,
+    not only the happy path a first pass at this rework left them gated
+    behind. `tan init` surfaces it BEFORE `_pin_sdk` writes — the pin `init`
     makes is PERMANENT, so silently baking a foreign checkout into a brand
     new project is worse than one build using the wrong SDK once.
   - **Fixed**: `writtenFor: ""` used to pass `_pointer_written_for`'s bare

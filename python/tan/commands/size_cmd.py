@@ -57,7 +57,7 @@ from tan.commands.build_output import (
     resolve_metadata_sdk_root,
     resolve_project_context,
 )
-from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
+from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.pending import is_pending_placeholder
 from tan.core.size import (
@@ -441,17 +441,35 @@ class _Outcome:
 
 
 def _error_outcome(
-    project: Project, sdk: SdkInfo | None, code: str, message: str
+    project: Project,
+    context: ProjectContext,
+    code: str,
+    message: str,
 ) -> _Outcome:
     """A hard manifest error: exit 1, an empty `alp-size/1` report as `data` so
-    the envelope shape stays stable, and the message prefixed for text mode."""
+    the envelope shape stays stable, and the message prefixed for text mode.
+
+    tan-cli#464 review: this used to take a bare `sdk: SdkInfo | None` and
+    report only the `code`/`message` issue -- so a manifest gate that fires
+    before `_run`'s own `sdk_resolution_issues` call further down reported
+    `sdk.sourceTier: "globalDefault"` with neither
+    `sdk.project-pin-unresolved` nor `sdk.global-default-foreign-project`,
+    even when one applied. Takes the whole `context` instead of just its `sdk`
+    field so it can compute the same pair `_run` computes on the happy path,
+    from the one shared `sdk_resolution_issues` -- no future early return
+    through here can drop them again.
+    """
+    issues = sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
+    )
+    issues.append(Issue(code, "error", message))
     return _Outcome(
         ExitCode.RUNTIME_FAILURE,
         build_size_report([]),
         project,
-        [Issue(code, "error", message)],
+        issues,
         [f"size: {message}"],
-        sdk,
+        context.sdk,
     )
 
 
@@ -485,14 +503,14 @@ def _run(
     except ManifestUnavailable as err:
         return _error_outcome(
             project,
-            context.sdk,
+            context,
             "size.manifest-unavailable",
             f"no system-manifest.yaml at {err.path}; run `tan build` first "
             f"({err.detail}).",
         )
     except ManifestInvalid as err:
         return _error_outcome(
-            project, context.sdk, "size.manifest-invalid", f"{err.path}: {err.detail}"
+            project, context, "size.manifest-invalid", f"{err.path}: {err.detail}"
         )
 
     sku = board if board is not None else (manifest.sku.strip() or None)
@@ -503,15 +521,14 @@ def _run(
     ]
 
     text: list[str] = []
-    issues: list[Issue] = []
+    # The same pair `_error_outcome` above computes for a manifest-gate
+    # refusal, from the same shared `sdk_resolution_issues` -- one source, so
+    # this path and that one can never disagree about whether either warning
+    # applies.
+    issues: list[Issue] = sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
+    )
     exit_code = ExitCode.SUCCESS
-
-    pin_issue = project_pin_issue(context.broken_project_pin, context.sdk_source_tier)
-    if pin_issue is not None:
-        issues.append(pin_issue)
-    foreign_issue = global_default_foreign_project_issue(context.foreign_global_default_for)
-    if foreign_issue is not None:
-        issues.append(foreign_issue)
 
     if not json_mode:
         text.extend(render_table_lines(rows, _use_color(no_color, ci)))

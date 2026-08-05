@@ -264,6 +264,46 @@ def test_global_default_written_for_empty_string_reads_as_unknown(tmp_path, isol
     assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
 
 
+def test_global_default_written_for_relative_path_reads_as_unknown(tmp_path, isolated_home):
+    """The `is_absolute()` clause itself had zero coverage: every existing
+    case above (`""`, a non-`str` shape) is already caught by the bare
+    `isinstance(value, str) and value` check, so a mutant that dropped the
+    absolute check entirely still passed every one of them. A bare relative
+    segment is a shape no real writer ever produces (`bootstrap_cmd._run`
+    only ever writes an already-absolute `Project.resolved` root), but must
+    degrade the same safe way, not warn from wherever `_workspace_under`
+    happens to resolve it relative to."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for="projB/ws"
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
+
+
+def test_global_default_written_for_cross_platform_absolute_path_is_recognised(
+    tmp_path, isolated_home
+):
+    """tan-cli#464 stage-2 review: `Path(value).is_absolute()` is answered by
+    whichever pathlib flavour the READER's OS picked -- a POSIX-absolute
+    `writtenFor` a Linux/macOS tan legitimately wrote (`/home/u/projB`) is NOT
+    absolute under `PureWindowsPath` (no drive letter), so it used to degrade
+    to "no opinion" here on a Windows reader, exactly the silent drop
+    tan-cli#464 exists to close -- just triggered by which OS is reading the
+    shared pointer rather than by which project wrote it. Accepted now
+    because `PurePosixPath("/home/u/projB").is_absolute()` is `True`
+    regardless of host OS."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    foreign_root = "/home/u/projB"
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for=foreign_root
+    )
+    assert resolve_sdk_tiered(None, workspace).foreign_global_default_for == foreign_root
+
+
 @pytest.mark.parametrize(
     "written_for", [123, ["a"], {"x": 1}, None], ids=["int", "list", "dict", "null"]
 )

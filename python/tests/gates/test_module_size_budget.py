@@ -109,13 +109,17 @@ _MODULE_BUDGET: dict[str, int] = {
     "tan/commands/bootstrap_cmd.py": 2886,
     "tan/core/bootstrap.py": 1890,
     "tan/core/flash_plan.py": 1808,
-    # 1808, not 1781, as of the tan-cli#464 rework: `_resolve_sdk`/
+    # 1829, not 1808, as of the tan-cli#464 stage-2 review round: `_resolve_sdk`/
     # `resolve_sdk_root_ladder_safe` now return a named `_SdkResolution`
     # instead of a growing tuple, and `flash` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- flashing real hardware against the silently-wrong SDK is the highest
-    # cost of any command on this ladder.
-    "tan/commands/flash_cmd.py": 1808,
+    # cost of any command on this ladder. Grew again when review found the
+    # manifest-not-found gate returned through `_error` BEFORE either warning
+    # was computed, so the dominant refusal reported neither -- `_error` now
+    # takes the resolution facts and calls the shared `sdk_cmd.
+    # sdk_resolution_issues` itself, so no future early return can skip them.
+    "tan/commands/flash_cmd.py": 1829,
     "tan/planner/kconfig.py": 1639,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
@@ -173,7 +177,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # (measured: an empty string resolved `Path("")` to the process's OWN
     # cwd) is now rejected at the source rather than reaching
     # `_workspace_under` at all.
-    "tan/commands/sdk_cmd.py": 1228,
+    #
+    # 1265, not 1228, as of the tan-cli#464 stage-2 review round:
+    # `_pointer_written_for`'s `Path(value).is_absolute()` was platform-native
+    # (`PureWindowsPath` needs a drive, `PurePosixPath` needs a leading `/`),
+    # so a legitimate absolute `writtenFor` written by the OTHER platform's tan
+    # degraded to "no opinion" -- now accepted when EITHER `PurePosixPath` or
+    # `PureWindowsPath` calls it absolute. Also adds `sdk_resolution_issues`,
+    # the one shared point `flash`/`size`/`image` now call (from `_error`/
+    # `_error_outcome` themselves) instead of each hand-copying the
+    # pin-issue/foreign-issue pair only on their happy path.
+    "tan/commands/sdk_cmd.py": 1265,
     "tan/commands/validate_cmd.py": 1093,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`

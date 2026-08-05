@@ -84,7 +84,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import typer
@@ -267,12 +267,25 @@ def _pointer_written_for(pointer: Path) -> str | None:
     on anything the pointer actually recorded. Every OTHER project root this
     field can legitimately hold is written by `bootstrap_cmd._run` as an
     already-absolute `root` (`Project.resolved`'s own contract), so rejecting
-    a relative or blank one here is not narrowing real coverage, only closing
-    the malformed-input gap.
+    a relative or blank one here is not narrowing real coverage ON THE
+    WRITER'S OWN PLATFORM -- but `~/.alp/sdk-default` is one pointer shared by
+    every tan on the host, and a bare `Path(value).is_absolute()` is answered
+    by whichever pathlib flavour the READER's OS picked: `PureWindowsPath`
+    needs a drive letter, so a legitimate `"/home/u/projB"` written by a
+    Linux/macOS tan degraded to "no opinion" the moment a Windows tan read it
+    back, and symmetrically `"C:/projB"` from a Windows writer is non-absolute
+    to `PurePosixPath` on the other two. Accepted here when EITHER
+    `PurePosixPath` or `PureWindowsPath` calls it absolute, so a value either
+    platform's tan legitimately wrote still counts, while `""`/`"."`/a bare
+    relative segment (`"projB/ws"`)/a drive-relative `"C:projB"` stay `None`
+    under both -- the safe degradation is unchanged, only which absolute
+    shapes clear it.
     """
     parsed = _read_pointer_json(pointer)
     value = parsed.get("writtenFor") if parsed is not None else None
-    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+    if not isinstance(value, str) or not value:
+        return None
+    if not PurePosixPath(value).is_absolute() and not PureWindowsPath(value).is_absolute():
         return None
     return value
 
@@ -643,6 +656,30 @@ def global_default_foreign_project_issue(foreign_global_default_for: str | None)
         f"explicitly with `--sdk-root <path>`, or bootstrap here, to stop "
         f"relying on the shared default.",
     )
+
+
+def sdk_resolution_issues(
+    broken_project_pin: str | None, tier: str, foreign_global_default_for: str | None
+) -> list[Issue]:
+    """`project_pin_issue` + `global_default_foreign_project_issue`, together,
+    in the order every existing call site already appends them -- the ONE
+    shared point tan-cli#464 review asks for instead of the two-line pair
+    being hand-copied at every caller (`flash_cmd._error`/`size_cmd.
+    _error_outcome`, in particular, used to compute this pair only on the
+    HAPPY path and skip it on a manifest-gate early return, so the exact same
+    `sdk.sourceTier: "globalDefault"` envelope that should have carried
+    `sdk.global-default-foreign-project` carried neither warning instead).
+    `[]` when neither fires, so a caller can `issues.extend(sdk_resolution_
+    issues(...))` unconditionally, on every return path, not just the one
+    that reaches the end of the function."""
+    issues: list[Issue] = []
+    pin_issue = project_pin_issue(broken_project_pin, tier)
+    if pin_issue is not None:
+        issues.append(pin_issue)
+    foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
+    if foreign_issue is not None:
+        issues.append(foreign_issue)
+    return issues
 
 
 def _default_cache_root() -> Path:

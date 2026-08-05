@@ -1692,13 +1692,12 @@ def test_collect_names_the_global_default_tier_and_the_unselected_child_checkout
     _write_global_default_pointer(global_sdk)
 
     resolution = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
-    resolved_root, tier, broken_pin = resolution.path, resolution.tier, resolution.broken_project_pin
-    assert tier == "globalDefault"
-    assert str(resolved_root) == str(global_sdk)
-    assert broken_pin is None
+    assert resolution.tier == "globalDefault"
+    assert str(resolution.path) == str(global_sdk)
+    assert resolution.broken_project_pin is None
 
     checks = doctor_cmd._collect(
-        str(resolved_root), workspace_root=str(workspace), sdk_tier=tier
+        str(resolution.path), workspace_root=str(workspace), sdk_tier=resolution.tier
     )
     sdk = next(c for c in checks if c.name == "sdk")
     assert sdk.status == "pass"
@@ -1793,15 +1792,14 @@ def test_collect_names_a_broken_global_default_end_to_end(tmp_path):
     _write_global_default_pointer(broken_target)
 
     resolution = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
-    resolved_root, tier, broken_pin = resolution.path, resolution.tier, resolution.broken_project_pin
-    assert resolved_root is None
-    assert tier == "none"
-    assert broken_pin is None  # this is the GLOBAL default, not the project pin
+    assert resolution.path is None
+    assert resolution.tier == "none"
+    assert resolution.broken_project_pin is None  # the GLOBAL default, not the project pin
 
     checks = doctor_cmd._collect(
         None,
         workspace_root=str(workspace),
-        sdk_tier=tier,
+        sdk_tier=resolution.tier,
         broken_global_default=doctor_cmd._broken_global_default(),
     )
     sdk = next(c for c in checks if c.name == "sdk")

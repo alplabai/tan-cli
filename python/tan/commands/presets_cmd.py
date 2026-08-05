@@ -528,13 +528,24 @@ def resolve_sdk(sdk_root: str | None, workspace_root: str) -> ActiveSdk | None:
     the same as "resolved something else".
 
     `.broken_project_pin` (tan-cli#263 review) and `.foreign_global_default_for`
-    (tan-cli#464) both carry through even when this call returns `None`
-    overall -- both callers (`presets`, `clean_cmd._run`) surface them as
-    `sdk.project-pin-unresolved` / `sdk.global-default-foreign-project`
-    alongside whatever else they already report. Returned as `ActiveSdk`
-    itself, not a growing tuple: a fact one caller needs must not force every
-    other caller's unpacking to grow a matching positional slot (the same
-    reasoning `build_cmd.SdkRootResolution` documents).
+    (tan-cli#464) both carry through onto the returned `ActiveSdk` -- but ONLY
+    when this call resolves to a usable checkout. When it does not (`active.path`
+    is `None`, or the loader marker is missing) this returns a bare `None`
+    instead, which drops both facts on the floor: neither caller can surface a
+    fact it was never given. `presets` and `clean_cmd._run` both guard on this
+    return (`if sdk is not None` / `if resolved_sdk`), so a workspace with,
+    say, a broken `.alp/sdk-path` pin AND no OTHER tier resolving anything
+    reports `presets.sdk-root-unresolved` / `clean.sdk-root-not-found` alone,
+    with no `sdk.project-pin-unresolved` alongside it -- the same silent-drop
+    shape tan-cli#263/#464 exist to close, just on the "resolved to nothing at
+    all" branch rather than the "resolved to something else" one those issues
+    named. Left as-is rather than fixed here: closing it needs `resolve_sdk`
+    to distinguish "nothing to report" from "a usable checkout", which changes
+    this function's return contract for both callers, not a one-line fix.
+    Returned as `ActiveSdk` itself when it DOES resolve, not a growing tuple: a
+    fact one caller needs must not force every other caller's unpacking to
+    grow a matching positional slot (the same reasoning
+    `build_cmd.SdkRootResolution` documents).
     """
     active = resolve_sdk_tiered(sdk_root, Path(workspace_root))
     if active.path is None or not Path(active.path).joinpath(*SDK_MARKER).exists():

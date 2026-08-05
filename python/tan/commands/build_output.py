@@ -117,12 +117,12 @@ def resolve_project_context(
         else None
     )
     return ProjectContext(
-        to_posix(workspace_root),
-        to_posix(board_yaml),
-        sdk,
-        active.broken_project_pin,
-        active.tier,
-        active.foreign_global_default_for,
+        workspace_root=to_posix(workspace_root),
+        board_yaml=to_posix(board_yaml),
+        sdk=sdk,
+        broken_project_pin=active.broken_project_pin,
+        sdk_source_tier=active.tier,
+        foreign_global_default_for=active.foreign_global_default_for,
     )
 
 
