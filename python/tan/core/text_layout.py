@@ -22,7 +22,20 @@ def wrap_block(body: str, width: int, initial_indent: str, hanging_indent: str) 
     `body`), so a caller building `"{prefix}{first_wrapped_chunk}"` never has
     to special-case an empty result.
     """
+    # `break_on_hyphens`/`break_long_words` default True, which is wrong for
+    # this seam: this repo's house rule is that SKUs, part numbers, flags and
+    # paths are reproduced verbatim, and stdlib's defaults mangle exactly
+    # those -- `arm-zephyr-eabi` splits into `arm-` / `zephyr-eabi`,
+    # `--sdk-root` into `--sdk-` / `root`. Both off means a single token
+    # longer than `width` overflows its line instead of being chopped mid-
+    # character; an over-long but intact line is readable and copy-pasteable,
+    # a silently corrupted identifier is not.
     wrapped = textwrap.wrap(
-        body, width=width, initial_indent=initial_indent, subsequent_indent=hanging_indent
+        body,
+        width=width,
+        initial_indent=initial_indent,
+        subsequent_indent=hanging_indent,
+        break_on_hyphens=False,
+        break_long_words=False,
     )
     return wrapped or [initial_indent]
