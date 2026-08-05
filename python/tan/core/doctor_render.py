@@ -8,6 +8,17 @@ no colour to tell `fail` from `pass` at a glance. This module fixes both,
 plus adds a failures-only footer so a customer with several failures gets an
 action list without re-reading the whole log.
 
+v2 (three changes, bundled because they interact -- see
+`doctor-v2-brief.md`): (1) one FIXED continuation indent for both `detail`
+and `fix` bodies, replacing the old per-check-name-length indent, which is
+also what makes (3) possible -- a check can be rendered without knowing any
+other check's name length; (2) the failures footer now names the start of
+each fix, not just the bare check name; (3) `render_check_lines` (one
+check) and `render_doctor_footer` (everything after the checks) are exposed
+separately so `doctor_cmd`'s streaming path can print each check as it
+completes and call the footer once, at the end, instead of only ever having
+the all-at-once `render_doctor_lines` this module used to expose.
+
 Pure and IO-free -- no terminal probe, no `print` -- so it is testable
 without one; `doctor_cmd.doctor` is the only caller, and reads `width` off
 `shutil.get_terminal_size()` and `color` off `tan.env.use_color` before
@@ -32,21 +43,60 @@ _STATUS_HUE: dict[str, str] = {
     "unknown": _CYAN,
 }
 
-#: `    fix: ` -- the fix line's own prefix, indented under its check the same
-#: way the old single-`print` form was (`"\n    fix: {fix}"`).
-_FIX_PREFIX = "    fix: "
+#: Every continuation line -- wrapped `detail` text AND the `fix:` block --
+#: lands on this ONE column now (review O-2: the old code re-derived the
+#: detail indent from `len(prefix)`, so it drifted with name length (15 for
+#: `sdk`, 23 for `pythonFloor`), while the fix block used its own separate
+#: fixed 9 -- two rails that agreed with neither each other nor themselves
+#: down the report). 10 is `len("[   fail] ")`, the bracket+status prefix
+#: every check shares regardless of its name -- the floor a continuation can
+#: never sit left of without reading as a new entry rather than one -- so a
+#: continuation lands exactly under where the check's own name starts, for
+#: every check, independent of that name's length.
+_CONTINUATION_INDENT = 10
+
+#: `fix: ` printed at `_CONTINUATION_INDENT`, like a second paragraph under
+#: the check -- its own wrapped continuation lines land back on that SAME
+#: column, not indented further under the label, which is the "same rail
+#: for detail and fix" this task's change 1 asks for.
+_FIX_PREFIX = " " * _CONTINUATION_INDENT + "fix: "
+
+#: ~75 characters of a failing check's `fix` text in the footer row (review
+#: range: 70-80). A CHARACTER budget, not a sentence split -- the `sdk`
+#: check's own fix (its longest) is one comma-joined clause with no sentence
+#: break, so first-sentence extraction would not shorten it at all.
+_FOOTER_FIX_BUDGET = 75
 
 
-def _check_lines(check: dict, width: int, color: bool) -> list[str]:
+def _truncate_fix(fix: str, budget: int = _FOOTER_FIX_BUDGET) -> str:
+    """`fix`, cut to `budget` characters on a word boundary where the budget
+    lands inside one, with a single `…` appended -- never a mid-word cut,
+    never a bare truncation with no marker. Returns `fix` byte-for-byte when
+    it already fits, with no trailing `…` added to text that was not cut."""
+    if len(fix) <= budget:
+        return fix
+    cut = fix[:budget]
+    boundary = cut.rfind(" ")
+    if boundary > 0:
+        cut = cut[:boundary]
+    return f"{cut}…"
+
+
+def render_check_lines(check: dict, width: int, color: bool) -> list[str]:
     """`[status] name: detail`, wrapped, plus an indented `fix:` block when
-    the check carries one. The status token's OWN width (`:>7`, matching
-    `unknown`, the longest status word) is computed on the plain text first,
-    so a painted token never throws off the hanging indent's alignment --
-    the ANSI bytes are invisible and must not count as columns."""
+    the check carries one -- ONE check's lines. `render_doctor_lines` below
+    (the batch path) and `doctor_cmd`'s streaming path (print the moment a
+    check completes, change 3) both call this SAME function, so the two
+    never fork into separate formatting code. The status token's OWN width
+    (`:>7`, matching `unknown`, the longest status word) is computed on the
+    plain text first, so a painted token never throws off the hanging
+    indent's alignment -- the ANSI bytes are invisible and must not count as
+    columns.
+    """
     status = check["status"]
     name = check["name"]
     prefix = f"[{status:>7}] {name}: "
-    indent = " " * len(prefix)
+    indent = " " * _CONTINUATION_INDENT
     lines = wrap_block(check["detail"], width, prefix, indent)
 
     hue = _STATUS_HUE.get(status)
@@ -56,7 +106,48 @@ def _check_lines(check: dict, width: int, color: bool) -> list[str]:
 
     fix = check.get("fix")
     if fix is not None:
-        lines.extend(wrap_block(fix, width, _FIX_PREFIX, " " * len(_FIX_PREFIX)))
+        lines.extend(wrap_block(fix, width, _FIX_PREFIX, indent))
+    return lines
+
+
+def render_doctor_footer(
+    checks: list[dict], summary: dict, extra_issue_lines: list[str]
+) -> list[str]:
+    """Everything AFTER the per-check blocks, in order:
+
+    1. `extra_issue_lines` verbatim (already filtered by the caller against
+       `checked_codes`, tan-cli#375 -- this function does not re-derive that
+       filter).
+    2. A failures-only footer, omitted entirely when nothing failed -- each
+       row now names the START of its own fix, truncated to
+       `_FOOTER_FIX_BUDGET` (change 2), so a customer with several failures
+       gets an action list without scrolling back up to read each one's
+       block in full. A failing check with no `fix` key falls back to the
+       bare `- <name>` row.
+    3. The summary line, last, wording unchanged.
+
+    Split out from `render_doctor_lines` so `doctor_cmd`'s streaming path can
+    print each check via `render_check_lines` as it completes and call this
+    once, for the tail, after every check -- never re-rendering a check
+    block itself.
+    """
+    lines: list[str] = list(extra_issue_lines)
+
+    failed = [c for c in checks if c["status"] == "fail"]
+    if failed:
+        lines.append("")
+        lines.append("Failed checks:")
+        for c in failed:
+            fix = c.get("fix")
+            if fix:
+                lines.append(f"  - {c['name']}: {_truncate_fix(fix)}")
+            else:
+                lines.append(f"  - {c['name']}")
+
+    lines.append("")
+    lines.append(
+        f"{summary['pass']} passed, {summary['warn']} warning(s), {summary['fail']} failed."
+    )
     return lines
 
 
@@ -67,31 +158,19 @@ def render_doctor_lines(
     width: int,
     color: bool,
 ) -> list[str]:
-    """The lines `doctor_cmd.doctor`'s text branch prints, in order:
+    """The lines `doctor_cmd.doctor`'s text branch prints, in order: one
+    block per check (`render_check_lines`, SAME order `checks` arrives in --
+    the order is a diagnostic progression, `hostPrerequisites` failing is why
+    `west` fails too, and reordering would hide that), then the tail
+    (`render_doctor_footer`).
 
-    1. One block per check, in the SAME order `checks` arrives in -- the
-       order is a diagnostic progression (`hostPrerequisites` failing is why
-       `west` fails too) and reordering would hide that.
-    2. `extra_issue_lines` verbatim (already filtered by the caller against
-       `checked_codes`, tan-cli#375 -- this function does not re-derive that
-       filter).
-    3. A failures-only footer, omitted entirely when nothing failed.
-    4. The summary line, last, wording unchanged.
+    The one-call batch form, for a caller holding the full check list up
+    front (this module's own tests); the streaming caller in `doctor_cmd`
+    calls `render_check_lines`/`render_doctor_footer` directly instead, see
+    their docstrings for why.
     """
     lines: list[str] = []
     for check in checks:
-        lines.extend(_check_lines(check, width, color))
-
-    lines.extend(extra_issue_lines)
-
-    failed_names = [c["name"] for c in checks if c["status"] == "fail"]
-    if failed_names:
-        lines.append("")
-        lines.append("Failed checks:")
-        lines.extend(f"  - {name}" for name in failed_names)
-
-    lines.append("")
-    lines.append(
-        f"{summary['pass']} passed, {summary['warn']} warning(s), {summary['fail']} failed."
-    )
+        lines.extend(render_check_lines(check, width, color))
+    lines.extend(render_doctor_footer(checks, summary, extra_issue_lines))
     return lines

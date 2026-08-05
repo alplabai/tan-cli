@@ -6,6 +6,7 @@ test that needs a real dispatch). No terminal, no colour probe, no `print`
 here -- the function takes `width`/`color` as plain arguments."""
 from __future__ import annotations
 
+from tan.core import doctor_render
 from tan.core.doctor_render import render_doctor_lines
 
 
@@ -81,3 +82,83 @@ def test_summary_line_is_last_and_keeps_its_exact_wording():
 
     lines = render_doctor_lines(checks, summary, [], 80, color=False)
     assert lines[-1] == "3 passed, 2 warning(s), 1 failed."
+
+
+# --------------------------------------------------------------------------
+# Change 1: one fixed continuation indent, shared by `detail` continuations
+# AND the `fix:` block, regardless of the check's own name length (review
+# O-2 -- the old code re-derived the detail indent from `len(prefix)`, so it
+# drifted with name length while the fix block used its own separate fixed
+# 9, and the two never agreed).
+# --------------------------------------------------------------------------
+
+
+def test_continuation_indent_is_fixed_for_both_detail_and_fix_across_name_lengths():
+    """`sdk` (3 chars) and `zephyrSdkAvailableForHost` (25 chars) must land
+    every continuation line -- wrapped `detail` AND the `fix:` block -- on
+    the exact SAME column, never left of it."""
+    long_detail = " ".join(["detailword"] * 20)
+    long_fix = " ".join(["fixword"] * 20)
+    checks = [
+        {"name": "sdk", "status": "fail", "detail": long_detail, "fix": long_fix},
+        {
+            "name": "zephyrSdkAvailableForHost",
+            "status": "fail",
+            "detail": long_detail,
+            "fix": long_fix,
+        },
+    ]
+    summary = {"pass": 0, "warn": 0, "fail": 2}
+
+    lines = render_doctor_lines(checks, summary, [], 60, color=False)
+    footer_at = lines.index("")
+    block = lines[:footer_at]
+
+    # Every continuation line -- detail wrap AND the `fix:` line and its own
+    # wrap -- is everything that does NOT open a new check (`[status] name:`).
+    continuations = [line for line in block if not line.startswith("[")]
+    assert len(continuations) > 2, block  # both checks actually wrapped
+
+    indents = {len(line) - len(line.lstrip(" ")) for line in continuations}
+    assert indents == {doctor_render._CONTINUATION_INDENT}, block
+    assert doctor_render._CONTINUATION_INDENT >= 10, "must never sit left of `[   fail] ` (10 cols)"
+
+
+# --------------------------------------------------------------------------
+# Change 2: the failures footer names the start of each fix (review O-1).
+# --------------------------------------------------------------------------
+
+
+def test_footer_row_truncates_a_long_fix_to_the_budget_on_a_word_boundary():
+    """No sentence break to lean on (`sdk`'s own real fix is exactly this
+    shape: one long comma-joined clause) -- a plain character budget, cut
+    back to the last word boundary inside it, with a single trailing `…`."""
+    long_fix = "install " * 20  # > 75 chars, no punctuation at all
+    checks = [{"name": "sdk", "status": "fail", "detail": "d", "fix": long_fix}]
+    summary = {"pass": 0, "warn": 0, "fail": 1}
+
+    lines = render_doctor_lines(checks, summary, [], 80, color=False)
+    footer_row = next(line for line in lines if line.startswith("  - sdk"))
+
+    assert footer_row.startswith("  - sdk: "), footer_row
+    assert footer_row.endswith("…") and footer_row.count("…") == 1, footer_row
+    body = footer_row[len("  - sdk: ") : -1]
+    assert len(body) <= doctor_render._FOOTER_FIX_BUDGET, footer_row
+    assert not body.endswith(" "), "must cut on a word boundary, not mid-word"
+
+
+def test_footer_row_is_bare_name_when_the_check_has_no_fix():
+    checks = [{"name": "workspace", "status": "fail", "detail": "d"}]
+    summary = {"pass": 0, "warn": 0, "fail": 1}
+
+    lines = render_doctor_lines(checks, summary, [], 80, color=False)
+    assert "  - workspace" in lines
+    assert not any(line.startswith("  - workspace:") for line in lines)
+
+
+def test_footer_row_keeps_a_short_fix_verbatim_with_no_ellipsis():
+    checks = [{"name": "sdk", "status": "fail", "detail": "d", "fix": "--sdk-root <path>"}]
+    summary = {"pass": 0, "warn": 0, "fail": 1}
+
+    lines = render_doctor_lines(checks, summary, [], 80, color=False)
+    assert "  - sdk: --sdk-root <path>" in lines

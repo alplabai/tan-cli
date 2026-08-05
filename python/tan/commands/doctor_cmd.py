@@ -106,6 +106,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -139,7 +140,7 @@ from tan.core.bootstrap import (
     reported_missing,
 )
 from tan.core.consent import can_prompt
-from tan.core.doctor_render import render_doctor_lines
+from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
@@ -230,10 +231,11 @@ SEVEN_ZIP_INSTALL_COMMAND = "winget install -e --id 7zip.7zip"
 #: past. Spelled in the SDK's own release-asset tokens (`x86_64`, not `x64`).
 ZEPHYR_SDK_HOSTS = ("linux-aarch64", "linux-x86_64", "macos-aarch64", "windows-x86_64")
 
-#: Text-mode report width floor (`render_doctor_lines` via `doctor`'s `else:`
-#: branch) -- a real terminal narrower than this (or a redirected/piped run
-#: whose `shutil.get_terminal_size` fallback would otherwise apply) must not
-#: be left to wrap one word per line.
+#: Text-mode report width floor (`render_check_lines`/`render_doctor_footer`,
+#: resolved once in `doctor()` before the first check streams) -- a real
+#: terminal narrower than this (or a redirected/piped run whose
+#: `shutil.get_terminal_size` fallback would otherwise apply) must not be
+#: left to wrap one word per line.
 _DOCTOR_TEXT_MIN_WIDTH = 60
 
 
@@ -2583,10 +2585,19 @@ def _collect(
     workspace_root: str = ".",
     sdk_tier: str | None = None,
     broken_global_default: str | None = None,
+    on_check: Callable[[Check], None] | None = None,
 ) -> list[Check]:
     """Every probe, in report order. Nothing here may raise -- see the module
     docstring; `probe`/`on_path`/`_read_text` are the only three ways this
     module touches the outside world and none of them can.
+
+    `on_check` (tan-cli streaming, change 3) fires the MOMENT each check is
+    added, in the exact same order -- `doctor()`'s text branch passes a
+    callback that prints that one check's block immediately, so a slow probe
+    later in this function never leaves an already-answered check unprinted
+    on screen. `None` (every direct test caller of this function, and JSON
+    mode) skips the callback entirely and this returns exactly the batch
+    `list[Check]` it always has.
 
     `build` (`--build`) is accepted and forwarded from `doctor()` but no
     longer changes anything here (tan-cli#290): `zephyrWorkspace`, the last
@@ -2630,6 +2641,11 @@ def _collect(
     only in the branch `sdk_root is None` already reaches.
     """
     checks: list[Check] = []
+
+    def _add(check: Check) -> None:
+        checks.append(check)
+        if on_check is not None:
+            on_check(check)
 
     # tan-cli#294 finding 2: build-environment preflight -- LEADS the report,
     # mirroring Rust's `prepend_doctor_checks(..., probe_build_preflight(...))`:
@@ -2677,7 +2693,7 @@ def _collect(
             _abs_posix(sdk_root)
         ):
             divergent_candidate = str(wide)
-    checks.append(
+    _add(
         sdk_check(
             sdk_root,
             project_scope,
@@ -2688,7 +2704,7 @@ def _collect(
         )
     )
     project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
-    checks.append(
+    _add(
         board_yaml_preflight_check(
             board_yaml is not None and Path(board_yaml).is_file(), project_selected
         )
@@ -2696,7 +2712,7 @@ def _collect(
     workspace_path = west_workspace_dir(
         workspace_root, Path(sdk_root) if sdk_root is not None else None
     )
-    checks.append(
+    _add(
         workspace_preflight_check(str(workspace_path) if workspace_path is not None else None)
     )
 
@@ -2718,7 +2734,7 @@ def _collect(
         if west_resolved_exe is not None
         else None
     )
-    checks.append(west_resolved_check(west_resolved_exe, west_resolved_version))
+    _add(west_resolved_check(west_resolved_exe, west_resolved_version))
 
     # tan-cli#292: `venvProvenance`, right beside `westResolved` -- it is a
     # verdict on the SAME resolved venv (`find_workspace_venv`, the search
@@ -2732,7 +2748,7 @@ def _collect(
             venv_record = parse_workspace_sdk_record(record_text)
     provenance_check = venv_provenance_check(venv_record, sdk_root)
     if provenance_check is not None:
-        checks.append(provenance_check)
+        _add(provenance_check)
 
     if workspace_path is not None:
         workspace_version = None
@@ -2748,27 +2764,27 @@ def _collect(
             workspace_version, sdk_pin_for_workspace
         )
         if zephyr_version_check is not None:
-            checks.append(zephyr_version_check)
+            _add(zephyr_version_check)
         # tan-cli#290: unconditional now, sourced from these SAME resolved
         # facts -- see `zephyr_workspace_check`'s docstring for why it still
         # earns its own check beside `zephyrVersion` rather than being
         # dropped as a duplicate.
-        checks.append(zephyr_workspace_check(str(workspace_path), workspace_version))
+        _add(zephyr_workspace_check(str(workspace_path), workspace_version))
 
     # tan-cli#294 finding 1: host-environment checks -- also unconditional
     # HOST facts (no board.yaml/workspace/SDK needed). See their docstrings.
     host_os, host_arch = _host_os_arch_tags()
-    checks.append(zephyr_sdk_host_check(host_os, host_arch))
+    _add(zephyr_sdk_host_check(host_os, host_arch))
     if os.name == "nt":
-        checks.append(long_paths_check(_long_paths_enabled(), _git_core_longpaths()))
-    checks.append(
+        _add(long_paths_check(_long_paths_enabled(), _git_core_longpaths()))
+    _add(
         home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
     )
 
     loaded = _load_manifest(sdk_root)
     facts, source = loaded.facts, loaded.source
     if loaded.error is not None:
-        checks.append(
+        _add(
             Check(
                 "bootstrapManifest",
                 "warn",
@@ -2805,7 +2821,7 @@ def _collect(
     )
 
     python_found = _probe_host_python(effective_floor)
-    checks.append(python_check(python_found, effective_floor, effective_source))
+    _add(python_check(python_found, effective_floor, effective_source))
     skew = python_floor_skew_check(
         manifest_floor,
         effective_floor,
@@ -2813,7 +2829,7 @@ def _collect(
         manifest_is_real=loaded.is_real,
     )
     if skew is not None:
-        checks.append(skew)
+        _add(skew)
 
     required = facts.get("windows" if os.name == "nt" else "posix")
     if not isinstance(required, list):
@@ -2838,7 +2854,7 @@ def _collect(
         and not _posix_venv_capable(python_found[0].split())
     ):
         venv_refusal = posix_venv_unusable()
-    checks.append(
+    _add(
         prerequisites_check(required, missing_tools, resolved_install, source, venv_refusal)
     )
 
@@ -2851,7 +2867,7 @@ def _collect(
     # instead of a permanent warn. Only passed when it is a real venv
     # binary (an absolute path); `west_program`'s bare-`"west"` fallback
     # carries no information `west_exe` above does not already have.
-    checks.append(
+    _add(
         west_check(
             west_exe,
             west_version,
@@ -2863,13 +2879,13 @@ def _collect(
     # Unconditional -- not gated on `build` or a resolved board.yaml/SDK. See
     # `zephyr_sdk_check`'s docstring (tan-cli#286).
     zephyr_sdk_ok = _zephyr_sdk_detected()
-    checks.append(zephyr_sdk_check(zephyr_sdk_ok, os.environ.get("ZEPHYR_SDK_INSTALL_DIR")))
+    _add(zephyr_sdk_check(zephyr_sdk_ok, os.environ.get("ZEPHYR_SDK_INSTALL_DIR")))
     # `sevenZip` rides beside the `zephyrSdk` Fail it unblocks and only there --
     # see `seven_zip_check`'s docstring and tan-cli#204.
     if os.name == "nt" and not zephyr_sdk_ok:
-        checks.append(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
+        _add(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
 
-    checks.append(
+    _add(
         setools_check(
             os.environ.get("SETOOLS_DIR"),
             os.environ.get("SE_UART"),
@@ -2886,12 +2902,12 @@ def _collect(
     # for a probe that is not plugged in, and the timeout bounds it regardless.
     jlink_version = _parse_two(probe([jlink_exe, "-?"]) or "") if jlink_exe else None
     resolved_device, device_source = jlink_flash_device(sdk_root)
-    checks.append(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
+    _add(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
 
     # tan-cli#294 finding 5: LAST, mirroring `assemble_doctor_report`'s own
     # placement -- traces a report back to the SDK checkout that produced it.
     if sdk_root is not None:
-        checks.append(sdk_provenance_check(sdk_root))
+        _add(sdk_provenance_check(sdk_root))
 
     return checks
 
@@ -3010,6 +3026,25 @@ def doctor(
         _abs_posix(board_yaml) if board_yaml is not None else None,
     )
 
+    # Text mode streams each check the MOMENT it completes (tan-cli doctor
+    # v2, change 3): `_collect` runs up to 15 subprocess probes at
+    # `PROBE_TIMEOUT_S` each, and the old code printed nothing until every
+    # one of them had answered -- on a host where one wedges, a blank
+    # terminal names nothing. `width`/`color` are resolved ONCE, here, before
+    # the first check can print, never re-resolved per check; JSON mode
+    # streams nothing; still exactly one envelope, at the end. Width floored
+    # at `_DOCTOR_TEXT_MIN_WIDTH` -- a 20-column terminal must not fall to
+    # one word per line -- and the fallback (piped/redirected stdout) matches
+    # `build_cmd`'s own `shutil.get_terminal_size` convention.
+    stream = not json_mode
+    if stream:
+        width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, _DOCTOR_TEXT_MIN_WIDTH)
+        color = use_color(no_color, ci)
+
+    def _print_check(check: Check) -> None:
+        for line in render_check_lines(check.as_dict(), width, color):
+            print(line, file=sys.stderr)
+
     try:
         checks = _collect(
             sdk_root,
@@ -3019,6 +3054,7 @@ def doctor(
             workspace_root=str(workspace_root),
             sdk_tier=sdk_tier,
             broken_global_default=broken_global_default,
+            on_check=_print_check if stream else None,
         )
         # tan-cli#91 / ADR 0021: `--fix` only ever RUNS anything when a human
         # is demonstrably present. `doctor` otherwise only REPORTS; this flag
@@ -3043,7 +3079,18 @@ def doctor(
                 (c.missing for c in checks if c.name == "hostPrerequisites"), None
             )
             if missing_for_fix:
-                checks = [*checks, *run_fix(missing_for_fix)]
+                # These checks stream too, same as every check `_collect`
+                # produced above -- gated on `stream` directly (never on
+                # "`fix_allowed` already implies `not json_mode`": that
+                # inference only holds for the REAL `can_prompt`, and a test
+                # double stubbing `can_prompt` can make `fix_allowed` true
+                # under `--format json`, where `width`/`color` were never
+                # resolved).
+                fix_checks = run_fix(missing_for_fix)
+                if stream:
+                    for fix_check in fix_checks:
+                        _print_check(fix_check)
+                checks = [*checks, *fix_checks]
         exit_code = exit_code_for(checks)
         issues = checks_to_issues(checks)
         # tan-cli#91 P1: `--fix` requested and consent refused used to be a
@@ -3113,10 +3160,11 @@ def doctor(
         # carried `doctor.fix-suppressed`/`sdk.project-pin-unresolved` and
         # text mode carried neither. `checks_to_issues(checks)` already turns
         # every warn/fail Check into an Issue, and each of those already
-        # renders as its own `[  warn]`/`[  fail]` block below -- reprinting
-        # them here would duplicate the whole report, so this filters down to
-        # exactly the codes no Check block already names. `render_doctor_lines`
-        # places these AFTER every check block and BEFORE the summary:
+        # rendered as its own `[  warn]`/`[  fail]` block, streamed above as
+        # `_collect` produced it -- reprinting them here would duplicate the
+        # whole report, so this filters down to exactly the codes no Check
+        # block already named. `render_doctor_footer` places these AFTER
+        # every check block (already on screen) and BEFORE the summary:
         # findable without being buried mid-report, report still ends on the
         # summary line.
         # `kebab_check_name`, not the bare `c.name`: tan-cli#461 made the
@@ -3131,16 +3179,7 @@ def doctor(
             for issue in issues
             if issue.code not in checked_codes
         ]
-        # A 20-column terminal must not fall to one word per line -- floored
-        # at `_DOCTOR_TEXT_MIN_WIDTH` (comfortably wider than the `[   fail]
-        # name: ` prefix on any check name in this file). The fallback
-        # (non-tty stdout, e.g. piped or redirected) matches `build_cmd`'s
-        # own `shutil.get_terminal_size` convention.
-        width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, _DOCTOR_TEXT_MIN_WIDTH)
-        color = use_color(no_color, ci)
-        for line in render_doctor_lines(
-            data["checks"], data["summary"], extra_issue_lines, width, color
-        ):
+        for line in render_doctor_footer(data["checks"], data["summary"], extra_issue_lines):
             print(line, file=sys.stderr)
 
     raise typer.Exit(int(exit_code))

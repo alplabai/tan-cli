@@ -2777,13 +2777,26 @@ def test_doctor_no_color_flag_reaches_the_render_and_suppresses_ansi(monkeypatch
     explicitly, same as `isatty` is forced explicitly below. `--ci` needs
     no equivalent treatment: `ci` reaches `use_color` only as the `--ci`
     CLI flag's own value (default `False`), never read from an env var, so
-    it is already fully controlled by the argv this test passes."""
+    it is already fully controlled by the argv this test passes.
+
+    `doctor` v2's streaming (change 3): each check's block now prints
+    through the `on_check` callback `_collect` is given, at the moment
+    `_collect` produces it -- a stub replacing `_collect` must call that
+    callback itself, or its check is never printed at all (there is no
+    separate batch-print step left to fall back on)."""
     from typer.testing import _NamedTextIOWrapper
 
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     stub_checks = [doctor_cmd.Check("west", "fail", "west not found")]
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+
+    def stub_collect(*a, on_check=None, **k):
+        if on_check is not None:
+            for check in stub_checks:
+                on_check(check)
+        return stub_checks
+
+    monkeypatch.setattr(doctor_cmd, "_collect", stub_collect)
     monkeypatch.chdir(tmp_path)
 
     colored = runner.invoke(app, ["doctor"])
@@ -2791,3 +2804,61 @@ def test_doctor_no_color_flag_reaches_the_render_and_suppresses_ansi(monkeypatch
 
     assert "\x1b[" in colored.stderr, colored.stderr
     assert "\x1b[" not in plain.stderr, plain.stderr
+
+
+# --------------------------------------------------------------------------
+# Streaming (`doctor` v2 task, change 3): each check's block prints the
+# MOMENT that check completes, not after every check has been computed.
+# --------------------------------------------------------------------------
+
+
+def test_checks_stream_incrementally_not_in_one_final_flush(monkeypatch, tmp_path):
+    """Proves ORDERING/interleaving, not just final content -- a test that
+    only inspects the finished stderr text would pass equally well against
+    the OLD batched code (compute every check first, print everything at the
+    very end) and prove nothing about this change.
+
+    `doctor_cmd._collect` is stubbed to accept the real `on_check` callback
+    `doctor()`'s text branch wires up, and to record a marker into the SAME
+    event list BETWEEN its two calls -- standing in for a slow probe still
+    running for the second check. `builtins.print` is wrapped (not replaced:
+    it still forwards to the real `print`, so `CliRunner` still captures
+    stderr normally) to append every printed line to that one list too. If
+    streaming works, the first check's line is already in `events` before
+    the marker; if the code regressed to batching, the marker would come
+    first, or nothing would separate the two checks' output at all.
+    """
+    events: list[str] = []
+
+    def fake_collect(*args, on_check=None, **kwargs):  # noqa: ARG001
+        first = doctor_cmd.Check("alpha", "pass", "alpha detail")
+        second = doctor_cmd.Check("beta", "pass", "beta detail")
+        if on_check is not None:
+            on_check(first)
+        # Stand-in for the second check's own slow probe -- spelled without
+        # "alpha"/"beta" so it cannot accidentally satisfy either substring
+        # search below.
+        events.append("MARKER-still-probing")
+        if on_check is not None:
+            on_check(second)
+        return [first, second]
+
+    monkeypatch.setattr(doctor_cmd, "_collect", fake_collect)
+    monkeypatch.chdir(tmp_path)
+
+    real_print = print
+
+    def recording_print(*args, **kwargs):
+        if args:
+            events.append(str(args[0]))
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.print", recording_print)
+
+    result = runner.invoke(app, ["doctor", "--no-color"])
+    assert result.exit_code == 0, result.stderr
+
+    alpha_at = next(i for i, e in enumerate(events) if "alpha" in e)
+    marker_at = events.index("MARKER-still-probing")
+    beta_at = next(i for i, e in enumerate(events) if "beta" in e)
+    assert alpha_at < marker_at < beta_at, events
