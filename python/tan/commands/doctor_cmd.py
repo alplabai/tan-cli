@@ -103,6 +103,7 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -138,9 +139,11 @@ from tan.core.bootstrap import (
     reported_missing,
 )
 from tan.core.consent import can_prompt
+from tan.core.doctor_render import render_doctor_lines
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
+from tan.env import use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -226,6 +229,12 @@ SEVEN_ZIP_INSTALL_COMMAND = "winget install -e --id 7zip.7zip"
 #: release; `macos-x86_64` was dropped in the 1.0.0 line the pinned SDK is
 #: past. Spelled in the SDK's own release-asset tokens (`x86_64`, not `x64`).
 ZEPHYR_SDK_HOSTS = ("linux-aarch64", "linux-x86_64", "macos-aarch64", "windows-x86_64")
+
+#: Text-mode report width floor (`render_doctor_lines` via `doctor`'s `else:`
+#: branch) -- a real terminal narrower than this (or a redirected/piped run
+#: whose `shutil.get_terminal_size` fallback would otherwise apply) must not
+#: be left to wrap one word per line.
+_DOCTOR_TEXT_MIN_WIDTH = 60
 
 
 @dataclass(frozen=True)
@@ -2944,6 +2953,7 @@ def doctor(
     ci: bool = typer.Option(
         False, "--ci", help="CI mode: implies --non-interactive and disables --fix."
     ),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable ANSI colour."),
 ) -> None:
     """Diagnose whether this host can build and flash."""
     json_mode = output_format == "json"
@@ -3088,43 +3098,51 @@ def doctor(
 
     if json_mode:
         emit(Envelope("doctor", project, data, issues, exit_code, sdk=sdk))
+    elif data is None:
+        for issue in issues:
+            print(f"{issue.severity}: {issue.message}", file=sys.stderr)
     else:
-        for check in (data or {}).get("checks", []):
-            # `fix_line`, never `fix`: this loop runs after the `fix: bool`
-            # parameter is done being read, but shadowing it here is a trap
-            # for the next edit that needs it further down.
-            fix_line = f"\n    fix: {check['fix']}" if "fix" in check else ""
-            print(f"[{check['status']:>7}] {check['name']}: {check['detail']}{fix_line}", file=sys.stderr)
-        if data is None:
-            for issue in issues:
-                print(f"{issue.severity}: {issue.message}", file=sys.stderr)
-        else:
-            # tan-cli#375: an Issue with no backing Check -- a suppressed
-            # `--fix` (`fix_suppressed_issue`) or a broken `.alp/sdk-path`
-            # pin (`project_pin_issue`, tan-cli#263) -- used to vanish here
-            # completely: this branch (the non-exception path) printed only
-            # the summary line, never `issues`. `--fix`'s consent gate
-            # (tan-cli#91) is right to suppress silently TOWARDS THE HOST --
-            # it must never mutate anything unwatched -- but silence towards
-            # the CUSTOMER is a different bug: the JSON envelope already
-            # carried `doctor.fix-suppressed`/`sdk.project-pin-unresolved`
-            # and text mode carried neither. `checks_to_issues(checks)`
-            # already turned every warn/fail Check into an Issue, and each of
-            # those already printed above as a `[  warn]`/`[  fail]` line --
-            # reprinting them here would duplicate the whole report, so this
-            # filters down to exactly the codes no Check line already named.
-            # Printed AFTER every check line and BEFORE the summary: findable
-            # without being buried mid-report, and the report still ends on
-            # the summary line.
-            checked_codes = {c.code or f"doctor.{kebab_check_name(c.name)}" for c in checks}
-            for issue in issues:
-                if issue.code not in checked_codes:
-                    print(f"{issue.severity}: {issue.message}", file=sys.stderr)
-            s = data["summary"]
-            print(
-                f"\n{s['pass']} passed, {s['warn']} warning(s), {s['fail']} failed.",
-                file=sys.stderr,
-            )
+        # tan-cli#375: an Issue with no backing Check -- a suppressed `--fix`
+        # (`fix_suppressed_issue`) or a broken `.alp/sdk-path` pin
+        # (`project_pin_issue`, tan-cli#263) -- used to vanish here
+        # completely: this branch (the non-exception path) used to print
+        # only the per-check lines and the summary, never `issues`. `--fix`'s
+        # consent gate (tan-cli#91) is right to suppress silently TOWARDS THE
+        # HOST -- it must never mutate anything unwatched -- but silence
+        # towards the CUSTOMER is a different bug: the JSON envelope already
+        # carried `doctor.fix-suppressed`/`sdk.project-pin-unresolved` and
+        # text mode carried neither. `checks_to_issues(checks)` already turns
+        # every warn/fail Check into an Issue, and each of those already
+        # renders as its own `[  warn]`/`[  fail]` block below -- reprinting
+        # them here would duplicate the whole report, so this filters down to
+        # exactly the codes no Check block already names. `render_doctor_lines`
+        # places these AFTER every check block and BEFORE the summary:
+        # findable without being buried mid-report, report still ends on the
+        # summary line.
+        # `kebab_check_name`, not the bare `c.name`: tan-cli#461 made the
+        # camelCase-to-kebab conversion the one shared way a `Check.name`
+        # becomes an issue-code suffix, so the set built here must be spelled
+        # the same way `checks_to_issues` spells the codes it is filtering
+        # against -- otherwise every check-backed issue misses the set and
+        # the whole report prints twice.
+        checked_codes = {c.code or f"doctor.{kebab_check_name(c.name)}" for c in checks}
+        extra_issue_lines = [
+            f"{issue.severity}: {issue.message}"
+            for issue in issues
+            if issue.code not in checked_codes
+        ]
+        # A 20-column terminal must not fall to one word per line -- floored
+        # at `_DOCTOR_TEXT_MIN_WIDTH` (comfortably wider than the `[   fail]
+        # name: ` prefix on any check name in this file). The fallback
+        # (non-tty stdout, e.g. piped or redirected) matches `build_cmd`'s
+        # own `shutil.get_terminal_size` convention.
+        width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, _DOCTOR_TEXT_MIN_WIDTH)
+        color = use_color(no_color, ci)
+        for line in render_doctor_lines(
+            data["checks"], data["summary"], extra_issue_lines, width, color
+        ):
+            print(line, file=sys.stderr)
+
     raise typer.Exit(int(exit_code))
 
 

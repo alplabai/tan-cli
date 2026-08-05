@@ -2743,3 +2743,38 @@ def test_doctor_fix_suppressed_notice_reaches_text_mode_not_just_json(monkeypatc
     summary_at = result.stderr.rindex("passed,")
     assert notice_at < summary_at, result.stderr
     assert result.stderr.strip().endswith("failed.")
+
+
+# --------------------------------------------------------------------------
+# `--no-color` must actually REACH `doctor()` (UX-polish sweep, text-layout
+# task). `accept_global_flags` (`tan/core/global_flags.py`) injects and then
+# DROPS `--no-color`/`--ci` for any command that doesn't declare them itself
+# -- `doctor()` didn't declare `--no-color`, so `tan doctor --no-color` was
+# accepted and silently ignored (never regressed by a test, because nothing
+# in `doctor` used colour yet either).
+# --------------------------------------------------------------------------
+
+
+def test_doctor_no_color_flag_reaches_the_render_and_suppresses_ansi(monkeypatch, tmp_path):
+    """`CliRunner`'s own stderr is a `BytesIO`-backed stream, never a real
+    tty, so colour is already off there regardless of `--no-color` -- that
+    would make this test pass for the same wrong reason the bug shipped
+    with. Forcing `isatty()` True on typer's own `_NamedTextIOWrapper` (the
+    class both `sys.stdout` and `sys.stderr` are swapped to for the duration
+    of `runner.invoke`) is what makes the flag's effect actually observable:
+    plain `tan doctor` must now carry ANSI escapes and `--no-color` must
+    strip them, through the REAL CLI dispatch (argument parsing ->
+    `accept_global_flags` -> `doctor()`'s body -> `tan.env.use_color` ->
+    `render_doctor_lines`), not a direct call to any one of those."""
+    from typer.testing import _NamedTextIOWrapper
+
+    monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
+    stub_checks = [doctor_cmd.Check("west", "fail", "west not found")]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+    monkeypatch.chdir(tmp_path)
+
+    colored = runner.invoke(app, ["doctor"])
+    plain = runner.invoke(app, ["doctor", "--no-color"])
+
+    assert "\x1b[" in colored.stderr, colored.stderr
+    assert "\x1b[" not in plain.stderr, plain.stderr
