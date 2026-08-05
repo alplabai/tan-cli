@@ -8,10 +8,8 @@
 `tan` is the standalone build CLI for Alp Lab E1M and E1M-X projects. It reads
 hardware metadata from an [alp-sdk](https://github.com/alplabai/alp-sdk)
 checkout, creates build plans, and runs the tools needed to build, inspect,
-flash, and debug firmware. VS Code is optional.
-
-The current implementation is Python. The Rust code under `crates/` is kept as
-a compatibility reference and is not the program shipped in current releases.
+flash, and debug firmware. VS Code is optional. The implementation is Python;
+see [Development](#development) for the frozen Rust reference under `crates/`.
 
 ## Install
 
@@ -34,8 +32,8 @@ digest, and install it for the current user. Open a new terminal if `tan` is not
 immediately on `PATH`.
 
 Use `--system` on Unix or `-System` on Windows for a system-wide install. See
-[`docs/release-contract.md`](docs/release-contract.md) for platform asset names,
-manual verification, checksums, build-provenance attestations, and OS support.
+[`docs/release-contract.md`](docs/release-contract.md) for asset names, manual
+verification, and OS support.
 
 The v0.5 release publishes four archives:
 
@@ -95,9 +93,9 @@ What those commands do:
 5. `size` reports firmware use against the SoM memory budget.
 6. `run --flash` builds and then runs or programs the selected target.
 
-Run `tan doctor` if setup or toolchain discovery fails. `tan doctor --fix` can
-install a small set of missing user-level prerequisites during an interactive
-run; it never invokes `sudo` for you.
+Run `tan doctor` if setup or toolchain discovery fails. `tan doctor --fix`
+installs missing user-level prerequisites interactively; it never invokes
+`sudo` for you.
 
 If you do not want the west workspace next to the SDK checkout, choose it
 explicitly:
@@ -127,10 +125,15 @@ tan bootstrap --sdk-root ./alp-sdk --workspace /path/to/alp-workspace
 | Explain resolved project settings | `tan explain` |
 | Show help | `tan <command> --help` |
 
+On a multi-core SoM, `debug-config` needs `--core <name>` to pick a target;
+without it, it exits 2 with `debug-config.target-kind-ambiguous`.
+
 The full command surface also includes `scaffold`, `completion`, `diff`,
 `pinmux`, `inspect`, `trace`, `support-bundle`, `kconfig`, `faultdecode`,
 `model`, and `new-som`. `migrate`, `lock`, and `quality` forward to their
-corresponding `west alp-*` commands; the other commands run directly in `tan`.
+corresponding `west alp-*` commands: `migrate` requires `--check`,
+`--preview`, or `--apply`; `quality` requires `--profile`. The other
+commands run directly in `tan`.
 
 For Alif Ensemble MRAM flashing with SETOOLS, see
 [`docs/setools.md`](docs/setools.md).
@@ -143,6 +146,11 @@ Most project commands find alp-sdk in this order:
 2. the project's `.alp/sdk-path` pin
 3. the user's default SDK pointer
 4. a nearby `alp-sdk` checkout
+
+Step 3 is one pointer shared across every project on the host and is
+last-writer-wins: another project's `tan bootstrap` can repoint it. `tan`
+warns (`sdk.global-default-foreign-project`) rather than resolving silently;
+use `--sdk-root` or the project pin to be explicit.
 
 Use `--sdk-root` when more than one checkout is nearby or when you want a
 one-off override:
@@ -180,11 +188,11 @@ alp-sdk-vscode  ->  tan  ->  alp-sdk
 VS Code UI          CLI      metadata, schemas, examples, west extensions
 ```
 
-- `alp-sdk` owns hardware metadata, schemas, examples, libraries, and the
-  remaining `west alp-*` extensions.
-- `tan` owns SDK selection, planning, build execution, progress, generated
-  files, and the manifest consumed by flash, size, image, and Renode commands.
-- `alp-sdk-vscode` is an optional UI that invokes `tan`.
+- `alp-sdk`: hardware metadata, schemas, examples, and the remaining
+  `west alp-*` extensions.
+- `tan`: SDK selection, planning, build execution, and the manifest that
+  `flash`/`size`/`image`/`renode` read.
+- `alp-sdk-vscode`: an optional UI that invokes `tan`.
 
 A successful build writes `build/system-manifest.yaml`, which records the
 per-core artifacts and is reused by downstream commands.
