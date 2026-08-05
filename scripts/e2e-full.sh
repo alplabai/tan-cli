@@ -59,10 +59,14 @@ git config --global core.longpaths true 2>/dev/null || true
 # tests/gates/test_no_leaked_host_paths.py caught exactly that here. Export
 # ZEPHYR_SDK_INSTALL_DIR to skip the search entirely.
 ZEPHYR_SDK_VERSION="${ZEPHYR_SDK_VERSION:-1.0.1}"
+# REAL_HOME, never the sandboxed $HOME (already redirected above at :48) -- a
+# candidate under the sandbox could only be this run's own debris, and a dev
+# box whose only SDK lives under its real ~/zephyr-sdk-<ver> would otherwise
+# bind nothing and silently degrade the ARM-ELF leg to the refusal path.
 for cand in \
   "${ZEPHYR_SDK_INSTALL_DIR:-}" \
-  "$HOME/zephyr-sdk-$ZEPHYR_SDK_VERSION" \
-  "$HOME/../zephyr-sdk-$ZEPHYR_SDK_VERSION" \
+  "$REAL_HOME/zephyr-sdk-$ZEPHYR_SDK_VERSION" \
+  "$REAL_HOME/../zephyr-sdk-$ZEPHYR_SDK_VERSION" \
   "/opt/zephyr-sdk-$ZEPHYR_SDK_VERSION" \
   "/usr/local/zephyr-sdk-$ZEPHYR_SDK_VERSION" \
   "/c/zephyr-sdk-$ZEPHYR_SDK_VERSION"
@@ -75,9 +79,13 @@ done
 # HKCU\Software\Kitware\CMake\Packages\Zephyr-sdk, probed separately below
 # where a Scenario-B build's success is judged against a pre-existing SDK.
 if [ -z "${ZEPHYR_SDK_INSTALL_DIR:-}" ]; then
-  for reg in "$HOME/.cmake/packages/Zephyr-sdk"/*; do
+  for reg in "$REAL_HOME/.cmake/packages/Zephyr-sdk"/*; do
     [ -f "$reg" ] || continue
-    cand=$(tr -d '\r\n' < "$reg")
+    # The dot-file records the directory holding Zephyr-sdkConfig.cmake, i.e.
+    # <sdk>/cmake -- NOT <sdk> itself (same shape as the HKCU registry probed
+    # further below, Scenario B's Zephyr SDK check). dirname first, or this
+    # never resolves a real SDK.
+    cand=$(dirname "$(tr -d '\r\n' < "$reg")")
     [ -f "$cand/sdk_version" ] && { export ZEPHYR_SDK_INSTALL_DIR="$cand"; break; }
   done
 fi
@@ -333,21 +341,35 @@ grep -q "would move\|would set" "$WORK/bsdry.out" && ok "#323: conditional wordi
 # Scenario B. macOS is a shipped target (install.sh, apple-darwin), so it gets
 # its own arm rather than falling through to the POSIX-with-xz/wget default.
 case "$(uname -s 2>/dev/null || echo unknown)" in
-  MINGW*|MSYS*|CYGWIN*) HOST_PREREQS="git cmake ninja" ; HOST_IS_WINDOWS=1 ;;
+  MINGW*|MSYS*|CYGWIN*) HOST_PREREQS="git cmake python ninja" ; HOST_IS_WINDOWS=1 ;;
   Darwin)                HOST_PREREQS="git cmake python3 ninja" ; HOST_IS_WINDOWS=0 ;;
   *)                     HOST_PREREQS="git cmake python3 ninja xz wget" ; HOST_IS_WINDOWS=0 ;;
 esac
 hdr "prerequisite scan ($(echo "$HOST_PREREQS" | tr ' ' ','))"
+# Windows accepts the interpreter as `python` OR the `py` launcher, matching
+# tan's own _prereq_present() (bootstrap_cmd.py:415). Shared by have_prereqs
+# (yes/no gate) and missing_prereqs (the exact absent subset -- what Scenario
+# A's refusal check must assert tan named, never the whole host set: tan only
+# ever names tools `check_prerequisites` found missing, bootstrap_cmd.py:473-478).
+_prereq_ok() {
+  if [ "$HOST_IS_WINDOWS" -eq 1 ] && [ "$1" = "python" ]; then
+    command -v python >/dev/null 2>&1 || command -v py >/dev/null 2>&1
+  else
+    command -v "$1" >/dev/null 2>&1
+  fi
+}
 have_prereqs() {
   for _t in $HOST_PREREQS; do
-    command -v "$_t" >/dev/null 2>&1 || return 1
+    _prereq_ok "$_t" || return 1
   done
-  # Windows accepts the interpreter as `python` OR the `py` launcher, matching
-  # tan's own _prereq_present() (bootstrap_cmd.py:415).
-  if [ "$HOST_IS_WINDOWS" -eq 1 ]; then
-    command -v python >/dev/null 2>&1 || command -v py >/dev/null 2>&1 || return 1
-  fi
   return 0
+}
+missing_prereqs() {
+  local _m=""
+  for _t in $HOST_PREREQS; do
+    _prereq_ok "$_t" || _m="$_m $_t"
+  done
+  printf '%s' "${_m# }"
 }
 CAN_APT=0
 if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && command -v apt-get >/dev/null 2>&1; then
@@ -432,19 +454,23 @@ echo; echo "############ SCENARIO A: bare host (no build toolchain) ############
 if have_prereqs; then
   note "A: not applicable -- host already has $HOST_PREREQS_LABEL, nothing to refuse"
 else
-  # The tools asserted here MUST be the ones `have_prereqs` just found missing
-  # -- i.e. this host's own $HOST_PREREQS -- not a hardcoded POSIX four: on a
-  # Windows host missing only `ninja`, the old literal asserted the refusal
-  # message named `xz` and `wget`, which tan's Windows prerequisite list never
-  # even asks for, so it went red for a reason unrelated to the actual gap.
-  check_bootstrap_refusal bsA1 prerequisites-missing $HOST_PREREQS
+  # The tools asserted here MUST be the ones ACTUALLY MISSING, not the whole
+  # $HOST_PREREQS set: tan's refusal message names only what
+  # `check_prerequisites` found absent (bootstrap_cmd.py:473-478), never a
+  # tool it found present. A host that REACHES this branch necessarily has
+  # `git` (the clone above would have ABORTed otherwise) and `python3`/`python`
+  # (this very script's `jget` and the verdict check below need it), so tan
+  # can never name either -- asserting the full host set demanded exactly that
+  # and failed 100% of bare-POSIX-host runs for a reason unrelated to any gap.
+  MISSING_PREREQS=$(missing_prereqs)
+  check_bootstrap_refusal bsA1 prerequisites-missing $MISSING_PREREQS
   if [ "$CAN_APT" -eq 1 ]; then
-    note "A: installing exactly what tan named: cmake ninja-build xz-utils wget"
+    note "A: installing cmake ninja-build xz-utils wget (apt package names for the bare-host set; missing: $MISSING_PREREQS)"
     apt-get install -y -qq --no-install-recommends cmake ninja-build xz-utils wget \
       >"$WORK/apt-a.log" 2>&1
     check_bootstrap_refusal bsA2 venv-unusable python3-venv
   else
-    note "A: no root apt-get in this environment -- cannot install the four named"
+    note "A: no root apt-get in this environment -- cannot install the missing"
     note "   tools to progress to the venv-unusable stage; that half of Scenario A"
     note "   is NOT RUN (not scored as a pass)."
   fi
@@ -455,6 +481,7 @@ echo "--- scenario A: $PASS_A passed, $FAIL_A failed ---"
 echo; echo "############ SCENARIO B: provisioned host ############"
 HAVE_PROJECT=0
 SDK_OK=0
+RUN_SDK=no
 if ! have_prereqs && [ "$CAN_APT" -ne 1 ]; then
   note "B: NOT RUN -- host lacks $HOST_PREREQS_LABEL and cannot self-provision (no root apt-get)"
 else
@@ -566,6 +593,18 @@ PY
       T1=$(date +%s)
       note "west sdk install: $((T1-T0))s (timeout ${SDK_TIMEOUT}s), exit-ok=$SDK_OK"
       [ "$SDK_OK" -eq 1 ] || note "$(tail -c 400 "$WORK/sdkinstall.err" 2>/dev/null)"
+      # `west sdk install` can extract a full, usable SDK into the sandbox
+      # $HOME and THEN fail at a later step -- missing file(1) (the host-tools
+      # gap documented above) or the `timeout "$SDK_TIMEOUT"` mid-extract --
+      # leaving SDK_OK=0 even though a real, buildable SDK is sitting right
+      # there. Recorded as ITS OWN fact: distinct from "a pre-existing host
+      # SDK" (HOST_ZSDK, scanned from $REAL_HOME below, outside the sandbox)
+      # and from "genuinely no SDK" (neither is true). The SANDBOXED $HOME is
+      # the right place to look HERE -- this asks "did THIS run's own install
+      # leave something usable", the opposite of what HOST_ZSDK asks.
+      for _r in "$HOME"/zephyr-sdk-*; do
+        [ -f "$_r/sdk_version" ] && RUN_SDK=yes && break
+      done
     fi
   else
     note "B: no west / no project -- cannot attempt the SDK install"
@@ -626,13 +665,24 @@ PY
       if [ "$HOST_ZSDK" = no ] && command -v reg >/dev/null 2>&1; then
         while IFS= read -r _z; do
           _z=$(printf '%s' "$_z" | tr -d '\r')
-          [ -n "$_z" ] && [ -f "$_z/sdk_version" ] && HOST_ZSDK=yes && break
+          # The registry records the directory holding Zephyr-sdkConfig.cmake,
+          # i.e. <sdk>/cmake -- NOT <sdk> itself. Measured on a real box: the
+          # value ends in /cmake, and <sdk>/cmake/sdk_version does not exist
+          # while <sdk>/sdk_version does. dirname first, or this channel can
+          # never resolve a real SDK and HOST_ZSDK stays no forever.
+          _zdir=$(dirname "$_z" 2>/dev/null)
+          [ -n "$_zdir" ] && [ -f "$_zdir/sdk_version" ] && HOST_ZSDK=yes && break
         done < <(reg query "HKCU\Software\Kitware\CMake\Packages\Zephyr-sdk" 2>/dev/null \
                     | grep REG_SZ | sed -E 's/^.*REG_SZ[[:space:]]+//')
       fi
       if [ "$RC" -eq 0 ] && [ "$HOST_ZSDK" = yes ]; then
         note "B: build succeeded using a Zephyr SDK already present on this host"
         note "   (not installed by this run) -- correct behaviour, not scored as"
+        note "   a pass or a failure: the no-SDK refusal path is NOT exercised here."
+      elif [ "$RC" -eq 0 ] && [ "$RUN_SDK" = yes ]; then
+        note "B: build succeeded using the SDK THIS RUN's own west install left"
+        note "   in place, even though the install itself did not finish clean"
+        note "   (host-tools step / timeout) -- correct behaviour, not scored as"
         note "   a pass or a failure: the no-SDK refusal path is NOT exercised here."
       elif [ "$RC" -eq 0 ]; then
         badb "B: build unexpectedly succeeded with no Zephyr SDK installed"
