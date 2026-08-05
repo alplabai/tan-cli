@@ -106,7 +106,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # (`writtenFor` + `sdk.global-default-foreign-project`) ships; the
     # removal gives back more lines than the small amount `_print_env_outcome`
     # threading a `foreign_issue` alongside `pin_issue` adds back.
-    "tan/commands/bootstrap_cmd.py": 2886,
+    # 2917, not 2886, as of tan-cli#469: the inline `workspace-orphan-refused`
+    # message (three string-literal list items, spliced together by `_refusal`)
+    # is now `workspace_orphan_refusal`, a standalone function alongside its two
+    # siblings (`workspace_guard_target_occupied_refusal`,
+    # `enclosing_west_workspace_refusal`) that already had that shape -- it was
+    # the one of the three still inlined. Branches on `target is None` instead
+    # of interpolating it unconditionally: unreachable today (`target is not
+    # None` already gates the call site, tan-cli#389/#390), but the inline
+    # f-string was the exact shape that printed a stringified `None` and then
+    # advised dropping a `--workspace` the invocation never carried, and
+    # nothing stopped that gate from being loosened again.
+    "tan/commands/bootstrap_cmd.py": 2917,
     "tan/core/bootstrap.py": 1890,
     "tan/core/flash_plan.py": 1808,
     # 1829, not 1808, as of the tan-cli#464 stage-2 review round: `_resolve_sdk`/
@@ -132,7 +143,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`.
-    "tan/commands/renode_cmd.py": 1476,
+    #
+    # 1501, not 1476, as of tan-cli#470: `--project PATH` used to be accepted
+    # and silently dropped for the default build root (resolved from the CWD
+    # instead), matching every OTHER command's `--project` handling except
+    # this one. `app_path` is now resolved through the same
+    # `build_output.resolve_app_base` ladder `size`/`image` already call,
+    # fed a native-separator workspace dir and renormalised after (this
+    # command does not POSIX-normalise its paths, unlike those two) -- the
+    # extra lines are the routing plus the docstring bullet documenting the
+    # divergence this fix removes.
+    "tan/commands/renode_cmd.py": 1501,
     # 1402, not 1296, as of tan-cli#462 (both rounds): four new `_failure`
     # callers (`_build_manifest_missing_failure`/`_core_unknown_failure`,
     # then the review round's `_target_kind_ambiguous_failure`/

@@ -43,6 +43,7 @@ from tan.commands.bootstrap_cmd import (
     load_facts,
     reconcile_west_manifest_path,
     resolve_python_floor,
+    workspace_orphan_refusal,
 )
 from tan.core.bootstrap import (
     INCOMPATIBLE,
@@ -1191,6 +1192,52 @@ def test_the_enclosing_west_guard_does_not_fire_when_the_topdir_reuses_its_own_w
     )
     env = envelope(proc)
     assert "bootstrap.enclosing-west-workspace" not in codes(env)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#469 -- `workspace-orphan-refused` never names a stringified `None`
+# or advises dropping a `--workspace` the invocation never carried.
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_orphan_refusal_names_the_real_destination_when_workspace_was_given(
+    tmp_path,
+):
+    """`target is not None` only when `--workspace` was passed explicitly --
+    currently the ONLY way this refusal is reached at all (`default_
+    relocation_target` returns `None` the instant the parent already holds a
+    `.west/config`, tan-cli#389/#390). The destination is real here, so
+    "drop --workspace" is applicable advice and must stay."""
+    repo_root = tmp_path / "ws" / "alp-sdk"
+    source_topdir = tmp_path / "ws"
+    target = tmp_path / "newhome"
+
+    message = workspace_orphan_refusal(repo_root, source_topdir, target)
+
+    assert "None" not in message
+    assert str(target) in message
+    assert "moving it to" in message
+    assert "drop --workspace" in message
+
+
+def test_workspace_orphan_refusal_has_no_destination_and_no_unreachable_advice(tmp_path):
+    """tan-cli#469: `target is None` is the shape of call the bug was filed
+    against -- no `--workspace` was passed, so there is no real destination.
+    The message must say that instead of interpolating a stringified `None`,
+    and must not send the reader to drop a flag they never carried."""
+    repo_root = tmp_path / "ws" / "alp-sdk"
+    source_topdir = tmp_path / "ws"
+
+    message = workspace_orphan_refusal(repo_root, source_topdir, None)
+
+    assert "None" not in message
+    assert str(repo_root) in message
+    assert str(source_topdir) in message
+    assert "cannot be relocated" in message
+    assert "This workspace is already bootstrapped" in message
+    assert "re-run without --sdk-root pointing into it" in message
+    assert "clone a SECOND alp-sdk checkout elsewhere" in message
+    assert "drop --workspace" not in message
 
 
 def test_a_relocation_is_rolled_back_when_a_later_step_fails(tmp_path):

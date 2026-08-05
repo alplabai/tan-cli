@@ -1277,6 +1277,43 @@ def enclosing_west_workspace_refusal(intended_topdir: Path, ancestor: Path) -> s
     )
 
 
+def workspace_orphan_refusal(repo_root: Path, source_topdir: Path, target: Path | None) -> str:
+    """`bootstrap.workspace-orphan-refused`: `repo_root` is the manifest repo of
+    the live west workspace at `source_topdir`, so relocating it would orphan
+    that workspace -- its `.west/config` would still name this checkout.
+
+    `target` is the real destination only when `--workspace` was given
+    explicitly: that is currently the ONLY way this refusal is reached at all,
+    since `default_relocation_target` (the no-`--workspace` auto-relocation
+    path) returns `None` the instant the parent already holds a `.west/config`
+    -- the same fact this refusal itself is gated on -- so an in-place re-run
+    with no `--workspace` never gets this far (tan-cli#389/#390). `target`
+    stays typed `Path | None` anyway, not narrowed to `Path` at the call site:
+    interpolating it unconditionally is exactly how tan-cli#469 printed a
+    stringified `None` in the prose and then advised dropping a `--workspace`
+    the invocation never carried, for the shape of call this guards against
+    ever recurring even if that gating changes.
+    """
+    if target is None:
+        return (
+            f"{_native(repo_root)} is the manifest repository of the west workspace at "
+            f"{_native(source_topdir)}, so it cannot be relocated -- its .west/config "
+            f"would still name this checkout. Nothing was moved and the default SDK was "
+            f"not changed. This workspace is already bootstrapped; re-run without "
+            f"--sdk-root pointing into it, or clone a SECOND alp-sdk checkout elsewhere "
+            f"and pass --sdk-root at that one."
+        )
+    return (
+        f"{_native(repo_root)} is the manifest repository of the west workspace at "
+        f"{_native(source_topdir)}, so moving it to {_native(target)} would leave that "
+        f"workspace pointing at nothing -- its .west/config would still name this "
+        f"checkout. Nothing was moved and the default SDK was not changed. Bootstrap "
+        f"that workspace in place (drop --workspace), or clone a SECOND alp-sdk "
+        f"checkout under the directory you want and pass --sdk-root pointing at that "
+        f"one."
+    )
+
+
 def find_enclosing_west(start: Path) -> Path | None:
     """Walk from `start`'s PARENT upward -- never `start` itself, whose own
     `.west` is the ordinary "already initialised, reuse" case `west_phase`
@@ -2225,8 +2262,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # Checked before the host and prerequisite gates below for the same
         # reason they sit before the relocation: a refusal knowable from
         # filesystem facts alone must not depend on having got that far.
-        # Gated on `target is not None`: with no relocation planned `target`
-        # stays `None` above, else an in-place re-run refuses with dest "None".
+        # Gated on `target is not None`: with no relocation planned there is
+        # nothing to orphan, so an in-place re-run over an already-bootstrapped
+        # workspace must fall through rather than refuse (tan-cli#389/#390) --
+        # `workspace_orphan_refusal` stays `None`-safe regardless, since that
+        # is the shape of call tan-cli#469 was filed against.
         source_topdir = paths.repo_root.parent
         if target is not None and _is_file(
             source_topdir / ".west" / "config"
@@ -2235,16 +2275,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 _refusal(
                     ExitCode.VALIDATION_FAILURE,
                     "workspace-orphan-refused",
-                    [
-                        f"{_native(paths.repo_root)} is the manifest repository of the "
-                        f"west workspace at {_native(source_topdir)}, so moving it to "
-                        f"{_native(target)} would leave that workspace pointing at "
-                        f"nothing -- its .west/config would still name this checkout.",
-                        "Nothing was moved and the default SDK was not changed.",
-                        "Bootstrap that workspace in place (drop --workspace), or clone a "
-                        "SECOND alp-sdk checkout under the directory you want and pass "
-                        "--sdk-root pointing at that one.",
-                    ],
+                    [workspace_orphan_refusal(paths.repo_root, source_topdir, target)],
                     payload(),
                 ),
                 reported_project,
