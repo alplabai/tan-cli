@@ -598,7 +598,9 @@ def presets(
         None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
     ),
     sdk_root: str = typer.Option(None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."),
-    verbose: bool = typer.Option(False, "--verbose", help="List each discovered SKU."),
+    verbose: bool = typer.Option(
+        False, "--verbose", help="Also show each SKU's family and core/OS pairs."
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """List the SDK's SoM presets plus tan's built-in defaults."""
@@ -671,6 +673,8 @@ def presets(
     else:
         for line in render_presets_text(soms, board_libraries, verbose):
             print(line, file=sys.stderr)
+        for issue in issues:
+            print(f"presets: {issue.message}", file=sys.stderr)
     raise typer.Exit(int(exit_code))
 
 

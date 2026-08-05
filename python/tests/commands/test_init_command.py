@@ -909,7 +909,7 @@ def test_would_overwrite_names_the_files_and_offers_preview(tmp_path):
 
     changes = [
         FileChange(relative_path="board.yaml", kind="update"),
-        FileChange(relative_path="src/main.c", kind="create"),
+        FileChange(relative_path="src/main.c", kind="new"),
     ]
     message = overwrite_refusal_message(changes)
 

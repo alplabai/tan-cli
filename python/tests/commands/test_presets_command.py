@@ -24,6 +24,7 @@ from typer.testing import CliRunner
 
 from tan.cli import app
 from tan.commands.presets_cmd import (
+    SDK_UNRESOLVED_MESSAGE,
     SomShapeError,
     infer_runtime_for_core_id,
     parse_som_preset,
@@ -357,6 +358,19 @@ def test_text_mode_writes_nothing_to_stdout(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert result.stdout == ""
     assert "presets: skus=0 libraries=8 boardLibraries=0" in result.stderr
+
+
+def test_text_mode_reports_the_unresolved_sdk_reason_too(tmp_path, monkeypatch):
+    """The JSON envelope has always carried `presets.sdk-root-unresolved` in
+    `issues`; text mode built the same list and then never printed it -- a
+    customer running a bare `tan presets` with no SDK resolvable saw
+    `skus=0` and nothing telling them why. Mirrors `examples_cmd.py`'s own
+    issue-printing loop for its text branch."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["presets", "--sdk-root", "./nope"])
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert f"presets: {SDK_UNRESOLVED_MESSAGE}" in result.stderr
 
 
 def test_a_bad_format_is_a_usage_error_not_a_traceback():

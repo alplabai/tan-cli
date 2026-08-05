@@ -338,7 +338,7 @@ def test_examples_text_names_the_categories_on_an_unfiltered_run():
     lines = render_examples_text(examples, filter_=None, category=None, verbose=False, sdk_resolved=True)
     joined = "\n".join(lines)
 
-    assert "ai" in joined and "audio" in joined
+    assert "categories: ai audio" in joined
     assert "--category" in joined
 
 
@@ -351,3 +351,62 @@ def test_examples_category_filter_narrows_and_reports_an_empty_match():
 
     lines = render_examples_text([], filter_=None, category="nope", verbose=False, sdk_resolved=True)
     assert lines == ['examples: no example projects in category "nope".']
+
+
+# --------------------------------------------------------------------------
+# End-to-end: --category through the real command, not just the helpers
+# --------------------------------------------------------------------------
+
+
+def _sdk_with_categories_for_composition(root):
+    """Three examples shaped so neither `--category` nor `--filter` alone
+    proves composition: `--filter tone` alone matches two examples in TWO
+    different categories (`ai/tone-detect` and `audio/i2s-tone`), and
+    `--category audio` alone matches two examples in the SAME category
+    (`audio/beep` and `audio/i2s-tone`). Only `--category audio --filter tone`
+    together narrow to the single example matching both."""
+    write(root / "scripts/alp_project.py", "# marker\n")
+    write(root / "examples/ai/tone-detect/board.yaml", "som:\n  sku: X\n")
+    write(root / "examples/ai/tone-detect/README.md", "# Tone Detect\n\nListens for a tone.\n")
+    write(root / "examples/audio/i2s-tone/board.yaml", "som:\n  sku: X\n")
+    write(root / "examples/audio/i2s-tone/README.md", "# I2S Tone\n\nPlays a tone.\n")
+    write(root / "examples/audio/beep/board.yaml", "som:\n  sku: X\n")
+    write(root / "examples/audio/beep/README.md", "# Beep\n\nPlays a beep.\n")
+    return root
+
+
+def test_examples_category_flag_narrows_the_real_command_and_composes_with_filter(tmp_path):
+    """`examples` is wrapped by `accept_global_flags`, which rebuilds the
+    command signature and resolves PEP-563 annotations by hand
+    (`tan/core/global_flags.py:174-192`) -- everything above this line tests
+    `render_examples_text`/`example_matches_category` directly and would keep
+    passing even if that wrapping silently dropped `--category` from the real
+    Typer command. This drives `tan examples --category ...` through
+    `CliRunner`, the same pattern as `test_json_envelope_shape` above.
+    """
+    sdk = _sdk_with_categories_for_composition(tmp_path / "sdk")
+
+    category_only = runner.invoke(
+        app, ["examples", "--sdk-root", str(sdk), "--category", "audio", "--format", "json"]
+    )
+    assert category_only.exit_code == 0
+    ids = {e["id"] for e in json.loads(category_only.stdout)["data"]["examples"]}
+    assert ids == {"audio/beep", "audio/i2s-tone"}
+
+    composed = runner.invoke(
+        app,
+        [
+            "examples",
+            "--sdk-root",
+            str(sdk),
+            "--category",
+            "audio",
+            "--filter",
+            "tone",
+            "--format",
+            "json",
+        ],
+    )
+    assert composed.exit_code == 0
+    composed_ids = [e["id"] for e in json.loads(composed.stdout)["data"]["examples"]]
+    assert composed_ids == ["audio/i2s-tone"]
