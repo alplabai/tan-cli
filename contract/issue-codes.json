@@ -822,7 +822,7 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "The `bootstrap.` prefix is applied by `Log.warn`; announces that a venv in a workspace bootstrap OWNS was removed and recreated because its pip ran and reported itself broken. Was a `log.line` before tan-cli#390, so the deletion never reached `issues[]` and was invisible to a `--format json` consumer. Registered by tan-cli#390, which stopped `ensure_venv` from deleting a venv it did not create. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `bootstrap.` prefix is applied by `Log.warn`; announces that a venv in a workspace bootstrap OWNS was removed and recreated because its pip ran and reported itself broken -- the one delete path that SURVIVED tan-cli#390's fix (the ADOPTED case is `bootstrap.adopted-venv-unusable`, a refusal instead of a delete). Was a `log.line` before tan-cli#390, so the deletion never reached `issues[]` and was invisible to a `--format json` consumer. Registered by tan-cli#390, which stopped `ensure_venv` from deleting a venv it did not create. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "bootstrap.workspace-orphan-refused",
@@ -839,22 +839,6 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/bootstrap_cmd.py",
       "note": "tan-cli#284: fires from `rollback_relocation_after()` when a LATER phase (venv/west) fails after the checkout was already relocated, and the rollback itself is reported -- whether the move-back and the pointer restore both succeeded, only the pointer restore failed, or the move-back itself could not complete. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "bootstrap.adopted-venv-unusable",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "tan-cli#390: a literal `Issue(\"bootstrap.adopted-venv-unusable\", \"error\", ...)` at the `ensure_venv` call site, built from `adopted_venv_unusable_refusal()`. Fires when the workspace was ADOPTED from `$ZEPHYR_BASE` (REUSE or STALE) and its `.venv` cannot run pip -- `uv venv` and `python -m venv --without-pip` both produce exactly that shape -- where bootstrap previously deleted and recreated the venv, announced only as a `log.line` no JSON consumer could see. Distinct from `bootstrap.venv-unusable`, which is the HOST `python3-venv`/`ensurepip` refusal. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "bootstrap.venv-recreated",
-      "status": "reserved",
-      "severity": "warning",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "tan-cli#390: prefixed by `Log.warn(\"venv-recreated\", ...)` in `ensure_venv`. The one delete path that SURVIVED the fix -- tan's own (non-adopted) workspace venv, whose interpreter runs but whose pip is proven absent -- reported as a warning rather than the `log.line` it used to be, so `--format json` carries the fact that a directory's contents were removed. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "cli.command-deferred",
