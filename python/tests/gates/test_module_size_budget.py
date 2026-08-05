@@ -265,9 +265,11 @@ _MODULE_BUDGET: dict[str, int] = {
     # which is the last thing to move out of the file it explains.
     # 851, not 842, as of the UX polish sweep task 1: all 32 command
     # registrations now carry `rich_help_panel=` keywords grouping them
-    # into six titled panels on `--help` (instead of a flat "Commands"
-    # list). The ~9 lines reflect wrapping context_settings arguments
-    # onto separate lines for readability.
+    # into six titled panels on `--help`. Growth: +6 lines from wrapping
+    # the three `context_settings=FORWARD_CONTEXT_SETTINGS` arguments
+    # (lock, migrate, quality) from single lines to three-line blocks,
+    # and +3 lines from the registration-table header comment growing
+    # from 1 line to 4 to document the panel-keyword pattern.
     "tan/cli.py": 851,
 }
 
