@@ -616,7 +616,12 @@ def root(
         # stderr, exit code 2), the same shape every other CLI mistake here
         # already gets, so bare invocation does not need its own bespoke
         # rendering.
-        ctx.fail("a command is required")
+        ctx.fail(
+            "a command is required.\n"
+            "New here? `tan doctor` checks this host, `tan init` creates a project, "
+            "`tan build` builds it.\n"
+            "`tan --help` lists all commands by category."
+        )
     # No third branch here any more (tan-cli#378). This callback used to refuse
     # a pre-subcommand `--format` for any command outside a hand-written
     # allowlist of commands that honoured it -- the refusal was correct given the

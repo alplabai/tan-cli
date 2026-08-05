@@ -671,6 +671,20 @@ def _plan_from_example(
 # ---------------------------------------------------------------------------
 
 
+def overwrite_refusal_message(changes: list[FileChange]) -> str:
+    """Name the files that actually collide, and offer the non-destructive
+    option first. `--force` is the only escape the old wording named, which
+    made overwriting look like the intended next step rather than the last
+    resort."""
+    colliding = [c.relative_path for c in changes if c.kind == "update"]
+    listed = ", ".join(sorted(colliding))
+    return (
+        f"{len(colliding)} file(s) would be overwritten: {listed}. "
+        "Run with --preview to see the full plan, --destination <DIR> or "
+        "--name <NAME> to write somewhere else, or --force to overwrite."
+    )
+
+
 def _finish(
     template_id: str,
     destination: str,
@@ -709,7 +723,7 @@ def _finish(
                 Issue(
                     "init.would-overwrite",
                     "error",
-                    "One or more files would be overwritten. Use --force to allow updates.",
+                    overwrite_refusal_message(changes),
                 )
             ],
             exit_code=ExitCode.WRITE_FAILURE,

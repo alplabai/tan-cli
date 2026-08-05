@@ -1136,7 +1136,9 @@ def _run_not_ported(*, json_mode: bool, subcommand: str, data: dict[str, Any]) -
         ),
         text_lines=[
             f"sdk {subcommand}: not available in this build of tan.",
-            "Use `--sdk-root <path>` to point a command at a checkout directly.",
+            "Use `--sdk-root <path>` to point a command at a checkout directly,",
+            "or clone one: `git clone https://github.com/alplabai/alp-sdk`.",
+            "`tan doctor` reports which checkout tan currently resolves.",
         ],
         exit_code=ExitCode.RUNTIME_FAILURE,
     )

@@ -423,3 +423,13 @@ def test_help_renders_the_six_panels():
         "Inspect & author",
     ):
         assert panel in p.stdout, f"missing panel: {panel}"
+
+
+def test_bare_invocation_points_a_new_user_somewhere():
+    """"a command is required" is true and useless. A first-time user needs
+    the three verbs that get them from nothing to a running build."""
+    p = run()
+    assert p.returncode == 2
+    assert p.stdout == ""          # unchanged: stdout is the envelope channel
+    assert "tan doctor" in p.stderr
+    assert "tan init" in p.stderr

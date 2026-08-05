@@ -711,13 +711,15 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
         raise BuildError(
             "build.plan-unavailable",
             "no alp-sdk checkout found -- pass `--sdk-root <PATH>` or run from a project "
-            "beside one. Planning reads the SDK's `metadata/**`.",
+            "beside one. Planning reads the SDK's `metadata/**`. Run `tan doctor` to see "
+            "which checkout tan resolves, if any.",
             ExitCode.RUNTIME_FAILURE,
         )
     if board_yaml is None:
         raise BuildError(
             "build.plan-unavailable",
-            "no board.yaml found -- pass `--board-yaml <PATH>` or run from a project.",
+            "no board.yaml found -- pass `--board-yaml <PATH>` or run from a project. "
+            "Run `tan init` to create one, or `tan examples` to list ready-made projects.",
             ExitCode.RUNTIME_FAILURE,
         )
     # `--sdk-root` is terminal and returned as-is even when wrong (I-31), so the
