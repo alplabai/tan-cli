@@ -71,11 +71,11 @@ _FUNCTION_CAP = 50
 #: module" number so a split that shrinks one file cannot be spent widening
 #: another.
 #:
-#: `build_cmd.py` 1559 -> 1562 (help-text cleanup, tan-cli#427): two changes,
-#: not one. The `--execute`/`--native` port-vs-oracle rationale moved OUT of
-#: `--help` and into the module docstring (+5 lines) while the `--execute`
-#: help string itself shrank once that rationale left it (-2 net); the
-#: `_DEFERRED_HELP` and `--native` help rewrites are line-count-neutral.
+#: The UX polish sweep's own raises are recorded per entry below, against the
+#: `dev` numbers this branch rebased onto -- `cli.py`, `build_cmd.py`,
+#: `doctor_cmd.py`, `init_cmd.py`, `sdk_cmd.py`. Each was re-measured after
+#: the rebase rather than carried over from the pre-rebase branch, since four
+#: of the five had moved on `dev` in between.
 _MODULE_BUDGET: dict[str, int] = {
     # 3127, not 3114: the 27-camelCase-issue-code fix added `kebab_check_name`
     # (+ its `_CAMEL_BOUNDARY` regex), the one shared place a `Check.name`
@@ -87,7 +87,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # project` alongside `sdk.project-pin-unresolved` -- the same warning
     # `sdk current`/`tan build` already disclose, wired into the "0 issues"
     # report doctor exists to be honest about.
-    "tan/commands/doctor_cmd.py": 3135,
+    # 3192, not 3135, as of the UX polish sweep's doctor work: 116 insertions
+    # against 59 deletions, net +57, and the deletions are the point -- the
+    # whole text renderer moved OUT to `tan/core/doctor_render.py` (the
+    # wrapping, colouring and footer are pure formatting and belong beside
+    # `text_layout`, not in the command). What stayed and grew is the
+    # streaming path: `_collect` gained an `on_check` callback and this module
+    # gained `_print_check`, so each check's block prints the moment it is
+    # produced instead of the whole report printing after the last probe --
+    # a wedged probe is now named by the last line on screen rather than
+    # leaving a blank terminal. Plus the `--fix`/`--no-color` plumbing and the
+    # `_DOCTOR_TEXT_MIN_WIDTH` floor the renderer is called with.
+    "tan/commands/doctor_cmd.py": 3192,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -144,7 +155,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # `foreign_global_default_for` -- the exact silent-drop shape #464 exists
     # to close -- and `build` appends `sdk.global-default-foreign-project`
     # beside `sdk.project-pin-unresolved`.
-    "tan/commands/build_cmd.py": 1607,
+    # 1612, not 1607, as of the UX polish sweep, two tasks again. Task 2
+    # (+3 net): the `--execute`/`--native` port-vs-oracle rationale moved OUT
+    # of `--help` and into the module docstring (+5) while the `--execute`
+    # help string shrank once that rationale left it (-2); the
+    # `_DEFERRED_HELP` and `--native` rewrites are line-count-neutral.
+    # Task 3 (+2): both `build.plan-unavailable` refusals (no-SDK, no-
+    # board.yaml) gained a next-step sentence naming `tan doctor`/`tan init`/
+    # `tan examples`, each appended as its own wrapped string literal rather
+    # than lengthening an existing line.
+    "tan/commands/build_cmd.py": 1612,
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
@@ -214,7 +234,10 @@ _MODULE_BUDGET: dict[str, int] = {
     # the one shared point `flash`/`size`/`image` now call (from `_error`/
     # `_error_outcome` themselves) instead of each hand-copying the
     # pin-issue/foreign-issue pair only on their happy path.
-    "tan/commands/sdk_cmd.py": 1265,
+    # 1266, not 1265, as of the UX polish sweep task 3: the `not-ported`
+    # refusal's `text_lines` gained its next step (the `git clone` remedy and
+    # the `tan doctor` pointer), +1 net.
+    "tan/commands/sdk_cmd.py": 1266,
     "tan/commands/validate_cmd.py": 1093,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
@@ -233,7 +256,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # -- this is the command a foreign `globalDefault` hurts most, since the
     # pin it is about to write is PERMANENT, unlike one build silently using
     # the wrong SDK once.
-    "tan/commands/init_cmd.py": 1009,
+    # 1023, not 1009, as of the UX polish sweep task 3: the new module-level
+    # `overwrite_refusal_message` helper (its docstring, the `update`-kind
+    # filter, and the returned `--preview`/`--force` message), +14 lines,
+    # single cause -- the `init.would-overwrite` call site itself stayed the
+    # same length, swapping a literal string for a call.
+    "tan/commands/init_cmd.py": 1023,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
@@ -269,14 +297,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # leading `--format` outside `text`/`json`). Raised rather than
     # extracted: the growth is the explanation of a shipped regression,
     # which is the last thing to move out of the file it explains.
-    # 851, not 842, as of the UX polish sweep task 1: all 32 command
-    # registrations now carry `rich_help_panel=` keywords grouping them
-    # into six titled panels on `--help`. Growth: +6 lines from wrapping
-    # the three `context_settings=FORWARD_CONTEXT_SETTINGS` arguments
-    # (lock, migrate, quality) from single lines to three-line blocks,
-    # and +3 lines from the registration-table header comment growing
-    # from 1 line to 4 to document the panel-keyword pattern.
-    "tan/cli.py": 851,
+    # 856, not 842, as of the UX polish sweep, from two separate tasks.
+    # Task 1 (+9): all 32 command registrations now carry `rich_help_panel=`
+    # keywords grouping them into six titled panels on `--help` -- +6 lines
+    # from wrapping the three `context_settings=FORWARD_CONTEXT_SETTINGS`
+    # arguments (lock, migrate, quality) from single lines to three-line
+    # blocks, and +3 from the registration-table header comment growing from
+    # 1 line to 4 to document the panel-keyword pattern.
+    # Task 3 (+5): the bare-`tan` `ctx.fail("a command is required")` became a
+    # three-sentence message naming `tan doctor`/`tan init`/`tan build` and
+    # `tan --help`, since exiting 2 at a user who typed the binary's own name
+    # with nowhere to go next is the most-hit dead end in the CLI.
+    "tan/cli.py": 856,
 }
 
 #: Some of these are `tan/planner/**`, which is a hash-audited MIRROR of
