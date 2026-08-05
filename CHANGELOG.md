@@ -61,6 +61,32 @@ All notable changes to `tan` are documented here. Format follows
   separately asserts the regex itself still rejects the 27 pre-fix
   camelCase spellings — non-vacuity, so this cannot regress to a gate that
   would have waved the original defect through.
+- **`tan kconfig` could not reach the workspace an ordinary `tan bootstrap`
+  had just built** (tan-cli#453) — the `prj.conf` LSP feed for
+  alp-sdk-vscode, so this was a dead symbol menu by default on any host with
+  another Zephyr checkout around. Two compounding defects: `west` was spawned
+  bare, depending on PATH having it, which `tan bootstrap` deliberately never
+  does (it installs `west` only inside the workspace-local venv); and
+  `ZEPHYR_BASE` resolution carried a private, weaker 3-tier ladder instead of
+  the shared, manifest-verified `tan.core.venv.west_workspace_dir` that
+  `build`/`flash`/`west_forward` already use, so an unrelated ambient
+  `$ZEPHYR_BASE` was accepted over the workspace `tan bootstrap` had just
+  built for the very `--sdk-root` in play. `kconfig` now delegates to that
+  same shared resolver rather than a third, driftable copy, and the bare
+  `west` spawn is fixed at its real site,
+  `tan/planner/kconfig_symbols.py`'s `_load_board_symbols`, which now
+  resolves `west_program(...)` and spawns that absolute path.
+- **`tan quality` and `tan migrate` could never succeed under any input**
+  (tan-cli#454) — both shell a `west` extension that declares an argument
+  REQUIRED (`alp_quality.py`'s `--profile`, `alp_migrate.py`'s mutually
+  exclusive `--check`/`--preview`/`--apply`), and neither flag existed on
+  tan's own surface, so every real run died on the child's own argparse usage
+  error (`quality.failed` / `migrate.failed`) before doing any work. Both
+  commands now declare the flag(s) for real and refuse BEFORE spawning `west`
+  when absent (`quality.profile-required` / `migrate.mode-required`, exit 2)
+  rather than round-tripping through a child process to find out. No default
+  is guessed for either: `quality`'s profile and `migrate`'s mode (`--apply`
+  mutates the customer's `board.yaml`) are both left to the caller.
 - **`tan generate` bare/`--all` refused every re-run once
   `boards/native_sim_native_64.overlay` existed, even against its own prior
   output.** `_overlay_would_overwrite`'s guard was existence-only, so a
