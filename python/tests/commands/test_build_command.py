@@ -1327,3 +1327,25 @@ def test_build_also_warns_when_the_global_default_was_written_for_another_projec
         if i["code"] == "sdk.global-default-foreign-project"
     )
     assert str(proj_b).replace("\\", "/") in message
+
+
+def test_build_help_carries_no_port_archaeology():
+    """`--help` is user documentation, not a changelog. "v0.4.1" is the Rust
+    release this Python port replaced; a user has never heard of it, and the
+    rationale it belongs to already lives in the surrounding docstrings."""
+    from typer.testing import CliRunner
+    import typer
+
+    from tan.commands.build_cmd import build
+
+    app = typer.Typer()
+    app.command("build")(build)
+    output = CliRunner().invoke(app, ["build", "--help"]).output
+
+    assert "v0.4.1" not in output
+    assert "ADDED BY THIS PORT" not in output
+    assert "parity gap" not in output
+    # The twelve deferred options stay LISTED -- hiding a flag a user will
+    # type, then refusing it at exit 1 is worse than naming it.
+    assert "--verbose" in output
+    assert "--non-interactive" in output

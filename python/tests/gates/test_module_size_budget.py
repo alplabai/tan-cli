@@ -70,6 +70,12 @@ _FUNCTION_CAP = 50
 #: `validate_cmd.py` 1092 -> 1093 (a corrected #262 docstring). Recorded per file rather than as a single "worst
 #: module" number so a split that shrinks one file cannot be spent widening
 #: another.
+#:
+#: `build_cmd.py` 1559 -> 1562 (help-text cleanup, tan-cli#427): two changes,
+#: not one. The `--execute`/`--native` port-vs-oracle rationale moved OUT of
+#: `--help` and into the module docstring (+5 lines) while the `--execute`
+#: help string itself shrank once that rationale left it (-2 net); the
+#: `_DEFERRED_HELP` and `--native` help rewrites are line-count-neutral.
 _MODULE_BUDGET: dict[str, int] = {
     # 3127, not 3114: the 27-camelCase-issue-code fix added `kebab_check_name`
     # (+ its `_CAMEL_BOUNDARY` regex), the one shared place a `Check.name`

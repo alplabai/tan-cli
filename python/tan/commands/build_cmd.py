@@ -60,6 +60,11 @@ conflicting combination is refused with its own code, never resolved by silent
 precedence (`--execute --materialise` -> `build.conflicting-flags`, exit 2;
 `--execute` with a deferred flag -> `cli.command-deferred`, exit 1, because a
 flag this build does not implement at all cannot be honoured either way).
+`--execute` is ADDED BY THIS PORT, not a v0.4.1 flag: there `--plan-from`
+implies `--plan` and outranks `--native`, so a file-supplied plan cannot be
+dispatched at all. Deliberate, not a parity gap. `--native` keeps v0.4.1's
+behaviour of NOT overriding the `--plan` that `--plan-from` implies, which
+`test_plan_from_shows_the_plan_and_writes_nothing_even_with_native` pins.
 
 **The OS is not an option (I-01/I-02).** There is deliberately no `--os` and
 no `--backend` flag. A core's runtime is derived from its Cortex class by the
@@ -173,7 +178,7 @@ _DEFERRED_FLAGS = (
 # meant was renumbered to 0.5.0, and a help string that names the release a
 # flag will appear in is a promise tan cannot keep true. The issue link is
 # the durable pointer.
-_DEFERRED_HELP = "Deferred, not implemented in this build (tan-cli#427)."
+_DEFERRED_HELP = "Accepted by other commands; not implemented for `build` yet (tan-cli#427)."
 
 
 class BuildError(Exception):
@@ -1249,8 +1254,8 @@ def build(
         False,
         "--native",
         help="Build natively: materialise the plan, then run each slice's command. "
-        "The default when no plan-mode flag is given. Like v0.4.1, this does NOT "
-        "override the --plan implied by --plan-from -- use --execute for that.",
+        "The default when no plan-mode flag is given. Does NOT override the --plan "
+        "implied by --plan-from -- use --execute for that.",
     ),
     execute: bool = typer.Option(
         False,
@@ -1258,9 +1263,7 @@ def build(
         help="Materialise the plan AND run each slice's command, even when the plan "
         "came from --plan-from -- run a pinned, reviewed plan file reproducibly. "
         "Implies --materialise (nothing can run that was never written); reports the "
-        "ordinary build result. ADDED BY THIS PORT, not a v0.4.1 flag: there "
-        "--plan-from implies --plan and outranks --native, so a file-supplied plan "
-        "cannot be dispatched at all. Deliberate, not a parity gap.",
+        "ordinary build result.",
     ),
     build_root: str = typer.Option(
         None,
