@@ -3146,8 +3146,8 @@ def doctor(
     raise typer.Exit(int(exit_code))
 
 
-# tan-cli#261: adds the five oracle `GlobalArgs` flags this command was still
-# missing (`--all`/`--no-color`/`--quiet`/`--target`/`--verbose`) on top of
+# tan-cli#261: adds the four oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--quiet`/`--target`/`--verbose`) on top of `--no-color`/
 # `--non-interactive`/`--ci`, already declared and wired into `can_prompt`
 # above; see `tan.core.global_flags`.
 doctor = accept_global_flags(doctor)

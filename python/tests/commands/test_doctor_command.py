@@ -2765,9 +2765,22 @@ def test_doctor_no_color_flag_reaches_the_render_and_suppresses_ansi(monkeypatch
     plain `tan doctor` must now carry ANSI escapes and `--no-color` must
     strip them, through the REAL CLI dispatch (argument parsing ->
     `accept_global_flags` -> `doctor()`'s body -> `tan.env.use_color` ->
-    `render_doctor_lines`), not a direct call to any one of those."""
+    `render_doctor_lines`), not a direct call to any one of those.
+
+    `tan.env.use_color` also short-circuits on `NO_COLOR`'s presence in the
+    real environment (`no_color_requested()`, tan-cli#288 -- correctly so,
+    per spec). Left alone, this test's first assertion is a coin flip on
+    whoever runs it: green on a shell with no `NO_COLOR`, red -- for the
+    right reason, colour genuinely suppressed -- on one that has it set
+    (CI runners commonly do). `NO_COLOR` is not something this test
+    controls via any argument or fixture, so it must be neutralised
+    explicitly, same as `isatty` is forced explicitly below. `--ci` needs
+    no equivalent treatment: `ci` reaches `use_color` only as the `--ci`
+    CLI flag's own value (default `False`), never read from an env var, so
+    it is already fully controlled by the argv this test passes."""
     from typer.testing import _NamedTextIOWrapper
 
+    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     stub_checks = [doctor_cmd.Check("west", "fail", "west not found")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
