@@ -58,6 +58,25 @@ git config --global core.longpaths true 2>/dev/null || true
 # its history is permanent, so `/home/<someone>` in a tracked file is a leak --
 # tests/gates/test_no_leaked_host_paths.py caught exactly that here. Export
 # ZEPHYR_SDK_INSTALL_DIR to skip the search entirely.
+
+# One toolchain-presence test, shared by EVERY "does a usable Zephyr SDK live
+# here" scan below (this candidate list, the CMake dot-file/registry reads,
+# RUN_SDK's post-install scan, and HOST_ZSDK's host scan) so none of them can
+# be satisfied by a bare `sdk_version` file alone. `sdk_version` sits at the
+# SDK root but the compiler ships in a SEPARATE tarball under it
+# (`gnu/arm-zephyr-eabi` on SDK 1.0.x, `arm-zephyr-eabi` on 0.16.x -- both
+# accepted). Testing for the GCC binary itself, not just the directory,
+# matters: a `timeout` mid-extract leaves an EMPTY toolchain directory that a
+# bare `-d` test would wave through.
+_sdk_has_toolchain() {
+  [ -f "$1/sdk_version" ] || return 1
+  local _g
+  for _g in "$1"/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc* "$1"/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc*; do
+    [ -f "$_g" ] && return 0
+  done
+  return 1
+}
+
 ZEPHYR_SDK_VERSION="${ZEPHYR_SDK_VERSION:-1.0.1}"
 # REAL_HOME, never the sandboxed $HOME (already redirected above at :48) -- a
 # candidate under the sandbox could only be this run's own debris, and a dev
@@ -71,7 +90,7 @@ for cand in \
   "/usr/local/zephyr-sdk-$ZEPHYR_SDK_VERSION" \
   "/c/zephyr-sdk-$ZEPHYR_SDK_VERSION"
 do
-  if [ -f "$cand/sdk_version" ]; then export ZEPHYR_SDK_INSTALL_DIR="$cand"; break; fi
+  _sdk_has_toolchain "$cand" && { export ZEPHYR_SDK_INSTALL_DIR="$cand"; break; }
 done
 # `west sdk install` records the location via CMake's user package registry.
 # On POSIX that channel is a dot-file tree, ~/.cmake/packages/Zephyr-sdk; on
@@ -89,9 +108,9 @@ if [ -z "${ZEPHYR_SDK_INSTALL_DIR:-}" ]; then
     # Test both the raw value and its dirname.
     _z=$(tr -d '\r\n' < "$reg")
     cand=$(dirname "$_z" 2>/dev/null)
-    if [ -n "$_z" ] && [ -f "$_z/sdk_version" ]; then
+    if [ -n "$_z" ] && _sdk_has_toolchain "$_z"; then
       export ZEPHYR_SDK_INSTALL_DIR="$_z"; break
-    elif [ -n "$_z" ] && [ -f "$cand/sdk_version" ]; then
+    elif [ -n "$_z" ] && _sdk_has_toolchain "$cand"; then
       export ZEPHYR_SDK_INSTALL_DIR="$cand"; break
     fi
   done
@@ -365,14 +384,36 @@ HOST_PREREQS=$(python3 - "$HOST_KIND" ./alp-sdk/metadata/bootstrap.json <<'PY' 2
 import json, sys
 host, path = sys.argv[1], sys.argv[2]
 try:
-    p = json.load(open(path))["prerequisites"]
+    doc = json.load(open(path))
+    # Refuse in this SAME try block, exactly as tan's own
+    # parse_bootstrap_manifest does (tan/core/bootstrap.py:513-535):
+    # schemaVersion is read FIRST there and a mismatch is a hard refusal, not
+    # "fall through and hope the shape still matches". Reading past a
+    # schemaVersion this harness does not understand would hand back a tuple
+    # tan itself refuses to parse, producing
+    # `bada "...envelope missing issue bootstrap.prerequisites-missing"` --
+    # blaming tan for a manifest-shape mismatch that was never tan's fault.
+    # 1 mirrors BOOTSTRAP_MANIFEST_SCHEMA_VERSION (bootstrap.py:89).
+    EXPECTED_SCHEMA = 1
+    version = doc.get("schemaVersion")
+    if not isinstance(version, int) or isinstance(version, bool) or version != EXPECTED_SCHEMA:
+        raise ValueError(f"schemaVersion {version!r} unsupported")
+    p = doc["prerequisites"]
     if host == "windows":
         lst = p["windows"]
     elif host == "macos":
         lst = p.get("macos") or p["posix"]
     else:
         lst = p["posix"]
-    if not isinstance(lst, list) or not lst:
+    if not isinstance(lst, list):
+        raise ValueError("empty")
+    # Filter shell-unsplittable entries (empty / whitespace-only strings):
+    # the schema only requires {"type": "string"}, no minLength, so a
+    # whitespace-only entry is schema-VALID and would otherwise survive both
+    # this check and `[ -z "$HOST_PREREQS" ]` below, making `have_prereqs`
+    # vacuously true -- a host wrongly declared provisioned.
+    lst = [t.strip() for t in lst if isinstance(t, str) and t.strip()]
+    if not lst:
         raise ValueError("empty")
     print(" ".join(lst))
 except Exception:
@@ -380,10 +421,16 @@ except Exception:
 PY
 )
 if [ -z "$HOST_PREREQS" ]; then
-  # FALLBACK ONLY -- the manifest is absent or unparseable (the clone at :268
-  # can fail, or an ALP_SDK_REF can predate metadata/bootstrap.json's shape).
-  # Hand-ported and may drift from the live SDK; the block above is preferred.
-  note "alp-sdk/metadata/bootstrap.json unreadable -- using hand-ported FALLBACK tuples"
+  # FALLBACK ONLY -- the manifest is absent, unparseable, an unsupported
+  # schemaVersion, or entirely whitespace-only tools (the clone at :268 can
+  # fail, or an ALP_SDK_REF can predate metadata/bootstrap.json's shape).
+  # Hand-ported and may drift from the live SDK; the block above is
+  # preferred. SCORED (not just a `note`) below because a silent fallback is
+  # otherwise byte-indistinguishable, in the final tally, from a run that
+  # read the manifest -- this box's own alp-sdk checkout has been seen on a
+  # ref whose prerequisites.posix carries no `macos` key at all, against a
+  # fallback that hardcodes six POSIX tools.
+  bad "prereq-manifest: alp-sdk/metadata/bootstrap.json unreadable -- using hand-ported FALLBACK tuples, may drift from the live SDK"
   case "$HOST_KIND" in
     windows) HOST_PREREQS="git cmake python ninja" ;;
     macos)   HOST_PREREQS="git cmake python3 ninja" ;;
@@ -655,16 +702,20 @@ PY
       # the right place to look HERE -- this asks "did THIS run's own install
       # leave something usable", the opposite of what HOST_ZSDK asks.
       #
-      # `sdk_version` alone does NOT establish "usable": the toolchain ships
-      # in a SEPARATE tarball, and a `timeout` mid-install is exactly the
-      # shape that leaves `sdk_version` at the root with no toolchain under
-      # it. The toolchain dir is `gnu/arm-zephyr-eabi` on SDK 1.0.x and
-      # `arm-zephyr-eabi` on 0.16.x -- accept either.
-      for _r in "$HOME"/zephyr-sdk-*; do
-        if [ -f "$_r/sdk_version" ] && { [ -d "$_r/gnu/arm-zephyr-eabi" ] || [ -d "$_r/arm-zephyr-eabi" ]; }; then
-          RUN_SDK=yes; break
-        fi
-      done
+      # `_sdk_has_toolchain` (defined near the top of this script), not a bare
+      # `sdk_version` check: a `timeout` mid-install is exactly the shape that
+      # leaves `sdk_version` at the root with no toolchain under it.
+      #
+      # Pinned to $ZEPHYR_SDK_VERSION, not a `zephyr-sdk-*` glob: THIS run's
+      # own install just above always requested exactly that version, so the
+      # sandboxed $HOME can never legitimately hold any other -- pinning says
+      # so directly instead of matching-then-hoping. Contrast with HOST_ZSDK
+      # below, which stays deliberately version-agnostic for a different
+      # reason (see its own comment): RUN_SDK only ever asks "did the install
+      # THIS RUN JUST RAN leave something usable", never "does any SDK exist".
+      if _sdk_has_toolchain "$HOME/zephyr-sdk-$ZEPHYR_SDK_VERSION"; then
+        RUN_SDK=yes
+      fi
     fi
   else
     note "B: no west / no project -- cannot attempt the SDK install"
@@ -675,17 +726,36 @@ PY
     badb "B: build not attempted -- init did not produce a project"
   else
     "$TAN" build --project blinky-e2e --format json >"$WORK/buildB.out" 2>"$WORK/buildB.err"; RC=$?
-    if [ "$SDK_OK" -eq 1 ]; then
-      [ "$RC" -eq 0 ] && okb "B: build exit 0" || { badb "B: build exit $RC"; note "$(head -c 500 "$WORK/buildB.out")"; }
+
+    # Hoisted OUT of the arms below and run unconditionally whenever RC=0, so
+    # no arm here -- present or future -- can return a build "success"
+    # without the artefact itself being checked and scored. Before this, the
+    # HOST_ZSDK arm further down was the exact unfixed twin of the RUN_SDK
+    # arm: tested FIRST among the SDK_OK=0 arms, `SDK_OK=0, HOST_ZSDK=yes,
+    # RC=0` scored nothing and never looked at the artefact at all. A
+    # Zephyr-slice-skipped PARTIAL build still exits 0
+    # (build_cmd.py:1097-1102 refuses only when NO slice succeeded), so
+    # "exit 0" alone is never proof of a real ELF on ANY arm.
+    ELF=""
+    if [ "$RC" -eq 0 ]; then
       ELF=$(find . -name "zephyr.elf" 2>/dev/null | head -1)
       if [ -n "$ELF" ]; then
-        DESC=$(file "$ELF" 2>/dev/null || echo "file(1) unavailable")
+        # `file -b`: the BARE description, no leading filename. Without `-b`
+        # the match below is unanchored against `file`'s path-prefixed
+        # output, so path text alone can satisfy it --
+        # `./self-test/arm-zephyr-eabi/build/zephyr.elf` would score "a real
+        # ARM ELF" even while holding a genuine x86-64 binary.
+        DESC=$(file -b "$ELF" 2>/dev/null || echo "file(1) unavailable")
         note "$ELF: $DESC"
         echo "$DESC" | grep -qi "ELF.*ARM" && okb "B: build produced a real ARM ELF" \
                                             || badb "B: artefact is not an ARM ELF"
       else
-        badb "B: no zephyr.elf produced despite a working Zephyr SDK"
+        badb "B: build exited 0 but no zephyr.elf was produced"
       fi
+    fi
+
+    if [ "$SDK_OK" -eq 1 ]; then
+      [ "$RC" -eq 0 ] && okb "B: build exit 0" || { badb "B: build exit $RC"; note "$(head -c 500 "$WORK/buildB.out")"; }
     else
       # SDK install failed or was impractical (measured above, not assumed):
       # the build is EXPECTED to fail, and must name the missing Zephyr SDK --
@@ -707,12 +777,23 @@ PY
       # `$HOME/zephyr-sdk-<ver>/` behind as THIS run's own debris; scanning the
       # sandbox would treat that empty directory as "pre-existing" and
       # permanently disarm the very assertion below for the rest of the run.
-      # `-f "$_z/sdk_version"` is required, not just `-d`, matching the
-      # top-of-script search (which already requires it) -- a directory alone
-      # proves nothing, a half-extracted SDK has one too.
+      # `_sdk_has_toolchain`, not a bare `-f sdk_version`, matching the
+      # top-of-script search -- a directory (or file) alone proves nothing, a
+      # half-extracted SDK has one too.
+      #
+      # Deliberately version-AGNOSTIC (`zephyr-sdk-*`, not
+      # `zephyr-sdk-$ZEPHYR_SDK_VERSION`): unlike RUN_SDK above, this asks
+      # "does the REAL host already carry a usable Zephyr SDK OF ITS OWN",
+      # which is exactly as legitimate an explanation for a successful build
+      # at ANY version as at this run's configured one -- a dev box's SDK
+      # from unrelated prior work does not stop being real because it is
+      # 0.16.8 and $ZEPHYR_SDK_VERSION defaults to 1.0.1. Pinning this scan
+      # would turn a genuinely-working, differently-versioned host SDK into a
+      # false "unexpectedly succeeded" failure below -- worse for a
+      # regression harness than under-filtering here.
       HOST_ZSDK=no
       for _z in "$REAL_HOME"/zephyr-sdk-* /opt/zephyr-sdk-* /usr/local/zephyr-sdk-* "${ZEPHYR_SDK_INSTALL_DIR:-}"; do
-        [ -n "$_z" ] && [ -f "$_z/sdk_version" ] && HOST_ZSDK=yes && break
+        [ -n "$_z" ] && _sdk_has_toolchain "$_z" && { HOST_ZSDK=yes; break; }
       done
       # `west sdk install` also registers via CMake's user package registry,
       # and on Windows that channel IS the registry -- HKCU\Software\Kitware\
@@ -737,7 +818,7 @@ PY
           # to $WORK/proj instead of being skipped, since dirname can never
           # itself leave $_zdir empty.
           _zdir=$(dirname "$_z" 2>/dev/null)
-          if [ -n "$_z" ] && { [ -f "$_z/sdk_version" ] || [ -f "$_zdir/sdk_version" ]; }; then
+          if [ -n "$_z" ] && { _sdk_has_toolchain "$_z" || _sdk_has_toolchain "$_zdir"; }; then
             HOST_ZSDK=yes; break
           fi
         done < <(reg query "HKCU\Software\Kitware\CMake\Packages\Zephyr-sdk" 2>/dev/null \
@@ -745,25 +826,13 @@ PY
       fi
       if [ "$RC" -eq 0 ] && [ "$HOST_ZSDK" = yes ]; then
         note "B: build succeeded using a Zephyr SDK already present on this host"
-        note "   (not installed by this run) -- correct behaviour, not scored as"
-        note "   a pass or a failure: the no-SDK refusal path is NOT exercised here."
+        note "   (not installed by this run) -- the no-SDK refusal path is NOT"
+        note "   exercised here; the artefact check above already scored the ELF."
       elif [ "$RC" -eq 0 ] && [ "$RUN_SDK" = yes ]; then
         note "B: build succeeded using the SDK THIS RUN's own west install left"
         note "   in place, even though the install itself did not finish clean"
         note "   (host-tools step / timeout) -- the no-SDK refusal path is NOT"
-        note "   exercised here, but exit 0 must still mean a real ARM ELF: a"
-        note "   partial build (one slice succeeds, Zephyr slice skipped) also"
-        note "   exits 0 with no ELF (build_cmd.py:1097-1102 only refuses when"
-        note "   NOTHING succeeded), and that must not be silent."
-        ELF=$(find . -name "zephyr.elf" 2>/dev/null | head -1)
-        if [ -n "$ELF" ]; then
-          DESC=$(file "$ELF" 2>/dev/null || echo "file(1) unavailable")
-          note "$ELF: $DESC"
-          echo "$DESC" | grep -qi "ELF.*ARM" && okb "B: build produced a real ARM ELF (RUN_SDK)" \
-                                              || badb "B: artefact is not an ARM ELF (RUN_SDK)"
-        else
-          badb "B: build exited 0 but no zephyr.elf produced despite RUN_SDK's own SDK"
-        fi
+        note "   exercised here; the artefact check above already scored the ELF."
       elif [ "$RC" -eq 0 ]; then
         badb "B: build unexpectedly succeeded with no Zephyr SDK installed"
       else
