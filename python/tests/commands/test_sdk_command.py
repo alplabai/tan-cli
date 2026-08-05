@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import typer
 
 from tan.commands.sdk_cmd import (
     _fetch_releases,
@@ -732,3 +733,121 @@ def test_the_notes_cell_is_still_truncated_to_sixty_characters():
     lines = format_release_table([_release("v1.0.0", "x" * 200)])
     assert "x" * 60 in lines[1]
     assert "x" * 61 not in lines[1]
+
+
+# --------------------------------------------------------------------------
+# The shared wrap seam (`tan.core.text_layout.wrap_lines` via
+# `tan.env.wrap_width`), adopted here after `doctor` (PR #480) and `explain`.
+# `wrap_lines` is pure logic and lives (and is unit-tested generically) in
+# `tan.core.text_layout` -- `test_text_layout.py` covers the mechanism.
+# What is worth asserting here is composition: `sdk current`'s own
+# assembled report going through it correctly, on a real terminal and a
+# piped one.
+#
+# There is no per-line exemption any more (an earlier version of this seam
+# kept `  path`/`  version`/`  state`/issue rows unwrapped via a
+# `_RECORD_LINE_PREFIXES` classification table, on the theory that a piped
+# reader might grep them) -- that reader can never observe a wrapped line in
+# the first place: `wrap_width()` returns a width only when stderr IS a
+# tty, and any pipe that could grep these lines makes stderr not a tty,
+# which already returns `None` and disables wrapping wholesale (see
+# `test_current_text_mode_does_not_wrap_off_a_terminal` below).
+# --------------------------------------------------------------------------
+
+
+def test_wrap_lines_wraps_the_no_sdk_next_steps_line():
+    """The measured baseline this task's brief names verbatim: bare `tan sdk
+    current`'s "To get started, ..." line is 137 columns unwrapped."""
+    from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS  # noqa: PLC0415
+    from tan.core.text_layout import wrap_lines  # noqa: PLC0415
+
+    lines = ["No active SDK configured for this workspace.", f"To get started, {NO_SDK_NEXT_STEPS}."]
+    assert len(lines[1]) == 137
+
+    wrapped = wrap_lines(lines, 100)
+    assert not any(len(line) > 100 for line in wrapped)
+    # Reassembled, the wrapped text is still the exact original sentence.
+    # `.strip()` peels off the two-space hanging indent `wrap_lines` puts on
+    # a continuation line (item 5's fix) before rejoining with a single
+    # space -- not a blanket `.replace("  ", " ")`, which would also (and
+    # wrongly) collapse a legitimate double space inside the body itself,
+    # were there one (there is not, in `NO_SDK_NEXT_STEPS` -- verified).
+    assert " ".join(line.strip() for line in wrapped) == " ".join(lines)
+
+
+def test_wrap_lines_now_wraps_the_fixed_fields_too():
+    """Contract change from this task: `  path`/`  version`/`  state` are no
+    longer exempt from wrapping (see the section comment above) -- on a
+    real terminal narrower than the line, this now wraps like any other,
+    with `break_long_words=False` still keeping the path token itself
+    intact on its own line rather than mangled mid-character."""
+    from tan.commands.sdk_cmd import format_readiness_block  # noqa: PLC0415
+    from tan.core.text_layout import wrap_lines  # noqa: PLC0415
+
+    report = {
+        "sdkPath": "/very/long/nested/checkout/path/" + "segment/" * 10 + "alp-sdk",
+        "version": "0.14.0",
+        "state": "ready",
+        "issues": [],
+    }
+    lines = format_readiness_block("Active SDK", report)
+    wrapped = wrap_lines(lines, 60)
+    assert wrapped != lines, "the long path line must actually wrap now"
+    assert any(report["sdkPath"] in line for line in wrapped), (
+        "the path token itself must survive whole"
+    )
+
+
+def test_wrap_lines_wraps_an_issue_sentence_but_keeps_the_quoted_path_whole():
+    from tan.commands.sdk_cmd import format_readiness_block  # noqa: PLC0415
+    from tan.core.text_layout import wrap_lines  # noqa: PLC0415
+
+    long_path = "/nested/" + "segment/" * 8 + "checkout"
+    report = {
+        "sdkPath": long_path,
+        "version": None,
+        "state": "missing",
+        "issues": [f'scripts/alp_project.py not found — "{long_path}" is not a valid Alp SDK root.'],
+    }
+    lines = format_readiness_block("Active SDK", report)
+    wrapped = wrap_lines(lines, 60)
+    assert not any(len(line) > 60 for line in wrapped if long_path not in line)
+    assert any(long_path in line for line in wrapped), "the path token itself must survive whole"
+
+
+def test_current_text_mode_wraps_on_a_real_terminal(monkeypatch, capsys, tmp_path, isolated_home):
+    """End to end through `_run_current` itself (not just the pure helper):
+    forces `sys.stderr.isatty()` True and a fixed terminal width, same
+    technique `test_size_command.py`'s own `NO_COLOR` test uses."""
+    import shutil
+
+    from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, _run_current  # noqa: PLC0415
+
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    with pytest.raises(typer.Exit):
+        _run_current(json_mode=False, sdk_root=None, workspace_root=workspace)
+
+    err = capsys.readouterr().err
+    lines = err.splitlines()
+    assert not any(len(line) > 100 for line in lines)
+    # The advice sentence survived, reassembled across its wrapped lines.
+    assert NO_SDK_NEXT_STEPS.split(",")[0] in " ".join(lines)
+
+
+def test_current_text_mode_does_not_wrap_off_a_terminal(tmp_path, isolated_home):
+    """`isolated_home`'s `run_tan` subprocess pipes stderr, which is never a
+    tty -- the 137-column line from the task's own measured baseline must
+    come back exactly as before."""
+    proc = run_tan("sdk", "current", cwd=tmp_path)
+    assert proc.returncode == 0
+    long_line = (
+        "To get started, get an alp-sdk checkout "
+        "(`git clone https://github.com/alplabai/alp-sdk`), then point tan at "
+        "it with `--sdk-root <path>`."
+    )
+    assert long_line in proc.stderr.splitlines()
+    assert len(long_line) == 137

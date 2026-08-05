@@ -144,7 +144,7 @@ from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
-from tan.env import use_color
+from tan.env import TEXT_WRAP_MIN_WIDTH, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -230,13 +230,6 @@ SEVEN_ZIP_INSTALL_COMMAND = "winget install -e --id 7zip.7zip"
 #: release; `macos-x86_64` was dropped in the 1.0.0 line the pinned SDK is
 #: past. Spelled in the SDK's own release-asset tokens (`x86_64`, not `x64`).
 ZEPHYR_SDK_HOSTS = ("linux-aarch64", "linux-x86_64", "macos-aarch64", "windows-x86_64")
-
-#: Text-mode report width floor (`render_check_lines`/`render_doctor_footer`,
-#: resolved once in `doctor()` before the first check streams) -- a real
-#: terminal narrower than this (or a redirected/piped run whose
-#: `shutil.get_terminal_size` fallback would otherwise apply) must not be
-#: left to wrap one word per line.
-_DOCTOR_TEXT_MIN_WIDTH = 60
 
 
 @dataclass(frozen=True)
@@ -3115,7 +3108,7 @@ def doctor(
     # v2, change 3): `_collect` runs up to 15 subprocess probes at
     # `PROBE_TIMEOUT_S` each, and the old code printed nothing until every
     # one of them had answered -- on a host where one wedges, a blank
-    # terminal names nothing. Width floored at `_DOCTOR_TEXT_MIN_WIDTH` -- a
+    # terminal names nothing. Width floored at `TEXT_WRAP_MIN_WIDTH` -- a
     # 20-column terminal must not fall to one word per line -- and the
     # fallback (piped/redirected stdout) matches `build_cmd`'s own
     # `shutil.get_terminal_size` convention. `width`/`color` are resolved
@@ -3123,8 +3116,15 @@ def doctor(
     # read: both calls are cheap and emit nothing, so gating them behind
     # `if stream` bought nothing but a second, held-together-by-an-11-line-
     # comment invariant (`_print_check` closes over both) for no benefit.
+    #
+    # UNCONDITIONAL on stderr being a terminal at all (unlike
+    # `tan.env.wrap_width`, which `explain`/`sdk current` use instead): a
+    # piped `tan doctor` still wraps to this `get_terminal_size` fallback
+    # today. That is a real inconsistency with the new seam, left exactly as
+    # it shipped in PR #480 rather than silently fixed here -- see that PR
+    # for the call to change it.
     stream = not json_mode
-    width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, _DOCTOR_TEXT_MIN_WIDTH)
+    width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, TEXT_WRAP_MIN_WIDTH)
     color = use_color(no_color, ci)
 
     def _print_check(check: Check) -> None:
