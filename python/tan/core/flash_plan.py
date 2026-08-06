@@ -745,6 +745,71 @@ def validate_address(text: str, field_name: str) -> None:
         )
 
 
+def validate_commander_path(text: str, label: str) -> None:
+    """Reject a control character (`\\x00`-`\\x1f`, or DEL `\\x7f`) in a value
+    bound for a J-Link Commander script LINE -- `loadbin`/`loadfile`/
+    `verifybin`'s path argument, or `SelectEmuBySN`'s serial (tan-cli#486).
+
+    Deliberately narrower than `validate_identifier`: this guards a real
+    filesystem path (`atoc`, the flash artefact), which legitimately carries
+    spaces, `:`, `\\`, and drive letters -- rejecting those would turn a real
+    Windows-style path into a refusal. What must never reach the script is a
+    literal newline/CR: `commander_path`'s conditional quoting only stops
+    SEGGER's whitespace tokeniser from splitting a spaced path into two
+    tokens, it does nothing to stop an embedded newline from ending the
+    quoted string's own Commander LINE and starting a new, attacker-chosen
+    one -- quoting controls tokenisation within a line, not where lines end.
+    A tab/formfeed/vertical-tab is technically a control character too but is
+    already forced through the quoting path by `commander_path`'s `c.isspace()`
+    check; rejecting the narrower "line-ending" set here (which still catches
+    every one of them, since `isspace()` control chars are also `< 0x20`)
+    keeps this guard doing ONE job instead of duplicating that quoting
+    decision.
+    """
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in text):
+        raise FlashPlanError(
+            f"{label} = {_quoted(text)} contains a control character -- "
+            "refusing to interpolate it into a J-Link Commander script line, "
+            "where it would end the current line and start a new, unintended "
+            "one regardless of quoting."
+        )
+
+
+#: The Jim Tcl bytes that are dangerous UNQUOTED in an OpenOCD `-c` word:
+#: `[`/`]` trigger command substitution (Jim Tcl ships `exec`, so this is
+#: arbitrary HOST command execution, not just an extra OpenOCD command);
+#: `$` triggers variable substitution; `;` separates commands; `"`/`{`/`}`
+#: change how the rest of the word is quoted/grouped. Everything else --
+#: spaces, `:`, `\\`, letters, digits, `.` -- is left alone; a real artefact
+#: path routinely carries all of them and none is special to Jim Tcl outside
+#: an already-quoted/braced word.
+_OPENOCD_TCL_UNSAFE = frozenset('[]$;"{}')
+
+
+def validate_openocd_word(text: str, label: str) -> None:
+    """Reject a control character or a Jim Tcl metacharacter in a value bound
+    for OpenOCD's `-c` command string (tan-cli#486).
+
+    `interface`/`target` already go through `validate_identifier` for exactly
+    this reason; the flash artefact cannot, because it is a real filesystem
+    path (spaces, `:`, `\\`, drive letters all legitimate) rather than a
+    plain identifier. This is the path-shaped equivalent: it blocks the
+    substitution/separator characters Jim Tcl treats specially in an
+    unquoted word, and control characters (a smuggled newline could inject an
+    extra Tcl command the same way it does in a J-Link Commander script),
+    while leaving every character a real path needs untouched.
+    """
+    bad = sorted({c for c in text if ord(c) < 0x20 or ord(c) == 0x7F or c in _OPENOCD_TCL_UNSAFE})
+    if bad:
+        raise FlashPlanError(
+            f"{label} = {_quoted(text)} contains {_str_list_debug(bad)}, a Jim Tcl "
+            "metacharacter or control character -- refusing to interpolate it "
+            "into OpenOCD's -c command string, where it could inject an extra "
+            "command or trigger [...] command substitution (arbitrary host "
+            "command execution)."
+        )
+
+
 #: `char::escape_debug`'s named escapes, which is what Rust's `{:?}` for a
 #: `&str` emits. Applied in ONE pass -- escaping `\\` up front and then
 #: re-scanning would revisit the backslashes it just added.
@@ -864,6 +929,7 @@ def commander_path(path: str) -> str:
 def jlink_commander_script(artefact: str, base: str, do_reset: bool) -> str:
     """The J-Link Commander script: reset/halt, load (`loadbin`+base for `.bin`,
     else `loadfile`), optional reset-and-go, quit-close."""
+    validate_commander_path(artefact, "the flash artefact path")
     lines = ["r", "halt"]
     # `is_raw_bin` reads the extension via `os.path.splitext` -- checked on
     # the UNQUOTED artefact, before `commander_path` may wrap it in `"..."`,
@@ -988,6 +1054,7 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     openocd = not force_pyocd and (inp.dry_run or which("openocd"))
     pyocd = not force_openocd and (inp.dry_run or which("pyocd"))
     if openocd:
+        validate_openocd_word(inp.artefact, "the flash artefact path")
         program = f"program {inp.artefact} verify"
         if do_reset:
             program += " reset"
@@ -1570,7 +1637,16 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     # Probe serial: the ONLY disambiguator when a bench carries more than one
     # J-Link. No default -- a bench-wide serial can be shared by two probes that
     # differ only by USB path, and a silent default can select the wrong board.
-    serial = fa_str(fa, "jlink_serial")
+    # `fa_str_checked`, not the tolerant `fa_str` (tan-cli#486): a NUMERIC
+    # serial -- the canonical SEGGER spelling -- is a bare YAML integer, which
+    # `fa_str` treats as "absent" and silently drops the SelectEmuBySN line
+    # on a bench with more than one probe attached. `validate_identifier`
+    # then closes the same newline-injection hole `jlink_flash_device` above
+    # is already guarded against: `serial` is interpolated verbatim into
+    # `SelectEmuBySN {serial}`, a J-Link Commander script LINE.
+    serial = fa_str_checked(fa, "jlink_serial", False)
+    if serial is not None:
+        validate_identifier(serial, "jlink_serial")
     # The expected SW-DP IDR. When the manifest supplies one, the Commander
     # script connects with the READ profile first and the caller ABORTS unless
     # that ID appears -- writing MRAM on the wrong attached board is the one
@@ -1607,6 +1683,12 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
         # itself is unchanged, because refusing would break every correct
         # single-probe host.
         pass
+    # tan-cli#486: quoting (below) is not escaping -- a newline embedded in
+    # either path still ends the quoted string's own Commander LINE and
+    # starts a new, attacker-chosen one. Validated on the UNQUOTED value,
+    # same as `jlink_commander_script`'s own artefact guard.
+    validate_commander_path(artefact, "the flash artefact path")
+    validate_commander_path(atoc, "flash_args.atoc")
     # Quoted (tan-cli#369) ONLY for these Commander-script lines, when either
     # actually contains whitespace -- `artefact`/`atoc` themselves are left
     # unquoted for `ok_message` and every other use above.
@@ -1739,8 +1821,15 @@ def flow_d_preflight_script(inp: FlashInputs) -> tuple[str, str] | None:
     fa = inp.flash_args
     speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
     lines = []
-    serial = fa_str(fa, "jlink_serial")
+    # `fa_str_checked` + `validate_identifier`, not the tolerant `fa_str`
+    # (tan-cli#486) -- same fix as `plan_alif_mram_jlink`'s write script, and
+    # more load-bearing HERE: an injected line prefixed onto this READ-ONLY
+    # preflight (see the module docstring's "the identity is confirmed while
+    # the session is still read-only" comment in `flash_cmd`) would run
+    # before the wrong-board abort ever gets a chance to fire.
+    serial = fa_str_checked(fa, "jlink_serial", False)
     if serial is not None:
+        validate_identifier(serial, "jlink_serial")
         lines.append(f"SelectEmuBySN {serial}")
     lines += ["si SWD", f"speed {speed}", f"device {read_device}", "connect", "exit"]
     return "\n".join(lines) + "\n", expected

@@ -802,6 +802,66 @@ def test_jlink_commander_script_leaves_an_unspaced_path_unquoted():
     assert '"' not in script
 
 
+# ── artefact/atoc path + jlink_serial guards (tan-cli#486) ─────────────────
+
+
+def test_jlink_commander_script_refuses_a_newline_embedded_in_the_artefact_path():
+    """`commander_path`'s conditional quoting (tan-cli#369) stops SEGGER's
+    whitespace tokeniser splitting a spaced path into two tokens -- it does
+    NOT stop an embedded newline from ending the quoted string's own
+    Commander LINE and starting a new, attacker-chosen one. Reproduced on the
+    real generator every `swd_probe` write calls."""
+    with pytest.raises(FlashPlanError):
+        flash_plan.jlink_commander_script("/build/zephyr.bin\nerase", "0x08000000", True)
+
+
+def test_jlink_commander_script_still_quotes_a_spaced_path_after_the_new_guard():
+    """tan-cli#486's new control-character guard must not turn a real spaced
+    Windows-style path into a refusal -- only a control character is
+    rejected; whitespace is left to `commander_path`'s existing conditional
+    quoting, unchanged from before this fix."""
+    script = flash_plan.jlink_commander_script(
+        "C:\\Program Files\\alp\\build\\zephyr.bin", "0x08000000", True
+    )
+    assert 'loadbin "C:\\Program Files\\alp\\build\\zephyr.bin", 0x08000000' in script
+
+
+def test_swd_probe_jlink_artefact_path_is_charset_guarded_against_a_newline():
+    """tan-cli#486, reproduced on `plan_swd_probe`'s real J-Link write path
+    (not just the pure `jlink_commander_script` generator): a hostile
+    `output_artefact`/`firmware_path` must refuse before a Commander script
+    is ever handed to `JLinkExe`."""
+    inp = FlashInputs(artefact="/build/zephyr.bin\nerase", flash_args={}, core_id="cm7", sku="S")
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+
+
+def test_swd_probe_openocd_artefact_path_is_guarded_against_tcl_substitution():
+    """tan-cli#486: OpenOCD 0.12's Jim Tcl has `exec`; an unescaped `[...]` in
+    the artefact triggers COMMAND SUBSTITUTION while the `-c program ...`
+    word is evaluated -- arbitrary host command execution as the user running
+    `tan flash`, reachable with no probe attached and even if the flash
+    itself would fail. `swd_probe` has no confirm gate, so this must refuse
+    at plan time."""
+    inp = FlashInputs(
+        artefact="/build/[exec calc].bin",
+        flash_args={"interface": "cmsis-dap", "target": "stm32h7x", "base": "0x00000000"},
+        core_id="cm7",
+        sku="S",
+    )
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+
+
+def test_swd_probe_openocd_artefact_path_guard_accepts_a_space():
+    """The Tcl-metacharacter/control-character guard must not itself turn a
+    spaced artefact path into a refusal, matching the "legitimate spaced path
+    still works" bar the J-Link-side guard is held to. (OpenOCD's `-c
+    program` word has never quoted a spaced artefact -- that pre-existing gap
+    is unrelated to this guard and out of scope for tan-cli#486.)"""
+    flash_plan.validate_openocd_word("/build/my app.elf", "artefact")
+
+
 # ── swd_probe device/target reporting (tan-cli#402) ─────────────────────────
 
 
@@ -1155,6 +1215,18 @@ def test_flow_d_addresses_are_charset_guarded(bad):
         plan_alif_mram_jlink(flow_d_inputs(slot0_load_address=bad), lambda t: True)
 
 
+@pytest.mark.parametrize("bad", ["a;b", "../x", "/x", "C:/x", "a b", "dev\nice"])
+def test_flow_d_probe_serial_is_charset_guarded(bad):
+    """tan-cli#486: `jlink_serial` is interpolated verbatim into a
+    `SelectEmuBySN {serial}` J-Link Commander script LINE, the same as
+    `jlink_flash_device` -- a newline is a command-injection primitive into a
+    process holding SWD write access. `jlink_serial` alone was missed when
+    `jlink_flash_device`/`slot0_load_address`/`atoc_address`/`expect_dpidr`
+    were guarded; this extends the same guard-class test to cover it."""
+    with pytest.raises(FlashPlanError):
+        plan_alif_mram_jlink(flow_d_inputs(jlink_serial=bad), lambda t: True)
+
+
 def test_flow_d_probe_serial_is_optional_and_has_no_default():
     """No default serial: a bench-wide serial can be SHARED by two probes that
     differ only by USB path, so a silent default can select the wrong board."""
@@ -1164,6 +1236,73 @@ def test_flow_d_probe_serial_is_optional_and_has_no_default():
         flow_d_inputs(confirm=True, jlink_serial="123456789"), lambda t: True
     )
     assert with_serial.jlink_script.startswith("SelectEmuBySN 123456789\n")
+
+
+def test_flow_d_probe_serial_accepts_a_bare_numeric_value():
+    """tan-cli#486: `jlink_serial: 123456789` (unquoted -- the canonical
+    SEGGER spelling) used to be silently DISCARDED by the tolerant `fa_str`
+    (it only accepts an already-`str` value), dropping the `SelectEmuBySN`
+    line with no diagnostic on a bench with more than one probe attached.
+    The strict `fa_str_checked` round-trips a bare non-negative integer into
+    its decimal string form, exactly like `atoc_address`/`jlink_speed`
+    already do for their own bare-integer manifest shapes."""
+    plan = plan_alif_mram_jlink(
+        flow_d_inputs(confirm=True, jlink_serial=123456789), lambda t: True
+    )
+    assert plan.jlink_script.startswith("SelectEmuBySN 123456789\n")
+
+
+def test_flow_d_atoc_path_is_charset_guarded_against_a_newline():
+    """tan-cli#486: `commander_path` only wraps a whitespace-bearing path in
+    `"..."` -- quoting is not escaping. An embedded newline in `flash_args.
+    atoc` still ends the quoted `loadbin`/`verifybin` LINE and starts a new,
+    attacker-chosen Commander command. `slot0_load_address` is deliberately
+    omitted here (the default single-ATOC-blob shape) so this isolates the
+    `atoc` guard from the artefact one, covered separately below."""
+    args = {
+        "jlink_flash_device": "PART_PROFILE",
+        "atoc": "/blobs/AppTocPackage.bin\nerase",
+        "atoc_address": "0x8057F5B0",
+        "confirm": True,
+    }
+    with pytest.raises(FlashPlanError):
+        plan_alif_mram_jlink(
+            FlashInputs(artefact="/build/zephyr/zephyr.bin", flash_args=args, core_id="m", sku="S"),
+            lambda t: True,
+        )
+
+
+def test_flow_d_mramxip_artefact_path_is_charset_guarded_against_a_newline():
+    """The mramxip shape's `loadbin {artefact} {app_address}` line is
+    vulnerable the same way the ATOC line is (tan-cli#486). The newline sits
+    ahead of the `.bin` extension so `is_raw_bin`/`resolve_slot0_binary`
+    still accept the shape and the injection reaches the real
+    Commander-script build rather than an unrelated earlier refusal."""
+    args = {**FLOW_D_ARGS, "confirm": True}
+    with pytest.raises(FlashPlanError):
+        plan_alif_mram_jlink(
+            FlashInputs(
+                artefact="/build/zephyr/ze\nphyr.bin", flash_args=args, core_id="m", sku="S"
+            ),
+            lambda t: True,
+        )
+
+
+def test_flow_d_atoc_and_artefact_paths_accept_spaces_after_the_new_guard():
+    """A legitimate spaced path must still flash: tan-cli#486's new guard
+    rejects only control characters, so a real Windows-style
+    `C:\\Program Files\\...`-shaped path (here just a plain space, matching
+    `commander_path`'s own quoting tests) must reach the write with the
+    SAME conditional quoting as before -- never a refusal."""
+    args = {**FLOW_D_ARGS, "atoc": "/blobs/App Toc Package.bin", "confirm": True}
+    plan = plan_alif_mram_jlink(
+        FlashInputs(
+            artefact="/build/zephyr bin/zephyr.bin", flash_args=args, core_id="m", sku="S"
+        ),
+        lambda t: True,
+    )
+    assert '"/blobs/App Toc Package.bin"' in plan.jlink_script
+    assert '"/build/zephyr bin/zephyr.bin"' in plan.jlink_script
 
 
 def test_flow_d_preflight_is_absent_unless_the_manifest_supplies_both_values():
@@ -1191,6 +1330,32 @@ def test_flow_d_preflight_is_absent_unless_the_manifest_supplies_both_values():
         "connect",
         "exit",
     ]
+
+
+def test_flow_d_preflight_serial_is_charset_guarded():
+    """tan-cli#486: the injected block this closes would prefix the
+    READ-ONLY DPIDR preflight, not just the write -- so the wrong-board
+    safety gate (`flash_cmd`'s "the identity is confirmed while the session
+    is still read-only" abort) would execute an injected command BEFORE it
+    ever gets a chance to abort. Guarded the same way as the write-path
+    serial in `plan_alif_mram_jlink`."""
+    with pytest.raises(FlashPlanError):
+        flash_plan.flow_d_preflight_script(
+            flow_d_inputs(
+                expect_dpidr="0x4C013477", jlink_device="Generic-Attach", jlink_serial="a;b"
+            )
+        )
+
+
+def test_flow_d_preflight_serial_accepts_a_bare_numeric_value():
+    """The same numeric-serial round-trip fix as the write path (tan-cli#486),
+    proven on the preflight generator too."""
+    prepared = flash_plan.flow_d_preflight_script(
+        flow_d_inputs(expect_dpidr="0x4C013477", jlink_device="Generic-Attach", jlink_serial=7)
+    )
+    assert prepared is not None
+    script, _ = prepared
+    assert script.startswith("SelectEmuBySN 7\n")
 
 
 @pytest.mark.parametrize(
