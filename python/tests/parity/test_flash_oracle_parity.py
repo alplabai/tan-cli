@@ -45,23 +45,8 @@ helper_mcus: []
 boot_order: []
 """
 
-#: A manifest with one helper MCU and no slices.
-HELPER = """schema_version: 1
-hw_info: {{sku: E1M-AEN801}}
-slices: []
-helper_mcus:
-- {{name: h1, chip: cc3501e, firmware_path: fw.bin, flash_method: {method},
-   flash_args: {args}}}
-boot_order: []
-"""
-
-
 def _slice(method, args="{}"):
     return SLICE.format(method=method, args=args)
-
-
-def _helper(method, args="{}"):
-    return HELPER.format(method=method, args=args)
 
 
 #: `(id, manifest-or-None, extra argv)`. `--sdk-root ./sdk` and `--format json`
@@ -128,24 +113,28 @@ boot_order: []
     # DESIGN, so diffing this case would only ever fail. Pinned instead in
     # `tests/commands/test_flash_command.py`.
     # ── skips that must never fail the run ──────────────────────────────────
-    ("helper-no-flash-method", _helper('""'), []),
-    (
-        "helper-update-channel-is-not-a-flash-target",
-        """schema_version: 1
-hw_info: {sku: S}
-slices: []
-helper_mcus:
-- {name: cc3501e_otp, chip: cc3501e, firmware_path: fw.bin,
-   update_channel: alp_ota_spi_otp}
-boot_order: []
-""",
-        [],
-    ),
-    ("flash-args-tbd-mapping", _helper("swd_probe", "{mode: TBD, device: TBD}"), []),
-    ("flash-args-tbd-bare-string", _helper("swd_probe", "TBD"), ["--dry-run"]),
+    # No `helper-no-flash-method` / `helper-update-channel-is-not-a-flash-
+    # target` / `flash-args-tbd-mapping` / `flash-args-tbd-bare-string` cases
+    # here, and that is NOT an oversight -- see tan-cli#487 defect 7. All four
+    # (plus `missing-tool-skips-with-flag`, moved out of the required-tool-gate
+    # section below for the identical reason) reach `_flash_entry`, which
+    # correctly skips the ONE target (`rc=-1`, `status: skipped`, the real
+    # per-entry reason in `entries[0].message`), but the aggregate check after
+    # `_flash_entry`'s loop only knows about `plan.refused`/
+    # `plan.refused_skipped` -- planner-level buckets an entry-level skip
+    # never populates -- so it fell through to "nothing matched the requested
+    # filters" on a run that carries NO `--core`/`--helper` at all and DID
+    # match exactly one real target. The shipped Rust oracle has the SAME
+    # shape (verified by running it: `flash.nothing-matched` on all five,
+    # `exitCode 0`) -- the two implementations diverge here BY DESIGN. Pinned
+    # instead, with the correct code/message, in
+    # `tests/commands/test_flash_command.py`. Do not "restore parity" by
+    # moving these back.
     # No `output_artefact`/`firmware_path: TBD` case here, and that is NOT an
-    # oversight -- see #222. The two `flash_args` cases above ARE diffed because
-    # both sides skip; the ARTEFACT sibling is a deliberate divergence. The
+    # oversight -- see #222. The `flash_args: TBD` shape used to be diffed
+    # here (both sides skipped it identically) until it moved out under the
+    # tan-cli#487 defect 7 divergence above; the ARTEFACT sibling below was
+    # ALWAYS a deliberate divergence of its own, for an unrelated reason. The
     # shipped Rust has the alp-sdk hole (`flash/mod.rs:307`'s
     # `.filter(|s| !s.is_empty())`, and `TBD` is not empty): run the oracle on a
     # helper with `firmware_path: TBD` and it reports `status: ok`, exit 0, and
@@ -255,7 +244,8 @@ boot_order: []
      _slice("xspi_flashwriter", "{flash_partition: mtd0, confirm: true}"), []),
     # ── the required-tool gate ──────────────────────────────────────────────
     ("missing-tool-fails", _slice("zephyr_west_flash"), []),
-    ("missing-tool-skips-with-flag", _slice("zephyr_west_flash"), ["--skip-missing-tools"]),
+    # No `missing-tool-skips-with-flag` case here -- moved out for tan-cli#487
+    # defect 7; see the divergence note above `helper-no-flash-method`.
     # ── --build-root ────────────────────────────────────────────────────────
     ("explicit-relative-build-root", _slice("swd_probe"), ["--dry-run", "--build-root", "build"]),
     # ── flag combinations a user gets wrong ─────────────────────────────────
@@ -397,11 +387,13 @@ def work_dir(tmp_path_factory):
 #: ``CAPTURE_PLATFORM`` simply cannot answer for the other one here.
 #:
 #: Exactly one case, arrived at by MEASUREMENT rather than by reading the
-#: manifests: `explicit-build-dir-wins-over-the-derived-one` and the
-#: `flash-args-tbd-*` pair also embed absolute paths and compare clean on
-#: POSIX, because their value never reaches the diffed surface. Do not widen
-#: this to "every case with a leading slash" -- that skips cases that are
-#: really comparing.
+#: manifests: `explicit-build-dir-wins-over-the-derived-one` also embeds an
+#: absolute path and compares clean on POSIX, because its value never reaches
+#: the diffed surface. (The `flash-args-tbd-*` pair used to be a second such
+#: example; they moved out of `CASES` entirely under tan-cli#487 defect 7 --
+#: see the divergence note above `helper-no-flash-method` -- so they no
+#: longer need mentioning here either.) Do not widen this to "every case
+#: with a leading slash" -- that skips cases that are really comparing.
 _HOST_ANCHORED_ABSOLUTE_CASES = frozenset({"absolute-artefact-passes-through"})
 
 
@@ -412,7 +404,7 @@ _HOST_ANCHORED_ABSOLUTE_CASES = frozenset({"absolute-artefact-passes-through"})
 #: `doctor_cmd.on_path` at `flash_cmd.py:879-882`). The frozen fixture
 #: recorded whichever tool inventory the CAPTURE host happened to have --
 #: `dd` present/`bmaptool` absent for the three yocto cases, `west` absent
-#: for the two `zephyr_west_flash` ones below -- so replaying on a host with
+#: for the `zephyr_west_flash` one below -- so replaying on a host with
 #: a DIFFERENT inventory (this box, for one: real `dd`, no `bmaptool`, and a
 #: broken but PATH-resolvable `west` shim) makes the port pick/find a
 #: different tool and diffs on text that is not a port bug at all
@@ -420,24 +412,21 @@ _HOST_ANCHORED_ABSOLUTE_CASES = frozenset({"absolute-artefact-passes-through"})
 #:
 #: `tool_gate` is bypassed ONLY under `--dry-run` or an empty `requires`
 #: (its own docstring) -- it is LIVE for every other case that reaches it.
-#: That is NOT every other case in `CASES`, though: three more non-dry-run
+#: That is NOT every other case in `CASES`, though: two more non-dry-run
 #: cases never reach `tool_gate` at all, refused by an earlier check in
 #: `flash_cmd.py`'s dispatch order (traced directly, not inferred):
 #:   * `no-artefact-real-run-fails` -- fails the empty-artefact check
 #:     BEFORE `tool_gate` (`flash_cmd.py:856-860`).
-#:   * `flash-args-tbd-mapping` -- skips on `flash_args_has_tbd` BEFORE
-#:     `tool_gate` (`flash_cmd.py:811-817`).
 #:   * `sdk-root-invalid` -- refused at SDK-root resolution, before the
 #:     manifest is even read (`flash_cmd.py:1163-1175`), nowhere near a
 #:     backend or `tool_gate`.
-#: See `_pin_tool_inventory` for why the five pinned below DO need it.
+#: See `_pin_tool_inventory` for why the four pinned below DO need it.
 _TOOL_PROBE_PINNED_CASES = frozenset(
     {
         "empty-boot-order-sorts-and-helpers-last",
         "yocto-unconfirmed-is-planned-not-ok",
         "yocto-alias-method-resolves",
         "missing-tool-fails",
-        "missing-tool-skips-with-flag",
     }
 )
 
@@ -449,10 +438,11 @@ def _pin_tool_inventory(work_dir) -> str:
 
     Serves two different probes with the one stub dir: `plan_yocto_wic`'s
     `which("bmaptool")`/`which("dd")` (the three yocto case IDs), where `dd`
-    being FOUND is the point, and `tool_gate`'s `west` probe (the two
-    `missing-tool-*` case IDs), where `dd`'s presence is irrelevant and
-    `west` simply not being anywhere on this replaced PATH is what the
-    frozen "none found" answer needs.
+    being FOUND is the point, and `tool_gate`'s `west` probe (the one
+    remaining `missing-tool-*` case ID, `missing-tool-fails` --
+    `missing-tool-skips-with-flag` moved out under tan-cli#487 defect 7),
+    where `dd`'s presence is irrelevant and `west` simply not being anywhere
+    on this replaced PATH is what the frozen "none found" answer needs.
 
     Replaces PATH outright rather than prepending: `doctor_cmd.on_path`
     (what `plan_yocto_wic`'s and `tool_gate`'s `which` callables both

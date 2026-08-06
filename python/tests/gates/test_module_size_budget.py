@@ -219,7 +219,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # `_timed_out_stderr` so an uncaptured (text-mode) pipeline failure does
     # not emit a body-less header; and nit 1 adds a TOCTOU-boundedness
     # comment beside the write-time gate.
-    "tan/commands/flash_cmd.py": 2075,
+    # 2098, not 2075, as of tan-cli#487 defect 7: the aggregate "did anything
+    # flash" check after `_flash_entry`'s loop split into a THIRD branch --
+    # `plan.targets` non-empty but every one of them was skipped INSIDE
+    # `_flash_entry` (an unresolved `TBD` flash_arg, no flash_method, or a
+    # missing tool under `--skip-missing-tools`) -- so it stops reporting
+    # `flash.nothing-matched` on a run that carried no `--core`/`--helper`
+    # filter and genuinely matched a target. New code `flash.entries-skipped`,
+    # `ok`/exit code unchanged (still SUCCESS). The five oracle-parity cases
+    # this used to share a wrong answer with moved to
+    # `tests/commands/test_flash_command.py` (see their own docstring for the
+    # divergence rationale).
+    "tan/commands/flash_cmd.py": 2098,
     "tan/planner/kconfig.py": 1639,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a

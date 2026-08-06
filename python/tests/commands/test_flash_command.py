@@ -307,6 +307,150 @@ boot_order: []
     assert payload["data"]["entries"] == []
 
 
+# ── tan-cli#487 defect 7: an entry-level skip must not be diagnosed as
+# "nothing matched the requested filters" ───────────────────────────────────
+#
+# `_flash_entry` can legitimately skip a target it DID dispatch to (an
+# unresolved `TBD` flash_arg, no flash_method, or a missing tool under
+# `--skip-missing-tools`) and correctly reports the real reason on that one
+# entry (`entries[0].status == "skipped"`, `rc == -1`, a specific message).
+# The aggregate "did anything flash" check used to know only about the
+# PLANNER's own skip buckets (`plan.refused`/`plan.refused_skipped`), which an
+# entry-level skip never populates -- so on a run with NO `--core`/`--helper`
+# filter at all it fell through to `flash.nothing-matched`, contradicting
+# that very message on a manifest that genuinely matched a target.
+#
+# The shipped Rust oracle carries the SAME misdiagnosis (verified by running
+# it: `flash.nothing-matched`, `exitCode 0`, on all five shapes below), which
+# is why none of these five cases appear in
+# `tests/parity/test_flash_oracle_parity.py` any more -- the maintainer
+# authorised a deliberate divergence from that frozen answer for exactly this
+# shape (see that file's own divergence note beside `helper-no-flash-method`).
+# Do NOT "restore parity" by moving these back.
+#
+# `ok`/exit code are DELIBERATELY unchanged here -- still SUCCESS, the same
+# pinned contract `test_tbd_sentinel_never_reaches_a_flasher` above asserts.
+# Only the issue code and message were wrong, and only those are fixed.
+
+_HELPER_487 = """schema_version: 1
+hw_info: {{sku: E1M-AEN801}}
+slices: []
+helper_mcus:
+- {{name: h1, chip: cc3501e, firmware_path: fw.bin, flash_method: {method},
+   flash_args: {args}}}
+boot_order: []
+"""
+
+
+def _h487(method, args="{}"):
+    return _HELPER_487.format(method=method, args=args)
+
+
+@pytest.mark.parametrize(
+    "manifest,expected_message_fragment",
+    [
+        pytest.param(_h487('""'), "has no flash_method", id="helper-no-flash-method"),
+        pytest.param(
+            """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: cc3501e_otp, chip: cc3501e, firmware_path: fw.bin,
+   update_channel: alp_ota_spi_otp}
+boot_order: []
+""",
+            "is Alp-OTA-updated",
+            id="helper-update-channel-is-not-a-flash-target",
+        ),
+        pytest.param(
+            _h487("swd_probe", "{mode: TBD, device: TBD}"),
+            "unresolved 'TBD' flash_arg",
+            id="flash-args-tbd-mapping",
+        ),
+        pytest.param(
+            _h487("swd_probe", "TBD"),
+            "unresolved 'TBD' flash_arg",
+            id="flash-args-tbd-bare-string",
+        ),
+    ],
+)
+def test_an_entry_level_skip_is_diagnosed_as_such_not_as_a_filter_miss(
+    tmp_path, manifest, expected_message_fragment
+):
+    """Four of the five #487 defect-7 shapes: a manifest with exactly ONE
+    helper, no `--core`/`--helper` filter, that helper skips inside
+    `_flash_entry`. Must report `flash.entries-skipped`, never
+    `flash.nothing-matched` -- and the per-entry `entries[0]` must still carry
+    the real, specific reason, unchanged by this fix."""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    assert payload["ok"] is True, payload
+    assert len(payload["data"]["entries"]) == 1, payload
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "skipped", payload
+    assert entry["rc"] == -1, payload
+    assert expected_message_fragment in entry["message"], payload
+    assert codes(payload) == ["flash.entries-skipped"], payload
+    issue = payload["issues"][0]
+    assert issue["severity"] == "warning", payload
+    assert issue["message"] == (
+        "flash: every matched target was skipped before dispatch; nothing "
+        "was flashed. See entries[] for why each one was skipped."
+    ), payload
+    # The old, wrong diagnosis must not reappear alongside the fix.
+    assert "nothing matched the requested filters" not in issue["message"], payload
+
+
+def test_a_missing_tool_skip_under_the_flag_is_also_an_entry_skip(tmp_path):
+    """The fifth #487 defect-7 shape: `--skip-missing-tools` turns the
+    required-tool gate's refusal into an entry-level `rc=-1` skip
+    (`missing-tool-skips-with-flag` in the retired parity case), which hit the
+    identical misdiagnosis -- and must be fixed the identical way."""
+    empty_bin = tmp_path / "no-tools"
+    empty_bin.mkdir()
+    exit_code, out, _ = run_flash(
+        tmp_path,
+        "--format", "json", "--skip-missing-tools",
+        env={"PATH": str(empty_bin)},
+        manifest=OK_SLICE,
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    assert payload["ok"] is True, payload
+    assert len(payload["data"]["entries"]) == 1, payload
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "skipped", payload
+    assert entry["rc"] == -1, payload
+    assert "none found" in entry["message"], payload
+    assert "(skipped via --skip-missing-tools)" in entry["message"], payload
+    assert codes(payload) == ["flash.entries-skipped"], payload
+    assert payload["issues"][0]["severity"] == "warning", payload
+    assert "nothing matched the requested filters" not in payload["issues"][0]["message"], payload
+
+
+def test_an_entry_level_skip_beside_a_real_refusal_still_fails_the_run(tmp_path):
+    """A genuine refusal (`status: failed`) alongside an entry-level skip must
+    still fail the run -- the defect-7 fix must not swallow a real failure
+    just because it sits beside an unrelated skip. `plan.refused` is
+    non-empty here, so neither the new `flash.entries-skipped` branch nor the
+    old `flash.nothing-matched` one fires -- only the pre-existing
+    `flash.slice-not-built` refusal, unchanged."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: a.elf, status: failed,
+   flash_method: swd_probe}
+helper_mcus:
+- {name: h1, chip: x, firmware_path: f.bin}
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1, payload
+    assert payload["ok"] is False, payload
+    assert codes(payload) == ["flash.slice-not-built"], payload
+
 
 _AEN_M55_COLLISION_MANIFEST = """schema_version: 1
 hw_info: {sku: E1M-AEN801}

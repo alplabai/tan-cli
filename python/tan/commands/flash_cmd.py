@@ -1867,11 +1867,34 @@ def _run(
         if rc > 0:
             failed += 1
 
-    if not flashed_anything and not plan.refused and not plan.refused_skipped:
-        # A refused (or skipped) slice DID match the requested filters -- it was
-        # refused, not absent -- so "nothing matched" would be a misleading
-        # second message on top of the flash.slice-not-built /
-        # flash.slice-skipped issue(s) already pushed above.
+    if not flashed_anything and not plan.refused and not plan.refused_skipped and plan.targets:
+        # tan-cli#487 defect 7: every target this run matched DID reach
+        # `_flash_entry`, which correctly skipped each one there (an
+        # unresolved `TBD` flash_arg, no flash_method, or a missing tool
+        # under `--skip-missing-tools`) -- a real, per-entry diagnosis
+        # already sitting in `entries[]` above. `plan.refused`/`plan.
+        # refused_skipped` are the planner's OWN skip buckets and an
+        # entry-level skip never populates either of them, so this branch
+        # used to fall through to `flash.nothing-matched` below -- which
+        # contradicts that branch's own reasoning (see its comment): the run
+        # had no `--core`/`--helper` filter at all, and something DID match.
+        # `ok`/exit code are UNCHANGED here (still SUCCESS, per `test_
+        # tbd_sentinel_never_reaches_a_flasher` and its siblings) -- this is
+        # a diagnosis fix, not a behaviour change; see each entry's own
+        # `message` for why THAT target didn't run.
+        message = (
+            "flash: every matched target was skipped before dispatch; nothing "
+            "was flashed. See entries[] for why each one was skipped."
+        )
+        text_lines.append(message)
+        issues.append(Issue("flash.entries-skipped", "warning", message))
+    elif not flashed_anything and not plan.refused and not plan.refused_skipped:
+        # `plan.targets` is empty too here (the `if` above already claimed
+        # the non-empty case) -- a refused (or skipped) slice DID match the
+        # requested filters -- it was refused, not absent -- so "nothing
+        # matched" would be a misleading second message on top of the
+        # flash.slice-not-built / flash.slice-skipped issue(s) already
+        # pushed above.
         message = "flash: nothing matched the requested filters."
         text_lines.append(message)
         # A `--core`/`--helper` filter matching nothing used to warn only in text
