@@ -230,7 +230,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # this used to share a wrong answer with moved to
     # `tests/commands/test_flash_command.py` (see their own docstring for the
     # divergence rationale).
-    "tan/commands/flash_cmd.py": 2098,
+    "tan/commands/flash_cmd.py": 2094,
     "tan/planner/kconfig.py": 1639,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a

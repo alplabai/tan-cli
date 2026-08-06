@@ -295,6 +295,21 @@ def test_pipeline_stderr_uncaptured_still_reports_a_half_that_actually_spoke():
     ]
 
 
+def test_timed_out_stderr_uncaptured_still_names_the_timeout():
+    """tan-cli#487 defect 4's worst case: an eMMC/SD write killed at
+    `_FLASH_TIMEOUT_S = 900.0` in TEXT mode (`captured=False`), where the
+    operator has no reason to suspect a truncated image on the card. The
+    killed half's stderr was never piped in text mode, so `_half_lines`
+    contributes nothing for it (see the body-less-header test above) -- but
+    the sentence naming the failure mode must survive that suppression
+    regardless, since it is the only diagnosis a text-mode timeout ever
+    gets. Fails if that sentence is dropped (measured: an empty string)."""
+    text = flash_cmd._timed_out_stderr(
+        flash_cmd._Half("gunzip", None, ""), 900.0, captured=False
+    )
+    assert text == "timed out after 900s and was killed\n"
+
+
 @pytest.mark.parametrize(
     ("left_rc", "right_rc", "expected"),
     [

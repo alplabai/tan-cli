@@ -426,80 +426,6 @@
    }
   }
  ],
- "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[flash-args-tbd-bare-string]#0": [
-  0,
-  {
-   "command": "flash",
-   "data": {
-    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
-    "entries": [
-     {
-      "id": "h1",
-      "kind": "helper",
-      "message": "flash: helper 'h1' has an unresolved 'TBD' flash_arg (e.g. mode/device not finalised); skipping",
-      "method": "swd_probe",
-      "rc": -1,
-      "status": "skipped"
-     }
-    ],
-    "schemaVersion": "1"
-   },
-   "exitCode": 0,
-   "issues": [
-    {
-     "code": "flash.nothing-matched",
-     "message": "flash: nothing matched the requested filters.",
-     "severity": "warning"
-    }
-   ],
-   "ok": true,
-   "project": {
-    "boardYaml": null,
-    "root": "<ORACLE-ROOT-0>"
-   },
-   "sdk": {
-    "root": "./sdk",
-    "sourceTier": "sdkRootFlag"
-   }
-  }
- ],
- "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[flash-args-tbd-mapping]#0": [
-  0,
-  {
-   "command": "flash",
-   "data": {
-    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
-    "entries": [
-     {
-      "id": "h1",
-      "kind": "helper",
-      "message": "flash: helper 'h1' has an unresolved 'TBD' flash_arg (e.g. mode/device not finalised); skipping",
-      "method": "swd_probe",
-      "rc": -1,
-      "status": "skipped"
-     }
-    ],
-    "schemaVersion": "1"
-   },
-   "exitCode": 0,
-   "issues": [
-    {
-     "code": "flash.nothing-matched",
-     "message": "flash: nothing matched the requested filters.",
-     "severity": "warning"
-    }
-   ],
-   "ok": true,
-   "project": {
-    "boardYaml": null,
-    "root": "<ORACLE-ROOT-0>"
-   },
-   "sdk": {
-    "root": "./sdk",
-    "sourceTier": "sdkRootFlag"
-   }
-  }
- ],
  "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[helper-filter-suppresses-slices-entirely]#0": [
   0,
   {
@@ -520,78 +446,6 @@
    },
    "exitCode": 0,
    "issues": [],
-   "ok": true,
-   "project": {
-    "boardYaml": null,
-    "root": "<ORACLE-ROOT-0>"
-   },
-   "sdk": {
-    "root": "./sdk",
-    "sourceTier": "sdkRootFlag"
-   }
-  }
- ],
- "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[helper-no-flash-method]#0": [
-  0,
-  {
-   "command": "flash",
-   "data": {
-    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
-    "entries": [
-     {
-      "id": "h1",
-      "kind": "helper",
-      "message": "flash: helper 'h1' has no flash_method; skipping",
-      "rc": -1,
-      "status": "skipped"
-     }
-    ],
-    "schemaVersion": "1"
-   },
-   "exitCode": 0,
-   "issues": [
-    {
-     "code": "flash.nothing-matched",
-     "message": "flash: nothing matched the requested filters.",
-     "severity": "warning"
-    }
-   ],
-   "ok": true,
-   "project": {
-    "boardYaml": null,
-    "root": "<ORACLE-ROOT-0>"
-   },
-   "sdk": {
-    "root": "./sdk",
-    "sourceTier": "sdkRootFlag"
-   }
-  }
- ],
- "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[helper-update-channel-is-not-a-flash-target]#0": [
-  0,
-  {
-   "command": "flash",
-   "data": {
-    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
-    "entries": [
-     {
-      "id": "cc3501e_otp",
-      "kind": "helper",
-      "message": "flash: helper 'cc3501e_otp' is Alp-OTA-updated (update_channel: alp_ota_spi_otp), not a customer flash target; skipping",
-      "rc": -1,
-      "status": "skipped"
-     }
-    ],
-    "schemaVersion": "1"
-   },
-   "exitCode": 0,
-   "issues": [
-    {
-     "code": "flash.nothing-matched",
-     "message": "flash: nothing matched the requested filters.",
-     "severity": "warning"
-    }
-   ],
    "ok": true,
    "project": {
     "boardYaml": null,
@@ -720,43 +574,6 @@
     }
    ],
    "ok": false,
-   "project": {
-    "boardYaml": null,
-    "root": "<ORACLE-ROOT-0>"
-   },
-   "sdk": {
-    "root": "./sdk",
-    "sourceTier": "sdkRootFlag"
-   }
-  }
- ],
- "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[missing-tool-skips-with-flag]#0": [
-  0,
-  {
-   "command": "flash",
-   "data": {
-    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
-    "entries": [
-     {
-      "id": "c1",
-      "kind": "slice",
-      "message": "flash: slice 'c1' backend 'zephyr_west_flash' needs one of [\"west\"] on PATH; none found. (skipped via --skip-missing-tools)",
-      "method": "zephyr_west_flash",
-      "rc": -1,
-      "status": "skipped"
-     }
-    ],
-    "schemaVersion": "1"
-   },
-   "exitCode": 0,
-   "issues": [
-    {
-     "code": "flash.nothing-matched",
-     "message": "flash: nothing matched the requested filters.",
-     "severity": "warning"
-    }
-   ],
-   "ok": true,
    "project": {
     "boardYaml": null,
     "root": "<ORACLE-ROOT-0>"

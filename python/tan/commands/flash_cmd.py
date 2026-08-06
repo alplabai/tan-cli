@@ -1890,11 +1890,7 @@ def _run(
         issues.append(Issue("flash.entries-skipped", "warning", message))
     elif not flashed_anything and not plan.refused and not plan.refused_skipped:
         # `plan.targets` is empty too here (the `if` above already claimed
-        # the non-empty case) -- a refused (or skipped) slice DID match the
-        # requested filters -- it was refused, not absent -- so "nothing
-        # matched" would be a misleading second message on top of the
-        # flash.slice-not-built / flash.slice-skipped issue(s) already
-        # pushed above.
+        # the non-empty case).
         message = "flash: nothing matched the requested filters."
         text_lines.append(message)
         # A `--core`/`--helper` filter matching nothing used to warn only in text

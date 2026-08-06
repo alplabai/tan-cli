@@ -197,7 +197,7 @@ run that day; use the new name if re-running it.
 THE CAPTURE HOST'S TOOL INVENTORY IS PART OF THE FROZEN ANSWER
 (tan-cli#313, tan-cli#324)
 
-Eight cases branch on a `which()` probe, so their frozen answers encode which
+Seven cases branch on a `which()` probe, so their frozen answers encode which
 tools the CAPTURE host had -- not just what the oracle computes. The capture
 host had:
 
@@ -209,13 +209,13 @@ host had:
 Replay pins the PYTHON side's PATH to match that inventory, so the comparison
 does not silently measure the replay host instead of the port. The pins:
 
-  test_flash_oracle_parity.py  `_TOOL_PROBE_PINNED_CASES` (5 cases) ->
+  test_flash_oracle_parity.py  `_TOOL_PROBE_PINNED_CASES` (4 cases) ->
     `_pin_tool_inventory`, a scratch PATH holding a stand-in `dd` only
   test_oracle_parity.py  `test_west_forward_matches_rust[migrate|lock|quality]`
     (3 cases) -> `oracle.empty_tool_inventory`, a scratch PATH holding nothing
 
 CONSEQUENCE FOR RE-CAPTURE, and the reason this section exists: the recipe at
-the top of this file NO LONGER WORKS AS WRITTEN for these eight. Under
+the top of this file NO LONGER WORKS AS WRITTEN for these seven. Under
 TAN_PARITY_LIVE=1 both sides genuinely spawn, so `compare()` REFUSES a
 `python_env_overrides` rather than compare one pinned side against one
 unpinned side -- deliberately, since that would be a fresh divergence rather
@@ -226,7 +226,7 @@ than a capture. Measured:
   -> 3 failed, RuntimeError: compare() got python_env_overrides under
      TAN_PARITY_LIVE=1
 
-To re-capture any of the eight, run the capture on a host whose tool
+To re-capture any of the seven, run the capture on a host whose tool
 inventory MATCHES the table above (no `west`, no `bmaptool`, a real `dd`) and
 drop the pin for that run. Capturing on a host with `west` installed and the
 pin dropped would freeze a different answer entirely -- one that then only

@@ -1377,8 +1377,8 @@ def plan_yocto_wic(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
                     '"gz" | "xz". Decompress the artefact first, or install '
                     "bmaptool (preferred -- it decompresses natively)."
                 )
-                # else: no `compress` key and an unrecognised/absent suffix --
-                # genuinely uncompressed, `compress` stays `None`.
+            # else: no `compress` key and an unrecognised/absent suffix --
+            # genuinely uncompressed, `compress` stays `None`.
         elif compress not in ("gz", "xz"):
             # tan-cli#487, defect 2, shape 1 (an explicit out-of-vocabulary
             # `compress`) and shape 3 (that same bad explicit value SHADOWING
