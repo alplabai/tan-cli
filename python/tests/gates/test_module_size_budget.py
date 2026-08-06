@@ -97,7 +97,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # produced instead of the whole report printing after the last probe --
     # a wedged probe is now named by the last line on screen rather than
     # leaving a blank terminal. Plus the `--fix`/`--no-color` plumbing and the
-    # `_DOCTOR_TEXT_MIN_WIDTH` floor the renderer is called with.
+    # `TEXT_WRAP_MIN_WIDTH` floor the renderer is called with.
     #
     # 3289, not 3192, as of the five-finding review pass on that same doctor
     # work, PLUS the correction pass on the review's own written rationale
@@ -121,6 +121,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # an 11-line comment. None of this is the width-wrapping fix itself --
     # that grew `doctor_render.py` (well under its own 800-line cap), not
     # this file.
+    #
+    # Still 3289, unchanged, as of `explain`/`sdk current` adopting the same
+    # wrap seam: `_DOCTOR_TEXT_MIN_WIDTH` moved out to
+    # `tan.env.TEXT_WRAP_MIN_WIDTH` so the two new callers and this module
+    # share one floor instead of drifting into two, which cost a handful of
+    # comment lines recording WHY this module's own width resolution stays
+    # unconditional (piped or not) even though the new seam is not (see the
+    # comment at the `width = max(...)` call site) -- but the doc-comment
+    # block for the constant this module no longer defines (only imports)
+    # is gone, not merely moved, so the net measures out to exactly the
+    # pre-existing count.
     "tan/commands/doctor_cmd.py": 3289,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
@@ -260,7 +271,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # 1266, not 1265, as of the UX polish sweep task 3: the `not-ported`
     # refusal's `text_lines` gained its next step (the `git clone` remedy and
     # the `tan doctor` pointer), +1 net.
-    "tan/commands/sdk_cmd.py": 1266,
+    #
+    # 1274, not 1266, as of `sdk current` adopting the shared wrap seam:
+    # `_run_current` now calls `tan.core.text_layout.wrap_lines` (via
+    # `tan.env.wrap_width`) on its assembled text report, +8 net -- an
+    # import and a one-line call site, nothing command-local. A first pass
+    # here carried a command-local `_wrap_current_text` plus
+    # `_RECORD_LINE_PREFIXES`/`_ISSUE_LINE_PREFIX` tables classifying which
+    # lines to exempt from wrapping; deleted (not merely simplified) because
+    # the case they existed for cannot occur -- `wrap_width()` returns a
+    # width only when stderr IS a tty, and any pipe/grep that could read a
+    # "record-shaped" line makes stderr not a tty, which already returns
+    # `None` and skips wrapping wholesale.
+    "tan/commands/sdk_cmd.py": 1274,
     "tan/commands/validate_cmd.py": 1093,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
