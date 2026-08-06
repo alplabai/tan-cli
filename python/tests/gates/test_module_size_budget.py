@@ -192,8 +192,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # refusal it feeds -- a still-compressed stream must never reach `dd` raw
     # -- plus the `swd_probe` success messages now withholding `@ {base}` for
     # a non-`.bin` artefact on both the J-Link and openocd/pyocd arms.
-    "tan/core/flash_plan.py": 2107,
-    # 2006, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
+    # 2123, not 2107, as of the tan-cli#487 REVIEW round (finding 2): the
+    # `compress` vocabulary refusals moved from ahead of tool selection into
+    # the `elif dd:` arm (bmaptool decompresses natively and never reads
+    # `compress`, so those refusals must not fire on that arm at all), which
+    # nets a few lines of comment explaining why, over and above the code
+    # move itself.
+    "tan/core/flash_plan.py": 2123,
+    # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
     # partial captured output into the timeout report instead of discarding
@@ -203,7 +209,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # `--sdk-root` resolves against the SAME base the flasher spawns from,
     # and gating Flow D's SETOOLS auto-sign on the SAME confirm check the
     # MRAM write it feeds already requires.
-    "tan/commands/flash_cmd.py": 1996,
+    # 2075, not 1996, as of the tan-cli#487 REVIEW round: finding 1 narrows
+    # `_yocto_wic_block_device_refusal`'s ENOENT fail-open to "target's
+    # parent is `/dev` itself" instead of any target, with a new refusal
+    # message and its rationale; finding 4 absolutises `resolved_sdk` ONCE,
+    # before `venv_bin_dir`/`west_workspace_dir` as well as `ctx.sdk_root`
+    # (the original fix only covered the latter); finding 5 threads a
+    # `captured` flag through `_half_lines`/`_pipeline_stderr`/
+    # `_timed_out_stderr` so an uncaptured (text-mode) pipeline failure does
+    # not emit a body-less header; and nit 1 adds a TOCTOU-boundedness
+    # comment beside the write-time gate.
+    "tan/commands/flash_cmd.py": 2075,
     "tan/planner/kconfig.py": 1639,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
@@ -444,7 +460,16 @@ _MIRRORED = ("tan/planner/",)
 # than left to bump this budget a second time. `run_fix` (`doctor_cmd.py`)
 # also grew this pass, but it was already over 50 lines before it, so it
 # never moved the COUNT either way.
-_FUNCTION_COUNT_BUDGET = 203
+#
+# 204, not 203, as of the tan-cli#487 REVIEW round (finding 1):
+# `flash_cmd.py:_yocto_wic_block_device_refusal` crossed 50 lines (41 -> 66)
+# once its docstring grew to explain the narrowed ENOENT fail-open (the
+# review's own point -- a blanket fail-open was the bug, and the function
+# needs to say precisely which shape still fails open and why, or the next
+# reader re-widens it by "simplifying" the condition). Body growth is small
+# (one `if`/`return` pair); the docstring is the reason. `_FUNCTION_WORST_
+# BUDGET` is untouched -- 66 lines is nowhere near it.
+_FUNCTION_COUNT_BUDGET = 204
 _FUNCTION_WORST_BUDGET = 707
 
 

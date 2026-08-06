@@ -1333,56 +1333,72 @@ def plan_yocto_wic(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     artefact = inp.artefact
     compress = fa_str(fa, "compress")
     suffix = os.path.splitext(artefact)[1].lstrip(".").lower()
-    if compress is None:
-        if suffix in ("gz", "xz"):
-            compress = suffix
-        elif suffix in _KNOWN_UNSUPPORTED_COMPRESSION_SUFFIXES:
-            # tan-cli#487, defect 2, shape 2: no `compress` key at all, but a
-            # suffix (`.wic.zst`, `.wic.bz2`, `.wic.lzo`) this backend
-            # RECOGNISES as a real codec it just cannot decompress -- the old
-            # auto-detect missed it (only "gz"/"xz" are recognised), so
-            # `compress` silently resolved to `None`, which reads as
-            # "genuinely uncompressed" and raw-`dd`s the compressed stream.
-            # An UNRECOGNISED suffix (anything else) is left alone -- there is
-            # no way to tell "genuinely uncompressed" from "a codec this list
-            # simply does not know about" for those, and guessing wrong in
-            # THAT direction would refuse a legitimate plain `.wic`.
-            raise FlashPlanError(
-                f"yocto_wic: artefact suffix '.{suffix}' looks compressed but "
-                'is not supported -- the vocabulary is "gz" | "xz". Set '
-                "flash_args.compress explicitly, or decompress the artefact "
-                "first."
-            )
-        # else: no `compress` key and an unrecognised/absent suffix --
-        # genuinely uncompressed, `compress` stays `None`.
-    elif compress not in ("gz", "xz"):
-        # tan-cli#487, defect 2, shape 1 (an explicit out-of-vocabulary
-        # `compress`) and shape 3 (that same bad explicit value SHADOWING a
-        # suffix that would have auto-detected correctly -- a genuinely
-        # `.wic.gz` artefact with `compress: zst` never even reaches the
-        # `if compress is None` branch above, so the bad explicit value wins
-        # and the auto-detect that WOULD have been right never runs). Both
-        # used to fall through to the `else` branch below and raw-`dd` the
-        # still-compressed stream onto the block device -- silently,
-        # `ok:true`, exit 0, and the board then silently does not boot. That
-        # `else` branch is the CORRECT path for a genuinely uncompressed
-        # `.wic`; it must never be reached for a value the manifest actually
-        # SET to something this backend cannot decompress. The documented
-        # vocabulary is "gz" | "xz" | None (alp-sdk `scripts/flash_backends/
-        # yocto_wic.py:46`).
-        raise FlashPlanError(
-            f"yocto_wic: flash_args.compress '{compress}' is not supported -- the "
-            'vocabulary is "gz" | "xz" (omit the key to auto-detect from the '
-            "artefact suffix instead)."
-        )
     confirm = inp.force_confirm or _default(fa_bool_checked(fa, "confirm"), False)
     planning_only = inp.dry_run or not confirm
 
     bmaptool = which("bmaptool")
     dd = which("dd")
     if bmaptool or (planning_only and not dd):
+        # tan-cli#487 review finding 2: `compress` is a `dd`-fallback-only
+        # concern -- bmaptool decompresses natively and never reads it -- so
+        # the vocabulary refusals below must not fire here. Before this fix
+        # they ran unconditionally, ahead of tool selection, so a stock Yocto
+        # `IMAGE_FSTYPES` artefact like `core-image.wic.zst` hard-refused a
+        # `bmaptool copy core-image.wic.zst /dev/sdb` even on a bmap-tools
+        # host -- a live regression on the arm this module's own docstring
+        # calls "preferred".
         argv: tuple[str, ...] = ("bmaptool", "copy", artefact, target)
     elif dd:
+        # `compress` is validated HERE, not before tool selection -- see the
+        # bmaptool arm above. The suffix-refusal message below does NOT
+        # suggest `flash_args.compress` as a fix for an UNSUPPORTED codec:
+        # that used to send the operator straight into the compress-value
+        # refusal a few lines down (the exact same codec, now explicit,
+        # is still not "gz"|"xz") -- a dead-end loop tan-cli#487's review
+        # caught.
+        if compress is None:
+            if suffix in ("gz", "xz"):
+                compress = suffix
+            elif suffix in _KNOWN_UNSUPPORTED_COMPRESSION_SUFFIXES:
+                # tan-cli#487, defect 2, shape 2: no `compress` key at all,
+                # but a suffix (`.wic.zst`, `.wic.bz2`, `.wic.lzo`) this
+                # backend RECOGNISES as a real codec it just cannot
+                # decompress via `dd` -- the old auto-detect missed it (only
+                # "gz"/"xz" are recognised), so `compress` silently resolved
+                # to `None`, which reads as "genuinely uncompressed" and
+                # raw-`dd`s the compressed stream. An UNRECOGNISED suffix
+                # (anything else) is left alone -- there is no way to tell
+                # "genuinely uncompressed" from "a codec this list simply
+                # does not know about" for those, and guessing wrong in THAT
+                # direction would refuse a legitimate plain `.wic`.
+                raise FlashPlanError(
+                    f"yocto_wic: artefact suffix '.{suffix}' looks compressed but "
+                    'is not supported by the dd fallback -- the vocabulary is '
+                    '"gz" | "xz". Decompress the artefact first, or install '
+                    "bmaptool (preferred -- it decompresses natively)."
+                )
+                # else: no `compress` key and an unrecognised/absent suffix --
+                # genuinely uncompressed, `compress` stays `None`.
+        elif compress not in ("gz", "xz"):
+            # tan-cli#487, defect 2, shape 1 (an explicit out-of-vocabulary
+            # `compress`) and shape 3 (that same bad explicit value SHADOWING
+            # a suffix that would have auto-detected correctly -- a genuinely
+            # `.wic.gz` artefact with `compress: zst` never even reaches the
+            # `if compress is None` branch above, so the bad explicit value
+            # wins and the auto-detect that WOULD have been right never
+            # runs). Both used to fall through to the `else` branch below and
+            # raw-`dd` the still-compressed stream onto the block device --
+            # silently, `ok:true`, exit 0, and the board then silently does
+            # not boot. That `else` branch is the CORRECT path for a
+            # genuinely uncompressed `.wic`; it must never be reached for a
+            # value the manifest actually SET to something this backend
+            # cannot decompress. The documented vocabulary is "gz" | "xz" |
+            # None (alp-sdk `scripts/flash_backends/yocto_wic.py:46`).
+            raise FlashPlanError(
+                f"yocto_wic: flash_args.compress '{compress}' is not supported -- the "
+                'vocabulary is "gz" | "xz" (omit the key to auto-detect from the '
+                "artefact suffix instead)."
+            )
         bs = _default(fa_str(fa, "bs"), "4M")
         dd_cmd = ["dd", f"of={target}", f"bs={bs}", "conv=fsync", "status=progress"]
         if compress == "gz":

@@ -778,6 +778,30 @@ def test_spawn_pipeline_both_stages_succeeding_is_a_clean_outcome():
     assert outcome.returncode == 0
 
 
+def test_spawn_pipeline_text_mode_ordinary_failure_leaves_the_outcome_and_message_empty():
+    """tan-cli#487 review finding 5: `_execute_message`'s own docstring
+    (`test_execute_message_text_mode_ordinary_stream_failure_is_unaffected`)
+    claims the ordinary text-mode failure leaves BOTH `outcome.stdout`/
+    `.stderr` empty -- true for the single-process `_spawn` path that test
+    covers, but NOT for `_spawn_pipeline` before this fix: neither half's
+    stderr is ever piped in text mode (`capture=False`), yet `_half_lines`
+    still emitted a body-less `"<program> exited rc=<n>:"` header for the
+    failing half, so `outcome.stderr` was non-empty and `_execute_message`
+    reported a dangling-colon header with no body instead of the generic
+    `flash command failed` sentence. Fails against the pre-fix source
+    (measured: `outcome.stderr == '<interpreter> exited rc=1:\\n'`, message
+    `'yocto_wic[a55]: <interpreter> exited rc=1:'`)."""
+    left = _stub("import sys; sys.stdout.write('data'); sys.exit(0)")
+    right = _stub("import sys; sys.stdin.buffer.read(); sys.exit(1)")
+    outcome = flash_cmd._spawn_pipeline(left, right, capture=False, timeout=10.0)
+    assert outcome.success is False
+    assert outcome.returncode == 1
+    assert outcome.stderr == ""
+    assert outcome.stdout == ""
+    message = flash_cmd._execute_message(outcome, "yocto_wic", "a55")
+    assert message == "yocto_wic[a55]: flash command failed"
+
+
 def test_spawn_pipeline_drains_more_than_one_pipe_buffer_without_hanging():
     """The anti-hang property this background thread exists for (unchanged by
     tan-cli#401): a decompressor that writes more to stderr than the OS pipe
@@ -1197,29 +1221,125 @@ def test_yocto_wic_block_device_refusal_accepts_a_real_block_device():
     assert flash_cmd._yocto_wic_block_device_refusal("/dev/sda", stat_fn=fake_stat) is None
 
 
-def test_yocto_wic_block_device_refusal_accepts_a_symlink_that_resolves_to_a_block_device():
+def test_yocto_wic_block_device_refusal_follows_a_real_symlink_to_its_own_mode(tmp_path):
     """A `/dev/disk/by-id/...`-style symlink: `os.stat` follows it to the real
-    device's mode by itself, with no separate realpath step needed here."""
-    real_mode = stat.S_IFBLK | 0o660
-    fake_stat = lambda _p: types.SimpleNamespace(st_mode=real_mode)  # noqa: E731
-    assert (
-        flash_cmd._yocto_wic_block_device_refusal("/dev/disk/by-id/mmc-foo", stat_fn=fake_stat)
-        is None
-    )
+    device's mode by itself, with no separate realpath step needed here.
+    Proven with a REAL symlink to `/dev/null` (a character device, not a
+    block device) rather than an injected `stat_fn` that ignores its path
+    argument -- the previous version of this test used
+    `fake_stat = lambda _p: ...st_mode=real_mode`, which is byte-for-byte the
+    preceding accepts-a-real-block-device test under a different string, so
+    it could not tell "the symlink was followed" from "the injected stat_fn
+    always answers the same fixed mode". This proves the FOLLOW half
+    (real `os.stat`, no `stat_fn` override, so the symlink genuinely has to
+    resolve); it cannot prove the block-device-acceptance half in the same
+    breath because `/dev/null` is a character device, so the refusal here is
+    the "not a block device" one, over the REAL resolved mode."""
+    link = tmp_path / "by-id-stand-in"
+    link.symlink_to("/dev/null")
+    refusal = flash_cmd._yocto_wic_block_device_refusal(str(link))
+    assert refusal is not None
+    assert "not a block device" in refusal
 
 
-def test_yocto_wic_block_device_refusal_fails_open_on_a_target_that_does_not_exist_yet():
-    """The deliberate divergence from alp-sdk's own `_require_block_device`
-    (which refuses on ANY stat failure, including ENOENT): tan's OWN oracle-
-    parity suite spawns a real `dd` against `flash_args.target: /dev/sdb`
-    BY DESIGN because that device does not exist on any host the suite runs
-    on (`tests/parity/test_flash_oracle_parity.py::
+def test_yocto_wic_block_device_refusal_fails_open_only_when_the_parent_is_dev_itself():
+    """tan-cli#487 review finding 1: the OLD blanket fail-open on
+    `FileNotFoundError` (for ANY target, not just a direct `/dev/<name>`
+    child) let a typo'd `flash_args.target` (`/dev/shm/sdb` for `/dev/sdb`)
+    `dd` a whole multi-GB image into a BRAND-NEW file under a real `/dev/`
+    subtree at `ok:true`/exit 0. The narrowed contract: fail open ONLY when
+    `target`'s own parent directory is `/dev` itself -- the devtmpfs root,
+    where "does not exist" genuinely means "not plugged in" -- which is
+    exactly the shape tan's OWN oracle-parity suite depends on (it spawns a
+    real `dd` against `flash_args.target: /dev/sdb` BY DESIGN because that
+    device does not exist on any host the suite runs on:
+    `tests/parity/test_flash_oracle_parity.py::
     test_a_real_spawn_diffs_including_the_captured_failure_tail`, a frozen
-    fixture under `python/tests/parity/` that may not move) -- refusing a
-    not-yet-plugged-in target here would break that comparison. A target
-    that does not exist cannot be an EXISTING file this write clobbers
-    either way."""
+    fixture under `python/tests/parity/` that may not move). A deeper `/dev/`
+    subtree now refuses instead. Fails against the pre-fix source (measured:
+    `/dev/shm/tan_review_missing.img` also returned `None`, no refusal)."""
+    # The happy path this fix must not trade away, and the exact shape the
+    # frozen oracle-parity fixture needs: a direct /dev/<name> child that
+    # simply is not plugged in yet.
     assert flash_cmd._yocto_wic_block_device_refusal("/dev/definitely-not-there-xyz") is None
+
+    refusal = flash_cmd._yocto_wic_block_device_refusal("/dev/shm/tan_review_missing.img")
+    assert refusal is not None
+    assert "does not exist" in refusal
+    assert "/dev/shm/tan_review_missing.img" in refusal
+
+
+def test_yocto_wic_block_device_refusal_refuses_a_traversal_through_a_symlinked_dev_child():
+    """tan-cli#487 review finding 1, the `/dev/x/../sdb` shape: were `/dev/x`
+    a symlink, the KERNEL resolves `..` against ITS real target, not against
+    `/dev` -- a lexically-`..`-collapsed dirname would misread this as
+    "parent is /dev" and fail open regardless of where `/dev/x` actually
+    points. `posixpath.dirname` is taken on the RAW string here (`/dev/x/..`,
+    not `/dev`), so this refuses instead. `/dev/x` need not even exist on the
+    test host for this to reach the same `FileNotFoundError` branch --
+    ENOENT on any missing intermediate component behaves identically to
+    ENOENT on the leaf. Fails against the pre-fix source (measured: `None`,
+    no refusal -- the old code failed open on ANY `FileNotFoundError`)."""
+    refusal = flash_cmd._yocto_wic_block_device_refusal("/dev/x/../sdb")
+    assert refusal is not None
+    assert "does not exist" in refusal
+
+
+def test_yocto_wic_write_time_gate_is_actually_wired_through_a_real_flash_entry(tmp_path):
+    """tan-cli#487 review finding 3: mutation-proven that NOTHING previously
+    exercised the write-time gate's WIRING -- deleting the whole
+    `if method in YOCTO_WIC_METHODS: ... return 1, entry(...)` block at
+    `flash_cmd.py:1373-1380` still passed the full suite (the review's own
+    measurement). Every existing `_yocto_wic_block_device_refusal` test
+    calls the helper directly; the only path that reaches it through a real
+    spawn is the oracle-parity fixture, which exercises the FAIL-OPEN branch
+    (a target that does not exist) -- never the refusal branch.
+
+    This drives the REAL `tan flash` subprocess, confirmed, against a target
+    that DOES exist as a regular file under a genuine `/dev/` subtree
+    (`/dev/shm/<unique>`, tmpfs, so this needs no real `/dev` write access
+    and touches no real device), and asserts BOTH that the entry fails AND
+    that the file's bytes are never touched -- if the gate were unwired,
+    `dd` would overwrite it with the fake artefact bytes below instead.
+
+    This is a wiring-regression test, not a pre/post-fix behaviour test:
+    the gate itself already exists on `451304a` (this branch's tip) and
+    this test passes there too -- what it proves is that DELETING the gate
+    (`flash_cmd.py:1373-1380`) now makes THIS test fail, closing the exact
+    hole the review's own mutation run found (the full suite passed with
+    the block deleted, because nothing reached it through a real spawn).
+    The mutation re-run confirming that is reported alongside this test,
+    not encoded in it."""
+    # `/dev/shm` is a real tmpfs mount, world-writable, present on every host
+    # this suite runs on -- the issue's own repro shape (`/dev/shm/<name>`),
+    # stood in with a collision-proof name derived from `tmp_path` rather
+    # than a fixed one, since this test does not get its own `/dev/shm`
+    # sandbox the way `tmp_path` is one.
+    victim = Path("/dev/shm") / f"tan-cli-487-gate-{tmp_path.name}.img"
+    victim.write_bytes(b"do-not-clobber-me")
+    try:
+        (tmp_path / "sdk" / "images").mkdir(parents=True)
+        (tmp_path / "sdk" / "images" / "core-image.wic").write_bytes(b"fake-image-bytes")
+        manifest = f"""schema_version: 1
+hw_info: {{sku: S}}
+slices:
+- {{core_id: a55, os: yocto, output_artefact: images/core-image.wic, status: ok,
+   flash_method: yocto_wic, flash_args: {{target: {victim}, confirm: true}}}}
+helper_mcus: []
+boot_order: []
+"""
+        exit_code, out, _ = run_flash(
+            tmp_path, "--format", "json", env={"ALP_FLASH_FORCE": "1"}, manifest=manifest
+        )
+        payload = envelope(out)
+        assert exit_code == 1
+        entries = payload["data"]["entries"]
+        assert len(entries) == 1
+        assert entries[0]["status"] == "failed"
+        assert "not a block device" in entries[0]["message"]
+        assert victim.read_bytes() == b"do-not-clobber-me"
+    finally:
+        victim.unlink(missing_ok=True)
 
 
 def test_plan_yocto_wic_compress_out_of_vocabulary_string_refuses():
@@ -1284,6 +1404,119 @@ def test_plan_yocto_wic_gz_suffix_still_auto_detects_with_no_compress_key():
     )
     assert flash_plan.PIPE in plan.argv
     assert "gunzip" in plan.argv
+
+
+def test_plan_yocto_wic_gz_suffix_auto_detects_case_insensitively():
+    """tan-cli#487 review, nit 6: the `.lower()` added to the suffix
+    extraction is an undeclared behaviour change worth its own test --
+    `core-image.wic.GZ` used to auto-detect `compress` as `None` (an
+    unrecognised suffix, "genuinely uncompressed"), so it built a raw `dd`
+    of a still-gzipped stream -- a real bug, since `IMAGE_FSTYPES` casing
+    varies by host/tooling. Now it correctly builds the `gunzip | dd`
+    pipeline, same as the lowercase suffix. Fails against the pre-fix
+    source (measured: `plan.argv[0] == "dd"`, no `gunzip`, `PIPE` absent)."""
+    inp = _wic_inputs(artefact="/build/core-image.wic.GZ")
+    plan = flash_plan.plan_yocto_wic(inp, lambda name: name in ("dd", "gunzip"))
+    assert flash_plan.PIPE in plan.argv
+    assert "gunzip" in plan.argv
+
+
+def test_plan_yocto_wic_bmaptool_present_ignores_an_unsupported_compress_suffix():
+    """tan-cli#487 review finding 2: a live regression this commit shipped --
+    both compress refusals used to run BEFORE tool selection, so a stock
+    Yocto `IMAGE_FSTYPES` artefact like `core-image.wic.zst` hard-refused
+    even when `bmaptool` (this module's own docstring calls it "preferred")
+    is on PATH and would have decompressed it natively without ever reading
+    `compress`. Fails against the pre-fix source (measured: `FlashPlanError`
+    naming the unsupported `.zst` suffix, even with `bmaptool` present)."""
+    inp = _wic_inputs(artefact="/build/core-image.wic.zst")
+    plan = flash_plan.plan_yocto_wic(inp, lambda name: name == "bmaptool")
+    assert plan.argv == ("bmaptool", "copy", "/build/core-image.wic.zst", "/dev/sdb")
+
+
+def test_plan_yocto_wic_bmaptool_present_ignores_an_out_of_vocabulary_explicit_compress():
+    """The explicit-`compress` half of the same regression: an out-of-
+    vocabulary `flash_args.compress` (e.g. `zst`) must not refuse a bmaptool
+    flash either -- bmaptool never reads the key at all."""
+    inp = _wic_inputs(artefact="/build/core-image.wic", compress="zst")
+    plan = flash_plan.plan_yocto_wic(inp, lambda name: name == "bmaptool")
+    assert plan.argv == ("bmaptool", "copy", "/build/core-image.wic", "/dev/sdb")
+
+
+def test_plan_yocto_wic_compress_unsupported_suffix_refusal_does_not_loop_back_on_itself():
+    """tan-cli#487 review finding 2: the suffix refusal used to tell the
+    operator to 'Set flash_args.compress explicitly', but doing exactly that
+    (with the SAME unsupported codec, now explicit) walked straight into the
+    compress-value refusal a few lines down -- a dead end for a codec `dd`
+    genuinely cannot decompress. The suffix-refusal message no longer offers
+    that advice."""
+    inp = _wic_inputs(artefact="/build/core-image.wic.bz2")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_yocto_wic(inp, lambda name: name == "dd")
+    assert "Set flash_args.compress explicitly" not in str(raised.value)
+
+
+def test_relative_sdk_root_absolutised_before_venv_and_workspace_resolution(tmp_path, monkeypatch):
+    """tan-cli#487 review finding 4: `venv_bin_dir`/`west_workspace_dir` used
+    to be called with `resolved_sdk` -- the LITERAL, possibly-relative
+    `--sdk-root` value -- 57 lines before defect 3's own fix absolutised a
+    DIFFERENT copy of the same value (`ctx.sdk_root`) for artefact
+    resolution. Both walk `Path(sdk_root).parent` looking for the
+    workspace-wide `.venv` (`tan.core.venv.find_workspace_venv`/
+    `_zephyr_base_venv`), so a relative `--sdk-root ../alp-sdk` produced a
+    RELATIVE `../.venv/bin` that `prepend_path` then put on the spawned
+    child's PATH -- while `_execute` spawns with `cwd=ctx.workspace` (the
+    west topdir), not this process's cwd: the tool half of defect 3's
+    "validate one base, execute against another" split. Fails against the
+    pre-fix source (measured: both captured calls received the literal
+    relative `"./sdk"` string, not an absolute path anchored on `cwd`)."""
+    captured: dict[str, object] = {}
+
+    def _capture_venv_bin_dir(_start, sdk_root):
+        captured["venv_bin_dir_sdk_root"] = sdk_root
+        return None
+
+    def _capture_west_workspace_dir(_start, sdk_root):
+        captured["west_workspace_dir_sdk_root"] = sdk_root
+        return None
+
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", _capture_venv_bin_dir)
+    monkeypatch.setattr(flash_cmd, "west_workspace_dir", _capture_west_workspace_dir)
+
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    manifest = "schema_version: 1\nhw_info: {sku: S}\nslices: []\nhelper_mcus: []\nboot_order: []\n"
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    # `_is_sdk_root("./sdk")` checks relative to the REAL process cwd, not the
+    # `cwd=` string `_run` otherwise threads through (`_run` is called with a
+    # real `os.getcwd()` by the CLI wrapper) -- `run_flash`'s own harness
+    # gets this for free by spawning a real subprocess with `cwd=work`.
+    monkeypatch.chdir(tmp_path)
+
+    flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg="./sdk",
+        board_yaml=None, core=None, helper=None, dry_run=True,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    # `_abs_join` preserves a `.` path component rather than normalising it
+    # away (see its own docstring, and
+    # `test_relative_sdk_root_artefact_resolves_against_the_same_base_the_
+    # flasher_spawns_from` below for the same shape), so the value
+    # `venv_bin_dir` receives (a plain string) is `<cwd>/./sdk`; wrapping
+    # that same value in `Path(...)` for `west_workspace_dir` (as the real
+    # code does) normalises the `.` segment away.
+    expected_raw = os.path.join(str(tmp_path), "./sdk")
+    assert captured["venv_bin_dir_sdk_root"] == expected_raw
+    assert str(captured["west_workspace_dir_sdk_root"]) == str(Path(expected_raw))
+    # And the divergence this closes: neither call received the literal,
+    # UN-absolutised `--sdk-root` value.
+    assert captured["venv_bin_dir_sdk_root"] != "./sdk"
+    assert str(captured["west_workspace_dir_sdk_root"]) != str(Path("./sdk"))
 
 
 # ── relative --sdk-root artefact resolution (tan-cli#487, defect 3) ─────────
