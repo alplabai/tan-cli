@@ -170,14 +170,22 @@ _MODULE_BUDGET: dict[str, int] = {
     # nothing stopped that gate from being loosened again.
     "tan/commands/bootstrap_cmd.py": 2917,
     "tan/core/bootstrap.py": 1890,
-    # 1897, not 1808, as of tan-cli#486: two new guard functions
-    # (`validate_commander_path`, closing the J-Link Commander newline-
-    # injection hole on the artefact/atoc/serial interpolations, and
-    # `validate_openocd_word`, closing the OpenOCD `-c` Jim Tcl `[...]`
+    # 1987, not 1808, as of tan-cli#486 and its review round: two guard
+    # functions (`validate_commander_path`, closing the J-Link Commander
+    # newline/`"`-injection hole on the artefact/atoc/serial interpolations,
+    # and `validate_openocd_word`, closing the OpenOCD `-c` Jim Tcl `[...]`
     # command-substitution hole on the artefact) plus their call sites and
     # docstrings across `jlink_commander_script`, `plan_swd_probe`,
-    # `plan_alif_mram_jlink` and `flow_d_preflight_script`.
-    "tan/core/flash_plan.py": 1897,
+    # `plan_alif_mram_jlink` and `flow_d_preflight_script`; then the review
+    # round added `openocd_program_word` (braces the OpenOCD artefact word
+    # against Jim Tcl's own word-splitting/backslash substitution),
+    # `validate_identifier`'s `destination` override (so `jlink_serial`'s
+    # refusal names the J-Link Commander script it actually reaches, not
+    # OpenOCD), `validate_commander_path`'s `"` rejection, and hoisting
+    # `jlink_serial` validation into `validate_flow_d_shape` so a hostile
+    # value refuses at `--dry-run` time instead of only deep inside
+    # `plan_alif_mram_jlink`/`flow_d_preflight_script`.
+    "tan/core/flash_plan.py": 1987,
     # 1829, not 1808, as of the tan-cli#464 stage-2 review round: `_resolve_sdk`/
     # `resolve_sdk_root_ladder_safe` now return a named `_SdkResolution`
     # instead of a growing tuple, and `flash` appends

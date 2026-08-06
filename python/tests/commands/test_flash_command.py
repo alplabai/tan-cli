@@ -826,6 +826,30 @@ def test_jlink_commander_script_still_quotes_a_spaced_path_after_the_new_guard()
     assert 'loadbin "C:\\Program Files\\alp\\build\\zephyr.bin", 0x08000000' in script
 
 
+def test_jlink_commander_script_refuses_an_embedded_double_quote():
+    """tan-cli#486 REVIEW, defect 3: a `"` inside an artefact defeats
+    `commander_path`'s own conditional quoting FROM THE INSIDE. Measured:
+    `/b/a" halt "z.bin` (a space AND a `"`) renders
+    `loadbin "/b/a" halt "z.bin", 0x8000` -- the embedded quote closes the
+    wrapper after `/b/a` and `halt` reads back as a bare Commander token
+    mid-line, exactly what `validate_commander_path`'s own docstring claims
+    quoting prevents ("controls tokenisation within a line"). `"` is a
+    reserved character in a Windows filename and vanishingly rare on POSIX,
+    so rejecting it costs a real path nothing."""
+    with pytest.raises(FlashPlanError):
+        flash_plan.jlink_commander_script('/b/a" halt "z.bin', "0x8000", True)
+
+
+def test_validate_commander_path_refuses_a_bare_double_quote_with_no_whitespace():
+    """The charset check itself, isolated from `commander_path`'s conditional
+    quoting: a `"` alone (no space, so `commander_path` would never even
+    consider quoting it) must still refuse -- the character is dangerous the
+    moment ANY sibling value on the same line legitimately needs quoting,
+    not only when this value itself has whitespace."""
+    with pytest.raises(FlashPlanError):
+        flash_plan.validate_commander_path('/build/a"b.bin', "the flash artefact path")
+
+
 def test_swd_probe_jlink_artefact_path_is_charset_guarded_against_a_newline():
     """tan-cli#486, reproduced on `plan_swd_probe`'s real J-Link write path
     (not just the pure `jlink_commander_script` generator): a hostile
@@ -854,12 +878,79 @@ def test_swd_probe_openocd_artefact_path_is_guarded_against_tcl_substitution():
 
 
 def test_swd_probe_openocd_artefact_path_guard_accepts_a_space():
-    """The Tcl-metacharacter/control-character guard must not itself turn a
-    spaced artefact path into a refusal, matching the "legitimate spaced path
-    still works" bar the J-Link-side guard is held to. (OpenOCD's `-c
-    program` word has never quoted a spaced artefact -- that pre-existing gap
-    is unrelated to this guard and out of scope for tan-cli#486.)"""
+    """tan-cli#486 REVIEW: the metacharacter/control-character guard alone
+    does not turn a spaced artefact path into a refusal -- but closing the
+    injection hole is not the same as producing a CORRECT plan. Before this
+    fix OpenOCD's `-c program` word left a spaced artefact UNQUOTED, and Jim
+    Tcl splits an unquoted word on whitespace: `program /build/my app.elf
+    verify reset exit` parses as SEVEN words
+    (`program`/`/build/my`/`app.elf`/`verify`/`reset`/`exit`), so `program`
+    receives `/build/my` and treats `app.elf` as a bogus extra argument. The
+    fix braces the word whenever it carries whitespace (or a backslash) --
+    `openocd_program_word` -- which makes the whole path ONE Jim Tcl word
+    with no substitution performed on its contents. Asserted on the actual
+    built plan, not just "the guard did not reject it"."""
     flash_plan.validate_openocd_word("/build/my app.elf", "artefact")
+    inp = FlashInputs(
+        artefact="/build/my app.elf",
+        flash_args={"interface": "cmsis-dap", "target": "stm32h7x", "base": "0x00000000"},
+        core_id="cm7",
+        sku="S",
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert plan.argv[-1] == "program {/build/my app.elf} verify reset exit"
+
+
+def test_swd_probe_openocd_windows_path_with_space_is_braced_not_mangled():
+    """tan-cli#486 REVIEW, defect 1's headline example. Unbraced, Jim Tcl's
+    own word-splitting AND backslash substitution both fire on
+    `C:\\Program Files\\alp\\build\\zephyr.elf`: it splits into `program` /
+    `C:Program` / `Files\\x07lp\\x08uildzephyr.elf` (`\\a`->BEL, `\\b`->BS) /
+    `verify` / `reset` / `exit`, so `program` receives the filename
+    `C:Program` and treats the mangled remainder as a bogus offset argument
+    -- verified against `tclsh`. Bracing (triggered here by either the space
+    or the backslash) makes Jim Tcl perform NO substitution on the material
+    between the braces and treat it as one atomic word, so the artefact
+    reaches `program` byte-identical to the manifest value."""
+    inp = FlashInputs(
+        artefact="C:\\Program Files\\alp\\build\\zephyr.elf",
+        flash_args={"interface": "cmsis-dap", "target": "stm32h7x", "base": "0x00000000"},
+        core_id="cm7",
+        sku="S",
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert plan.argv[-1] == (
+        "program {C:\\Program Files\\alp\\build\\zephyr.elf} verify reset exit"
+    )
+
+
+def test_swd_probe_openocd_space_only_hostile_artefact_cannot_inject_keywords():
+    """tan-cli#486 REVIEW, defect 1's second measured example: a hostile
+    artefact carrying no Tcl metacharacter at all -- just spaces -- used to
+    inject extra Tcl keywords once interpolated unquoted:
+    `/build/evil.elf verify exit 0x20000000` rendered `program /build/evil.elf
+    verify exit 0x20000000 verify reset exit`, an extra `verify`/`exit`/
+    address the manifest author never wrote. Bracing on whitespace closes
+    this: the whole hostile string becomes ONE word, i.e. ONE (bogus but
+    inert) filename argument to `program`, not five extra Tcl words."""
+    inp = FlashInputs(
+        artefact="/build/evil.elf verify exit 0x20000000",
+        flash_args={"interface": "cmsis-dap", "target": "stm32h7x", "base": "0x00000000"},
+        core_id="cm7",
+        sku="S",
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert plan.argv[-1] == (
+        "program {/build/evil.elf verify exit 0x20000000} verify reset exit"
+    )
+
+
+#: `openocd_program_word` leaves a plain (no whitespace, no backslash)
+#: artefact unbraced -- unchanged from before this fix, which is what keeps
+#: the two recorded `tests/parity/test_flash_oracle_parity.py` fixtures
+#: (`multi-segment-interface-is-allowed`, `openocd-forced-bin-appends-base`)
+#: byte-identical; that suite (not a case here, since it cannot differ
+#: before/after this fix) is the regression guard for it.
 
 
 # ── swd_probe device/target reporting (tan-cli#402) ─────────────────────────
@@ -1227,6 +1318,25 @@ def test_flow_d_probe_serial_is_charset_guarded(bad):
         plan_alif_mram_jlink(flow_d_inputs(jlink_serial=bad), lambda t: True)
 
 
+def test_flow_d_probe_serial_refusal_names_jlink_not_openocd():
+    """tan-cli#486 REVIEW, defect 4 (NIT): reusing `validate_identifier`'s
+    default `destination` gave a hostile `jlink_serial` a refusal ending "...
+    into a spawned command / OpenOCD Tcl script" -- verbatim in a captured
+    envelope -- even though `jlink_serial` never reaches an OpenOCD Tcl
+    script at all; it reaches a J-Link Commander `SelectEmuBySN` line.
+    `validate_identifier`'s `destination` override fixes the text for this
+    field without touching `interface`/`target`, which legitimately DO name
+    OpenOCD (see `test_flow_d_probe_serial_is_charset_guarded` for the
+    refusal itself, and the `interface`/`target` guard tests elsewhere for
+    the unchanged sibling wording)."""
+    with pytest.raises(FlashPlanError) as raised:
+        plan_alif_mram_jlink(flow_d_inputs(jlink_serial="dev\nice"), lambda t: True)
+    message = str(raised.value)
+    assert "J-Link Commander" in message
+    assert "SelectEmuBySN" in message
+    assert "OpenOCD" not in message
+
+
 def test_flow_d_probe_serial_is_optional_and_has_no_default():
     """No default serial: a bench-wide serial can be SHARED by two probes that
     differ only by USB path, so a silent default can select the wrong board."""
@@ -1250,6 +1360,26 @@ def test_flow_d_probe_serial_accepts_a_bare_numeric_value():
         flow_d_inputs(confirm=True, jlink_serial=123456789), lambda t: True
     )
     assert plan.jlink_script.startswith("SelectEmuBySN 123456789\n")
+
+
+@pytest.mark.parametrize("serial", ["801012345", "000440123456", "J-Link-OB_1", "12345678-9"])
+def test_flow_d_probe_serial_real_segger_spellings_still_render(serial):
+    """tan-cli#486 REVIEW's own regression bar: real SEGGER serial spellings
+    must keep rendering a correct `SelectEmuBySN` line after the early-
+    validation move (defect 2) and the wording fix (defect 4) above --
+    `801012345` (bare numeric), `000440123456` (a leading-zero string,
+    quoted in a real manifest), `J-Link-OB_1` (an on-board probe's name),
+    and `12345678-9` (a hyphenated form)."""
+    plan = plan_alif_mram_jlink(flow_d_inputs(confirm=True, jlink_serial=serial), lambda t: True)
+    assert plan.jlink_script.startswith(f"SelectEmuBySN {serial}\n")
+
+
+def test_flow_d_probe_serial_empty_string_still_opts_out():
+    """`jlink_serial: ""` still opts OUT of the `SelectEmuBySN` line entirely
+    -- `fa_str_checked` treats an empty string the same as absent, unchanged
+    by moving the check into `validate_flow_d_shape` (defect 2)."""
+    plan = plan_alif_mram_jlink(flow_d_inputs(confirm=True, jlink_serial=""), lambda t: True)
+    assert "SelectEmuBySN" not in plan.jlink_script
 
 
 def test_flow_d_atoc_path_is_charset_guarded_against_a_newline():
@@ -2124,6 +2254,54 @@ boot_order: []
     assert entry["status"] == "failed"
     assert "flash_args.jlink_speed" in entry["message"]
     assert "bare number" in entry["message"]
+    # Never got far enough to preview a sign.
+    assert "would sign" not in entry["message"]
+    codes = {issue["code"] for issue in payload["issues"]}
+    assert "flash.entry-failed" in codes
+
+
+def test_flow_d_dry_run_with_setools_still_surfaces_a_hostile_jlink_serial(tmp_path):
+    """tan-cli#486 REVIEW, defect 2: `jlink_serial` lived only inside
+    `plan_alif_mram_jlink`/`flow_d_preflight_script`, never in
+    `validate_flow_d_shape` -- the "everything checkable early" half #366/
+    #373 created for exactly this. Measured: a Flow D entry with
+    `jlink_serial: "1234\\nerase\\nw4 0x50000000 0xDEADBEEF"`, no `atoc`/
+    `atoc_map`/`atoc_address`, and a resolving `--setools-dir` used to report
+    `ok:true`/exit 0 from `tan flash --dry-run` -- and on a real (confirmed)
+    run `_resolve_flow_d_atoc_via_setools` spawns `app-gen-toc` into the
+    customer's SETOOLS install BEFORE `plan_alif_mram_jlink` ever gets a
+    chance to refuse the serial. Same shape as the sibling
+    `jlink_speed`/`expect_dpidr` cases just above -- `jlink_serial` is now
+    hoisted into `validate_flow_d_shape` alongside them, so the dry-run and a
+    real run agree: both refuse before any SETOOLS spawn is even
+    considered."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    # Present, but must never be reached -- validation has to fail BEFORE any
+    # SETOOLS spawn is even considered.
+    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                jlink_serial: "1234\\nerase\\nw4 0x50000000 0xDEADBEEF"}}
+helper_mcus: []
+boot_order: []
+"""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir)},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "flash_args.jlink_serial" in entry["message"]
     # Never got far enough to preview a sign.
     assert "would sign" not in entry["message"]
     codes = {issue["code"] for issue in payload["issues"]}

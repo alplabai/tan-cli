@@ -695,7 +695,9 @@ def flash_args_has_tbd(value: Any) -> bool:
 # ── validators ──────────────────────────────────────────────────────────────
 
 
-def validate_identifier(text: str, field_name: str) -> None:
+def validate_identifier(
+    text: str, field_name: str, *, destination: str = "a spawned command / OpenOCD Tcl script"
+) -> None:
     """Reject anything that is not a plain identifier, or a `/`-separated path
     of plain identifier segments.
 
@@ -711,6 +713,14 @@ def validate_identifier(text: str, field_name: str) -> None:
     `.`/`..`, and every one of those carries a character (`/` leading -> an empty
     segment, `:`, `\\`, `.`) the charset already rejects. Cross-checked against
     the oracle on `a;b`, `../x`, `/x`, `\\x`, `C:/x`, `a//b`, `.`.
+
+    `destination` lets a caller whose value never goes near OpenOCD say so.
+    The default names OpenOCD because `interface`/`target` -- the callers
+    that shaped this message originally -- legitimately reach its `-c` Tcl
+    string; `jlink_serial` (tan-cli#486 review) does not, and reusing the
+    default gave a captured refusal envelope the sentence "refusing to
+    interpolate it into a spawned command / OpenOCD Tcl script" for a value
+    that only ever reaches a J-Link Commander `SelectEmuBySN` line.
     """
     segments = text.split("/")
     ok = bool(text) and all(
@@ -720,8 +730,7 @@ def validate_identifier(text: str, field_name: str) -> None:
         raise FlashPlanError(
             f"flash_args.{field_name} = {_quoted(text)} is not a plain identifier or "
             "'/'-separated path of plain identifiers (letters, digits, '-', '_' per "
-            "segment) -- refusing to interpolate it into a spawned command / OpenOCD "
-            "Tcl script."
+            f"segment) -- refusing to interpolate it into {destination}."
         )
 
 
@@ -746,9 +755,10 @@ def validate_address(text: str, field_name: str) -> None:
 
 
 def validate_commander_path(text: str, label: str) -> None:
-    """Reject a control character (`\\x00`-`\\x1f`, or DEL `\\x7f`) in a value
-    bound for a J-Link Commander script LINE -- `loadbin`/`loadfile`/
-    `verifybin`'s path argument, or `SelectEmuBySN`'s serial (tan-cli#486).
+    """Reject a control character (`\\x00`-`\\x1f`, or DEL `\\x7f`) or a literal
+    `"` in a value bound for a J-Link Commander script LINE -- `loadbin`/
+    `loadfile`/`verifybin`'s path argument, or `SelectEmuBySN`'s serial
+    (tan-cli#486).
 
     Deliberately narrower than `validate_identifier`: this guards a real
     filesystem path (`atoc`, the flash artefact), which legitimately carries
@@ -765,13 +775,23 @@ def validate_commander_path(text: str, label: str) -> None:
     every one of them, since `isspace()` control chars are also `< 0x20`)
     keeps this guard doing ONE job instead of duplicating that quoting
     decision.
+
+    `"` is rejected too (tan-cli#486 review): a value carrying BOTH a `"` and
+    a space defeats `commander_path`'s own conditional quoting from the
+    inside -- `/b/a" halt "z.bin` renders `loadbin "/b/a" halt "z.bin", 0x8000`,
+    where the embedded quote closes the wrapper early and `halt` reads back
+    as a bare token mid-line, exactly what this function's own claim to
+    "control tokenisation within a line" promises will not happen. `"` is a
+    reserved character in a Windows filename and vanishingly rare on POSIX,
+    so rejecting it costs a real path nothing.
     """
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in text):
+    if any(ord(c) < 0x20 or ord(c) == 0x7F or c == '"' for c in text):
         raise FlashPlanError(
-            f"{label} = {_quoted(text)} contains a control character -- "
-            "refusing to interpolate it into a J-Link Commander script line, "
-            "where it would end the current line and start a new, unintended "
-            "one regardless of quoting."
+            f"{label} = {_quoted(text)} contains a control character or a "
+            'literal \'"\' -- refusing to interpolate it into a J-Link '
+            "Commander script line, where either would let it end the "
+            "current line/quoted token and start a new, unintended one "
+            "regardless of quoting."
         )
 
 
@@ -808,6 +828,44 @@ def validate_openocd_word(text: str, label: str) -> None:
             "command or trigger [...] command substitution (arbitrary host "
             "command execution)."
         )
+
+
+def openocd_program_word(text: str) -> str:
+    """Brace `text` for OpenOCD's `-c program {...} verify ...` word when
+    (and only when) leaving it unbraced would corrupt or split it -- i.e.
+    `text` contains whitespace or a backslash (tan-cli#486 review).
+
+    `validate_openocd_word` closes the injection hole but leaves the artefact
+    at the mercy of Jim Tcl's own WORD-level rules the moment it is left
+    unbraced: whitespace splits an unquoted word on Tcl's normal command
+    boundary (`program a.elf verify exit 0x20000000` parses as five words --
+    `program`/`a.elf`/`verify`/`exit`/`0x20000000` -- so a space-only hostile
+    artefact injects extra keywords with no metacharacter in sight), and
+    Jim Tcl performs backslash substitution on every unbraced word regardless
+    of whether it also has whitespace, silently mangling any Windows-style
+    path (`C:\\Program Files\\alp\\build\\zephyr.elf` -> `C:Program` /
+    `Files\\x07lp\\x08uildzephyr.elf` -- `\\a`->BEL, `\\b`->BS -- verified
+    against `tclsh`).
+
+    A matched brace pair is the fix (the review's own suggestion): Jim Tcl
+    performs NO substitution -- command, variable, OR backslash -- on the
+    material between braces, and treats the whole braced span as ONE word
+    regardless of embedded whitespace. This is safe here BECAUSE
+    `validate_openocd_word` has already rejected `{`/`}` (along with
+    `[`/`]`/`$`/`;`/`"`/control characters) for every caller of this
+    function -- nothing inside `text` can prematurely close the brace or
+    smuggle a substitution past it.
+
+    Conditional, not unconditional: bracing a value that contains NEITHER
+    whitespace nor a backslash changes nothing about how Jim Tcl parses it
+    (a single already-atomic word reads identically braced or not), so
+    leaving those alone keeps every already-recorded `program <path> verify
+    ...` parity fixture byte-identical -- neither of the two recorded
+    openocd `program` lines contains whitespace or a backslash. Bracing
+    UNCONDITIONALLY was measured to move both of those fixtures (extra `{`/
+    `}` in the rendered message) and was rejected for exactly that reason.
+    """
+    return f"{{{text}}}" if any(c.isspace() for c in text) or "\\" in text else text
 
 
 #: `char::escape_debug`'s named escapes, which is what Rust's `{:?}` for a
@@ -1055,7 +1113,12 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     pyocd = not force_openocd and (inp.dry_run or which("pyocd"))
     if openocd:
         validate_openocd_word(inp.artefact, "the flash artefact path")
-        program = f"program {inp.artefact} verify"
+        # `openocd_program_word` braces the artefact when (and only when)
+        # leaving it unbraced would let Jim Tcl's own word-splitting or
+        # backslash substitution corrupt it -- see its docstring (tan-cli#486
+        # review). Safe here because `validate_openocd_word` just rejected
+        # every character (`{`/`}` included) that could escape the brace.
+        program = f"program {openocd_program_word(inp.artefact)} verify"
         if do_reset:
             program += " reset"
         # `base` is a load OFFSET, meaningful only for a raw `.bin`; ELF/HEX
@@ -1283,6 +1346,12 @@ def plan_xspi_flashwriter(inp: FlashInputs, which: Callable[[str], bool]) -> Fla
 #: unarmed for every real AEN entry, which is the bug this comment replaces.
 FLOW_D_KEYS = ("jlink_flash_device",)
 FLOW_D_METHOD = "alif_mram_jlink"
+
+#: `jlink_serial`'s `validate_identifier(..., destination=...)` override
+#: (tan-cli#486 review): it is interpolated into a J-Link Commander
+#: `SelectEmuBySN` line, never an OpenOCD Tcl script -- the default
+#: `destination` names the wrong interpreter for this one field.
+_JLINK_SERIAL_DESTINATION = "a J-Link Commander script line (SelectEmuBySN)"
 
 
 def flow_d_available(flash_args: Any) -> bool:
@@ -1550,6 +1619,22 @@ def validate_flow_d_shape(fa: Any, artefact: str, is_file: Callable[[str], bool]
     # the entry takes afterward.
     fa_int_checked(fa, "jlink_speed")
     fa_bool_checked(fa, "confirm")
+    # tan-cli#486 review: `jlink_serial` is the same class of "checkable
+    # early" field as `jlink_speed`/`confirm` just above -- it does not
+    # depend on `atoc`/`atoc_address` either -- but was left validated only
+    # deep inside `plan_alif_mram_jlink`/`flow_d_preflight_script`, which is
+    # exactly the #373 gap those two comments describe: a hostile
+    # `jlink_serial` (e.g. embedded newlines forming extra Commander
+    # commands) reported `ok:true` from `tan flash --dry-run`, and on a real
+    # confirmed run reached the customer's SETOOLS install via
+    # `_resolve_flow_d_atoc_via_setools` -- which runs BEFORE this
+    # function -- before ever being refused. Validating (and discarding the
+    # result, like the two lines above) here closes that gap regardless of
+    # which path the entry takes afterward; the late call sites keep their
+    # own check too, defensively, since it is pure and costs nothing to repeat.
+    serial = fa_str_checked(fa, "jlink_serial", False)
+    if serial is not None:
+        validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
     return FlowDShape(device=device, app_address=app_address, artefact=resolved_artefact)
 
 
@@ -1643,10 +1728,13 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     # on a bench with more than one probe attached. `validate_identifier`
     # then closes the same newline-injection hole `jlink_flash_device` above
     # is already guarded against: `serial` is interpolated verbatim into
-    # `SelectEmuBySN {serial}`, a J-Link Commander script LINE.
+    # `SelectEmuBySN {serial}`, a J-Link Commander script LINE. Also already
+    # validated by `validate_flow_d_shape` above (tan-cli#486 review, #373
+    # gap) -- repeated here defensively; the check is pure and this is the
+    # value actually used below.
     serial = fa_str_checked(fa, "jlink_serial", False)
     if serial is not None:
-        validate_identifier(serial, "jlink_serial")
+        validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
     # The expected SW-DP IDR. When the manifest supplies one, the Commander
     # script connects with the READ profile first and the caller ABORTS unless
     # that ID appears -- writing MRAM on the wrong attached board is the one
@@ -1826,10 +1914,12 @@ def flow_d_preflight_script(inp: FlashInputs) -> tuple[str, str] | None:
     # more load-bearing HERE: an injected line prefixed onto this READ-ONLY
     # preflight (see the module docstring's "the identity is confirmed while
     # the session is still read-only" comment in `flash_cmd`) would run
-    # before the wrong-board abort ever gets a chance to fire.
+    # before the wrong-board abort ever gets a chance to fire. Also already
+    # validated by `validate_flow_d_shape`, which `_flash_entry` runs before
+    # this preflight (tan-cli#486 review) -- repeated here defensively.
     serial = fa_str_checked(fa, "jlink_serial", False)
     if serial is not None:
-        validate_identifier(serial, "jlink_serial")
+        validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
         lines.append(f"SelectEmuBySN {serial}")
     lines += ["si SWD", f"speed {speed}", f"device {read_device}", "connect", "exit"]
     return "\n".join(lines) + "\n", expected
