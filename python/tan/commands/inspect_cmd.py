@@ -60,7 +60,7 @@ from typing import Any
 import typer
 
 from tan.commands.build_cmd import _abs_posix, resolve_sdk_root_ladder
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -102,6 +102,20 @@ class ResolvedDebugContext:
     project: Project
     #: The envelope `sdk` block, or `None` when nothing resolved.
     sdk: SdkInfo | None
+    #: tan-cli#478: the project `~/.alp/sdk-default` was written FOR, when the
+    #: SDK resolved through `globalDefault` and that project is not this one.
+    #: `resolve_sdk_root_ladder` has always answered with it; this context
+    #: dropped it, so `inspect`/`trace`/`support-bundle` reported
+    #: `sourceTier: "globalDefault"` pointing at ANOTHER project's checkout
+    #: with `ok: true` and `issues: []` -- the exact silence tan-cli#464 closed
+    #: for `doctor`/`generate`/`build`/`presets`/`examples` and no one else.
+    #: `None` when the pointer is this project's own, or was never consulted.
+    foreign_global_default_for: str | None = None
+    #: The unreadable/unresolvable `.alp/sdk-path` pin, same carry-through.
+    #: Paired with the field above because `sdk_resolution_issues` emits the
+    #: two together, in that order, and a caller holding one but not the other
+    #: can only re-open half the hole.
+    broken_project_pin: str | None = None
 
 
 def resolve_debug_project_context(
@@ -144,6 +158,11 @@ def resolve_debug_project_context(
         python_binary=python_binary,
         project=Project.resolved(workspace_root, board_yaml_path),
         sdk=sdk,
+        # tan-cli#478: carried, not recomputed. The ladder already answered
+        # with both; dropping them here is what left three commands silent
+        # about resolving another project's SDK.
+        foreign_global_default_for=sdk_resolution.foreign_global_default_for,
+        broken_project_pin=sdk_resolution.broken_project_pin,
     )
 
 
@@ -292,7 +311,14 @@ def inspect(
     generated_at = generated_at_iso(millis=True)
     context = resolve_debug_project_context(project, board_yaml, sdk_root)
 
-    issues: list[Issue] = []
+    # tan-cli#478: FIRST, and unconditionally. `inspect`'s whole job is to say
+    # which SDK a build would use, so resolving another project's checkout
+    # through `globalDefault` is the single most load-bearing thing it can
+    # report -- and it reported the root while saying nothing about whose it
+    # was. Same helper, same order, as `size`/`image`/`flash`.
+    issues: list[Issue] = sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_tier, context.foreign_global_default_for
+    )
     if not context.board_yaml_exists:
         issues.append(
             Issue(

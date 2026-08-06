@@ -284,7 +284,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # "record-shaped" line makes stderr not a tty, which already returns
     # `None` and skips wrapping wholesale.
     "tan/commands/sdk_cmd.py": 1274,
-    "tan/commands/validate_cmd.py": 1093,
+    # 1093 -> 1108: tan-cli#478 wired `sdk_resolution_issues` through the
+    # spawn path, so a `globalDefault` written for ANOTHER project stops
+    # being silent here. Raised rather than absorbed by cutting the
+    # comments that explain why: extracting from a 1100-line module is
+    # tan-cli#408's job, and holding a defect fix hostage to it would
+    # leave the silence in place for the sake of a number.
+    "tan/commands/validate_cmd.py": 1108,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
@@ -335,7 +341,10 @@ _MODULE_BUDGET: dict[str, int] = {
     # splitting it here would make the next port a hand-merge instead of
     # a diff.
     "tan/planner/zephyr_board.py": 970,
-    "tan/commands/support_bundle_cmd.py": 834,
+    # 834 -> 842: tan-cli#478, same reason as `validate_cmd.py` above --
+    # the bundle is the one artefact that never carried the foreign-default
+    # warning, and its embedded doctor set could not have supplied it.
+    "tan/commands/support_bundle_cmd.py": 842,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring

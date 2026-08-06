@@ -262,7 +262,7 @@ from tan.commands.doctor_cmd import resolve_manifest_python_floor
 # oracle's own "(VS Code users can instead set alpSdk.pythonPath)" sentence. A
 # third copy here would make it the pattern.
 from tan.commands.generate_cmd import _python_too_old
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -869,6 +869,10 @@ def validate(
     # `--sdk-root`).
     resolved_sdk: Path | None = None
     sdk_info: SdkInfo | None = None
+    # tan-cli#478. OUTSIDE the `offline` branch: that path consults no
+    # pointer, so this stays empty -- but every emit site reads it, so no
+    # future early return can drop the pair (tan-cli#464 review).
+    sdk_context_issues: list[Issue] = []
     if not offline:
         sdk_resolution = resolve_sdk_root_ladder(sdk_root, Path(os.path.abspath(root)))
         resolved_sdk = sdk_resolution.path
@@ -885,6 +889,14 @@ def validate(
             resolved_sdk = None
         if resolved_sdk is not None:
             sdk_info = SdkInfo(str(resolved_sdk), sdk_tier)
+        # tan-cli#478: `validate` SPAWNS out of the resolved root, so a
+        # foreign `globalDefault` means another project's schemas decided
+        # `clean` for this board.yaml. Reported `ok: true`, `issues: []`.
+        sdk_context_issues = sdk_resolution_issues(
+            sdk_resolution.broken_project_pin,
+            sdk_tier,
+            sdk_resolution.foreign_global_default_for,
+        )
 
     def fail(code: str, message: str, exit_code: ExitCode) -> None:
         _emit(
@@ -892,7 +904,7 @@ def validate(
             root=root,
             board_path=board_path,
             outcome=OUTCOME_FAILED,
-            issues=[Issue(f"validate.{code}", "error", message)],
+            issues=[*sdk_context_issues, Issue(f"validate.{code}", "error", message)],
             exit_code=exit_code,
             sdk=sdk_info,
         )
@@ -1064,8 +1076,11 @@ def validate(
                 )
 
     issues = [
-        Issue(f"validate.{result.outcome}", severity, message)
-        for severity, message in result.findings
+        *sdk_context_issues,
+        *(
+            Issue(f"validate.{result.outcome}", severity, message)
+            for severity, message in result.findings
+        ),
     ]
     exit_code = (
         ExitCode.SUCCESS

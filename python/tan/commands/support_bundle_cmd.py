@@ -77,7 +77,7 @@ from tan.commands.inspect_cmd import (
     collect_resolved_values,
     resolve_debug_project_context,
 )
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.commands.trace_cmd import (
     TraceTargetError,
     build_trace_decisions,
@@ -704,7 +704,15 @@ def _run(
     # and exit 0 beside error-severity issues in the same envelope. The bundle
     # file is still written on the failing path -- it is what the user
     # attaches, and a doctor failure is the reason they are attaching it.
-    issues = _doctor_issues(checks)
+    # tan-cli#478: the SDK-resolution pair FIRST, then the doctor rollup.
+    # This bundle is what a user sends to explain a broken machine, and it
+    # was the only place the foreign-default warning never appeared. The
+    # embedded doctor set would not have covered it either -- it keeps host
+    # checks only (tan-cli#441): 8, where a standalone doctor emitted ~17.
+    issues = sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_tier, context.foreign_global_default_for
+    )
+    issues.extend(_doctor_issues(checks))
     exit_code = doctor_cmd.exit_code_for(checks)
 
     data = {
