@@ -80,6 +80,20 @@ def wrap_width() -> int | None:
     Folding either flag in here would silently also turn off wrapping for
     every `--no-color` invocation, which is a second, unrelated behaviour
     change riding on a flag that never asked for it.
+
+    `doctor` deliberately does NOT use this seam: it resolves its width
+    unconditionally, so `tan doctor > report.txt` still comes out wrapped.
+    That is a difference in what the two kinds of output ARE, not an
+    oversight, and it is the reason this function exists as a separate
+    decision rather than something `render_check_lines` could have called
+    for everybody. `doctor` prints a REPORT -- prose a human reads top to
+    bottom, whose redirected form is a file someone opens later and wants
+    wrapped exactly as the terminal would have shown it. `explain` and
+    `sdk current` print RECORDS -- `Generation targets: ...`, `  path
+    <value>` -- whose redirected form is an input to `grep`/`cut`, where a
+    hard newline in the middle of a value is corruption. Shape of the
+    output decides, so a future command adopting this seam should ask which
+    of the two it is rather than copying whichever neighbour it read first.
     """
     if not _stderr_is_tty():
         return None
