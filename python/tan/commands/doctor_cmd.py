@@ -103,8 +103,10 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -138,9 +140,11 @@ from tan.core.bootstrap import (
     reported_missing,
 )
 from tan.core.consent import can_prompt
+from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
+from tan.env import TEXT_WRAP_MIN_WIDTH, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -2251,8 +2255,11 @@ def resolve_manifest_python_floor(sdk_root: str | None) -> tuple[tuple[int, int]
 #: Generous on purpose: a real install can pull a package over the network,
 #: unlike every OTHER timeout in this file (`PROBE_TIMEOUT_S`), which only
 #: ever waits on a local `--version` banner. `ponytail`: one fixed ceiling,
-#: no live progress reporting -- raise it, or stream output, if a real
-#: install exceeds it before this is revisited.
+#: no live progress WITHIN a single install -- `run_fix`'s `on_check` streams
+#: a Check the MOMENT one tool's own outcome is known, which closes the blank
+#: window BETWEEN tools, not the window a single slow install itself still
+#: opens; raise this ceiling, or stream that install's own output, if one
+#: exceeds it before this is revisited.
 FIX_INSTALL_TIMEOUT_S = 300
 
 
@@ -2423,7 +2430,10 @@ def fix_installer_not_found_check(installer: str, tools: list[str]) -> Check:
     )
 
 
-def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
+def run_fix(
+    missing: list[dict[str, str | None]],
+    on_check: Callable[[Check], None] | None = None,
+) -> list[Check]:
     """`--fix`'s ADR 0021 executor (tan-cli#91): for each tool
     `hostPrerequisites` already reported missing, either run its manifest
     install command (no elevation needed -- Tier A) or refuse and name it
@@ -2448,11 +2458,20 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
     fixing" from "tan tried and silently gave up": a spawn error, a non-zero
     exit, a `FIX_INSTALL_TIMEOUT_S` (300s) timeout, or an install command
     whose own program is not on PATH each used to `continue` with no trace at
-    all, and text-mode output only prints after the WHOLE report completes --
-    up to 20 minutes of silent terminal across four tools with nothing to
-    show for it. `hostPrerequisites`'s own Fail still names the tool and its
-    command either way; these Checks add the ONE fact it structurally cannot
-    carry -- what `--fix` itself did about it.
+    all. `hostPrerequisites`'s own Fail still names the tool and its command
+    either way; these Checks add the ONE fact it structurally cannot carry --
+    what `--fix` itself did about it.
+
+    `on_check` -- same shape, same job as `_collect`'s parameter of that
+    name: fired the MOMENT one tool's own outcome is known, not after every
+    tool has been tried. Before this, `--fix`'s checks streamed only once
+    `run_fix` returned IN FULL -- the LARGEST blank-terminal window in the
+    whole command, `FIX_INSTALL_TIMEOUT_S` (300s) times up to 4 tools,
+    against `PROBE_TIMEOUT_S` (15s) for the probes `_collect` already
+    streamed. `doctor()` passes it the SAME `_print_check` it gives
+    `_collect`, so a `--fix` outcome prints through the identical guarded
+    `_print_stream_lines` path (see its docstring) as every other check in
+    this report.
 
     Only ever called from `doctor()`'s `--fix` branch, itself gated on
     `can_prompt` (`tan.core.consent`) -- the one place in this module that
@@ -2461,6 +2480,15 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
     docstring).
     """
     results: list[Check] = []
+
+    def _add(check: Check) -> None:
+        # Mirrors `_collect`'s own `_add` closure exactly -- append, then
+        # stream, so a caller with no `on_check` (every direct unit-test
+        # caller of this function) sees no behaviour change at all.
+        results.append(check)
+        if on_check is not None:
+            on_check(check)
+
     # installer -> every tool whose install command starts with it and that
     # therefore went unrepaired (tan-cli#360). Insertion-ordered, so the
     # grouped Checks appended below come out in `missing` order rather than
@@ -2472,7 +2500,7 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
         if not tool or not command:
             continue
         if command.strip().startswith("sudo "):
-            results.append(fix_needs_sudo_check(tool, command))
+            _add(fix_needs_sudo_check(tool, command))
             continue
         argv = shlex.split(command)
         if not argv:
@@ -2507,19 +2535,18 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            results.append(fix_timed_out_check(tool, command))
+            _add(fix_timed_out_check(tool, command))
             continue
         except (OSError, ValueError, subprocess.SubprocessError) as err:
-            results.append(fix_spawn_failed_check(tool, command, err))
+            _add(fix_spawn_failed_check(tool, command, err))
             continue
         if result.returncode == 0:
-            results.append(fix_installed_check(tool, command))
+            _add(fix_installed_check(tool, command))
         else:
-            results.append(fix_failed_check(tool, command, result.returncode))
-    return [
-        *results,
-        *(fix_installer_not_found_check(i, t) for i, t in unresolved.items()),
-    ]
+            _add(fix_failed_check(tool, command, result.returncode))
+    for installer, tools in unresolved.items():
+        _add(fix_installer_not_found_check(installer, tools))
+    return results
 
 
 def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) -> Issue:
@@ -2574,10 +2601,29 @@ def _collect(
     workspace_root: str = ".",
     sdk_tier: str | None = None,
     broken_global_default: str | None = None,
+    on_check: Callable[[Check], None] | None = None,
 ) -> list[Check]:
-    """Every probe, in report order. Nothing here may raise -- see the module
-    docstring; `probe`/`on_path`/`_read_text` are the only three ways this
-    module touches the outside world and none of them can.
+    """Every probe, in report order. `probe`/`on_path`/`_read_text` are the
+    three ways THIS function's own body touches the outside world, and none
+    of them can raise (see the module docstring).
+
+    `on_check`, when given, is a FOURTH path out -- `_collect` does not
+    control what it does, only that it fires, so this function's "nothing
+    here may raise" promise is only as strong as whatever callback the
+    caller supplies. `doctor()`'s real callback (`_print_check`) prints
+    through `_print_stream_lines`, which guards exactly that failure and
+    explains why (see its docstring for the mechanism -- not restated here)
+    rather than letting it unwind back through here and discard every check
+    already collected. A direct test caller that passes a callback of its
+    own is responsible for the same guarantee.
+
+    `on_check` (tan-cli streaming, change 3) fires the MOMENT each check is
+    added, in the exact same order -- `doctor()`'s text branch passes a
+    callback that prints that one check's block immediately, so a slow probe
+    later in this function never leaves an already-answered check unprinted
+    on screen. `None` (every direct test caller of this function, and JSON
+    mode) skips the callback entirely and this returns exactly the batch
+    `list[Check]` it always has.
 
     `build` (`--build`) is accepted and forwarded from `doctor()` but no
     longer changes anything here (tan-cli#290): `zephyrWorkspace`, the last
@@ -2621,6 +2667,11 @@ def _collect(
     only in the branch `sdk_root is None` already reaches.
     """
     checks: list[Check] = []
+
+    def _add(check: Check) -> None:
+        checks.append(check)
+        if on_check is not None:
+            on_check(check)
 
     # tan-cli#294 finding 2: build-environment preflight -- LEADS the report,
     # mirroring Rust's `prepend_doctor_checks(..., probe_build_preflight(...))`:
@@ -2668,7 +2719,7 @@ def _collect(
             _abs_posix(sdk_root)
         ):
             divergent_candidate = str(wide)
-    checks.append(
+    _add(
         sdk_check(
             sdk_root,
             project_scope,
@@ -2679,7 +2730,7 @@ def _collect(
         )
     )
     project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
-    checks.append(
+    _add(
         board_yaml_preflight_check(
             board_yaml is not None and Path(board_yaml).is_file(), project_selected
         )
@@ -2687,7 +2738,7 @@ def _collect(
     workspace_path = west_workspace_dir(
         workspace_root, Path(sdk_root) if sdk_root is not None else None
     )
-    checks.append(
+    _add(
         workspace_preflight_check(str(workspace_path) if workspace_path is not None else None)
     )
 
@@ -2709,7 +2760,7 @@ def _collect(
         if west_resolved_exe is not None
         else None
     )
-    checks.append(west_resolved_check(west_resolved_exe, west_resolved_version))
+    _add(west_resolved_check(west_resolved_exe, west_resolved_version))
 
     # tan-cli#292: `venvProvenance`, right beside `westResolved` -- it is a
     # verdict on the SAME resolved venv (`find_workspace_venv`, the search
@@ -2723,7 +2774,7 @@ def _collect(
             venv_record = parse_workspace_sdk_record(record_text)
     provenance_check = venv_provenance_check(venv_record, sdk_root)
     if provenance_check is not None:
-        checks.append(provenance_check)
+        _add(provenance_check)
 
     if workspace_path is not None:
         workspace_version = None
@@ -2739,27 +2790,27 @@ def _collect(
             workspace_version, sdk_pin_for_workspace
         )
         if zephyr_version_check is not None:
-            checks.append(zephyr_version_check)
+            _add(zephyr_version_check)
         # tan-cli#290: unconditional now, sourced from these SAME resolved
         # facts -- see `zephyr_workspace_check`'s docstring for why it still
         # earns its own check beside `zephyrVersion` rather than being
         # dropped as a duplicate.
-        checks.append(zephyr_workspace_check(str(workspace_path), workspace_version))
+        _add(zephyr_workspace_check(str(workspace_path), workspace_version))
 
     # tan-cli#294 finding 1: host-environment checks -- also unconditional
     # HOST facts (no board.yaml/workspace/SDK needed). See their docstrings.
     host_os, host_arch = _host_os_arch_tags()
-    checks.append(zephyr_sdk_host_check(host_os, host_arch))
+    _add(zephyr_sdk_host_check(host_os, host_arch))
     if os.name == "nt":
-        checks.append(long_paths_check(_long_paths_enabled(), _git_core_longpaths()))
-    checks.append(
+        _add(long_paths_check(_long_paths_enabled(), _git_core_longpaths()))
+    _add(
         home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
     )
 
     loaded = _load_manifest(sdk_root)
     facts, source = loaded.facts, loaded.source
     if loaded.error is not None:
-        checks.append(
+        _add(
             Check(
                 "bootstrapManifest",
                 "warn",
@@ -2796,7 +2847,7 @@ def _collect(
     )
 
     python_found = _probe_host_python(effective_floor)
-    checks.append(python_check(python_found, effective_floor, effective_source))
+    _add(python_check(python_found, effective_floor, effective_source))
     skew = python_floor_skew_check(
         manifest_floor,
         effective_floor,
@@ -2804,7 +2855,7 @@ def _collect(
         manifest_is_real=loaded.is_real,
     )
     if skew is not None:
-        checks.append(skew)
+        _add(skew)
 
     required = facts.get("windows" if os.name == "nt" else "posix")
     if not isinstance(required, list):
@@ -2829,7 +2880,7 @@ def _collect(
         and not _posix_venv_capable(python_found[0].split())
     ):
         venv_refusal = posix_venv_unusable()
-    checks.append(
+    _add(
         prerequisites_check(required, missing_tools, resolved_install, source, venv_refusal)
     )
 
@@ -2842,7 +2893,7 @@ def _collect(
     # instead of a permanent warn. Only passed when it is a real venv
     # binary (an absolute path); `west_program`'s bare-`"west"` fallback
     # carries no information `west_exe` above does not already have.
-    checks.append(
+    _add(
         west_check(
             west_exe,
             west_version,
@@ -2854,13 +2905,13 @@ def _collect(
     # Unconditional -- not gated on `build` or a resolved board.yaml/SDK. See
     # `zephyr_sdk_check`'s docstring (tan-cli#286).
     zephyr_sdk_ok = _zephyr_sdk_detected()
-    checks.append(zephyr_sdk_check(zephyr_sdk_ok, os.environ.get("ZEPHYR_SDK_INSTALL_DIR")))
+    _add(zephyr_sdk_check(zephyr_sdk_ok, os.environ.get("ZEPHYR_SDK_INSTALL_DIR")))
     # `sevenZip` rides beside the `zephyrSdk` Fail it unblocks and only there --
     # see `seven_zip_check`'s docstring and tan-cli#204.
     if os.name == "nt" and not zephyr_sdk_ok:
-        checks.append(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
+        _add(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
 
-    checks.append(
+    _add(
         setools_check(
             os.environ.get("SETOOLS_DIR"),
             os.environ.get("SE_UART"),
@@ -2877,12 +2928,12 @@ def _collect(
     # for a probe that is not plugged in, and the timeout bounds it regardless.
     jlink_version = _parse_two(probe([jlink_exe, "-?"]) or "") if jlink_exe else None
     resolved_device, device_source = jlink_flash_device(sdk_root)
-    checks.append(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
+    _add(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
 
     # tan-cli#294 finding 5: LAST, mirroring `assemble_doctor_report`'s own
     # placement -- traces a report back to the SDK checkout that produced it.
     if sdk_root is not None:
-        checks.append(sdk_provenance_check(sdk_root))
+        _add(sdk_provenance_check(sdk_root))
 
     return checks
 
@@ -2906,6 +2957,58 @@ def _generated_at() -> str:
     fabricated "tan is broken" verdict on a host that was diagnosed fine.
     """
     return generated_at_iso()
+
+
+def _print_stream_lines(lines: Iterable[str], label: str) -> None:
+    """The ONE guarded stderr-print path `doctor()`'s two streaming call
+    sites both go through -- once per finished check (`_print_check`) and
+    once more for the footer (summary / failed-checks / extra-issue lines)
+    -- neither prints via a bare `print()` loop of its own any more.
+
+    Measured, not inferred (this repo's own oracle rule -- established by
+    RUNNING, never by reasoning about it): `tan.cli.main` calls
+    `_reconfigure_stdio()` before any command runs, which puts `sys.stderr`
+    in utf-8/`errors="strict"` -- a legacy-codepage stream (`cp1252`) never
+    reaches this function on the real CLI path, and `cp1252` can encode `…`
+    (U+2026) anyway (`"\\u2026".encode("cp1252")` == `b"\\x85"`), so that was
+    never the actual risk. What DOES raise `UnicodeEncodeError` on a strict
+    utf-8 stream is a lone surrogate (e.g. `\\udcff`) -- a filesystem path
+    that reached Python via `surrogateescape` (`on_path`'s `shutil.which`
+    result, resolved off `PATH`) and that a check's `detail`/`fix` text goes
+    on to print verbatim; utf-8 cannot encode a lone surrogate no matter what
+    decoded it. `OSError` (its subclass `BrokenPipeError` in particular)
+    covers a closed PIPE (`tan doctor | head`); `ValueError` covers a stream
+    closed OUTRIGHT (`I/O operation on closed file` -- the object itself is
+    gone, not merely refusing writes at the far end) -- included
+    deliberately, because the one thing this guard exists to prevent,
+    discarding an already-finished diagnosis over how the stream died, does
+    not care which of the three killed it, and the `try` body here is
+    nothing but `print()` calls to a fixed stream, so a bare `ValueError`
+    catch has no wider blast radius to worry about.
+
+    Unguarded, any of the three propagates out of `_collect` (as `on_check`)
+    into `doctor()`'s own `except Exception`, discarding every check this
+    run already completed as a fabricated `doctor.internal-failure`; from
+    the footer call site (never inside that `try`) it would instead escape
+    `doctor()` outright as a raw, unhandled traceback. Caught here instead,
+    and never silently: a second, INDEPENDENT `try` wraps the failure note
+    itself, since it prints through the SAME `sys.stderr` that just failed.
+    Nothing left to do if even that fails -- the diagnosis behind it already
+    made it back to `doctor()` (or, for the footer, was already fully
+    rendered) regardless.
+    """
+    try:
+        for line in lines:
+            print(line, file=sys.stderr)
+    except (UnicodeError, OSError, ValueError) as err:
+        try:
+            print(
+                f"doctor: could not print the '{label}' block "
+                f"({type(err).__name__}: {err}).",
+                file=sys.stderr,
+            )
+        except (UnicodeError, OSError, ValueError):
+            pass
 
 
 def doctor(
@@ -2944,6 +3047,7 @@ def doctor(
     ci: bool = typer.Option(
         False, "--ci", help="CI mode: implies --non-interactive and disables --fix."
     ),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable ANSI colour."),
 ) -> None:
     """Diagnose whether this host can build and flash."""
     json_mode = output_format == "json"
@@ -3000,6 +3104,39 @@ def doctor(
         _abs_posix(board_yaml) if board_yaml is not None else None,
     )
 
+    # Text mode streams each check the MOMENT it completes (tan-cli doctor
+    # v2, change 3): `_collect` runs up to 15 subprocess probes at
+    # `PROBE_TIMEOUT_S` each, and the old code printed nothing until every
+    # one of them had answered -- on a host where one wedges, a blank
+    # terminal names nothing. Width floored at `TEXT_WRAP_MIN_WIDTH` -- a
+    # 20-column terminal must not fall to one word per line -- and the
+    # fallback (piped/redirected stdout) matches `build_cmd`'s own
+    # `shutil.get_terminal_size` convention. `width`/`color` are resolved
+    # unconditionally, even under `--format json` where neither is ever
+    # read: both calls are cheap and emit nothing, so gating them behind
+    # `if stream` bought nothing but a second, held-together-by-an-11-line-
+    # comment invariant (`_print_check` closes over both) for no benefit.
+    #
+    # UNCONDITIONAL on stderr being a terminal at all (unlike
+    # `tan.env.wrap_width`, which `explain`/`sdk current` use instead): a
+    # piped `tan doctor` still wraps to this `get_terminal_size` fallback
+    # today. That is a real inconsistency with the new seam, left exactly as
+    # it shipped in PR #480 rather than silently fixed here -- see that PR
+    # for the call to change it.
+    stream = not json_mode
+    width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, TEXT_WRAP_MIN_WIDTH)
+    color = use_color(no_color, ci)
+
+    def _print_check(check: Check) -> None:
+        """`on_check`'s real, streaming callback: render one check's block
+        and print it through `_print_stream_lines` -- the FOURTH way
+        `_collect` reaches the outside world (see its docstring), and the
+        only one of the four that can raise. See `_print_stream_lines`'s own
+        docstring for the guard and why it is shaped the way it is; not
+        restated here.
+        """
+        _print_stream_lines(render_check_lines(check.as_dict(), width, color), check.name)
+
     try:
         checks = _collect(
             sdk_root,
@@ -3009,6 +3146,7 @@ def doctor(
             workspace_root=str(workspace_root),
             sdk_tier=sdk_tier,
             broken_global_default=broken_global_default,
+            on_check=_print_check if stream else None,
         )
         # tan-cli#91 / ADR 0021: `--fix` only ever RUNS anything when a human
         # is demonstrably present. `doctor` otherwise only REPORTS; this flag
@@ -3033,7 +3171,17 @@ def doctor(
                 (c.missing for c in checks if c.name == "hostPrerequisites"), None
             )
             if missing_for_fix:
-                checks = [*checks, *run_fix(missing_for_fix)]
+                # These checks stream too, same as every check `_collect`
+                # produced above -- `run_fix` takes the SAME `on_check`
+                # `_collect` does, gated on `stream` directly (never on
+                # "`fix_allowed` already implies `not json_mode`": that
+                # inference only holds for the REAL `can_prompt`, and a test
+                # double stubbing `can_prompt` can make `fix_allowed` true
+                # under `--format json`, where printing a check block to
+                # stderr would be wrong regardless of `width`/`color` being
+                # bound -- both are resolved unconditionally now, see above).
+                fix_checks = run_fix(missing_for_fix, on_check=_print_check if stream else None)
+                checks = [*checks, *fix_checks]
         exit_code = exit_code_for(checks)
         issues = checks_to_issues(checks)
         # tan-cli#91 P1: `--fix` requested and consent refused used to be a
@@ -3068,10 +3216,14 @@ def doctor(
     except Exception as err:  # noqa: BLE001
         # The port's most-repeated defect class: an uncaught exception escapes as
         # a raw traceback, stdout stays empty, and the extension renders nothing
-        # with no error on either side. Every probe above is already guarded, so
-        # anything reaching here is a tan bug -- reported as one, with an
-        # envelope. INTERNAL_FAILURE, not DOCTOR_FAILURE: the host was never
-        # diagnosed, and claiming it is unhealthy would be a fabricated verdict.
+        # with no error on either side. Every probe above is already guarded, and
+        # so is the one thing `_collect` calls that is not a probe: its `on_check`
+        # callback prints through `_print_stream_lines`, which guards its own
+        # failures (see its docstring) instead of letting them unwind here and
+        # discard a diagnosis that already finished -- so anything still reaching
+        # here is a tan bug -- reported as one, with an envelope. INTERNAL_FAILURE,
+        # not DOCTOR_FAILURE: the host was never diagnosed, and claiming it is
+        # unhealthy would be a fabricated verdict.
         exit_code = ExitCode.INTERNAL_FAILURE
         data = None
         issues = [Issue("doctor.internal-failure", "error", f"{type(err).__name__}: {err}")]
@@ -3088,48 +3240,50 @@ def doctor(
 
     if json_mode:
         emit(Envelope("doctor", project, data, issues, exit_code, sdk=sdk))
+    elif data is None:
+        for issue in issues:
+            print(f"{issue.severity}: {issue.message}", file=sys.stderr)
     else:
-        for check in (data or {}).get("checks", []):
-            # `fix_line`, never `fix`: this loop runs after the `fix: bool`
-            # parameter is done being read, but shadowing it here is a trap
-            # for the next edit that needs it further down.
-            fix_line = f"\n    fix: {check['fix']}" if "fix" in check else ""
-            print(f"[{check['status']:>7}] {check['name']}: {check['detail']}{fix_line}", file=sys.stderr)
-        if data is None:
-            for issue in issues:
-                print(f"{issue.severity}: {issue.message}", file=sys.stderr)
-        else:
-            # tan-cli#375: an Issue with no backing Check -- a suppressed
-            # `--fix` (`fix_suppressed_issue`) or a broken `.alp/sdk-path`
-            # pin (`project_pin_issue`, tan-cli#263) -- used to vanish here
-            # completely: this branch (the non-exception path) printed only
-            # the summary line, never `issues`. `--fix`'s consent gate
-            # (tan-cli#91) is right to suppress silently TOWARDS THE HOST --
-            # it must never mutate anything unwatched -- but silence towards
-            # the CUSTOMER is a different bug: the JSON envelope already
-            # carried `doctor.fix-suppressed`/`sdk.project-pin-unresolved`
-            # and text mode carried neither. `checks_to_issues(checks)`
-            # already turned every warn/fail Check into an Issue, and each of
-            # those already printed above as a `[  warn]`/`[  fail]` line --
-            # reprinting them here would duplicate the whole report, so this
-            # filters down to exactly the codes no Check line already named.
-            # Printed AFTER every check line and BEFORE the summary: findable
-            # without being buried mid-report, and the report still ends on
-            # the summary line.
-            checked_codes = {c.code or f"doctor.{kebab_check_name(c.name)}" for c in checks}
-            for issue in issues:
-                if issue.code not in checked_codes:
-                    print(f"{issue.severity}: {issue.message}", file=sys.stderr)
-            s = data["summary"]
-            print(
-                f"\n{s['pass']} passed, {s['warn']} warning(s), {s['fail']} failed.",
-                file=sys.stderr,
-            )
+        # tan-cli#375: an Issue with no backing Check -- a suppressed `--fix`
+        # (`fix_suppressed_issue`) or a broken `.alp/sdk-path` pin
+        # (`project_pin_issue`, tan-cli#263) -- used to vanish here
+        # completely: this branch (the non-exception path) used to print
+        # only the per-check lines and the summary, never `issues`. `--fix`'s
+        # consent gate (tan-cli#91) is right to suppress silently TOWARDS THE
+        # HOST -- it must never mutate anything unwatched -- but silence
+        # towards the CUSTOMER is a different bug: the JSON envelope already
+        # carried `doctor.fix-suppressed`/`sdk.project-pin-unresolved` and
+        # text mode carried neither. `checks_to_issues(checks)` already turns
+        # every warn/fail Check into an Issue, and each of those already
+        # rendered as its own `[  warn]`/`[  fail]` block, streamed above as
+        # `_collect` produced it -- reprinting them here would duplicate the
+        # whole report, so this filters down to exactly the codes no Check
+        # block already named. `render_doctor_footer` places these AFTER
+        # every check block (already on screen) and BEFORE the summary:
+        # findable without being buried mid-report, report still ends on the
+        # summary line.
+        # `kebab_check_name`, not the bare `c.name`: tan-cli#461 made the
+        # camelCase-to-kebab conversion the one shared way a `Check.name`
+        # becomes an issue-code suffix, so the set built here must be spelled
+        # the same way `checks_to_issues` spells the codes it is filtering
+        # against -- otherwise every check-backed issue misses the set and
+        # the whole report prints twice.
+        checked_codes = {c.code or f"doctor.{kebab_check_name(c.name)}" for c in checks}
+        extra_issue_lines = [
+            f"{issue.severity}: {issue.message}"
+            for issue in issues
+            if issue.code not in checked_codes
+        ]
+        _print_stream_lines(
+            render_doctor_footer(data["checks"], data["summary"], extra_issue_lines, width),
+            "footer",
+        )
+
     raise typer.Exit(int(exit_code))
 
 
-# tan-cli#261: adds the five oracle `GlobalArgs` flags this command was still
-# missing (`--all`/`--no-color`/`--quiet`/`--target`/`--verbose`) on top of
+# tan-cli#261: adds the four oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--quiet`/`--target`/`--verbose`) on top of `--no-color`/
 # `--non-interactive`/`--ci`, already declared and wired into `can_prompt`
 # above; see `tan.core.global_flags`.
 doctor = accept_global_flags(doctor)

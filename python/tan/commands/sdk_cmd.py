@@ -90,6 +90,8 @@ from typing import Any
 import typer
 
 from tan.core.global_flags import accept_global_flags
+from tan.core.text_layout import wrap_lines
+from tan.env import wrap_width
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.net import default_ssl_context
@@ -1018,6 +1020,12 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
     if divergence is not None:
         text = [*text, divergence.message]
         issues.append(divergence)
+    if not json_mode:
+        # Only in text mode: `wrap_width()` probes stderr, which is the
+        # right thing to skip entirely for `--format json`, where `text` is
+        # built but never printed (`_emit`'s json branch reads `data`/
+        # `issues`, not `text_lines`).
+        text = wrap_lines(text, wrap_width())
     _emit(
         json_mode=json_mode,
         data={
@@ -1136,7 +1144,8 @@ def _run_not_ported(*, json_mode: bool, subcommand: str, data: dict[str, Any]) -
         ),
         text_lines=[
             f"sdk {subcommand}: not available in this build of tan.",
-            "Use `--sdk-root <path>` to point a command at a checkout directly.",
+            f"To get started, {NO_SDK_NEXT_STEPS}.",
+            "`tan doctor` reports which checkout tan currently resolves.",
         ],
         exit_code=ExitCode.RUNTIME_FAILURE,
     )

@@ -98,6 +98,22 @@ RELEASES: dict[str, tuple[str, ...]] = {
         "tan-x86_64-pc-windows-msvc.zip",
         "tan-x86_64-unknown-linux-gnu.tar.gz",
     ),
+    # v0.5.1 publishes the same four archives as v0.5.0 -- verified against the
+    # real release, not assumed from the shape of its predecessor:
+    #   gh release view v0.5.1 --repo alplabai/tan-cli --json assets
+    # returns exactly these plus `checksums.txt` and `envelope-contract.json`,
+    # which this dict omits by the convention documented above.
+    #
+    # This entry is what the bare-`latest` tests need: `latest` resolves against
+    # the real GitHub, so the day a new tag ships they fail -- loudly and by
+    # design -- until it is listed here. Leaving it out is not a skip, it is a
+    # red on every open PR.
+    "v0.5.1": (
+        "tan-aarch64-apple-darwin.tar.gz",
+        "tan-x86_64-apple-darwin.tar.gz",
+        "tan-x86_64-pc-windows-msvc.zip",
+        "tan-x86_64-unknown-linux-gnu.tar.gz",
+    ),
 }
 
 #: What the fixture's POSIX executable prints, so a test can tell the payload

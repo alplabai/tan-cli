@@ -561,15 +561,27 @@ def resolve_sdk(sdk_root: str | None, workspace_root: str) -> ActiveSdk | None:
 # ---------------------------------------------------------------------------
 
 
-def render_presets_text(skus: list[str], board_libraries: list[str], verbose: bool) -> list[str]:
-    """The count line, plus one `sku: <id>` line per SKU under `--verbose`.
-    Verbatim shape from `presets_text`."""
+def render_presets_text(
+    soms: list[Som], board_libraries: list[str], verbose: bool
+) -> list[str]:
+    """The count line, then one line per SoM.
+
+    Takes `Som` rather than the bare SKU strings it used to: the count line
+    answered nothing on its own, and every field the fuller answer needs was
+    already parsed and then thrown away by the caller.
+    """
     lines = [
-        f"presets: skus={len(skus)} libraries={len(LIBRARIES)} "
+        f"presets: skus={len(soms)} libraries={len(LIBRARIES)} "
         f"boardLibraries={len(board_libraries)}"
     ]
-    if verbose:
-        lines.extend(f"sku: {sku}" for sku in skus)
+    if not soms:
+        return lines
+    sku_width = max(len(s.sku) for s in soms)
+    for som in soms:
+        lines.append(f"  {som.sku:<{sku_width}}  {som.display_name}")
+        if verbose:
+            cores = ", ".join(f"{c.id} ({c.os})" for c in som.cores)
+            lines.append(f"  {'':<{sku_width}}  family: {som.family}; cores: {cores}")
     return lines
 
 
@@ -586,7 +598,9 @@ def presets(
         None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
     ),
     sdk_root: str = typer.Option(None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."),
-    verbose: bool = typer.Option(False, "--verbose", help="List each discovered SKU."),
+    verbose: bool = typer.Option(
+        False, "--verbose", help="Also show each SKU's family and core/OS pairs."
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """List the SDK's SoM presets plus tan's built-in defaults."""
@@ -657,8 +671,10 @@ def presets(
             )
         )
     else:
-        for line in render_presets_text(skus, board_libraries, verbose):
+        for line in render_presets_text(soms, board_libraries, verbose):
             print(line, file=sys.stderr)
+        for issue in issues:
+            print(f"presets: {issue.message}", file=sys.stderr)
     raise typer.Exit(int(exit_code))
 
 

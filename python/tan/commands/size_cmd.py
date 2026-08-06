@@ -39,7 +39,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -81,7 +80,7 @@ from tan.core.system_manifest import (
     slice_elf_candidates,
     slice_footprint_dirs,
 )
-from tan.env import no_color_requested
+from tan.env import use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
@@ -408,14 +407,11 @@ def _measure_slice(
 
 
 def _use_color(no_color: bool, ci: bool) -> bool:
-    """`Theme::from_args`: human text goes to stderr, so the TTY probe is against
-    stderr."""
-    if no_color or ci or no_color_requested():
-        return False
-    try:
-        return sys.stderr.isatty()
-    except (AttributeError, ValueError):
-        return False
+    """Delegates to `tan.env.use_color` (tan-cli's UX-polish sweep moved the
+    logic there so `doctor_cmd` can reuse it without importing this command
+    module) -- kept as a same-named wrapper so this file's own call site and
+    `test_size_command.py` stay untouched."""
+    return use_color(no_color, ci)
 
 
 def _join_core_ids(rows: list[SliceSize]) -> str:

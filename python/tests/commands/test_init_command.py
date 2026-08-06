@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 import typer
 
+from tan.commands.init_cmd import overwrite_refusal_message
 from tan.core.scaffold import TEMPLATE_IDS
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
@@ -898,3 +899,21 @@ def test_pin_sdk_still_works_when_the_project_root_itself_is_a_symlink(tmp_path)
     assert env["data"]["sdkPinned"] == sdk.as_posix()
     pointer = json.loads((real_project / ".alp" / "sdk-path").read_text(encoding="utf-8"))
     assert pointer["sdkPath"] == sdk.as_posix()
+
+
+def test_would_overwrite_names_the_files_and_offers_preview(tmp_path):
+    """"One or more files" is the one fact the user already knows. The command
+    holds the FileChange list; naming the paths and offering --preview is what
+    turns a dead end into a next step."""
+    from tan.core.scaffold import FileChange
+
+    changes = [
+        FileChange(relative_path="board.yaml", kind="update"),
+        FileChange(relative_path="src/main.c", kind="new"),
+    ]
+    message = overwrite_refusal_message(changes)
+
+    assert "board.yaml" in message
+    assert "src/main.c" not in message      # only the "update" kind collides
+    assert "--preview" in message
+    assert "--force" in message
