@@ -807,6 +807,36 @@ def _build_manifest_missing_failure(
     )
 
 
+def _project_not_found_failure(
+    generated_at: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#476: `--project` names a directory that does not exist.
+
+    Refused rather than created. `_write_launch_json` calls `mkdir(parents=
+    True)`, so a typo'd `--project` (or a stale path in a script) silently
+    MATERIALISED a project tree and dropped a `launch.json` in it, at exit 0
+    with `issues: []`. Nothing downstream could tell that apart from writing
+    into a real project.
+
+    A deliberate divergence from the oracle, which does the same thing --
+    measured, not assumed: `target/release/tan debug-config --project <ghost>`
+    exits 0 and leaves `<ghost>/.vscode/launch.json` behind. No parity CASE
+    pins it (all four frozen `debug-config` argvs run in an existing
+    `work_dir`), so this changes no frozen comparison. `--project` names a
+    project that EXISTS; a path that does not is the caller's own input error,
+    hence `ValidationFailure` (2), the same class as tan-cli#462's four."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="project-not-found",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
 def _core_unknown_failure(generated_at: str, message: str, launch_json_path: str) -> _Outcome:
     """tan-cli#462: an explicit `--core` (with `--target-kind` omitted) names
     no slice this project's own build produced -- the caller's own typo or a
@@ -958,6 +988,17 @@ def _run(
 
     workspace_root = _normalise(project_arg)
     launch_json_path = os.path.join(workspace_root, ".vscode", "launch.json")
+    # tan-cli#476, FIRST: a `--project` that does not exist is refused, not
+    # created. Everything below this point can write, and the writer uses
+    # `mkdir(parents=True)`.
+    if not os.path.isdir(workspace_root):
+        return _project_not_found_failure(
+            generated_at,
+            f"--project {project_arg!r} does not exist ({workspace_root}). "
+            f"Name a project directory that already exists; debug-config "
+            f"never creates one.",
+            launch_json_path,
+        )
     project_root, board_yaml, sdk_root = _resolve_project_reporting_fields(
         project_arg, board_yaml_arg, sdk_root_arg
     )

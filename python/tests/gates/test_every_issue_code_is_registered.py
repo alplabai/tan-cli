@@ -783,7 +783,11 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `infer_target_kind`'s other two refusal shapes -- the SAME defect,
         # not a distinct one -- bringing this to 6. All four split-off codes
         # checked against the registry before each bump.
-        expected_calls=6,
+        # 7 as of tan-cli#476: `_project_not_found_failure` refuses a `--project`
+        # that names a directory which does not exist, instead of creating it
+        # and writing a launch.json into it at exit 0. Code registered before
+        # this bump.
+        expected_calls=7,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(

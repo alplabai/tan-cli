@@ -231,7 +231,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # resolved to a literal ... a 'code=' keyword argument is not a
     # resolvable code literal" -- each wrapper's own literal is the only
     # shape the gate can verify against the registry.
-    "tan/commands/debug_config_cmd.py": 1402,
+    # 1402 -> 1443: tan-cli#476 added `_project_not_found_failure` and the
+    # guard that reaches it, so a `--project` naming a directory which does
+    # not exist is refused instead of CREATED (the writer calls
+    # `mkdir(parents=True)`). Extracting from this module is tan-cli#408's
+    # job; a defect that silently materialises a project tree should not
+    # wait on it.
+    "tan/commands/debug_config_cmd.py": 1443,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
