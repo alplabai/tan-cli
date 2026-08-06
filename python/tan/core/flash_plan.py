@@ -41,6 +41,7 @@ without argument.
 from __future__ import annotations
 
 import os
+import posixpath
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -1095,7 +1096,20 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
             # ({device})`, i.e. it resolved the device from metadata and then
             # threw it away in the prose half, reporting every successful
             # `swd_probe` write as a GD32G553 whatever it had programmed.
-            ok_message=f"swd_probe[{core}]: {device} flashed via J-Link @ {base}",
+            #
+            # `@ {base}` only for a raw `.bin` (tan-cli#487, the address half
+            # of #402's device fix): `jlink_commander_script` itself withholds
+            # `base` from `loadfile` for an ELF/HEX (`base` is a load OFFSET,
+            # meaningful only for a raw binary -- see that function and the
+            # openocd/pyocd arm below), so asserting it here unconditionally
+            # named an address the tool never received on every non-`.bin`
+            # write -- either the compiled-in `_DEFAULT_BASE` or whatever the
+            # manifest's `base` happened to be, neither of which this run used.
+            ok_message=(
+                f"swd_probe[{core}]: {device} flashed via J-Link @ {base}"
+                if is_bin
+                else f"swd_probe[{core}]: {device} flashed via J-Link"
+            ),
             jlink_script=jlink_commander_script(inp.artefact, base, do_reset),
         )
 
@@ -1149,8 +1163,19 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     # message could contradict it. `target` is the only device identity this
     # path has -- it is literally what OpenOCD/pyOCD were pointed at -- so it
     # is what the line records, together with which of the two ran.
+    #
+    # `@ {base}` only for a raw `.bin` (tan-cli#487, the address half of #402):
+    # the argv just above deliberately withholds `base` for an ELF/HEX on
+    # BOTH tools (openocd's `program ... exit` with no trailing address;
+    # pyOCD's `if is_bin` guard on `--base-address`), so asserting it here
+    # unconditionally named an address neither tool ever received.
     return FlashPlan(
-        argv=argv, ok_message=f"swd_probe[{core}]: {target} flashed via {tool} @ {base}"
+        argv=argv,
+        ok_message=(
+            f"swd_probe[{core}]: {target} flashed via {tool} @ {base}"
+            if is_bin
+            else f"swd_probe[{core}]: {target} flashed via {tool}"
+        ),
     )
 
 
@@ -1236,6 +1261,61 @@ def plan_baremetal_cmake_flash(inp: FlashInputs, which: Callable[[str], bool]) -
 
 PIPE = "|"
 
+#: The directory a `yocto_wic` flash target must resolve beneath (tan-cli#487,
+#: porting alp-sdk's `_DEV_ROOT` -- security fix 3aa65cd7 / #1112, the half of
+#: that commit tan-cli#486's sibling-hardening pass dropped). A module
+#: constant, not a literal in the check, so a test can exercise the real
+#: resolution logic without touching a host's actual `/dev`.
+_DEV_ROOT = "/dev"
+
+#: The two registry keys `plan_yocto_wic` answers for -- exported so
+#: `tan.commands.flash_cmd` can scope its write-time block-device gate
+#: (tan-cli#487, see that module's `_yocto_wic_block_device_refusal`) to
+#: exactly this backend without re-typing the strings.
+YOCTO_WIC_METHODS = ("yocto_wic_to_sd_or_emmc", "yocto_wic")
+
+#: Suffixes `plan_yocto_wic` RECOGNISES as a real compression codec it
+#: cannot decompress (tan-cli#487, defect 2, shape 2) -- named verbatim from
+#: the issue's own examples. Deliberately NOT "every suffix that isn't gz/
+#: xz/wic": an unrecognised suffix might be a customer's own naming
+#: convention for a genuinely uncompressed artefact, and refusing THAT would
+#: trade a silent raw-dd for a false-positive refusal on a legitimate plain
+#: `.wic`.
+_KNOWN_UNSUPPORTED_COMPRESSION_SUFFIXES = ("zst", "bz2", "lzo")
+
+
+def _resolve_dev_root(target: str) -> str | None:
+    """LEXICAL canonicalization of `target`: `posixpath.normpath` on a
+    POSIX-normalized copy of the string -- collapses a `..` traversal
+    (`/dev/../home/u/x`) on every host, including Windows, where
+    `pathlib`/`os.path` would instead reinterpret the string as an NT path.
+    Pure -- no filesystem access -- so safe to run unconditionally, including
+    for a `--dry-run` preview of a target that is not plugged in yet.
+
+    Returns the normalized path when it resolves at or beneath `_DEV_ROOT`,
+    else `None`. The caller keeps using the ORIGINAL `target` string for the
+    refusal message and for the argv actually spawned -- never this return
+    value -- so a target that is itself a symlink (`/dev/by-id/mmc-foo`)
+    still reaches `dd`/`bmaptool` under the name the caller asked for.
+
+    Ported from alp-sdk's `_resolve_dev_root` (`scripts/flash_backends/
+    yocto_wic.py`) MINUS its real-filesystem symlink-chase layer: this
+    module is pure by convention (see its own docstring's "NO IO"), so that
+    half lives in `tan.commands.flash_cmd`'s IO side instead, as a SEPARATE,
+    write-time-only block-device `stat` gate
+    (`_yocto_wic_block_device_refusal`) -- see that function's docstring for
+    why, and for the one shape this lexical-only layer alone cannot catch (a
+    real, existing regular file lexically living under a real `/dev/`
+    subtree, e.g. `/dev/shm/<name>`)."""
+    normalized = posixpath.normpath(target.replace(os.sep, "/") if os.sep != "/" else target)
+    root = _DEV_ROOT.rstrip("/")
+    # Strictly BENEATH the root, not equal to it -- `_DEV_ROOT` itself is not
+    # a device (matches the old bare `startswith("/dev/")` check, which also
+    # rejected the bare string `"/dev"`: it has no trailing slash to match).
+    if normalized.startswith(root + "/"):
+        return normalized
+    return None
+
 
 def plan_yocto_wic(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     """`yocto_wic_to_sd_or_emmc` / `yocto_wic`: bmaptool (preferred) or dd to a
@@ -1245,16 +1325,56 @@ def plan_yocto_wic(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     target = fa_str(fa, "target")
     if target is None:
         raise FlashPlanError("yocto_wic: flash_args.target is required (e.g. /dev/sdb)")
-    if not target.startswith("/dev/"):
+    if _resolve_dev_root(target) is None:
         raise FlashPlanError(
             f"yocto_wic: refusing target '{target}' -- must start with /dev/ to avoid "
             "clobbering a regular file. Set flash_args.target to a real block device."
         )
     artefact = inp.artefact
     compress = fa_str(fa, "compress")
+    suffix = os.path.splitext(artefact)[1].lstrip(".").lower()
     if compress is None:
-        suffix = os.path.splitext(artefact)[1].lstrip(".")
-        compress = suffix if suffix in ("gz", "xz") else None
+        if suffix in ("gz", "xz"):
+            compress = suffix
+        elif suffix in _KNOWN_UNSUPPORTED_COMPRESSION_SUFFIXES:
+            # tan-cli#487, defect 2, shape 2: no `compress` key at all, but a
+            # suffix (`.wic.zst`, `.wic.bz2`, `.wic.lzo`) this backend
+            # RECOGNISES as a real codec it just cannot decompress -- the old
+            # auto-detect missed it (only "gz"/"xz" are recognised), so
+            # `compress` silently resolved to `None`, which reads as
+            # "genuinely uncompressed" and raw-`dd`s the compressed stream.
+            # An UNRECOGNISED suffix (anything else) is left alone -- there is
+            # no way to tell "genuinely uncompressed" from "a codec this list
+            # simply does not know about" for those, and guessing wrong in
+            # THAT direction would refuse a legitimate plain `.wic`.
+            raise FlashPlanError(
+                f"yocto_wic: artefact suffix '.{suffix}' looks compressed but "
+                'is not supported -- the vocabulary is "gz" | "xz". Set '
+                "flash_args.compress explicitly, or decompress the artefact "
+                "first."
+            )
+        # else: no `compress` key and an unrecognised/absent suffix --
+        # genuinely uncompressed, `compress` stays `None`.
+    elif compress not in ("gz", "xz"):
+        # tan-cli#487, defect 2, shape 1 (an explicit out-of-vocabulary
+        # `compress`) and shape 3 (that same bad explicit value SHADOWING a
+        # suffix that would have auto-detected correctly -- a genuinely
+        # `.wic.gz` artefact with `compress: zst` never even reaches the
+        # `if compress is None` branch above, so the bad explicit value wins
+        # and the auto-detect that WOULD have been right never runs). Both
+        # used to fall through to the `else` branch below and raw-`dd` the
+        # still-compressed stream onto the block device -- silently,
+        # `ok:true`, exit 0, and the board then silently does not boot. That
+        # `else` branch is the CORRECT path for a genuinely uncompressed
+        # `.wic`; it must never be reached for a value the manifest actually
+        # SET to something this backend cannot decompress. The documented
+        # vocabulary is "gz" | "xz" | None (alp-sdk `scripts/flash_backends/
+        # yocto_wic.py:46`).
+        raise FlashPlanError(
+            f"yocto_wic: flash_args.compress '{compress}' is not supported -- the "
+            'vocabulary is "gz" | "xz" (omit the key to auto-detect from the '
+            "artefact suffix instead)."
+        )
     confirm = inp.force_confirm or _default(fa_bool_checked(fa, "confirm"), False)
     planning_only = inp.dry_run or not confirm
 

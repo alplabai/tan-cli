@@ -185,18 +185,25 @@ _MODULE_BUDGET: dict[str, int] = {
     # `jlink_serial` validation into `validate_flow_d_shape` so a hostile
     # value refuses at `--dry-run` time instead of only deep inside
     # `plan_alif_mram_jlink`/`flow_d_preflight_script`.
-    "tan/core/flash_plan.py": 1987,
-    # 1829, not 1808, as of the tan-cli#464 stage-2 review round: `_resolve_sdk`/
-    # `resolve_sdk_root_ladder_safe` now return a named `_SdkResolution`
-    # instead of a growing tuple, and `flash` appends
-    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
-    # -- flashing real hardware against the silently-wrong SDK is the highest
-    # cost of any command on this ladder. Grew again when review found the
-    # manifest-not-found gate returned through `_error` BEFORE either warning
-    # was computed, so the dominant refusal reported neither -- `_error` now
-    # takes the resolution facts and calls the shared `sdk_cmd.
-    # sdk_resolution_issues` itself, so no future early return can skip them.
-    "tan/commands/flash_cmd.py": 1829,
+    # 2107, not 1987, as of tan-cli#487: `_resolve_dev_root` (a PURE lexical
+    # `/dev/` traversal-collapse check, replacing the bare `startswith`
+    # `plan_yocto_wic` used to trust) plus `YOCTO_WIC_METHODS`/
+    # `_KNOWN_UNSUPPORTED_COMPRESSION_SUFFIXES` and the `compress` vocabulary
+    # refusal it feeds -- a still-compressed stream must never reach `dd` raw
+    # -- plus the `swd_probe` success messages now withholding `@ {base}` for
+    # a non-`.bin` artefact on both the J-Link and openocd/pyocd arms.
+    "tan/core/flash_plan.py": 2107,
+    # 2006, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
+    # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
+    # perform -- it is pure), `_timeout_stderr` (folds a killed child's
+    # partial captured output into the timeout report instead of discarding
+    # it), the `_execute_message` gate fix so a text-mode run surfaces a
+    # tan-authored diagnosis instead of a bare `flash command failed`,
+    # absolutising `ctx.sdk_root` so an artefact anchored on a relative
+    # `--sdk-root` resolves against the SAME base the flasher spawns from,
+    # and gating Flow D's SETOOLS auto-sign on the SAME confirm check the
+    # MRAM write it feeds already requires.
+    "tan/commands/flash_cmd.py": 1996,
     "tan/planner/kconfig.py": 1639,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
