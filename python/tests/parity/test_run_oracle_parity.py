@@ -132,7 +132,8 @@ def test_run_no_sdk_is_a_known_divergence_from_the_oracle(tmp_path):
     )
     assert p_out["issues"][0]["message"] == (
         "no alp-sdk checkout found -- pass `--sdk-root <PATH>` or run from a "
-        "project beside one. Planning reads the SDK's `metadata/**`."
+        "project beside one. Planning reads the SDK's `metadata/**`. Run `tan "
+        "doctor` to see which checkout tan resolves, if any."
     )
     assert r_out["data"] is None
     assert p_out["data"] is None

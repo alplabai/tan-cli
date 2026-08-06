@@ -5,6 +5,7 @@ hand-rolled copy can drift from it (tan-cli#288).
 from __future__ import annotations
 
 import os
+import sys
 
 
 def no_color_requested() -> bool:
@@ -22,3 +23,17 @@ def no_color_requested() -> bool:
     command outright, a regression neither original copy had.
     """
     return os.environ.get("NO_COLOR") is not None
+
+
+def use_color(no_color: bool, ci: bool) -> bool:
+    """`Theme::from_args`: human text goes to stderr, so the TTY probe is
+    against stderr. Shared by every command's `--no-color`/`--ci` handling
+    (moved out of `size_cmd.py`, tan-cli's UX-polish sweep) so a second,
+    driftable copy never grows up beside this one -- `size_cmd._use_color`
+    now delegates here."""
+    if no_color or ci or no_color_requested():
+        return False
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False

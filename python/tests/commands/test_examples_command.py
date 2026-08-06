@@ -134,7 +134,7 @@ def test_text_render_lists_id_and_title_not_just_a_count():
         entry("peripheral-io/hello-world", "Hello World", "Blinks a pin."),
         entry("multicore/rpmsg-v2n", "RPMsg V2N", "A55+M33 messaging."),
     ]
-    lines = render_examples_text(examples, None, False, True)
+    lines = render_examples_text(examples, None, None, False, True)
     assert lines[0] == "examples: 2 example project(s) available"
     assert "peripheral-io/hello-world" in lines[1] and "Hello World" in lines[1]
     assert "multicore/rpmsg-v2n" in lines[2] and "RPMsg V2N" in lines[2]
@@ -143,12 +143,12 @@ def test_text_render_lists_id_and_title_not_just_a_count():
 
 def test_verbose_appends_the_description_non_verbose_omits_it():
     examples = [entry("audio/i2s-tone", "I2S Tone", "Plays a tone.")]
-    assert "Plays a tone." not in render_examples_text(examples, None, False, True)[1]
-    assert "Plays a tone." in render_examples_text(examples, None, True, True)[1]
+    assert "Plays a tone." not in render_examples_text(examples, None, None, False, True)[1]
+    assert "Plays a tone." in render_examples_text(examples, None, None, True, True)[1]
 
 
 def test_empty_result_names_the_filter_that_produced_it():
-    lines = render_examples_text([], "no-such-thing", False, True)
+    lines = render_examples_text([], "no-such-thing", None, False, True)
     assert len(lines) == 1
     assert "no-such-thing" in lines[0]
 
@@ -158,7 +158,7 @@ def test_empty_result_from_a_resolved_checkout_blames_the_checkout_not_resolutio
     `examples/` tree must not be described with the old "is the alp-sdk
     checkout resolvable?" question -- that sent the reader after a
     configuration problem they do not have."""
-    lines = render_examples_text([], None, False, True)
+    lines = render_examples_text([], None, None, False, True)
     assert lines == [
         "examples: the resolved alp-sdk checkout ships no example projects."
     ]
@@ -168,10 +168,10 @@ def test_an_unresolved_checkout_is_never_reported_as_a_filter_miss():
     """tan-cli#400: `--filter` used to take the blame for an empty result the
     filter had nothing to do with -- with no catalogue to filter, `--filter
     blinky` printed "no example projects match --filter "blinky"."."""
-    lines = render_examples_text([], "blinky", False, False)
+    lines = render_examples_text([], "blinky", None, False, False)
     assert lines == ["examples: no example projects found."]
     assert "blinky" not in lines[0]
-    assert render_examples_text([], None, False, False) == lines
+    assert render_examples_text([], None, None, False, False) == lines
 
 
 @pytest.mark.parametrize(
@@ -324,3 +324,89 @@ def test_bad_format_is_a_usage_error_not_a_traceback(tmp_path):
     result = runner.invoke(app, ["examples", "--format", "yaml"])
     assert result.exit_code == 2
     assert "Traceback" not in result.output
+
+
+def test_examples_text_names_the_categories_on_an_unfiltered_run():
+    """100 flat lines with no hint a taxonomy exists. The category is already
+    the id prefix -- surfacing it costs no new data."""
+    from tan.commands.examples_cmd import Example, render_examples_text
+
+    examples = [
+        Example(id="ai/cold-chain", source_dir="ai/cold-chain", title="Cold chain", description=""),
+        Example(id="audio/i2s-tone", source_dir="audio/i2s-tone", title="I2S tone", description=""),
+    ]
+    lines = render_examples_text(examples, filter_=None, category=None, verbose=False, sdk_resolved=True)
+    joined = "\n".join(lines)
+
+    assert "categories: ai audio" in joined
+    assert "--category" in joined
+
+
+def test_examples_category_filter_narrows_and_reports_an_empty_match():
+    from tan.commands.examples_cmd import Example, example_matches_category, render_examples_text
+
+    entry = Example(id="ai/cold-chain", source_dir="ai/cold-chain", title="Cold chain", description="")
+    assert example_matches_category(entry, "ai")
+    assert not example_matches_category(entry, "audio")
+
+    lines = render_examples_text([], filter_=None, category="nope", verbose=False, sdk_resolved=True)
+    assert lines == ['examples: no example projects in category "nope".']
+
+
+# --------------------------------------------------------------------------
+# End-to-end: --category through the real command, not just the helpers
+# --------------------------------------------------------------------------
+
+
+def _sdk_with_categories_for_composition(root):
+    """Three examples shaped so neither `--category` nor `--filter` alone
+    proves composition: `--filter tone` alone matches two examples in TWO
+    different categories (`ai/tone-detect` and `audio/i2s-tone`), and
+    `--category audio` alone matches two examples in the SAME category
+    (`audio/beep` and `audio/i2s-tone`). Only `--category audio --filter tone`
+    together narrow to the single example matching both."""
+    write(root / "scripts/alp_project.py", "# marker\n")
+    write(root / "examples/ai/tone-detect/board.yaml", "som:\n  sku: X\n")
+    write(root / "examples/ai/tone-detect/README.md", "# Tone Detect\n\nListens for a tone.\n")
+    write(root / "examples/audio/i2s-tone/board.yaml", "som:\n  sku: X\n")
+    write(root / "examples/audio/i2s-tone/README.md", "# I2S Tone\n\nPlays a tone.\n")
+    write(root / "examples/audio/beep/board.yaml", "som:\n  sku: X\n")
+    write(root / "examples/audio/beep/README.md", "# Beep\n\nPlays a beep.\n")
+    return root
+
+
+def test_examples_category_flag_narrows_the_real_command_and_composes_with_filter(tmp_path):
+    """`examples` is wrapped by `accept_global_flags`, which rebuilds the
+    command signature and resolves PEP-563 annotations by hand
+    (`tan/core/global_flags.py:174-192`) -- everything above this line tests
+    `render_examples_text`/`example_matches_category` directly and would keep
+    passing even if that wrapping silently dropped `--category` from the real
+    Typer command. This drives `tan examples --category ...` through
+    `CliRunner`, the same pattern as `test_json_envelope_shape` above.
+    """
+    sdk = _sdk_with_categories_for_composition(tmp_path / "sdk")
+
+    category_only = runner.invoke(
+        app, ["examples", "--sdk-root", str(sdk), "--category", "audio", "--format", "json"]
+    )
+    assert category_only.exit_code == 0
+    ids = {e["id"] for e in json.loads(category_only.stdout)["data"]["examples"]}
+    assert ids == {"audio/beep", "audio/i2s-tone"}
+
+    composed = runner.invoke(
+        app,
+        [
+            "examples",
+            "--sdk-root",
+            str(sdk),
+            "--category",
+            "audio",
+            "--filter",
+            "tone",
+            "--format",
+            "json",
+        ],
+    )
+    assert composed.exit_code == 0
+    composed_ids = [e["id"] for e in json.loads(composed.stdout)["data"]["examples"]]
+    assert composed_ids == ["audio/i2s-tone"]

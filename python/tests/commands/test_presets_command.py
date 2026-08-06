@@ -24,6 +24,7 @@ from typer.testing import CliRunner
 
 from tan.cli import app
 from tan.commands.presets_cmd import (
+    SDK_UNRESOLVED_MESSAGE,
     SomShapeError,
     infer_runtime_for_core_id,
     parse_som_preset,
@@ -262,14 +263,36 @@ def test_a_valid_sdk_root_flag_keeps_the_path_as_typed(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_text_is_a_count_line_and_lists_skus_only_when_verbose():
-    assert render_presets_text(["E1M-A", "E1M-B"], ["lvgl"], False) == [
-        "presets: skus=2 libraries=8 boardLibraries=1"
+def test_text_lists_skus_with_display_names_and_verbose_adds_family_cores():
+    """Was count-only-then-bare-skus (tan-cli#164-adjacent regression): three
+    integers and a sku list answer no question a user has. Superseded by
+    `render_presets_text` taking `Som` and printing the display name by
+    default, family/cores under `--verbose`."""
+    from tan.commands.presets_cmd import Som, SomCore
+
+    soms = [
+        Som(
+            sku="E1M-A",
+            display_name="Alpha",
+            family="fam-a",
+            cores=(SomCore(id="c1", os="zephyr"),),
+        ),
+        Som(
+            sku="E1M-B",
+            display_name="Bravo",
+            family="fam-b",
+            cores=(SomCore(id="c2", os="yocto"),),
+        ),
     ]
-    assert render_presets_text(["E1M-A"], [], True) == [
-        "presets: skus=1 libraries=8 boardLibraries=0",
-        "sku: E1M-A",
-    ]
+    lines = render_presets_text(soms, ["lvgl"], False)
+    assert lines[0] == "presets: skus=2 libraries=8 boardLibraries=1"
+    assert any("E1M-A" in line and "Alpha" in line for line in lines)
+    assert any("E1M-B" in line and "Bravo" in line for line in lines)
+
+    verbose = render_presets_text(soms[:1], [], True)
+    assert verbose[0] == "presets: skus=1 libraries=8 boardLibraries=0"
+    assert any("fam-a" in line for line in verbose)
+    assert any("c1" in line and "zephyr" in line for line in verbose)
 
 
 # --------------------------------------------------------------------------
@@ -337,7 +360,58 @@ def test_text_mode_writes_nothing_to_stdout(tmp_path, monkeypatch):
     assert "presets: skus=0 libraries=8 boardLibraries=0" in result.stderr
 
 
+def test_text_mode_reports_the_unresolved_sdk_reason_too(tmp_path, monkeypatch):
+    """The JSON envelope has always carried `presets.sdk-root-unresolved` in
+    `issues`; text mode built the same list and then never printed it -- a
+    customer running a bare `tan presets` with no SDK resolvable saw
+    `skus=0` and nothing telling them why. Mirrors `examples_cmd.py`'s own
+    issue-printing loop for its text branch."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["presets", "--sdk-root", "./nope"])
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert f"presets: {SDK_UNRESOLVED_MESSAGE}" in result.stderr
+
+
 def test_a_bad_format_is_a_usage_error_not_a_traceback():
     result = runner.invoke(app, ["presets", "--format", "yaml"])
     assert result.exit_code == 2
     assert "Traceback" not in result.output
+
+
+def test_presets_text_lists_skus_with_display_names_by_default():
+    """Three integers answer no question a user has. The SoM entries carry a
+    display name already; the default output should show it."""
+    from tan.commands.presets_cmd import Som, SomCore, render_presets_text
+
+    soms = [
+        Som(
+            sku="E1M-AEN301",
+            display_name="E1M-AEN301 (Alif Ensemble E3)",
+            family="alif-ensemble",
+            cores=(SomCore(id="m55_hp", os="zephyr"), SomCore(id="m55_he", os="zephyr")),
+        )
+    ]
+    lines = render_presets_text(soms, ["lib-a"], verbose=False)
+
+    assert lines[0] == "presets: skus=1 libraries=8 boardLibraries=1"
+    assert any("E1M-AEN301" in line and "Alif Ensemble E3" in line for line in lines)
+    # family/cores are the --verbose tier, not the default
+    assert not any("m55_hp" in line for line in lines)
+
+
+def test_presets_text_verbose_adds_family_and_cores():
+    from tan.commands.presets_cmd import Som, SomCore, render_presets_text
+
+    soms = [
+        Som(
+            sku="E1M-AEN301",
+            display_name="E1M-AEN301 (Alif Ensemble E3)",
+            family="alif-ensemble",
+            cores=(SomCore(id="m55_hp", os="zephyr"),),
+        )
+    ]
+    lines = render_presets_text(soms, [], verbose=True)
+
+    assert any("alif-ensemble" in line for line in lines)
+    assert any("m55_hp" in line and "zephyr" in line for line in lines)
