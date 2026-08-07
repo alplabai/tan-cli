@@ -179,7 +179,13 @@ def _hwrev_pad_route_overrides(
     independently of `loader.load_board_yaml`, so both gates need their own
     copy here -- before tan-cli#485, `--target carrier-netlist` /
     `composed-route-table` emitted a full route table for a `reserved`
-    hw_rev while `tan build` refused the same input.
+    hw_rev while `tan build` refused the same input. Same predicates
+    (`sdk_compat.revision_known`/`revision_buildable`), same error TYPE and
+    MESSAGE SHAPE as `loader.load_board_yaml`'s SoM-side refusals -- the
+    `status_repr` construction below is `loader._status_repr` INLINED, not
+    imported, so a caller does not see two different shapes of the same
+    problem depending on which path resolved it; keep the two in sync by
+    hand if either one's message wording changes.
     """
     if not hw_rev:
         return []

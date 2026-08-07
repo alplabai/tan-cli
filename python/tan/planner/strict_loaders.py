@@ -4,9 +4,11 @@
 
 RELOCATED (was alp-sdk `scripts/strict_loaders.py`, a top-level module outside
 `scripts/alp_orchestrate/`, hand-ported the same way `zephyr_board.py` /
-`project_loader.py` were -- tracked in `HAND_PORT_HASHES` /
-`HAND_PORT_SOURCES`, not `PINNED_HASHES`, since it has no
-`scripts/alp_orchestrate/` counterpart to pin by filename).
+`project_loader.py` were -- named in `HAND_PORT_SOURCES` (not `PINNED_HASHES`,
+since it has no `scripts/alp_orchestrate/` counterpart to pin by filename), but
+its staleness hash lives in its OWN `STRICT_LOADERS_HASH` /
+`STRICT_LOADERS_PINNED_SDK_COMMIT` pair, not `HAND_PORT_HASHES` -- see
+`test_planner_relocation_freshness.py`'s STRICT_LOADERS_* comment for why).
 
 `yaml.safe_load` and `json.loads` silently keep only the LAST value of a
 duplicated mapping key -- `yaml.safe_load("som: a\\nsom: b\\n")` returns

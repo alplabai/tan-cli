@@ -184,10 +184,10 @@ env:
   #   `tests/parity/bootstrap_manifest_parity.py` itself survives as a
   #   manual diagnostic tool (see its module doc), not run in CI.
   #
-  # HELD at f4d87a1f (tan-cli#425). The pin IS 7 contract-surface commits
-  # behind alp-sdk dev and the freshness warning is correct -- but bumping it
-  # to `2bc6b400` was tried and REVERTED: it reds 77 SDK-bound tests on all
-  # three OS legs, e.g.
+  # HELD at f4d87a1f from tan-cli#425 through tan-cli#485 (moved again below,
+  # to `53557a60`, in #485's own fix). The `2bc6b400` bump #425 tried and
+  # REVERTED stays recorded here as the precedent the #485 bump was checked
+  # against: it reds 77 SDK-bound tests on all three OS legs, e.g.
   #
   #   test_planner_emit_parity.py::test_the_breadth_layer_still_covers_every_board
   #     AssertionError: only 2194 artefacts were compared byte for byte
@@ -229,7 +229,30 @@ env:
   # Windows host this time -- none of the vendored templates' SDK inputs
   # changed in this range, so the Windows-only limitation this comment
   # elsewhere notes did not block the check for THIS bump specifically).
-  PINNED_SDK_TAG: f4d87a1f472dffe9fe7dffc247cc55bce71034ba
+  #
+  # f4d87a1f -> 53557a60 (tan-cli#485, #320 recurred): this is #485's own
+  # suggested step 1, and NOT the same trap #425 hit bumping toward
+  # `2bc6b400` -- that bump broke the emit-parity breadth-layer artefact-count
+  # floor (`>= 2900`); this one does not (measured: 766 passed / 1 failed / 8
+  # skipped against `python/tests/parity/test_planner_emit_parity.py`'s whole
+  # module at `53557a60`, well clear of the floor -- the one failure is
+  # `test_an_unresolvable_board_preset_is_a_coded_envelope`, a pre-existing
+  # fixture defect this same tan-cli#485 change surfaces and fixes in the same
+  # diff, unrelated to this pin). Left at `f4d87a1f`, `python-tests` and this
+  # job's own steps are ref-independent-red on every PR and push instead of
+  # just the dispatch-tested ref: alp-sdk `53557a60` (the SAME commit
+  # `PINNED_SDK_COMMIT` above now targets) is also where alp-sdk dropped
+  # `cacheable: true` from `examples/multicore/rpmsg-aen/board.yaml` -- the
+  # exact field this tan-cli#485 change's `loader.py` refusal now rejects.
+  # Bound to the OLD `f4d87a1f`, tan correctly refuses alp-sdk's OWN fixture
+  # (which at that ref still carries the flag `53557a60` deleted), a 31-test
+  # failure with nothing wrong on either side, just two repos measured a
+  # half-step apart. `ci.yml`'s `sdk_parity` checkout re-pinned to the same
+  # `53557a60` in the matching tan-cli commit, for the same reason -- the two
+  # MUST agree (see that file's comment) -- and the CI-wired byte-parity gate
+  # SCRIPTS (kconfig-fixture, toolchain-lock, scaffold) were re-verified PASS
+  # against `53557a60` locally before this bump too.
+  PINNED_SDK_TAG: 53557a6030c4f90a5525d29c142190e7e91f2bbb
 
 jobs:
   seam1-plan-shape:
@@ -1469,14 +1492,23 @@ jobs:
           close it by hand once the port lands.
           EOF
           )
-          # Search on the bare token, not the HTML-comment syntax around it --
-          # GitHub's search tokenizer treats `<`/`!`/`--` unpredictably, so the
-          # de-dup query drops the comment delimiters and searches only the
-          # marker word itself (still unique enough to not collide with an
-          # unrelated issue).
+          # NOT `gh issue list --search "... in:body"`: GitHub's search
+          # tokenizes on hyphens and ANDs the tokens, so a multi-word marker
+          # like this one is not an exact-phrase match -- measured live,
+          # `--search "alp-sdk-planner-change in:body"` returned 5 issues
+          # (only one of which actually contains that string), because
+          # "alp", "sdk", "planner" and "change" each independently appear
+          # across several unrelated open issues and GitHub ANDs the token
+          # set, not the phrase. `.[0].number` on that result comments on
+          # whichever issue happens to sort first, forever, silently
+          # de-duping against the wrong issue. Server-side filter on the
+          # LABEL set this job itself creates the issue with -- exact match,
+          # no tokenizing -- to keep the candidate list small, then filter
+          # CLIENT-SIDE on the literal marker string for the exact match.
           existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
-              --search "tan-cli-planner-drift-tracker in:body" \
-              --json number --jq '.[0].number' || true)
+              --label bug,ci,python-port --json number,body \
+              --jq '[.[] | select(.body | contains("tan-cli-planner-drift-tracker"))][0].number' \
+              || true)
           if [ -n "${existing}" ]; then
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
             echo "::notice::updated existing drift-tracking issue #${existing}"

@@ -188,38 +188,42 @@ jobs:
       # gate and the parity gate silently measure different alp-sdks.
       #
       # Bumped from `v0.15.0-rc1` (#319) to `f4d87a1f` for tan-cli#320, and from
-      # `f4d87a1f` to THIS commit for tan-cli#485 (#320 recurred). The operative
-      # rule this ref actually follows -- despite the paragraph above naming
-      # `PINNED_SDK_TAG` -- is narrower: this checkout must match whatever
+      # `f4d87a1f` to THIS commit for tan-cli#485 (#320 recurred) --
+      # `parity.yml`'s own `PINNED_SDK_TAG` bumped to the identical
+      # `53557a6030c4f90a5525d29c142190e7e91f2bbb` in the same tan-cli#485
+      # change, so the "MUST be bumped together" rule two paragraphs up holds
+      # again after a brief, deliberate divergence mid-review (an earlier pass
+      # of #485 left `PINNED_SDK_TAG` at `f4d87a1f` while moving THIS ref and
       # `python/tests/gates/test_planner_relocation_freshness.py`'s
-      # `PINNED_SDK_COMMIT` pins, because `sdk_parity: true`'s `pytest tests -q`
-      # (no `--ignore=tests/gates`, unlike `parity.yml`'s own `python-tests` job)
-      # hashes `scripts/alp_orchestrate/*.py` at whatever THIS ref resolves to
-      # and compares it against `PINNED_HASHES`. `PINNED_SDK_TAG` and
-      # `PINNED_SDK_COMMIT` happened to be the same value from #320 through
-      # #485 (both bumped to `f4d87a1f` together), which is what let this
-      # comment conflate the two; tan-cli#485 deliberately left `PINNED_SDK_TAG`
-      # at `f4d87a1f` while moving `PINNED_SDK_COMMIT` to `53557a60` (see that
-      # gate file's own comment for why), so this ref follows
-      # `PINNED_SDK_COMMIT`, not `PINNED_SDK_TAG`, from here on -- re-verified
-      # empirically before the bump: `test_relocated_planner_modules_match_
-      # the_pinned_sdk_audit` PASSES bound to `53557a60` (FAILS bound to the
-      # old `f4d87a1f`, hash mismatch, since `PINNED_HASHES` moved), and the
-      # `test_the_breadth_layer_still_covers_every_board` artefact-count floor
-      # (`>= 2900`) is NOT hit at `53557a60` (766 passed / 1 failed / 8 skipped
-      # across the whole `test_planner_emit_parity.py` module) -- unlike the
-      # `2bc6b400` bump #425 tried and reverted for exactly that floor.
+      # `PINNED_SDK_COMMIT` to `53557a60` together -- correct for the
+      # freshness-gate hash check this ref exists to satisfy, but it left
+      # `parity.yml`'s `python-tests`/`seam1` jobs, which resolve
+      # `ALP_SDK_ROOT` from `PINNED_SDK_TAG` on every `pull_request`/`push`,
+      # testing tan against the OLDER `f4d87a1f` -- and alp-sdk `53557a60` is
+      # also where `examples/multicore/rpmsg-aen/board.yaml` dropped
+      # `cacheable: true`, the exact field tan-cli#485's `loader.py` refusal
+      # now rejects, so every non-dispatch parity run went red: 31 failures,
+      # all tracing to that one fixture, alp-sdk's own repo unchanged).
+      # Re-verified empirically before this final bump: `test_relocated_
+      # planner_modules_match_the_pinned_sdk_audit` PASSES bound to
+      # `53557a60` (FAILS bound to the old `f4d87a1f`, hash mismatch, since
+      # `PINNED_HASHES` moved), and the `test_the_breadth_layer_still_
+      # covers_every_board` artefact-count floor (`>= 2900`) is NOT hit at
+      # `53557a60` (766 passed / 1 failed / 8 skipped across the whole
+      # `test_planner_emit_parity.py` module) -- unlike the `2bc6b400` bump
+      # #425 tried and reverted for exactly that floor.
       #
-      # KNOWN, NOT fixed here: `test_an_unresolvable_board_preset_is_a_coded_
-      # envelope` in `python/tests/parity/test_planner_emit_parity.py` now
-      # fails under `sdk_parity: true` regardless of this ref (reproduces
-      # identically bound to the OLD `f4d87a1f` too) -- tan-cli#485's own
-      # `strict_loaders.py` port (duplicate-mapping-key refusal) correctly
-      # rejects that test's OWN fixture, which appends a second `preset:` key
-      # onto a board.yaml that already declares one, expecting last-key-wins
-      # to reach its intended "unresolvable preset" refusal. `python/tests/
-      # parity/` is frozen for this change (see tan-cli#485's own report) --
-      # the fixture needs a human decision, not a drive-by edit here.
+      # `test_an_unresolvable_board_preset_is_a_coded_envelope` in
+      # `python/tests/parity/test_planner_emit_parity.py`, which surfaced
+      # during this same review (its OWN fixture appended a second `preset:`
+      # key onto a board.yaml that already declared one, tripping the new
+      # duplicate-key refusal before reaching its intended "unresolvable
+      # preset" assertion), is FIXED in the same tan-cli#485 change -- the
+      # fixture now substitutes the existing `preset:` value instead of
+      # appending a second one. `python/tests/parity/` carries no repo-level
+      # freeze (that applies to `crates/`, `contract/`, and `test_oracle_
+      # parity.py`'s `CASES` table specifically), so this was in scope to fix
+      # directly rather than route around.
       #
       # Not a tag -- alp-sdk had not cut one past v0.15.0-rc1 at the time of
       # the #320 port; re-pin to a real tag once alp-sdk cuts one at or after

@@ -434,7 +434,19 @@ _MIRRORED = ("tan/planner/",)
 # than left to bump this budget a second time. `run_fix` (`doctor_cmd.py`)
 # also grew this pass, but it was already over 50 lines before it, so it
 # never moved the COUNT either way.
-_FUNCTION_COUNT_BUDGET = 203
+#
+# 204, not 203, as of tan-cli#485's review round: `project_loader.py:
+# _hwrev_pad_route_overrides` (trimmed to exactly 50 lines, at the cap not
+# over it, in #485's first pass) needed its dropped constraint note back --
+# "same error TYPE and MESSAGE SHAPE as loader.load_board_yaml's SoM-side
+# refusals" is load-bearing: the function INLINES `loader._status_repr`
+# rather than importing it, and that inlining is invisible without the note
+# telling a future editor the two must be kept in sync by hand. +6 lines
+# (50 -> 56), all docstring, this budget raised rather than re-trimmed --
+# the same choice `render_doctor_footer` made the OTHER way, above, when the
+# growth was prose that added nothing a reader couldn't infer; this growth
+# names a real constraint the code doesn't otherwise state anywhere.
+_FUNCTION_COUNT_BUDGET = 204
 _FUNCTION_WORST_BUDGET = 707
 
 
