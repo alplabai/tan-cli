@@ -591,7 +591,27 @@ _MODULE_BUDGET: dict[str, int] = {
     # on disk) and guards each `unlink()` individually, so a second `OSError`
     # during cleanup is collected and reported instead of escaping uncaught
     # with zero bytes on stdout in either output mode.
-    "tan/commands/new_som_cmd.py": 1091,
+    # 1250, not 1091, closing the five remaining tan-cli#496 defects that
+    # PR's own fix left open: (1) `_yaml_scalar` -- both `default_hw_rev`
+    # and `default_board` now render through PyYAML's own emitter instead
+    # of raw f-string splicing, closing the YAML-injection hole a multi-line
+    # `--default-hw-rev` used to open (defect 3); (2) `default_hw_rev` is
+    # now pattern-checked by this command itself, before render, so a bad
+    # value on a brand-new family is `new-som.failed` rather than
+    # `new-som.internal-failure` (defect 5); (3) a `--cores` duplicate is
+    # now refused up front instead of landing as a duplicate YAML/JSON key
+    # in both skeletons (defect 4); (4) `_rollback_write_failure` replaces
+    # the inline cleanup loop -- it RESTORES a pre-existing `--force`
+    # preset's original bytes instead of deleting it (defect 2), and only
+    # ever reports a path as an undoable cleanup failure when that path
+    # PHYSICALLY EXISTS, closing the finding against this file's own
+    # earlier fix (a target this run never reached disk for was reported
+    # "may be half-written"); (5) every `click.prompt` call in
+    # `_interactive` is now `err=True` (defect 6); (6) the bare
+    # `sys.stdin.isatty()` at the top-level input-gathering step now guards
+    # `sys.stdin is None` first (a console-less launcher raises
+    # `AttributeError` there otherwise).
+    "tan/commands/new_som_cmd.py": 1250,
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
@@ -877,7 +897,19 @@ _MIRRORED = ("tan/planner/",)
 # survives rebasing #520's work onto the `dev` tip that now carries all of
 # the former. Re-walked with the gate's own `ast` logic (span > 50 over all
 # of `tan/`, planner included) against this exact tree.
-_FUNCTION_COUNT_BUDGET = 211
+#
+# 212, not 211, as of tan-cli#496's remaining-defects pass:
+# `new_som_cmd.py:_rollback_write_failure` is a genuinely NEW function (61
+# lines) extracted from the write-failure `except OSError:` block so the
+# restore-vs-delete logic (defect 2) and the exists()-gated cleanup
+# reporting (the finding against this file's own earlier fix) are
+# unit-testable on their own; every other function this pass touched
+# (`_interactive`, `_render_preset`, `new_som`, `scaffold_cmd.py:scaffold`)
+# was already over 50 lines before it, so growing them moves nothing here.
+# `_FUNCTION_WORST_BUDGET` is untouched -- `_rollback_write_failure` is 61
+# lines and `new_som` (grown to 506) is still well under `bootstrap_cmd.
+# _run`'s 701, itself under the recorded 707.
+_FUNCTION_COUNT_BUDGET = 212
 _FUNCTION_WORST_BUDGET = 707
 
 

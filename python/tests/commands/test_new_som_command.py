@@ -52,12 +52,14 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+import tan.commands.new_som_cmd as new_som_cmd_module
 from tan.commands.new_som_cmd import (
     DEFAULT_BOARD,
     ETHOS_U_VARIANTS,
     INFERENCE_BACKENDS,
     _split_cores_csv,
     _yaml_dquote,
+    _yaml_scalar,
     new_som,
 )
 
@@ -129,6 +131,24 @@ def _normalise_content(text: str) -> str:
 
 def test_yaml_dquote_escapes_backslash_and_quote():
     assert _yaml_dquote(r'a "quoted" \ value') == r'a \"quoted\" \\ value'
+
+
+def test_yaml_scalar_round_trips_plain_and_quoted_values():
+    """tan-cli#496 defect 3: `_yaml_scalar` is PyYAML's own emitter choosing
+    the quoting style, not a second hand-rolled implementation like
+    `_yaml_dquote` above -- every value here must read back byte-identical
+    through `yaml.safe_load`, whatever style the emitter picked."""
+    import yaml
+
+    for value in ("r1", "E1M-EVK rev 2", 'a "quoted" \\ value', "", "yes", "1.0", "r1: x"):
+        scalar = _yaml_scalar(value)
+        assert "\n" not in scalar
+        assert yaml.safe_load(f"key: {scalar}")["key"] == value
+
+
+def test_yaml_scalar_refuses_a_newline():
+    with pytest.raises(ValueError, match="control characters"):
+        _yaml_scalar("r1\nsku: E1M-AEN801")
 
 
 def test_split_cores_csv_trims_and_drops_empties():
@@ -306,6 +326,57 @@ def test_non_interactive_stdin_reports_the_missing_flags(tmp_path, monkeypatch):
     )
     assert result.exit_code == 1
     assert "--sku" in result.output and "--soc-ref" in result.output and "--family" in result.output
+
+
+def test_sys_stdin_none_refuses_cleanly_instead_of_an_attributeerror(tmp_path, monkeypatch):
+    """tan-cli#496: the missing-flags gate dereferenced `sys.stdin.isatty()`
+    bare. `sys.stdin` is `None` under a console-less launcher (a frozen
+    build run with no console, or any host that closes standard streams
+    rather than redirecting them to `os.devnull`) -- `None.isatty()` is an
+    `AttributeError`: an unhandled traceback instead of this command's own
+    coded refusal, in exactly the "no real terminal" case this check exists
+    to name cleanly.
+
+    Called directly, not through `CliRunner`: `typer.testing`'s own
+    `isolation()` unconditionally installs a real (non-`None`) stdin
+    wrapper the instant a command is invoked through it, so it can never
+    reproduce this condition. Every optional flag below is passed at
+    Click's own "omitted" value (`typer.Option`'s first positional arg,
+    i.e. exactly what Click passes when a flag is absent from argv), so
+    this is equivalent to `tan new-som --sdk-root ... --output-root ...
+    --dry-run` with nothing else on the command line.
+    """
+    sdk = _marker_sdk(tmp_path / "sdk")
+    monkeypatch.setattr(new_som_cmd_module.sys, "stdin", None)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        new_som_cmd_module.new_som(
+            sku=None,
+            soc_ref=None,
+            family=None,
+            vendor=None,
+            display_name=None,
+            inference_backend=None,
+            ethos_u_variant=None,
+            cores=None,
+            default_board=None,
+            default_hw_rev=None,
+            output_root=str(tmp_path / "out"),
+            dry_run=True,
+            force=False,
+            project=None,
+            sdk_root=str(sdk),
+            board_yaml=None,
+            target=None,
+            all_targets=False,
+            output_format=None,
+            verbose=False,
+            quiet=False,
+            no_color=False,
+            non_interactive=False,
+            ci=False,
+        )
+    assert exc_info.value.exit_code == 1
 
 
 @needs_oracle_sdk
@@ -628,6 +699,36 @@ def test_interactive_prompts_ask_same_questions_in_order(monkeypatch, tmp_path):
         encoding="utf-8"
     )
     assert "ethos_u_variant:      u55" in preset_text
+
+
+@needs_oracle_sdk
+def test_interactive_prompts_go_to_stderr_not_stdout(monkeypatch, tmp_path):
+    """tan-cli#496 defect 6: `click.prompt`'s OWN default is `err=False` --
+    the question text goes to stdout. `typer.testing.CliRunner` captures
+    stdout and stderr SEPARATELY (`Result.stdout`/`Result.stderr`) even
+    though `Result.output` mixes them for a human reading test output, so
+    this is provable without a second runner: click's own `prompt()`
+    writes the question via `echo(text, nl=False, err=err)` -- see
+    `click.termui.prompt` -- so `err=True` on every `_interactive` call
+    (the fix) means the question text lands in `.stderr`, never `.stdout`.
+    Before the fix, `Module name: `-shaped text corrupted whatever a
+    redirected/piped stdout was carrying, matching the oracle's
+    `inquire::Text`, which renders to stderr."""
+    monkeypatch.setattr("typer.testing._NamedTextIOWrapper.isatty", lambda self: True)
+    result = runner.invoke(
+        app,
+        ["--sdk-root", str(_SDK_ROOT), "--output-root", str(tmp_path)],
+        input="E1M-XINT2\ntest:tf:tp\ntfam\n\n\nethos_u\nu55\n\n\n\n",
+    )
+    assert result.exit_code == 0, result.output
+    # The question text, not the echoed answer (`visible_prompt_func`'s own
+    # readline-workaround space still lands on stdout regardless of `err` --
+    # see `click.termui.prompt`'s `prompt_func` -- so this checks the
+    # QUESTION, the part `err` actually routes).
+    assert "New SoM SKU" not in result.stdout
+    assert "New SoM SKU" in result.stderr
+    assert "Silicon triple-colon ref" in result.stderr
+    assert "Default hw rev" in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -953,7 +1054,20 @@ def test_write_failure_rollback_never_escapes_and_reports_cleanup_json(tmp_path)
     raises on the pre-fix bug). The already-written preset was also left on
     disk non-deterministically (the old cleanup loop iterated a `set`,
     order depending on `PYTHONHASHSEED`); this asserts it is gone
-    deterministically instead."""
+    deterministically instead.
+
+    Also the finding against THIS FILE's own earlier fix: `imx95.json`
+    (`soc_path`) is never physically created in this scenario -- `mkdir()`
+    on its parent fails structurally before any bytes land -- so it must
+    NOT be named as a cleanup failure ("could not remove: ...imx95.json").
+    The old cleanup loop attempted `unlink()` on it anyway, got a SECOND
+    `NotADirectoryError` (only `FileNotFoundError` is `missing_ok`), and
+    told the caller "this may be a half-written scaffold" for a path that
+    was never written at all. `_rollback_write_failure` gates every
+    candidate on `Path.exists()` (which swallows exactly this class of
+    `OSError` and reports `False`), so the message here is the clean
+    "rolled back any partial output" -- there is nothing left to report.
+    """
     sdk = _marker_sdk(tmp_path / "sdk")
     out = tmp_path / "out"
     (out / "metadata").mkdir(parents=True)
@@ -976,7 +1090,9 @@ def test_write_failure_rollback_never_escapes_and_reports_cleanup_json(tmp_path)
     assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
     message = payload["issues"][0]["message"]
     assert "could not write the skeletons" in message
-    assert "imx95.json" in message  # names exactly what could not be cleaned up
+    assert "rolled back any partial output" in message
+    assert "imx95.json" not in message, "never created -- must not be reported as uncleanable"
+    assert "cleanup also failed" not in message
     preset_path = out / "metadata" / "e1m_modules" / "E1M-XTST1.yaml"
     assert not preset_path.exists(), "rollback must not leave a half-written preset behind"
 
@@ -1000,8 +1116,156 @@ def test_write_failure_rollback_never_escapes_and_reports_in_text_mode(tmp_path)
     )
     assert result.exit_code == 1, result.output
     assert "new-som: could not write the skeletons" in result.output
+    assert "imx95.json" not in result.output, "never created -- must not be reported"
     preset_path = out / "metadata" / "e1m_modules" / "E1M-XTST1.yaml"
     assert not preset_path.exists(), "rollback must not leave a half-written preset behind"
+
+
+def test_force_rollback_restores_a_pre_existing_preset_instead_of_deleting_it(tmp_path):
+    """tan-cli#496 defect 2: the write-failure rollback used to unlink
+    `preset_path` UNCONDITIONALLY, so a `--force` re-scaffold whose SoC-spec
+    write then fails destroyed a pre-existing, hand-filled preset and left
+    NOTHING in its place -- turning "clobbered" into "deleted" with no copy
+    taken and none restored. This pre-creates a preset holding content that
+    is obviously not the generated skeleton, forces the identical
+    `NotADirectoryError` double-fault the other rollback tests use (a
+    regular file at `<output-root>/metadata/socs`), and asserts the
+    ORIGINAL bytes are back on disk afterward -- not deleted, not left as
+    the clobbering skeleton."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    preset_path = out / "metadata" / "e1m_modules" / "E1M-XTST1.yaml"
+    preset_path.parent.mkdir(parents=True)
+    original = "REAL HAND-EDITED PRESET WITH AUTHORITATIVE HW FACTS\n"
+    preset_path.write_text(original, encoding="utf-8")
+    (out / "metadata" / "socs").write_text("not a directory", encoding="utf-8")
+    argv = [
+        a
+        for a in _dry_run_argv(sdk, out, "--format", "json", "--force")
+        if a != "--dry-run"
+    ]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        result.exception,
+        result.output,
+    )
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
+    assert preset_path.is_file(), "the pre-existing preset must not be deleted"
+    assert preset_path.read_text(encoding="utf-8") == original, (
+        "a failed --force re-scaffold must restore the ORIGINAL preset, not "
+        "leave the clobbering skeleton or an empty/missing file"
+    )
+
+
+def test_cores_duplicate_id_is_refused_not_a_silent_duplicate_key(tmp_path):
+    """tan-cli#496 defect 4: a repeated `--cores` id used to reach both
+    skeletons unnoticed -- a duplicate `<id>: {}` mapping key in the
+    preset's `topology:` block (PyYAML keeps the last; alp-sdk's own
+    `validate_metadata.py` strict loader rejects it outright) and two
+    identical `cores[]` rows in the SoC JSON -- reported as a clean success
+    by both schema self-checks. `tan init`'s sibling parser
+    (`tan.core.scaffold.parse_cores`) already refuses this; new-som must
+    too, and refuse BEFORE anything is written."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    argv = [
+        a
+        for a in _dry_run_argv(sdk, out, "--format", "json", "--cores", "m33_a,m33_a")
+        if a != "--dry-run"
+    ]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
+    assert "duplicate" in payload["issues"][0]["message"].lower()
+    assert "m33_a" in payload["issues"][0]["message"]
+    assert not (out / "metadata").exists(), "a refused --cores must write nothing"
+
+
+def test_default_hw_rev_multiline_injection_is_refused(tmp_path):
+    """tan-cli#496 defect 3 (fact injection): `--default-hw-rev` used to be
+    spliced RAW into the hand-built preset YAML. A multi-line value's
+    embedded newline turned into a SIBLING YAML mapping key the instant it
+    was written -- `--default-hw-rev $'r1\\nsku: E1M-AEN801'` planted a
+    DIFFERENT real production SKU inside a file named for this one, and the
+    self-check never caught it because it only re-parses the
+    ALREADY-INJECTED document (`default_hw_rev` itself still read back
+    pattern-clean, `'r1'`). Refused up front now: the FULL raw value must
+    match `^[a-z0-9_-]+$`, which no multi-line string can."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    hostile = "r1\ncapabilities: {secure_element: true, ethos_u: true}"
+    argv = [
+        a
+        for a in _dry_run_argv(sdk, out, "--format", "json", "--default-hw-rev", hostile)
+        if a != "--dry-run"
+    ]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
+    assert not (out / "metadata").exists(), "an injected hw rev must write nothing at all"
+
+
+def test_default_hw_rev_colon_value_is_refused_not_an_uncaught_scanner_error(tmp_path):
+    """The second half of defect 3: `--default-hw-rev 'r1: x'` used to reach
+    `yaml.safe_load(preset_text)` UNGUARDED and raise a raw
+    `yaml.scanner.ScannerError` -- exit 1, a Python traceback on stderr, and
+    ZERO bytes on stdout under `--format json` (the `json.loads` below is
+    itself the regression assertion: it raises on the pre-fix crash)."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    argv = [
+        a
+        for a in _dry_run_argv(sdk, out, "--format", "json", "--default-hw-rev", "r1: x")
+        if a != "--dry-run"
+    ]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        result.exception,
+        result.output,
+    )
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
+
+
+def test_default_hw_rev_out_of_pattern_is_failed_not_internal_error(tmp_path):
+    """tan-cli#496 defect 5: an out-of-pattern `--default-hw-rev` (e.g. the
+    literal Altium board-rev spelling `R1`, uppercase) used to reach the
+    POST-RENDER schema self-check unchecked by this command itself -- and
+    for a brand-new family (where the `_family_hw_revisions` cross-check is
+    skipped: no `scripts/alp_project_loader.py` in this throwaway checkout,
+    matching a real brand-new-family SDK), that self-check reported it as
+    `new-som.internal-failure` ("a tan bug, never bad user input") instead
+    of the `new-som.failed` every other bad flag gets. Must be
+    `new-som.failed` now, with `data` carrying `{"subcommand": "new-som"}`
+    (matching `_fail`'s shape), not `internal-failure` with `data: null`."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    argv = [
+        a
+        for a in _dry_run_argv(sdk, out, "--format", "json", "--default-hw-rev", "R1")
+        if a != "--dry-run"
+    ]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
+    assert payload["data"] == {"subcommand": "new-som"}
+    assert "R1" in payload["issues"][0]["message"]
 
 
 def test_format_json_failure_path_carries_a_new_som_code(tmp_path):

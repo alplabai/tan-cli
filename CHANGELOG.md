@@ -201,6 +201,69 @@ All notable changes to `tan` are documented here. Format follows
   surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
   `--format json` and tan's default text output, so that silent gap has a
   signal without making the field mandatory. (#520)
+- **`tan new-som`: a YAML-injection hole, a `--force` rollback that could
+  destroy a customer's hand-filled preset, and three smaller correctness
+  gaps in the porting-kit scaffolder.** Five defects beyond the
+  write-failure rollback fixed earlier this cycle:
+  - **YAML injection into a generated preset.** `--default-hw-rev` and
+    `--default-board` were the only two user-supplied strings still spliced
+    RAW into the hand-built preset YAML. A multi-line `--default-hw-rev`
+    turned its embedded newline into a SIBLING mapping key the instant it
+    was written -- `--default-hw-rev $'r1\ncapabilities: {secure_element:
+    true}'` exited 0, reported success, and planted a fabricated hardware
+    capability flag in the generated `metadata/e1m_modules/<SKU>.yaml`, the
+    exact thing the module's own docstring says never happens ("values are
+    NEVER invented"). A colon-bearing value (`'r1: x'`) instead reached
+    `yaml.safe_load` unguarded and crashed with a raw `ScannerError` -- exit
+    1, zero bytes on stdout under `--format json`. Both fields now render
+    through PyYAML's own emitter (a new `_yaml_scalar` helper), never
+    f-string splicing, and `--default-hw-rev` is additionally checked
+    against its full schema pattern (`^[a-z0-9_-]+$`) before anything is
+    rendered -- a value that cannot be represented as a safe one-line YAML
+    scalar is refused outright.
+  - **`--force` could destroy a pre-existing, hand-filled preset.** The
+    write-failure rollback unlinked `preset_path` unconditionally, so a
+    `--force` re-scaffold whose SoC-spec write failed AFTER the preset
+    write succeeded deleted the customer's original preset and left
+    nothing in its place -- turning "clobbered" into "deleted" with no copy
+    taken and none restored. The rollback now captures the pre-existing
+    preset's bytes before overwriting it and RESTORES them on failure; a
+    genuinely new preset (nothing to restore) is still removed.
+  - **A repeated `--cores` id produced a duplicate YAML/JSON key, reported
+    as success.** `--cores m33_a,m33_a` exited 0 and wrote `topology:` with
+    `m33_a: {}` twice in the preset and two identical `cores[]` rows in the
+    SoC spec -- invalid YAML (a strict loader rejects a duplicate key) that
+    both schema self-checks let through, since neither schema forbids a
+    repeated id within its own document. `tan init`'s sibling `--cores`
+    parser already refused this; `new-som` now does too, before anything is
+    written.
+  - **An out-of-pattern `--default-hw-rev` misreported as an internal tan
+    bug.** `--default-hw-rev R1` (uppercase -- the literal spelling
+    alp-sdk's own hw-revisions files use for an Altium board rev) on a
+    brand-new family (where the family cross-check has nothing to check
+    against yet) reached the post-render schema self-check unvalidated by
+    the command itself, and came back as `new-som.internal-failure` with
+    `data: null` -- a code whose own contract entry says "never bad user
+    input". Pre-validated against the pattern now, so this is
+    `new-som.failed` like every other bad flag.
+  - **Every `click.prompt` in the interactive fallback wrote its question to
+    stdout, not stderr.** `click.prompt`'s own default is `err=False`;
+    `tan new-som`'s ten prompts and `tan scaffold`'s two both used it
+    unset, so `tan new-som > log.txt` (or a pipe) with a real terminal on
+    stdin/stderr wrote the question into the redirect instead of the
+    terminal and blocked on a question the human never saw -- a
+    behavioural divergence from the frozen oracle, whose `inquire`-based
+    prompts render to stderr. Every prompt in both commands now passes
+    `err=True`.
+  - Also: a bare `sys.stdin.isatty()` in `new-som`'s missing-flags gate
+    crashed with an `AttributeError` under a console-less launcher (`sys.
+    stdin` is `None` there, not merely non-interactive); it now checks
+    `sys.stdin is None` first. And the write-failure rollback's own report
+    no longer claims a path "may be half-written" when that path was never
+    physically created (a regular file below `--output-root` fails
+    `mkdir()` structurally, before anything reaches disk for it) --
+    cleanup is now reported only for a path the rollback finds actually
+    exists. (#496)
 
 ## [0.5.1] — 2026-08-04
 

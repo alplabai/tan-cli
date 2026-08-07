@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from tan.commands.scaffold_cmd import _resolve_module_name, _resolve_template
 from tan.core.module_template import MODULE_TEMPLATE_IDS
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
@@ -375,3 +376,46 @@ def test_write_refuses_through_a_symlinked_parent_directory(tmp_path):
     assert env["ok"] is False
     assert issue(env)["code"] == "scaffold.write-failed"
     assert not any(outside.rglob("*")), "nothing may land outside the project through the link"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#496 defect 6: prompts must ride stderr, never stdout
+# ---------------------------------------------------------------------------
+#
+# Unit-level, not the `run_tan` subprocess harness above: pytest gives that
+# subprocess no controlling terminal at all, so `--name`/`--template`
+# refuse before either prompt is ever reached (the module docstring's own
+# "no CI runner has a TTY" point) -- there is no way to exercise the
+# INTERACTIVE branch through it. `click.prompt` itself is monkeypatched to
+# capture its kwargs, which proves the fix directly rather than depending
+# on a real terminal/pty to observe which stream a question landed on.
+
+
+def test_resolve_module_name_prompts_with_err_true(monkeypatch):
+    """`click.prompt`'s own default is `err=False` -- the question would go
+    to stdout, corrupting whatever a piped/redirected run is carrying there
+    and leaving a real terminal on stderr blank (measured against the
+    frozen oracle: `inquire::Text` renders to stderr)."""
+    calls = []
+
+    def fake_prompt(text, **kwargs):
+        calls.append((text, kwargs))
+        return "a-module"
+
+    monkeypatch.setattr("tan.commands.scaffold_cmd.click.prompt", fake_prompt)
+    assert _resolve_module_name(None, interactive=True) == "a-module"
+    assert len(calls) == 1
+    assert calls[0][1].get("err") is True
+
+
+def test_resolve_template_prompts_with_err_true(monkeypatch):
+    calls = []
+
+    def fake_prompt(text, **kwargs):
+        calls.append((text, kwargs))
+        return MODULE_TEMPLATE_IDS[0]
+
+    monkeypatch.setattr("tan.commands.scaffold_cmd.click.prompt", fake_prompt)
+    assert _resolve_template(None, interactive=True) == MODULE_TEMPLATE_IDS[0]
+    assert len(calls) == 1
+    assert calls[0][1].get("err") is True
