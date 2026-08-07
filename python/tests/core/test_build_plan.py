@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
+import os
 
 import pytest
 
@@ -182,19 +183,55 @@ def test_rejects_a_malformed_command(command_json, fragment):
     assert fragment in e.value.message
 
 
+# tan-cli#530: "absolute" for the parse-time check is deliberately THIS
+# HOST's own notion (`pathlib`'s `ntpath` on Windows / `posixpath`
+# elsewhere) -- decision (a) below. Build the accepted absolute path in the
+# HOST's own convention, not a hardcoded POSIX string, so this test asserts
+# the real invariant on every platform instead of only ever exercising the
+# POSIX branch (the trap that made `/usr/bin/west` a Windows CI failure:
+# `PureWindowsPath("/usr/bin/west").is_absolute()` is False -- no drive --
+# even though `ntpath.isabs` says True).
+_HOST_ABSOLUTE_TOOL = "C:\\tools\\west.exe" if os.name == "nt" else "/usr/bin/west"
+_FOREIGN_ABSOLUTE_TOOL = "/usr/bin/west" if os.name == "nt" else "C:\\tools\\west.exe"
+
+
 @pytest.mark.parametrize(
     "tool",
     [
         "west",  # a bare identity -- untouched
-        "/usr/bin/west",  # POSIX absolute -- untouched
+        _HOST_ABSOLUTE_TOOL,  # already-resolved absolute, in THIS host's own notion of absolute
     ],
 )
 def test_accepts_an_identity_or_an_absolute_tool(tool):
     """tan-cli#510 review, MAJOR 4's refusal is scoped to a RELATIVE path
     carrying a separator only -- a bare identity (no separator at all) and
-    an already-absolute path must both still parse."""
+    an already-absolute path (in the HOST's own sense of absolute) must
+    both still parse."""
     plan = parse_build_plan(_plan_with_command(json.dumps({"tool": tool, "args": [], "cwd": None})))
     assert plan.slices[0].command.tool == tool
+
+
+def test_refuses_a_foreign_os_absolute_tool():
+    """tan-cli#530, decision (a): a build plan is a portable artefact, but an
+    already-absolute `command.tool` is inherently host-specific -- nothing
+    can re-root `/usr/bin/west` onto Windows, or `C:\\tools\\west.exe` onto
+    POSIX, because the two conventions don't overlap. Refusing it HERE, at
+    parse time, with a message naming the reason ("this host cannot resolve
+    or spawn it") beats reaching `_resolve_tool`/`Popen` and failing with a
+    bare `FileNotFoundError` that doesn't say why.
+
+    No real emitting flow produces this shape today -- `tan build`'s own
+    planner (`tan/planner/orchestrator.py::_slice_command`) only ever emits
+    the bare identities `west`/`bitbake`/`cmake` for `tool`, never an
+    absolute path -- so this refusal has no known real-plan casualty; it
+    guards a hand-authored or foreign-host `--plan-from` file."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(
+            _plan_with_command(json.dumps({"tool": _FOREIGN_ABSOLUTE_TOOL, "args": [], "cwd": None}))
+        )
+    assert e.value.code == "build.plan-invalid"
+    assert "command.tool" in e.value.message
+    assert "host" in e.value.message
 
 
 def _plan_with_env(env_json: str) -> str:

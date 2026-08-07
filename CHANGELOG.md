@@ -305,6 +305,43 @@ All notable changes to `tan` are documented here. Format follows
   override); reachable only through a hand-authored or materialised plan
   passed via `--plan-from`. (#510)
 
+  A fourth review round -- the first real `windows-latest` CI run of this
+  whole fix, everything before it having only ever run against a sandbox
+  that unconditionally skips both `skipif(os.name != "nt")` regression
+  tests -- found:
+  - Both Windows-only regression tests' own assertions were case-sensitive
+    against a path Windows resolves with its own case: `CreateProcess`
+    reported the correct real-tool path back, but with a `.EXE` extension
+    where the assertion expected `.exe`, so both went red on the case bytes,
+    never on the property under test. THE INVARIANT ITSELF HELD -- the
+    `real_on_path` copy ran, never the slice/parent shadow. Both assertions
+    now `os.path.normcase()` both sides before comparing (a no-op on POSIX,
+    case-folding on Windows) while still comparing the FULL resolved path,
+    never a basename or substring, so they keep the ability to tell "real
+    tool ran" apart from "shadow tool ran" -- the entire point of either
+    test.
+  - The MAJOR-4 parse-time refusal (previous round) used
+    `Path(tool).is_absolute()`, which answers relative to the host RUNNING
+    THE CHECK, not the host that emitted the plan: `/usr/bin/west` is
+    absolute under POSIX `pathlib` but not under Windows' (no drive), so a
+    plan built on Linux and parsed on Windows was refused at parse time as
+    "a relative path" even though it genuinely is absolute, just under the
+    wrong OS's convention. Decided explicitly rather than left as an
+    accident: kept as a refusal -- an already-absolute `command.tool` is
+    inherently host-specific (nothing can re-root a POSIX-absolute path
+    onto Windows, or the reverse), so refusing it at parse time, naming
+    which OS's convention it belongs to, beats accepting it and failing
+    later at spawn with an unexplained `FileNotFoundError`. The message now
+    says so explicitly (``"...is a {POSIX,Windows}-absolute path, not
+    executable on this host..."``); the accepts-an-absolute-tool test is
+    now built from the RUNNING host's own path convention instead of a
+    hardcoded POSIX string, so it exercises the real invariant on both
+    platforms in CI rather than only ever the POSIX branch. No known
+    real-plan casualty: the SDK planner
+    (`tan/planner/orchestrator.py::_slice_command`) only ever emits the
+    bare identities `west`/`bitbake`/`cmake`, never an absolute path.
+    (#510, #530)
+
 ## [0.5.1] — 2026-08-04
 
 ### Fixed

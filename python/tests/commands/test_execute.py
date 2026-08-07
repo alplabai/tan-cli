@@ -298,7 +298,15 @@ def test_a_tool_shadowed_in_the_spawns_cwd_is_not_the_one_spawned(tmp_path, monk
     )
     assert out[0].status == "succeeded", out[0].message
     ran = marker.read_text(encoding="utf-8").strip()
-    assert ran == str(real_dir / "tan510shadowtool.exe"), (
+    expected = str(real_dir / "tan510shadowtool.exe")
+    # os.path.normcase: a no-op on POSIX, lowercases (and normalises slash
+    # style) on Windows -- CreateProcess reports the extension it actually
+    # resolved (observed `.EXE`), which is a case-folding artefact of the
+    # Windows filesystem, not a different directory. Comparing the FULL
+    # normcase'd path (never a basename or substring) keeps this test able
+    # to tell "real tool ran" apart from "shadow tool ran" -- that
+    # distinction is the entire point of the assertion.
+    assert os.path.normcase(ran) == os.path.normcase(expected), (
         "the tool shadowed in the slice's own cwd ran instead of the one "
         f"resolved off PATH -- the running interpreter reported its own path "
         f"as {ran!r}; out[0].message: " + str(out[0].message)
@@ -364,7 +372,12 @@ def test_a_tool_shadowed_in_the_parent_processs_cwd_is_not_the_one_spawned(tmp_p
     )
     assert out[0].status == "succeeded", out[0].message
     ran = marker.read_text(encoding="utf-8").strip()
-    assert ran == str(real_dir / "tan510shadowtool2.exe"), (
+    expected = str(real_dir / "tan510shadowtool2.exe")
+    # os.path.normcase: see the sibling test above -- Windows reports the
+    # extension case it actually resolved (`.EXE`), a case-folding artefact,
+    # not a different directory. Full-path comparison (never basename/
+    # substring) so this still distinguishes real from shadow.
+    assert os.path.normcase(ran) == os.path.normcase(expected), (
         "the tool shadowed in the PARENT process's own cwd ran instead of "
         f"the one resolved off PATH -- the running interpreter reported its "
         f"own path as {ran!r}; out[0].message: " + str(out[0].message)
