@@ -260,6 +260,21 @@ def _root_cause(report: FaultReport) -> str:
         return ("Debug event with no debugger attached -- a stray BKPT or a watchpoint firing in a "
                 "free-running build.")
     if report.has("FORCED"):
+        # LSPERR/MLSPERR (tan-cli#503) have no dedicated branch of their own
+        # above -- unlike every other CFSR cause bit -- so an escalated lazy
+        # -FP-stacking fault used to fall all the way through to here and
+        # report "its own status bits are clear" while BFSR.LSPERR/MMFSR.
+        # MLSPERR were the very bits set. Handled ONLY inside this FORCED
+        # branch, not as a standalone check above it: LSPERR/MLSPERR alone
+        # (no escalation) still falls through to the generic `first =
+        # report.flags[0]` fallback below, unchanged, matching the SDK
+        # original and the frozen golden fixture for every case that is not
+        # this exact combination.
+        if report.has("LSPERR") or report.has("MLSPERR"):
+            return ("Fault during lazy floating-point state preservation -- the deferred FPU "
+                    "context push/pop (lazy stacking) hit a bad or unmapped stack address. Check "
+                    "the active stack's FP context region and CONTROL.FPCA, and consider disabling "
+                    "lazy stacking (FPCCR.LSPEN) if the crash is hard to reproduce.")
         return ("Forced HardFault -- a configurable fault escalated but its own status bits are clear; "
                 "the escalation usually means faults are disabled (SHCSR) or it faulted at priority -1.")
 

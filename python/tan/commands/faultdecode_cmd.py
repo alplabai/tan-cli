@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import json as _json
 import select
-import shutil
 import subprocess
 import sys
 import threading
@@ -55,6 +54,7 @@ from pathlib import Path
 
 import typer
 
+from tan.commands.doctor_cmd import on_path
 from tan.core.faultdecode import (
     Symbol,
     decode,
@@ -76,8 +76,19 @@ def resolve_symbol(addr: int, elf: Path) -> Symbol | None:
     Tries ``arm-zephyr-eabi-addr2line`` then ``llvm-addr2line`` then plain
     ``addr2line``. Returns ``None`` (caller skips gracefully) if no tool is on
     PATH or the lookup fails -- symbolication is a convenience, never required.
+
+    Uses `doctor_cmd.on_path`, NOT `shutil.which` (tan-cli#503): on Windows,
+    `shutil.which` inserts `os.curdir` ahead of `$PATH`, so an
+    `addr2line.exe`/`llvm-addr2line.exe`/`arm-zephyr-eabi-addr2line.exe`
+    sitting at the root of a checked-out project is reported as "available".
+    Spawning it by bare NAME afterwards (rather than the resolved absolute
+    path) would reopen the same hole a second way -- `CreateProcess`'s own
+    current-directory-first search -- even past a hardened probe, so the
+    resolved absolute path from `on_path` is what gets spawned below, exactly
+    like `size_cmd`/`doctor_cmd`/`flash_cmd`/`build/execute.py` already do for
+    every other tool probe in this package.
     """
-    tool = next((t for t in _ADDR2LINE_TOOLS if shutil.which(t)), None)
+    tool = next((p for t in _ADDR2LINE_TOOLS if (p := on_path(t))), None)
     if tool is None or not elf.is_file():
         return None
     try:
@@ -116,17 +127,35 @@ def _use_color(no_color: bool) -> bool:
 def _parse_hexint(option: str, value: str | None) -> int | None:
     """A fault-register value, hex by default: these are CPU status registers,
     always read in hex, so a bare ``8200`` means ``0x8200`` (not decimal 8200)
-    and ``0x8200`` works too. Mirrors the original's `_HexInt.convert`."""
+    and ``0x8200`` works too. Mirrors the original's `_HexInt.convert`.
+
+    Rejects anything outside ``0x0..0xFFFFFFFF`` (tan-cli#503): `int(text, 16)`
+    happily accepts a leading ``-`` (``"-8200"`` -> -33280), and that arbitrary
+    -precision negative went on to corrupt everything downstream that assumed
+    a 32-bit register word -- `_scan`'s bitwise-and against it reported a
+    dozen bogus flags and the wrong root cause, and `report_to_json`'s
+    ``f"0x{v:08x}"`` printed the malformed, non-hex ``"0x-0008200"`` on the
+    JSON contract. Refusing here, at the one place every register/address
+    value enters the command, keeps `decode()` a pure function of well-formed
+    32-bit words and gives the caller a coded refusal instead of a confident
+    wrong diagnosis.
+    """
     if value is None:
         return None
     text = value.strip()
     try:
         # base 16 accepts an optional 0x prefix and a bare hex run alike.
-        return int(text, 16)
+        parsed = int(text, 16)
     except ValueError as err:
         raise typer.BadParameter(
             f"{value!r} is not a valid integer (try 0x...)", param_hint=f"--{option}"
         ) from err
+    if not 0 <= parsed <= 0xFFFFFFFF:
+        raise typer.BadParameter(
+            f"{value!r} is out of range for a 32-bit register (must be 0x0..0xFFFFFFFF)",
+            param_hint=f"--{option}",
+        )
+    return parsed
 
 
 #: How long the IMPLICIT stdin auto-consume waits for a non-TTY stdin to offer
@@ -218,22 +247,35 @@ def _stdin_offers_input_by_reading() -> bool:
     return bool(got[0])
 
 
-def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
+def _read_dump(file_: str | None) -> str:
     """Read a pasted dump from --file, '-' (stdin), or piped stdin.
 
     `--file -` is the EXPLICIT opt-in and always reads stdin to EOF, whatever
     else is on the command line: the caller asked for that read by name, and a
-    dump has no terminator other than EOF. `auto_consume_stdin` gates only the
-    IMPLICIT read, and the caller passes `False` once any fault register was
-    supplied as a flag -- there is nothing left for a dump to contribute, so
-    there is no reason to wait on a pipe for one (tan-cli#388).
+    dump has no terminator other than EOF.
+
+    The IMPLICIT read (no `--file` at all) is attempted UNCONDITIONALLY,
+    whether or not a fault register was also supplied as a flag: the command's
+    own help promises "Explicit flags win over a parsed dump", which is only
+    true if a dump is still read when flags are present too, and the merge in
+    `faultdecode()`'s `pick()` exists precisely to let a flag override a
+    parsed value register-by-register (tan-cli#503) -- a piped CFSR/BFAR must
+    not be silently dropped just because `--hfsr` was also given. This is safe
+    against the tan-cli#388 hang because `_stdin_offers_input()` below already
+    bounds the wait to `_STDIN_READY_TIMEOUT_S`: an idle open pipe with
+    nothing to contribute costs a quarter second, not the process, so gating
+    the read on "were there already flags" was never load-bearing for #388 --
+    it only cost the merge.
     """
     if file_ == "-":
+        if sys.stdin is None:  # fd 0 closed (tan-cli#503): nothing to read.
+            return ""
         return sys.stdin.read()
     if file_ is not None:
         return Path(file_).read_text(encoding="utf-8", errors="ignore")
-    # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works.
-    if not auto_consume_stdin or sys.stdin.isatty() or not _stdin_offers_input():
+    # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works,
+    # flags or no flags.
+    if sys.stdin is None or sys.stdin.isatty() or not _stdin_offers_input():
         return ""
     if _PREREAD_STDIN:
         # The readiness check had to consume stdin to answer (Windows, or a
@@ -369,14 +411,11 @@ def faultdecode(
     pc_i = _parse_hexint("pc", pc)
     lr_i = _parse_hexint("lr", lr)
 
-    # `--pc`/`--lr` are addresses to symbolicate, not status registers, and
-    # neither satisfies the "something to analyse" check below -- so neither
-    # counts as a reason to skip the dump.
-    registers_given = any(
-        value is not None
-        for value in (cfsr_i, hfsr_i, dfsr_i, bfar_i, mmfar_i, mmfsr_i, bfsr_i, ufsr_i)
-    )
-    dump_text = _read_dump(file_value, auto_consume_stdin=not registers_given)
+    # A piped/pasted dump is always read (tan-cli#503), whether or not fault
+    # registers were also supplied as flags -- see `_read_dump`'s docstring.
+    # Explicit flags still win: `pick()` below prefers the flag value and only
+    # falls back to a value the dump provided.
+    dump_text = _read_dump(file_value)
     parsed: dict[str, int] = parse_dump(dump_text) if dump_text else {}
 
     def pick(name: str, flag_val: int | None) -> int | None:

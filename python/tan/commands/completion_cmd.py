@@ -13,12 +13,43 @@ file allowlist is `completion_cmd.py` alone).
 The captures hardcoded `text json` in all three scripts, so `tan validate
 --format <TAB>` offered two of the four values `validate` really accepts and
 actively taught an IDE integrator that `diagnostic-v1` and `sarif` do not
-exist. Those three lists (and only those) are now placeholders spliced from
-`tan.output_format`'s enums by `_fill_formats` -- the same declarations the
-parser and `--help` derive from, so the three surfaces cannot disagree again.
-Everything else in the scripts is still the oracle's own bytes; the emitted
-`data.script` therefore diverges from v0.4.1's exactly where v0.4.1 was wrong
-about this port's own format surface.
+exist. Those lists are now placeholders spliced from `tan.output_format`'s
+enums by `_fill_formats` -- the same declarations the parser and `--help`
+derive from, so the surfaces cannot disagree again. Everything else in the
+scripts is still the oracle's own bytes; the emitted `data.script` therefore
+diverges from v0.4.1's exactly where v0.4.1 was wrong about this port's own
+format/target surface.
+
+**A second splice, tan-cli#503: `generate --target`'s value list.** The fish
+capture hardcoded 9 of the 12 real `--target` values, silently missing
+`os-topology` (a member of the default/`--all` set, so a bare `tan generate`
+runs it), `composed-route-table` and `ipc-contract-h` (both explicit-only, but
+real). Also spliced from `generate_cmd`'s own tables now, same mechanism and
+same reasoning as `--format` above. bash and zsh publish no `--target` value
+list at all, so fish was (and is) the only surface this touches.
+
+**A third, hand-edited exception, tan-cli#503: `doctor` drops
+`--target-kind`/`--server`.** The oracle's `doctor` declared both
+(`crates/tan-cli/src/cli.rs`), so the captured scripts still offer them, but
+`doctor_cmd.py` deliberately did NOT port that debug half (see its own module
+docstring) -- `support-bundle` and `debug-config` genuinely still take both.
+Completing a flag `tan doctor` rejects at exit 2 is worse than not offering
+it, so the three `doctor` arms had the two flags (and, in zsh/fish, their
+value lists) removed by hand.
+
+**A fourth, hand-edited exception, tan-cli#503: bash/zsh `--format` value
+selection now scans for the real subcommand instead of assuming it sits at a
+fixed word index.** `${COMP_WORDS[1]}` (bash) / `$words[2]` (zsh) is only the
+subcommand when nothing precedes it, but `--format` is itself a global flag
+typeable BEFORE the subcommand (`tan --sdk-root /x validate --format <TAB>`),
+so a global flag there used to point the `--format` value-list selection at
+the wrong word and silently offer the narrow list -- the exact misinformation
+tan-cli#403 exists to prevent, reintroduced by the splice that fixed it. See
+the inline comments at each site for the scan. This is new code the port
+added (the `_fill_formats` splice itself), not oracle-inherited behaviour --
+unlike the *other* `${COMP_WORDS[1]}`/`$words[2]` reads a few lines below each
+(the per-command flag-table `case`), which are the oracle's own bytes and are
+left untouched here.
 
 **Why hand-captured and not Typer/Click's own shell-completion machinery.**
 Typer ships one (`click.shell_completion`, gated off here via `app =
@@ -48,6 +79,12 @@ import sys
 
 import typer
 
+from tan.commands.generate_cmd import (
+    ALL_EMIT_MODES,
+    COMPOSED_ROUTE_TABLE,
+    IPC_CONTRACT_H,
+    ZEPHYR_BOARD,
+)
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import (
@@ -73,17 +110,31 @@ SHELL_UNSUPPORTED_TEXT_LINE = "completion: unsupported shell. Use --shell bash|z
 #: Where the captured scripts had a hardcoded `--format` value list, they now
 #: carry a placeholder `_fill_formats` (below) substitutes from the CLI's own
 #: enums -- tan-cli#403. The scripts are otherwise still byte-for-byte oracle
-#: captures; these four markers are the ONLY derived text in them.
+#: captures; these five markers are the ONLY derived text in them.
 _FORMATS_MARK = "@FORMATS@"
 _WIDE_FORMATS_MARK = "@WIDE_FORMATS@"
 #: The commands with the wider domain, as a bash/zsh `case` alternation
 #: (`a|b`) and as fish's space-separated argument list respectively.
 _WIDE_COMMANDS_ALT_MARK = "@WIDE_COMMANDS_ALT@"
 _WIDE_COMMANDS_LIST_MARK = "@WIDE_COMMANDS_LIST@"
+#: `generate --target`'s value list (tan-cli#503): the fish capture hardcoded
+#: 9 of the 12 real values, missing `os-topology` (a bare `tan generate`
+#: default target) plus the explicit-only `composed-route-table` and
+#: `ipc-contract-h`. Spliced from `generate_cmd`'s own tables, same as the
+#: `--format` lists above, so this cannot go stale a second time.
+_TARGETS_MARK = "@TARGETS@"
+#: `ALL_EMIT_MODES` is the default/`--all` set; `ZEPHYR_BOARD`,
+#: `COMPOSED_ROUTE_TABLE` and `IPC_CONTRACT_H` are the explicit-only targets
+#: it excludes (`generate_cmd.EXPLICIT_ONLY_TARGETS`) but `--target` still
+#: accepts by name.
+_TARGET_VALUES = " ".join(
+    (*ALL_EMIT_MODES, ZEPHYR_BOARD, COMPOSED_ROUTE_TABLE, IPC_CONTRACT_H)
+)
 
 
 def _fill_formats(template: str) -> str:
-    """Splice the declared `--format` value lists into one captured script.
+    """Splice the declared `--format`/`--target` value lists into one captured
+    script.
 
     The oracle generated its completions from the same clap `ValueEnum` that
     fed its parser and its `--help`, so all three surfaces agreed by
@@ -99,6 +150,7 @@ def _fill_formats(template: str) -> str:
         .replace(_WIDE_FORMATS_MARK, " ".join(format_values(ValidateOutputFormat)))
         .replace(_WIDE_COMMANDS_ALT_MARK, "|".join(WIDE_FORMAT_COMMANDS))
         .replace(_WIDE_COMMANDS_LIST_MARK, " ".join(WIDE_FORMAT_COMMANDS))
+        .replace(_TARGETS_MARK, _TARGET_VALUES)
     )
 
 
@@ -116,11 +168,35 @@ _tan_complete() {
   local global_flags="--project --board-yaml --sdk-root --target --all --format --verbose --quiet --no-color --non-interactive --ci --help --version"
 
   # Not one list for every command (tan-cli#403): `validate` also emits the
-  # two IDE-oriented documents. `${COMP_WORDS[1]}` is the subcommand word,
-  # already typed by the time `--format` can be completed.
+  # two IDE-oriented documents. `${COMP_WORDS[1]}` is only the subcommand word
+  # when nothing precedes it -- but `--format` is itself one of the global
+  # flags clap/typer accept BEFORE the subcommand (`tan --sdk-root /x
+  # validate --format <TAB>`, the exact pre-subcommand shape
+  # `output_format.py`'s docstring names as the one alp-sdk-vscode's
+  # `withSdkRoot` actually uses), so word 1 there is `--sdk-root`, not
+  # `validate`, and this used to silently fall back to the narrow list
+  # (tan-cli#503 -- the same misinformation tan-cli#403 exists to prevent).
+  # Scan for the real subcommand instead of assuming its position: skip every
+  # global flag that consumes a following value, and the first bare word left
+  # is the subcommand (or "" if none was typed yet).
   if [[ "$prev" == "--format" ]]; then
+    local value_flags="--project --board-yaml --sdk-root --target --format"
+    local subcmd="" i=1 w skip
+    while [[ $i -lt $cword ]]; do
+      w="${COMP_WORDS[$i]}"
+      if [[ "$w" == --* ]]; then
+        skip=0
+        for vf in $value_flags; do
+          [[ "$w" == "$vf" ]] && skip=1 && break
+        done
+        i=$((i + 1 + skip))
+        continue
+      fi
+      subcmd="$w"
+      break
+    done
     local formats="@FORMATS@"
-    case "${COMP_WORDS[1]}" in
+    case "$subcmd" in
       @WIDE_COMMANDS_ALT@) formats="@WIDE_FORMATS@" ;;
     esac
     COMPREPLY=( $(compgen -W "$formats" -- "$cur") )
@@ -166,7 +242,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags --sku --family" -- "$cur") )
       ;;
     doctor)
-      COMPREPLY=( $(compgen -W "$global_flags --target-kind --server --build --fix" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --build --fix" -- "$cur") )
       ;;
     inspect)
       COMPREPLY=( $(compgen -W "$global_flags --path --show-origin" -- "$cur") )
@@ -289,7 +365,24 @@ _tan() {
   # the two IDE-oriented documents. Chosen here, once, so every `_arguments`
   # call below still splices exactly one `${global_args[@]}` and no arm can
   # drift.
-  case $words[2] in
+  #
+  # `$words[2]` is only the subcommand when nothing precedes it -- but
+  # `--format` is itself a global flag typeable BEFORE the subcommand
+  # (`tan --sdk-root /x validate --format <TAB>`), so this read at the
+  # function top (before `_arguments` reindexes `words`) used to silently
+  # fall back to the narrow list for that shape (tan-cli#503). Scan for the
+  # real subcommand: skip every global flag that consumes a following value,
+  # and the first bare word left is the subcommand.
+  local subcmd="" i=2
+  while (( i <= ${#words[@]} )); do
+    case "$words[i]" in
+      --project|--board-yaml|--sdk-root|--target|--format) (( i += 2 )); continue ;;
+      --*) (( i += 1 )); continue ;;
+    esac
+    subcmd="$words[i]"
+    break
+  done
+  case "$subcmd" in
     @WIDE_COMMANDS_ALT@) global_args+=('--format[Output format]:format:(@WIDE_FORMATS@)') ;;
     *) global_args+=('--format[Output format]:format:(@FORMATS@)') ;;
   esac
@@ -327,7 +420,7 @@ _tan() {
           _arguments '--sku[SoM SKU]' '--family[Pinmux family]' "${global_args[@]}"
           ;;
         doctor)
-          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--build[Build readiness preflight]' '--fix[Auto-repair a fixable blocker]' "${global_args[@]}"
+          _arguments '--build[Build readiness preflight]' '--fix[Auto-repair a fixable blocker]' "${global_args[@]}"
           ;;
         inspect)
           _arguments '--path[Field path]' '--show-origin[Include source metadata]' "${global_args[@]}"
@@ -388,7 +481,7 @@ complete -c tan -n '__fish_use_subcommand' -a 'validate generate init scaffold e
 complete -c tan -l project -d 'Project root'
 complete -c tan -l board-yaml -d 'board.yaml path'
 complete -c tan -l sdk-root -d 'SDK root path'
-complete -c tan -l target -d 'Generation target' -a 'zephyr-conf dts-overlay native-sim-overlay cmake-args yocto-conf carrier-netlist west-libraries zephyr-board hw-info-h'
+complete -c tan -l target -d 'Generation target' -a '@TARGETS@'
 complete -c tan -l all -d 'Generate all targets'
 complete -c tan -n 'not __fish_seen_subcommand_from @WIDE_COMMANDS_LIST@' -l format -d 'Output format' -a '@FORMATS@'
 complete -c tan -n '__fish_seen_subcommand_from @WIDE_COMMANDS_LIST@' -l format -d 'Output format' -a '@WIDE_FORMATS@'
@@ -414,8 +507,6 @@ complete -c tan -n '__fish_seen_subcommand_from init scaffold' -l preview -d 'Pr
 complete -c tan -n '__fish_seen_subcommand_from init scaffold' -l force -d 'Overwrite existing files'
 complete -c tan -n '__fish_seen_subcommand_from pinmux' -l sku -d 'SoM SKU'
 complete -c tan -n '__fish_seen_subcommand_from pinmux' -l family -d 'Pinmux family'
-complete -c tan -n '__fish_seen_subcommand_from doctor' -l target-kind -d 'Debug target kind' -a 'zephyr-mcu baremetal-mcu yocto-userspace native-host'
-complete -c tan -n '__fish_seen_subcommand_from doctor' -l server -d 'Debug server' -a 'jlink openocd pyocd gdbserver none'
 complete -c tan -n '__fish_seen_subcommand_from doctor' -l build -d 'Build readiness preflight'
 complete -c tan -n '__fish_seen_subcommand_from doctor' -l fix -d 'Auto-repair a fixable blocker'
 complete -c tan -n '__fish_seen_subcommand_from inspect trace support-bundle' -l path -d 'Field path'

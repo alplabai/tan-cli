@@ -249,3 +249,40 @@ def test_mmfsr_bfsr_ufsr_sub_registers_compose_into_cfsr():
 def test_last_occurrence_of_a_token_wins():
     found = port.parse_dump("cfsr: 0x1\ncfsr: 0x2\n")
     assert found["cfsr"] == 0x2
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503, defect 4: LSPERR/MLSPERR must not fall through to the generic
+# FORCED message when both are set -- LSPERR/MLSPERR name the real cause.
+# --------------------------------------------------------------------------
+
+
+def test_lsperr_plus_forced_names_lazy_fp_stacking_not_the_generic_forced_message():
+    """BFSR.LSPERR (bit 13) escalated to HardFault (HFSR.FORCED, bit 30) used
+    to report 'its own status bits are clear' while LSPERR was the very bit
+    set -- self-contradictory against the flag list in the same report."""
+    report = port.decode(cfsr=1 << 13, hfsr=1 << 30)
+    assert report.has("LSPERR")
+    assert report.has("FORCED")
+    assert "lazy floating-point" in report.root_cause
+    assert "its own status bits are clear" not in report.root_cause
+
+
+def test_mlsperr_plus_forced_names_lazy_fp_stacking_not_the_generic_forced_message():
+    """MMFSR.MLSPERR (bit 5) is the MemManage-side twin of the same defect."""
+    report = port.decode(cfsr=1 << 5, hfsr=1 << 30)
+    assert report.has("MLSPERR")
+    assert "lazy floating-point" in report.root_cause
+
+
+def test_lsperr_alone_without_forced_is_unaffected():
+    """The fix must be scoped to the FORCED combination only: LSPERR alone
+    (no escalation) must keep decoding exactly as before -- via the generic
+    `first = report.flags[0]` fallback -- matching the frozen golden fixture
+    and the SDK oracle for every case that is not this exact combination."""
+    report = port.decode(cfsr=1 << 13)
+    assert report.has("LSPERR")
+    assert report.has("FORCED") is False
+    assert report.root_cause == (
+        "LSPERR set (BFSR): Bus fault during lazy floating-point state preservation."
+    )

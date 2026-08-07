@@ -328,6 +328,134 @@ def test_format_json_before_subcommand_reads_off_ctx_obj():
     assert doc["data"]["script"] == ZSH_SCRIPT
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#503: `doctor` must not advertise flags the Python `doctor` rejects
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_completion_no_longer_offers_target_kind_or_server():
+    """`doctor_cmd.py` deliberately did not port the debug half
+    (`--target-kind`/`--server`) -- but the captured scripts still offered
+    both, so accepting the completion's own suggestion was a guaranteed exit
+    2 (`cli.parse-error`). `support-bundle`/`debug-config` genuinely still
+    carry both and must be untouched."""
+    for script in (BASH_SCRIPT, ZSH_SCRIPT, FISH_SCRIPT):
+        # Isolate the `doctor` arm/line, not a substring hit inside
+        # `debug-config`'s or `support-bundle`'s (which legitimately contain
+        # `--target-kind`/`--server` too).
+        doctor_lines = [
+            line
+            for line in script.splitlines()
+            if "doctor)" in line
+            or "'doctor:" in line
+            or "__fish_seen_subcommand_from doctor'" in line
+        ]
+        assert doctor_lines, script[:200]
+        for line in doctor_lines:
+            # Bare substrings, not "--target-kind"/"--server": fish spells
+            # its flags `-l target-kind`/`-l server` (no double dash).
+            assert "target-kind" not in line, line
+            assert "server" not in line, line
+
+
+def test_debug_config_and_support_bundle_still_keep_target_kind_and_server():
+    """Control for the above: only `doctor` lost the two flags. bash/zsh spell
+    the flag `--target-kind`; fish's `complete -l target-kind` spells it
+    without the leading dashes."""
+    assert "--target-kind" in BASH_SCRIPT
+    assert "--server" in BASH_SCRIPT
+    assert "--target-kind" in ZSH_SCRIPT
+    assert "--server" in ZSH_SCRIPT
+    assert "-l target-kind" in FISH_SCRIPT
+    assert "-l server" in FISH_SCRIPT
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#503: bash/zsh `--format` completion must find the real subcommand
+# even when a global flag (with a value) precedes it.
+# ---------------------------------------------------------------------------
+
+
+def _bash_complete(argv: list[str]) -> list[str]:
+    """Drive the real emitted `BASH_SCRIPT` in a live bash and return
+    `COMPREPLY` for completing the LAST word of `argv` (typically `""`, an
+    about-to-be-typed value)."""
+    import subprocess as sp
+
+    words = " ".join(f'"{w}"' for w in argv)
+    script = (
+        BASH_SCRIPT
+        + "\nCOMP_WORDS=(" + words + ")\n"
+        + f"COMP_CWORD={len(argv) - 1}\n"
+        + "COMPREPLY=()\n_tan_complete\nprintf '%s\\n' \"${COMPREPLY[@]}\"\n"
+    )
+    proc = sp.run(  # noqa: S603, S607 -- fixed script, no shell metacharacters
+        ["bash", "-c", script], capture_output=True, text=True, timeout=10
+    )
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def _bash_available() -> bool:
+    import shutil as _shutil
+
+    return _shutil.which("bash") is not None
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_format_completion_finds_the_subcommand_past_a_leading_global_flag():
+    """`tan --sdk-root /x validate --format <TAB>` used to offer only `text
+    json` (`${COMP_WORDS[1]}` was `--sdk-root`, matching no `case` arm), the
+    exact misinformation tan-cli#403 exists to prevent -- and the exact
+    pre-subcommand shape `output_format.py`'s docstring names as the one
+    alp-sdk-vscode's `withSdkRoot` actually uses."""
+    reply = _bash_complete(["tan", "--sdk-root", "/x", "validate", "--format", ""])
+    assert "diagnostic-v1" in reply
+    assert "sarif" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_format_completion_still_works_with_no_leading_flag():
+    """Regression guard: the ordinary, no-global-flag shape must still work
+    after the scan replaces the fixed-index read."""
+    reply = _bash_complete(["tan", "validate", "--format", ""])
+    assert "diagnostic-v1" in reply
+    assert "sarif" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_format_completion_narrow_command_still_gets_the_narrow_list():
+    reply = _bash_complete(["tan", "--sdk-root", "/x", "size", "--format", ""])
+    assert reply == ["text", "json"]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#503: fish `generate --target` must list every real target value.
+# ---------------------------------------------------------------------------
+
+
+def test_fish_target_completion_lists_every_valid_generate_target():
+    from tan.commands.generate_cmd import (
+        ALL_EMIT_MODES,
+        COMPOSED_ROUTE_TABLE,
+        IPC_CONTRACT_H,
+        ZEPHYR_BOARD,
+    )
+
+    line = next(line for line in FISH_SCRIPT.splitlines() if line.startswith(
+        "complete -c tan -l target -d"
+    ))
+    listed = set(line.rsplit("-a '", 1)[1].rstrip("'").split())
+    expected = set(ALL_EMIT_MODES) | {ZEPHYR_BOARD, COMPOSED_ROUTE_TABLE, IPC_CONTRACT_H}
+    assert listed == expected
+    # The three the reviewer's evidence named as missing, by name (a stronger
+    # assertion than the set-equality above, so a future refactor that
+    # accidentally drops one still fails loudly here even if it also drops it
+    # from `expected`'s own source).
+    assert "os-topology" in listed
+    assert "composed-route-table" in listed
+    assert "ipc-contract-h" in listed
+
+
 def test_subcommand_format_overrides_a_leading_root_format():
     """`--format` declared after the subcommand name still wins over a
     leading root-position value, matching `debug_config_cmd.debug_config`'s

@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -351,6 +352,182 @@ def test_explicit_flag_wins_over_a_parsed_dump():
     # bit 0 (IACCVIOL) from the explicit flag, not bit 9 (PRECISERR) from the dump.
     assert "IACCVIOL" in result.output
     assert "PRECISERR" not in result.output
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503, defect 1: a piped dump must still be READ and MERGED when a
+# register flag is also given -- `pick()` prefers the flag, per register, but
+# a register the flags never mentioned must still come from the dump.
+# --------------------------------------------------------------------------
+
+
+def test_a_piped_dump_still_contributes_registers_the_flags_did_not_give():
+    """`--hfsr` alone used to suppress the implicit stdin read entirely, so a
+    piped CFSR/BFAR was silently dropped and the wrong root cause reported
+    (tan-cli#503). `--hfsr` here is deliberately a flag that does NOT
+    contradict the dump (dump has no HFSR line), isolating the "does a piped
+    dump get read/merged at all when any flag is present" question from the
+    per-register precedence `test_explicit_flag_wins_over_a_parsed_dump`
+    already pins."""
+    dump = "CFSR: 0x00008200\nBFAR: 0xdeadbeef\n"
+    result = runner.invoke(app, ["--hfsr", "0x40000000", "--json"], input=dump)
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    # CFSR/BFAR came from the piped dump; HFSR came from the flag.
+    assert payload["inputs"]["cfsr"] == "0x00008200"
+    assert payload["addresses"]["bfar"] == "0xdeadbeef"
+    assert payload["addresses"]["bfar_valid"] is True
+    assert any(f["name"] == "PRECISERR" for f in payload["flags"])
+    assert "Precise data bus fault" in payload["root_cause"]
+
+
+def test_bfar_only_flag_does_not_suppress_a_piped_cfsr():
+    """`--bfar`/`--mmfar` count toward "a register was supplied" but do not
+    satisfy the "something to analyse" gate (cfsr/hfsr/dfsr only) -- so
+    suppressing the dump on their account used to refuse with
+    `faultdecode.no-registers` even though a perfectly good CFSR was sitting
+    on stdin (tan-cli#503)."""
+    result = runner.invoke(
+        app, ["--bfar", "0x20001000", "--json"], input="CFSR: 0x00008200\n"
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["inputs"]["cfsr"] == "0x00008200"
+    # The explicit --bfar flag still wins over the dump (dump has no BFAR).
+    assert payload["addresses"]["bfar"] == "0x20001000"
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503, defect 3: fd 0 closed must be a coded refusal, never a
+# traceback -- `sys.stdin` is `None` in that shape, and both `_read_dump`
+# call sites used to dereference it bare.
+# --------------------------------------------------------------------------
+
+
+def test_closed_stdin_is_a_coded_refusal_not_a_traceback():
+    proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [sys.executable, "-m", "tan", "faultdecode", "--format", "json"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        close_fds=True,
+        timeout=20,
+        # Close fd 0 in the child rather than redirecting it, to reproduce
+        # `sys.stdin is None` exactly (a redirected /dev/null still leaves
+        # `sys.stdin` a real, readable file object).
+        preexec_fn=lambda: os.close(0),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["command"] == "faultdecode"
+    assert payload["ok"] is False
+    assert [i["code"] for i in payload["issues"]] == ["faultdecode.no-registers"]
+
+
+def test_closed_stdin_with_explicit_file_dash_is_also_a_coded_refusal():
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "tan", "faultdecode", "--file", "-", "--format", "json"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        close_fds=True,
+        timeout=20,
+        preexec_fn=lambda: os.close(0),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["command"] == "faultdecode"
+    assert [i["code"] for i in payload["issues"]] == ["faultdecode.no-registers"]
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503, defect 2: addr2line must be resolved via `on_path` (PATH-only),
+# never `shutil.which` (which inserts CWD ahead of PATH on Windows), and
+# spawned by its resolved absolute path, never a bare name.
+# --------------------------------------------------------------------------
+
+
+def test_resolve_symbol_resolves_the_tool_through_on_path_not_shutil_which(
+    monkeypatch, tmp_path
+):
+    from tan.commands import faultdecode_cmd
+
+    elf = tmp_path / "zephyr.elf"
+    elf.write_bytes(b"\x7fELF")
+
+    calls: list[list[str]] = []
+
+    def fake_on_path(command: str) -> str | None:
+        if command == "arm-zephyr-eabi-addr2line":
+            return None
+        if command == "llvm-addr2line":
+            return None
+        if command == "addr2line":
+            return "/usr/bin/addr2line"  # a resolved ABSOLUTE path
+        raise AssertionError(f"unexpected tool probe: {command}")
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+
+        class _Result:
+            stdout = "my_func\nfile.c:42\n"
+
+        return _Result()
+
+    monkeypatch.setattr(faultdecode_cmd, "on_path", fake_on_path)
+    monkeypatch.setattr(faultdecode_cmd.subprocess, "run", fake_run)
+
+    sym = faultdecode_cmd.resolve_symbol(0x08001000, elf)
+    assert sym is not None
+    assert sym.func == "my_func"
+    # The RESOLVED ABSOLUTE PATH was spawned, not the bare name "addr2line"
+    # (tan-cli#503): a bare name would let a project-local decoy on CWD
+    # (Windows CreateProcess search order) get executed a second way even
+    # past a hardened probe.
+    assert calls[0][0] == "/usr/bin/addr2line"
+
+
+def test_resolve_symbol_skips_gracefully_when_no_tool_resolves(monkeypatch, tmp_path):
+    from tan.commands import faultdecode_cmd
+
+    elf = tmp_path / "zephyr.elf"
+    elf.write_bytes(b"\x7fELF")
+    monkeypatch.setattr(faultdecode_cmd, "on_path", lambda _tool: None)
+    assert faultdecode_cmd.resolve_symbol(0x08001000, elf) is None
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503, defect 5: a negative/out-of-range register value must be a
+# coded refusal, never a masked-then-decoded arbitrary-precision int.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["-8200", "-0x8200"])
+def test_negative_register_value_is_rejected_not_silently_masked(raw):
+    result = runner.invoke(app, ["--cfsr", raw])
+    assert result.exit_code == 2
+    # Never the malformed non-hex "0x-..." string, and never a report at all.
+    assert "0x-" not in result.output
+
+
+def test_negative_register_value_names_the_flag_in_the_error():
+    """`typer.BadParameter`'s `param_hint` names the offending flag, matching
+    the existing bad-hex-value path (`_parse_hexint`'s other `raise`) -- the
+    same envelope-vs-usage-error caveat `test_bad_hex_value_is_exit_2` (only
+    checking the exit code) already accepts: a parse-time `BadParameter` on
+    this throwaway app renders Click's own usage banner, not this command's
+    JSON envelope -- `cli.py`'s exception middleware is what turns that into
+    an envelope for the REAL registered app, and is out of scope here."""
+    result = runner.invoke(app, ["--cfsr", "-8200"])
+    assert result.exit_code == 2
+    assert "--cfsr" in result.output
+
+
+def test_oversized_register_value_is_also_rejected():
+    result = runner.invoke(app, ["--cfsr", "0x100000000"])  # 33 bits
+    assert result.exit_code == 2
 
 
 def test_symbolication_is_skipped_gracefully_for_a_non_elf_file():
