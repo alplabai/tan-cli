@@ -349,9 +349,22 @@ try {
 	# different code) risked the same misattribution on Windows. There is no
 	# meaningful process exit code to fall back on here -- CreateProcess never
 	# started a process at all -- so the discriminator instead is the actual
-	# Win32 status CreateProcess returned: ERROR_ACCESS_DENIED (5), read off
-	# the Win32Exception PowerShell wraps the failure in, not a substring of
-	# its formatted .Message.
+	# Win32 status CreateProcess returned, read off the Win32Exception
+	# PowerShell wraps the failure in, not a substring of its formatted
+	# .Message.
+	#
+	# tan-cli#490 review, round 5: ERROR_ACCESS_DENIED (5) alone missed the
+	# exact scenario the issue names -- the stock AppLocker/Software
+	# Restriction Policy "block executables from %TEMP%" rule. That policy
+	# class fails CreateProcess with ERROR_ACCESS_DISABLED_BY_POLICY (1260,
+	# "This program is blocked by group policy") or, when the policy is
+	# configured with no user-facing notification,
+	# ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY (1261) -- neither of which
+	# is 5. Both new tests at the time only reproduced an NTFS deny-execute
+	# ACE (`icacls /deny`), which genuinely does yield 5, so nothing exercised
+	# this path against the mechanism the issue actually names. All three
+	# codes are the same class of refusal (CreateProcess never started the
+	# process at all) and get the same "security policy" wording below.
 	# -------------------------------------------------------------------------
 	function Get-Win32ErrorCode($exception) {
 		$e = $exception
@@ -362,7 +375,10 @@ try {
 		return $null
 	}
 	function Test-AccessDeniedSignature($win32ErrorCode) {
-		return ($null -ne $win32ErrorCode) -and ($win32ErrorCode -eq 5) # ERROR_ACCESS_DENIED
+		if ($null -eq $win32ErrorCode) { return $false }
+		return ($win32ErrorCode -eq 5) -or       # ERROR_ACCESS_DENIED
+			($win32ErrorCode -eq 1260) -or       # ERROR_ACCESS_DISABLED_BY_POLICY
+			($win32ErrorCode -eq 1261)           # ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY
 	}
 	function Invoke-HealthCheck([string]$exePath) {
 		try {

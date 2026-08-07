@@ -280,6 +280,13 @@ windows_only = pytest.mark.skipif(
 posix_only = pytest.mark.skipif(
     os.name == "nt", reason="install.sh refuses a Windows host and points at install.ps1"
 )
+# Unlike windows_only, this does NOT require os.name == "nt": Get-Win32ErrorCode
+# and Test-AccessDeniedSignature are pure functions over a real
+# System.ComponentModel.Win32Exception (a cross-platform .NET type -- its
+# NativeErrorCode is just the int the constructor was given, no Win32 API
+# involved), so they run correctly under pwsh on Linux/macOS too. GitHub-hosted
+# ubuntu-latest/macos-latest/windows-latest runners all ship pwsh preinstalled.
+pwsh_only = pytest.mark.skipif(not PWSH, reason="needs PowerShell (pwsh) on PATH")
 
 
 def _run(
@@ -733,6 +740,67 @@ def test_ps1_temp_execute_denied_distinguishes_from_a_broken_binary(release_serv
     assert "may be missing a runtime dependency" not in combined
 
 
+@pwsh_only
+def test_ps1_access_denied_signature_accepts_the_applocker_policy_codes(tmp_path):
+    """tan-cli#490 review, MAJOR 2: the two icacls-based tests above only
+    reproduce an NTFS deny-execute ACE, which fails CreateProcess with
+    ERROR_ACCESS_DENIED (5) -- they cannot exercise the scenario the issue
+    actually names, a real AppLocker/Software Restriction Policy "block
+    executables from %TEMP%" rule, because that needs live policy
+    enforcement (the Application Identity service, or a Safer/SRP registry
+    policy) that is not something a hosted CI runner should be made to carry
+    for one assertion. That policy class fails CreateProcess with
+    ERROR_ACCESS_DISABLED_BY_POLICY (1260) or, with no user notification,
+    ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY (1261) -- and pre-fix,
+    Test-AccessDeniedSignature only ever matched 5, so neither the retry nor
+    the "security policy" wording would ever fire against the issue's own
+    named case.
+
+    This exercises the REAL discriminator function extracted verbatim out of
+    install.ps1 (not a reimplementation that could silently drift from it),
+    against a REAL System.ComponentModel.Win32Exception -- the same object
+    type Get-Win32ErrorCode unwraps at install.ps1:356-363 -- rather than a
+    bare integer, so a change to how the exception is unwrapped is covered
+    too.
+    """
+    text = INSTALL_PS1.read_text()
+    start = text.index("function Get-Win32ErrorCode(")
+    end = text.index("function Invoke-HealthCheck(")
+    assert start != -1 and end > start, "install.ps1's Get-Win32ErrorCode/Test-AccessDeniedSignature functions moved or were renamed"
+    funcs_ps1 = tmp_path / "funcs.ps1"
+    funcs_ps1.write_text(text[start:end])
+
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(
+        f'. "{funcs_ps1}"\n'
+        'function Probe($code) {\n'
+        '    if ($null -eq $code) { $exc = New-Object System.Exception "plain, no Win32Exception anywhere in the chain" }\n'
+        '    else {\n'
+        '        $inner = New-Object System.ComponentModel.Win32Exception -ArgumentList $code\n'
+        '        $exc = New-Object System.Exception -ArgumentList "wrapped", $inner  # exercise the InnerException walk too\n'
+        '    }\n'
+        '    return Test-AccessDeniedSignature (Get-Win32ErrorCode $exc)\n'
+        '}\n'
+        'Write-Output ("5=" + (Probe 5))\n'
+        'Write-Output ("1260=" + (Probe 1260))  # ERROR_ACCESS_DISABLED_BY_POLICY -- the AppLocker/SRP case #490 names\n'
+        'Write-Output ("1261=" + (Probe 1261))  # ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY\n'
+        'Write-Output ("2="    + (Probe 2))     # ERROR_FILE_NOT_FOUND -- must NOT match\n'
+        'Write-Output ("none=" + (Probe $null))\n'
+    )
+
+    result = subprocess.run(
+        [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    lines = result.stdout.split()
+    assert "5=True" in lines
+    assert "1260=True" in lines
+    assert "1261=True" in lines
+    assert "2=False" in lines
+    assert "none=False" in lines
+
+
 @windows_only
 def test_ps1_commit_resets_the_source_temp_acl_after_move(release_server, tmp_path):
     """tan-cli#490, MAJOR 2: `Move-Item` carries the SOURCE item's ACL into
@@ -1146,6 +1214,96 @@ def test_sh_noexec_tmpdir_retries_staging_inside_install_dir(release_server, tmp
 
 
 @posix_only
+def test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic(tmp_path):
+    """tan-cli#490 review, MAJOR 1 (install.sh's `run_health_check`): a
+    command-prefix assignment (`LC_ALL=C "$1" --version`) sets LC_ALL only in
+    the ENVIRONMENT HANDED TO THE CHILD ABOUT TO BE EXEC'D. When exec(2)
+    itself fails -- the noexec case this whole health check exists for -- no
+    child ever replaces the running shell's image, so the "Permission
+    denied" diagnostic is printed by the shell (or its command-substitution
+    subshell) in whatever locale IT was already running in, not the
+    temporarily-prefixed one. On a bash-as-/bin/sh host
+    (RHEL/Rocky/Alma/Fedora/SLES -- exactly the hardened enterprise/
+    government image class #490 targets) a localized ambient locale then
+    gets a translated `strerror(EACCES)`, `is_noexec_signature`'s English
+    substring match misses, and the retry silently never fires.
+
+    Getting a REAL translated "Permission denied" onto a CI runner needs a
+    glibc language pack that is not guaranteed present on
+    ubuntu-latest/macos-latest (confirmed for real on a Fedora 40 container
+    with `glibc-langpack-de` installed while writing this fix: under a
+    de_DE.UTF-8 ambient locale, the pre-fix command-prefix form prints "Keine
+    Berechtigung" for a real noexec exec failure; the fixed
+    export-in-subshell form prints "Permission denied" -- not reproduced
+    here for that reason). So this proves the underlying, portable half of
+    the same mechanism instead: bash always warns on stderr when asked to
+    set a locale that does not exist ("...: warning: setlocale: LC_ALL:
+    cannot change locale ..."), on every host, no package install required.
+    That warning is bash calling `setlocale()` on the CURRENT process as a
+    side effect of the assignment -- which is exactly, and only, what
+    `export` does; a command-prefix assignment builds an envp for the child
+    about to be exec'd and never calls the current process's own
+    `setlocale()` at all, so it produces no warning regardless of whether the
+    value is valid. Once `setlocale()` has actually been called (the `export`
+    form, always, even for a valid value like install.sh's real "C") the
+    change is a property of the PROCESS and persists into every later
+    statement in that same subshell -- including the next statement's own
+    exec-failure message, which is the mechanism the Fedora repro above
+    exercises for real. The warning is checked across the whole process's
+    combined output rather than narrowly inside `$verify_out` on purpose: it
+    is emitted by the `export` statement itself, a separate statement from
+    the one `2>&1` is attached to, so it would never land inside
+    `$verify_out` in EITHER form -- that is exactly why it is the right
+    portable proxy for "did this reach the process's own setlocale()", not a
+    claim about install.sh's own capture, which "C" never triggers because
+    "C" is always a valid locale.
+
+    The two forms compared below are the exact shapes install.sh had before
+    and after this fix (with `C` swapped for an invalid locale value purely
+    so the shell has something to warn about). The final assertions then pin
+    the ACTUAL line in install.sh to the export-in-subshell shape, so a
+    regression back to the command-prefix shape fails this test even without
+    re-deriving the mechanism proof.
+    """
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash -- the '/bin/sh IS bash' class tan-cli#490 targets")
+
+    target = tmp_path / "target.sh"
+    target.write_text("#!/bin/sh\necho reached\n")
+    target.chmod(0o755)
+
+    def run_form(body: str) -> str:
+        probe = tmp_path / "probe.sh"
+        probe.write_text(f'#!/bin/bash\n{body}\nprintf \'%s\' "$verify_out"\n')
+        probe.chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(probe), str(target)], capture_output=True, text=True, timeout=15
+        )
+        return result.stdout + result.stderr
+
+    prefix_out = run_form('verify_out="$(LC_ALL=xx_YY.bogus "$1" 2>&1)"')
+    export_out = run_form('verify_out="$(export LC_ALL=xx_YY.bogus; "$1" 2>&1)"')
+
+    assert "cannot change locale" not in prefix_out, (
+        "a command-prefix LC_ALL assignment was not expected to reach the "
+        f"running shell's own setlocale(), but it did: {prefix_out!r}"
+    )
+    assert "cannot change locale" in export_out, (
+        "export inside the command-substitution subshell was expected to "
+        f"reach that subshell's own setlocale(): {export_out!r}"
+    )
+
+    text = INSTALL_SH.read_text()
+    assert 'verify_out="$(export LC_ALL=C; "$1" --version 2>&1)"' in text, (
+        "install.sh:run_health_check must set LC_ALL=C via `export` inside "
+        "the $(...) subshell, not as a command-prefix assignment on the "
+        "probed binary -- see this test's docstring for why the prefix form "
+        "cannot reach the running shell's own exec-failure diagnostic."
+    )
+    assert 'verify_out="$(LC_ALL=C "$1" --version 2>&1)"' not in text
+
+
+@posix_only
 @noexec_capable
 def test_sh_noexec_tmpdir_archive_layout_retries_staging_inside_install_dir(release_server, tmp_path):
     """Same as above, for the `--onedir` archive layout (tan-cli#349): the
@@ -1353,6 +1511,57 @@ def test_sh_no_curl_or_wget_prints_a_diagnostic(release_server, tmp_path):
     assert result.returncode != 0
     combined = result.stdout + result.stderr
     assert "need curl or wget on PATH" in combined
+
+
+@posix_only
+def test_sh_no_curl_or_wget_prints_a_diagnostic_on_the_default_latest_invocation(tmp_path):
+    """tan-cli#490 review, MAJOR finding (install.sh:184-192): the test above
+    only covers `--version vX.Y.Z`, which skips the `latest` redirect
+    resolution entirely -- but that block is what actually runs FIRST on the
+    DEFAULT invocation (`curl ... | sh`, no `--version`, exactly the
+    documented one-liner), and it has its own inline curl/wget branching that
+    is not routed through `download()` at all: when neither tool exists it
+    silently falls through both `if`/`elif` arms, `resolved` is never
+    assigned, and the script prints "could not resolve which release
+    'latest' points at" -- true in isolation, but not the actual problem, and
+    it masks the real one. Confirmed against the real, unfixed script while
+    writing this (2>&1 output):
+
+        install.sh: resolving the latest release tag...
+        install.sh: could not resolve which release 'latest' points at.
+        install.sh: refusing to install -- without a tag there is no
+        checksums.txt to verify against. Retry, or pass an explicit
+        --version vX.Y.Z.
+
+    instead of "need curl or wget on PATH". Deliberately does NOT use
+    `release_server`/`TAN_INSTALL_BASE_URL` -- the whole point is that a host
+    with neither transport must refuse before ever reaching the network, `latest`
+    included, using the sha256-tool-check idiom (:234-246 today): check for
+    the tool up front, before anything that assumes it exists.
+    """
+    dest = tmp_path / "bin"
+    bin_dir = tmp_path / "no-curl-wget-bin"
+    bin_dir.mkdir()
+    needed = (
+        "sh", "uname", "sha256sum", "shasum", "mktemp", "mkdir", "mv", "rm", "rmdir",
+        "chmod", "grep", "awk", "sed", "basename", "dirname", "cat", "printf", "cut",
+        "tar", "ls", "sort", "head", "tail", "ldd", "id",
+    )
+    for tool in needed:
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--dir", str(dest), "--no-modify-path"],
+        env={**os.environ, "PATH": str(bin_dir), "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "need curl or wget on PATH" in combined
+    assert "could not resolve which release 'latest' points at" not in combined
 
 
 @posix_only

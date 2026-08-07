@@ -169,6 +169,25 @@ download() { # $1 = url, $2 = output path; returns non-zero on failure
 	fi
 }
 
+# tan-cli#490 review, round 5: same idiom as the sha256-tool check further
+# down (:234-246) -- refuse with the correct diagnostic, up front, before
+# anything that assumes the tool exists, rather than only inside download().
+# Without this, a host with neither curl nor wget on PATH never reached
+# download()'s own check on the DEFAULT (no --version) invocation at all:
+# the `latest` redirect resolution just below has its own inline
+# curl/wget branching that is not routed through download(), always runs
+# BEFORE the first download() call, and falls through to
+# `resolved="$(wget ...)"` unguarded -- so on a curl+wget-less host every
+# `latest` install printed "could not resolve which release 'latest' points
+# at", not "need curl or wget on PATH", masking the real problem behind a
+# misleading one. Passing an explicit --version skipped the `latest` block
+# and reached download() directly, which is why that path alone was covered
+# before.
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+	echo "install.sh: need curl or wget on PATH" >&2
+	exit 1
+fi
+
 # `latest` is a REDIRECT, and resolving it twice is not the same as resolving
 # it once: a release cut between the binary fetch and the checksums fetch would
 # have us verify one release's asset against another release's digests. Rare,
@@ -429,17 +448,34 @@ fi
 # extracting/running an only-checksum-verified payload with root privilege.
 # ---------------------------------------------------------------------------
 run_health_check() { # $1 = path to the binary to run; sets $verify_out, $health_rc
-	# LC_ALL=C, forced here rather than exported for the whole script: glibc
-	# translates strerror(EACCES) ("Permission denied") into the host's
-	# locale, and so does a shell's own gettext catalog for its exec-failure
-	# message -- so on a localized host (precisely the hardened
-	# enterprise/government image class tan-cli#490 targets) the untranslated
-	# English substring `is_noexec_signature` keys on below would never match,
-	# and the retry this whole block exists for would never fire. The
-	# temporary assignment reaches the forked child that actually attempts (and
-	# fails) the exec, which is what prints the diagnostic, so it is set right
-	# here rather than globally.
-	if verify_out="$(LC_ALL=C "$1" --version 2>&1)"; then
+	# LC_ALL=C, scoped to a subshell rather than exported for the whole
+	# script: glibc translates strerror(EACCES) ("Permission denied") into
+	# the host's locale, and so does a shell's own gettext catalog for its
+	# own exec-failure message -- so on a localized host (precisely the
+	# hardened enterprise/government image class tan-cli#490 targets) the
+	# untranslated English substring `is_noexec_signature` keys on below
+	# would never match, and the retry this whole block exists for would
+	# never fire.
+	#
+	# tan-cli#490 review, round 5: a command-prefix assignment
+	# (`LC_ALL=C "$1" --version`) does NOT do this. `exec(2)` never runs when
+	# the target is on a noexec mount -- the process that prints "Permission
+	# denied" is the CURRENT shell (or its command-substitution subshell),
+	# which never got exec()'d over, and a temporary prefix assignment is only
+	# ever applied to the ENVIRONMENT HANDED TO THE CHILD ABOUT TO BE EXEC'D,
+	# never to the running shell's own locale state -- so on a bash-as-/bin/sh
+	# host (RHEL/Rocky/Alma/Fedora/SLES -- the class this bug targets) it
+	# leaves the shell printing its own diagnostic in whatever locale it was
+	# ALREADY running in. Measured: `bash -c 'LC_ALL=xx_YY.bogus /some/script'`
+	# prints no setlocale warning at all; `bash -c 'export LC_ALL=xx_YY.bogus;
+	# /some/script'` prints `bash: warning: setlocale: LC_ALL: cannot change
+	# locale (xx_YY.bogus): No such file or directory` -- proof the prefix
+	# form never reaches the running shell's own locale, while `export` inside
+	# the command substitution's own subshell does. Wrapping the assignment in
+	# `export` (still confined to the `$(...)` subshell, so it does not leak
+	# into the rest of this script) reaches the same subshell that prints the
+	# diagnostic when the exec fails.
+	if verify_out="$(export LC_ALL=C; "$1" --version 2>&1)"; then
 		health_rc=0
 	else
 		health_rc=$?

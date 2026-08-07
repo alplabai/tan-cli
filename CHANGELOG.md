@@ -311,6 +311,44 @@ All notable changes to `tan` are documented here. Format follows
   the install lands under the subdirectory rather than wherever the `pwsh`
   PROCESS itself started -- `windows_only` like the rest of this file's ps1
   coverage. (#490)
+- **Three more defects found reviewing the (#490) fixes above, all shipping
+  the exact misattribution the fix exists to prevent:**
+  - `install.sh`'s noexec health check forced `LC_ALL=C` as a COMMAND-PREFIX
+    assignment (`LC_ALL=C "$1" --version`), which sets the variable only in
+    the environment handed to the child about to be exec'd. When `exec(2)`
+    itself fails -- the noexec case this whole check exists for -- no child
+    ever replaces the running shell's image, so the "Permission denied"
+    diagnostic is printed by the shell in whatever locale IT was already
+    running in, not the temporarily-prefixed one; on a bash-as-`/bin/sh` host
+    (RHEL/Rocky/Alma/Fedora/SLES) with a localized ambient locale, glibc's
+    translated `strerror(EACCES)` never matched the English substring the
+    noexec signature keys on, and the retry silently never fired. Confirmed
+    for real on a Fedora 40 host with `glibc-langpack-de` installed: under a
+    `de_DE.UTF-8` ambient locale, the old command-prefix form printed "Keine
+    Berechtigung" (missing the signature); wrapping the same assignment in
+    `export` inside the `$(...)` subshell -- which does reach that
+    subshell's own `setlocale()`, and a shell's locale state persists across
+    the rest of that same process -- prints "Permission denied" instead.
+  - `install.ps1`'s `Test-AccessDeniedSignature` matched
+    `ERROR_ACCESS_DENIED` (5) only, but the scenario this whole fix names --
+    the stock AppLocker/Software Restriction Policy "block executables from
+    %TEMP%" rule -- fails `CreateProcess` with
+    `ERROR_ACCESS_DISABLED_BY_POLICY` (1260) or, with no user notification,
+    `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (1261), neither of which is
+    5; the two `icacls`-based tests this issue's own prior round added only
+    reproduce an NTFS deny-execute ACE, which genuinely does yield 5 and so
+    never exercised this path. All three codes now match.
+  - `install.sh`'s `latest` redirect resolution (the DEFAULT invocation --
+    no `--version`, exactly the documented `curl | sh` one-liner) has its
+    own inline curl/wget branching that does not go through `download()` and
+    always runs first, so a host with neither tool fell through both
+    branches unguarded and printed "could not resolve which release
+    'latest' points at ... pass an explicit --version" instead of "need curl
+    or wget on PATH" -- the correct diagnostic, and the one the prior
+    round's fix only reached when `--version` was passed explicitly, skipping
+    this block entirely. Now checked up front, before `latest` resolution or
+    any other download, the same idiom the sha256-tool check further down
+    already uses. (#490)
 
 ## [0.5.1] — 2026-08-04
 
