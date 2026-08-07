@@ -103,6 +103,42 @@ def test_cleans_up_the_temp_file_when_the_replace_fails(tmp_path, monkeypatch):
     assert leftovers == [], leftovers
 
 
+def test_unencodable_content_does_not_leak_the_temp_sibling(tmp_path):
+    """tan-cli#516 review round, finding 3: `handle.write(content)` raises
+    `UnicodeEncodeError` -- a `ValueError`, not an `OSError` -- when `content`
+    carries a codepoint `encoding` cannot represent (a lone surrogate under
+    the default `utf-8`, here). FAILS against an implementation that only
+    catches `OSError` around the write/rename: the exception would propagate
+    past the cleanup entirely and the `*.tan-tmp` sibling `mkstemp` already
+    created would leak into the caller's own directory, unremoved."""
+    target = tmp_path / "config"
+
+    with pytest.raises(UnicodeEncodeError):
+        atomic_write_text(str(target), "\udc80", encoding="utf-8")
+
+    assert not target.exists()
+    leftovers = list(tmp_path.glob("*.tan-tmp"))
+    assert leftovers == [], leftovers
+
+
+def test_an_unknown_encoding_does_not_leak_the_temp_sibling(tmp_path):
+    """tan-cli#516 review round, finding 3: an unrecognised `encoding=` makes
+    `os.fdopen` itself raise `LookupError`, before any file object takes
+    ownership of the raw descriptor `mkstemp` opened. FAILS against an
+    implementation whose inner `except OSError:` (guarding the `os.close(fd)`
+    that would otherwise leak the descriptor) does not also list
+    `LookupError` -- the exception passes both that guard and the outer
+    `except OSError:` untouched, leaking the temp file on disk."""
+    target = tmp_path / "config"
+
+    with pytest.raises(LookupError):
+        atomic_write_text(str(target), "hello\n", encoding="not-a-real-encoding")
+
+    assert not target.exists()
+    leftovers = list(tmp_path.glob("*.tan-tmp"))
+    assert leftovers == [], leftovers
+
+
 def test_a_fsync_failure_leaves_the_original_untouched_and_no_temp_leftover(tmp_path, monkeypatch):
     """A failure INSIDE the durability sequence -- after `write` has already
     put bytes in the temp's own buffer but before the temp is durable or the

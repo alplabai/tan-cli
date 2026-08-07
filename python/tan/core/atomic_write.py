@@ -93,9 +93,20 @@ def atomic_write_text(path: str, content: str, *, encoding: str = "utf-8") -> No
         except (OSError, LookupError):
             # `fdopen` failing before a file object takes ownership of `fd`
             # would otherwise leak the raw descriptor `mkstemp` opened -- an
-            # unknown `encoding=` fails here, as a `LookupError`, not inside
-            # the `with` block below.
-            os.close(fd)
+            # unknown `encoding=` fails here, as a `LookupError`. But `io.
+            # open`'s OWN construction sequence (`_pyio.open`) wraps the raw
+            # `FileIO` in a `try/except: result.close(); raise` the moment
+            # that raw layer exists -- so a `LookupError` from encoding
+            # validation, which happens strictly AFTER that wrapping, has
+            # already had `fd` closed by `io.open` itself before it ever
+            # reaches us. Closing it again unconditionally then raises a
+            # spurious `OSError: Bad file descriptor` that REPLACES the
+            # `LookupError` the caller needs to see (measured). Best-effort:
+            # close if `fd` is still ours to close, ignore if it is not.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
             raise
         with handle:
             handle.write(content)
