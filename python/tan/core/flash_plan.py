@@ -1033,14 +1033,25 @@ def jlink_commander_script(
     than one J-Link -- `JLinkExe` selects a probe by serial alone, with no
     USB-port equivalent. When given, it is emitted as a leading
     `SelectEmuBySN {serial}` line, matching `plan_alif_mram_jlink`'s own Flow D
-    shape (`flash_plan.py:1936-1937`) byte-for-byte -- same line text, same
-    "first line of the script" position, same "absent -> no line" default. The
-    caller (`plan_swd_probe`) validates the value with the same
+    shape (its `lines.append(f"SelectEmuBySN {serial}")` emit, its DPIDR
+    preflight's identical emit in `flow_d_preflight_script`) byte-for-byte --
+    same line text, same "first line of the script" position, same
+    "absent -> no line" default. `swd_probe` (tan-cli#513 REVIEW) also passes
+    `-SelectEmuBySN {serial}` in its own argv, belt-and-braces: this backend's
+    `-AutoConnect 1` flag (unlike Flow D's argv, which carries no
+    `-AutoConnect` and relies on its script's own leading `si SWD`/`connect`)
+    means JLinkExe may start connecting to WHATEVER probe autoconnect finds
+    before this script's first line is ever read, so the script-line selector
+    alone is not provably ahead of the connect on every DLL version -- the
+    argv selector is.
+
+    The caller (`plan_swd_probe`) validates `serial` with the same
     `validate_identifier(..., destination=_JLINK_SERIAL_DESTINATION)` guard
-    Flow D applies before it ever reaches here; this function does not
-    re-validate it, exactly as it does not re-validate `artefact` after
-    `validate_commander_path` below -- validation is the caller's job, this is
-    the caller's callee.
+    Flow D applies, before this function is ever reached; this function does
+    NOT re-validate it -- unlike `artefact`, which this function DOES validate
+    itself via `validate_commander_path` just below (`artefact` has no other
+    single caller to trust; `serial` has exactly one, `plan_swd_probe`, which
+    validates it unconditionally regardless of which arm ends up running).
     """
     validate_commander_path(artefact, "the flash artefact path")
     lines: list[str] = []
@@ -1127,6 +1138,43 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     core = inp.core_id
     is_bin = is_raw_bin(inp.artefact)
 
+    # tan-cli#513: `flash_args.jlink_serial` was accepted (it passes the #486
+    # charset guard on every other backend) and then silently dropped here --
+    # `swd_probe` emitted no `SelectEmuBySN` at all, so on a bench with more
+    # than one J-Link this backend either failed to connect (JLinkExe with no
+    # probe selected refuses to pick) or, if a connect got through anyway,
+    # could not be trusted to have reached the intended board: `JLinkExe`
+    # selects a probe ONLY by serial, and an OEM-cloned serial shared by two
+    # different probes on the same host is a measured, not hypothetical,
+    # bench condition (tan-cli#513).
+    #
+    # Resolved and validated HERE, unconditionally, BEFORE the J-Link-vs-
+    # openocd/pyocd arm split just below -- not only inside the J-Link
+    # branch (tan-cli#513 REVIEW, finding 2). Two gaps that split closed:
+    # (1) a host-dependent refusal -- `--dry-run` always takes the J-Link arm
+    # (see the `inp.dry_run` bypass just below), so a hostile `jlink_serial`
+    # was refused under `--dry-run` and silently accepted-and-ignored on a
+    # real run on an openocd-only host, the SAME manifest getting two
+    # different verdicts depending on what happened to be on PATH; and
+    # (2) `jlink_serial` reaching the openocd/pyocd arm at all with no
+    # diagnostic -- openocd/pyocd have no probe-serial selection of their own
+    # (`JLinkExe`'s `SelectEmuBySN` is a J-Link-only primitive), so silently
+    # planning that arm anyway would be the exact accept-and-ignore shape
+    # #513 fixed for the J-Link arm, just moved one branch over; that branch
+    # refuses explicitly instead, below.
+    #
+    # `fa_str_checked`, not the tolerant `fa_str` (tan-cli#486 on Flow D): a
+    # NUMERIC serial -- the canonical SEGGER spelling -- is a bare YAML
+    # integer, which `fa_str` treats as "absent" and would silently drop the
+    # line right back. `validate_identifier` closes the same newline-
+    # injection hole `jlink_serial` is guarded against on Flow D
+    # (`_JLINK_SERIAL_DESTINATION`) -- `serial` is interpolated verbatim into
+    # `SelectEmuBySN {serial}`, a J-Link Commander script LINE, and (as of
+    # tan-cli#513 REVIEW) a `-SelectEmuBySN` argv word too.
+    serial = fa_str_checked(fa, "jlink_serial", False)
+    if serial is not None:
+        validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
+
     # `--dry-run` is documented to bypass the required-tool PATH gate entirely;
     # without the `inp.dry_run` bypass here this inner probe hard-failed a dry
     # run on any box without a probe tool installed, making `--dry-run`
@@ -1140,28 +1188,23 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     if jlink is not None:
         device = _resolve_jlink_device(fa)
         speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
-        # tan-cli#513: `flash_args.jlink_serial` was accepted (it passes the
-        # #486 charset guard on every other backend) and then silently
-        # dropped here -- `swd_probe` emitted no `SelectEmuBySN` at all, so on
-        # a bench with more than one J-Link this backend either fails to
-        # connect (JLinkExe with no probe selected refuses to pick) or, if a
-        # connect got through anyway, cannot be trusted to have reached the
-        # intended board: `JLinkExe` selects a probe ONLY by serial, and an
-        # OEM-cloned serial shared by two different probes on the same host
-        # is a measured, not hypothetical, bench condition (tan-cli#513).
-        # `fa_str_checked`, not the tolerant `fa_str` (tan-cli#486 on Flow D):
-        # a NUMERIC serial -- the canonical SEGGER spelling -- is a bare YAML
-        # integer, which `fa_str` treats as "absent" and would silently drop
-        # the line right back. `validate_identifier` closes the same
-        # newline-injection hole `jlink_serial` is guarded against on Flow D
-        # (`_JLINK_SERIAL_DESTINATION`) -- `serial` is interpolated verbatim
-        # into `SelectEmuBySN {serial}`, a J-Link Commander script LINE.
-        serial = fa_str_checked(fa, "jlink_serial", False)
-        if serial is not None:
-            validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
         return FlashPlan(
             argv=(
                 jlink, "-device", device, "-if", "SWD", "-speed", str(speed),
+                # tan-cli#513 REVIEW: `-SelectEmuBySN {serial}` in ARGV, not
+                # only the Commander script's leading line. This arm's argv
+                # carries `-AutoConnect 1` (unlike Flow D's argv, which has no
+                # `-AutoConnect` and instead relies entirely on its script's
+                # own leading `si SWD`/`connect` lines) -- with AutoConnect
+                # armed, JLinkExe may start connecting to whatever probe
+                # autoconnect finds during its own startup, BEFORE this
+                # backend's script is ever read, so the script line alone is
+                # not provably ahead of the connect on every DLL version. The
+                # argv selector applies at parse time, ahead of any connect
+                # the tool performs on its own -- order-independent within
+                # argv itself, and documented SEGGER Commander behaviour, so
+                # both are emitted: belt and braces, not a replacement.
+                *(("-SelectEmuBySN", serial) if serial is not None else ()),
                 "-AutoConnect", "1", "-ExitOnError", "1", "-NoGui", "1",
                 "-CommanderScript",
             ),
@@ -1187,6 +1230,27 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
                 else f"swd_probe[{core}]: {device} flashed via J-Link"
             ),
             jlink_script=jlink_commander_script(inp.artefact, base, do_reset, serial),
+        )
+
+    # tan-cli#513 REVIEW, finding 2: the openocd/pyocd arm has no probe-serial
+    # selection of its own -- `JLinkExe`'s `SelectEmuBySN` is a J-Link-only
+    # primitive, and neither `openocd`'s nor `pyocd`'s argv below reads
+    # `jlink_serial` at all. Refusing here (rather than silently building the
+    # plan anyway) is the same accept-and-ignore fix #513 applied to the
+    # J-Link arm, extended to this one: a manifest that names a probe serial
+    # and then runs on the arm that cannot honour it must say so, not report
+    # `ok:true` having dropped the field. Checked unconditionally, ahead of
+    # the `interface`/`target` requirement just below, so the diagnosis is
+    # about the field this arm cannot use rather than a field it happens to
+    # be missing.
+    if serial is not None:
+        raise FlashPlanError(
+            "swd_probe: flash_args.jlink_serial is set, but this run is taking the "
+            "openocd/pyocd path, which has no probe-serial selection of its own -- "
+            "JLinkExe's SelectEmuBySN is a J-Link-only primitive. Remove "
+            "flash_args.jlink_serial, or ensure a SEGGER J-Link is on PATH (and "
+            "flash_args.use_openocd/use_pyocd are not forcing this path) so the "
+            "manifest takes the primary path flash_args.jlink_serial belongs to."
         )
 
     interface = _default(fa_str_checked(fa, "interface", False), "")

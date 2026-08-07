@@ -1335,6 +1335,160 @@ def test_jlink_commander_script_serial_defaults_to_absent():
     assert script.splitlines()[0] == "r"
 
 
+@pytest.mark.parametrize("serial", ["801012345", "000440123456", "J-Link-OB_1", "12345678-9"])
+def test_swd_probe_jlink_probe_serial_real_segger_spellings_still_render(serial):
+    """tan-cli#513 REVIEW: the same four real SEGGER serial spellings Flow D's
+    own `test_flow_d_probe_serial_real_segger_spellings_still_render` pins --
+    `801012345` (bare numeric), `000440123456` (leading-zero string), the
+    on-board-probe name `J-Link-OB_1`, and the hyphenated `12345678-9`. The
+    swd_probe/Flow D asymmetry is exactly the one-path drift that let #486's
+    guard go missing on this arm in the first place; pinning the identical
+    fixture set on both keeps that from silently happening again."""
+    plan = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_serial=serial), lambda n: n == "JLinkExe"
+    )
+    assert plan.jlink_script.startswith(f"SelectEmuBySN {serial}\n")
+    assert "-SelectEmuBySN" in plan.argv
+    assert plan.argv[plan.argv.index("-SelectEmuBySN") + 1] == serial
+
+
+# ── swd_probe J-Link probe-serial: argv selector (tan-cli#513 REVIEW) ───────
+
+
+def test_swd_probe_jlink_argv_includes_selectemubysn_when_serial_is_set():
+    """tan-cli#513 REVIEW, finding 1: this arm's argv carries `-AutoConnect 1`
+    (Flow D's argv has none), so JLinkExe may start connecting to whatever
+    probe autoconnect finds BEFORE the Commander script's own leading
+    `SelectEmuBySN` line is ever read -- the script line alone does not
+    provably precede the connect on every DLL version. `-SelectEmuBySN` must
+    also be passed in argv, which selects at parse time. Fails against the
+    original #513 fix alone (measured: `-SelectEmuBySN` absent from
+    `plan.argv` even though the script line was already present)."""
+    plan = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_serial="603000869"), lambda n: n == "JLinkExe"
+    )
+    assert "-SelectEmuBySN" in plan.argv
+    assert plan.argv[plan.argv.index("-SelectEmuBySN") + 1] == "603000869"
+
+
+def test_swd_probe_jlink_argv_omits_selectemubysn_when_no_serial():
+    """The unaffected case: no `jlink_serial` means no `-SelectEmuBySN` word
+    at all, matching the script's own "absent -> no line" default."""
+    plan = flash_plan.plan_swd_probe(_swd_inputs(), lambda n: n == "JLinkExe")
+    assert "-SelectEmuBySN" not in plan.argv
+
+
+def test_swd_probe_jlink_argv_with_serial_is_byte_identical_apart_from_the_insertion():
+    """tan-cli#513 REVIEW nit: the emit tests must not stop at `startswith` --
+    prove `-SelectEmuBySN <serial>` is a pure INSERTION, disturbing no other
+    argv word (`-device`, `-if SWD`, `-speed`, `-AutoConnect 1`,
+    `-ExitOnError 1`, `-NoGui 1`, `-CommanderScript` all keep their exact
+    values and relative order)."""
+    without = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="STM32H747XI_M7"), lambda n: n == "JLinkExe"
+    )
+    with_serial = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="STM32H747XI_M7", jlink_serial="603000869"),
+        lambda n: n == "JLinkExe",
+    )
+    assert with_serial.argv[:7] == without.argv[:7]
+    assert with_serial.argv[7:9] == ("-SelectEmuBySN", "603000869")
+    assert with_serial.argv[9:] == without.argv[7:]
+
+
+def test_swd_probe_jlink_script_with_serial_is_the_no_serial_script_plus_one_line():
+    """Companion to the argv-identical check just above, for the Commander
+    script half: `SelectEmuBySN {serial}` is a pure PREPEND -- every line
+    after it is byte-identical to the no-serial script."""
+    without = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="STM32H747XI_M7"), lambda n: n == "JLinkExe"
+    )
+    with_serial = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="STM32H747XI_M7", jlink_serial="603000869"),
+        lambda n: n == "JLinkExe",
+    )
+    with_lines = with_serial.jlink_script.splitlines()
+    assert with_lines[0] == "SelectEmuBySN 603000869"
+    assert with_lines[1:] == without.jlink_script.splitlines()
+
+
+# ── swd_probe J-Link probe-serial: openocd/pyocd cannot honour it
+#    (tan-cli#513 REVIEW, finding 2) ─────────────────────────────────────────
+
+
+def test_swd_probe_probe_serial_is_refused_on_a_real_openocd_only_host():
+    """tan-cli#513 REVIEW, finding 2's headline repro: `flash_args: {
+    use_openocd: true, interface: cmsis-dap, target: gd32g553, jlink_serial:
+    "a;b"}` used to keep `jlink` `None` (the J-Link arm was never taken), so
+    the resolve+validate that lived only inside `if jlink is not None:` never
+    ran, and the plan was built and reported `ok` with the hostile value
+    silently dropped. Fails against the original #513 fix alone (measured: no
+    refusal on this exact manifest with only `openocd` on PATH)."""
+    inp = _swd_inputs(use_openocd=True, interface="cmsis-dap", target="gd32g553", jlink_serial="a;b")
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+
+
+def test_swd_probe_probe_serial_charset_guard_is_not_host_dependent():
+    """tan-cli#513 REVIEW, finding 2's host-dependency half: the SAME hostile
+    `jlink_serial` must be refused whether `--dry-run` forces the J-Link arm
+    (which validated it even under the original #513 fix) OR a real run on an
+    openocd-only host takes the fallback arm -- not one and not the other.
+    Fails against the original #513 fix alone (measured: the `--dry-run` case
+    already refused; the real-openocd-only case did not)."""
+    args = {"interface": "cmsis-dap", "target": "gd32g553", "jlink_serial": "dev\nice"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(dry, lambda n: n == "openocd")
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(real, lambda n: n == "openocd")
+
+
+def test_swd_probe_probe_serial_is_refused_on_the_openocd_arm_even_when_valid():
+    """A charset-CLEAN `jlink_serial` must still be refused on the
+    openocd/pyocd arm -- the problem is not the value's shape, it is that
+    `openocd`'s argv (`-f interface/....cfg -f target/....cfg -c program
+    ...`) has no probe-serial word to put it in at all. Accepting a
+    well-formed-but-unusable value and reporting `ok:true` would be the exact
+    accept-and-ignore shape #513 fixed for the J-Link arm."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", jlink_serial="603000869")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    message = str(raised.value)
+    assert "jlink_serial" in message
+    assert "openocd" in message.lower()
+
+
+def test_swd_probe_probe_serial_is_refused_on_the_pyocd_arm_too():
+    """The same refusal on the sibling tool: `pyocd`'s argv (`pyocd flash
+    --target ... [--base-address ...] <artefact>`) has no probe-serial word
+    either."""
+    inp = _swd_inputs(use_pyocd=True, interface="cmsis-dap", target="gd32g553", jlink_serial="603000869")
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+
+
+def test_swd_probe_probe_serial_refusal_precedes_the_interface_target_check():
+    """The `jlink_serial`-on-the-wrong-arm refusal fires even when
+    `interface`/`target` are ALSO missing -- the diagnosis names the field
+    this arm cannot use, not a coincidentally-also-missing one."""
+    inp = _swd_inputs(jlink_serial="603000869")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert "jlink_serial" in str(raised.value)
+
+
+def test_swd_probe_no_serial_still_reaches_the_openocd_arm_unaffected():
+    """The unaffected case: a manifest naming no `jlink_serial` at all must
+    keep working on the openocd/pyocd arm exactly as before this review
+    round -- this refusal is scoped to the field being SET, not to taking the
+    fallback arm in general."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553")
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert plan.argv[0] == "openocd"
+
+
 # ── swd_probe success message asserts no address for ELF/HEX (tan-cli#487) ──
 
 
