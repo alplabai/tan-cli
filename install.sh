@@ -381,15 +381,82 @@ fi
 # ---------------------------------------------------------------------------
 # Health-check BEFORE anything is committed (tan-cli#434). The sha256 check
 # above proves the downloaded BYTES are the ones the release published; it
-# says nothing about whether THIS host can execute them (e.g. a glibc floor
-# the host's libc is below -- the -gnu asset's dynamic loader then fails with
-# a message like `GLIBC_2.xx not found`, on stderr). Running it here, from its
-# staging location, means a verified-but-unrunnable release never gets near
-# $INSTALL_DIR or the shell rc file -- the only things at risk are $stage and
-# $tmp, which the EXIT trap reclaims either way, and whatever was already
-# installed is untouched because nothing below this point has run yet.
+# says nothing about whether THIS host can execute them. Two very different
+# hosts fail here and must never read the same (tan-cli#490):
+#
+#   * A glibc floor the host's libc is below -- the -gnu asset's dynamic
+#     loader runs and THEN fails, with a message like `GLIBC_2.xx not found`
+#     on stderr; the shell's exit code for that is whatever the loader
+#     returns, not 126.
+#   * $TMPDIR (or the /tmp `mktemp` falls back to) is mounted `noexec` --
+#     common on CIS/STIG-hardened images, which is exactly where customers
+#     install from via `curl | sh`. exec(2) never gets to run the file at
+#     all; every POSIX shell reports that as exit 126 with "...: Permission
+#     denied" on stderr. Exit 126 ALONE is not enough to tell noexec apart
+#     from a genuinely corrupt payload -- dash reports a mangled/non-ELF file
+#     as exit 126 too, just with "Exec format error" instead (measured) -- so
+#     both the code and the message text are checked below.
+#
+# On the noexec signature this retries ONCE, staged inside $INSTALL_DIR
+# instead of $TMPDIR: $INSTALL_DIR has to be exec-able anyway for `tan` to
+# ever run once installed, so if that mount refuses execution too there is
+# nothing short of a different --dir that will help, and the final message
+# says so instead of pointing at glibc. The retry only runs when
+# $INSTALL_DIR is writable without sudo (the default `--dir "$HOME/.local/bin"`
+# case this bug was filed against) -- a --system install prints the
+# diagnosis and stops rather than auto-retrying as root, which would mean
+# extracting/running an only-checksum-verified payload with root privilege.
 # ---------------------------------------------------------------------------
-if verify_out="$("$staged_bin" --version 2>&1)"; then
+run_health_check() { # $1 = path to the binary to run; sets $verify_out, $health_rc
+	if verify_out="$("$1" --version 2>&1)"; then
+		health_rc=0
+	else
+		health_rc=$?
+	fi
+}
+is_noexec_signature() { # $1 = exit code, $2 = captured output
+	[ "$1" = "126" ] || return 1
+	case "$2" in
+	*"Permission denied"*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+run_health_check "$staged_bin"
+
+retried=0
+if is_noexec_signature "$health_rc" "$verify_out" && mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ]; then
+	retried=1
+	echo "install.sh: staged binary failed to execute (exit 126) -- that filesystem is very likely mounted noexec. Retrying staged inside ${INSTALL_DIR}..."
+	retry_dir="$(mktemp -d "${INSTALL_DIR}/.tan-install-retry.XXXXXX" 2>/dev/null || true)"
+	if [ -n "$retry_dir" ]; then
+		old_stage="$stage"
+		if [ "$layout" = "archive" ]; then
+			if mv "$old_stage/tan" "$retry_dir/tan" 2>/dev/null; then
+				chmod -R a+rX "$retry_dir/tan"
+				rm -rf "$old_stage"
+				stage="$retry_dir"
+				staged_bin="$stage/tan/tan"
+				run_health_check "$staged_bin"
+			else
+				rm -rf "$retry_dir"
+			fi
+		else
+			if mv "$tmp" "$retry_dir/tan" 2>/dev/null; then
+				chmod +x "$retry_dir/tan"
+				rm -rf "$old_stage"
+				stage="$retry_dir"
+				staged_bin="$retry_dir/tan"
+				payload="$staged_bin"
+				run_health_check "$staged_bin"
+			else
+				rm -rf "$retry_dir"
+			fi
+		fi
+	fi
+fi
+
+if [ "$health_rc" = "0" ]; then
 	echo "install.sh: staged binary verified: ${verify_out}"
 else
 	echo "install.sh: newly downloaded binary failed to run: ${verify_out}" >&2
@@ -398,7 +465,17 @@ else
 	else
 		echo "install.sh: refusing to install -- no previous installation existed, so there is nothing to fall back to." >&2
 	fi
-	echo "install.sh: PATH was not modified. If the message above names a GLIBC symbol, this host's glibc is older than the release floor; install from a checkout instead: git clone https://github.com/${REPO} && pip install ./tan-cli/python" >&2
+	echo "install.sh: PATH was not modified." >&2
+	if is_noexec_signature "$health_rc" "$verify_out"; then
+		if [ "$retried" = "1" ]; then
+			echo "install.sh: exit 126 (Permission denied) persisted even after staging inside ${INSTALL_DIR} -- that filesystem is very likely ALSO mounted noexec." >&2
+		else
+			echo "install.sh: exit 126 (Permission denied) with the execute bit already set almost always means the staging filesystem is mounted noexec -- and ${INSTALL_DIR} was not writable without elevation, so no retry was attempted there." >&2
+		fi
+		echo "install.sh: this is a mount option on this host, NOT a broken download -- the sha256 check above already proved the downloaded bytes match the release. Retry with a TMPDIR (and/or --dir) that permits execution, e.g.:  TMPDIR=\"\$HOME/.cache\" sh install.sh ...   or   sh install.sh --dir <an exec-able path>" >&2
+	else
+		echo "install.sh: If the message above names a GLIBC symbol, this host's glibc is older than the release floor; install from a checkout instead: git clone https://github.com/${REPO} && pip install ./tan-cli/python" >&2
+	fi
 	exit 1
 fi
 

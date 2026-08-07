@@ -300,14 +300,63 @@ try {
 	# $LASTEXITCODE is checked explicitly. Running this against the STAGED copy,
 	# before $Dir is touched, means a verified-but-unrunnable release never
 	# costs the user their previous working install.
+	#
+	# tan-cli#490: on a host where a software-restriction / AppLocker policy
+	# blocks execution from %TEMP% -- exactly the enterprise-hardened image
+	# class customers install `tan` onto -- CreateProcess itself refuses and
+	# .NET surfaces that as a Win32Exception "Access is denied", not as
+	# anything that looks like a broken binary. That has to read differently
+	# from an actual corrupt payload (a missing-dependency error, or "is not a
+	# valid Win32 application"), so on that signature this retries the health
+	# check against a COPY staged inside $Dir instead of %TEMP% -- $Dir already
+	# has to permit running `tan` for the install to be usable at all -- before
+	# settling on the generic "this may be a broken binary" wording. The copy
+	# is discarded either way; $stage/$tmp (and the eventual commit) are
+	# untouched by this, so a policy-driven retry failure still leaves nothing
+	# under $Dir.
 	# -------------------------------------------------------------------------
-	try {
-		$verifyOut = (& $stagedExe --version 2>&1 | Out-String).Trim()
-		$verifyExit = $LASTEXITCODE
-	} catch {
-		$verifyOut = $_.Exception.Message
-		$verifyExit = 1
+	function Test-AccessDeniedSignature([string]$message) {
+		return $message -match "Access is denied"
 	}
+	function Invoke-HealthCheck([string]$exePath) {
+		try {
+			$out = (& $exePath --version 2>&1 | Out-String).Trim()
+			return @{ Out = $out; Exit = $LASTEXITCODE }
+		} catch {
+			return @{ Out = $_.Exception.Message; Exit = 1 }
+		}
+	}
+
+	$check = Invoke-HealthCheck $stagedExe
+	$verifyOut = $check.Out
+	$verifyExit = $check.Exit
+
+	$retried = $false
+	if ($verifyExit -ne 0 -and (Test-AccessDeniedSignature $verifyOut)) {
+		$retryDir = Join-Path $Dir (".tan-install-retry." + [Guid]::NewGuid().ToString("N"))
+		try {
+			New-Item -ItemType Directory -Path $retryDir | Out-Null
+			$retryExe = Join-Path $retryDir (Split-Path -Leaf $stagedExe)
+			Copy-Item -LiteralPath $stagedExe -Destination $retryExe -Force
+			if ($layout -eq "archive") {
+				# The onedir freeze needs its whole runtime tree beside the exe
+				# to even start, not just the exe file by itself.
+				Copy-Item -LiteralPath (Join-Path $stage "tan\_internal") -Destination (Join-Path $retryDir "_internal") -Recurse -Force
+			}
+			Write-Host "install.ps1: staged binary would not execute (Access is denied) -- a security policy on this host likely blocks running from its staging location. Retrying staged inside $Dir..."
+			$retried = $true
+			$check = Invoke-HealthCheck $retryExe
+			$verifyOut = $check.Out
+			$verifyExit = $check.Exit
+		} catch {
+			# $Dir could not be used for the retry (e.g. -System without
+			# elevation) -- fall through to the failure branch below with the
+			# ORIGINAL %TEMP% result.
+		} finally {
+			Remove-Item -LiteralPath $retryDir -Recurse -Force -ErrorAction SilentlyContinue
+		}
+	}
+
 	if ($verifyExit -eq 0) {
 		Write-Host "install.ps1: staged binary verified: $verifyOut"
 	} else {
@@ -317,7 +366,16 @@ try {
 		} else {
 			Write-Host "install.ps1: no previous installation existed, so there is nothing to fall back to."
 		}
-		Write-Error "install.ps1: refusing to install. The Path was not modified. This host may be missing a runtime dependency the binary needs, or security software may have altered it. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
+		if (Test-AccessDeniedSignature $verifyOut) {
+			if ($retried) {
+				Write-Host "install.ps1: Access is denied persisted even after staging inside $Dir -- a security policy (AppLocker / Software Restriction Policy) very likely blocks running tan from there too, not only from %TEMP%." -ForegroundColor Red
+			} else {
+				Write-Host "install.ps1: Access is denied, with the file freshly downloaded and sha256-verified, almost always means a security policy (AppLocker / Software Restriction Policy) blocks running an executable from %TEMP% -- not a broken download. ($Dir could not be used for a retry without elevation.)" -ForegroundColor Red
+			}
+			Write-Error "install.ps1: refusing to install. The Path was not modified. This is a policy on this host, NOT evidence the download is broken -- the sha256 check above already proved the bytes match the release. Ask an administrator to allow execution from $Dir, or install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
+		} else {
+			Write-Error "install.ps1: refusing to install. The Path was not modified. This host may be missing a runtime dependency the binary needs, or security software may have altered it. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
+		}
 		exit 1
 	}
 

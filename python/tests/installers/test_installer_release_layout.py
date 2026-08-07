@@ -399,6 +399,69 @@ def _fake_sudo(unlock_target: Path, calls_log: Path) -> Path:
     return bin_dir
 
 
+def _noexec_probe() -> bool:
+    """Best-effort: mounting a `noexec` tmpfs needs `CAP_SYS_ADMIN`, which
+    `unshare --map-root-user -m` grants inside a fresh, unprivileged user+mount
+    namespace -- but some sandboxes/CI images block unprivileged user
+    namespaces outright (or lack `unshare`/`mount` entirely, e.g. macOS). Used
+    only to decide whether the tan-cli#490 noexec tests below can run for
+    real; see their own docstrings for why a real mount is used instead of a
+    permission-bit trick.
+    """
+    if os.name == "nt" or shutil.which("unshare") is None:
+        return False
+    try:
+        probe = subprocess.run(
+            [
+                "unshare", "--map-root-user", "-m", "--", "sh", "-c",
+                "d=$(mktemp -d) && mount -t tmpfs -o noexec tmpfs \"$d\"",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        return probe.returncode == 0
+    except OSError:
+        return False
+
+
+noexec_capable = pytest.mark.skipif(
+    not _noexec_probe(),
+    reason="host cannot mount a noexec tmpfs via unshare -- cannot simulate tan-cli#490's failure mode for real",
+)
+
+
+def _install_sh_under_noexec_tmpdir(
+    base_url: str, dest: Path, home: Path, noexec_dir: Path, *args: str
+) -> subprocess.CompletedProcess:
+    """Runs `install.sh` with `$TMPDIR` pointed at a REAL `noexec`-mounted
+    tmpfs (tan-cli#490), inside one `unshare --map-root-user -m` so the mount
+    is unprivileged and vanishes with the process -- nothing persists on the
+    host. A real mount is used rather than stripping the execute bit off a
+    staging dir: the two are different kernel-level refusals (`noexec` blocks
+    `exec(2)` outright, even for root, via the VFS mount flags; a missing
+    directory search bit is a DAC permission check that root/`CAP_DAC_OVERRIDE`
+    -- which `--map-root-user` grants inside the namespace -- bypasses), and
+    only the mount reproduces the exact "Permission denied", exit-126 signature
+    install.sh now keys off.
+    """
+    script = (
+        "set -e\n"
+        f'mount -t tmpfs -o noexec tmpfs "{noexec_dir}"\n'
+        # `--map-root-user` maps this process to uid 0 inside the namespace but
+        # `tar`'s default same-owner extraction still tries (and, on some
+        # kernels, fails) to chown to the archive's recorded uid/gid -- a
+        # userns-mapping artefact unrelated to noexec (also hit and noted the
+        # same way in the tan-cli#490 report's own repro).
+        'TAR_OPTIONS="--no-same-owner" '
+        f'TMPDIR="{noexec_dir}" TAN_INSTALL_BASE_URL="{base_url}" '
+        f'HOME="{home}" USERPROFILE="{home}" '
+        f'sh "{INSTALL_SH}" --dir "{dest}" --no-modify-path {" ".join(args)}\n'
+    )
+    return subprocess.run(
+        ["unshare", "--map-root-user", "-m", "--", "sh", "-c", script],
+        capture_output=True, text=True, timeout=180,
+    )
+
+
 def _skip_unless_latest_is_a_fixture_tag(result: subprocess.CompletedProcess) -> None:
     """`latest` is resolved against the real GitHub, so which tag comes back is
     not this suite's to decide. SKIP -- never fail -- only when it could not be
@@ -599,6 +662,69 @@ def test_ps1_bad_payload_on_upgrade_leaves_previous_install_working(release_serv
     combined = result.stdout + result.stderr
     assert "your existing installation" in combined
     assert "was never touched" in combined
+
+
+@windows_only
+def test_ps1_temp_execute_denied_retries_staging_inside_dest_dir(release_server, tmp_path):
+    """tan-cli#490, Windows half: a host-level "no execute from here" refusal
+    over the staging location -- the same shape an AppLocker / Software
+    Restriction Policy "block execution from %TEMP%" rule produces
+    (`CreateProcess` fails with `ERROR_ACCESS_DENIED`, which .NET surfaces as
+    `Win32Exception: Access is denied`) -- must not sink the install.
+    `icacls /deny (X)` reproduces that refusal for real on the staging
+    directory (rather than mocking it), the same way install.sh's sibling
+    test (`test_sh_noexec_tmpdir_retries_staging_inside_install_dir`) uses a
+    real `noexec` mount instead of a permission-bit trick.
+    """
+    temp_root = tmp_path / "denied-temp"
+    temp_root.mkdir()
+    deny = subprocess.run(
+        ["icacls", str(temp_root), "/deny", "Everyone:(OI)(CI)(X)"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert deny.returncode == 0, f"could not set up the deny-execute ACE: {deny.stdout}\n{deny.stderr}"
+
+    dest = tmp_path / "prog"
+    result = _install_ps1(
+        release_server, dest, tmp_path, "-Version", "v0.4.1",
+        extra_env={"TEMP": str(temp_root), "TMP": str(temp_root)},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert (dest / "tan.exe").is_file()
+    combined = result.stdout + result.stderr
+    assert "security policy" in combined
+
+
+@windows_only
+def test_ps1_temp_execute_denied_distinguishes_from_a_broken_binary(release_server, tmp_path):
+    """tan-cli#490's hard requirement, Windows half: when the retry ALSO
+    fails (here, `-Dir` is put inside the SAME deny-execute directory, so
+    there is no exec-able place left to stage), the failure has to say this
+    is a host security policy, not the generic "missing runtime dependency /
+    security software altered it" wording install.ps1 gives for an
+    actually-corrupt payload.
+    """
+    denied_root = tmp_path / "denied"
+    denied_root.mkdir()
+    deny = subprocess.run(
+        ["icacls", str(denied_root), "/deny", "Everyone:(OI)(CI)(X)"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert deny.returncode == 0, f"could not set up the deny-execute ACE: {deny.stdout}\n{deny.stderr}"
+
+    dest = denied_root / "prog"  # -Dir itself is under the same deny-execute ACE
+    result = _install_ps1(
+        release_server, dest, tmp_path, "-Version", "v0.4.1",
+        extra_env={"TEMP": str(denied_root), "TMP": str(denied_root)},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "Access is denied" in combined
+    assert "security policy" in combined
+    # Must not misattribute a host security policy to a missing dependency.
+    assert "may be missing a runtime dependency" not in combined
 
 
 # ---------------------------------------------------------------------------
@@ -806,3 +932,94 @@ def test_sh_bad_payload_on_upgrade_leaves_previous_install_working(release_serve
     combined = result.stdout + result.stderr
     assert "your existing installation" in combined
     assert "was never touched" in combined
+
+
+@posix_only
+@noexec_capable
+def test_sh_noexec_tmpdir_retries_staging_inside_install_dir(release_server, tmp_path):
+    """tan-cli#490: a `$TMPDIR` mounted `noexec` -- common on CIS/STIG-hardened
+    images, which is exactly where customers install `tan` from via
+    `curl | sh` -- must not sink the install. `$INSTALL_DIR` (here, a normal
+    writable dir OUTSIDE the noexec mount) already has to be exec-able for
+    `tan` to ever run once installed, so install.sh retries the health check
+    staged there instead of refusing outright.
+    """
+    dest = tmp_path / "bin"
+    home = tmp_path / "home"
+    home.mkdir()
+    noexec_dir = tmp_path / "noexec-tmp"
+    noexec_dir.mkdir()
+
+    result = _install_sh_under_noexec_tmpdir(
+        release_server, dest, home, noexec_dir, "--version", "v0.4.1"
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    installed = dest / "tan"
+    assert installed.is_file()
+    assert FIXTURE_VERSION_LINE in installed.read_text(encoding="utf-8")
+    assert os.access(installed, os.X_OK)
+    # No retry staging directory left behind under $INSTALL_DIR.
+    assert list(dest.iterdir()) == [installed]
+    combined = result.stdout + result.stderr
+    assert "noexec" in combined
+
+
+@posix_only
+@noexec_capable
+def test_sh_noexec_tmpdir_archive_layout_retries_staging_inside_install_dir(release_server, tmp_path):
+    """Same as above, for the `--onedir` archive layout (tan-cli#349): the
+    thing that has to move off the noexec mount is `$stage/tan/tan`, not the
+    launcher (which is never executed while staged), and the retry has to
+    carry the runtime's `_internal/` tree along with it.
+    """
+    dest = tmp_path / "bin"
+    home = tmp_path / "home"
+    home.mkdir()
+    noexec_dir = tmp_path / "noexec-tmp"
+    noexec_dir.mkdir()
+
+    result = _install_sh_under_noexec_tmpdir(
+        release_server, dest, home, noexec_dir, "--version", FIRST_ARCHIVE_TAG
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    launcher = dest / "tan"
+    assert launcher.is_file() and os.access(launcher, os.X_OK)
+    payload = dest / "tan-cli-lib" / "tan"
+    assert payload.is_file() and os.access(payload, os.X_OK)
+    assert (dest / "tan-cli-lib" / "_internal").is_dir()
+    # No retry staging directory left behind under $INSTALL_DIR.
+    assert sorted(p.name for p in dest.iterdir()) == ["tan", "tan-cli-lib"]
+    combined = result.stdout + result.stderr
+    assert "noexec" in combined
+
+
+@posix_only
+@noexec_capable
+def test_sh_noexec_tmpdir_distinguishes_noexec_from_a_broken_binary(release_server, tmp_path):
+    """tan-cli#490's hard requirement: when the retry ALSO fails (here,
+    `--dir` is put INSIDE the same noexec mount, so there is no exec-able
+    place left to stage), the failure has to say this is a noexec mount, not
+    the generic "your glibc may be too old" guidance install.sh gives for an
+    actually-corrupt payload -- a customer who cannot tell those two apart
+    from the message alone files a support ticket against the wrong thing.
+    """
+    noexec_dir = tmp_path / "noexec-tmp"
+    noexec_dir.mkdir()
+    dest = noexec_dir / "bin"  # $INSTALL_DIR itself is on the noexec mount too
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = _install_sh_under_noexec_tmpdir(
+        release_server, dest, home, noexec_dir, "--version", "v0.4.1"
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "noexec" in combined
+    assert "Permission denied" in combined
+    assert "PATH was not modified" in combined
+    # Must not misattribute a mount option to a libc floor.
+    assert "GLIBC" not in combined
+    assert "glibc" not in combined
