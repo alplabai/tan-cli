@@ -7,7 +7,70 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [0.5.2] — Unreleased
 
+### Changed
+
+- **`tan debug-config --core <id>` now refuses a `--core` matching no build
+  slice even when `--target-kind` is given explicitly**, not only when it is
+  omitted. Previously an explicit `--core` was only checked against
+  `build/system-manifest.yaml` when `tan` had to infer the target class
+  itself; naming `--target-kind` bypassed that check entirely, so a
+  mistyped or stale `--core` on an otherwise-built project silently produced
+  a launch configuration pointing at a generic pre-build path that does not
+  exist (`${workspaceFolder}/build/app/zephyr/zephyr.elf`) instead of the
+  real per-core artefact. A customer preparing a launch config for a core
+  named in `board.yaml` but not yet built by THIS project is now refused
+  (`debug-config.core-unknown`, exit 2) rather than getting a placeholder
+  config back at exit 0 -- run `tan build` for that core first, or drop
+  `--target-kind` to let it infer. (#489)
+
 ### Fixed
+
+- **`tan debug-config` could destroy a customer's hand-authored
+  `.vscode/launch.json`, in three separate ways, plus two smaller merge
+  gaps found reviewing the fix.** All under (#489):
+  - The write used a truncating `open(path, "w")`: any failure between the
+    truncate and the flush (a full disk, a quota/`RLIMIT_FSIZE` hit, an I/O
+    error, or the process dying) destroyed the file, and the next run then
+    refused *permanently* at the malformed-JSON guard. Rewritten as a
+    temp-sibling write, `fsync`'d before an `os.replace` onto the REAL
+    (symlink-resolved) target, with a POSIX directory `fsync` after --
+    matching, and closing gaps in, `bootstrap_cmd.reconcile_west_manifest_path`'s
+    own pattern. A symlinked `launch.json` (dotfile-managed, or shared
+    across worktrees) now keeps the link and updates the real file, instead
+    of the link being replaced by a plain file holding stale content.
+  - Merging a fresh draft into an existing `configFiles`/`setupCommands`
+    list matched entries by POSITION, so a shorter or differently-ordered
+    resolved list silently deleted the customer's own extra entries (a
+    hand-added second OpenOCD `.cfg`, extra `setupCommands` for a remote
+    gdb session) and could pair unrelated entries, both destroying one and
+    duplicating another. Matching is now by identity (a dict's own `text`
+    field, or a scalar's own value) instead of index.
+  - `debug-config.sdk-identity-key-absent` misattributed "no core id was
+    resolved to look up the SDK's per-core `jlink_device` map with" as "the
+    SDK publishes no `device` value for this SoM at all" -- telling a
+    customer on a never-built project to file a metadata bug when the
+    working remedy was `--core <id>`. Split into
+    `debug-config.sdk-identity-core-unresolved` for that case (and the
+    sibling case of an unrecognised `--core`, which now names the cores the
+    SDK does publish); `sdk-identity-key-absent` still fires, correctly,
+    when the SDK's identity block genuinely carries no `jlink_device` map at
+    all.
+  - `--pre-launch-task ''` (documented as "omit the key entirely") was a
+    silent no-op against an EXISTING `launch.json` already carrying one from
+    a prior run -- the merge only visits keys the fresh draft carries, and
+    the opt-out's own implementation removes the key from the draft rather
+    than marking it for removal. `create_launch_json_write_plan` now takes
+    an explicit set of keys to omit from the merged result.
+
+  Known, accepted limitation: the list-identity fix above still cannot
+  SHRINK a `configFiles`/`setupCommands` list past what the fresh draft no
+  longer names, even when the reason is that tan's OWN earlier write (a
+  stale SDK-filled config, or a build that now registers fewer configs) is
+  what should be retracted -- nothing at this layer can tell "tan wrote
+  this and it is now wrong" apart from "the customer wrote this and tan has
+  never resolved it"; both are a concrete value in the file that no current
+  draft item claims. Preserving (never silently deleting real content) is
+  the deliberately safer default given that ambiguity.
 
 - **Two release gates went red on every open PR the moment `v0.5.1` was
   tagged.** `version-identity` refused a tree still claiming `0.5.1` once

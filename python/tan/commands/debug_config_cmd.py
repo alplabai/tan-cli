@@ -46,8 +46,11 @@ converts any unexpected exception into `debug-config.internal-failure` at exit
 
 from __future__ import annotations
 
+import glob
 import os
+import shutil
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -940,6 +943,107 @@ def _no_debuggable_target_class_failure(
     )
 
 
+def _sweep_stale_tan_tmp_siblings(directory: str) -> None:
+    """Best-effort cleanup of `*.tan-tmp` files left behind by a PRIOR run
+    that died between [`_atomic_write_launch_json`]'s temp write and its
+    rename (SIGKILL, power loss, the VS Code extension killing the child --
+    none of these leave Python a chance to run its own `except` cleanup).
+    Never raises: a leftover temp this sweep cannot remove (permissions, the
+    directory itself gone) must not fail an otherwise-successful write, and a
+    fresh `mkstemp` name never collides with a stale one regardless."""
+    try:
+        for stale in glob.glob(os.path.join(glob.escape(directory), "*.tan-tmp")):
+            try:
+                os.unlink(stale)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _atomic_write_launch_json(path: str, content: str) -> None:
+    """Write `content` to `path` atomically and durably. Raises `OSError` on
+    any failure; the caller decides how to report it (`_write_failure`).
+
+    tan-cli#489 review round, findings 4 + 5 -- two gaps the original
+    temp-sibling-plus-`os.replace` fix (matching
+    `bootstrap_cmd.reconcile_west_manifest_path`'s own pattern) still had:
+
+    * **Symlink-safe.** `.vscode/launch.json` can be a symlink -- dotfile-
+      managed, or a canonical file shared across worktrees. `os.path.realpath`
+      resolves the REAL target FIRST, both for where the temp sibling is
+      created and for what `os.replace` targets: writing the temp beside the
+      UN-resolved `path` and replacing THAT would put a regular file where
+      the symlink was (destroying the link) while the real file silently
+      stops being updated -- measured: `os.replace` on a symlink replaces the
+      link itself, it does not write through it the way `open(path, "w")`
+      always did. Resolving first also keeps the temp on the SAME filesystem
+      as the real target when the two differ (`.vscode/` and the symlink's
+      destination can be different mounts), which `os.replace` requires for
+      its atomicity guarantee and fails outright (`EXDEV`) without.
+    * **Durable, not just atomic-in-naming.** `os.replace` is atomic with
+      respect to the RENAME only -- it says nothing about whether the
+      renamed-TO content has actually reached stable storage. A bare
+      `write`+`close` leaves the data in the page cache; power loss after
+      `os.replace` returns but before the temp's data blocks are flushed can
+      journal the rename without the content on a filesystem that does not
+      order the two together (XFS, btrfs, APFS, NTFS via `MoveFileExW`, and
+      network filesystems generally) -- ext4's `auto_da_alloc` heuristic
+      happens to cover the common Linux case, but nothing here may depend on
+      a heuristic that is filesystem-specific. `os.fsync` on the temp file's
+      OWN descriptor before the rename covers the content; a directory
+      `fsync` after the rename (POSIX only -- Windows has no directory
+      handle to fsync, and `ReplaceFile`/`MoveFileExW` already journal the
+      rename itself) covers the rename entry surviving a crash too.
+
+    Mode/ACL are carried across the inode swap with `shutil.copymode`,
+    guarded for the create case (nothing to copy from, and best-effort: a
+    mode this process cannot read or `chmod` must not fail an otherwise-
+    successful write) -- `os.replace` swaps the DIRECTORY ENTRY, not the
+    file's own permission bits, so a `600`-mode `launch.json` (this file can
+    carry `miDebuggerServerAddress` and absolute host paths) would otherwise
+    come back at `mkstemp`'s own default `600`... except `mkstemp` ALSO
+    defaults to `600`, so the real risk this guards is a customer file with
+    WIDER permissions than that (a `664` a shared `.vscode/` convention set
+    deliberately) silently narrowing, not just widening -- `copymode` makes
+    the swap permission-preserving in either direction.
+    """
+    resolved = os.path.realpath(path)
+    directory = os.path.dirname(resolved)
+    _sweep_stale_tan_tmp_siblings(directory)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tan-tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.path.exists(resolved):
+            try:
+                shutil.copymode(resolved, tmp_path)
+            except OSError:
+                pass
+        os.replace(tmp_path, resolved)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    if os.name != "nt":
+        try:
+            dir_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            # Best-effort insurance for the RENAME entry surviving a crash,
+            # on top of the file's own fsync above (which already protects
+            # the content): some filesystems/mounts (overlayfs, certain
+            # FUSE/NFS setups) refuse a bare directory fsync outright.
+            pass
+
+
 def _write_failure(
     generated_at: str, target: str, server: str, launch_json_path: str, message: str
 ) -> _Outcome:
@@ -1185,7 +1289,22 @@ def _run(
             # core was resolved, or the one resolved has no entry in the
             # published map -- never "the SDK publishes no value for this
             # SoM", which is what `sdk-identity-key-absent` would have said.
-            core_unindexed = identity_core is None or identity_core not in known_jlink_cores
+            #
+            # Review round: `bool(known_jlink_cores)` is required in front of
+            # the core-mismatch half. A SoM whose published `variants[].debug`
+            # carries NO `jlink_device` key at all (real shape: today's Alif
+            # entries publish `openocd_config` but not `jlink_device`) makes
+            # `known_jlink_cores` the empty set regardless of `identity_core`
+            # -- `core_unindexed` was unconditionally True, so even a VALID
+            # `--core m55_hp` reported "has no `device` entry for core
+            # 'm55_hp' -- its published cores are: none ... pass --core with
+            # one of the cores above", advice that contradicts itself. That
+            # SoM genuinely publishes no `device` value for ANY core --
+            # `sdk-identity-key-absent` is the correct, and only correct,
+            # code for it, exactly as it was before this split.
+            core_unindexed = bool(known_jlink_cores) and (
+                identity_core is None or identity_core not in known_jlink_cores
+            )
             if server == JLINK and core_unindexed:
                 identity_issues.append(
                     _sdk_identity_core_unresolved_issue(identity_core, known_jlink_cores)
@@ -1314,45 +1433,34 @@ def _run(
     # it can be disclosed.
     overwrites = sdk_identity_overwrites(existing, draft, sdk_filled_json_fields)
 
+    # tan-cli#489 (6): `--pre-launch-task ''` opts OUT of a `preLaunchTask` key
+    # entirely (`create_launch_draft` builds it, then deletes it), which is
+    # indistinguishable, to the merge's own "only visit the draft's own keys"
+    # rule, from this target simply having no default -- so the opt-out was a
+    # silent no-op against an entry a PRIOR run already gave one. Named here,
+    # explicitly, rather than left for `create_launch_json_write_plan` to
+    # infer from the draft alone.
+    explicit_omissions = frozenset({"preLaunchTask"}) if pre_launch_task == "" else frozenset()
+
     try:
-        plan = create_launch_json_write_plan(existing, draft)
+        plan = create_launch_json_write_plan(existing, draft, explicit_omissions)
     except DebugConfigError as err:
         # A malformed existing launch.json surfaces as an internal failure in TS.
         return _internal_failure(generated_at, str(err), cwd_launch_path)
 
-    # Atomic replace: write a sibling temp in the same `.vscode/` directory,
-    # then rename over the real path -- the same pattern
-    # `bootstrap_cmd.reconcile_west_manifest_path` already uses for
-    # `.west/config`. `open(launch_json_path, "w")` truncates the customer's
-    # file to zero before a single byte of `plan.content` is written, and that
-    # content exists only in memory -- a failure between the truncate and the
-    # flush (ENOSPC, a quota/RLIMIT_FSIZE hit, an I/O error, or the process
-    # dying: SIGKILL, power loss, the VS Code extension killing the child)
-    # destroys every hand-written configuration with no way for tan to repair
-    # it: the next run reads the wreckage, hits the malformed-JSON guard
-    # above, and refuses at exit 5 forever. Writing the temp file first means
-    # the same failure leaves the temp truncated and the real file untouched.
-    # `tmp_path` sits beside `launch_json_path` (not in a system temp dir) so
-    # `os.replace` never crosses a filesystem boundary -- required for the
-    # POSIX atomicity guarantee, and on Windows `os.replace` still performs
-    # the swap (via `MoveFileExW`/`MOVEFILE_REPLACE_EXISTING`) but only once
-    # the temp write has already fully succeeded. `newline=""` so the
-    # splice's own CRLF survives: Python's text mode would otherwise
-    # translate every `\n` it wrote, turning a CRLF-authored file into
-    # `\r\r\n`. The content is already exactly the bytes intended.
-    launch_path_obj = Path(launch_json_path)
-    tmp_path = launch_path_obj.with_name(f"{launch_path_obj.name}.{os.getpid()}.tan-tmp")
+    # `open(launch_json_path, "w")` truncates the customer's file to zero
+    # before a single byte of `plan.content` is written, and that content
+    # exists only in memory -- a failure between the truncate and the flush
+    # (ENOSPC, a quota/RLIMIT_FSIZE hit, an I/O error, or the process dying:
+    # SIGKILL, power loss, the VS Code extension killing the child) destroys
+    # every hand-written configuration with no way for tan to repair it: the
+    # next run reads the wreckage, hits the malformed-JSON guard above, and
+    # refuses at exit 5 forever. `_atomic_write_launch_json`'s own docstring
+    # covers the rest: symlink-safe, fsync'd before the rename, and mode-
+    # preserving.
     try:
-        tmp_path.write_text(plan.content, encoding="utf-8", newline="")
-        os.replace(tmp_path, launch_path_obj)
+        _atomic_write_launch_json(launch_json_path, plan.content)
     except OSError as err:
-        # Worth naming on Windows: a `launch.json` open in another process
-        # (e.g. VS Code itself) or marked read-only fails the replace even
-        # though writing the temp succeeded -- clean up the temp either way.
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return _write_failure(
             generated_at, target, server, launch_json_path, str(err)
         )

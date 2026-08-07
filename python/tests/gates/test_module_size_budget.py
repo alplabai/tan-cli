@@ -240,7 +240,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # it used to misattribute; (5) `_explicit_core_unknown_failure` closes the
     # silent `--core`-vs-manifest gap `infer_target_kind`'s own guard cannot
     # reach once `--target-kind` is given explicitly.
-    "tan/commands/debug_config_cmd.py": 1535,
+    # 1535 -> 1643, review round on the same issue: (1) `bool(known_jlink_cores)`
+    # guard plus its own explaining comment, so a SoM with no `jlink_device`
+    # map at all does not steal `sdk-identity-key-absent`'s correct case;
+    # (4/5, symlink+fsync) `_atomic_write_launch_json` replaced the bare
+    # temp-plus-`os.replace` with a symlink-resolving, `fsync`'d,
+    # mode-preserving write plus a stale-temp sweep -- a real function with a
+    # real docstring, not a few extra lines at the call site; (6)
+    # `explicit_omissions` threaded through `create_launch_json_write_plan`
+    # so `--pre-launch-task ''` actually removes an existing key on a write,
+    # not just a fresh draft.
+    "tan/commands/debug_config_cmd.py": 1643,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -343,7 +353,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # counterpart of `_core_not_in_manifest_message` above, kept in `tan.core`
     # rather than duplicated in the command module per this file's own
     # pure-logic convention.
-    "tan/core/debug_launch.py": 1109,
+    # 1201, not 1109, review round on the same issue: (2/3) the per-index
+    # list merge was replaced with `_list_item_identity` +
+    # `_merge_list_by_identity` (a reordered `configFiles`/`setupCommands`
+    # was pairing the wrong entries, both destroying one and duplicating
+    # another) -- a real function plus its own docstring recording the
+    # remaining, deliberately-accepted "cannot shrink a list tan itself
+    # wrote" limitation, not a few extra lines; (6) `explicit_omissions`
+    # threaded through `create_launch_json_write_plan` so
+    # `--pre-launch-task ''` removes an existing key on a write, not only a
+    # fresh draft.
+    "tan/core/debug_launch.py": 1201,
     "tan/commands/build/execute.py": 941,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
@@ -449,7 +469,14 @@ _MIRRORED = ("tan/planner/",)
 # per-index merge used to silently delete a customer's own `setupCommands`/
 # `configFiles` entries). `_run` (`debug_config_cmd.py`) also grew, 320 -> 382,
 # but was already over the cap, so it does not move this count.
-_FUNCTION_COUNT_BUDGET = 205
+#
+# 206, not 205, review round on the same issue: `_merge_value`'s old 53-line
+# list branch was REPLACED by `_merge_list_by_identity` (52 lines, a wash --
+# still one function over the cap, not two), but `_atomic_write_launch_json`
+# (`debug_config_cmd.py`, findings 4+5: symlink-resolving, `fsync`'d,
+# mode-preserving) is a genuinely NEW one at 81 lines, so the count moves by
+# exactly the net +1 that accounts for.
+_FUNCTION_COUNT_BUDGET = 206
 _FUNCTION_WORST_BUDGET = 707
 
 

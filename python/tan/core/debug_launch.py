@@ -715,6 +715,90 @@ def _is_resolved(value: Any) -> bool:
     return isinstance(value, str) and not is_unresolved_placeholder(value)
 
 
+def _list_item_identity(item: Any) -> Any:
+    """The stable identity a per-list-element merge matches an incoming
+    (draft) item against an existing one BY, instead of by shared index.
+
+    tan-cli#489 review round: a per-INDEX merge treats `existing[i]` and
+    `next_value[i]` as "the same logical entry" regardless of what either
+    actually holds. On a REORDERED `configFiles` (the conventional OpenOCD
+    interface-first order: `["interface/jlink.cfg", "board/renesas_rzv2n.cfg"]`)
+    merged against a one-element resolved draft
+    (`["board/renesas_rzv2n.cfg"]`), position 0 pairs the customer's
+    `interface/jlink.cfg` with tan's OWN `board/renesas_rzv2n.cfg` -- which
+    the merge then treats as an UPDATE (overwriting the interface entry),
+    while the untouched tail-preservation for `existing[1:]` finds tan's own
+    value a SECOND time, so OpenOCD ends up loading the board config twice
+    AND never loading the interface config at all. Matching by identity finds
+    each draft item's REAL counterpart (if any) wherever it sits, so the
+    merge updates the right entry and duplicates nothing, regardless of
+    order.
+
+    `setupCommands`' dicts are identified by their own `text` field -- the
+    real cppdbg command string, the one thing that names WHICH command this
+    is; `ignoreFailures` is a modifier on that SAME command, not a separate
+    identity. Anything else (a bare string -- `configFiles`'s own shape -- or
+    a dict with no `text`) is its own identity, compared by value.
+    """
+    if isinstance(item, dict) and isinstance(item.get("text"), str):
+        return item["text"]
+    return item
+
+
+def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[Any]:
+    """Merge `next_value` into `existing`, matching each draft item against
+    its real counterpart in `existing` (by [`_list_item_identity`]) instead
+    of assuming they share an index. Port target: `_merge_value`'s list
+    branch, factored out so its own docstring can stay about the OVERALL
+    merge rule.
+
+    Every draft item is visited, in the draft's own order: matched against an
+    unconsumed `existing` entry with the SAME identity (merged recursively,
+    so a matched `setupCommands` dict keeps a customer-added key like
+    `ignoreFailures` the draft never writes -- unchanged from before this
+    round), or, with no match, taken as-is (a genuinely NEW resolved value
+    this run added). `existing` entries no `next_value` item names at all --
+    the customer's own addition tan never resolves for, e.g. a hand-added
+    second `.cfg` or `setupCommands` entry -- are appended afterward, in
+    their original relative order, never re-truncated away (tan-cli#489 (3)).
+
+    **Known, accepted limitation** (tan-cli#489 review round, finding 3): this
+    can still never SHRINK a list past what the draft itself no longer names,
+    even when the reason is that tan's OWN earlier write is now stale (a
+    rebuild whose `runners.yaml` drops a `--config`, or an SDK-filled element
+    superseded by a real build). Nothing at this layer can tell "tan wrote
+    this, and it is now wrong" apart from "the customer wrote this, and tan
+    has never resolved it" -- both look identical: a concrete value sitting
+    in `existing` that no draft item claims. The SAME two scenarios are, in
+    fact, structurally IDENTICAL to the one this whole list-merge exists to
+    protect (tan-cli#489 (3)'s own launch-configuration evidence: a hand-added
+    second OpenOCD `.cfg`, `["board/renesas_rzv2n.cfg", "interface/jlink.cfg"]`
+    merged against a one-element resolved draft, MUST keep both) -- so
+    resolving this in general needs a provenance signal ("did TAN write this
+    value, in a prior run") that no state here, or on disk, currently
+    records. Given that choice, keeping (never silently deleting real
+    content) is the deliberately safer default; a stale value surviving one
+    run too many is a strictly smaller harm than the data loss #489 is about.
+    A future fix would need to record which values a write actually
+    authored (a sidecar, or an in-file marker) rather than infer it from
+    shape alone.
+    """
+    remaining = list(existing)
+    merged: list[Any] = []
+    for item in next_value:
+        identity = _list_item_identity(item)
+        match_index = next(
+            (i for i, e in enumerate(remaining) if _list_item_identity(e) == identity),
+            None,
+        )
+        if match_index is not None:
+            merged.append(_merge_value(remaining.pop(match_index), item))
+        else:
+            merged.append(item)
+    merged.extend(remaining)
+    return merged
+
+
 def _merge_value(existing: Any, next_value: Any) -> Any:
     """Merge one incoming value over what the file already holds.
 
@@ -739,24 +823,7 @@ def _merge_value(existing: Any, next_value: Any) -> Any:
         # per element, so an entry we did resolve wins.
         if next_value and existing and all(_is_unresolved(v) for v in next_value):
             return list(existing)
-        merged = [
-            _merge_value(existing[i] if i < len(existing) else None, item)
-            for i, item in enumerate(next_value)
-        ]
-        # tan-cli#489 (3): the per-index merge above must never TRUNCATE. A
-        # SHORTER incoming list is not a signal that the customer's extra
-        # entries should be deleted -- `setupCommands`' draft hardcodes ONE
-        # element (`create_launch_draft`) while a real cppdbg session's
-        # customer-authored list can hold any number, and this guard's own
-        # `all(_is_unresolved(...))` above can never fire for it: every
-        # element is a dict, never a `<...>` string. Anything past
-        # `len(next_value)` in `existing` has no corresponding incoming item
-        # -- it is the customer's own, untouched by this run -- so it is kept
-        # verbatim, at its original position, rather than merged against
-        # nothing.
-        if len(existing) > len(next_value):
-            merged.extend(existing[len(next_value) :])
-        return merged
+        return _merge_list_by_identity(existing, next_value)
     if isinstance(next_value, dict) and isinstance(existing, dict):
         # tan-cli#489 (3): recurse instead of replacing wholesale. A dict
         # *inside* a list element (`setupCommands`' `{"text": ..., "ignoreFailures":
@@ -841,7 +908,9 @@ def _legacy_name(next_name: str) -> str | None:
 
 
 def create_launch_json_write_plan(
-    existing_content: str | None, draft: dict[str, Any]
+    existing_content: str | None,
+    draft: dict[str, Any],
+    explicit_omissions: frozenset[str] = frozenset(),
 ) -> LaunchJsonWritePlan:
     """Merge ``draft`` into an existing launch.json (or a fresh document),
     merging key-by-key over any configuration with the same ``name``. Mirrors TS
@@ -862,6 +931,25 @@ def create_launch_json_write_plan(
     The legacy entry is left exactly as it is: nothing decides which of two
     possibly-hand-edited entries is authoritative, so nothing is merged or
     deleted on this run's say-so (tan-cli#179 reports it instead).
+
+    ``explicit_omissions`` (tan-cli#489 (6)): the KEYS the caller explicitly
+    asked to have no value for this run -- today only ``preLaunchTask``, via
+    ``--pre-launch-task ''``. [`create_launch_draft`] implements that opt-out
+    by building the key then deleting it, which is indistinguishable, to
+    [`_merge_configuration`]'s "only visit the draft's OWN keys" rule, from
+    ``preLaunchTask`` never existing on this target's shape at all (the
+    yocto-userspace "no default" case, tan-cli#138 vs #321, which must stay
+    untouched when the file already carries one). Both mean "the key is
+    absent from ``draft``"; only one of them means "remove it from the
+    file too". So an explicit opt-out merged against an entry that already
+    carries a ``preLaunchTask`` from a PRIOR run silently kept the old value
+    -- exit 0, ``issues: []``, no signal the flag did nothing. `--pre-launch-
+    task ''`'s whole point (alp-sdk-vscode#406) is escaping a task that fails
+    every F5; the escape hatch not working on the one file that matters is
+    the same shape of bug this run's OTHER four defects are. Applied AFTER
+    the ordinary merge, on the merged result -- never on `pre_merge` or
+    `draft` themselves, so `_merge_configuration`'s own "visit only the
+    incoming keys" contract stays true for every OTHER key.
     """
     document = _parse_launch_json_or_default(existing_content)
     next_name = _configuration_name(draft)
@@ -885,6 +973,8 @@ def create_launch_json_write_plan(
     if existing_index is not None:
         pre_merge = configs[existing_index]
         entry = _merge_configuration(pre_merge, draft)
+        for key in explicit_omissions:
+            entry.pop(key, None)
         unchanged = entry == pre_merge
         configs[existing_index] = entry
         legacy = _legacy_name(next_name)
@@ -903,6 +993,8 @@ def create_launch_json_write_plan(
             pre_merge = configs[legacy_index]
             migrated_from = pre_merge.get("name")
             entry = _merge_configuration(pre_merge, draft)
+            for key in explicit_omissions:
+                entry.pop(key, None)
             unchanged = entry == pre_merge
             configs[legacy_index] = entry
             replaced = True
