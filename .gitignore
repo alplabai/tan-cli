@@ -36,13 +36,16 @@ python/*.egg-info/
 # depth costs nothing; use `git add -f` if one is ever meant to ship.
 .vscode/
 # `tan debug-config`'s own atomic-write temp sibling (`debug_config_cmd.py`,
-# tan-cli#489). Named `<file>.<random>.tan-tmp` next to the real
-# `launch.json` and renamed over it on success; a process killed between the
-# write and the rename (SIGKILL, power loss) leaves this behind. Unanchored:
-# the real file it sits beside can be anywhere `--project`/`--workspace`
-# points, which is never this repo's own tree in normal use, but a stray one
-# must not become committable by a `git add -A` run from inside a test
-# fixture.
+# tan-cli#489). `tempfile.mkstemp(dir=..., suffix=".tan-tmp")` names it
+# `tmpXXXXXXXX.tan-tmp` (mkstemp's own random prefix, not the real file's
+# own name), next to the real `launch.json` (or its symlink-resolved real
+# target), and renames it over that path on success; a process killed
+# between the write and the rename (SIGKILL, power loss) leaves this
+# behind -- deliberately NOT swept by a later run, which could otherwise
+# delete a DIFFERENT process's still-open temp. Unanchored: the real file
+# it sits beside can be anywhere `--project`/`--workspace` points, which is
+# never this repo's own tree in normal use, but a stray one must not become
+# committable by a `git add -A` run from inside a test fixture.
 *.tan-tmp
 
 # Agent/session state, never repository content. `.claude/alp-tasks.json` is

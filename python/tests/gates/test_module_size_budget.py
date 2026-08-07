@@ -250,7 +250,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # `explicit_omissions` threaded through `create_launch_json_write_plan`
     # so `--pre-launch-task ''` actually removes an existing key on a write,
     # not just a fresh draft.
-    "tan/commands/debug_config_cmd.py": 1643,
+    # 1643 -> 1656, SECOND review round on the same issue: the stale-temp
+    # sweep from the round above was DELETED outright (it could delete a
+    # concurrent process's own in-flight temp, including one outside the
+    # project through a symlinked `launch.json`) rather than shrinking this
+    # file; the mode-preservation logic grew instead -- reading the existing
+    # file's mode BEFORE the write and applying it AFTER a successful
+    # replace (never to the temp itself, so a failed replace's cleanup
+    # `unlink` is never blocked by a read-only-mirrored temp), plus the
+    # umask-respecting default for a brand first-ever write, plus a guard
+    # against `os.fdopen` leaking `mkstemp`'s own fd.
+    "tan/commands/debug_config_cmd.py": 1656,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -363,7 +373,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # threaded through `create_launch_json_write_plan` so
     # `--pre-launch-task ''` removes an existing key on a write, not only a
     # fresh draft.
-    "tan/core/debug_launch.py": 1201,
+    # 1221, not 1201, SECOND review round on the same issue: the identity-only
+    # merge above was NON-IDEMPOTENT (measured: three consecutive runs
+    # accumulated three revisions of `configFiles` instead of holding only
+    # the latest) and emitted in the DRAFT's own order, not `existing`'s --
+    # both fatal to OpenOCD/gdb sessions that depend on entry order.
+    # `_merge_list_by_identity` now keeps position as a weaker fallback
+    # signal for a draft item matching nothing already present, restoring
+    # idempotence and order, with its own docstring rewritten to describe
+    # the residual limitation this ACTUALLY leaves (not the "cannot shrink"
+    # framing the previous round's docstring used, which described a
+    # symptom of the accumulation bug, not a real property).
+    "tan/core/debug_launch.py": 1221,
     "tan/commands/build/execute.py": 941,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own

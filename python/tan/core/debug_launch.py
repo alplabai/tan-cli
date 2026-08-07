@@ -717,22 +717,8 @@ def _is_resolved(value: Any) -> bool:
 
 def _list_item_identity(item: Any) -> Any:
     """The stable identity a per-list-element merge matches an incoming
-    (draft) item against an existing one BY, instead of by shared index.
-
-    tan-cli#489 review round: a per-INDEX merge treats `existing[i]` and
-    `next_value[i]` as "the same logical entry" regardless of what either
-    actually holds. On a REORDERED `configFiles` (the conventional OpenOCD
-    interface-first order: `["interface/jlink.cfg", "board/renesas_rzv2n.cfg"]`)
-    merged against a one-element resolved draft
-    (`["board/renesas_rzv2n.cfg"]`), position 0 pairs the customer's
-    `interface/jlink.cfg` with tan's OWN `board/renesas_rzv2n.cfg` -- which
-    the merge then treats as an UPDATE (overwriting the interface entry),
-    while the untouched tail-preservation for `existing[1:]` finds tan's own
-    value a SECOND time, so OpenOCD ends up loading the board config twice
-    AND never loading the interface config at all. Matching by identity finds
-    each draft item's REAL counterpart (if any) wherever it sits, so the
-    merge updates the right entry and duplicates nothing, regardless of
-    order.
+    (draft) item against an existing one BY, before falling back to shared
+    index (see [`_merge_list_by_identity`]).
 
     `setupCommands`' dicts are identified by their own `text` field -- the
     real cppdbg command string, the one thing that names WHICH command this
@@ -746,57 +732,91 @@ def _list_item_identity(item: Any) -> Any:
 
 
 def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[Any]:
-    """Merge `next_value` into `existing`, matching each draft item against
-    its real counterpart in `existing` (by [`_list_item_identity`]) instead
-    of assuming they share an index. Port target: `_merge_value`'s list
+    """Merge `next_value` into `existing`. Port target: `_merge_value`'s list
     branch, factored out so its own docstring can stay about the OVERALL
     merge rule.
 
-    Every draft item is visited, in the draft's own order: matched against an
-    unconsumed `existing` entry with the SAME identity (merged recursively,
-    so a matched `setupCommands` dict keeps a customer-added key like
-    `ignoreFailures` the draft never writes -- unchanged from before this
-    round), or, with no match, taken as-is (a genuinely NEW resolved value
-    this run added). `existing` entries no `next_value` item names at all --
-    the customer's own addition tan never resolves for, e.g. a hand-added
-    second `.cfg` or `setupCommands` entry -- are appended afterward, in
-    their original relative order, never re-truncated away (tan-cli#489 (3)).
+    tan-cli#489 review round (second pass): identity-only matching, with no
+    positional fallback, was NON-IDEMPOTENT -- measured through the real CLI,
+    rebuilding only `runners.yaml`'s `--config=` between runs, three
+    consecutive `tan debug-config` runs left `configFiles` holding all THREE
+    values (`["board/alp_rev_c.cfg", "board/alp_rev_b.cfg",
+    "board/alp_rev_a.cfg"]`), because an incoming value that matches NOTHING
+    already in the file (the whole point: it is a NEW resolution) was always
+    treated as an ADDITION, never a REPLACEMENT of whatever tan itself wrote
+    last time. OpenOCD sources every `-f` in turn, so that is not "a stale
+    value surviving one run too many" -- it is three `target create` calls on
+    the same TAP, and the session fails to start at all. The SAME version
+    also emitted in the DRAFT's own order, so a customer's `interface/jlink.cfg`
+    could end up sequenced AFTER a `board/...cfg` that must configure the
+    adapter first -- also fatal to the same session, and unlike the
+    accumulation bug, ALSO fatal to `setupCommands`'s gdb-executes-in-order
+    contract (`-gdb-set sysroot` after `-enable-pretty-printing`).
 
-    **Known, accepted limitation** (tan-cli#489 review round, finding 3): this
-    can still never SHRINK a list past what the draft itself no longer names,
-    even when the reason is that tan's OWN earlier write is now stale (a
-    rebuild whose `runners.yaml` drops a `--config`, or an SDK-filled element
-    superseded by a real build). Nothing at this layer can tell "tan wrote
-    this, and it is now wrong" apart from "the customer wrote this, and tan
-    has never resolved it" -- both look identical: a concrete value sitting
-    in `existing` that no draft item claims. The SAME two scenarios are, in
-    fact, structurally IDENTICAL to the one this whole list-merge exists to
-    protect (tan-cli#489 (3)'s own launch-configuration evidence: a hand-added
-    second OpenOCD `.cfg`, `["board/renesas_rzv2n.cfg", "interface/jlink.cfg"]`
-    merged against a one-element resolved draft, MUST keep both) -- so
-    resolving this in general needs a provenance signal ("did TAN write this
-    value, in a prior run") that no state here, or on disk, currently
-    records. Given that choice, keeping (never silently deleting real
-    content) is the deliberately safer default; a stale value surviving one
-    run too many is a strictly smaller harm than the data loss #489 is about.
-    A future fix would need to record which values a write actually
-    authored (a sidecar, or an in-file marker) rather than infer it from
-    shape alone.
+    **Position is restored as a second, WEAKER signal, used only when
+    identity finds nothing**, closing both defects together:
+
+    1. Every draft item is matched against an UNCONSUMED `existing` entry
+       with the SAME [`_list_item_identity`], wherever it sits -- merged
+       recursively there (so a matched `setupCommands` dict keeps a
+       customer-added key like `ignoreFailures` the draft never writes), IN
+       PLACE, never moved. This is what fixes the reordering defect: the
+       result is always emitted in `existing`'s OWN order, not the draft's.
+    2. A draft item with NO identity match ANYWHERE is tan's own NEW
+       resolution for a field it has always owned POSITIONALLY -- the same
+       assumption the pre-#489 code made before the identity-matching round
+       removed it. It overwrites `existing[i]` at ITS OWN index `i`, but
+       ONLY when that slot exists (`i < len(existing)`) and was not already
+       claimed by an identity match for a DIFFERENT draft item. This is what
+       fixes the accumulation defect: a single-element draft replacing a
+       single-element existing value now overwrites position 0 instead of
+       appending, exactly like `open(path, "w")`'s wholesale replace did for
+       that one-to-one case (tan-cli#489's original defect was clobbering
+       the SURROUNDING entries when the list was NOT one-to-one, never this).
+    3. Anything neither claims -- an `existing` entry past `len(existing)`'s
+       overlap with the draft, or one the draft's own length structurally
+       cannot reach -- is untouched, kept at its own position: the customer's
+       own addition tan never resolves for (a hand-added second `.cfg`, an
+       extra `setupCommands` entry), the tan-cli#489 (3) case this whole
+       function exists for.
+    4. A draft item with no identity match AND no free positional slot (the
+       draft grew past what `existing` held) is a genuinely NEW value --
+       appended.
+
+    **Known, accepted limitation**, now precisely what remains after the
+    above (NOT "cannot shrink a list" -- that framing described the
+    ACCUMULATION bug's symptom, not a residual property): position is a
+    HEURISTIC, not real provenance, so a customer's hand-added entry that (a)
+    matches nothing in the fresh draft AND (b) happens to sit at an index
+    `< len(next_value)` can still be overwritten, exactly the way the
+    pre-#489 code always overwrote whatever sat at that index. [`sdk_
+    identity_overwrites`] exists precisely to disclose this one case when a
+    caller can identify it (an SDK-filled, not build-resolved, single value)
+    -- there is still no general provenance record ("did TAN write THIS
+    value, in a prior run") to close the gap further; tan-cli#518 tracks the
+    deferred in-file-marker-vs-`.alp/`-sidecar follow-up.
     """
-    remaining = list(existing)
-    merged: list[Any] = []
-    for item in next_value:
+    result = list(existing)
+    consumed: set[int] = set()
+    for i, item in enumerate(next_value):
         identity = _list_item_identity(item)
         match_index = next(
-            (i for i, e in enumerate(remaining) if _list_item_identity(e) == identity),
+            (
+                j
+                for j, existing_item in enumerate(existing)
+                if j not in consumed and _list_item_identity(existing_item) == identity
+            ),
             None,
         )
         if match_index is not None:
-            merged.append(_merge_value(remaining.pop(match_index), item))
+            result[match_index] = _merge_value(existing[match_index], item)
+            consumed.add(match_index)
+        elif i not in consumed and i < len(existing):
+            result[i] = _merge_value(existing[i], item)
+            consumed.add(i)
         else:
-            merged.append(item)
-    merged.extend(remaining)
-    return merged
+            result.append(item)
+    return result
 
 
 def _merge_value(existing: Any, next_value: Any) -> Any:

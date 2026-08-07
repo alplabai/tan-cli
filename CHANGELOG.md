@@ -37,14 +37,25 @@ All notable changes to `tan` are documented here. Format follows
     matching, and closing gaps in, `bootstrap_cmd.reconcile_west_manifest_path`'s
     own pattern. A symlinked `launch.json` (dotfile-managed, or shared
     across worktrees) now keeps the link and updates the real file, instead
-    of the link being replaced by a plain file holding stale content.
+    of the link being replaced by a plain file holding stale content. A
+    launch.json `tan` creates now lands at the umask-filtered default a
+    plain `open(path, "w")` would have produced, not `mkstemp`'s own
+    hardcoded `0600`; a rewrite carries the existing file's own mode across
+    the swap.
   - Merging a fresh draft into an existing `configFiles`/`setupCommands`
     list matched entries by POSITION, so a shorter or differently-ordered
     resolved list silently deleted the customer's own extra entries (a
     hand-added second OpenOCD `.cfg`, extra `setupCommands` for a remote
     gdb session) and could pair unrelated entries, both destroying one and
-    duplicating another. Matching is now by identity (a dict's own `text`
-    field, or a scalar's own value) instead of index.
+    duplicating another. Matching is now primarily by IDENTITY (a dict's
+    own `text` field, or a scalar's own value), wherever the matching entry
+    sits, with position kept as a weaker fallback signal ONLY for a draft
+    item that matches nothing already in the file -- needed to keep the
+    merge idempotent: without it, a single resolved value that replaces a
+    PRIOR run's own single resolved value (e.g. a rebuilt `runners.yaml`
+    naming a different `--config`) was treated as an ADDITION every time,
+    so `configFiles` accumulated every revision a project had ever been
+    built with instead of holding only the current one.
   - `debug-config.sdk-identity-key-absent` misattributed "no core id was
     resolved to look up the SDK's per-core `jlink_device` map with" as "the
     SDK publishes no `device` value for this SoM at all" -- telling a
@@ -60,17 +71,23 @@ All notable changes to `tan` are documented here. Format follows
     a prior run -- the merge only visits keys the fresh draft carries, and
     the opt-out's own implementation removes the key from the draft rather
     than marking it for removal. `create_launch_json_write_plan` now takes
-    an explicit set of keys to omit from the merged result.
+    an explicit set of keys to omit from the merged result. **This is the
+    one place in this whole fix where `tan` deliberately REMOVES
+    hand-authored content**: if a customer had themselves typed a
+    `preLaunchTask` value into the entry `tan` merges into, `--pre-launch-task
+    ''` now deletes it -- correct, and the flag's own documented meaning, but
+    worth stating plainly rather than only as "a key from a prior run".
 
-  Known, accepted limitation: the list-identity fix above still cannot
-  SHRINK a `configFiles`/`setupCommands` list past what the fresh draft no
-  longer names, even when the reason is that tan's OWN earlier write (a
-  stale SDK-filled config, or a build that now registers fewer configs) is
-  what should be retracted -- nothing at this layer can tell "tan wrote
-  this and it is now wrong" apart from "the customer wrote this and tan has
-  never resolved it"; both are a concrete value in the file that no current
-  draft item claims. Preserving (never silently deleting real content) is
-  the deliberately safer default given that ambiguity.
+  Known, accepted limitation: position is a heuristic, not real provenance,
+  so a customer's hand-added `configFiles`/`setupCommands` entry that
+  matches nothing in the fresh draft AND happens to sit within the draft's
+  own length can still be overwritten, the same way the pre-#489 code
+  always overwrote whatever sat at that index -- `sdk-identity-overwrite`
+  discloses the one case a caller can identify (an SDK-filled, not
+  build-resolved, single value) rather than hiding it behind `ok: true`.
+  Closing this further needs a real provenance record ("did `tan` write
+  THIS value, in a prior run"), which nothing here or on disk keeps today;
+  tracked as a follow-up (#518), not built in this change.
 
 - **Two release gates went red on every open PR the moment `v0.5.1` was
   tagged.** `version-identity` refused a tree still claiming `0.5.1` once

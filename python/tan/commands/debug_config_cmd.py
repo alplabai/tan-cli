@@ -46,9 +46,7 @@ converts any unexpected exception into `debug-config.internal-failure` at exit
 
 from __future__ import annotations
 
-import glob
 import os
-import shutil
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -943,24 +941,6 @@ def _no_debuggable_target_class_failure(
     )
 
 
-def _sweep_stale_tan_tmp_siblings(directory: str) -> None:
-    """Best-effort cleanup of `*.tan-tmp` files left behind by a PRIOR run
-    that died between [`_atomic_write_launch_json`]'s temp write and its
-    rename (SIGKILL, power loss, the VS Code extension killing the child --
-    none of these leave Python a chance to run its own `except` cleanup).
-    Never raises: a leftover temp this sweep cannot remove (permissions, the
-    directory itself gone) must not fail an otherwise-successful write, and a
-    fresh `mkstemp` name never collides with a stale one regardless."""
-    try:
-        for stale in glob.glob(os.path.join(glob.escape(directory), "*.tan-tmp")):
-            try:
-                os.unlink(stale)
-            except OSError:
-                pass
-    except OSError:
-        pass
-
-
 def _atomic_write_launch_json(path: str, content: str) -> None:
     """Write `content` to `path` atomically and durably. Raises `OSError` on
     any failure; the caller decides how to report it (`_write_failure`).
@@ -996,32 +976,50 @@ def _atomic_write_launch_json(path: str, content: str) -> None:
       handle to fsync, and `ReplaceFile`/`MoveFileExW` already journal the
       rename itself) covers the rename entry surviving a crash too.
 
-    Mode/ACL are carried across the inode swap with `shutil.copymode`,
-    guarded for the create case (nothing to copy from, and best-effort: a
-    mode this process cannot read or `chmod` must not fail an otherwise-
-    successful write) -- `os.replace` swaps the DIRECTORY ENTRY, not the
-    file's own permission bits, so a `600`-mode `launch.json` (this file can
-    carry `miDebuggerServerAddress` and absolute host paths) would otherwise
-    come back at `mkstemp`'s own default `600`... except `mkstemp` ALSO
-    defaults to `600`, so the real risk this guards is a customer file with
-    WIDER permissions than that (a `664` a shared `.vscode/` convention set
-    deliberately) silently narrowing, not just widening -- `copymode` makes
-    the swap permission-preserving in either direction.
+    **Mode, not ACL, is carried across the inode swap** -- `shutil.copymode`
+    (nine permission bits) or the create-case `chmod` below copies exactly
+    that and nothing more: no explicit ACL entry survives, and on Windows
+    `os.replace`/`MoveFileExW` itself drops a non-inherited DACL regardless
+    of anything this function does. `os.replace` swaps the DIRECTORY ENTRY,
+    not the file's own permission bits, so without this a `664`-mode
+    `launch.json` a shared `.vscode/` convention set deliberately would come
+    back at whatever the temp happened to be created with -- read BEFORE the
+    write (`existing_mode`, `None` for a first-ever write) and applied to
+    the REAL path AFTER a successful `os.replace`, never to the temp file
+    itself: `shutil.copymode`-ing the temp to match a READ-ONLY existing
+    file, before attempting the replace, would leave a temp this function's
+    own `except`-cleanup then also cannot `unlink` (Windows refuses to
+    delete a read-only file) -- a permanent leak on exactly the failure path
+    meant to prevent one. Best-effort throughout: a mode this process cannot
+    read or `chmod` must not fail an otherwise-successful write.
+
+    **Creating launch.json for the first time respects the process umask**,
+    rather than keeping `mkstemp`'s own hardcoded `0600` (deliberately
+    narrow -- POSIX designed `mkstemp` for secrets, which this temp file is
+    not) forever: every later run's `existing_mode` read would otherwise
+    just copy that `0600` forward, silently narrowing a file a shared
+    checkout or a devcontainer running as a different uid needs to read.
     """
     resolved = os.path.realpath(path)
     directory = os.path.dirname(resolved)
-    _sweep_stale_tan_tmp_siblings(directory)
+    existing_mode: int | None = None
+    try:
+        existing_mode = stat.S_IMODE(os.stat(resolved).st_mode)
+    except OSError:
+        pass
     fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tan-tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+        except OSError:
+            # `fdopen` failing before a file object takes ownership of `fd`
+            # would otherwise leak the raw descriptor `mkstemp` opened.
+            os.close(fd)
+            raise
+        with handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        if os.path.exists(resolved):
-            try:
-                shutil.copymode(resolved, tmp_path)
-            except OSError:
-                pass
         os.replace(tmp_path, resolved)
     except OSError:
         try:
@@ -1029,6 +1027,21 @@ def _atomic_write_launch_json(path: str, content: str) -> None:
         except OSError:
             pass
         raise
+    if existing_mode is not None:
+        try:
+            os.chmod(resolved, existing_mode)
+        except OSError:
+            pass
+    else:
+        try:
+            # No race-free way to READ the process umask -- the standard
+            # idiom sets a harmless value and reads back the PREVIOUS one,
+            # then restores it immediately.
+            current_umask = os.umask(0o022)
+            os.umask(current_umask)
+            os.chmod(resolved, 0o666 & ~current_umask)
+        except OSError:
+            pass
     if os.name != "nt":
         try:
             dir_fd = os.open(directory, os.O_RDONLY)
