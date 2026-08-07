@@ -260,7 +260,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # `unlink` is never blocked by a read-only-mirrored temp), plus the
     # umask-respecting default for a brand first-ever write, plus a guard
     # against `os.fdopen` leaking `mkstemp`'s own fd.
-    "tan/commands/debug_config_cmd.py": 1656,
+    # 1656 -> 1661, THIRD review round: doc-only corrections (the stale
+    # `shutil.copymode` present-tense claim after `shutil` was dropped from
+    # the imports; `.gitignore`'s comment split into a `debug_config_cmd.py`
+    # entry) plus a single-threaded-CLI caveat on the `os.umask` set-restore
+    # -- the list-merge algorithm change that dominates this round's diff
+    # lives in `debug_launch.py` below, not here.
+    "tan/commands/debug_config_cmd.py": 1661,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -384,7 +390,20 @@ _MODULE_BUDGET: dict[str, int] = {
     # the residual limitation this ACTUALLY leaves (not the "cannot shrink"
     # framing the previous round's docstring used, which described a
     # symptom of the accumulation bug, not a real property).
-    "tan/core/debug_launch.py": 1221,
+    # 1275, not 1221, THIRD review round on the same issue: the SECOND
+    # round's fallback used the unmatched draft item's own INDEX against
+    # `existing` at that same index -- correct only while nothing earlier in
+    # the draft had also identity-matched, which any customer-prepended
+    # entry ahead of tan's own resolved values immediately breaks (measured:
+    # accumulation persisted for any board with more than one `--config`).
+    # `_merge_list_by_identity` now does ANCHOR-relative placement (a free
+    # `existing` slot bracketed by the nearest identity matches before/after
+    # the unmatched item in the draft, not its own raw index) -- more state
+    # to track per merge (`anchor_of_draft_index`, the two-pass placement
+    # loop) and a docstring long enough to record why the simpler two-pass
+    # ("assign every leftover draft item to every leftover existing slot in
+    # order") was rejected, not just what shipped.
+    "tan/core/debug_launch.py": 1275,
     "tan/commands/build/execute.py": 941,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own

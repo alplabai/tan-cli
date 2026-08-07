@@ -740,21 +740,43 @@ def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[
     positional fallback, was NON-IDEMPOTENT -- measured through the real CLI,
     rebuilding only `runners.yaml`'s `--config=` between runs, three
     consecutive `tan debug-config` runs left `configFiles` holding all THREE
-    values (`["board/alp_rev_c.cfg", "board/alp_rev_b.cfg",
-    "board/alp_rev_a.cfg"]`), because an incoming value that matches NOTHING
-    already in the file (the whole point: it is a NEW resolution) was always
-    treated as an ADDITION, never a REPLACEMENT of whatever tan itself wrote
-    last time. OpenOCD sources every `-f` in turn, so that is not "a stale
-    value surviving one run too many" -- it is three `target create` calls on
-    the same TAP, and the session fails to start at all. The SAME version
-    also emitted in the DRAFT's own order, so a customer's `interface/jlink.cfg`
-    could end up sequenced AFTER a `board/...cfg` that must configure the
-    adapter first -- also fatal to the same session, and unlike the
-    accumulation bug, ALSO fatal to `setupCommands`'s gdb-executes-in-order
-    contract (`-gdb-set sysroot` after `-enable-pretty-printing`).
+    values, because an incoming value that matches NOTHING already in the
+    file (the whole point: it is a NEW resolution) was always treated as an
+    ADDITION, never a REPLACEMENT of whatever tan itself wrote last time.
+    OpenOCD sources every `-f` in turn, so that is not "a stale value
+    surviving one run too many" -- it is repeated `target create` on the
+    same TAP, and the session fails to start at all. The SAME version also
+    emitted in the DRAFT's own order rather than `existing`'s, which could
+    sequence an adapter driver AFTER the config that needs it, or reorder
+    `setupCommands`, whose commands gdb executes in order.
 
-    **Position is restored as a second, WEAKER signal, used only when
-    identity finds nothing**, closing both defects together:
+    tan-cli#489 review round (THIRD pass): the second pass's positional
+    fallback used the UNMATCHED draft item's OWN index `i` against
+    `existing[i]` directly -- correct only when nothing before `i` in the
+    draft has ALSO matched something in `existing`, which shifts the two
+    index spaces out of alignment. Measured: a customer-prepended
+    `configFiles` entry ahead of tan's own two resolved values (`interface`,
+    which matches every run, plus a per-revision `target/revN.cfg`) meant
+    `i`, the target entry's DRAFT index, never lined up with a genuinely
+    free `existing` slot -- `i` was always either already consumed by the
+    interface match or past `len(existing)` -- so it fell to the `append`
+    branch on EVERY run, accumulating one more revision each time. Still
+    fatal to the same OpenOCD session for the same reason; still reachable
+    through ordinary multi-`--config`/`openocd_search` boards, not an
+    exotic shape.
+
+    **Anchor-relative placement replaces index-relative placement.** An
+    "anchor" is a draft item that DID identity-match, at the `existing`
+    index it matched -- these are fixed points neither pass moves. An
+    unmatched draft item is placed into the first free `existing` slot that
+    lies AFTER the nearest anchor before it (in draft order) and BEFORE the
+    nearest anchor after it -- i.e. between the two anchors bracketing its
+    position in the draft, not at its own raw index. This is deliberately
+    NOT the simpler "collect every unmatched draft item, then assign them to
+    every free existing slot in existing's own order" two-pass: that
+    ignores which UNMATCHED items are near which anchors, so a customer's
+    LEADING entry (no anchor before it at all) is just as free a slot as any
+    other and can still be claimed by an unrelated tan-resolved value.
 
     1. Every draft item is matched against an UNCONSUMED `existing` entry
        with the SAME [`_list_item_identity`], wherever it sits -- merged
@@ -763,40 +785,44 @@ def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[
        PLACE, never moved. This is what fixes the reordering defect: the
        result is always emitted in `existing`'s OWN order, not the draft's.
     2. A draft item with NO identity match ANYWHERE is tan's own NEW
-       resolution for a field it has always owned POSITIONALLY -- the same
-       assumption the pre-#489 code made before the identity-matching round
-       removed it. It overwrites `existing[i]` at ITS OWN index `i`, but
-       ONLY when that slot exists (`i < len(existing)`) and was not already
-       claimed by an identity match for a DIFFERENT draft item. This is what
-       fixes the accumulation defect: a single-element draft replacing a
-       single-element existing value now overwrites position 0 instead of
-       appending, exactly like `open(path, "w")`'s wholesale replace did for
-       that one-to-one case (tan-cli#489's original defect was clobbering
-       the SURROUNDING entries when the list was NOT one-to-one, never this).
-    3. Anything neither claims -- an `existing` entry past `len(existing)`'s
-       overlap with the draft, or one the draft's own length structurally
-       cannot reach -- is untouched, kept at its own position: the customer's
-       own addition tan never resolves for (a hand-added second `.cfg`, an
-       extra `setupCommands` entry), the tan-cli#489 (3) case this whole
-       function exists for.
-    4. A draft item with no identity match AND no free positional slot (the
-       draft grew past what `existing` held) is a genuinely NEW value --
-       appended.
+       resolution for a field it has always owned positionally -- placed at
+       the first `existing` index strictly between the anchor of the
+       nearest matched draft item BEFORE it (or the start of `existing`, if
+       none) and the anchor of the nearest matched draft item AFTER it (or
+       the end of `existing`, if none) that no earlier placement in THIS
+       merge already claimed. This is what fixes the accumulation defect
+       for the general case, not only the no-anchors-at-all one: a value
+       that keeps replacing a PRIOR run's own single resolved value
+       overwrites it in place regardless of what else in the list matched
+       by identity around it.
+    3. Anything neither an anchor nor a placement claims is untouched, kept
+       at its own position: the customer's own addition tan never resolves
+       for (a hand-added second `.cfg`, an extra `setupCommands` entry), the
+       tan-cli#489 (3) case this whole function exists for.
+    4. A draft item with no identity match and no free slot in its own
+       bracketing window (the window is empty, or every slot in it was
+       already claimed by an earlier placement in this same merge) is a
+       genuinely NEW value -- appended.
 
-    **Known, accepted limitation**, now precisely what remains after the
-    above (NOT "cannot shrink a list" -- that framing described the
-    ACCUMULATION bug's symptom, not a residual property): position is a
-    HEURISTIC, not real provenance, so a customer's hand-added entry that (a)
-    matches nothing in the fresh draft AND (b) happens to sit at an index
-    `< len(next_value)` can still be overwritten, exactly the way the
-    pre-#489 code always overwrote whatever sat at that index. [`sdk_
-    identity_overwrites`] exists precisely to disclose this one case when a
-    caller can identify it (an SDK-filled, not build-resolved, single value)
-    -- there is still no general provenance record ("did TAN write THIS
-    value, in a prior run") to close the gap further; tan-cli#518 tracks the
-    deferred in-file-marker-vs-`.alp/`-sidecar follow-up.
+    **Known, accepted limitation**, precisely what remains after the above:
+    position is still a HEURISTIC, not real provenance. A customer's
+    hand-added entry that (a) matches nothing in the fresh draft AND (b)
+    sits in the SAME bracketing window an unmatched draft item is being
+    placed into can still be overwritten -- e.g. `["mine.cfg"] + ["board/x.cfg"]
+    -> ["board/x.cfg"]`, no anchors on either side to protect `mine.cfg`,
+    exactly the way the pre-#489 code always overwrote whatever sat at that
+    lone position. [`sdk_identity_overwrites`] exists precisely to disclose
+    this one case when a caller can identify it (an SDK-filled, not
+    build-resolved, single value) -- there is still no general provenance
+    record ("did TAN write THIS value, in a prior run") to close the gap
+    further; tan-cli#518 tracks the deferred in-file-marker-vs-`.alp/`-sidecar
+    follow-up.
     """
-    result = list(existing)
+    n_existing = len(existing)
+    # Pass 1: identity match, anywhere in `existing`, greedily consuming at
+    # most one `existing` index per match. Keyed by DRAFT index so pass 2 can
+    # look up "the nearest matched draft item before/after me" directly.
+    anchor_of_draft_index: dict[int, int] = {}
     consumed: set[int] = set()
     for i, item in enumerate(next_value):
         identity = _list_item_identity(item)
@@ -809,13 +835,41 @@ def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[
             None,
         )
         if match_index is not None:
-            result[match_index] = _merge_value(existing[match_index], item)
+            anchor_of_draft_index[i] = match_index
             consumed.add(match_index)
-        elif i not in consumed and i < len(existing):
-            result[i] = _merge_value(existing[i], item)
-            consumed.add(i)
+
+    result = list(existing)
+    for i, match_index in anchor_of_draft_index.items():
+        result[match_index] = _merge_value(existing[match_index], next_value[i])
+
+    # Pass 2: anchor-relative placement for every draft item pass 1 did not
+    # match, processed in DRAFT order so "first free slot" within a window
+    # shared by more than one unmatched item is deterministic.
+    sorted_anchor_draft_indices = sorted(anchor_of_draft_index)
+    claimed = set(anchor_of_draft_index.values())
+    appended: list[Any] = []
+    for i, item in enumerate(next_value):
+        if i in anchor_of_draft_index:
+            continue
+        window_start = -1
+        for j in sorted_anchor_draft_indices:
+            if j >= i:
+                break
+            window_start = anchor_of_draft_index[j]
+        window_end = n_existing
+        for j in sorted_anchor_draft_indices:
+            if j > i:
+                window_end = anchor_of_draft_index[j]
+                break
+        slot = next(
+            (k for k in range(window_start + 1, window_end) if k not in claimed), None
+        )
+        if slot is not None:
+            result[slot] = _merge_value(existing[slot], item)
+            claimed.add(slot)
         else:
-            result.append(item)
+            appended.append(item)
+    result.extend(appended)
     return result
 
 

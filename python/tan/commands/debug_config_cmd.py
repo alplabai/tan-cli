@@ -976,9 +976,9 @@ def _atomic_write_launch_json(path: str, content: str) -> None:
       handle to fsync, and `ReplaceFile`/`MoveFileExW` already journal the
       rename itself) covers the rename entry surviving a crash too.
 
-    **Mode, not ACL, is carried across the inode swap** -- `shutil.copymode`
-    (nine permission bits) or the create-case `chmod` below copies exactly
-    that and nothing more: no explicit ACL entry survives, and on Windows
+    **Mode, not ACL, is carried across the inode swap** -- `stat.S_IMODE` +
+    `os.chmod` below copies exactly the nine permission bits and nothing
+    more: no explicit ACL entry survives, and on Windows
     `os.replace`/`MoveFileExW` itself drops a non-inherited DACL regardless
     of anything this function does. `os.replace` swaps the DIRECTORY ENTRY,
     not the file's own permission bits, so without this a `664`-mode
@@ -1036,7 +1036,12 @@ def _atomic_write_launch_json(path: str, content: str) -> None:
         try:
             # No race-free way to READ the process umask -- the standard
             # idiom sets a harmless value and reads back the PREVIOUS one,
-            # then restores it immediately.
+            # then restores it immediately. `os.umask` is PROCESS-global, so
+            # this brief set-then-restore is safe only because `tan` itself
+            # is single-threaded here; a second thread calling `os.umask` (or
+            # doing anything umask-sensitive, like creating its own file)
+            # inside this same window would observe -- or set -- the wrong
+            # value.
             current_umask = os.umask(0o022)
             os.umask(current_umask)
             os.chmod(resolved, 0o666 & ~current_umask)

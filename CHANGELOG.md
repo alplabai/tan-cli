@@ -47,15 +47,23 @@ All notable changes to `tan` are documented here. Format follows
     resolved list silently deleted the customer's own extra entries (a
     hand-added second OpenOCD `.cfg`, extra `setupCommands` for a remote
     gdb session) and could pair unrelated entries, both destroying one and
-    duplicating another. Matching is now primarily by IDENTITY (a dict's
-    own `text` field, or a scalar's own value), wherever the matching entry
-    sits, with position kept as a weaker fallback signal ONLY for a draft
-    item that matches nothing already in the file -- needed to keep the
-    merge idempotent: without it, a single resolved value that replaces a
-    PRIOR run's own single resolved value (e.g. a rebuilt `runners.yaml`
-    naming a different `--config`) was treated as an ADDITION every time,
-    so `configFiles` accumulated every revision a project had ever been
-    built with instead of holding only the current one.
+    duplicating another. Matching is now by IDENTITY (a dict's own `text`
+    field, or a scalar's own value), wherever the matching entry sits, with
+    position kept as a fallback for a draft item that matches nothing
+    already in the file -- placed at the first free slot ANCHORED between
+    the nearest identity matches before and after it in the draft, not at
+    its own raw index. The anchor-relative placement matters as soon as any
+    entry in the list identity-matches: an index-relative fallback (a draft
+    item's own position against the SAME position in the existing list)
+    stays correct only while nothing before it in the draft has also
+    matched something -- once it has, the two index spaces drift apart, and
+    a value that keeps replacing a PRIOR run's own single resolved value
+    (e.g. a rebuilt `runners.yaml` naming a different `--config`, alongside
+    an unrelated `interface/...cfg` entry every run resolves identically)
+    fell through to "append", so `configFiles` accumulated every revision a
+    project had ever been built with instead of holding only the current
+    one, on any board with more than one `--config` argument or a
+    non-empty `openocd_search`.
   - `debug-config.sdk-identity-key-absent` misattributed "no core id was
     resolved to look up the SDK's per-core `jlink_device` map with" as "the
     SDK publishes no `device` value for this SoM at all" -- telling a
@@ -78,16 +86,19 @@ All notable changes to `tan` are documented here. Format follows
     ''` now deletes it -- correct, and the flag's own documented meaning, but
     worth stating plainly rather than only as "a key from a prior run".
 
-  Known, accepted limitation: position is a heuristic, not real provenance,
-  so a customer's hand-added `configFiles`/`setupCommands` entry that
-  matches nothing in the fresh draft AND happens to sit within the draft's
-  own length can still be overwritten, the same way the pre-#489 code
-  always overwrote whatever sat at that index -- `sdk-identity-overwrite`
-  discloses the one case a caller can identify (an SDK-filled, not
-  build-resolved, single value) rather than hiding it behind `ok: true`.
-  Closing this further needs a real provenance record ("did `tan` write
-  THIS value, in a prior run"), which nothing here or on disk keeps today;
-  tracked as a follow-up (#518), not built in this change.
+  Known, accepted limitation: position is still a heuristic, not real
+  provenance. A customer's hand-added `configFiles`/`setupCommands` entry
+  that matches nothing in the fresh draft AND sits in the SAME
+  anchor-bracketed window an unmatched draft item is placed into can still
+  be overwritten -- e.g. `["mine.cfg"] + ["board/x.cfg"] -> ["board/x.cfg"]`,
+  with no identity match anywhere on either side to anchor `mine.cfg`
+  against, exactly the way the pre-#489 code always overwrote whatever sat
+  at that lone position. `sdk-identity-overwrite` discloses the one case a
+  caller can identify (an SDK-filled, not build-resolved, single value)
+  rather than hiding it behind `ok: true`. Closing this further needs a
+  real provenance record ("did `tan` write THIS value, in a prior run"),
+  which nothing here or on disk keeps today; tracked as a follow-up (#518),
+  not built in this change.
 
 - **Two release gates went red on every open PR the moment `v0.5.1` was
   tagged.** `version-identity` refused a tree still claiming `0.5.1` once

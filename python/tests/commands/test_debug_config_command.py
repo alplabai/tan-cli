@@ -1341,6 +1341,94 @@ def test_three_real_cli_runs_replace_configfiles_each_time_not_accumulate(tmp_pa
     assert on_disk["configurations"][0]["configFiles"] == ["board/alp_rev_c.cfg"], on_disk
 
 
+def test_a_multi_element_draft_with_a_customer_prepended_entry_still_replaces(tmp_path):
+    """tan-cli#489 review round (THIRD pass): the BLOCKER the reviewer chose
+    the algorithm for. The test above only ever resolves ONE `--config`, so
+    the positional fallback's own index (draft position 0) always lined up
+    with `existing`'s first free slot by coincidence -- a multi-`--config`
+    board (ordinary: an interface driver plus a target config is the normal
+    OpenOCD shape) with a customer-prepended entry shifts the two index
+    spaces out of alignment, and the SECOND-round fix's index-relative
+    fallback (`existing[i]` for the unmatched draft item's own index `i`)
+    never lands on a free slot: it is always either consumed by the
+    `interface` match, or past `len(existing)`, so it falls to the `append`
+    branch on every single run. `openocd_search`/`searchDir` (a second,
+    independently-merged list field) is exercised the same way, since it is
+    reachable through the exact same code path. FAILS against the
+    THIRD-round algorithm's own predecessor (`e19ef39`'s index-relative
+    fallback): three runs there leave `configFiles` with FOUR target
+    revisions (one per run plus the customer's), not one."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+    zephyr_dir = Path(build_dir, "zephyr")
+    zephyr_dir.mkdir(parents=True)
+    runners_yaml = zephyr_dir / "runners.yaml"
+
+    # rev_a establishes tan's own entries FIRST, through an ordinary run --
+    # this is what gives `interface/cmsis-dap.cfg` (and the stable
+    # `openocd_search` entry) their own ANCHOR for every later run to match
+    # against. The customer then hand-PREPENDS their own entries, between
+    # rev_a and rev_b -- the exact sequence the issue's own evidence
+    # describes ("a hand-added second .cfg" added to an already-tan-managed
+    # file), not a customer authoring the file from nothing.
+    runners_yaml.write_text(
+        "runners:\n- openocd\n"
+        "config:\n  openocd_search:\n  - /opt/zephyr-sdk/scripts\n"
+        f"  - {root}/build/a/zephyr\n"
+        "args:\n  openocd:\n  - --config=interface/cmsis-dap.cfg\n"
+        "  - --config=target/rev_a.cfg\n",
+        encoding="utf-8",
+    )
+    env_a = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_a["exitCode"] == 0, env_a
+
+    on_disk_a = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    on_disk_a["configurations"][0]["configFiles"].insert(0, "custom/pre.cfg")
+    on_disk_a["configurations"][0]["searchDir"].insert(0, "/home/me/my-scripts")
+    launch_json(tmp_path).write_text(json.dumps(on_disk_a), encoding="utf-8")
+
+    for rev in "b", "c", "d":
+        runners_yaml.write_text(
+            "runners:\n- openocd\n"
+            "config:\n  openocd_search:\n  - /opt/zephyr-sdk/scripts\n"
+            f"  - {root}/build/{rev}/zephyr\n"
+            "args:\n  openocd:\n  - --config=interface/cmsis-dap.cfg\n"
+            f"  - --config=target/rev_{rev}.cfg\n",
+            encoding="utf-8",
+        )
+        env = envelope(
+            run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+        )
+        assert env["exitCode"] == 0, env
+        config = env["data"]["configuration"]
+        assert config["configFiles"] == [
+            "custom/pre.cfg",
+            "interface/cmsis-dap.cfg",
+            f"target/rev_{rev}.cfg",
+        ], (rev, config["configFiles"])
+        assert config["searchDir"] == [
+            "/home/me/my-scripts",
+            "/opt/zephyr-sdk/scripts",
+            f"{root}/build/{rev}/zephyr",
+        ], (rev, config["searchDir"])
+
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk["configurations"][0]["configFiles"] == [
+        "custom/pre.cfg",
+        "interface/cmsis-dap.cfg",
+        "target/rev_d.cfg",
+    ], on_disk
+
+
 def test_a_hand_written_setup_commands_list_survives_a_one_element_draft(tmp_path):
     """tan-cli#489 (3): `setupCommands` is the case the all-placeholder guard
     can NEVER reach -- its elements are dicts, never `<...>` strings, so
