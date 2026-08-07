@@ -132,7 +132,21 @@ _MODULE_BUDGET: dict[str, int] = {
     # block for the constant this module no longer defines (only imports)
     # is gone, not merely moved, so the net measures out to exactly the
     # pre-existing count.
-    "tan/commands/doctor_cmd.py": 3289,
+    # 3531, not 3289, as of tan-cli#488 (the eight wrong-verdict defects):
+    # `probe_status` (spawn-vs-parse split, `west_resolved_check`'s new `ran`
+    # arm), `_is_own_git_checkout` (the nested-git-repo guard for
+    # `_git_short_commit`/`_git_behind_upstream`), `_module_importable` (asks
+    # the workspace venv's interpreter, not tan's own, for `fdt`), the
+    # `schemaVersion`-first read and the host-keyed (not `windows`-bool-keyed)
+    # tool list in `_load_manifest`/`_collect`, `zephyr_python_floor`'s
+    # three-way fallback split, and the bare-PATH-re-probe fix for `west` --
+    # each earns its own paragraph of "why", which is most of the growth; the
+    # `doctor()` prologue also grew by one `try:` level (the whole
+    # `cwd = Path.cwd()`-onward body, not just `_collect`, now reports
+    # `doctor.internal-failure` instead of a raw traceback on a deleted
+    # working directory) plus five pre-try defaults for the names its
+    # exception handler and final `emit()` read.
+    "tan/commands/doctor_cmd.py": 3531,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -871,7 +885,15 @@ _MIRRORED = ("tan/planner/",)
 # survives rebasing #520's work onto the `dev` tip that now carries all of
 # the former. Re-walked with the gate's own `ast` logic (span > 50 over all
 # of `tan/`, planner included) against this exact tree.
-_FUNCTION_COUNT_BUDGET = 211
+#
+# 214, not 211, as of tan-cli#488: three NEW functions crossed 50 lines --
+# `doctor_cmd.py:zephyr_python_floor` (28 -> 59, the three-way fallback
+# split), `doctor_cmd.py:_load_manifest` (48 -> 80, the `schemaVersion`-first
+# read), and `doctor_cmd.py:west_resolved_check` (50 -> 81, the `ran` arm).
+# `doctor` (269 -> 286) and `_collect` (343 -> 380) both grew too, but were
+# already over the cap, so neither moves this count. `_FUNCTION_WORST_BUDGET`
+# is untouched -- 380 lines is nowhere near 707.
+_FUNCTION_COUNT_BUDGET = 214
 _FUNCTION_WORST_BUDGET = 707
 
 

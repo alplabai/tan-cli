@@ -163,6 +163,41 @@ def test_zephyr_floor_survives_an_unreadable_cmake_file(tmp_path):
     assert doctor_cmd.zephyr_python_floor(str(tmp_path))[0] == doctor_cmd.ZEPHYR_PYTHON_FLOOR
 
 
+def test_zephyr_floor_names_the_real_workspace_when_the_cmake_file_is_missing(tmp_path):
+    """tan-cli#488 defect 7: a resolved Zephyr workspace mid-`west update` (a
+    `.west` workspace with no `cmake/modules/python.cmake` yet --
+    `zephyr_workspace_check`'s own "legitimate, working-in-progress host
+    state") used to fall back to the SAME hardcoded string as "nothing
+    resolved at all": "no $ZEPHYR_BASE workspace on this host to read
+    `cmake/modules/python.cmake` from" -- blaming an env var this call was
+    never even given (`_collect` passes the RESOLVED workspace path here,
+    never `$ZEPHYR_BASE`, once one resolves) in the same envelope that
+    reported the workspace resolving fine. The fallback VALUE stays correct;
+    only the PROVENANCE must now name the real cause.
+    """
+    workspace_zephyr = tmp_path / "zephyr"
+    workspace_zephyr.mkdir()
+    floor, source = doctor_cmd.zephyr_python_floor(str(workspace_zephyr))
+    assert floor == doctor_cmd.ZEPHYR_PYTHON_FLOOR
+    assert str(workspace_zephyr) in source
+    assert "could not be read" in source
+    assert "no $ZEPHYR_BASE workspace" not in source
+
+
+def test_zephyr_floor_names_the_real_file_when_it_has_no_parseable_pin(tmp_path):
+    """Third cause: the file resolves and reads fine, but its content has no
+    `PYTHON_MINIMUM_REQUIRED` this regex can find -- a future Zephyr rename,
+    say. Still not "no workspace on this host"."""
+    modules = tmp_path / "cmake" / "modules"
+    modules.mkdir(parents=True)
+    (modules / "python.cmake").write_text("include_guard(GLOBAL)\n", encoding="utf-8")
+    floor, source = doctor_cmd.zephyr_python_floor(str(tmp_path))
+    assert floor == doctor_cmd.ZEPHYR_PYTHON_FLOOR
+    assert "python.cmake" in source
+    assert "did not declare a parseable" in source
+    assert "no $ZEPHYR_BASE workspace" not in source
+
+
 def test_the_manifest_declaring_a_lower_floor_is_itself_reported():
     """`doctor` must not silently paper over the skew: it says which floor is
     which, and where the ACTUAL fix belongs (a newer host interpreter, not
@@ -214,7 +249,12 @@ def test_no_skew_check_when_the_two_floors_agree():
 def _write_bootstrap_json(root: Path, prerequisites: dict) -> Path:
     path = root / "metadata" / "bootstrap.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"prerequisites": prerequisites}), encoding="utf-8")
+    # `schemaVersion` is required (tan-cli#488 defect 3): `_load_manifest`
+    # reads it FIRST, same as `tan.core.bootstrap.parse_bootstrap_manifest`,
+    # and refuses a manifest that omits or misdeclares it.
+    path.write_text(
+        json.dumps({"schemaVersion": 1, "prerequisites": prerequisites}), encoding="utf-8"
+    )
     return path
 
 
@@ -251,6 +291,89 @@ def test_load_manifest_with_no_sdk_resolved_is_not_real():
     assert loaded.facts["pythonMinVersion"] == "3.10"
 
 
+def test_load_manifest_refuses_a_schema_version_tan_bootstrap_would_also_refuse(
+    tmp_path,
+):
+    """tan-cli#488 defect 3: `_load_manifest` used to accept ANY `prerequisites`
+    object regardless of `schemaVersion`, so an SDK whose manifest `tan
+    bootstrap` refuses outright (a schema this build does not understand)
+    still yielded `hostPrerequisites: pass`, zero tools probed, and no
+    `bootstrapManifest` warning -- a clean bill of health for a manifest that
+    was never actually read.
+    """
+    path = tmp_path / "metadata" / "bootstrap.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "prerequisites": {
+                    "pythonMinVersion": "3.10",
+                    "posix": [],
+                    "windows": [],
+                    "install": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is False
+    assert loaded.error is not None
+    assert "schemaVersion 2" in loaded.error
+    assert "supports only 1" in loaded.error
+    # The fallback tool list, not an empty one this manifest declared -- a
+    # manifest tan cannot understand must probe tan's OWN built-in tools,
+    # never trust a shape it never actually parsed as real.
+    assert loaded.facts["posix"] == ["git", "cmake", "python3", "ninja"]
+
+
+def test_load_manifest_refuses_a_manifest_missing_schema_version_entirely(tmp_path):
+    """Same refusal, the other input shape: `schemaVersion` absent altogether
+    (not merely a different number) -- `tan.core.bootstrap.
+    parse_bootstrap_manifest` (the ONE other reader of this file) raises
+    identically, and `_load_manifest` must not disagree with it."""
+    path = tmp_path / "metadata" / "bootstrap.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"prerequisites": {"posix": ["git", "cmake", "python3", "ninja"]}}),
+        encoding="utf-8",
+    )
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is False
+    assert loaded.error is not None
+    assert "schemaVersion" in loaded.error
+
+
+def test_collect_warns_bootstrap_manifest_and_falls_back_on_an_unsupported_schema(
+    tmp_path,
+):
+    """The end-to-end wire: an unsupported `schemaVersion` must surface as the
+    `bootstrapManifest` warning (previously silent) with the fallback tool
+    list actually probed, not a silent `hostPrerequisites: pass`."""
+    path = tmp_path / "metadata" / "bootstrap.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "prerequisites": {
+                    "pythonMinVersion": "3.10",
+                    "posix": [],
+                    "windows": [],
+                    "install": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    checks = doctor_cmd._collect(str(tmp_path))
+    manifest_warn = next((c for c in checks if c.name == "bootstrapManifest"), None)
+    assert manifest_warn is not None, [c.name for c in checks]
+    assert manifest_warn.status == "warn"
+    assert "schemaVersion 2" in manifest_warn.detail
+
+
 def test_collect_reports_no_manifest_read_when_none_resolves(tmp_path, monkeypatch):
     """The end-to-end wire: with no `metadata/bootstrap.json` under `sdk_root`,
     `pythonFloor` (when it fires) must say the manifest was never consulted --
@@ -279,6 +402,63 @@ def test_missing_prerequisites_carry_the_frozen_code_and_the_install_commands():
     assert check.status == "fail"
     assert check.code == "bootstrap.prerequisites-missing"
     assert "sudo apt-get install -y ninja-build" in (check.fix or "")
+
+
+def test_macos_reads_its_own_prerequisites_list_not_posixs(tmp_path, monkeypatch):
+    """tan-cli#488 defect 2: a stock Mac has neither `wget` nor a standalone
+    `xz`, and alp-sdk v0.14.0 declares a separate `prerequisites.macos` that
+    omits both for exactly that reason. Before the fix, `_collect` selected
+    the tool list with `facts.get("windows" if os.name == "nt" else
+    "posix")` -- no `macos` arm at all -- so a stock Mac got the POSIX list
+    (including `xz`/`wget`) wholesale and `hostPrerequisites` reported `fail`
+    on a host `tan bootstrap` accepts.
+    """
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "darwin")
+    monkeypatch.setattr(doctor_cmd.os, "name", "posix")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja", "xz", "wget"],
+            "macos": ["git", "cmake", "python3", "ninja"],
+            "windows": ["git", "cmake", "python", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {},
+        },
+    )
+    # Every tool the MACOS list names is "present"; `xz`/`wget` (posix-only)
+    # would be "missing" if the posix list were used instead -- `on_path`
+    # never even gets asked about them when the fix is in place.
+    present = {"git", "cmake", "python3", "ninja"}
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: f"/usr/bin/{name}" if name in present else None)
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    host_prereqs = next(c for c in checks if c.name == "hostPrerequisites")
+    assert host_prereqs.status == "pass", host_prereqs.detail
+
+
+def test_macos_falls_back_to_posix_when_the_manifest_declares_no_macos_list(
+    tmp_path, monkeypatch
+):
+    """A manifest predating alp-sdk v0.14.0 (`prerequisites.macos` absent
+    entirely) must still read `posix` on macOS -- the behaviour every SDK had
+    before that release, not a refusal."""
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "darwin")
+    monkeypatch.setattr(doctor_cmd.os, "name", "posix")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "windows": ["git", "cmake", "python", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {},
+        },
+    )
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: f"/usr/bin/{name}")
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    host_prereqs = next(c for c in checks if c.name == "hostPrerequisites")
+    assert host_prereqs.status == "pass", host_prereqs.detail
+    assert "git" in host_prereqs.detail
 
 
 def test_west_on_bare_path_the_activated_venv_state_passes():
@@ -383,7 +563,14 @@ def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_pa
         bin_dir = ws / ".venv" / ("Scripts" if os.name == "nt" else "bin")
         bin_dir.mkdir(parents=True)
         if with_west:
-            (bin_dir / ("west.exe" if os.name == "nt" else "west")).write_text("", encoding="utf-8")
+            # A GENUINELY runnable west (tan-cli#488 defect 1): a 0-byte,
+            # non-executable file at the right name used to be enough to
+            # satisfy this fixture's "builds work" state, because
+            # `west_resolved_check` treated ANY resolved path as `pass`
+            # regardless of whether it could actually be spawned. Now it
+            # cannot -- see `test_a_resolved_but_unrunnable_west_fails_not_
+            # passes` below for that exact regression, planted deliberately.
+            _write_runnable_west(bin_dir)
         return ws
 
     # west is on NEITHER PATH in both states -- that is the constant under test.
@@ -425,7 +612,65 @@ def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_pa
     ), issues
 
 
-def test_the_two_west_checks_split_the_question_and_only_one_can_be_fatal():
+def test_a_resolved_but_unrunnable_west_fails_not_passes(tmp_path, monkeypatch):
+    """tan-cli#488 defect 1, reproduced against the REAL `_collect` wiring: a
+    workspace venv whose `west` launcher FILE survives -- `tool_in_venv`'s
+    `is_file()` check passes -- but cannot actually be EXECUTED. A relocated
+    workspace (the state `tan bootstrap` itself models as
+    `bootstrap.workspace-relocated`), a deleted `.venv/bin/python`, or (as
+    planted here, portable across POSIX/Windows) a 0-byte non-executable file
+    at the right name -- every one leaves `westResolved` unable to spawn the
+    binary it names.
+
+    Before the fix, `probe()` collapsed "could not be spawned" into the same
+    `None` `west_resolved_check` also sees for "spawned fine but printed
+    something unparseable", and treated `version is None` as `pass`
+    unconditionally: `westResolved: pass`, `summary.fail == 0`, `ok: true`,
+    exit 0 -- on a host where the very first real `west build` invocation
+    dies with `FileNotFoundError`/`ModuleNotFoundError`. This is the check
+    that must now refuse instead.
+    """
+    ws = tmp_path
+    (ws / ".west").mkdir(parents=True)
+    bin_dir = ws / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    bin_dir.mkdir(parents=True)
+    (bin_dir / ("west.exe" if os.name == "nt" else "west")).write_text("", encoding="utf-8")
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+
+    checks = doctor_cmd._collect(None, workspace_root=str(ws))
+    by_name = {c.name: c.status for c in checks}
+    assert by_name.get("westResolved") == "fail", (
+        "a west that resolves but cannot run must FAIL, not pass"
+    )
+    assert int(doctor_cmd.exit_code_for(checks)) == 4
+
+
+def test_west_check_probes_the_resolved_path_not_a_bare_name_reprobe(tmp_path, monkeypatch):
+    """tan-cli#488 defect 5: `west`'s version used to come from a SECOND,
+    bare-name spawn (`probe(["west", "--version"])`) rather than the
+    `on_path`-resolved absolute path -- reopening the exact cwd-injection gap
+    `on_path` exists to close (its own docstring: a project-local
+    `west.exe`/`west` at the cwd root must not be reported as this host's
+    tooling). Fake `probe` so the bare name and the resolved path answer
+    DIFFERENT version strings -- a real rogue-binary scenario could not do
+    this so cleanly, but it proves which argv this call site actually spawns.
+    """
+    resolved = "/opt/onpath/west"
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: resolved if name == "west" else None)
+
+    def _fake_probe(argv, timeout=doctor_cmd.PROBE_TIMEOUT_S):
+        if argv == [resolved, "--version"]:
+            return "West version: v1.5.0\n"
+        if argv == ["west", "--version"]:
+            return "West version: v9.99.0\n"  # the rogue binary's answer
+        return None
+
+    monkeypatch.setattr(doctor_cmd, "probe", _fake_probe)
+
+    checks = doctor_cmd._collect(None, workspace_root=str(tmp_path))
+    west = next(c for c in checks if c.name == "west")
+    assert "1.5" in west.detail, west.detail
+    assert "9.99" not in west.detail, west.detail
     """`west` = "is it on bare PATH, or resolvable through the same resolver
     `westResolved` uses" -- never fatal either way (tan-cli#299 second half).
     `westResolved` = "can a slice run at all", fatal when not. tan-cli#123's
@@ -478,32 +723,23 @@ def test_collect_reports_west_resolved_unconditionally(tmp_path):
         assert "westResolved" in names, (build, names)
 
 
-def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
-    """tan-cli#123's exact bug, reproduced then guarded: a workspace venv
-    holds `west`, PATH is scrubbed empty so a bare lookup CANNOT possibly
-    answer -- `westResolved` must still resolve and report a version, proving
-    it came from the venv binary, never a bare-PATH re-probe. Break
-    `west_resolved_check`'s wiring in `_collect` (e.g. feed it
-    `on_path("west")` instead of `tan.core.venv.west_program`'s result) and
-    this goes red: `westResolved` would report the same absent verdict `west`
-    (bare-PATH-only) does, with PATH scrubbed.
+def _write_runnable_west(bin_dir: Path) -> Path:
+    """Plant a REAL, spawnable `west` under `bin_dir` -- one that a
+    `subprocess.run([west_path, "--version"])` actually executes to a
+    successful exit, not merely a file at the right name (tan-cli#488 defect
+    1: `west_resolved_check` now FAILS a `west` that resolves but cannot
+    run, so a fixture meaning "this venv's west genuinely works" must plant
+    one that genuinely does).
 
-    Also STATE 2 of tan-cli#299's second half, run through the REAL envelope
-    a `tan doctor --format json` process emits (`doctor_cmd.doctor`'s own
-    `checks_to_issues`/`exit_code_for`, not a hand-built `Check`): `west`
-    must now PASS here too -- fed the SAME resolved venv path `westResolved`
-    reports -- naming it, and it must not surface as a `doctor.west` issue
-    at any severity in `data.issues`. Before this fix, this exact state (the
-    default one every correct install starts in) reported `west` as a
-    permanent `warn`.
+    Shared by every test that needs a "builds work" west, factored out of
+    `test_west_resolved_reproduces_and_closes_tan_cli_123`'s own fixture.
     """
     layout = venv_layout(os.name == "nt")
-    bin_dir = tmp_path / ".venv" / layout.bin_dir
-    bin_dir.mkdir(parents=True)
     west_path = bin_dir / layout.west
     if os.name == "nt":
         # A real, spawnable PE binary under the exact required name -- a text
-        # file named `west.exe` is not executable at all, and this test's own
+        # file named `west.exe` is not executable at all, and
+        # `test_west_resolved_reproduces_and_closes_tan_cli_123`'s own
         # `scrub_path=True` proved (by breaking it first) that a bare copy of
         # `python.exe` is NOT self-contained: with PATH empty it cannot find
         # its own `python3*.dll`/`vcruntime*.dll` via the app-directory search
@@ -539,6 +775,32 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     else:
         west_path.write_text("#!/bin/sh\necho 'West version: v99.98.97'\n", encoding="utf-8")
         os.chmod(west_path, 0o755)
+    return west_path
+
+
+def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
+    """tan-cli#123's exact bug, reproduced then guarded: a workspace venv
+    holds `west`, PATH is scrubbed empty so a bare lookup CANNOT possibly
+    answer -- `westResolved` must still resolve and report a version, proving
+    it came from the venv binary, never a bare-PATH re-probe. Break
+    `west_resolved_check`'s wiring in `_collect` (e.g. feed it
+    `on_path("west")` instead of `tan.core.venv.west_program`'s result) and
+    this goes red: `westResolved` would report the same absent verdict `west`
+    (bare-PATH-only) does, with PATH scrubbed.
+
+    Also STATE 2 of tan-cli#299's second half, run through the REAL envelope
+    a `tan doctor --format json` process emits (`doctor_cmd.doctor`'s own
+    `checks_to_issues`/`exit_code_for`, not a hand-built `Check`): `west`
+    must now PASS here too -- fed the SAME resolved venv path `westResolved`
+    reports -- naming it, and it must not surface as a `doctor.west` issue
+    at any severity in `data.issues`. Before this fix, this exact state (the
+    default one every correct install starts in) reported `west` as a
+    permanent `warn`.
+    """
+    layout = venv_layout(os.name == "nt")
+    bin_dir = tmp_path / ".venv" / layout.bin_dir
+    bin_dir.mkdir(parents=True)
+    west_path = _write_runnable_west(bin_dir)
 
     proc = run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True)
     envelope = json.loads(proc.stdout)
@@ -999,6 +1261,51 @@ def test_setools_is_unknown_not_warn_off_linux():
     )
     assert check.status == "unknown"
     assert "app-release-exec-linux" in check.detail
+
+
+def test_module_importable_asks_the_given_interpreter_not_tans_own():
+    """tan-cli#488 defect 6: `_module_importable(python_exe, name)` must
+    probe `python_exe` -- a REAL subprocess spawn, `os` (always importable)
+    vs a name that certainly is not, both under `sys.executable` standing in
+    for "some other interpreter"."""
+    assert doctor_cmd._module_importable(sys.executable, "os") is True
+    assert (
+        doctor_cmd._module_importable(sys.executable, "tan_cli_488_no_such_module")
+        is False
+    )
+
+
+def test_module_importable_falls_back_to_tans_own_interpreter_with_no_venv():
+    """`python_exe is None` (no workspace venv resolved yet, e.g. before `tan
+    bootstrap` has run) falls back to `_has_module`, against tan's own
+    interpreter -- the best available signal before there is anything else
+    to ask."""
+    assert doctor_cmd._module_importable(None, "os") == doctor_cmd._has_module("os")
+
+
+def test_collect_asks_the_workspace_venvs_python_for_fdt_not_tans_own(
+    tmp_path, monkeypatch
+):
+    """The `_collect` wiring: `setools_check`'s `has_fdt` argument must come
+    from `_module_importable(venv_python(workspace_root, sdk_root), "fdt")`
+    -- the interpreter `west flash` actually runs `app-gen-toc` under -- never
+    a bare `_has_module("fdt")` against tan's own interpreter. Proven by
+    substituting a sentinel `venv_python` and recording what
+    `_module_importable` was actually called with, rather than asserting on
+    `has_fdt`'s boolean value alone (which cannot distinguish "asked the
+    right interpreter and got False" from "asked the wrong one entirely").
+    """
+    sentinel = "/some/workspace/.venv/bin/python"
+    monkeypatch.setattr(doctor_cmd, "venv_python", lambda *_a, **_k: sentinel)
+    calls: list[tuple[str | None, str]] = []
+
+    def _record(python_exe, name):
+        calls.append((python_exe, name))
+        return True
+
+    monkeypatch.setattr(doctor_cmd, "_module_importable", _record)
+    doctor_cmd._collect(None, workspace_root=str(tmp_path))
+    assert (sentinel, "fdt") in calls, calls
 
 
 # --------------------------------------------------------------------------
@@ -2271,6 +2578,44 @@ def test_sdk_provenance_check_distinguishes_a_real_git_checkout_from_a_plain_dir
     assert head in real_checkout.detail
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git must be on PATH for this test")
+def test_sdk_provenance_check_does_not_attribute_an_enclosing_repos_commit(tmp_path):
+    """tan-cli#488 defect 4: `git -C <root> ...` discovery walks UPWARD, so an
+    SDK with no `.git` of its own -- an extracted release archive vendored
+    inside a customer's own application repository, a setup this port
+    explicitly supports -- used to answer every git query with the ENCLOSING
+    repo's HEAD instead of "not a checkout". Build exactly that: an outer git
+    repo, and a plain subdirectory inside it standing in for a vendored SDK.
+    """
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        )
+
+    git("init", "-q")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "outer")
+    outer_head = git("rev-parse", "--short", "HEAD").stdout.strip()
+
+    vendored_sdk = tmp_path / "vendor" / "alp-sdk"
+    vendored_sdk.mkdir(parents=True)
+    (vendored_sdk / "metadata").mkdir()
+    (vendored_sdk / "metadata" / "sdk_version.yaml").write_text("version: 0.42.0\n", encoding="utf-8")
+
+    check = doctor_cmd.sdk_provenance_check(str(vendored_sdk))
+    assert check.status == "pass"
+    assert outer_head not in check.detail, check.detail
+    # No commit attributed at all -- `detail` is bare "alp-sdk <version>", not
+    # "alp-sdk <version> @ <commit>", proving `_git_short_commit` answered
+    # `None` rather than the enclosing repo's HEAD.
+    assert "@" not in check.detail, check.detail
+    assert check.detail == "alp-sdk 0.42.0", check.detail
+    # `_is_own_git_checkout` unit-level, directly: proves the guard itself,
+    # not just its downstream effect on the assembled detail string.
+    assert doctor_cmd._is_own_git_checkout(str(vendored_sdk)) is False
+    assert doctor_cmd._is_own_git_checkout(str(tmp_path)) is True
+
+
 def test_sdk_provenance_check_reads_the_sdk_version_file_when_present(tmp_path):
     metadata = tmp_path / "metadata"
     metadata.mkdir()
@@ -2986,3 +3331,41 @@ def test_doctor_fix_passes_a_real_on_check_to_run_fix_in_text_mode_and_none_unde
 
     assert callable(seen_on_check[0]), seen_on_check  # text mode: a real callback
     assert seen_on_check[1] is None, seen_on_check  # json mode: never streamed
+
+
+# --------------------------------------------------------------------------
+# tan-cli#488 defect 8 -- a deleted cwd must produce an envelope, not a
+# traceback with empty stdout.
+# --------------------------------------------------------------------------
+
+
+def test_a_deleted_working_directory_still_produces_an_envelope(monkeypatch):
+    """`doctor()`'s prologue -- `Path.cwd()` through `Project.resolved(...)`
+    and the SDK-root ladder -- used to run OUTSIDE the `try`/`except` that
+    turns a raise into the `doctor.internal-failure` envelope: `Path.cwd()`
+    throws `FileNotFoundError` when the working directory has been deleted
+    out from under the process (entirely reachable -- a cleanup script
+    racing a `tan doctor` run in the same shell), and that raise used to
+    unwind through typer's own traceback renderer instead: empty stdout, a
+    bare non-zero exit, no error on either side of the CLI/extension seam.
+    `flash_cmd`/`build_cmd`/`validate_cmd` already guard the identical shape
+    (`flash_cmd.workspace_root`'s own docstring calls it "the port's
+    recurring double fault").
+    """
+    def gone():
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(doctor_cmd.Path, "cwd", staticmethod(gone))
+
+    result = runner.invoke(app, ["doctor", "--format", "json"])
+    assert result.stdout, "must never be empty stdout"
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "doctor"
+    assert payload["ok"] is False
+    assert result.exit_code == payload["exitCode"] == int(doctor_cmd.ExitCode.INTERNAL_FAILURE)
+    # An envelope, whatever the outcome -- both `project` keys present (null
+    # is fine; typer's own traceback renderer would have produced no JSON at
+    # all).
+    assert set(payload["project"]) == {"root", "boardYaml"}
+    assert payload["issues"], "a failure must always carry an issue"
+    assert any(i["code"] == "doctor.internal-failure" for i in payload["issues"]), payload["issues"]
