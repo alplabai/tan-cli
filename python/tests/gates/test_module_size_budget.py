@@ -209,7 +209,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # bracing was measured-safe, the Fable-advisory finding that made it so,
     # and the one Tcl brace-counting glass jaw (an odd trailing backslash
     # count) it deliberately still leaves fail-safe.
-    "tan/core/flash_plan.py": 2161,
+    # 2199, not 2161, as of tan-cli#513: `jlink_commander_script` gains an
+    # optional `serial` parameter that emits a leading `SelectEmuBySN` line
+    # (matching Flow D's own shape) and `plan_swd_probe`'s J-Link arm now
+    # resolves/validates `flash_args.jlink_serial` the same way Flow D
+    # already does, instead of silently dropping it -- net growth is mostly
+    # docstring explaining why this mirrors Flow D's guard verbatim.
+    "tan/core/flash_plan.py": 2199,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's

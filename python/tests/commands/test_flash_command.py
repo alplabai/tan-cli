@@ -1238,6 +1238,103 @@ def test_swd_probe_openocd_message_names_the_resolved_target_not_gd32g553():
     assert "GD32G553" not in plan.ok_message
 
 
+# ── swd_probe J-Link probe-serial selection (tan-cli#513) ───────────────────
+
+
+def test_swd_probe_jlink_emits_selectemubysn_when_serial_is_set():
+    """tan-cli#513, the headline defect: `flash_args.jlink_serial` was
+    accepted (it passes the #486 charset guard the same as every other
+    backend) and then silently DROPPED on `swd_probe`'s J-Link arm -- neither
+    `SelectEmuBySN` in the Commander script nor `-SelectEmuBySN` in argv, so a
+    bench with more than one J-Link either fails to connect (JLinkExe cannot
+    pick) or, worse, could reach the wrong board on a shared/cloned serial.
+    Fails against the pre-fix source (measured: no `SelectEmuBySN` anywhere in
+    `plan.jlink_script` when `jlink_serial` was set)."""
+    inp = _swd_inputs(jlink_serial="603000869")
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert plan.jlink_script.startswith("SelectEmuBySN 603000869\n")
+
+
+def test_swd_probe_jlink_no_serial_emits_no_selectemubysn():
+    """No default serial, same reasoning as Flow D
+    (`test_flow_d_probe_serial_is_optional_and_has_no_default`): a bench-wide
+    serial can be SHARED by two probes that differ only by USB path, so a
+    silent default can select the wrong board. `swd_probe` has no confirm
+    gate to hide behind either -- this must stay opt-in."""
+    plan = flash_plan.plan_swd_probe(_swd_inputs(), lambda name: name == "JLinkExe")
+    assert "SelectEmuBySN" not in plan.jlink_script
+
+
+def test_swd_probe_jlink_probe_serial_accepts_a_bare_numeric_value():
+    """tan-cli#486's own fix for Flow D, extended to `swd_probe`:
+    `jlink_serial: 603000869` (unquoted -- the canonical SEGGER spelling) is a
+    bare YAML integer. `fa_str_checked`, not the tolerant `fa_str`, is what
+    round-trips it into its decimal string form instead of silently treating
+    it as absent."""
+    plan = flash_plan.plan_swd_probe(_swd_inputs(jlink_serial=603000869), lambda n: n == "JLinkExe")
+    assert plan.jlink_script.startswith("SelectEmuBySN 603000869\n")
+
+
+@pytest.mark.parametrize("bad", ["a;b", "../x", "/x", "C:/x", "a b", "dev\nice"])
+def test_swd_probe_jlink_probe_serial_is_charset_guarded(bad):
+    """tan-cli#513: before this fix `swd_probe` validated `jlink_serial` NOT
+    AT ALL -- the field was dead code on this backend, so a hostile value
+    (e.g. an embedded newline forming an extra Commander command) sailed
+    through with `ok:true`. Fails against the pre-fix source (measured: no
+    refusal for any of these). Same guard-class as Flow D's own
+    `test_flow_d_probe_serial_is_charset_guarded`."""
+    inp = _swd_inputs(jlink_serial=bad)
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+
+
+def test_swd_probe_jlink_probe_serial_refusal_names_jlink_not_openocd():
+    """Mirrors Flow D's own `test_flow_d_probe_serial_refusal_names_jlink_
+    not_openocd` (tan-cli#486 REVIEW, defect 4): `jlink_serial` reaches a
+    J-Link Commander `SelectEmuBySN` line, never an OpenOCD Tcl script, so the
+    refusal must say so -- `swd_probe` shares `_JLINK_SERIAL_DESTINATION`
+    with Flow D rather than hand-rolling a second wording."""
+    inp = _swd_inputs(jlink_serial="dev\nice")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    message = str(raised.value)
+    assert "J-Link Commander" in message
+    assert "SelectEmuBySN" in message
+    assert "OpenOCD" not in message
+
+
+def test_swd_probe_jlink_probe_serial_empty_string_still_opts_out():
+    """`jlink_serial: ""` opts OUT of `SelectEmuBySN` entirely, matching Flow
+    D's own `test_flow_d_probe_serial_empty_string_still_opts_out`."""
+    plan = flash_plan.plan_swd_probe(_swd_inputs(jlink_serial=""), lambda n: n == "JLinkExe")
+    assert "SelectEmuBySN" not in plan.jlink_script
+
+
+def test_swd_probe_jlink_probe_serial_precedes_the_reset_halt_lines():
+    """`SelectEmuBySN` must be the FIRST line of the Commander script -- a
+    probe has to be selected before `r`/`halt` can address it. Also proves
+    `jlink_commander_script`'s new `serial` parameter composes correctly with
+    the rest of the script (reset/halt, load, optional reset-and-go,
+    quit-close) rather than merely being accepted and ignored a second time."""
+    script = flash_plan.jlink_commander_script(
+        "/build/zephyr.bin", "0x08000000", True, serial="603000869"
+    )
+    lines = script.splitlines()
+    assert lines[0] == "SelectEmuBySN 603000869"
+    assert lines[1] == "r"
+    assert lines[2] == "halt"
+
+
+def test_jlink_commander_script_serial_defaults_to_absent():
+    """The new `serial` parameter is optional and defaults to `None` -- every
+    existing call site/test in this file that constructs a Commander script
+    with the original 3-positional-argument shape must render byte-identical
+    to before this fix."""
+    script = flash_plan.jlink_commander_script("/build/zephyr.bin", "0x08000000", True)
+    assert not script.startswith("SelectEmuBySN")
+    assert script.splitlines()[0] == "r"
+
+
 # ── swd_probe success message asserts no address for ELF/HEX (tan-cli#487) ──
 
 

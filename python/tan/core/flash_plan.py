@@ -1023,11 +1023,30 @@ def commander_path(path: str) -> str:
     return f'"{path}"' if any(c.isspace() for c in path) else path
 
 
-def jlink_commander_script(artefact: str, base: str, do_reset: bool) -> str:
+def jlink_commander_script(
+    artefact: str, base: str, do_reset: bool, serial: str | None = None
+) -> str:
     """The J-Link Commander script: reset/halt, load (`loadbin`+base for `.bin`,
-    else `loadfile`), optional reset-and-go, quit-close."""
+    else `loadfile`), optional reset-and-go, quit-close.
+
+    `serial` (tan-cli#513) is the ONLY disambiguator when a bench carries more
+    than one J-Link -- `JLinkExe` selects a probe by serial alone, with no
+    USB-port equivalent. When given, it is emitted as a leading
+    `SelectEmuBySN {serial}` line, matching `plan_alif_mram_jlink`'s own Flow D
+    shape (`flash_plan.py:1936-1937`) byte-for-byte -- same line text, same
+    "first line of the script" position, same "absent -> no line" default. The
+    caller (`plan_swd_probe`) validates the value with the same
+    `validate_identifier(..., destination=_JLINK_SERIAL_DESTINATION)` guard
+    Flow D applies before it ever reaches here; this function does not
+    re-validate it, exactly as it does not re-validate `artefact` after
+    `validate_commander_path` below -- validation is the caller's job, this is
+    the caller's callee.
+    """
     validate_commander_path(artefact, "the flash artefact path")
-    lines = ["r", "halt"]
+    lines: list[str] = []
+    if serial is not None:
+        lines.append(f"SelectEmuBySN {serial}")
+    lines += ["r", "halt"]
     # `is_raw_bin` reads the extension via `os.path.splitext` -- checked on
     # the UNQUOTED artefact, before `commander_path` may wrap it in `"..."`,
     # which would otherwise shift the extension off the string entirely.
@@ -1121,6 +1140,25 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     if jlink is not None:
         device = _resolve_jlink_device(fa)
         speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
+        # tan-cli#513: `flash_args.jlink_serial` was accepted (it passes the
+        # #486 charset guard on every other backend) and then silently
+        # dropped here -- `swd_probe` emitted no `SelectEmuBySN` at all, so on
+        # a bench with more than one J-Link this backend either fails to
+        # connect (JLinkExe with no probe selected refuses to pick) or, if a
+        # connect got through anyway, cannot be trusted to have reached the
+        # intended board: `JLinkExe` selects a probe ONLY by serial, and an
+        # OEM-cloned serial shared by two different probes on the same host
+        # is a measured, not hypothetical, bench condition (tan-cli#513).
+        # `fa_str_checked`, not the tolerant `fa_str` (tan-cli#486 on Flow D):
+        # a NUMERIC serial -- the canonical SEGGER spelling -- is a bare YAML
+        # integer, which `fa_str` treats as "absent" and would silently drop
+        # the line right back. `validate_identifier` closes the same
+        # newline-injection hole `jlink_serial` is guarded against on Flow D
+        # (`_JLINK_SERIAL_DESTINATION`) -- `serial` is interpolated verbatim
+        # into `SelectEmuBySN {serial}`, a J-Link Commander script LINE.
+        serial = fa_str_checked(fa, "jlink_serial", False)
+        if serial is not None:
+            validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
         return FlashPlan(
             argv=(
                 jlink, "-device", device, "-if", "SWD", "-speed", str(speed),
@@ -1148,7 +1186,7 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
                 if is_bin
                 else f"swd_probe[{core}]: {device} flashed via J-Link"
             ),
-            jlink_script=jlink_commander_script(inp.artefact, base, do_reset),
+            jlink_script=jlink_commander_script(inp.artefact, base, do_reset, serial),
         )
 
     interface = _default(fa_str_checked(fa, "interface", False), "")
