@@ -1325,6 +1325,44 @@ def _flash_entry(
             # setools`'s own docstring for why an unconfirmed real run must
             # not sign for real just because it is not ALSO `--dry-run`.
             confirm = ctx.force_confirm or bool(fa_bool_checked(flash_args, "confirm"))
+            # tan-cli#512: the read-only DPIDR preflight must run BEFORE the
+            # SETOOLS auto-sign, not after -- `_resolve_flow_d_atoc_via_
+            # setools` is itself a real write into the customer's SETOOLS
+            # install (`app-gen-toc` REWRITES `build/app-package-map.txt`
+            # rather than appending, destroying any prior accumulated sign
+            # record), and the wrong-board case this preflight exists to
+            # catch is exactly the one where nothing should have been
+            # written yet. Measured on real E1M-AEN801 silicon: a wrong-
+            # board `expect_dpidr` correctly aborted the MRAM write with
+            # slot0 byte-identical, but the SETOOLS install had already been
+            # mutated by the sign that ran first.
+            #
+            # Gated on the SAME `not (ctx.dry_run or not confirm)` condition
+            # `_resolve_flow_d_atoc_via_setools`'s own real-sign branch uses
+            # (identically, `plan_alif_mram_jlink` computes this as
+            # `planning_only` for the OLD call site below) -- a preview or an
+            # unconfirmed run gets no preflight probe either, matching the
+            # previous call site's behaviour exactly. The preflight reads
+            # only `expect_dpidr`/`jlink_device`/`jlink_serial`/`jlink_speed`
+            # off `flash_args` (`flow_d_preflight_script`) -- none of which
+            # `_resolve_flow_d_atoc_via_setools` touches (it only ever adds
+            # `atoc`/`atoc_address`) -- so running it against `flash_args` as
+            # it stands here, before the sign, is behaviourally identical to
+            # running it after for every case except the one this fixes.
+            if not ctx.dry_run and confirm:
+                preflight_inputs = FlashInputs(
+                    artefact=artefact_path,
+                    flash_args=flash_args,
+                    core_id=entry_id,
+                    sku=ctx.sku,
+                    dry_run=ctx.dry_run,
+                    force_confirm=ctx.force_confirm,
+                )
+                refusal = _flow_d_preflight(preflight_inputs, ctx.venv_bin, ctx.workspace)
+                if refusal is not None:
+                    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                    lines.append(f"  FAIL: {refusal}")
+                    return 1, entry(method, "failed", 1, refusal), lines
             flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
                 flash_args, shape, ctx, entry_id, confirm
             )
@@ -1394,14 +1432,12 @@ def _flash_entry(
         lines.append(f"  {msg}")
         return 0, entry(method, "planned", 0, msg), lines
 
-    # A real write. Flow D gets its read-only DPIDR preflight FIRST: flashing the
-    # wrong attached board is the one unrecoverable mistake here, so the identity
-    # is confirmed while the session is still read-only, and a mismatch aborts.
-    if method == FLOW_D_METHOD:
-        refusal = _flow_d_preflight(inputs, ctx.venv_bin, ctx.workspace)
-        if refusal is not None:
-            lines.append(f"  FAIL: {refusal}")
-            return 1, entry(method, "failed", 1, refusal), lines
+    # tan-cli#512: Flow D's read-only DPIDR preflight used to run HERE --
+    # after `meta.build`, immediately before the real write. It now runs
+    # earlier, above, ahead of the SETOOLS auto-sign that may precede this
+    # point: see the `if not ctx.dry_run and confirm:` block in the
+    # `FLOW_D_METHOD` branch near the top of this function for the fix and
+    # why the sign could not be allowed to run first.
 
     # tan-cli#487, defect 1's second tier -- see `_yocto_wic_block_device_
     # refusal`'s own docstring. Scoped to `yocto_wic`/`yocto_wic_to_sd_or_
@@ -1541,9 +1577,18 @@ def _flow_d_preflight(
         # selector. The SW-DP ID this preflight already reads IS the true
         # per-silicon discriminator; this remediation says so instead of
         # pointing at the one field that cannot fix this.
+        # tan-cli#512, secondary: name the ACTUAL SW-DP ID this connect just read,
+        # not only the expected one -- on a bench where a USB serial is CLONED
+        # across two physical probes (measured: `603000869` answers both a real
+        # AEN E8 at `0x4C013477` and a GD32 bridge at `0x0BE12477`), the actual ID
+        # is the single most useful datum for working out which board actually
+        # answered. `_dp_id_value` reuses the exact regex `_dp_id_reported` just
+        # matched on this same banner, so it cannot fail to find a value here.
+        actual = _dp_id_value(banner) or "an ID this preflight could not parse back out"
         return (
             f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
-            "-- refusing to write MRAM to an unidentified board. Check the wiring and "
+            f"-- the probe reported {actual} instead. Refusing to write MRAM to an "
+            "unidentified board. Check the wiring and "
             "which board is physically attached -- do NOT treat pinning "
             "flash_args.jlink_serial alone as the fix: some OEM J-Link probes share a "
             "CLONED serial across more than one physical unit, so jlink_serial cannot "
@@ -1580,8 +1625,11 @@ def _hex_in(expected: str, haystack: str) -> bool:
 #: it turned out to be -- "Found SW-DP with ID 0x........" / "DPIDR: 0x........".
 #: Matched loosely on purpose: what this distinguishes is "a real board
 #: answered with a different identity" from "nothing answered", not the exact
-#: firmware/DLL version's phrasing.
-_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*0x[0-9A-Fa-f]+", re.IGNORECASE)
+#: firmware/DLL version's phrasing. The hex value is its own capture group
+#: (tan-cli#512) so `_dp_id_value` can report what was ACTUALLY read, not only
+#: whether something was -- `_dp_id_reported` still just asks whether this
+#: matches at all.
+_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*(0x[0-9A-Fa-f]+)", re.IGNORECASE)
 
 #: SEGGER's own wording for the PROBE itself refusing the connection outright
 #: -- measured verbatim on the rc3 bench run: "Connecting to J-Link ...FAILED:
@@ -1609,6 +1657,16 @@ def _dp_id_reported(banner: str) -> bool:
     `expected` (the caller already ruled that out via `_hex_in`), only whether
     a connect got far enough to read one at all."""
     return _DP_ID_RE.search(banner) is not None
+
+
+def _dp_id_value(banner: str) -> str | None:
+    """The actual SW-DP ID text the banner reported, verbatim (whatever hex
+    casing/`0x` spelling SEGGER printed), or `None` if `_DP_ID_RE` does not
+    match at all. tan-cli#512: a caller that already knows `_dp_id_reported(
+    banner)` is `True` gets a non-`None` value here by construction -- both
+    read the same regex against the same banner."""
+    match = _DP_ID_RE.search(banner)
+    return match.group(1) if match else None
 
 
 def _connect_failed_outright(banner: str) -> bool:

@@ -2371,6 +2371,24 @@ def test_flow_d_preflight_a_different_reported_dp_id_keeps_the_wiring_message(mo
     assert "re-enumerat" not in message
 
 
+def test_flow_d_preflight_wrong_dp_id_names_the_actual_id_too(monkeypatch):
+    """tan-cli#512, secondary. The mismatch refusal used to name only the
+    EXPECTED SW-DP IDR, never the actual one the preflight just read --
+    although it took this exact `_dp_id_reported(banner)` branch and
+    therefore had the value in hand. On a bench where two probes share a
+    cloned USB serial (measured: `603000869` answers both a real E1M-AEN801
+    at `0x4C013477` and a GD32 bridge at `0x0BE12477`), the actual ID is the
+    single most useful datum for telling which board actually answered."""
+    _stub_flow_d_probe(
+        monkeypatch,
+        stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
+    )
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None
+    assert "0x4C013477" in message, message  # the expected id (unchanged)
+    assert "0x2BA01477" in message, message  # tan-cli#512: the actual id, new
+
+
 def test_flow_d_preflight_wrong_dp_id_names_the_sw_dp_id_not_jlink_serial(monkeypatch):
     """tan-cli#369: the wrong-DP-ID remediation used to read as "pin
     jlink_serial to fix this" -- wrong on the bench this preflight actually
@@ -2967,6 +2985,112 @@ boot_order: []
     assert any(i.code == "flash.confirm-required" for i in issues)
     assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
     assert not (setools_dir / "build" / "config").exists()
+
+
+def test_flow_d_wrong_board_refuses_before_any_setools_write(tmp_path, monkeypatch):
+    """tan-cli#512. A CONFIRMED, non-dry-run Flow D entry whose read-only
+    DPIDR preflight catches a wrong-board mismatch must abort BEFORE the
+    SETOOLS auto-sign ever touches the customer's install -- not merely
+    before the MRAM write itself.
+
+    Measured on real E1M-AEN801 silicon: a manifest with `expect_dpidr` set
+    to the GD32 bridge's DP ID (deliberately the wrong board) correctly
+    aborted the MRAM write with slot0 byte-identical -- but
+    `_resolve_flow_d_atoc_via_setools` had already run FIRST and rewrote
+    `build/app-package-map.txt` (1141 -> 689 bytes), regenerated `build/
+    AppTocPackage.bin`, and created `build/images/m55_he.bin` + `build/
+    config/m55_he-slot0.json`, destroying the prior accumulated (hand-run-
+    inclusive) sign record. `_flow_d_preflight` moving ahead of the sign is
+    the fix under test.
+
+    `tan.core.setools.subprocess.run` -- `sign_slot0`'s own real spawn site
+    -- is stubbed to raise if it is EVER called: a regression back to the
+    pre-fix ordering (sign runs before the preflight) fails LOUDLY here,
+    mirroring `test_flow_d_end_to_end_does_not_sign_via_setools_when_
+    unconfirmed`'s own technique for the sibling (unconfirmed) case.
+    `flash_cmd._spawn_jlink` -- the one spawn site the preflight probe and
+    the eventual real write share -- is stubbed to a canned "a different
+    board answered" banner; nothing here can reach a real J-Link either way.
+
+    Verified to fail against the pre-fix code (preflight after the sign):
+    with the ordering reverted, `_resolve_flow_d_atoc_via_setools` reaches
+    `sign_slot0` before the preflight ever runs, tripping the
+    `AssertionError` stub above -- the exact regression this guards.
+    """
+    from tan.core import setools as setools_module
+
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    name = _setools_script_name()
+    if name != setools_module.APP_GEN_TOC:
+        monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
+    _write_working_app_gen_toc(setools_dir / name)
+
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    (build_root / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = f"""schema_version: 1
+hw_info: {{sku: S}}
+slices:
+- {{core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: {{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                expect_dpidr: "0x0BE12477", jlink_device: Generic-Attach,
+                setools_dir: "{setools_dir.as_posix()}", confirm: true}}}}
+helper_mcus: []
+boot_order: []
+"""
+    (build_root / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+
+    monkeypatch.setattr(
+        flash_cmd,
+        "_spawn_jlink",
+        lambda *_a, **_k: flash_cmd._Outcome(
+            success=False,
+            stdout="Connecting to target via SWD\nFound SW-DP with ID 0x4C013477\n",
+            stderr="",
+        ),
+    )
+
+    def _fail_if_spawned(*_a, **_k):
+        raise AssertionError(
+            "app-gen-toc was spawned before the DPIDR preflight refused a wrong board"
+        )
+
+    monkeypatch.setattr(setools_module.subprocess, "run", _fail_if_spawned)
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 1
+    entry = data["entries"][0]
+    assert entry["status"] == "failed"
+    assert "expected SW-DP IDR 0x0BE12477" in entry["message"], entry["message"]
+    # tan-cli#512, secondary: the ACTUAL reported ID must reach the message too.
+    assert "0x4C013477" in entry["message"], entry["message"]
+    assert any(i.code == "flash.entry-failed" for i in issues)
+
+    # The core assertion: nothing was written into the SETOOLS install.
+    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
+    assert not (setools_dir / "build" / "config").exists()
+    assert not (setools_dir / "build" / "app-package-map.txt").exists()
 
 
 def test_flow_d_end_to_end_refuses_with_setools_guidance_when_unresolved(tmp_path):
