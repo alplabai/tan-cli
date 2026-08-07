@@ -125,6 +125,7 @@ create a second list that immediately drifts.
 | `data.checks[].{name,status}`, `data.summary.{pass,warn,fail}`, `data.nextSteps`, the literal check name `workspace` | `doctor --build` | `doctor_build_data_keys_the_extension_reads` — a KEY-SET assertion, not a golden, because doctor's values are host facts |
 | `data.written` | `build --materialise` | **NOT COVERED.** Reaching it needs a resolvable alp-sdk checkout and a Python spawn; nothing in this suite is allowed either. |
 | `data.releases` | `sdk list` | **NOT COVERED.** Hits the GitHub releases API. |
+| `data.configuration` (the `launch.json` entry alp-sdk-vscode#342 writes verbatim) | `debug-config` | **PARTIAL.** Live oracle-parity fixtures cover only the bare `zephyr-mcu` invocation (all three servers) and `native-host` — see "Known divergence: `debug-config-preview-*`" below for `zephyr-mcu-sdk-identity`, `baremetal-mcu` and `yocto-userspace`, which are not. The five `debug-config-preview-*` goldens above no longer pin this field either (`xfail(strict=True)`, same section). |
 
 The last two rows are stated rather than quietly omitted: an uncovered field
 that reads as covered is worse than one everybody knows about.
@@ -258,7 +259,7 @@ just the one that captured it:
 | `sdk-unknown-subcommand` | `sdk bogus --format json` | 1 | Runtime-failure envelope shape; the only offline path that exercises exit code 1 in this set. |
 | `generate-board-yaml-missing` | `generate --format json` (no `board.yaml` present) | 2 | `generate`'s `data` schema (`{schemaVersion,targets,written,failed}`) is distinct from `init`'s and was otherwise completely unguarded — this is the first guard clause in `python/tan/commands/generate_cmd.py`, needing no board/SDK/network to reach. |
 | `debug-config-preview-zephyr-mcu` | `debug-config --target-kind zephyr-mcu --server jlink --preview` | 0 | |
-| `debug-config-preview-zephyr-mcu-sdk-identity` | `debug-config --target-kind zephyr-mcu --server jlink --preview` (fixture SDK, `--sdk-root ./sdk`) | 0 | |
+| `debug-config-preview-zephyr-mcu-sdk-identity` | `debug-config --target-kind zephyr-mcu --server jlink --core m55_hp --sdk-root ./sdk --preview` (fixture SDK) | 0 | |
 | `debug-config-preview-baremetal-mcu` | `debug-config --target-kind baremetal-mcu --server openocd --preview` | 0 | |
 | `debug-config-preview-yocto-userspace` | `debug-config --target-kind yocto-userspace --server gdbserver --preview` | 0 | |
 | `debug-config-preview-native-host` | `debug-config --target-kind native-host --server none --preview` | 0 | One profile per `--target-kind`. Unlike the other cases these pin a `data` value that is itself a consumer ARTEFACT, not a report: alp-sdk-vscode#342 writes `data.configuration` into `launch.json` verbatim, so on a case *without* a declared divergence the golden pins the emitted key SET — an added key or a changed `program`/`executable` fails here instead of shipping. **All five of the rows above currently carry a declared, `xfail(strict=True)` divergence from this golden — see "Known divergence: `debug-config-preview-*`" right below this table for what actually ships and what pins it instead.** `--preview` reads no `board.yaml`, spawns no Python and probes no PATH; the only host-dependent output is the absolute working directory, tokenized as `__WORKDIR__` above. |
@@ -290,18 +291,28 @@ intro above, doing so would also redden the frozen `crates/` oracle test):
   (`DEFAULT_PRE_LAUNCH_TASK`, key position via `runToEntryPoint`/
   `preLaunchTask` adjacency) and `python/tests/commands/
   test_debug_config_command.py` at the envelope level for `zephyr-mcu`.
+
+  **Live oracle-parity coverage of the REST of the envelope is narrower than
+  this bullet's grouping suggests — read it per case, not per cause:**
   `python/tests/parity/test_oracle_parity.py::test_debug_config_resolution_matches_rust`
-  and `::test_debug_config_native_host_preview_global_format_matches_rust`
-  diff the WHOLE envelope against the live frozen oracle with `preLaunchTask`
+  and `::test_debug_config_native_host_preview_global_format_matches_rust` diff
+  the WHOLE envelope against the live frozen oracle with `preLaunchTask`
   stripped out first, so any OTHER field drifting (a changed `executable`, a
-  dropped `servertype`, a stray key) still fails there for `zephyr-mcu`
-  (jlink/openocd/pyocd) and `native-host`. **`baremetal-mcu`'s full envelope
-  has no such live oracle-parity fixture** — only its `preLaunchTask` value is
-  unit-pinned — so an unrelated drift in its `data.configuration` is currently
-  unguarded outside this xfail'd golden. Filed as a follow-up rather than
-  fixed here: extending `test_debug_config_resolution_matches_rust`'s
-  parametrization to `baremetal-mcu` needs a `system-manifest.yaml` fixture
-  shaped for that target class, which is beyond this golden-accuracy fix.
+  dropped `servertype`, a stray key) still fails there — but only for the
+  **bare** `zephyr-mcu` invocation (jlink/openocd/pyocd, no `--sdk-root`/
+  `--core`) and for `native-host`. `zephyr-mcu-sdk-identity` shares the
+  `preLaunchTask` cause but is a DIFFERENT parity case (it resolves
+  `configuration.device` and `project.boardYaml` off the fixture SDK, which
+  the bare `zephyr-mcu` case does not exercise); that resolution is unit-pinned
+  in `python/tests/commands/test_debug_config_command.py` but has no live
+  oracle-parity fixture. `baremetal-mcu`'s full envelope has no such fixture
+  either — only its `preLaunchTask` value is unit-pinned. Both gaps leave an
+  unrelated drift in that target's `data.configuration` unguarded outside this
+  xfail'd golden. Filed as tan-cli#529 rather than fixed here: extending
+  `test_debug_config_resolution_matches_rust`'s parametrization to
+  `zephyr-mcu-sdk-identity` and `baremetal-mcu` needs, respectively, an
+  `--sdk-root`-driven variant and a `system-manifest.yaml` fixture shaped for
+  the baremetal target class — both beyond this golden-accuracy fix.
 - **`yocto-userspace`** (tan-cli#321, an unrelated cause from the four above):
   `data.configuration` matches the golden exactly — this target gets no
   `preLaunchTask` default at all — but the envelope now also carries a
@@ -311,7 +322,12 @@ intro above, doing so would also redden the frozen `crates/` oracle test):
   predates and never emits. Live pin:
   `python/tests/commands/test_debug_config_command.py` asserts the issue's
   code, severity and message end to end, and its absence once
-  `--gdbserver-address` is supplied.
+  `--gdbserver-address` is supplied. **That pin covers only `issues[]`.**
+  Like `baremetal-mcu`, `yocto-userspace` has no live oracle-parity fixture
+  for the rest of its envelope (`data.configuration.executable`, `cwd`, …), so
+  an unrelated drift there is also unguarded outside this xfail'd golden — the
+  same tan-cli#529 follow-up covers extending parity coverage to this case
+  too.
 
 Consequence for consumers: the published `envelope-contract.json` release
 asset's five corresponding entries (see "Published as a release asset" above)
