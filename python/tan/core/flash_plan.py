@@ -75,6 +75,14 @@ _DEFAULT_JLINK_DEVICE = "GD32G553MEY7TR"
 _DEFAULT_JLINK_SPEED = 4000
 _JLINK_BINARIES = ("JLinkExe", "JLink")
 
+#: tan-cli#520 REVIEW round 2, nit: the backend-registry key AND the string
+#: `validate_flow_d_preflight_args`/`flow_d_preflight_script`/`_flow_d_
+#: preflight` read as `method` to pick which backend a refusal names --
+#: named the same way `FLOW_D_METHOD` already is, rather than a bare
+#: `"swd_probe"` literal repeated at every call site with nothing tying them
+#: together.
+SWD_PROBE_METHOD = "swd_probe"
+
 
 class ManifestError(Exception):
     """`build/system-manifest.yaml` could not be consumed. `message` is the
@@ -960,6 +968,14 @@ class FlashPlan:
     ok_message: str
     planning_only: bool = False
     jlink_script: str | None = None
+    #: tan-cli#520: the J-Link device profile `swd_probe`'s J-Link arm already
+    #: resolved for the WRITE (`_resolve_jlink_device`), carried through so
+    #: the caller's read-only DPIDR preflight can reuse it as its own connect
+    #: device rather than re-reading a second `flash_args` key with a
+    #: different meaning. `None` for every other backend/arm, including
+    #: `swd_probe`'s own openocd/pyocd arm (no J-Link device profile exists
+    #: there at all).
+    preflight_device: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1109,6 +1125,20 @@ def _resolve_jlink_device(fa: Any) -> str:
     """
     device = fa_str_checked(fa, "jlink_device", False)
     if device is not None:
+        # tan-cli#520 REVIEW round 2, MAJOR: validated HERE, at PLAN time --
+        # not only inside `flow_d_preflight_script`'s own defensive repeat
+        # (kept; see that call site's comment). Originally this was the ONE
+        # choke point every caller of the J-Link branch passed through,
+        # `--dry-run` included; round 3, finding 1 moved the primary check
+        # to `plan_swd_probe`, ahead of the J-Link-vs-openocd/pyocd split
+        # (this branch is reached only from the J-Link side of that split,
+        # so the openocd/pyocd branch never called this function and never
+        # got the guard). This call is now the redundant-but-harmless
+        # defensive repeat for the J-Link branch's own choke point --
+        # `validate_identifier` is pure, so re-running it here costs nothing
+        # and protects a future caller of `_resolve_jlink_device` that does
+        # not go through `plan_swd_probe`'s hoisted check.
+        validate_identifier(device, "jlink_device")
         return device
     if _fa_has_key(fa, "target"):
         raise FlashPlanError(
@@ -1175,6 +1205,62 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     if serial is not None:
         validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
 
+    # tan-cli#520 REVIEW round 3, finding 1: `flash_args.jlink_device`'s
+    # charset guard used to live ONLY inside `_resolve_jlink_device`, which
+    # is called from the J-Link branch alone -- the openocd/pyocd branch
+    # below never calls it and never reads `jlink_device` at all, so a
+    # hostile value there reached `ok_message`/argv unvalidated whenever a
+    # real run happened to land on that branch (e.g. no J-Link binary on
+    # PATH). `--dry-run` always forces the J-Link branch (the `inp.dry_run`
+    # bypass a few lines down), so the SAME manifest disagreed by mode alone:
+    # `--dry-run` refused, a real run on an openocd-only host reported `ok`.
+    # Hoisted here, unconditionally, mirroring the `jlink_serial` guard just
+    # above -- charset AND type (`fa_str_checked`, not merely `validate_
+    # identifier`'s charset check), so it still doesn't change which branch
+    # is taken, and a benign `jlink_device` still plans identically on the
+    # openocd/pyocd branch -- but a hostile TYPE there (`true` / `-8` / a
+    # list / a map) now raises `FlashPlanError` where it previously reached
+    # `ok_message`/argv unvalidated (that branch has no `_DEFAULT_JLINK_
+    # DEVICE` fallback to protect; it simply never read the key before).
+    # Deliberate arm parity with the J-Link branch's own guard, not an
+    # accident. `_resolve_jlink_device`'s own `validate_identifier` call is kept,
+    # not deleted -- see its docstring -- as the defensive repeat for the
+    # J-Link branch's own choke point, the same "kept" shape this file
+    # already uses for `flow_d_preflight_script`'s read-device recheck.
+    device_precheck = fa_str_checked(fa, "jlink_device", False)
+    if device_precheck is not None:
+        validate_identifier(device_precheck, "jlink_device")
+
+    # tan-cli#520: `flash_args.expect_dpidr` shape-validated HERE,
+    # unconditionally -- reusing Flow D's own `validate_flow_d_preflight_args`
+    # (with `method="swd_probe"` so a refusal names the right backend) rather
+    # than growing a second null/empty checker. `require_device_key=False`:
+    # unlike Flow D, `swd_probe` has no SEPARATE preflight-only device field --
+    # `flash_args.jlink_device` here ALREADY means the write's own `-device`
+    # profile (`_resolve_jlink_device`, a few lines below), oracle-pinned on
+    # its own (`tests/parity/…jlink-bin-artefact-uses-loadbin`, `jlink_device:
+    # NRF_DUMMY` with no `expect_dpidr` at all) -- pairing it with
+    # `expect_dpidr` the way Flow D's DIFFERENT `jlink_device` (a live-core
+    # READ attach profile, distinct from Flow D's own WRITE profile
+    # `jlink_flash_device`) is paired would retroactively demand a preflight
+    # of every manifest that only ever set the write device, moving that
+    # frozen fixture's answer -- measured: it did, before this was scoped to
+    # `require_device_key=False`. `swd_probe`'s preflight is armed by
+    # `expect_dpidr` ALONE; the read device is the same one already resolved
+    # for the write (`_resolve_jlink_device`, passed through explicitly below
+    # rather than re-read from a second `flash_args` key).
+    #
+    # `swd_probe` also has no confirm gate to hide a malformed `expect_dpidr`
+    # behind (`planning_only` is always False here, unlike Flow D) -- so this
+    # runs at PLAN time, same as Flow D's own call, so a malformed manifest
+    # surfaces under `--dry-run` too, not only on a real write. The returned
+    # tuple is discarded here on purpose: this call exists only to make a
+    # null/empty `expect_dpidr` fail loudly now; the real, read-only preflight
+    # probe (which needs a live JLinkExe) reruns `flow_d_preflight_script` --
+    # and therefore this same validation -- from the same `flash_args`, at
+    # write time, in `tan.commands.flash_cmd`.
+    validate_flow_d_preflight_args(fa, method=SWD_PROBE_METHOD, require_device_key=False)
+
     # `--dry-run` is documented to bypass the required-tool PATH gate entirely;
     # without the `inp.dry_run` bypass here this inner probe hard-failed a dry
     # run on any box without a probe tool installed, making `--dry-run`
@@ -1230,6 +1316,13 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
                 else f"swd_probe[{core}]: {device} flashed via J-Link"
             ),
             jlink_script=jlink_commander_script(inp.artefact, base, do_reset, serial),
+            # tan-cli#520: the ALREADY-RESOLVED write device, carried through
+            # so the caller's read-only DPIDR preflight (armed by
+            # `flash_args.expect_dpidr` alone -- see the `require_device_key
+            # =False` note above) can reuse it as the preflight's own connect
+            # device, instead of a manifest needing to repeat a value under a
+            # second key with a different meaning.
+            preflight_device=device,
         )
 
     # tan-cli#513 REVIEW, finding 2: the openocd/pyocd arm has no probe-serial
@@ -1251,6 +1344,31 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
             "flash_args.jlink_serial, or ensure a SEGGER J-Link is on PATH (and "
             "flash_args.use_openocd/use_pyocd are not forcing this path) so the "
             "manifest takes the primary path flash_args.jlink_serial belongs to."
+        )
+
+    # tan-cli#520, the same accept-and-ignore shape one field over: the
+    # SW-DP IDR read-only preflight this arms is a JLinkExe-only primitive too
+    # (there is no OpenOCD/pyOCD DPIDR probe wired here), so a manifest naming
+    # `expect_dpidr` that then lands on this arm must refuse, not silently
+    # drop the wrong-board guard. `_fa_has_key` (not the validated tuple
+    # above) so a null/empty `expect_dpidr` -- already refused by the
+    # `validate_flow_d_preflight_args` call above, on every arm -- is not
+    # reported a second time with a different message; reaching here at all
+    # means it was well-formed (present-and-valid, or absent). Unlike the
+    # `jlink_serial` guard just above, this does NOT also check
+    # `flash_args.jlink_device`: that key already means the WRITE's `-device`
+    # profile on this arm's OWN sibling J-Link branch (`_resolve_jlink_
+    # device`) and has no preflight-only meaning to protect here -- see the
+    # `require_device_key=False` note on the `validate_flow_d_preflight_args`
+    # call above.
+    if _fa_has_key(fa, "expect_dpidr"):
+        raise FlashPlanError(
+            "swd_probe: flash_args.expect_dpidr is set, but this run is taking the "
+            "openocd/pyocd path, which has no DPIDR preflight of its own -- the SW-DP "
+            "IDR read is a JLinkExe-only primitive. Remove flash_args.expect_dpidr, or "
+            "ensure a SEGGER J-Link is on PATH (and flash_args.use_openocd/use_pyocd "
+            "are not forcing this path) so the manifest takes the primary path "
+            "flash_args.expect_dpidr belongs to."
         )
 
     interface = _default(fa_str_checked(fa, "interface", False), "")
@@ -2107,38 +2225,75 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     )
 
 
-def validate_flow_d_preflight_args(flash_args: Any) -> tuple[str | None, str | None]:
-    """The presence/pairing/shape checks for Flow D's DPIDR preflight,
+def validate_flow_d_preflight_args(
+    flash_args: Any, method: str = FLOW_D_METHOD, *, require_device_key: bool = True
+) -> tuple[str | None, str | None]:
+    """The presence/pairing/shape checks for the read-only DPIDR preflight,
     returning `(expect_dpidr, jlink_device)` -- both `None` (opted out) or
-    both set (validated). Raises `FlashPlanError` for every half-armed or
-    malformed shape; never touches a J-Link binary or builds the Commander
-    script, so the CALLER decides when to run it. `flow_d_preflight_script`
-    (write-path) runs it then builds the script from the same values;
-    `tan.commands.flash_cmd` also runs it PLAN-TIME, before the confirm/
-    dry-run gate, so a half-armed or malformed manifest surfaces as a
-    `flash.entry-failed` issue in the planned envelope too -- not only at
-    real-write time.
+    both set (validated), UNLESS `require_device_key` is `False` (see below),
+    in which case the second slot is always `None`. Raises `FlashPlanError`
+    for every half-armed or malformed shape; never touches a J-Link binary or
+    builds the Commander script, so the CALLER decides when to run it.
+    `flow_d_preflight_script` (write-path) runs it then builds the script
+    from the same values; `tan.commands.flash_cmd` also runs it PLAN-TIME,
+    before the confirm/dry-run gate, so a half-armed or malformed manifest
+    surfaces as a `flash.entry-failed` issue in the planned envelope too --
+    not only at real-write time.
 
-    `None`/`None` only for a genuinely ABSENT `expect_dpidr`/`jlink_device` --
-    the documented, test-pinned way to opt out of the preflight entirely. A
-    key that IS present must still refuse when it resolves to `None`
-    (`fa_str_checked` alone cannot tell "absent" from "present but
-    null/empty"; see `_fa_has_key`'s docstring): silently treating it as
-    absent would drop the SW-DP IDR check -- the one guard standing between a
-    wrong-board attach and an MRAM write -- with no diagnostic at all.
+    Shared by two backends, not two copies of this shape (tan-cli#520): the
+    ORIGINAL caller is Flow D (`alif_mram_jlink`), and `plan_swd_probe`'s
+    J-Link arm now calls this too, with `method="swd_probe"`, to give the GD32
+    bridge write the identical wrong-board guard. `method` is interpolated
+    ONLY into the refusal text -- it names which backend's `flash_args` a
+    customer needs to fix, since both share one `flash_args` namespace and a
+    manifest could otherwise not tell which entry a bare "flash_args.
+    expect_dpidr" refusal was about. Defaults to `FLOW_D_METHOD` so every
+    existing Flow D call site keeps its exact wording unchanged.
+
+    `require_device_key` (default `True`, Flow D's own shape, unchanged):
+    whether `expect_dpidr` must be PAIRED with a `flash_args.jlink_device`
+    naming the live-core read attach profile, the way Flow D needs it
+    (Flow D's `jlink_device` is DISTINCT from its write-time flash-algorithm
+    profile, `jlink_flash_device`). `swd_probe` passes `False`: it has no
+    separate preflight-only device field at all -- `flash_args.jlink_device`
+    on THAT backend already means the write's own `-device` profile
+    (`_resolve_jlink_device`), oracle-pinned on its own with no `expect_dpidr`
+    anywhere near it (`tests/parity/…jlink-bin-artefact-uses-loadbin`).
+    Pairing `swd_probe`'s `jlink_device` with `expect_dpidr` the way Flow D's
+    DIFFERENT field is paired would retroactively demand a preflight of every
+    manifest that only ever set the write device -- measured: it moved that
+    frozen fixture's answer before this parameter existed. With
+    `require_device_key=False`, `expect_dpidr` ALONE arms the preflight and
+    the second returned slot is always `None`; the caller supplies its own
+    read device (`plan_swd_probe` reuses the already-resolved write device via
+    `FlashPlan.preflight_device`).
+
+    `None`/`None` (or `expect_dpidr`/`None` under `require_device_key=False`)
+    only for a genuinely ABSENT `expect_dpidr` -- the documented, test-pinned
+    way to opt out of the preflight entirely. A key that IS present must
+    still refuse when it resolves to `None` (`fa_str_checked` alone cannot
+    tell "absent" from "present but null/empty"; see `_fa_has_key`'s
+    docstring): silently treating it as absent would drop the SW-DP IDR check
+    -- the one guard standing between a wrong-board attach and an MRAM/GD32
+    write -- with no diagnostic at all.
     """
     fa = flash_args
     expected = fa_str_checked(fa, "expect_dpidr", False)
     if expected is None and _fa_has_key(fa, "expect_dpidr"):
         raise FlashPlanError(
-            f"{FLOW_D_METHOD}: flash_args.expect_dpidr is present but null/empty -- "
+            f"{method}: flash_args.expect_dpidr is present but null/empty -- "
             "refusing to silently skip the pre-write SW-DP IDR check. Remove the key "
             "entirely to skip the preflight, or supply the board's real expected ID."
         )
+    if not require_device_key:
+        if expected is None:
+            return None, None
+        validate_address(expected, "expect_dpidr")
+        return expected, None
     read_device = fa_str_checked(fa, "jlink_device", False)
     if read_device is None and _fa_has_key(fa, "jlink_device"):
         raise FlashPlanError(
-            f"{FLOW_D_METHOD}: flash_args.jlink_device is present but null/empty -- "
+            f"{method}: flash_args.jlink_device is present but null/empty -- "
             "refusing to silently skip the pre-write SW-DP IDR check. Remove the key "
             "entirely to skip the preflight, or supply the live-core read device "
             "profile."
@@ -2156,7 +2311,7 @@ def validate_flow_d_preflight_args(flash_args: Any) -> tuple[str | None, str | N
             else ("jlink_device", "expect_dpidr")
         )
         raise FlashPlanError(
-            f"{FLOW_D_METHOD}: flash_args.{present_key} is present but flash_args."
+            f"{method}: flash_args.{present_key} is present but flash_args."
             f"{absent_key} is not -- refusing to silently skip the pre-write SW-DP "
             "IDR check. Supply both flash_args.expect_dpidr and flash_args."
             "jlink_device to arm the preflight, or remove both to skip it entirely."
@@ -2168,20 +2323,60 @@ def validate_flow_d_preflight_args(flash_args: Any) -> tuple[str | None, str | N
     return expected, read_device
 
 
-def flow_d_preflight_script(inp: FlashInputs) -> tuple[str, str] | None:
-    """The read-only DPIDR preflight for a Flow D plan: `(script, expected_id)`,
-    or `None` when the manifest declared neither `expect_dpidr` nor
-    `jlink_device` at all -- see `validate_flow_d_preflight_args` for every
-    other case, which this delegates to before building the script.
+def flow_d_preflight_script(
+    inp: FlashInputs, method: str = FLOW_D_METHOD, *, read_device: str | None = None
+) -> tuple[str, str] | None:
+    """The read-only DPIDR preflight script for a Flow D OR `swd_probe` J-Link
+    plan (tan-cli#520 generalised this from Flow D-only): `(script,
+    expected_id)`, or `None` when the preflight is not armed at all -- see
+    `validate_flow_d_preflight_args` for every refusal shape, which this
+    delegates to (passing `method` through unchanged) before building the
+    script.
 
-    Run BEFORE any write, with the manifest's READ device profile (a live-core
-    attach profile, which the part-number one is not), so the caller can abort on
-    the wrong board while the session is still read-only. Both the device name
-    and the expected ID come from `flash_args`.
+    `read_device` (tan-cli#520, default `None`): when the CALLER already has a
+    connect device in hand -- `swd_probe` always does, via
+    `FlashPlan.preflight_device`, the same device its write already resolved
+    -- pass it here rather than requiring a second `flash_args` key. This
+    flips `validate_flow_d_preflight_args`'s `require_device_key` to `False`,
+    so `expect_dpidr` ALONE arms the preflight on that path. `None` (the
+    default) keeps Flow D's own shape exactly: `jlink_device` PAIRED with
+    `expect_dpidr` in `flash_args`, as it always has been.
+
+    Run BEFORE any write, with a live-core attach profile (which the
+    part-number one is not), so the caller can abort on the wrong board while
+    the session is still read-only. The expected ID always comes from
+    `flash_args.expect_dpidr`; the device name comes from either
+    `flash_args.jlink_device` (Flow D shape) or `read_device` (`swd_probe`
+    shape) depending on which was armed.
     """
-    expected, read_device = validate_flow_d_preflight_args(inp.flash_args)
-    if expected is None or read_device is None:
+    expected, paired_device = validate_flow_d_preflight_args(
+        inp.flash_args, method, require_device_key=read_device is None
+    )
+    if expected is None:
         return None
+    read_device = read_device if read_device is not None else paired_device
+    if read_device is None:
+        return None
+    # tan-cli#520 REVIEW, BLOCKER 1: `read_device` -- whichever source it came
+    # from -- is charset-validated HERE, unconditionally, before it reaches
+    # the script line below. A CALLER-supplied `read_device` (`swd_probe`'s
+    # `FlashPlan.preflight_device`, i.e. `_resolve_jlink_device`'s return
+    # value) was NEVER validated anywhere: `_resolve_jlink_device` returns
+    # `flash_args.jlink_device` verbatim, which was safe while it only ever
+    # reached ARGV (a list element, newline-inert) via the write -- this
+    # preflight instead interpolates it into a Commander script LINE
+    # (`device {read_device}`, a few lines down), the exact injection surface
+    # `validate_identifier` already closes for Flow D's own PAIRED
+    # `jlink_device` inside `validate_flow_d_preflight_args`'s
+    # `require_device_key=True` branch. Without this, an embedded newline in
+    # `flash_args.jlink_device` could splice EXTRA Commander lines (a
+    # `loadfile`/`r`/`g` ahead of `connect`) into this READ-ONLY preflight,
+    # running BEFORE the mismatch abort this function exists to run first --
+    # the same class of hole #486 closed for `jlink_serial` on Flow D, now
+    # closed here for the device name on both callers (re-validating Flow
+    # D's own already-checked `paired_device` here too is redundant but
+    # harmless -- `validate_identifier` is pure).
+    validate_identifier(read_device, "jlink_device")
     fa = inp.flash_args
     speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
     lines = []
@@ -2202,7 +2397,7 @@ def flow_d_preflight_script(inp: FlashInputs) -> tuple[str, str] | None:
 
 
 _REGISTRY: dict[str, BackendMeta] = {
-    "swd_probe": BackendMeta(("JLinkExe", "JLink", "openocd", "pyocd"), plan_swd_probe),
+    SWD_PROBE_METHOD: BackendMeta(("JLinkExe", "JLink", "openocd", "pyocd"), plan_swd_probe),
     "zephyr_west_flash": BackendMeta(("west",), plan_zephyr_west_flash),
     "baremetal_cmake_flash": BackendMeta(("cmake",), plan_baremetal_cmake_flash),
     "yocto_wic_to_sd_or_emmc": BackendMeta(("bmaptool", "dd"), plan_yocto_wic),
