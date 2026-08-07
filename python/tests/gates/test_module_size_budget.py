@@ -700,7 +700,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # the existing tan-cli#307 one) are both new, and the absolute-path-miss
     # message split into two non-circular returns (the review's minor
     # finding) plus the `os.get_exec_path(env)` POSIX comment (MAJOR 2).
-    "tan/commands/build/execute.py": 1075,
+    # 1119, not 1075, as of the tan-cli#510 REVIEW ROUND 3: the missing-tool
+    # refusal's searched-`PATH` text was reaching the persisted
+    # `system-manifest.yaml` `reason` (a support-ticket-forwarded artefact),
+    # not just the transient message/envelope -- `SliceOutcome` gained a
+    # `manifest_message` field (and its own docstring) plus a short-form
+    # value threaded through the missing-tool call site and
+    # `_write_manifest_after_dispatch`'s `reason=` line; `SliceOutcome.
+    # resolved_tool`'s docstring also grew a paragraph documenting a
+    # deliberate ambiguity the review flagged as a NIT (an already-absolute
+    # `tool` that fails to launch reports `resolvedTool: null`,
+    # indistinguishable from "never resolved" without a separate field this
+    # port does not add).
+    "tan/commands/build/execute.py": 1119,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather

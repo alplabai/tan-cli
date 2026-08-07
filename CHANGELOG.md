@@ -248,7 +248,62 @@ All notable changes to `tan` are documented here. Format follows
     the exact class of defect this fix exists to close. Refused at PLAN
     PARSE time instead (`build.plan-invalid`): `command.tool` is an identity
     (a bare name to look up) or an already-resolved absolute path, and a
-    relative path with a separator is neither. (#510)
+    relative path with a separator is neither.
+
+  A third review round found two further issues:
+  - **The Windows cwd-shadow regression tests were vacuous.** Both shadowed
+    a `.bat` under the extension-less identity `command.tool` resolves --
+    but `CreateProcess` with `lpApplicationName=NULL` appends only `.exe` to
+    a bare name in its own implicit search; it never consults `PATHEXT`.
+    Reverting to a bare-identity spawn (defeating `_resolve_tool` on
+    purpose, to check the test could fail) still never finds
+    `tan510shadowtool.exe` anywhere, so both tests went red on
+    `status == "succeeded"`, never on the shadow marker -- a green run
+    proved only that `_resolve_tool`'s own PATHEXT walk finds a `.bat`, not
+    the cwd-shadowing property tan-cli#510 exists to close. Both shadows are
+    now real, valid `.exe` files -- a copy of the running interpreter plus
+    its own co-located DLLs, discriminated at runtime by `sys.executable`
+    (which reports the actual loaded image path, not the invocation
+    string) -- so the defeated-resolver case now genuinely fails to find
+    the tool at all, and the fixed case genuinely proves the real, PATH-
+    resolved copy ran. Still Windows-only (`windows-latest`'s
+    `python-tests` matrix in `parity.yml` is the only host that can execute
+    either); unrunnable in this sandbox (Linux), where both remain
+    unconditionally skipped regardless of resolver state.
+  - **The missing-tool refusal's `-- searched PATH: <every entry>` text was
+    reaching `build/system-manifest.yaml`'s persisted `slices[].reason`,
+    not just the terminal/envelope.** That text is what makes the terminal
+    message actionable for the customer running the build, but the
+    manifest is a build ARTEFACT that outlives the run and gets forwarded
+    -- often pasted into a support ticket -- so persisting the full search
+    list leaked the customer's machine layout (private directory names,
+    sometimes credentials embedded in a path) to whoever the ticket
+    reaches. The persisted `reason` is now the short form,
+    `` tool `<name>` not found `` -- byte-identical to what this port
+    always wrote for this case before the searched-PATH detail was added
+    -- while `SliceOutcome.message`/`data.slices[].reason` (the JSON
+    envelope, this run's own screen) keep the full detail unchanged. The
+    "manifest write is byte-identical to `dev`'s" verification this whole
+    fix relies on held for an all-green build throughout, but did NOT hold
+    for a build with a missing-tool slice between the first and this
+    round; it now holds for both. (#510)
+
+  **A separate, undeclared CLI-envelope classification change** ships as a
+  side effect of the env-scoped resolution fix above (the second sub-bullet
+  of round two): a slice whose `command.env` pins a `PATH` that does not
+  contain the tool used to reach the spawn at all (bare `Command::new(&tool)`
+  under the parent's own resolvable PATH, `failed`/exit 1) and now instead
+  resolves against that pinned `PATH`, finds nothing, and reports
+  `skipped`/exit 0 with the new "searched PATH" message. The new
+  classification is correct -- a plan that pins its own `PATH` and gets
+  nothing on it is exactly the missing-tool case, not a spawn failure -- but
+  it is an envelope shape change of the same class the maintainer's own
+  correction on this issue was about, so it is called out explicitly rather
+  than folded silently into the fix above. Unreachable through an SDK-
+  emitted plan (`tan/planner/buildplan.py:465`, inside `emit_build_plan`,
+  emits only `env: {"ALP_SDK_ROOT": "${SDK_ROOT}"}`, never a `PATH`
+  override); reachable only through a hand-authored or materialised plan
+  passed via `--plan-from`. (#510)
 
 ## [0.5.1] — 2026-08-04
 

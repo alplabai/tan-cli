@@ -185,12 +185,45 @@ class SliceOutcome:
     #: `build_cmd.py` for where this is surfaced in default text (failed and
     #: cancelled slices only -- a success confirms the right tool already,
     #: with nothing left to explain).
+    #:
+    #: tan-cli#510 review round 3, NIT: `None` here is genuinely AMBIGUOUS for
+    #: an already-absolute `command.tool` that then FAILS to launch -- both
+    #: "never resolved" (an earlier refusal) and "resolved, identical to the
+    #: plan's own `tool`" collapse to the same `null`, and `data.slices[]`
+    #: carries no separate `tool` key to disambiguate from the envelope
+    #: alone. Deliberate, not an oversight: the motivating case this field
+    #: exists for is a MISMATCH (a bare identity landing on a different
+    #: binary than the plan named) -- an absolute `tool` that fails is
+    #: already fully explained by `message`'s `failed to launch \`<tool>\`:
+    #: ...`, which names the identity verbatim, so the suppression rule
+    #: (`tool == resolved_tool`) is doing its job rather than hiding
+    #: something. A future consumer that needs "which identity did the plan
+    #: name" independent of "did it resolve to something different" should
+    #: get it as its own additive field (mirroring `resolvedTool`'s own
+    #: addition), not by overloading this one's `None` further.
     resolved_tool: str | None = None
+    #: The text persisted as `system-manifest.yaml` `slices[].reason`, when it
+    #: must differ from `message` -- `None` (the common case) means "use
+    #: `message` verbatim". Exists ONLY for the missing-tool refusal
+    #: (tan-cli#510 review round 3, MAJOR): `message` there carries `-- searched
+    #: PATH: <every entry>` so the CUSTOMER'S OWN TERMINAL shows a fix they can
+    #: apply themselves (tan-cli#510's own acceptance bar) -- but that same
+    #: string, unredacted, is also what a customer pastes into a support
+    #: ticket, and `system-manifest.yaml` is a build ARTEFACT that outlives the
+    #: run and gets forwarded. Persisting the full `PATH` there leaks machine
+    #: layout (private directory names, sometimes credentials-in-paths) to
+    #: whoever the ticket reaches. The short form still answers "why" per the
+    #: alp-sdk schema's own field description; the searched detail stays
+    #: transient (this run's stdout/envelope only) -- see
+    #: [`_write_manifest_after_dispatch`]'s use of this field.
+    manifest_message: str | None = None
 
 
-def _skip_or_fail(core_id: str, action: PolicyAction, message: str) -> SliceOutcome:
+def _skip_or_fail(
+    core_id: str, action: PolicyAction, message: str, *, manifest_message: str | None = None
+) -> SliceOutcome:
     status = "skipped" if action is PolicyAction.SKIP else "failed"
-    return SliceOutcome(core_id, status, None, message)
+    return SliceOutcome(core_id, status, None, message, manifest_message=manifest_message)
 
 
 @dataclass
@@ -755,6 +788,12 @@ def execute_slices(
                     sl.core_id,
                     resolve_action(policy, "missing_tool", PolicyAction.SKIP),
                     f"tool `{tool}` not found -- searched {resolution.searched}",
+                    # tan-cli#510 review round 3, MAJOR: the full searched-PATH
+                    # text stays in `message` (this run's stdout + envelope
+                    # `reason`) but must NOT reach the persisted
+                    # `system-manifest.yaml` -- see [`SliceOutcome.
+                    # manifest_message`]'s own docstring.
+                    manifest_message=f"tool `{tool}` not found",
                 )
             )
             continue
@@ -1039,7 +1078,12 @@ def _write_manifest_after_dispatch(
             status=_WIRE_STATUS.get(o.status, "failed"),
             output_artefact=o.output_artefact,
             build_dir=o.build_dir,
-            reason=o.message,
+            # tan-cli#510 review round 3, MAJOR: `manifest_message`, when set,
+            # is the short form that must land on disk instead of `message`
+            # (the missing-tool refusal's `-- searched PATH: <every entry>`
+            # leaks the customer's machine layout into a persisted, forwarded
+            # artefact -- see [`SliceOutcome.manifest_message`]).
+            reason=o.manifest_message if o.manifest_message is not None else o.message,
         )
         for o in outcomes
     ]

@@ -231,11 +231,16 @@ def test_a_two_slice_plan_reports_one_executed_and_one_skipped(project):
     assert slices[1]["status"] == "skipped"
 
 
-def _one_slice_plan(tool: str, exit_code: int) -> dict:
+def _one_slice_plan(tool: str) -> dict:
     """A single, real slice naming `tool` by whatever identity the caller
     gives it (bare or absolute) -- minimal scaffolding for the
     `resolvedTool` cases below, which need to control the exact `tool`
-    string rather than reuse `two_slice_plan`'s fixed `sys.executable`."""
+    string rather than reuse `two_slice_plan`'s fixed `sys.executable`. The
+    exit code is controlled entirely by the SPAWNED SCRIPT
+    (`_write_dualtool_script`'s own `exit_code`), not by anything here --
+    tan-cli#510 review round 3, NIT: this used to take its own `exit_code`
+    parameter that nothing in the plan ever consumed, reading as if it
+    governed the outcome when it was silently discarded."""
     return {
         "schemaVersion": 1,
         "generatedBy": "tests/commands/test_build_command.py",
@@ -293,7 +298,7 @@ def test_resolved_tool_is_reported_in_json_but_not_in_text_on_success(
     tool_name = _write_dualtool_script(tool_dir, 0)
     monkeypatch.setenv("PATH", str(tool_dir))
 
-    plan = write_plan(project, _one_slice_plan(tool_name, 0))
+    plan = write_plan(project, _one_slice_plan(tool_name))
     proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
     env = envelope_of(proc)
     assert proc.returncode == 0, env
@@ -322,7 +327,7 @@ def test_resolved_tool_note_appears_in_default_text_only_on_failure(project, tmp
     tool_name = _write_dualtool_script(tool_dir, 7)
     monkeypatch.setenv("PATH", str(tool_dir))
 
-    plan = write_plan(project, _one_slice_plan(tool_name, 7))
+    plan = write_plan(project, _one_slice_plan(tool_name))
     proc = run_tan("build", "--plan-from", str(plan), "--execute", cwd=project)
     assert "failed: only" in proc.stderr
     assert "resolved to `" in proc.stderr, proc.stderr

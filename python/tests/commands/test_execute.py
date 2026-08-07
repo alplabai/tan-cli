@@ -140,6 +140,99 @@ def test_missing_tool_names_what_was_searched(tmp_path, monkeypatch):
     assert str(tmp_path / "empty-path-dir") in out[0].message
 
 
+def test_missing_tool_reason_persisted_to_the_manifest_omits_the_searched_path(
+    tmp_path, monkeypatch
+):
+    """tan-cli#510 review round 3, MAJOR: the searched-`PATH` text belongs on
+    the customer's OWN screen (`SliceOutcome.message`, `data.slices[].reason`
+    in the JSON envelope) -- never in `build/system-manifest.yaml`, a build
+    ARTEFACT that outlives the run and gets pasted into support tickets,
+    forwarding the customer's machine layout (private directory names,
+    sometimes credentials-in-paths) to whoever reads the ticket. The
+    persisted `reason` must stay the short form -- byte-identical to what the
+    pre-#510 oracle-mirroring code (and `dev`) always wrote for this case,
+    `tool `<name>` not found` -- while `message`/the envelope keep the
+    detailed one."""
+    import tan.planner_root as planner_root
+
+    fixture_manifest = (
+        "schema_version: 1\nhw_info:\n  sku: S\nslices:\n"
+        "- core_id: c1\n  os: baremetal\n  status: pending\n"
+        "ipc: []\nhelper_mcus: []\nboot_order: []\n"
+    )
+    monkeypatch.setattr(planner_root, "emit", lambda *a, **k: fixture_manifest)
+
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path-dir"))
+    cmd = '{"tool": "definitely-not-a-real-tool-xyz", "args": [], "cwd": null}'
+    out = execute_slices(
+        parse_build_plan(_plan(cmd, backend="baremetal")), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
+        sdk_root="/fake/sdk",
+    )
+    assert out[0].status == "skipped"
+    # The in-memory/envelope message still carries the full searched-PATH
+    # detail -- unchanged, this is what makes the terminal message
+    # actionable (see the sibling test above).
+    assert "searched" in out[0].message
+    assert str(tmp_path / "empty-path-dir") in out[0].message
+
+    written = (tmp_path / "build" / "system-manifest.yaml").read_text(encoding="utf-8")
+    manifest = parse_system_manifest(written)
+    c1 = next(s for s in manifest.slices if s["core_id"] == "c1")
+    assert c1["reason"] == "tool `definitely-not-a-real-tool-xyz` not found"
+    assert str(tmp_path / "empty-path-dir") not in c1["reason"]
+    assert "searched" not in c1["reason"]
+
+
+def _copy_interpreter_as(target_dir: Path, name: str) -> Path:
+    """A real, valid PE executable at `target_dir / name` -- literally the
+    running interpreter's own binary, copied. tan-cli#510 review round 3,
+    BLOCKER: the shadow tests below used to plant a `.bat` under the
+    extension-less identity `tan510shadowtool`/`tan510shadowtool2`, but
+    Windows' `CreateProcess` with `lpApplicationName=NULL` appends ONLY
+    `.exe` to a bare, unqualified name in its own implicit search -- it does
+    NOT consult `PATHEXT` (the same documented reason
+    `subprocess.run(["npm"])` raises `FileNotFoundError` on Windows while
+    `npm.cmd` sits on `PATH`). A `.bat` shadow was therefore unreachable by
+    that search under ANY cwd, before or after this fix: revert
+    `execute_slices` to spawn the bare identity again (defeating
+    `_resolve_tool`) and the search still never finds
+    `tan510shadowtool.exe` -- it goes red on `status == "succeeded"`, never
+    on the marker, which proves nothing about cwd-shadowing. A REAL `.exe`
+    closes that gap: `_resolve_tool`'s own hardened PATHEXT walk still finds
+    it (this port's resolver is meant to be MORE permissive than the bare
+    native search, not less), and a defeated resolver's bare-name spawn now
+    exercises the exact implicit `.exe`-append search tan-cli#510 is about.
+
+    Windows resolves a copied `python.exe`'s own DLL imports
+    (`python3XX.dll`, `vcruntime140.dll`, ...) by searching the directory the
+    LOADED IMAGE itself lives in first -- copying every `*.dll` that sits
+    alongside `sys.executable` keeps each copy self-contained, independent
+    of whatever `PATH` a test then narrows to just the "real" directory (a
+    bare `python.exe` copy with no co-located DLL would fail to launch at
+    all once `PATH` no longer reaches the real install dir)."""
+    src = Path(sys.executable)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dest = target_dir / name
+    shutil.copy2(src, dest)
+    for dll in src.parent.glob("*.dll"):
+        shutil.copy2(dll, target_dir / dll.name)
+    return dest
+
+
+def _marker_writing_script(marker: Path) -> list[str]:
+    """`-c` args that make a copied interpreter report WHICH PHYSICAL FILE
+    Windows actually loaded, not merely which argv string invoked it:
+    `sys.executable` is computed at runtime via `GetModuleFileNameW` against
+    the process's own loaded image, so two byte-identical copies of the same
+    `python.exe` at different paths still each report their OWN real path --
+    exactly the discriminator these shadow tests need, since the plan's
+    `command.args` are identical either way (the plan cannot know in advance
+    which copy will run)."""
+    script = f"import sys, pathlib; pathlib.Path({json.dumps(str(marker))}).write_text(sys.executable)"
+    return ["-c", script]
+
+
 @pytest.mark.skipif(
     os.name != "nt",
     reason="tan-cli#510: the CreateProcess current-directory question is Windows-only",
@@ -148,10 +241,10 @@ def test_a_tool_shadowed_in_the_spawns_cwd_is_not_the_one_spawned(tmp_path, monk
     """tan-cli#510's own open question, settled here rather than asserted:
     whether `subprocess.Popen(cwd=...)` -- the CHILD's own
     `lpCurrentDirectory` -- changes which directory Windows' `CreateProcess`
-    consults when resolving a BARE, unqualified command name. Before this
-    fix, `execute_slices` spawned `Popen([tool, *args], cwd=spawn_cwd)` with
-    `tool` still the plan's bare identity -- exactly the scenario
-    `_resolve_tool`'s own docstring (and, before this fix, `_command_on_path`'s)
+    consults when resolving a BARE, unqualified command name. Before the
+    #510 fix, `execute_slices` spawned `Popen([tool, *args], cwd=spawn_cwd)`
+    with `tool` still the plan's bare identity -- exactly the scenario
+    `_resolve_tool`'s own docstring (and, before that fix, `_command_on_path`'s)
     names: "a project checked out with its own `west.exe`/`openocd.exe` at
     its root can never get spawned in place of the real tool". This
     reproduces that layout against the REAL dispatch path (`execute_slices`,
@@ -161,26 +254,19 @@ def test_a_tool_shadowed_in_the_spawns_cwd_is_not_the_one_spawned(tmp_path, monk
     Only runnable on a real `windows-latest` CI host, not this sandbox
     (Linux) -- see this repo's own `python-tests` matrix
     (`.github/workflows/parity.yml`), which is where this test's verdict
-    comes from. A `.bat` in each directory is the simplest REAL executable
-    this test can author without a compiler; Windows' `CreateProcess`
-    launches a `.bat`/`.cmd` directly (via `%COMSPEC%`) with no `shell=True`
-    needed."""
+    comes from. The shadow is a real, valid `.exe` -- see
+    [`_copy_interpreter_as`]'s own docstring for why a `.bat` proves
+    nothing here."""
     real_dir = tmp_path / "real_on_path"
-    real_dir.mkdir()
     marker = tmp_path / "which_ran.txt"
-    (real_dir / "tan510shadowtool.bat").write_text(
-        f'@echo real>"{marker}"\r\n', encoding="utf-8"
-    )
+    _copy_interpreter_as(real_dir, "tan510shadowtool.exe")
 
     # The slice's OWN `cwd` (`command.cwd`, confined under `build_root`) --
     # the exact directory `Popen(cwd=...)` hands the child as
-    # `lpCurrentDirectory` -- carries a DIFFERENT program under the SAME
-    # bare name.
+    # `lpCurrentDirectory` -- carries a DIFFERENT copy under the SAME bare
+    # name.
     slice_cwd = tmp_path / "build" / "c1"
-    slice_cwd.mkdir(parents=True)
-    (slice_cwd / "tan510shadowtool.bat").write_text(
-        f'@echo shadow>"{marker}"\r\n', encoding="utf-8"
-    )
+    _copy_interpreter_as(slice_cwd, "tan510shadowtool.exe")
 
     # PATH carries ONLY the real tool's directory -- the shadow is
     # reachable exclusively through a search that consults the CHILD's own
@@ -188,7 +274,9 @@ def test_a_tool_shadowed_in_the_spawns_cwd_is_not_the_one_spawned(tmp_path, monk
     # Windows' `CreateProcess` exhibits.
     monkeypatch.setenv("PATH", str(real_dir))
 
-    cmd = json.dumps({"tool": "tan510shadowtool", "args": [], "cwd": "build/c1"})
+    cmd = json.dumps(
+        {"tool": "tan510shadowtool", "args": _marker_writing_script(marker), "cwd": "build/c1"}
+    )
     out = execute_slices(
         parse_build_plan(_plan(cmd, backend="baremetal")),
         build_root=tmp_path,
@@ -197,9 +285,11 @@ def test_a_tool_shadowed_in_the_spawns_cwd_is_not_the_one_spawned(tmp_path, monk
         on_output=lambda s: None,
     )
     assert out[0].status == "succeeded", out[0].message
-    assert marker.read_text(encoding="utf-8").strip() == "real", (
+    ran = marker.read_text(encoding="utf-8").strip()
+    assert ran == str(real_dir / "tan510shadowtool.exe"), (
         "the tool shadowed in the slice's own cwd ran instead of the one "
-        "resolved off PATH -- see out[0].message: " + str(out[0].message)
+        f"resolved off PATH -- the running interpreter reported its own path "
+        f"as {ran!r}; out[0].message: " + str(out[0].message)
     )
 
 
@@ -227,24 +317,21 @@ def test_a_tool_shadowed_in_the_parent_processs_cwd_is_not_the_one_spawned(tmp_p
     binary at all -- the ONLY place `tan510shadowtool2` exists outside `PATH`
     is the directory `monkeypatch.chdir` makes this TEST PROCESS's real cwd
     before the call, so a pass here can only be explained by the parent
-    process's own cwd, never the slice's."""
+    process's own cwd, never the slice's. Real `.exe` shadow, same reasoning
+    as the sibling test -- see [`_copy_interpreter_as`]."""
     real_dir = tmp_path / "real_on_path"
-    real_dir.mkdir()
     marker = tmp_path / "which_ran_parent.txt"
-    (real_dir / "tan510shadowtool2.bat").write_text(
-        f'@echo real>"{marker}"\r\n', encoding="utf-8"
-    )
+    _copy_interpreter_as(real_dir, "tan510shadowtool2.exe")
 
     parent_shadow_dir = tmp_path / "parent_shadow"
-    parent_shadow_dir.mkdir()
-    (parent_shadow_dir / "tan510shadowtool2.bat").write_text(
-        f'@echo shadow>"{marker}"\r\n', encoding="utf-8"
-    )
+    _copy_interpreter_as(parent_shadow_dir, "tan510shadowtool2.exe")
     monkeypatch.chdir(parent_shadow_dir)
 
     monkeypatch.setenv("PATH", str(real_dir))
 
-    cmd = json.dumps({"tool": "tan510shadowtool2", "args": [], "cwd": None})
+    cmd = json.dumps(
+        {"tool": "tan510shadowtool2", "args": _marker_writing_script(marker), "cwd": None}
+    )
     out = execute_slices(
         parse_build_plan(_plan(cmd, backend="baremetal")),
         build_root=tmp_path,
@@ -253,9 +340,11 @@ def test_a_tool_shadowed_in_the_parent_processs_cwd_is_not_the_one_spawned(tmp_p
         on_output=lambda s: None,
     )
     assert out[0].status == "succeeded", out[0].message
-    assert marker.read_text(encoding="utf-8").strip() == "real", (
+    ran = marker.read_text(encoding="utf-8").strip()
+    assert ran == str(real_dir / "tan510shadowtool2.exe"), (
         "the tool shadowed in the PARENT process's own cwd ran instead of "
-        "the one resolved off PATH -- see out[0].message: " + str(out[0].message)
+        f"the one resolved off PATH -- the running interpreter reported its "
+        f"own path as {ran!r}; out[0].message: " + str(out[0].message)
     )
 
 
