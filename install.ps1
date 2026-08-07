@@ -66,6 +66,14 @@ if ($System) {
 	$scope = "User"
 	if (-not $Dir) { $Dir = Join-Path $env:LOCALAPPDATA "Programs\tan" }
 }
+# tan-cli#490: normalise $Dir to an absolute path before it is used anywhere.
+# The generated launcher is already immune to a relative -Dir (it resolves
+# itself through `%~dp0`, its own directory, never a baked-in path) -- but the
+# Path update below is not: a relative -Dir would be written into the
+# User/Machine registry Path verbatim, permanently putting a CWD-relative
+# entry on PATH. GetFullPath resolves a relative path against the process's
+# current directory and passes an already-absolute one through unchanged.
+$Dir = [System.IO.Path]::GetFullPath($Dir)
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -314,25 +322,45 @@ try {
 	# is discarded either way; $stage/$tmp (and the eventual commit) are
 	# untouched by this, so a policy-driven retry failure still leaves nothing
 	# under $Dir.
+	#
+	# tan-cli#490 review: gating on the "Access is denied" MESSAGE alone
+	# (unlike install.sh's `is_noexec_signature`, which requires exit code
+	# 126 AND the message text -- text alone is not enough there because a
+	# genuinely corrupt/wrong-arch binary can print similar wording under a
+	# different code) risked the same misattribution on Windows. There is no
+	# meaningful process exit code to fall back on here -- CreateProcess never
+	# started a process at all -- so the discriminator instead is the actual
+	# Win32 status CreateProcess returned: ERROR_ACCESS_DENIED (5), read off
+	# the Win32Exception PowerShell wraps the failure in, not a substring of
+	# its formatted .Message.
 	# -------------------------------------------------------------------------
-	function Test-AccessDeniedSignature([string]$message) {
-		return $message -match "Access is denied"
+	function Get-Win32ErrorCode($exception) {
+		$e = $exception
+		while ($e) {
+			if ($e -is [System.ComponentModel.Win32Exception]) { return $e.NativeErrorCode }
+			$e = $e.InnerException
+		}
+		return $null
+	}
+	function Test-AccessDeniedSignature($win32ErrorCode) {
+		return ($null -ne $win32ErrorCode) -and ($win32ErrorCode -eq 5) # ERROR_ACCESS_DENIED
 	}
 	function Invoke-HealthCheck([string]$exePath) {
 		try {
 			$out = (& $exePath --version 2>&1 | Out-String).Trim()
-			return @{ Out = $out; Exit = $LASTEXITCODE }
+			return @{ Out = $out; Exit = $LASTEXITCODE; Win32ErrorCode = $null }
 		} catch {
-			return @{ Out = $_.Exception.Message; Exit = 1 }
+			return @{ Out = $_.Exception.Message; Exit = 1; Win32ErrorCode = (Get-Win32ErrorCode $_.Exception) }
 		}
 	}
 
 	$check = Invoke-HealthCheck $stagedExe
 	$verifyOut = $check.Out
 	$verifyExit = $check.Exit
+	$verifyWin32Code = $check.Win32ErrorCode
 
 	$retried = $false
-	if ($verifyExit -ne 0 -and (Test-AccessDeniedSignature $verifyOut)) {
+	if ($verifyExit -ne 0 -and (Test-AccessDeniedSignature $verifyWin32Code)) {
 		$retryDir = Join-Path $Dir (".tan-install-retry." + [Guid]::NewGuid().ToString("N"))
 		try {
 			New-Item -ItemType Directory -Path $retryDir | Out-Null
@@ -348,6 +376,7 @@ try {
 			$check = Invoke-HealthCheck $retryExe
 			$verifyOut = $check.Out
 			$verifyExit = $check.Exit
+			$verifyWin32Code = $check.Win32ErrorCode
 		} catch {
 			# $Dir could not be used for the retry (e.g. -System without
 			# elevation) -- fall through to the failure branch below with the
@@ -366,7 +395,7 @@ try {
 		} else {
 			Write-Host "install.ps1: no previous installation existed, so there is nothing to fall back to."
 		}
-		if (Test-AccessDeniedSignature $verifyOut) {
+		if (Test-AccessDeniedSignature $verifyWin32Code) {
 			if ($retried) {
 				Write-Host "install.ps1: Access is denied persisted even after staging inside $Dir -- a security policy (AppLocker / Software Restriction Policy) very likely blocks running tan from there too, not only from %TEMP%." -ForegroundColor Red
 			} else {
@@ -488,17 +517,82 @@ exit /b %ERRORLEVEL%
 	Remove-Item -Path "$tmpBase*" -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# Add $Dir to the chosen PATH scope if absent. Machine scope requires admin;
-# SetEnvironmentVariable throws a clear permission error if not elevated.
+# Add $Dir to the chosen PATH scope if absent. Machine scope requires admin.
 # Reached only after the commit above succeeded, so a failed install never
 # leaves a Path edit behind (tan-cli#434).
-$curPath = [Environment]::GetEnvironmentVariable("Path", $scope)
-if (-not ($curPath -split ';' | Where-Object { $_ -eq $Dir })) {
+#
+# tan-cli#490 -- the worst defect in the whole report: [Environment]::
+# GetEnvironmentVariable("Path", $scope) EXPANDS a REG_EXPAND_SZ Path value
+# (e.g. "%JAVA_HOME%\bin;%LOCALAPPDATA%\Microsoft\WindowsApps") before
+# returning it, and [Environment]::SetEnvironmentVariable always writes back
+# REG_SZ -- so that round-trip SILENTLY AND PERMANENTLY collapses every %VAR%
+# reference in the User (or, under -System, the MACHINE) Path to its
+# expansion at install time. If the profile is ever relocated (domain join,
+# roaming profile, a drive-letter change) every collapsed entry breaks, with
+# nothing pointing at tan's installer as the cause. This is exactly why
+# rustup/scoop/chocolatey open the registry directly rather than go through
+# these two .NET calls: read UNEXPANDED (DoNotExpandEnvironmentNames), and
+# write back using the SAME ValueKind the key already had, so a REG_EXPAND_SZ
+# Path stays REG_EXPAND_SZ and a REG_SZ one stays REG_SZ.
+function Get-PathRegistryKey([bool]$writable) {
+	if ($scope -eq "Machine") {
+		return [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+			"SYSTEM\CurrentControlSet\Control\Session Manager\Environment", $writable)
+	} else {
+		return [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $writable)
+	}
+}
+# WM_SETTINGCHANGE broadcast, done by hand: [Environment]::SetEnvironmentVariable
+# sends this itself (target User/Machine) so already-running GUI apps (Explorer,
+# and consoles it spawns afterward) pick up the change without a reboot -- a
+# direct registry write bypasses that side effect entirely, so it has to be
+# replicated here or a working installer would silently start requiring a
+# logoff/logon it never used to.
+Add-Type -Namespace TanInstall -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(
+	IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+	uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@ -ErrorAction SilentlyContinue
+
+# Read-only first: reading either hive's Environment key needs no elevation,
+# and -NoModifyPath must keep working exactly as before even when this
+# process is not elevated for -System (only the WRITE below needs that).
+$pathKey = Get-PathRegistryKey $false
+try {
+	$curPathRaw = $pathKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+	try {
+		$curKind = $pathKey.GetValueKind("Path")
+	} catch {
+		# No Path value on this key at all yet (rare, but possible on a fresh
+		# account) -- REG_EXPAND_SZ is the kind Windows itself uses for a new
+		# Path, so a value this script creates matches that convention.
+		$curKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+	}
+} finally {
+	$pathKey.Close()
+}
+# Compare both the raw entry and its expansion: an existing entry may have
+# been written unexpanded (e.g. "%LOCALAPPDATA%\Programs\tan") by another
+# REG_EXPAND_SZ-aware installer, and must still count as "already present"
+# even though $Dir here is always the expanded, literal form.
+$alreadyPresent = $curPathRaw -split ';' | Where-Object {
+	$_ -eq $Dir -or [Environment]::ExpandEnvironmentVariables($_) -eq $Dir
+}
+if (-not $alreadyPresent) {
 	if ($NoModifyPath) {
 		Write-Host "install.ps1: $Dir is not on the $scope Path -- add it yourself, or re-run without -NoModifyPath."
 	} else {
-		$newPath = if ([string]::IsNullOrEmpty($curPath)) { $Dir } else { "$curPath;$Dir" }
-		[Environment]::SetEnvironmentVariable("Path", $newPath, $scope)
+		$pathKey = Get-PathRegistryKey $true
+		try {
+			$newPath = if ([string]::IsNullOrEmpty($curPathRaw)) { $Dir } else { "$curPathRaw;$Dir" }
+			$pathKey.SetValue("Path", $newPath, $curKind)
+		} finally {
+			$pathKey.Close()
+		}
+		$result = [UIntPtr]::Zero
+		[TanInstall.NativeMethods]::SendMessageTimeout(
+			[IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
 		Write-Host "install.ps1: added $Dir to the $scope Path -- restart the terminal for it to take effect."
 	}
 }

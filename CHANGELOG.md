@@ -201,6 +201,66 @@ All notable changes to `tan` are documented here. Format follows
   surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
   `--format json` and tan's default text output, so that silent gap has a
   signal without making the field mandatory. (#520)
+- **`install.ps1`'s Path update permanently destroyed every `%VAR%` reference
+  in the User (or, under `-System`, the MACHINE) Path -- silently.**
+  `[Environment]::GetEnvironmentVariable("Path", $scope)` EXPANDS a
+  `REG_EXPAND_SZ` Path value before returning it, and
+  `[Environment]::SetEnvironmentVariable` always writes the result back as
+  `REG_SZ` -- so a Path like `%JAVA_HOME%\bin;%LOCALAPPDATA%\...` lost every
+  indirection the moment `install.ps1` appended its own directory, breaking
+  every one of those entries the next time the referenced profile moved
+  (domain join, roaming profile, a drive-letter change). `install.ps1` now
+  opens the registry directly -- reading UNEXPANDED
+  (`DoNotExpandEnvironmentNames`) and writing back with the SAME
+  `RegistryValueKind` the key already had, the way rustup/scoop/chocolatey
+  do -- and re-broadcasts `WM_SETTINGCHANGE` itself, since a direct registry
+  write does not get that side effect for free the way
+  `SetEnvironmentVariable` did. (#490)
+- **`install.sh`'s tan-cli#434 health check ran the freshly downloaded
+  binary out of `$TMPDIR`, which 404s the whole install on a host with
+  `$TMPDIR` mounted `noexec`** (common on CIS/STIG-hardened images --
+  exactly where customers install `tan` from via `curl | sh`) -- and
+  misattributed the failure to a glibc floor. `install.sh` and `install.ps1`
+  now recognise the noexec/AppLocker signature and retry the health check
+  staged inside `$INSTALL_DIR`/`$Dir` (which already has to be exec-able for
+  `tan` to ever run) before falling back to a message that names the mount
+  option explicitly, with the `TMPDIR`/`--dir` workaround spelled out.
+  Six further defects found reviewing that fix, all closed together:
+  - `install.sh` reported a retry that never got staged as one that ran and
+    failed -- `retried=1` was set before the retry was attempted, and the
+    `mktemp`/`mv` error was discarded rather than surfaced. It is now set
+    only after the retry's own health check actually runs, and a staging
+    failure's real error text is reported instead.
+  - `install.sh`'s noexec signature keyed on the untranslated English
+    "Permission denied", but neither it nor the health check forced
+    `LC_ALL=C` -- on a localized host (the same hardened-image class this
+    fix targets) glibc's translated `strerror(EACCES)` never matched, and
+    the noexec retry silently never fired.
+  - `install.ps1`'s AppLocker signature matched on the "Access is denied"
+    message text alone; `install.sh`'s equivalent already requires exit code
+    126 AND the text. `install.ps1` now reads the actual Win32 status
+    (`ERROR_ACCESS_DENIED`, 5) off the underlying `Win32Exception` instead.
+  - The retry gate's speculative `mkdir -p "$INSTALL_DIR"` ran even when the
+    install was then refused, leaving an empty directory where pre-fix
+    nothing existed; it is now removed on that path.
+  - `restore_previous`'s `as_root rm -rf "$dest" "$LIB_DIR"` was unguarded,
+    so under `set -eu` a failure there aborted the script mid-rollback,
+    skipping both the backup restore and the warning that names it.
+  - The first `download` call's own fatal `need curl or wget on PATH`
+    message was redirected to `/dev/null`, so a host with neither tool
+    exited 1 with zero diagnostic output.
+  Three more defects from the same report, also closed: a relative
+  `--dir`/`-Dir` was baked verbatim into the archive layout's generated
+  launcher and the PATH-modifying line, working only from the one CWD
+  install ran in -- both scripts now normalise it to an absolute path
+  first; a `--system`/root-owned install left the whole tree owned by the
+  invoking unprivileged user (`mktemp` stages unprivileged and `mv`
+  preserves ownership even across filesystems as root) -- `install.sh` now
+  `chown`s the installed files to root after a sudo-elevated commit
+  (non-fatal if the chown itself cannot succeed); and fish/tcsh/csh fell
+  through to `~/.profile` with a POSIX `export` line neither shell reads or
+  parses -- each now gets its own rc file (`~/.config/fish/config.fish`,
+  `~/.tcshrc`, `~/.cshrc`) and its own syntax (`set -gx` / `setenv`). (#490)
 
 ## [0.5.1] — 2026-08-04
 

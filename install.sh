@@ -52,6 +52,27 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+# tan-cli#490: normalise a relative $INSTALL_DIR (from --dir or
+# TAN_INSTALL_DIR) to an absolute path before it is used anywhere else. Left
+# relative, the archive layout's generated launcher bakes it into
+# `exec "${LIB_DIR}/tan" "$@"` -- which then only works while the CWD is the
+# one install.sh happened to run in -- and the rc-file PATH line below would
+# put a CWD-relative entry first on PATH permanently. --system's
+# "/usr/local/bin" and the default "$HOME/.local/bin" are already absolute, so
+# this only ever does work for an explicit relative --dir/TAN_INSTALL_DIR.
+case "$INSTALL_DIR" in
+/*) : ;; # already absolute
+*)
+	install_dir_parent="$(dirname -- "$INSTALL_DIR")"
+	mkdir -p "$install_dir_parent" 2>/dev/null || true
+	install_dir_abs_parent="$(cd "$install_dir_parent" 2>/dev/null && pwd -P)" || {
+		echo "install.sh: could not resolve --dir '${INSTALL_DIR}' to an absolute path -- '${install_dir_parent}' does not exist." >&2
+		exit 1
+	}
+	INSTALL_DIR="${install_dir_abs_parent}/$(basename -- "$INSTALL_DIR")"
+	;;
+esac
+
 # host os -> rust target os part
 os="$(uname -s)"
 case "$os" in
@@ -225,7 +246,7 @@ else
 fi
 
 echo "install.sh: fetching ${VERSION} checksums.txt..."
-if ! download "$sums_url" "$sums" 2>/dev/null; then
+if ! download "$sums_url" "$sums"; then
 	# Outcome 1: the digests could not be fetched. Says nothing about the
 	# release's contents -- which is exactly why it must not be worded like a
 	# mismatch.
@@ -408,7 +429,17 @@ fi
 # extracting/running an only-checksum-verified payload with root privilege.
 # ---------------------------------------------------------------------------
 run_health_check() { # $1 = path to the binary to run; sets $verify_out, $health_rc
-	if verify_out="$("$1" --version 2>&1)"; then
+	# LC_ALL=C, forced here rather than exported for the whole script: glibc
+	# translates strerror(EACCES) ("Permission denied") into the host's
+	# locale, and so does a shell's own gettext catalog for its exec-failure
+	# message -- so on a localized host (precisely the hardened
+	# enterprise/government image class tan-cli#490 targets) the untranslated
+	# English substring `is_noexec_signature` keys on below would never match,
+	# and the retry this whole block exists for would never fire. The
+	# temporary assignment reaches the forked child that actually attempts (and
+	# fails) the exec, which is what prints the diagnostic, so it is set right
+	# here rather than globally.
+	if verify_out="$(LC_ALL=C "$1" --version 2>&1)"; then
 		health_rc=0
 	else
 		health_rc=$?
@@ -425,32 +456,55 @@ is_noexec_signature() { # $1 = exit code, $2 = captured output
 run_health_check "$staged_bin"
 
 retried=0
-if is_noexec_signature "$health_rc" "$verify_out" && mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ]; then
-	retried=1
-	echo "install.sh: staged binary failed to execute (exit 126) -- that filesystem is very likely mounted noexec. Retrying staged inside ${INSTALL_DIR}..."
-	retry_dir="$(mktemp -d "${INSTALL_DIR}/.tan-install-retry.XXXXXX" 2>/dev/null || true)"
-	if [ -n "$retry_dir" ]; then
-		old_stage="$stage"
-		if [ "$layout" = "archive" ]; then
-			if mv "$old_stage/tan" "$retry_dir/tan" 2>/dev/null; then
-				chmod -R a+rX "$retry_dir/tan"
-				rm -rf "$old_stage"
-				stage="$retry_dir"
-				staged_bin="$stage/tan/tan"
-				run_health_check "$staged_bin"
-			else
-				rm -rf "$retry_dir"
-			fi
+retry_stage_err=""
+install_dir_created_for_retry=0
+if is_noexec_signature "$health_rc" "$verify_out"; then
+	if [ ! -e "$INSTALL_DIR" ]; then
+		if mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+			install_dir_created_for_retry=1
+		fi
+	fi
+	if [ -d "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ]; then
+		echo "install.sh: staged binary failed to execute (exit 126) -- that filesystem is very likely mounted noexec. Retrying staged inside ${INSTALL_DIR}..."
+		retry_dir=""
+		# `|| true` (not `2>/dev/null`) so a real failure here -- an
+		# inode-exhausted or read-only $INSTALL_DIR, e.g. -- is CAPTURED and
+		# reported below rather than silently discarded; discarding it is
+		# exactly the misattributed-diagnostic class #490 is about; without
+		# capturing it, a retry that never got staged could only be reported
+		# as either "ran and failed" or nothing at all, both wrong.
+		if mktemp_out="$(mktemp -d "${INSTALL_DIR}/.tan-install-retry.XXXXXX" 2>&1)"; then
+			retry_dir="$mktemp_out"
 		else
-			if mv "$tmp" "$retry_dir/tan" 2>/dev/null; then
-				chmod +x "$retry_dir/tan"
-				rm -rf "$old_stage"
-				stage="$retry_dir"
-				staged_bin="$retry_dir/tan"
-				payload="$staged_bin"
-				run_health_check "$staged_bin"
+			retry_stage_err="$mktemp_out"
+		fi
+		if [ -n "$retry_dir" ]; then
+			old_stage="$stage"
+			if [ "$layout" = "archive" ]; then
+				if mv_out="$(mv "$old_stage/tan" "$retry_dir/tan" 2>&1)"; then
+					chmod -R a+rX "$retry_dir/tan"
+					rm -rf "$old_stage"
+					stage="$retry_dir"
+					staged_bin="$stage/tan/tan"
+					run_health_check "$staged_bin"
+					retried=1
+				else
+					retry_stage_err="$mv_out"
+					rm -rf "$retry_dir"
+				fi
 			else
-				rm -rf "$retry_dir"
+				if mv_out="$(mv "$tmp" "$retry_dir/tan" 2>&1)"; then
+					chmod +x "$retry_dir/tan"
+					rm -rf "$old_stage"
+					stage="$retry_dir"
+					staged_bin="$retry_dir/tan"
+					payload="$staged_bin"
+					run_health_check "$staged_bin"
+					retried=1
+				else
+					retry_stage_err="$mv_out"
+					rm -rf "$retry_dir"
+				fi
 			fi
 		fi
 	fi
@@ -459,6 +513,15 @@ fi
 if [ "$health_rc" = "0" ]; then
 	echo "install.sh: staged binary verified: ${verify_out}"
 else
+	# tan-cli#490: if the only thing this noexec probe accomplished was to
+	# create an install dir that pre-fix would never have existed, do not
+	# leave it behind on a refused install -- `rm -rf "$stage"` first so a
+	# staged-but-failed retry_dir under it (if any) is gone before the rmdir,
+	# which only removes an EMPTY directory.
+	if [ "$install_dir_created_for_retry" = "1" ]; then
+		rm -rf "$stage" 2>/dev/null || true
+		rmdir "$INSTALL_DIR" 2>/dev/null || true
+	fi
 	echo "install.sh: newly downloaded binary failed to run: ${verify_out}" >&2
 	if [ -e "$dest" ] || [ -e "$LIB_DIR" ]; then
 		echo "install.sh: refusing to install -- your existing installation at ${dest} was never touched." >&2
@@ -469,6 +532,8 @@ else
 	if is_noexec_signature "$health_rc" "$verify_out"; then
 		if [ "$retried" = "1" ]; then
 			echo "install.sh: exit 126 (Permission denied) persisted even after staging inside ${INSTALL_DIR} -- that filesystem is very likely ALSO mounted noexec." >&2
+		elif [ -n "$retry_stage_err" ]; then
+			echo "install.sh: could not stage a retry inside ${INSTALL_DIR}: ${retry_stage_err}" >&2
 		else
 			echo "install.sh: exit 126 (Permission denied) with the execute bit already set almost always means the staging filesystem is mounted noexec -- and ${INSTALL_DIR} was not writable without elevation, so no retry was attempted there." >&2
 		fi
@@ -484,11 +549,13 @@ fi
 # the admin step is visible, never silent. A function rather than a `$sudo`
 # variable so every expansion below stays quoted (getting-started.yml runs
 # `shellcheck --shell=sh` over this file).
+used_sudo=0
 if mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ]; then
 	as_root() { "$@"; }
 else
 	echo "install.sh: ${INSTALL_DIR} needs elevated permission -- running sudo (admin)."
 	as_root() { sudo "$@"; }
+	used_sudo=1
 	as_root mkdir -p "$INSTALL_DIR"
 fi
 
@@ -515,7 +582,13 @@ fi
 
 restore_previous() { # sets $restore_ok; never lets its own exit status kill the script under set -e
 	restore_ok=1
-	as_root rm -rf "$dest" "$LIB_DIR"
+	# tan-cli#490: guarded, unlike the rest of this function's own claim --
+	# under `set -eu` an unguarded failure here (e.g. $dest.bak's filesystem
+	# went read-only mid-copy, or the second sudo in the sequence has no tty)
+	# would abort the script on THIS line, meaning the `mv "${dest}.bak"
+	# "$dest"` restore below -- and the "could not fully restore" warning
+	# that names the surviving backup -- would never run at all.
+	as_root rm -rf "$dest" "$LIB_DIR" || restore_ok=0
 	if [ "$had_dest_backup" = "1" ]; then
 		as_root mv "${dest}.bak" "$dest" || restore_ok=0
 	fi
@@ -552,6 +625,28 @@ fi
 # +x on 0600 is 0700 -- an owner-only binary, which is precisely what --system
 # into /usr/local/bin must not produce.
 as_root chmod 755 "$dest"
+# tan-cli#490: $payload and $stage/tan were staged UNPRIVILEGED (mktemp,
+# mktemp -d) and never chowned, and `mv` preserves ownership on both a
+# same-filesystem rename and, as root, a cross-filesystem copy -- so without
+# this, everything under $INSTALL_DIR would be owned (and writable) by the
+# invoking user despite living in a root-owned dir that sits early on root's
+# own PATH. Root here is whichever account `sudo` elevates to, so this must
+# match `as_root`'s own escalation rather than hardcode a "root:root" pair --
+# `chown` with no group leaves the group untouched, which is fine: the
+# `chmod 755` / `chmod -R a+rX` above already deny group and other write.
+# Non-fatal: an install that already succeeded must not be turned into a
+# failure over this hardening step (e.g. a sudoers rule that permits `mv`/
+# `mkdir` but not `chown` to a different owner) -- warn instead.
+if [ "$used_sudo" = "1" ]; then
+	if ! as_root chown root "$dest" 2>/dev/null; then
+		echo "install.sh: warning -- could not chown ${dest} to root; it may remain owned by the account that ran sudo." >&2
+	fi
+	if [ "$layout" = "archive" ]; then
+		if ! as_root chown -R root "$LIB_DIR" 2>/dev/null; then
+			echo "install.sh: warning -- could not chown ${LIB_DIR} to root; it may remain owned by the account that ran sudo." >&2
+		fi
+	fi
+fi
 # Commit succeeded -- the backup is no longer needed. rm -rf on an absent path
 # is a no-op, so this needs no had_*_backup guard.
 as_root rm -rf "${dest}.bak" "${LIB_DIR}.bak"
@@ -575,25 +670,66 @@ case ":${PATH}:" in
 	;;
 *)
 	if [ "$MODIFY_PATH" = "1" ]; then
-		# Pick the login shell's rc file, append the PATH line (idempotent), and
-		# announce it -- never edit a dotfile silently. This is what makes a
-		# no-sudo user-local install usable globally (notably on macOS, where
-		# ~/.local/bin is not on the default PATH). Reached only after the commit
-		# above succeeded, so a failed install never leaves this line behind
-		# (tan-cli#434).
+		# Pick the login shell's rc file and the syntax it actually parses
+		# (idempotent append), and announce it -- never edit a dotfile
+		# silently. This is what makes a no-sudo user-local install usable
+		# globally (notably on macOS, where ~/.local/bin is not on the
+		# default PATH). Reached only after the commit above succeeded, so a
+		# failed install never leaves this line behind (tan-cli#434).
+		#
+		# tan-cli#490: fish and tcsh/csh do not read ~/.profile and do not
+		# understand POSIX `export FOO=bar` -- falling through to the `*)`
+		# arm for them wrote a line their shell can never source and then
+		# told the user PATH now worked "anywhere", which was false and,
+		# because of the idempotency guard below, unrecoverable on a re-run.
+		# fish is already a first-class shell for this CLI (`tan completion
+		# --shell fish`), so it gets its own arm rather than being treated as
+		# unsupported.
 		case "$(basename "${SHELL:-/bin/sh}")" in
-		zsh) rc="$HOME/.zshrc" ;;
+		zsh)
+			rc="$HOME/.zshrc"
+			path_line="export PATH=\"${INSTALL_DIR}:\$PATH\"  # added by tan install.sh"
+			source_hint=". \"${rc}\""
+			;;
 		bash)
 			if [ "$(uname -s)" = "Darwin" ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi
+			path_line="export PATH=\"${INSTALL_DIR}:\$PATH\"  # added by tan install.sh"
+			source_hint=". \"${rc}\""
 			;;
-		*) rc="$HOME/.profile" ;;
+		fish)
+			# fish treats PATH as a list, not a colon-joined string, and does
+			# not have `export` -- `set -gx` in config.fish (fish's rc file,
+			# sourced on every new session) is the idiomatic equivalent.
+			rc="$HOME/.config/fish/config.fish"
+			path_line="set -gx PATH \"${INSTALL_DIR}\" \$PATH  # added by tan install.sh"
+			source_hint="source \"${rc}\""
+			;;
+		tcsh)
+			rc="$HOME/.tcshrc"
+			path_line="setenv PATH \"${INSTALL_DIR}:\${PATH}\"  # added by tan install.sh"
+			source_hint="source \"${rc}\""
+			;;
+		csh)
+			rc="$HOME/.cshrc"
+			path_line="setenv PATH \"${INSTALL_DIR}:\${PATH}\"  # added by tan install.sh"
+			source_hint="source \"${rc}\""
+			;;
+		*)
+			rc="$HOME/.profile"
+			path_line="export PATH=\"${INSTALL_DIR}:\$PATH\"  # added by tan install.sh"
+			source_hint=". \"${rc}\""
+			;;
 		esac
 		if [ -f "$rc" ] && grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
 			echo "install.sh: ${INSTALL_DIR} already referenced in ${rc} -- not modified."
 		else
-			printf '\n%s\n' "export PATH=\"${INSTALL_DIR}:\$PATH\"  # added by tan install.sh" >>"$rc"
+			# fish's rc lives under ~/.config/fish/, which a fresh account
+			# does not have yet -- every other rc path here is directly under
+			# $HOME, which already exists, so this is a no-op for them.
+			mkdir -p "$(dirname -- "$rc")" 2>/dev/null || true
+			printf '\n%s\n' "$path_line" >>"$rc"
 			echo "install.sh: added ${INSTALL_DIR} to PATH in ${rc}."
-			echo "install.sh: open a NEW shell (or run:  . \"${rc}\") to use 'tan' anywhere. Undo: delete that line."
+			echo "install.sh: open a NEW shell (or run:  ${source_hint}) to use 'tan' anywhere. Undo: delete that line."
 		fi
 	else
 		echo "install.sh: ${INSTALL_DIR} is not on PATH -- add:  export PATH=\"${INSTALL_DIR}:\$PATH\"  (or re-run without --no-modify-path)"

@@ -1023,3 +1023,326 @@ def test_sh_noexec_tmpdir_distinguishes_noexec_from_a_broken_binary(release_serv
     # Must not misattribute a mount option to a libc floor.
     assert "GLIBC" not in combined
     assert "glibc" not in combined
+
+
+def _fake_noop_chmod(tmp_path: Path) -> Path:
+    """A `chmod` stub that never actually sets any bit -- shadowing the real
+    one reproduces the exact exit-126 "Permission denied" health-check
+    signature (the staged payload simply never becomes executable) WITHOUT a
+    real noexec mount, so `$INSTALL_DIR` can be an ordinary, directly
+    inspectable path rather than something living inside an `unshare -m`
+    mount namespace that vanishes -- taking any evidence written under it --
+    the moment that subprocess exits.
+    """
+    bin_dir = tmp_path / "fake-noop-chmod-bin"
+    bin_dir.mkdir()
+    script = bin_dir / "chmod"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+    script.chmod(0o755)
+    return bin_dir
+
+
+@posix_only
+def test_sh_noop_chmod_retry_failure_leaves_no_empty_install_dir(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:428): the retry gate's
+    `mkdir -p "$INSTALL_DIR"` ran even when the install was ultimately
+    refused, leaving an empty directory behind where pre-fix nothing existed.
+    A no-op `chmod` ahead of the real one on PATH means the staged (and,
+    after the retry, re-staged) binary never actually becomes executable --
+    the same exit-126 "Permission denied" signature a noexec mount produces,
+    without one -- so `$INSTALL_DIR` here is a normal path this test can
+    inspect directly after the subprocess exits (unlike the noexec-mount
+    tests above, whose `$INSTALL_DIR` lives inside a private mount namespace
+    that is torn down, and any evidence with it, the moment the `unshare`d
+    process exits).
+    """
+    dest = tmp_path / "bin"  # must not exist before this run
+    chmod_dir = _fake_noop_chmod(tmp_path)
+    env_path = f"{chmod_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", "v0.4.1",
+        extra_env={"PATH": env_path},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "Permission denied" in combined
+    assert not dest.exists(), "a refused install must not leave an empty install dir behind"
+
+
+def _install_sh_noexec_with_exhausted_install_dir(
+    base_url: str, dest: Path, home: Path, noexec_dir: Path, install_mount: Path, *args: str
+) -> subprocess.CompletedProcess:
+    """Reproduces the exact tan-cli#490 review scenario: `$TMPDIR` noexec AND
+    `$INSTALL_DIR` on a filesystem that cannot stage a NEW directory. A real
+    `nr_inodes=2` tmpfs at `$install_mount` (one inode for its own root, one
+    for `$dest` pre-created below to stand in for whatever already lived
+    there) leaves none for the retry's `mktemp -d` -- so `$INSTALL_DIR` itself
+    stays writable (unlike the noexec-tmpdir tests above) while staging a
+    retry inside it genuinely fails, the way an inode-exhausted filesystem
+    would.
+    """
+    script = (
+        "set -e\n"
+        f'mount -t tmpfs -o noexec tmpfs "{noexec_dir}"\n'
+        f'mkdir -p "{install_mount}"\n'
+        f'mount -t tmpfs -o size=4k,nr_inodes=2 tmpfs "{install_mount}"\n'
+        f'mkdir -p "{dest}"\n'
+        'TAR_OPTIONS="--no-same-owner" '
+        f'TMPDIR="{noexec_dir}" TAN_INSTALL_BASE_URL="{base_url}" '
+        f'HOME="{home}" USERPROFILE="{home}" '
+        f'sh "{INSTALL_SH}" --dir "{dest}" --no-modify-path {" ".join(args)}\n'
+    )
+    return subprocess.run(
+        ["unshare", "--map-root-user", "-m", "--", "sh", "-c", script],
+        capture_output=True, text=True, timeout=180,
+    )
+
+
+@posix_only
+@noexec_capable
+def test_sh_noexec_retry_staging_failure_is_reported_not_misattributed(release_server, tmp_path):
+    """tan-cli#490 review, MAJOR finding (install.sh:429): `retried=1` used to
+    be set BEFORE the retry was actually attempted, so a retry that could
+    never even get staged was reported as one that RAN and failed -- blaming
+    the wrong mount, exactly the misattributed-diagnostic class #490 itself is
+    about. Reproduced for real (not mocked): `$TMPDIR` is a noexec tmpfs (the
+    original failure) and `$INSTALL_DIR` sits on a SEPARATE tmpfs whose inode
+    budget is already exhausted (the retry's own `mktemp -d` has nowhere to
+    land), which is the report's own example ("$TMPDIR noexec + $INSTALL_DIR
+    on an inode-exhausted fs").
+
+    Against the unfixed script this prints "Retrying staged inside .../bin..."
+    followed by "exit 126 (Permission denied) persisted even after staging
+    inside" -- neither of which happened; the retry's own `mktemp` never even
+    ran to completion. The fixed script must instead surface the real staging
+    error and never claim the retry persisted when it never got staged.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    noexec_dir = tmp_path / "noexec-tmp"
+    noexec_dir.mkdir()
+    install_mount = tmp_path / "install-mount"
+    dest = install_mount / "bin"
+
+    result = _install_sh_noexec_with_exhausted_install_dir(
+        release_server, dest, home, noexec_dir, install_mount, "--version", "v0.4.1"
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "Permission denied" in combined
+    # The retry must never be reported as having actually run and failed --
+    # it never got staged in the first place.
+    assert "persisted even after staging inside" not in combined
+    assert "could not stage a retry inside" in combined
+
+
+@posix_only
+def test_sh_no_curl_or_wget_prints_a_diagnostic(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:228): the FIRST `download` call
+    (checksums.txt) redirected its own `need curl or wget on PATH` message to
+    /dev/null, so a host with neither tool exited 1 with ZERO further output
+    -- and because that call always runs before any other download, the
+    message was unreachable on every code path. A PATH built from real
+    coreutils but deliberately missing curl/wget reproduces the real failure
+    (not a mock of `download`) -- everything upstream of the transport check
+    (OS/arch/musl detection, the sha256-tool check) still runs for real and
+    still has to fall through correctly to the actual missing-transport
+    refusal.
+    """
+    dest = tmp_path / "bin"
+    bin_dir = tmp_path / "no-curl-wget-bin"
+    bin_dir.mkdir()
+    needed = (
+        "sh", "uname", "sha256sum", "shasum", "mktemp", "mkdir", "mv", "rm", "rmdir",
+        "chmod", "grep", "awk", "sed", "basename", "dirname", "cat", "printf", "cut",
+        "tar", "ls", "sort", "head", "tail", "ldd", "id",
+    )
+    for tool in needed:
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", "v0.4.1",
+        extra_env={"PATH": str(bin_dir)},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "need curl or wget on PATH" in combined
+
+
+@posix_only
+def test_sh_system_style_install_attempts_to_chown_the_installed_files_to_root(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:459): `$payload`/`$stage` are
+    staged UNPRIVILEGED (`mktemp`), and `mv` preserves ownership on both a
+    same-filesystem rename and, as real root, a cross-filesystem copy -- so
+    without a `chown`, a `--system`-shaped install would leave the whole tree
+    owned by the invoking (non-root) user despite living in a root-owned dir
+    early on root's own PATH. `_fake_sudo` cannot exercise a REAL ownership
+    change (chowning to a different user needs real root/CAP_CHOWN, which is
+    off the table here the same way elevation itself is -- see its own
+    docstring), but it does prove the code path is REACHED: the logged sudo
+    invocations must include a `chown` of both the launcher and the runtime
+    dir.
+    """
+    dest = tmp_path / "system-style-bin"
+    dest.mkdir()
+    dest.chmod(0o555)
+    calls_log = tmp_path / "sudo-calls.log"
+    sudo_dir = _fake_sudo(dest, calls_log)
+    env_path = f"{sudo_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", FIRST_ARCHIVE_TAG,
+        extra_env={"PATH": env_path},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    logged = calls_log.read_text(encoding="utf-8")
+    assert "chown root" in logged
+    assert "tan-cli-lib" in logged.split("chown root", 1)[1] or "chown -R root" in logged
+
+
+@posix_only
+def test_sh_relative_install_dir_is_normalised_to_absolute(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:373): a relative `--dir` used to
+    be baked verbatim into the archive layout's generated launcher
+    (`exec "${LIB_DIR}/tan" "$@"`), which then only worked while the CWD was
+    the one install.sh happened to run in. Running from a specific CWD with a
+    relative `--dir` must still produce a launcher whose `exec` target is an
+    ABSOLUTE path.
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--dir", "./mybin", "--no-modify-path", "--version", FIRST_ARCHIVE_TAG],
+        cwd=workdir,
+        env={
+            **os.environ,
+            "TAN_INSTALL_BASE_URL": release_server,
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
+        },
+        capture_output=True, text=True, timeout=180,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    launcher = workdir / "mybin" / "tan"
+    assert launcher.is_file()
+    launcher_text = launcher.read_text(encoding="utf-8")
+    assert "./mybin" not in launcher_text
+    assert str((workdir / "mybin" / "tan-cli-lib").resolve()) in launcher_text
+    # The launcher must work from a DIFFERENT cwd than the one install.sh ran in.
+    run_elsewhere = subprocess.run([str(launcher), "--version"], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert run_elsewhere.returncode == 0, f"{run_elsewhere.stdout}\n{run_elsewhere.stderr}"
+    assert FIXTURE_VERSION_LINE in run_elsewhere.stdout
+
+
+@posix_only
+def test_sh_relative_install_dir_rc_file_gets_an_absolute_path(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:373): the rc-file PATH line was
+    built from the same un-normalised `$INSTALL_DIR`, permanently putting a
+    CWD-relative entry first on PATH. `SHELL=/bin/sh` pins the rc file to
+    `~/.profile` deterministically (matching `_install_sh_modify_path`'s own
+    convention).
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--dir", "./mybin", "--version", FIRST_ARCHIVE_TAG],
+        cwd=workdir,
+        env={
+            **os.environ,
+            "TAN_INSTALL_BASE_URL": release_server,
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "SHELL": "/bin/sh",
+        },
+        capture_output=True, text=True, timeout=180,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    rc = home / ".profile"
+    assert rc.is_file()
+    rc_text = rc.read_text(encoding="utf-8")
+    assert "./mybin" not in rc_text
+    assert str((workdir / "mybin").resolve()) in rc_text
+
+
+@posix_only
+def test_sh_fish_shell_gets_fish_syntax_in_its_own_config_file(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:507): fish never reads
+    ~/.profile and does not understand POSIX `export FOO=bar` -- falling
+    through to the `*)` default silently wrote a line fish can never source
+    and then claimed 'tan' now worked "anywhere", which was false. fish gets
+    its own rc file (`~/.config/fish/config.fish`, which does not exist yet on
+    a fresh account) and its own `set -gx` syntax.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/usr/bin/fish"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    rc = home / ".config" / "fish" / "config.fish"
+    assert rc.is_file(), "install.sh must create ~/.config/fish/ if it does not exist yet"
+    rc_text = rc.read_text(encoding="utf-8")
+    assert "set -gx PATH" in rc_text
+    assert "export PATH" not in rc_text
+    combined = result.stdout + result.stderr
+    assert "source" in combined  # the re-source hint must use fish's own command
+
+
+@posix_only
+def test_sh_tcsh_shell_gets_csh_syntax_in_tcshrc(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:507): tcsh/csh do not read
+    ~/.profile and do not parse `export` -- they need `setenv` in
+    ~/.tcshrc (or ~/.cshrc for plain csh).
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/tcsh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    rc = home / ".tcshrc"
+    assert rc.is_file()
+    rc_text = rc.read_text(encoding="utf-8")
+    assert "setenv PATH" in rc_text
+    assert "export PATH" not in rc_text
+
+
+@posix_only
+def test_sh_fish_rerun_is_idempotent(release_server, tmp_path):
+    """The idempotency guard (`grep -qF "$INSTALL_DIR" "$rc"`) must still
+    recognise fish's own line format on a re-run, the same way it does for
+    the POSIX `export` line -- otherwise every re-run duplicates the entry.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    dest = tmp_path / "bin"
+    extra_env = {"SHELL": "/usr/bin/fish"}
+
+    first = _install_sh_modify_path(release_server, dest, home, "--version", "v0.4.1", extra_env=extra_env)
+    assert first.returncode == 0, f"{first.stdout}\n{first.stderr}"
+    rc = home / ".config" / "fish" / "config.fish"
+    before = rc.read_text(encoding="utf-8")
+
+    second = _install_sh_modify_path(release_server, dest, home, "--version", "v0.4.1", extra_env=extra_env)
+    assert second.returncode == 0, f"{second.stdout}\n{second.stderr}"
+    assert rc.read_text(encoding="utf-8") == before
+    assert "already referenced in" in (second.stdout + second.stderr)
