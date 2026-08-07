@@ -191,30 +191,42 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
 _STDIN_READY_TIMEOUT_S = 0.25
 
 
+def _stdin_errors_ignore() -> None:
+    """Make `sys.stdin` skip a malformed byte instead of raising mid-decode
+    (tan-cli#503): matches `--file`'s own `Path.read_text(..., errors=
+    "ignore")` in `_read_dump` below. `hasattr` skips a stream that cannot
+    reconfigure (e.g. a test harness's in-memory stdin) -- the same guard
+    `cli._reconfigure_stdio` uses for stdout/stderr.
+    """
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(errors="ignore")
+
+
 def _read_implicit_stdin() -> str:
     """Read whatever an IMPLICIT (no `--file`) piped stdin offers, bounded by
     IDLE time (`_STDIN_READY_TIMEOUT_S` since the LAST line, not since the
     read began) rather than a fixed total budget (tan-cli#388, tan-cli#503).
 
     A daemon thread reads `sys.stdin` line by line (never one unbounded
-    `read()`, which blocks past readiness until EOF -- fatal for a pipe held
-    open and never closed) and hands each line to the main thread over a
-    `Queue` the instant it arrives. The main thread loops on `queue.get
-    (timeout=_STDIN_READY_TIMEOUT_S)`, so the window resets on every line: a
-    producer writing faster than it elapses is read to EOF however long that
-    takes in total; only a producer that goes idle for a whole window, or
-    never writes at all, is cut off, keeping every line already queued.
-
-    An earlier shape called `reader.join(_STDIN_READY_TIMEOUT_S)` once and
-    kept whatever had accumulated by then -- a TOTAL budget, not a stall
-    detector, that silently truncated a slow-but-steady producer's dump the
-    instant it kept writing past the window (tan-cli#503's own regression).
-
-    The reader thread stays daemon: abandoning it mid-`readline()` when the
-    main thread gives up is correct for a producer that sends nothing more.
-    A final, newline-less partial line still in flight at the timeout is the
-    one exception -- `readline` blocks on it, so it was never queued.
+    `read()`, which blocks past readiness until EOF) and hands each line to
+    the main thread over a `Queue` the instant it arrives. The main thread
+    loops on `queue.get(timeout=_STDIN_READY_TIMEOUT_S)`, so the window
+    resets on every line: a producer writing faster than it elapses is read
+    to EOF however long that takes; only a producer idle for a whole window,
+    or one that never writes, is cut off. An earlier shape bounded the WHOLE
+    read with one `reader.join(...)` -- a TOTAL budget, not a stall detector,
+    that truncated a slow-but-steady producer mid-dump (tan-cli#503's own
+    regression).
+    `_stdin_errors_ignore()` closes a SECOND regression: `_drain`'s `except
+    (OSError, ValueError)` also swallowed a `UnicodeDecodeError` (a
+    `ValueError` subclass) `readline()` raises decoding a WHOLE buffered
+    chunk (up to ~8 KB) at once -- one stray non-UTF-8 byte anywhere in it
+    used to discard every complete line already sitting there, undelivered,
+    plus everything after, not merely a trailing partial line. Abandoning the
+    daemon thread mid-`readline()` at a genuine idle timeout still costs only
+    whatever it had not yet turned into a returned, queued line.
     """
+    _stdin_errors_ignore()
     q: queue.Queue[str | None] = queue.Queue()
 
     def _drain() -> None:
@@ -268,6 +280,7 @@ def _read_dump(file_: str | None) -> str:
     if file_ == "-":
         if sys.stdin is None:  # fd 0 closed (tan-cli#503): nothing to read.
             return ""
+        _stdin_errors_ignore()  # a stray byte must not raise (tan-cli#503)
         return sys.stdin.read()
     if file_ is not None:
         return Path(file_).read_text(encoding="utf-8", errors="ignore")

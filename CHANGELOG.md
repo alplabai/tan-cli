@@ -231,8 +231,43 @@ All notable changes to `tan` are documented here. Format follows
     engineer piped in had, in fact, fully arrived. The thread now reads
     line-by-line and appends each line as it lands, so whatever was
     delivered inside the bounded window survives the timeout that abandons
-    the thread; only an unfinished, newline-less line still in flight when
-    the timeout fires is lost, not everything that came before it.
+    the thread.
+  - That per-line fix still bounded the WHOLE read with a single
+    `reader.join(_STDIN_READY_TIMEOUT_S)` -- a TOTAL budget for the entire
+    operation, not a stall detector, so a slow-but-steady producer (a serial
+    capture, a script draining a device one line at a time) whose first line
+    landed inside the window but whose dump kept arriving after it had
+    everything past the cutoff silently discarded, at exit 0, with no signal
+    the dump was truncated -- the exact bench case this issue exists to fix,
+    one layer in. The reader thread now hands each line to the main thread
+    over a `Queue` the instant it arrives, and the main thread loops on
+    `queue.get(timeout=_STDIN_READY_TIMEOUT_S)` -- a fresh window starting
+    from the LAST line, not from when the read began. A producer that keeps
+    writing faster than the idle window elapses is read to EOF however long
+    that takes in total; only a producer that goes idle for a whole window,
+    or never writes at all, is cut off.
+  - This bullet's own text above, for the first shape, said "only an
+    unfinished, newline-less line still in flight when the timeout fires is
+    lost, not everything that came before it"; `_read_implicit_stdin`'s
+    docstring said the same thing for the queue-based follow-on shape ("a
+    final, newline-less partial line still in flight at the timeout is the
+    one exception"). Both were false: `_drain`'s `except (OSError,
+    ValueError)` also caught `UnicodeDecodeError` (a `ValueError` subclass)
+    `readline()` raises decoding a WHOLE buffered `TextIOWrapper` chunk (up
+    to ~8 KB) at once, so ONE stray non-UTF-8 byte anywhere in that chunk
+    discarded every complete line already sitting in it, undelivered, plus
+    everything after it -- not merely a trailing partial line -- confidently
+    misdiagnosing at exit 0. `--file` was never affected: it already reads
+    with `errors="ignore"` (`Path.read_text`). The implicit read now matches
+    it (`_stdin_errors_ignore`, `sys.stdin.reconfigure(errors="ignore")`,
+    guarded by `hasattr` for a stream that cannot reconfigure -- the same
+    guard `cli._reconfigure_stdio` uses for stdout/stderr), applied to both
+    the implicit auto-consume AND the explicit `--file -` read, which had
+    the identical unguarded `sys.stdin.read()` and was exposed to the same
+    defect one call site over. The except clause is unchanged (still
+    `OSError, ValueError`, still broad) -- a narrower except would only be
+    another shape of the same mistake, catching this ValueError subclass by
+    accident of scope rather than by design.
   - `_read_dump`/`resolve_symbol`/`can_prompt` dereferenced `sys.stdin`/
     `sys.stderr` bare; with fd 0/2 closed (a daemon/service parent, some CI
     runners, a Windows `pythonw`/frozen no-console launch) both are `None`,

@@ -877,6 +877,70 @@ def test_a_producer_that_opens_the_pipe_and_never_writes_still_does_not_hang():
 
 
 # --------------------------------------------------------------------------
+# tan-cli#503: a stray non-UTF-8 byte anywhere in a piped dump must not
+# silently discard whatever arrived ahead of it. `_drain`'s
+# `except (OSError, ValueError)` also caught `UnicodeDecodeError` (a
+# `ValueError` subclass) `sys.stdin.readline()` raises decoding a WHOLE
+# buffered TextIOWrapper chunk (up to ~8 KB) at once -- one bad byte anywhere
+# in that chunk discarded every complete, already-arrived line sitting in it,
+# undelivered, plus everything after, at exit 0, with no signal anything was
+# lost. `--file` was never affected: it already reads with
+# `errors="ignore"` (`Path.read_text`).
+# --------------------------------------------------------------------------
+
+
+def _noisy_dump_bytes() -> bytes:
+    """A realistic-shaped Cortex-M fault dump padded past the ~8 KB
+    TextIOWrapper read-and-decode chunk, ending in a single stray non-UTF-8
+    byte -- the exact shape a serial-monitor capture of a real fault
+    routinely carries. Pinned as its own function so the implicit-stdin test
+    and the `--file` test below read byte-identical input."""
+    lines = [b"HFSR: 0x40000000\n"]
+    lines += [
+        f"# pad line {i} to exceed the 8192-byte TextIOWrapper chunk\n".encode()
+        for i in range(600)
+    ]
+    lines += [b"CFSR: 0x00008200\n", b"BFAR: 0xdeadbeef\n", b"\xff"]
+    return b"".join(lines)
+
+
+def test_a_stray_byte_mid_dump_decodes_the_same_via_stdin_and_via_file(tmp_path):
+    """Before this fix: `--file` on this exact byte stream decoded
+    `CFSR=0x00008200 ... BFAR=0xdeadbeef` (a precise bus fault), while piping
+    the SAME bytes into stdin silently reverted to HFSR's lone `Forced
+    HardFault -- ... its own status bits are clear` at exit 0 -- a confident
+    WRONG diagnosis, not a refusal. This pins the property worth pinning: the
+    two paths, given identical bytes, must produce the identical decode."""
+    data = _noisy_dump_bytes()
+
+    dump_file = tmp_path / "noisy_dump.bin"
+    dump_file.write_bytes(data)
+    try:
+        file_proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            [sys.executable, "-m", "tan", "faultdecode", "--no-color", "--file", str(dump_file)],
+            capture_output=True,
+            text=True,
+            timeout=_OPEN_STDIN_TIMEOUT_S,
+        )
+        stdin_proc = subprocess.run(  # noqa: S603
+            [sys.executable, "-m", "tan", "faultdecode", "--no-color"],
+            input=data,
+            capture_output=True,
+            timeout=_OPEN_STDIN_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"tan faultdecode did not exit within {_OPEN_STDIN_TIMEOUT_S}s")
+
+    assert file_proc.returncode == 0, file_proc.stderr
+    assert stdin_proc.returncode == 0, stdin_proc.stderr
+    stdin_stdout = stdin_proc.stdout.decode("utf-8")
+    assert stdin_stdout == file_proc.stdout
+    assert "0x00008200" in stdin_stdout
+    assert "0xdeadbeef" in stdin_stdout
+    assert "Precise data bus fault" in stdin_stdout
+
+
+# --------------------------------------------------------------------------
 # Every `--format json` command must have an envelope to emit (tan-cli#399)
 # --------------------------------------------------------------------------
 
