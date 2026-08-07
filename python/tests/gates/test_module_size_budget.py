@@ -585,7 +585,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
     # resolved, the same cost `project_pin_issue` above already justified.
-    "tan/commands/new_som_cmd.py": 1057,
+    # 1091, not 1057, as of tan-cli#496: the write-failure rollback loop now
+    # walks a deduplicated LIST (not a `set` -- the PYTHONHASHSEED-dependent
+    # iteration order that non-deterministically left a half-written preset
+    # on disk) and guards each `unlink()` individually, so a second `OSError`
+    # during cleanup is collected and reported instead of escaping uncaught
+    # with zero bytes on stdout in either output mode.
+    "tan/commands/new_som_cmd.py": 1091,
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside

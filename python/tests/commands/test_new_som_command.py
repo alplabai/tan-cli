@@ -941,6 +941,69 @@ def test_format_json_write_reports_the_files_it_actually_created(tmp_path):
     assert [Path(p).is_file() for p in data["written"]] == [True, True]
 
 
+def test_write_failure_rollback_never_escapes_and_reports_cleanup_json(tmp_path):
+    """tan-cli#496: a SECOND `OSError` during the write-failure rollback --
+    here a `NotADirectoryError` because a path component below
+    `--output-root` (`metadata/socs`) is a regular file, so the SoC-spec
+    write fails and its own cleanup attempt fails the identical way -- used
+    to escape the handler entirely: `new_som` has no `except Exception`
+    backstop, so the run crashed with a raw traceback instead of ever
+    reaching `fail()` -- exit 1 and ZERO bytes on stdout under `--format
+    json` (the `json.loads(result.stdout)` below IS that assertion: it
+    raises on the pre-fix bug). The already-written preset was also left on
+    disk non-deterministically (the old cleanup loop iterated a `set`,
+    order depending on `PYTHONHASHSEED`); this asserts it is gone
+    deterministically instead."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    (out / "metadata").mkdir(parents=True)
+    (out / "metadata" / "socs").write_text("not a directory", encoding="utf-8")
+    argv = [a for a in _dry_run_argv(sdk, out, "--format", "json") if a != "--dry-run"]
+
+    result = runner.invoke(app, argv)
+
+    # `typer.Exit`/`SystemExit` from `fail()` is the EXPECTED clean exit; any
+    # OTHER exception class reaching here is exactly the pre-fix escape.
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        result.exception,
+        result.output,
+    )
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "new-som"
+    assert payload["ok"] is False
+    assert payload["exitCode"] == 1
+    assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
+    message = payload["issues"][0]["message"]
+    assert "could not write the skeletons" in message
+    assert "imx95.json" in message  # names exactly what could not be cleaned up
+    preset_path = out / "metadata" / "e1m_modules" / "E1M-XTST1.yaml"
+    assert not preset_path.exists(), "rollback must not leave a half-written preset behind"
+
+
+def test_write_failure_rollback_never_escapes_and_reports_in_text_mode(tmp_path):
+    """The DEFAULT text mode side of tan-cli#496: before the fix, the same
+    double-fault crashed with a raw Python traceback and no `new-som:`
+    prefixed line at all -- reported nowhere a script or a human could parse
+    it, in EITHER output mode, not only under `--format json`."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    (out / "metadata").mkdir(parents=True)
+    (out / "metadata" / "socs").write_text("not a directory", encoding="utf-8")
+    argv = [a for a in _dry_run_argv(sdk, out) if a != "--dry-run"]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        result.exception,
+        result.output,
+    )
+    assert result.exit_code == 1, result.output
+    assert "new-som: could not write the skeletons" in result.output
+    preset_path = out / "metadata" / "e1m_modules" / "E1M-XTST1.yaml"
+    assert not preset_path.exists(), "rollback must not leave a half-written preset behind"
+
+
 def test_format_json_failure_path_carries_a_new_som_code(tmp_path):
     """tan-cli#399: the failure path used to be answered by `cli.main`'s
     generic fallback -- `command: "cli"`, `cli.parse-error` -- so a consumer

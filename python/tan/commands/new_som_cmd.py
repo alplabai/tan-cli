@@ -979,10 +979,44 @@ def new_som(
         except OSError as exc:
             # Never leave a half-written scaffold behind: remove both the
             # partially-written target and anything already created.
+            #
+            # tan-cli#496: this loop must itself be a deterministic LIST, not
+            # a set -- `{*written, *targets}` iterated in a PYTHONHASHSEED-
+            # dependent order, so which path got unlinked first (and which
+            # got orphaned when a second failure aborted the loop) was a coin
+            # flip: measured, 5 of 10 hash seeds left the preset behind.
+            # Every unlink is now individually guarded too: a SECOND OSError
+            # during cleanup (NotADirectoryError when a path component below
+            # `--output-root` is a regular file; PermissionError when
+            # `--force` targets a preset in a non-writable directory) used to
+            # escape this handler entirely -- no `except Exception` backstop
+            # catches it, so the run crashed with a raw traceback, exit 1,
+            # and ZERO bytes on stdout in EITHER output mode, never reaching
+            # `fail()`. Now every candidate is attempted regardless of
+            # whether an earlier one failed, and the report names exactly
+            # which path(s) could not be removed and why, so the caller knows
+            # precisely what may still be on disk instead of guessing.
             targets = [preset_path] + ([soc_path] if soc_doc is not None else [])
-            for path in {*written, *targets}:
-                path.unlink(missing_ok=True)
-            fail(f"could not write the skeletons ({exc}); removed any partial output")
+            to_remove: list[Path] = []
+            seen: set[Path] = set()
+            for path in [*written, *targets]:
+                if path not in seen:
+                    seen.add(path)
+                    to_remove.append(path)
+            cleanup_failures: list[str] = []
+            for path in to_remove:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    cleanup_failures.append(f"{path} ({cleanup_exc})")
+            if cleanup_failures:
+                fail(
+                    f"could not write the skeletons ({exc}); cleanup also "
+                    "failed, so this may be a half-written scaffold -- "
+                    "could not remove: " + "; ".join(cleanup_failures)
+                )
+            else:
+                fail(f"could not write the skeletons ({exc}); removed any partial output")
             return
         say(f"Created {preset_path}")
         if soc_doc is None:
