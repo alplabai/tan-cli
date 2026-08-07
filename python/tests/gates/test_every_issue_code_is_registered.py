@@ -783,7 +783,11 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `infer_target_kind`'s other two refusal shapes -- the SAME defect,
         # not a distinct one -- bringing this to 6. All four split-off codes
         # checked against the registry before each bump.
-        expected_calls=6,
+        # 7 as of tan-cli#489 (5): `_explicit_core_unknown_failure` adds a
+        # SEVENTH call, reusing the ALREADY-registered `core-unknown` literal
+        # (not a new code) for the `--target-kind`-explicit path
+        # `infer_target_kind`'s own guard never reaches.
+        expected_calls=7,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(

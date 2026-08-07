@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import os
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,7 @@ from tan.core.debug_launch import (
     apply_launch_resolution,
     create_launch_draft,
     create_launch_json_write_plan,
+    explicit_core_unknown_message,
     fill_debug_probe_identity_gaps,
     infer_target_kind,
     is_unresolved_placeholder,
@@ -419,7 +421,7 @@ def _fill_debug_probe_identity_from_sdk(
     sdk_root: str | None,
     board_yaml_path: str,
     core_id: str | None,
-) -> bool:
+) -> tuple[bool, frozenset[str]]:
     """alp-sdk#1026: fill `resolution`'s remaining `device`/`target_id`/
     `config_files` gaps from the SDK's published per-variant debug-probe
     identity (`variants[].debug`, alp-sdk#987), so `tan debug-config` resolves
@@ -435,23 +437,30 @@ def _fill_debug_probe_identity_from_sdk(
     existing placeholder note still applies, and nothing here can fail the
     command.
 
-    Returns whether a `variants[].debug` block was actually found for the
-    resolved SoC variant -- distinct from whether every field this run wanted
-    got filled from it. The caller uses this (alp-sdk#1026 review finding #4)
-    to tell "the SDK publishes an identity for this part, but not a value for
-    the specific field this server needs yet" apart from "no identity was
-    resolvable at all".
+    Returns `(debug_block_found, known_jlink_cores)`. `debug_block_found` is
+    whether a `variants[].debug` block was actually found for the resolved SoC
+    variant -- distinct from whether every field this run wanted got filled
+    from it. The caller uses this (alp-sdk#1026 review finding #4) to tell
+    "the SDK publishes an identity for this part, but not a value for the
+    specific field this server needs yet" apart from "no identity was
+    resolvable at all". `known_jlink_cores` is `jlink_device`'s own key set --
+    tan-cli#489 (4): `jlink_device` is the ONE field here keyed by core
+    (`pyocd_target`/`openocd_config` are not), so a `device` placeholder that
+    survives despite `debug_block_found` being true is either "no core id was
+    resolved to index with" or "the given core id has no entry in this SoM's
+    published map" -- two distinct, both-fixable-by-`--core` causes the caller
+    cannot tell apart, or name the known cores for, without this set.
     """
     if sdk_root is None:
-        return False
+        return False, frozenset()
     board = _load_yaml(Path(board_yaml_path))
     som = board.get("som") if isinstance(board, dict) else None
     sku = som.get("sku") if isinstance(som, dict) else None
     if not isinstance(sku, str) or sku == "":
-        return False
+        return False, frozenset()
     debug = _sdk_variant_debug_block(sdk_root, sku)
     if debug is None:
-        return False
+        return False, frozenset()
     jlink_device = debug.get("jlink_device")
     jlink_device = (
         {k: v for k, v in jlink_device.items() if isinstance(v, str)}
@@ -463,7 +472,7 @@ def _fill_debug_probe_identity_from_sdk(
     openocd_config = debug.get("openocd_config")
     openocd_config = openocd_config if isinstance(openocd_config, str) else None
     fill_debug_probe_identity_gaps(resolution, core_id, jlink_device, pyocd_target, openocd_config)
-    return True
+    return True, frozenset(jlink_device.keys())
 
 
 def _resolve_user_svd(workspace_root: str, arg: str) -> str:
@@ -664,6 +673,42 @@ def _sdk_identity_key_absent_issue(field: str) -> Issue:
     )
 
 
+def _sdk_identity_core_unresolved_issue(core: str | None, known_cores: frozenset[str]) -> Issue:
+    """tan-cli#489 (4): distinct from [`_sdk_identity_key_absent_issue`] above,
+    which is only correct when the field genuinely has no core dependency
+    (`configFiles`/`targetId`) or a core WAS resolved and is simply not the
+    one the SDK's map happens to key `device` under. On a never-built project
+    with no `--core`, `jlink_device.get(None)` is structurally always `None`
+    -- the SDK's map is never even consulted -- so `sdk-identity-key-absent`
+    told the customer "the SDK publishes no `device` for this SoM" when
+    `metadata/socs/.../*.json` may publish one for every core it has. Both
+    "no core id was resolved" and "the given core id has no entry in the
+    published map" share the SAME working remedy (pass `--core <id>` naming a
+    core the SDK DOES publish), so this one code covers both; the message
+    differs only in whether a core was named to look up."""
+    if core is None:
+        return Issue(
+            "debug-config.sdk-identity-core-unresolved",
+            "info",
+            "This SoM's SDK-published debug-probe identity (alp-sdk#987) is "
+            "keyed per core, and no core id was resolved for this run (no "
+            "--core given, and this project has no prior build to infer one "
+            "from) — so `device` stays the placeholder shown in "
+            "`configuration`, even though the SDK may publish a value for "
+            "one or more of this SoM's cores. Pass --core <id> to resolve it.",
+        )
+    cores = ", ".join(sorted(known_cores)) if known_cores else "none"
+    return Issue(
+        "debug-config.sdk-identity-core-unresolved",
+        "info",
+        f"This SoM's SDK-published debug-probe identity (alp-sdk#987) has no "
+        f"`device` entry for core '{core}' — its published cores are: "
+        f"{cores}. `device` stays the placeholder shown in `configuration`; "
+        "pass --core with one of the cores above, if that is the core you "
+        "meant.",
+    )
+
+
 def _sdk_identity_overwrite_issue(field: str, existing_value: str, incoming_value: str) -> Issue:
     """alp-sdk#1026 review finding #1: emitted whenever the SDK's published
     debug-probe identity (not a real build) just replaced a concrete existing
@@ -824,6 +869,32 @@ def _core_unknown_failure(generated_at: str, message: str, launch_json_path: str
     )
 
 
+def _explicit_core_unknown_failure(
+    generated_at: str, target: str, server: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#489 (5): the SAME `core-unknown` refusal as
+    [`_core_unknown_failure`] above, reached from the OTHER side --
+    `--target-kind` given EXPLICITLY, so `infer_target_kind` (and its own
+    `--core`-vs-manifest guard) never runs at all, and an explicit `--core`
+    naming no slice in this project's own build used to sail through in
+    silence: exit 0, a placeholder `device`, and an `executable` pointing at
+    a path that does not exist in this project. Same code, same exit, same
+    caller-fixable cause -- only the TARGET/SERVER differ: both are already
+    resolved here (unlike the omitted-`--target-kind` path, which fires
+    before either is known), so this reports the REAL ones instead of
+    `_core_unknown_failure`'s `zephyr-mcu`/`none` placeholder pair."""
+    return _failure(
+        generated_at=generated_at,
+        target=target,
+        server=server,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="core-unknown",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
 def _target_kind_ambiguous_failure(
     generated_at: str, message: str, launch_json_path: str
 ) -> _Outcome:
@@ -868,6 +939,127 @@ def _no_debuggable_target_class_failure(
         message=message,
         text_lines=["debug-config: validation failure"],
     )
+
+
+def _atomic_write_launch_json(path: str, content: str) -> None:
+    """Write `content` to `path` atomically and durably. Raises `OSError` on
+    any failure; the caller decides how to report it (`_write_failure`).
+
+    tan-cli#489 review round, findings 4 + 5 -- two gaps the original
+    temp-sibling-plus-`os.replace` fix (matching
+    `bootstrap_cmd.reconcile_west_manifest_path`'s own pattern) still had:
+
+    * **Symlink-safe.** `.vscode/launch.json` can be a symlink -- dotfile-
+      managed, or a canonical file shared across worktrees. `os.path.realpath`
+      resolves the REAL target FIRST, both for where the temp sibling is
+      created and for what `os.replace` targets: writing the temp beside the
+      UN-resolved `path` and replacing THAT would put a regular file where
+      the symlink was (destroying the link) while the real file silently
+      stops being updated -- measured: `os.replace` on a symlink replaces the
+      link itself, it does not write through it the way `open(path, "w")`
+      always did. Resolving first also keeps the temp on the SAME filesystem
+      as the real target when the two differ (`.vscode/` and the symlink's
+      destination can be different mounts), which `os.replace` requires for
+      its atomicity guarantee and fails outright (`EXDEV`) without.
+    * **Durable, not just atomic-in-naming.** `os.replace` is atomic with
+      respect to the RENAME only -- it says nothing about whether the
+      renamed-TO content has actually reached stable storage. A bare
+      `write`+`close` leaves the data in the page cache; power loss after
+      `os.replace` returns but before the temp's data blocks are flushed can
+      journal the rename without the content on a filesystem that does not
+      order the two together (XFS, btrfs, APFS, NTFS via `MoveFileExW`, and
+      network filesystems generally) -- ext4's `auto_da_alloc` heuristic
+      happens to cover the common Linux case, but nothing here may depend on
+      a heuristic that is filesystem-specific. `os.fsync` on the temp file's
+      OWN descriptor before the rename covers the content; a directory
+      `fsync` after the rename (POSIX only -- Windows has no directory
+      handle to fsync, and `ReplaceFile`/`MoveFileExW` already journal the
+      rename itself) covers the rename entry surviving a crash too.
+
+    **Mode, not ACL, is carried across the inode swap** -- `stat.S_IMODE` +
+    `os.chmod` below copies exactly the nine permission bits and nothing
+    more: no explicit ACL entry survives, and on Windows
+    `os.replace`/`MoveFileExW` itself drops a non-inherited DACL regardless
+    of anything this function does. `os.replace` swaps the DIRECTORY ENTRY,
+    not the file's own permission bits, so without this a `664`-mode
+    `launch.json` a shared `.vscode/` convention set deliberately would come
+    back at whatever the temp happened to be created with -- read BEFORE the
+    write (`existing_mode`, `None` for a first-ever write) and applied to
+    the REAL path AFTER a successful `os.replace`, never to the temp file
+    itself: `shutil.copymode`-ing the temp to match a READ-ONLY existing
+    file, before attempting the replace, would leave a temp this function's
+    own `except`-cleanup then also cannot `unlink` (Windows refuses to
+    delete a read-only file) -- a permanent leak on exactly the failure path
+    meant to prevent one. Best-effort throughout: a mode this process cannot
+    read or `chmod` must not fail an otherwise-successful write.
+
+    **Creating launch.json for the first time respects the process umask**,
+    rather than keeping `mkstemp`'s own hardcoded `0600` (deliberately
+    narrow -- POSIX designed `mkstemp` for secrets, which this temp file is
+    not) forever: every later run's `existing_mode` read would otherwise
+    just copy that `0600` forward, silently narrowing a file a shared
+    checkout or a devcontainer running as a different uid needs to read.
+    """
+    resolved = os.path.realpath(path)
+    directory = os.path.dirname(resolved)
+    existing_mode: int | None = None
+    try:
+        existing_mode = stat.S_IMODE(os.stat(resolved).st_mode)
+    except OSError:
+        pass
+    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tan-tmp")
+    try:
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+        except OSError:
+            # `fdopen` failing before a file object takes ownership of `fd`
+            # would otherwise leak the raw descriptor `mkstemp` opened.
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, resolved)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    if existing_mode is not None:
+        try:
+            os.chmod(resolved, existing_mode)
+        except OSError:
+            pass
+    else:
+        try:
+            # No race-free way to READ the process umask -- the standard
+            # idiom sets a harmless value and reads back the PREVIOUS one,
+            # then restores it immediately. `os.umask` is PROCESS-global, so
+            # this brief set-then-restore is safe only because `tan` itself
+            # is single-threaded here; a second thread calling `os.umask` (or
+            # doing anything umask-sensitive, like creating its own file)
+            # inside this same window would observe -- or set -- the wrong
+            # value.
+            current_umask = os.umask(0o022)
+            os.umask(current_umask)
+            os.chmod(resolved, 0o666 & ~current_umask)
+        except OSError:
+            pass
+    if os.name != "nt":
+        try:
+            dir_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            # Best-effort insurance for the RENAME entry surviving a crash,
+            # on top of the file's own fsync above (which already protects
+            # the content): some filesystems/mounts (overlayfs, certain
+            # FUSE/NFS setups) refuse a bare directory fsync outright.
+            pass
 
 
 def _write_failure(
@@ -1018,6 +1210,29 @@ def _run(
     except DebugConfigError as err:
         return _internal_failure(generated_at, str(err), cwd_launch_path)
 
+    # tan-cli#489 (5): an EXPLICIT --target-kind bypasses `infer_target_kind`
+    # entirely, so its own --core-vs-manifest guard (the `core-unknown` refusal
+    # above) never runs for this path. Without this check, --core naming no
+    # slice in this project's own build sailed through in silence: exit 0, a
+    # placeholder `device`, and an `executable` pointing at a path this
+    # project's build never produced. Checked against the WHOLE manifest (any
+    # os), mirroring `infer_target_kind`'s own guard exactly -- and, like that
+    # guard, only when a build actually exists to check against: a pre-build
+    # project has nothing to validate --core against yet, and staying silent
+    # there is the existing, correct "not built yet" behaviour every other
+    # placeholder-carrying draft already has.
+    if target_kind is not None and core is not None:
+        build_manifest = _load_yaml(Path(workspace_root, "build", "system-manifest.yaml"))
+        all_slices = manifest_slices(build_manifest)
+        if all_slices and not any(s.get("core_id") == core for s in all_slices):
+            return _explicit_core_unknown_failure(
+                generated_at,
+                target,
+                server,
+                explicit_core_unknown_message(core, all_slices),
+                launch_json_path,
+            )
+
     # Fill the `<resolved-...>` placeholders from what this project's own build
     # recorded (#66). Nothing here fails the command: pre-build, or against a
     # Zephyr that reshaped `runners.yaml`, the draft keeps its placeholders.
@@ -1040,7 +1255,7 @@ def _run(
     device_before_identity = resolution.device
     target_id_before_identity = resolution.target_id
     config_files_empty_before_identity = not resolution.config_files
-    identity_debug_block_found = _fill_debug_probe_identity_from_sdk(
+    identity_debug_block_found, known_jlink_cores = _fill_debug_probe_identity_from_sdk(
         resolution, sdk_root, board_yaml, identity_core
     )
     # Which launch-configuration JSON keys the SDK fallback (not a real build)
@@ -1084,7 +1299,36 @@ def _run(
     if identity_debug_block_found:
         field = _SERVER_IDENTITY_FIELD.get(server)
         if field is not None and _has_placeholder(draft.get(field)):
-            identity_issues.append(_sdk_identity_key_absent_issue(field))
+            # tan-cli#489 (4): `jlink_device` is the ONE field this identity
+            # keys by core (`configFiles`/`targetId` are not core-dependent at
+            # all -- `sdk-identity-key-absent` is always the right call for
+            # those). For `device`, a placeholder surviving despite a found
+            # debug block means the lookup itself never had a usable key: no
+            # core was resolved, or the one resolved has no entry in the
+            # published map -- never "the SDK publishes no value for this
+            # SoM", which is what `sdk-identity-key-absent` would have said.
+            #
+            # Review round: `bool(known_jlink_cores)` is required in front of
+            # the core-mismatch half. A SoM whose published `variants[].debug`
+            # carries NO `jlink_device` key at all (real shape: today's Alif
+            # entries publish `openocd_config` but not `jlink_device`) makes
+            # `known_jlink_cores` the empty set regardless of `identity_core`
+            # -- `core_unindexed` was unconditionally True, so even a VALID
+            # `--core m55_hp` reported "has no `device` entry for core
+            # 'm55_hp' -- its published cores are: none ... pass --core with
+            # one of the cores above", advice that contradicts itself. That
+            # SoM genuinely publishes no `device` value for ANY core --
+            # `sdk-identity-key-absent` is the correct, and only correct,
+            # code for it, exactly as it was before this split.
+            core_unindexed = bool(known_jlink_cores) and (
+                identity_core is None or identity_core not in known_jlink_cores
+            )
+            if server == JLINK and core_unindexed:
+                identity_issues.append(
+                    _sdk_identity_core_unresolved_issue(identity_core, known_jlink_cores)
+                )
+            else:
+                identity_issues.append(_sdk_identity_key_absent_issue(field))
     notes = _preview_notes_for(draft, registered_runners, server)
     # tan-cli#456 review: say when target/server were DERIVED, not requested --
     # otherwise silent, unlike the --svd/--gdbserver-address no-op notes right
@@ -1207,18 +1451,33 @@ def _run(
     # it can be disclosed.
     overwrites = sdk_identity_overwrites(existing, draft, sdk_filled_json_fields)
 
+    # tan-cli#489 (6): `--pre-launch-task ''` opts OUT of a `preLaunchTask` key
+    # entirely (`create_launch_draft` builds it, then deletes it), which is
+    # indistinguishable, to the merge's own "only visit the draft's own keys"
+    # rule, from this target simply having no default -- so the opt-out was a
+    # silent no-op against an entry a PRIOR run already gave one. Named here,
+    # explicitly, rather than left for `create_launch_json_write_plan` to
+    # infer from the draft alone.
+    explicit_omissions = frozenset({"preLaunchTask"}) if pre_launch_task == "" else frozenset()
+
     try:
-        plan = create_launch_json_write_plan(existing, draft)
+        plan = create_launch_json_write_plan(existing, draft, explicit_omissions)
     except DebugConfigError as err:
         # A malformed existing launch.json surfaces as an internal failure in TS.
         return _internal_failure(generated_at, str(err), cwd_launch_path)
 
+    # `open(launch_json_path, "w")` truncates the customer's file to zero
+    # before a single byte of `plan.content` is written, and that content
+    # exists only in memory -- a failure between the truncate and the flush
+    # (ENOSPC, a quota/RLIMIT_FSIZE hit, an I/O error, or the process dying:
+    # SIGKILL, power loss, the VS Code extension killing the child) destroys
+    # every hand-written configuration with no way for tan to repair it: the
+    # next run reads the wreckage, hits the malformed-JSON guard above, and
+    # refuses at exit 5 forever. `_atomic_write_launch_json`'s own docstring
+    # covers the rest: symlink-safe, fsync'd before the rename, and mode-
+    # preserving.
     try:
-        # `newline=""` so the splice's own CRLF survives: Python's text mode
-        # would otherwise translate every `\n` it wrote, turning a CRLF-authored
-        # file into `\r\r\n`. The content is already exactly the bytes intended.
-        with open(launch_json_path, "w", encoding="utf-8", newline="") as handle:
-            handle.write(plan.content)
+        _atomic_write_launch_json(launch_json_path, plan.content)
     except OSError as err:
         return _write_failure(
             generated_at, target, server, launch_json_path, str(err)

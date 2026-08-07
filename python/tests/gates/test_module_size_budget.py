@@ -342,7 +342,42 @@ _MODULE_BUDGET: dict[str, int] = {
     # resolved to a literal ... a 'code=' keyword argument is not a
     # resolvable code literal" -- each wrapper's own literal is the only
     # shape the gate can verify against the registry.
-    "tan/commands/debug_config_cmd.py": 1402,
+    # 1402 -> 1535: tan-cli#489 fixed three data-loss/misattribution defects
+    # in one bounded change: (1+2) the launch.json write moved from a
+    # truncating `open(path, "w")` to a temp-sibling + `os.replace` (matching
+    # `bootstrap_cmd.reconcile_west_manifest_path`'s own pattern); (4) split
+    # `sdk-identity-key-absent` off a new `_sdk_identity_core_unresolved_issue`
+    # for the "no core to index the SDK's per-core identity with" case, which
+    # it used to misattribute; (5) `_explicit_core_unknown_failure` closes the
+    # silent `--core`-vs-manifest gap `infer_target_kind`'s own guard cannot
+    # reach once `--target-kind` is given explicitly.
+    # 1535 -> 1643, review round on the same issue: (1) `bool(known_jlink_cores)`
+    # guard plus its own explaining comment, so a SoM with no `jlink_device`
+    # map at all does not steal `sdk-identity-key-absent`'s correct case;
+    # (4/5, symlink+fsync) `_atomic_write_launch_json` replaced the bare
+    # temp-plus-`os.replace` with a symlink-resolving, `fsync`'d,
+    # mode-preserving write plus a stale-temp sweep -- a real function with a
+    # real docstring, not a few extra lines at the call site; (6)
+    # `explicit_omissions` threaded through `create_launch_json_write_plan`
+    # so `--pre-launch-task ''` actually removes an existing key on a write,
+    # not just a fresh draft.
+    # 1643 -> 1656, SECOND review round on the same issue: the stale-temp
+    # sweep from the round above was DELETED outright (it could delete a
+    # concurrent process's own in-flight temp, including one outside the
+    # project through a symlinked `launch.json`) rather than shrinking this
+    # file; the mode-preservation logic grew instead -- reading the existing
+    # file's mode BEFORE the write and applying it AFTER a successful
+    # replace (never to the temp itself, so a failed replace's cleanup
+    # `unlink` is never blocked by a read-only-mirrored temp), plus the
+    # umask-respecting default for a brand first-ever write, plus a guard
+    # against `os.fdopen` leaking `mkstemp`'s own fd.
+    # 1656 -> 1661, THIRD review round: doc-only corrections (the stale
+    # `shutil.copymode` present-tense claim after `shutil` was dropped from
+    # the imports; `.gitignore`'s comment split into a `debug_config_cmd.py`
+    # entry) plus a single-threaded-CLI caveat on the `os.umask` set-restore
+    # -- the list-merge algorithm change that dominates this round's diff
+    # lives in `debug_launch.py` below, not here.
+    "tan/commands/debug_config_cmd.py": 1661,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -442,7 +477,49 @@ _MODULE_BUDGET: dict[str, int] = {
     # matching nothing) carry a bare reason code the caller maps to a new
     # issue code -- and `_core_not_in_manifest_message` grew a `slices`
     # parameter to name the cores the build actually produced.
-    "tan/core/debug_launch.py": 1068,
+    # 1109, not 1068, as of tan-cli#489: (3) `_merge_value`'s list branch grew
+    # a no-truncation tail-append plus a recursive dict branch (a per-index
+    # merge used to silently delete a customer's extra `setupCommands`/
+    # `configFiles` entries and their hand-added keys); (5)
+    # `explicit_core_unknown_message` is the `--target-kind`-explicit
+    # counterpart of `_core_not_in_manifest_message` above, kept in `tan.core`
+    # rather than duplicated in the command module per this file's own
+    # pure-logic convention.
+    # 1201, not 1109, review round on the same issue: (2/3) the per-index
+    # list merge was replaced with `_list_item_identity` +
+    # `_merge_list_by_identity` (a reordered `configFiles`/`setupCommands`
+    # was pairing the wrong entries, both destroying one and duplicating
+    # another) -- a real function plus its own docstring recording the
+    # remaining, deliberately-accepted "cannot shrink a list tan itself
+    # wrote" limitation, not a few extra lines; (6) `explicit_omissions`
+    # threaded through `create_launch_json_write_plan` so
+    # `--pre-launch-task ''` removes an existing key on a write, not only a
+    # fresh draft.
+    # 1221, not 1201, SECOND review round on the same issue: the identity-only
+    # merge above was NON-IDEMPOTENT (measured: three consecutive runs
+    # accumulated three revisions of `configFiles` instead of holding only
+    # the latest) and emitted in the DRAFT's own order, not `existing`'s --
+    # both fatal to OpenOCD/gdb sessions that depend on entry order.
+    # `_merge_list_by_identity` now keeps position as a weaker fallback
+    # signal for a draft item matching nothing already present, restoring
+    # idempotence and order, with its own docstring rewritten to describe
+    # the residual limitation this ACTUALLY leaves (not the "cannot shrink"
+    # framing the previous round's docstring used, which described a
+    # symptom of the accumulation bug, not a real property).
+    # 1275, not 1221, THIRD review round on the same issue: the SECOND
+    # round's fallback used the unmatched draft item's own INDEX against
+    # `existing` at that same index -- correct only while nothing earlier in
+    # the draft had also identity-matched, which any customer-prepended
+    # entry ahead of tan's own resolved values immediately breaks (measured:
+    # accumulation persisted for any board with more than one `--config`).
+    # `_merge_list_by_identity` now does ANCHOR-relative placement (a free
+    # `existing` slot bracketed by the nearest identity matches before/after
+    # the unmatched item in the draft, not its own raw index) -- more state
+    # to track per merge (`anchor_of_draft_index`, the two-pass placement
+    # loop) and a docstring long enough to record why the simpler two-pass
+    # ("assign every leftover draft item to every leftover existing slot in
+    # order") was rejected, not just what shipped.
+    "tan/core/debug_launch.py": 1275,
     "tan/commands/build/execute.py": 941,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
@@ -542,6 +619,36 @@ _MIRRORED = ("tan/planner/",)
 # also grew this pass, but it was already over 50 lines before it, so it
 # never moved the COUNT either way.
 #
+# 205, not 203, as of tan-cli#489: two more functions crossed 50 lines --
+# `debug_config_cmd.py:_fill_debug_probe_identity_from_sdk` (52 -> 57), which
+# now also returns the `known_jlink_cores` set item (4)'s
+# `sdk-identity-core-unresolved` message needs, and
+# `debug_launch.py:_merge_value` (44 -> 53), whose list branch gained the
+# no-truncation tail-append plus a recursive dict branch (item (3): a
+# per-index merge used to silently delete a customer's own `setupCommands`/
+# `configFiles` entries). `_run` (`debug_config_cmd.py`) also grew, 320 -> 382,
+# but was already over the cap, so it does not move this count.
+#
+# 206, not 205, review round on the same issue: `_merge_value`'s old 53-line
+# list branch was REPLACED by `_merge_list_by_identity` (52 lines, a wash --
+# still one function over the cap, not two), but `_atomic_write_launch_json`
+# (`debug_config_cmd.py`, findings 4+5: symlink-resolving, `fsync`'d,
+# mode-preserving) is a genuinely NEW one at 81 lines, so the count moves by
+# exactly the net +1 that accounts for.
+#
+# 207, not 206, merging in tan-cli#485's review round (independent of the
+# #489 work above -- both landed on top of the same 203 baseline):
+# `project_loader.py:_hwrev_pad_route_overrides` (trimmed to exactly 50
+# lines, at the cap not over it, in #485's first pass) needed its dropped
+# constraint note back -- "same error TYPE and MESSAGE SHAPE as
+# loader.load_board_yaml's SoM-side refusals" is load-bearing: the function
+# INLINES `loader._status_repr` rather than importing it, and that inlining
+# is invisible without the note telling a future editor the two must be kept
+# in sync by hand. +6 lines (50 -> 56), all docstring, so the function
+# crosses the cap again -- the same choice `render_doctor_footer` made the
+# OTHER way, above, when the growth was prose that added nothing a reader
+# couldn't infer; this growth names a real constraint the code doesn't
+# otherwise state anywhere.
 # 204, not 203, as of tan-cli#485's review round: `project_loader.py:
 # _hwrev_pad_route_overrides` (trimmed to exactly 50 lines, at the cap not
 # over it, in #485's first pass) needed its dropped constraint note back --
@@ -580,7 +687,20 @@ _MIRRORED = ("tan/planner/",)
 # either side's pre-merge number on its own. Re-measured against the merged
 # tree with the gate's own `ast`-walk, not summed from the two branches'
 # comments on faith.
-_FUNCTION_COUNT_BUDGET = 206
+#
+# 209, not 206 and not 207, merging tan-cli#489's branch with the `dev` tip
+# that now carries BOTH tan-cli#521 (#485's `project_loader.py` step) and
+# tan-cli#511 (#487's `_yocto_wic_block_device_refusal` and #511's
+# `openocd_program_word`). The two comment histories above each describe a
+# DIFFERENT subset of the same 203 baseline and overlap on #485's single
+# step, so neither side's total survives the merge and neither does the
+# naive union of them: 207 + 206 - 203 = 210, which is WRONG. The real
+# figure is 203 + 1 (#485, counted once) + 3 (#489) + 2 (#487/#511) = 209,
+# and it was re-measured against the merged tree with the gate's own
+# `ast`-walk rather than summed from the two branches' comments on faith --
+# the arithmetic and the measurement disagree by one, and the measurement
+# wins.
+_FUNCTION_COUNT_BUDGET = 209
 _FUNCTION_WORST_BUDGET = 707
 
 
