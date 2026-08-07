@@ -1289,6 +1289,122 @@ def test_swd_probe_openocd_elf_message_omits_an_address_the_tool_never_received(
     assert "0x08000000" not in plan.ok_message
 
 
+# ── swd_probe jlink_device resolved from SDK metadata (tan-cli#514) ─────────
+
+
+def _write_aen801_sdk_fixture(sdk_root: Path) -> None:
+    """A minimal E1M-AEN801 SoM preset + Alif Ensemble E8 SoC JSON fixture --
+    the exact shape `metadata/e1m_modules/E1M-AEN801.yaml` /
+    `metadata/socs/alif/ensemble/e8.json` publish on a real alp-sdk checkout
+    (measured against `/home/dev/alp-sdk`), with `debug.jlink_device.m55_he
+    == "Cortex-M55"`. Self-contained here rather than reused from
+    `test_debug_config_command.py`'s own `write_sdk_fixture` -- this file
+    must not depend on another test module's fixture shape."""
+    som_dir = sdk_root / "metadata" / "e1m_modules"
+    som_dir.mkdir(parents=True)
+    (som_dir / "E1M-AEN801.yaml").write_text(
+        "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
+        "silicon_variant: AE822FA0E5597LS0\n",
+        encoding="utf-8",
+    )
+    soc_dir = sdk_root / "metadata" / "socs" / "alif" / "ensemble"
+    soc_dir.mkdir(parents=True)
+    (soc_dir / "e8.json").write_text(
+        """{
+            "soc_spec_version": 1,
+            "ref": "alif:ensemble:e8",
+            "vendor": "Alif Semiconductor",
+            "family": "Ensemble",
+            "part": "E8",
+            "variants": [
+                {
+                    "order_code": "AE822FA0E5597LS0",
+                    "debug": {
+                        "pyocd_target": "AE822FA0E5597LS0",
+                        "jlink_device": {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+                    }
+                }
+            ]
+        }""",
+        encoding="utf-8",
+    )
+
+
+def test_swd_probe_resolves_jlink_device_from_sdk_metadata_not_the_gd32_default(tmp_path):
+    """tan-cli#514. An AEN801 project's `swd_probe` entry that names no
+    `flash_args.jlink_device` must plan against the SDK's published attach
+    profile (`Cortex-M55`, `metadata/socs/alif/ensemble/e8.json` --
+    measured against a real alp-sdk checkout), not the foreign GD32
+    supervisor part `flash_plan._DEFAULT_JLINK_DEVICE` falls back to.
+    `flash_cmd._resolve_swd_probe_jlink_device` is the fix under test; the
+    pure `flash_plan.plan_swd_probe` itself is untouched (see
+    `test_swd_probe_still_defaults_to_gd32_when_neither_device_nor_target_
+    is_set`, still green, for its own unchanged fallback)."""
+    _write_aen801_sdk_fixture(tmp_path / "sdk")
+    manifest = """schema_version: 1
+hw_info: {sku: E1M-AEN801}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.elf, status: ok,
+   flash_method: swd_probe, flash_args: {}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    message = payload["data"]["entries"][0]["message"]
+    assert "-device Cortex-M55" in message, message
+    assert "GD32G553MEY7TR" not in message, message
+
+
+def test_swd_probe_keeps_the_gd32_default_when_no_sdk_variant_resolves(tmp_path):
+    """The oracle-parity-pinned negative case: a manifest whose `hw_info.sku`
+    resolves no SoC variant at all (no `metadata/e1m_modules/**` under this
+    `sdk_root`) must still reach `_DEFAULT_JLINK_DEVICE`, byte-identical to
+    before tan-cli#514 -- this is exactly the shape all 14 `test_flash_
+    oracle_parity.py` `swd_probe` fixtures are, and none of them may move."""
+    manifest = """schema_version: 1
+hw_info: {sku: NOT-A-REAL-SKU}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: zephyr.elf, status: ok,
+   flash_method: swd_probe, flash_args: {}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    message = payload["data"]["entries"][0]["message"]
+    assert "-device GD32G553MEY7TR" in message, message
+
+
+def test_swd_probe_sdk_resolution_does_not_suppress_the_target_only_refusal(tmp_path):
+    """tan-cli#514 review guard: `flash_args.target` present without
+    `jlink_device` is `_resolve_jlink_device`'s own deliberate refusal
+    branch (tan-cli#402) -- a SoM that named an OpenOCD/pyOCD target wants
+    that path, not a silently substituted J-Link device profile, however it
+    was sourced. `_resolve_swd_probe_jlink_device` must not pre-fill
+    `jlink_device` from the SDK and short-circuit that refusal, even though
+    the SDK fixture here DOES resolve a real attach profile for this core."""
+    _write_aen801_sdk_fixture(tmp_path / "sdk")
+    manifest = """schema_version: 1
+hw_info: {sku: E1M-AEN801}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.elf, status: ok,
+   flash_method: swd_probe,
+   flash_args: {interface: cmsis-dap, target: stm32h7x}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1, payload
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "jlink_device" in entry["message"]
+    assert "target" in entry["message"]
+
+
 # ── yocto_wic target/compress validation (tan-cli#487) ──────────────────────
 
 
@@ -2371,6 +2487,24 @@ def test_flow_d_preflight_a_different_reported_dp_id_keeps_the_wiring_message(mo
     assert "re-enumerat" not in message
 
 
+def test_flow_d_preflight_wrong_dp_id_names_the_actual_id_too(monkeypatch):
+    """tan-cli#512, secondary. The mismatch refusal used to name only the
+    EXPECTED SW-DP IDR, never the actual one the preflight just read --
+    although it took this exact `_dp_id_reported(banner)` branch and
+    therefore had the value in hand. On a bench where two probes share a
+    cloned USB serial (measured: `603000869` answers both a real E1M-AEN801
+    at `0x4C013477` and a GD32 bridge at `0x0BE12477`), the actual ID is the
+    single most useful datum for telling which board actually answered."""
+    _stub_flow_d_probe(
+        monkeypatch,
+        stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
+    )
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None
+    assert "0x4C013477" in message, message  # the expected id (unchanged)
+    assert "0x2BA01477" in message, message  # tan-cli#512: the actual id, new
+
+
 def test_flow_d_preflight_wrong_dp_id_names_the_sw_dp_id_not_jlink_serial(monkeypatch):
     """tan-cli#369: the wrong-DP-ID remediation used to read as "pin
     jlink_serial to fix this" -- wrong on the bench this preflight actually
@@ -2967,6 +3101,112 @@ boot_order: []
     assert any(i.code == "flash.confirm-required" for i in issues)
     assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
     assert not (setools_dir / "build" / "config").exists()
+
+
+def test_flow_d_wrong_board_refuses_before_any_setools_write(tmp_path, monkeypatch):
+    """tan-cli#512. A CONFIRMED, non-dry-run Flow D entry whose read-only
+    DPIDR preflight catches a wrong-board mismatch must abort BEFORE the
+    SETOOLS auto-sign ever touches the customer's install -- not merely
+    before the MRAM write itself.
+
+    Measured on real E1M-AEN801 silicon: a manifest with `expect_dpidr` set
+    to the GD32 bridge's DP ID (deliberately the wrong board) correctly
+    aborted the MRAM write with slot0 byte-identical -- but
+    `_resolve_flow_d_atoc_via_setools` had already run FIRST and rewrote
+    `build/app-package-map.txt` (1141 -> 689 bytes), regenerated `build/
+    AppTocPackage.bin`, and created `build/images/m55_he.bin` + `build/
+    config/m55_he-slot0.json`, destroying the prior accumulated (hand-run-
+    inclusive) sign record. `_flow_d_preflight` moving ahead of the sign is
+    the fix under test.
+
+    `tan.core.setools.subprocess.run` -- `sign_slot0`'s own real spawn site
+    -- is stubbed to raise if it is EVER called: a regression back to the
+    pre-fix ordering (sign runs before the preflight) fails LOUDLY here,
+    mirroring `test_flow_d_end_to_end_does_not_sign_via_setools_when_
+    unconfirmed`'s own technique for the sibling (unconfirmed) case.
+    `flash_cmd._spawn_jlink` -- the one spawn site the preflight probe and
+    the eventual real write share -- is stubbed to a canned "a different
+    board answered" banner; nothing here can reach a real J-Link either way.
+
+    Verified to fail against the pre-fix code (preflight after the sign):
+    with the ordering reverted, `_resolve_flow_d_atoc_via_setools` reaches
+    `sign_slot0` before the preflight ever runs, tripping the
+    `AssertionError` stub above -- the exact regression this guards.
+    """
+    from tan.core import setools as setools_module
+
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    name = _setools_script_name()
+    if name != setools_module.APP_GEN_TOC:
+        monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
+    _write_working_app_gen_toc(setools_dir / name)
+
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    (build_root / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = f"""schema_version: 1
+hw_info: {{sku: S}}
+slices:
+- {{core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: {{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                expect_dpidr: "0x0BE12477", jlink_device: Generic-Attach,
+                setools_dir: "{setools_dir.as_posix()}", confirm: true}}}}
+helper_mcus: []
+boot_order: []
+"""
+    (build_root / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+
+    monkeypatch.setattr(
+        flash_cmd,
+        "_spawn_jlink",
+        lambda *_a, **_k: flash_cmd._Outcome(
+            success=False,
+            stdout="Connecting to target via SWD\nFound SW-DP with ID 0x4C013477\n",
+            stderr="",
+        ),
+    )
+
+    def _fail_if_spawned(*_a, **_k):
+        raise AssertionError(
+            "app-gen-toc was spawned before the DPIDR preflight refused a wrong board"
+        )
+
+    monkeypatch.setattr(setools_module.subprocess, "run", _fail_if_spawned)
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 1
+    entry = data["entries"][0]
+    assert entry["status"] == "failed"
+    assert "expected SW-DP IDR 0x0BE12477" in entry["message"], entry["message"]
+    # tan-cli#512, secondary: the ACTUAL reported ID must reach the message too.
+    assert "0x4C013477" in entry["message"], entry["message"]
+    assert any(i.code == "flash.entry-failed" for i in issues)
+
+    # The core assertion: nothing was written into the SETOOLS install.
+    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
+    assert not (setools_dir / "build" / "config").exists()
+    assert not (setools_dir / "build" / "app-package-map.txt").exists()
 
 
 def test_flow_d_end_to_end_refuses_with_setools_guidance_when_unresolved(tmp_path):

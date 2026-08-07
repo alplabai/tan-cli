@@ -59,6 +59,7 @@ from typing import Any, Callable
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_ladder
+from tan.commands.build_output import read_sdk_som_and_soc
 from tan.commands.doctor_cmd import on_path
 from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.flash_plan import (
@@ -74,6 +75,7 @@ from tan.core.flash_plan import (
     ManifestError,
     YOCTO_WIC_METHODS,
     _DEV_ROOT,
+    _fa_has_key,
     backend_for,
     display_argv,
     fa_bool_checked,
@@ -94,6 +96,7 @@ from tan.core.flash_plan import (
     validate_flow_d_shape,
 )
 from tan.core.global_flags import accept_global_flags
+from tan.core.size import resolve_variant
 from tan.core.setools import (
     find_app_gen_toc,
     missing_tool_message,
@@ -915,6 +918,79 @@ class _Context:
     setools_dir: str | None = None
 
 
+def _sdk_jlink_device_for_core(sdk_root: str, sku: str, core_id: str) -> str | None:
+    """tan-cli#514: the SDK's published attach-profile J-Link device
+    (`variants[].debug.jlink_device`, keyed by core id) for `sku`'s SoM
+    preset -- the SAME metadata block `tan debug-config` already resolves for
+    the identical SoM/core (`debug_config_cmd._fill_debug_probe_identity_
+    from_sdk`), read here through the SAME shared primitives
+    (`build_output.read_sdk_som_and_soc` + `size.resolve_variant`) rather
+    than a second, driftable reader.
+
+    `resolve_variant`'s `sku=None` deliberately disables its reverse `sku in
+    alp_module_skus` fallback, mirroring `debug_config_cmd._sdk_variant_
+    debug_block`'s own precedent: a drifted/`TBD` preset must resolve NO
+    identity here rather than possibly a WRONG one that plans a real write
+    against a different part's attach profile.
+
+    Best-effort throughout, never raises: an empty `sku`, an unreadable SoM
+    preset/SoC JSON, an unresolved variant, or a `debug.jlink_device` that
+    names no entry for `core_id` all return `None`, leaving the caller's
+    existing fallback untouched.
+    """
+    if not sku:
+        return None
+    walked = read_sdk_som_and_soc(os.path.join(sdk_root, "metadata"), sku)
+    if walked is None:
+        return None
+    _silicon, silicon_variant, variants, _soc_flash_mb, _soc_cores = walked
+    variant = resolve_variant(silicon_variant, None, variants)
+    if variant is None:
+        return None
+    debug = variant.get("debug")
+    if not isinstance(debug, dict):
+        return None
+    jlink_device = debug.get("jlink_device")
+    if not isinstance(jlink_device, dict):
+        return None
+    device = jlink_device.get(core_id)
+    return device if isinstance(device, str) and device else None
+
+
+def _resolve_swd_probe_jlink_device(flash_args: Any, ctx: _Context, entry_id: str) -> Any:
+    """tan-cli#514: fill `flash_args.jlink_device` from the SDK's published
+    per-variant attach profile BEFORE `flash_plan._resolve_jlink_device` ever
+    runs -- ahead of ITS OWN `_DEFAULT_JLINK_DEVICE` fallback, which names a
+    DIFFERENT SoM family's part (the V2N carrier's GD32 supervisor MCU) and
+    is not a plausible default for an AEN or NX91 project that never asked
+    for it.
+
+    **Oracle parity forces that fallback to stay** (`flash_plan._resolve_
+    jlink_device`'s own docstring): 14 recorded `test_flash_oracle_parity.py`
+    cases reach it verbatim, every one of them via a synthetic `sdk_root`
+    carrying no `metadata/e1m_modules/**` -- `_sdk_jlink_device_for_core`
+    cannot resolve a variant for any of them, so none of them move. This is
+    the resolution-order fix AHEAD of that fallback, not a change to it or
+    its value.
+
+    A no-op whenever `flash_args` already names `jlink_device` (an explicit
+    manifest value always wins, and a malformed one is left for `_resolve_
+    jlink_device`'s own strict accessor to refuse, unchanged) or `target` (by
+    KEY PRESENCE, matching `_resolve_jlink_device`'s own check exactly --
+    that combination is its OpenOCD/pyOCD refusal branch, which this must
+    never silently pre-empt by handing it a J-Link device profile it never
+    asked for), or when the SDK metadata resolves nothing for this SKU/core.
+    """
+    if _fa_has_key(flash_args, "jlink_device") or _fa_has_key(flash_args, "target"):
+        return flash_args
+    device = _sdk_jlink_device_for_core(ctx.sdk_root, ctx.sku, entry_id)
+    if device is None:
+        return flash_args
+    merged = dict(flash_args)
+    merged["jlink_device"] = device
+    return merged
+
+
 def _resolve_flow_d_atoc_address(flash_args: Any, build_root: str, sdk_root: str) -> Any:
     """Fill in `flash_args.atoc_address` from the `app-gen-toc` build report
     (`flash_args.atoc_map`, an `app-package-map.txt` path) when the manifest
@@ -1278,6 +1354,15 @@ def _flash_entry(
         return 1, entry(method, "failed", 1, gate.message), lines
 
     flash_args = target.flash_args
+    # tan-cli#514: resolve `flash_args.jlink_device` from the SDK's per-variant
+    # attach profile BEFORE `swd_probe`'s own plan-builder ever runs -- ahead
+    # of `flash_plan._resolve_jlink_device`'s foreign-part fallback. A no-op
+    # on every manifest that already names `jlink_device`/`target`, or that
+    # resolves no SoC variant at all (unconditional on `--dry-run`/confirm:
+    # pure metadata IO, no hardware touched, and a preview should show the
+    # real resolved device too).
+    if method == "swd_probe":
+        flash_args = _resolve_swd_probe_jlink_device(flash_args, ctx, entry_id)
     # Set only on the Flow D SETOOLS-auto-sign path below, and only when THIS
     # run's own sign actually ran -- carried past the `if` block so the
     # eventual success message (tan-cli#373) can name which SETOOLS install
@@ -1325,6 +1410,44 @@ def _flash_entry(
             # setools`'s own docstring for why an unconfirmed real run must
             # not sign for real just because it is not ALSO `--dry-run`.
             confirm = ctx.force_confirm or bool(fa_bool_checked(flash_args, "confirm"))
+            # tan-cli#512: the read-only DPIDR preflight must run BEFORE the
+            # SETOOLS auto-sign, not after -- `_resolve_flow_d_atoc_via_
+            # setools` is itself a real write into the customer's SETOOLS
+            # install (`app-gen-toc` REWRITES `build/app-package-map.txt`
+            # rather than appending, destroying any prior accumulated sign
+            # record), and the wrong-board case this preflight exists to
+            # catch is exactly the one where nothing should have been
+            # written yet. Measured on real E1M-AEN801 silicon: a wrong-
+            # board `expect_dpidr` correctly aborted the MRAM write with
+            # slot0 byte-identical, but the SETOOLS install had already been
+            # mutated by the sign that ran first.
+            #
+            # Gated on the SAME `not (ctx.dry_run or not confirm)` condition
+            # `_resolve_flow_d_atoc_via_setools`'s own real-sign branch uses
+            # (identically, `plan_alif_mram_jlink` computes this as
+            # `planning_only` for the OLD call site below) -- a preview or an
+            # unconfirmed run gets no preflight probe either, matching the
+            # previous call site's behaviour exactly. The preflight reads
+            # only `expect_dpidr`/`jlink_device`/`jlink_serial`/`jlink_speed`
+            # off `flash_args` (`flow_d_preflight_script`) -- none of which
+            # `_resolve_flow_d_atoc_via_setools` touches (it only ever adds
+            # `atoc`/`atoc_address`) -- so running it against `flash_args` as
+            # it stands here, before the sign, is behaviourally identical to
+            # running it after for every case except the one this fixes.
+            if not ctx.dry_run and confirm:
+                preflight_inputs = FlashInputs(
+                    artefact=artefact_path,
+                    flash_args=flash_args,
+                    core_id=entry_id,
+                    sku=ctx.sku,
+                    dry_run=ctx.dry_run,
+                    force_confirm=ctx.force_confirm,
+                )
+                refusal = _flow_d_preflight(preflight_inputs, ctx.venv_bin, ctx.workspace)
+                if refusal is not None:
+                    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                    lines.append(f"  FAIL: {refusal}")
+                    return 1, entry(method, "failed", 1, refusal), lines
             flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
                 flash_args, shape, ctx, entry_id, confirm
             )
@@ -1394,14 +1517,12 @@ def _flash_entry(
         lines.append(f"  {msg}")
         return 0, entry(method, "planned", 0, msg), lines
 
-    # A real write. Flow D gets its read-only DPIDR preflight FIRST: flashing the
-    # wrong attached board is the one unrecoverable mistake here, so the identity
-    # is confirmed while the session is still read-only, and a mismatch aborts.
-    if method == FLOW_D_METHOD:
-        refusal = _flow_d_preflight(inputs, ctx.venv_bin, ctx.workspace)
-        if refusal is not None:
-            lines.append(f"  FAIL: {refusal}")
-            return 1, entry(method, "failed", 1, refusal), lines
+    # tan-cli#512: Flow D's read-only DPIDR preflight used to run HERE --
+    # after `meta.build`, immediately before the real write. It now runs
+    # earlier, above, ahead of the SETOOLS auto-sign that may precede this
+    # point: see the `if not ctx.dry_run and confirm:` block in the
+    # `FLOW_D_METHOD` branch near the top of this function for the fix and
+    # why the sign could not be allowed to run first.
 
     # tan-cli#487, defect 1's second tier -- see `_yocto_wic_block_device_
     # refusal`'s own docstring. Scoped to `yocto_wic`/`yocto_wic_to_sd_or_
@@ -1541,9 +1662,18 @@ def _flow_d_preflight(
         # selector. The SW-DP ID this preflight already reads IS the true
         # per-silicon discriminator; this remediation says so instead of
         # pointing at the one field that cannot fix this.
+        # tan-cli#512, secondary: name the ACTUAL SW-DP ID this connect just read,
+        # not only the expected one -- on a bench where a USB serial is CLONED
+        # across two physical probes (measured: `603000869` answers both a real
+        # AEN E8 at `0x4C013477` and a GD32 bridge at `0x0BE12477`), the actual ID
+        # is the single most useful datum for working out which board actually
+        # answered. `_dp_id_value` reuses the exact regex `_dp_id_reported` just
+        # matched on this same banner, so it cannot fail to find a value here.
+        actual = _dp_id_value(banner) or "an ID this preflight could not parse back out"
         return (
             f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
-            "-- refusing to write MRAM to an unidentified board. Check the wiring and "
+            f"-- the probe reported {actual} instead. Refusing to write MRAM to an "
+            "unidentified board. Check the wiring and "
             "which board is physically attached -- do NOT treat pinning "
             "flash_args.jlink_serial alone as the fix: some OEM J-Link probes share a "
             "CLONED serial across more than one physical unit, so jlink_serial cannot "
@@ -1580,8 +1710,11 @@ def _hex_in(expected: str, haystack: str) -> bool:
 #: it turned out to be -- "Found SW-DP with ID 0x........" / "DPIDR: 0x........".
 #: Matched loosely on purpose: what this distinguishes is "a real board
 #: answered with a different identity" from "nothing answered", not the exact
-#: firmware/DLL version's phrasing.
-_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*0x[0-9A-Fa-f]+", re.IGNORECASE)
+#: firmware/DLL version's phrasing. The hex value is its own capture group
+#: (tan-cli#512) so `_dp_id_value` can report what was ACTUALLY read, not only
+#: whether something was -- `_dp_id_reported` still just asks whether this
+#: matches at all.
+_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*(0x[0-9A-Fa-f]+)", re.IGNORECASE)
 
 #: SEGGER's own wording for the PROBE itself refusing the connection outright
 #: -- measured verbatim on the rc3 bench run: "Connecting to J-Link ...FAILED:
@@ -1609,6 +1742,16 @@ def _dp_id_reported(banner: str) -> bool:
     `expected` (the caller already ruled that out via `_hex_in`), only whether
     a connect got far enough to read one at all."""
     return _DP_ID_RE.search(banner) is not None
+
+
+def _dp_id_value(banner: str) -> str | None:
+    """The actual SW-DP ID text the banner reported, verbatim (whatever hex
+    casing/`0x` spelling SEGGER printed), or `None` if `_DP_ID_RE` does not
+    match at all. tan-cli#512: a caller that already knows `_dp_id_reported(
+    banner)` is `True` gets a non-`None` value here by construction -- both
+    read the same regex against the same banner."""
+    match = _DP_ID_RE.search(banner)
+    return match.group(1) if match else None
 
 
 def _connect_failed_outright(banner: str) -> bool:

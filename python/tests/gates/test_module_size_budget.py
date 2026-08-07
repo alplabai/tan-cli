@@ -249,11 +249,30 @@ _MODULE_BUDGET: dict[str, int] = {
     # instead of needing a real regular file under a literal `/dev/`-rooted
     # path (Linux-only tmpfs `/dev/shm`; neither macOS nor Windows have an
     # equivalent).
-    "tan/commands/flash_cmd.py": 2112,
+    # 2255, not 2112, as of tan-cli#512/#514. #512: the read-only DPIDR
+    # preflight moved ahead of the SETOOLS auto-sign inside `_flash_entry`
+    # (a wrong-board refusal must not have already mutated the customer's
+    # SETOOLS install), plus its own docstring explaining the ordering
+    # invariant and its old call site's replacement comment; and the
+    # wrong-DP-ID message now names the ACTUAL SW-DP ID the probe reported,
+    # not only the expected one (`_dp_id_value`, `_DP_ID_RE` gained a capture
+    # group). #514: `swd_probe` no longer reaches `flash_plan`'s foreign-part
+    # `_DEFAULT_JLINK_DEVICE` fallback for a manifest that resolves a real
+    # SoC variant -- two new IO-layer helpers (`_sdk_jlink_device_for_core`,
+    # `_resolve_swd_probe_jlink_device`) read the SDK's published
+    # `variants[].debug.jlink_device` ahead of that fallback, through the
+    # same shared primitives `tan debug-config` already uses, so there is no
+    # second, driftable reader. The fallback itself is untouched -- it is
+    # oracle-parity-pinned across 14 recorded fixtures; see both functions'
+    # own docstrings.
+    "tan/commands/flash_cmd.py": 2255,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
     # `entry.kind in ("raw_shmem", "rpmsg")` instead of `raw_shmem` alone).
+    # This branch carried a stale 1639 from before #485 landed on dev; the
+    # rebase re-derived it on the merged tree rather than keeping either
+    # side's number by ownership.
     "tan/planner/kconfig.py": 1643,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
