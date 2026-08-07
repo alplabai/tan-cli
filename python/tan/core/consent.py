@@ -53,11 +53,21 @@ def can_prompt(*, non_interactive: bool, ci: bool, json_mode: bool) -> bool:
 
     A command with a documented default takes it when this returns `False`; one
     without a default fails instead of asking.
+
+    `sys.stdin`/`sys.stderr` are guarded with an `is not None` check before
+    `.isatty()` (tan-cli#503): both are `None`, not merely non-a-tty, with fd
+    0/2 closed -- a daemon/service parent, some CI runners, and a Windows
+    `pythonw`/frozen no-console launch all give exactly this shape for BOTH
+    streams at once -- and a bare `.isatty()` there raises `AttributeError`
+    instead of this function doing what it is for: answering "no" and letting
+    the caller refuse the prompt cleanly.
     """
     return (
         not non_interactive
         and not ci
         and not json_mode
+        and sys.stdin is not None
         and sys.stdin.isatty()
+        and sys.stderr is not None
         and sys.stderr.isatty()
     )

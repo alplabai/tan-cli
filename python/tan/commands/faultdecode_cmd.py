@@ -46,7 +46,6 @@ original's `click.BadParameter`/`click.UsageError`, both exit 2).
 from __future__ import annotations
 
 import json as _json
-import select
 import subprocess
 import sys
 import threading
@@ -135,10 +134,14 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
     a 32-bit register word -- `_scan`'s bitwise-and against it reported a
     dozen bogus flags and the wrong root cause, and `report_to_json`'s
     ``f"0x{v:08x}"`` printed the malformed, non-hex ``"0x-0008200"`` on the
-    JSON contract. Refusing here, at the one place every register/address
-    value enters the command, keeps `decode()` a pure function of well-formed
-    32-bit words and gives the caller a coded refusal instead of a confident
-    wrong diagnosis.
+    JSON contract. Refusing here gives the caller a coded refusal instead of a
+    confident wrong diagnosis -- but this is NOT the one place a register
+    value enters the command: `tan.core.faultdecode.parse_dump` greps a pasted
+    dump through its own regex and is a second, independent entry point.
+    Its ``0x[0-9A-Fa-f]+`` alternative has no width cap either, so it needed
+    (and, as of tan-cli#503, has) the identical bound applied at parse time,
+    in `parse_dump` itself, keeping `decode()` a pure function of well-formed
+    32-bit words regardless of which of the two paths a value arrived by.
     """
     if value is None:
         return None
@@ -158,77 +161,47 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
     return parsed
 
 
-#: How long the IMPLICIT stdin auto-consume waits for a non-TTY stdin to offer
-#: something -- bytes, or EOF, both of which make it readable -- before giving
-#: up and decoding from the flags alone (tan-cli#388).
+#: How long the IMPLICIT stdin auto-consume waits for a non-TTY stdin to
+#: deliver something -- bytes, or EOF, either of which ends the read --
+#: before giving up and decoding from the flags alone (tan-cli#388).
 #:
-#: Not 0: `producer | tan faultdecode` races the producer's first write against
-#: this process's own startup, and losing that race would drop a dump the user
-#: really did pipe. Not unbounded either -- unbounded is the defect. A quarter
-#: second is far longer than a scheduler hiccup and far shorter than the
-#: indefinite block a held-open pipe used to cause.
+#: Not 0: `producer | tan faultdecode` races the producer's first write
+#: against this process's own startup, and losing that race would drop a
+#: dump the user really did pipe. Not unbounded either -- unbounded is the
+#: defect this bounds, for the WHOLE read, not just a readiness check (see
+#: `_read_implicit_stdin`). A quarter second is far longer than a scheduler
+#: hiccup and far shorter than the indefinite block a held-open pipe used to
+#: cause.
 _STDIN_READY_TIMEOUT_S = 0.25
 
 
-def _stdin_offers_input() -> bool:
-    """Whether reading `sys.stdin` will terminate promptly (tan-cli#388).
+def _read_implicit_stdin() -> str:
+    """Read whatever an IMPLICIT (no `--file`) piped stdin offers, the whole
+    operation bounded to `_STDIN_READY_TIMEOUT_S` (tan-cli#388, tan-cli#503).
 
-    `sys.stdin.read()` returns at EOF, and a pipe reaches EOF only when its
-    last writer CLOSES it -- not when the writer merely stops writing. Every
-    caller that spawns `tan` as a child with `stdin=PIPE` and does not close
-    the write end (the default shape of `subprocess.Popen(..., stdin=PIPE)`)
-    therefore used to block the child forever, with zero bytes on stdout and
-    stderr and no exit code: worse than a malformed report, because there is
-    nothing for the caller to classify.
+    `sys.stdin.read()` blocks until EOF, not until bytes merely become
+    available -- so bounding only a READINESS probe (e.g. `select.select`)
+    is not enough: a producer that writes one byte and then holds the pipe
+    open (never closes it) makes the fd report readable, and a raw,
+    unbounded `sys.stdin.read()` issued after that still blocks forever
+    waiting for an EOF that is never coming. That was tan-cli#503's own
+    regression -- the readiness check was bounded, the read that followed it
+    was not, and a producer holding the pipe open past its first byte hung
+    the process exactly like the tan-cli#388 bug this was supposed to fix.
 
-    `select` reports a pipe readable both when bytes are buffered and when the
-    writer has closed, so a real `echo ... | tan faultdecode` still reads its
-    dump and only the open-and-idle pipe falls through.
+    Doing the read itself on a background daemon thread and joining it with
+    a timeout bounds BOTH questions -- "is anything coming" and "what did it
+    send" -- with the one guarantee, on every platform: this covers Windows
+    (where `select.select` accepts sockets only) and a `fileno`-less
+    in-memory stdin (`CliRunner`) the same way it covers a real POSIX pipe,
+    because none of them need a working `select` in the first place.
 
-    `select.select` answers this directly wherever it can, which is every
-    POSIX host. It CANNOT on Windows -- there it accepts sockets only -- and an
-    in-memory `CliRunner` stdin has no `fileno` at all
-    (`io.UnsupportedOperation` derives from both `OSError` and `ValueError`).
-
-    Falling back to "just read it" was the first shape of this fix, and it left
-    the bug fully intact on Windows: measured on windows-latest,
-    `test_an_idle_open_stdin_pipe_falls_through_to_the_no_dump_refusal` still
-    hit its 20 s bound, because an idle open pipe with no registers supplied
-    took the fallback and blocked exactly as before. A platform-specific
-    readiness check meant a platform-specific hang, on a platform this repo
-    gates as a required check.
-
-    So the fallback is a BOUNDED read rather than a guess: the read still
-    happens, still terminates at EOF, and still yields a dump that arrives
-    inside the window -- but a writer that never writes and never closes costs
-    `_STDIN_READY_TIMEOUT_S`, not the process.
-    """
-    try:
-        ready, _, _ = select.select([sys.stdin], [], [], _STDIN_READY_TIMEOUT_S)
-    except (OSError, ValueError):
-        return _stdin_offers_input_by_reading()
-    return bool(ready)
-
-
-#: Filled by `_stdin_offers_input_by_reading` so `_read_dump` does not read a
-#: second time -- those bytes are already consumed, and a pipe cannot be
-#: rewound.
-_PREREAD_STDIN: list[str] = []
-
-
-def _stdin_offers_input_by_reading() -> bool:
-    """The Windows / no-`fileno` path: read stdin on a daemon thread, bounded.
-
-    Reading is the only way to learn whether a Windows pipe will ever deliver,
-    so this reads -- but off the main thread, so `_STDIN_READY_TIMEOUT_S` is a
-    real bound and not an aspiration. Whatever arrived is stashed in
-    :data:`_PREREAD_STDIN` for `_read_dump` to return, because a pipe read
-    cannot be undone and reading twice would drop the dump this exists to
-    preserve.
-
-    The thread is a daemon precisely because it may still be parked in
-    `read()` at interpreter exit; it holds nothing but stdin, and leaving it
-    is the correct outcome for a producer that never speaks.
+    The thread is a daemon because it may still be parked in `read()` when
+    the timeout fires; it holds nothing but stdin, and abandoning it there
+    is correct for a producer that never closes its end -- that read
+    genuinely never finishes, so nothing already-decoded is lost by not
+    waiting for it. Whatever DID arrive inside the window is still returned
+    and still decoded; only the wait is bounded, never the payload.
     """
     got: list[str] = []
 
@@ -241,10 +214,7 @@ def _stdin_offers_input_by_reading() -> bool:
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
     reader.join(_STDIN_READY_TIMEOUT_S)
-    if not got:
-        return False
-    _PREREAD_STDIN.append(got[0])
-    return bool(got[0])
+    return got[0] if got else ""
 
 
 def _read_dump(file_: str | None) -> str:
@@ -261,11 +231,11 @@ def _read_dump(file_: str | None) -> str:
     `faultdecode()`'s `pick()` exists precisely to let a flag override a
     parsed value register-by-register (tan-cli#503) -- a piped CFSR/BFAR must
     not be silently dropped just because `--hfsr` was also given. This is safe
-    against the tan-cli#388 hang because `_stdin_offers_input()` below already
-    bounds the wait to `_STDIN_READY_TIMEOUT_S`: an idle open pipe with
-    nothing to contribute costs a quarter second, not the process, so gating
-    the read on "were there already flags" was never load-bearing for #388 --
-    it only cost the merge.
+    against the tan-cli#388 hang because `_read_implicit_stdin` bounds the
+    ENTIRE read (not just a readiness check) to `_STDIN_READY_TIMEOUT_S`: an
+    idle-or-stalled open pipe with nothing (more) to contribute costs a
+    quarter second, not the process, so gating the read on "were there
+    already flags" was never load-bearing for #388 -- it only cost the merge.
     """
     if file_ == "-":
         if sys.stdin is None:  # fd 0 closed (tan-cli#503): nothing to read.
@@ -275,18 +245,9 @@ def _read_dump(file_: str | None) -> str:
         return Path(file_).read_text(encoding="utf-8", errors="ignore")
     # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works,
     # flags or no flags.
-    if sys.stdin is None or sys.stdin.isatty() or not _stdin_offers_input():
+    if sys.stdin is None or sys.stdin.isatty():
         return ""
-    if _PREREAD_STDIN:
-        # The readiness check had to consume stdin to answer (Windows, or a
-        # stdin with no `fileno`). Return what it read rather than reading
-        # again: a pipe cannot be rewound, so a second read returns "" and
-        # would silently drop the dump.
-        return _PREREAD_STDIN.pop()
-    try:
-        return sys.stdin.read()
-    except (OSError, ValueError):  # pragma: no cover - env-dependent
-        return ""
+    return _read_implicit_stdin()
 
 
 def _check_elf_path(value: str | None) -> Path | None:

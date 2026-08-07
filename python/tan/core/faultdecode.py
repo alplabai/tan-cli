@@ -327,9 +327,21 @@ def parse_dump(text: str) -> dict[str, int]:
         key = canon[m.group(1).lower()]
         raw = m.group(2)
         try:
-            found[key] = int(raw, 16)
+            value = int(raw, 16)
         except ValueError:  # pragma: no cover - regex already constrains this
             continue
+        if value > 0xFFFFFFFF:
+            # `0x[0-9A-Fa-f]+` has no width cap (tan-cli#503 follow-up): an
+            # over-wide hex run in a pasted dump would otherwise reach
+            # `decode()` unbounded, the same corruption `faultdecode_cmd
+            # ._parse_hexint`'s range check exists to refuse on the flag
+            # path. There is no caller to hand a coded refusal to from here
+            # (this is a pure grep over free text, not a CLI option), so an
+            # out-of-range match is treated like unrecognised text and
+            # skipped, keeping `decode()` a function of well-formed 32-bit
+            # words regardless of which of the two entry points supplied it.
+            continue
+        found[key] = value
 
     # Compose CFSR from sub-registers if a combined CFSR was not given outright.
     if "cfsr" not in found:
