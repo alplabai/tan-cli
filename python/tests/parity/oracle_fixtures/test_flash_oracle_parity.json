@@ -1650,12 +1650,12 @@
   {
    "command": "flash",
    "data": {
-    "buildRoot": "<ORACLE-ROOT-0>/./build",
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
     "entries": [
      {
       "id": "c1",
       "kind": "slice",
-      "message": "would run openocd -f interface/ftdi/olimex-arm-usb-ocd-h.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>/./build/a.elf verify reset exit",
+      "message": "would run openocd -f interface/ftdi/olimex-arm-usb-ocd-h.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>\\.\\build\\a.elf verify reset exit",
       "method": "swd_probe",
       "rc": 0,
       "status": "ok"
@@ -1681,12 +1681,12 @@
   {
    "command": "flash",
    "data": {
-    "buildRoot": "<ORACLE-ROOT-0>/./build",
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
     "entries": [
      {
       "id": "c1",
       "kind": "slice",
-      "message": "would run openocd -f interface/cmsis-dap.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>/./build/a.bin verify reset exit 0x08000000",
+      "message": "would run openocd -f interface/cmsis-dap.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>\\.\\build\\a.bin verify reset exit 0x08000000",
       "method": "swd_probe",
       "rc": 0,
       "status": "ok"

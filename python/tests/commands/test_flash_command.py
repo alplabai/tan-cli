@@ -1368,44 +1368,51 @@ def test_yocto_wic_block_device_refusal_accepts_a_real_block_device():
     assert flash_cmd._yocto_wic_block_device_refusal("/dev/sda", stat_fn=fake_stat) is None
 
 
-def test_yocto_wic_block_device_refusal_follows_a_real_symlink_to_its_own_mode(tmp_path):
-    """A `/dev/disk/by-id/...`-style symlink: `os.stat` follows it to the real
-    device's mode by itself, with no separate realpath step needed here.
-    Proven with a REAL symlink to a real character device (not a block
-    device) rather than an injected `stat_fn` that ignores its path
-    argument -- the previous version of this test used
+def test_yocto_wic_block_device_refusal_resolves_a_real_symlink_via_the_real_stat(tmp_path):
+    """A `/dev/disk/by-id/...`-style symlink: the real, un-injected `os.stat`
+    resolves it to the real target's mode by itself, with no separate
+    realpath step needed here. Proven with a REAL symlink to a REAL,
+    on-disk target rather than an injected `stat_fn` that ignores its path
+    argument -- an earlier version of this test used
     `fake_stat = lambda _p: ...st_mode=real_mode`, which is byte-for-byte the
-    preceding accepts-a-real-block-device test under a different string, so
-    it could not tell "the symlink was followed" from "the injected stat_fn
-    always answers the same fixed mode". This proves the FOLLOW half
-    (real `os.stat`, no `stat_fn` override, so the symlink genuinely has to
-    resolve); it cannot prove the block-device-acceptance half in the same
-    breath because a character device is not a block device, so the refusal
-    here is the "not a block device" one, over the REAL resolved mode.
+    preceding accepts-a-real-block-device test under a different string, and
+    proved nothing beyond "the fixed mode we handed it came back".
 
-    **The symlink TARGET is platform-specific (tan-cli#511); the ASSERTION
-    is not.** `/dev/null` is POSIX -- real on Linux and macOS, but not a
-    path Windows has at all (there is no `/dev` filesystem there). Measured:
-    a symlink literally pointing at the string `/dev/null` is DANGLING on
-    Windows (nothing resolves it), so `os.stat` raises `FileNotFoundError`
-    on the symlink's own path instead of following it anywhere -- and
-    `_yocto_wic_block_device_refusal` answers its FileNotFoundError branch
-    (`does not exist, and its parent is not /dev itself...`) rather than
-    the `not a block device` branch this test means to exercise. That is a
-    test-input defect (a POSIX path assumed to exist everywhere), not a
-    `tan` defect: nothing under test ever claimed `/dev/null` was portable.
-    `NUL` is Windows' own equivalent reserved device name (the documented
-    `/dev/null` stand-in there, e.g. `open('NUL', 'w')`), and CPython's own
-    Windows `stat()` reports it as a character device
-    (`GetFileType()` == `FILE_TYPE_CHAR` -> `S_IFCHR` in `st_mode`,
-    `Modules/posixmodule.c`) -- `S_ISBLK` is False for it exactly as it is
-    for POSIX `/dev/null`, so the SAME assertion ("not a block device")
-    is the right one on all three platforms; only the real device the
-    symlink resolves to differs. Not independently verified on a live
-    Windows host as part of this change -- flag if CI still disagrees."""
+    Renamed from `..._follows_a_real_symlink_to_its_own_mode` (tan-cli#511).
+    The old name and docstring claimed this proves the symlink is FOLLOWED
+    -- i.e. that `os.stat` (which resolves through a link) behaves
+    differently here from `os.lstat` (which reports the link node itself).
+    That is NOT what this test proves, and re-checking it exposed the gap:
+    a symlink node is itself `S_IFLNK`, so `os.lstat` on `link` ALSO reports
+    "not a block device", for exactly the same `not stat.S_ISBLK(mode)`
+    branch the resolved target hits under `os.stat`. The one assertion this
+    test makes (`"not a block device" in refusal`) is identical either way.
+    Measured directly: monkeypatching this function's default `stat_fn` from
+    `os.stat` to `os.lstat` and re-running `python -m pytest tests -q` from
+    `python/` still gives a fully green bar -- nothing here, or anywhere
+    else in the suite, distinguishes the two. Proving the FOLLOW property
+    for real needs a genuine block device on the far end of the link
+    (`os.mknod` for one needs root) so a resolved-vs-unresolved mode
+    actually differ observably; that is out of reach in this sandbox, so
+    this test is honestly scoped down to what it can prove: the real
+    `os.stat`, given a real symlink, resolves it to the real target's mode
+    without a separate realpath step, and the refusal is computed over that
+    resolved mode -- proven here for a resolved mode of "regular file"
+    rather than "block device", since only the former is constructible
+    without root.
+
+    The target is a plain regular file created in `tmp_path`, not a
+    platform device name -- `S_ISBLK` is False for a regular file on every
+    platform, so this needs no `sys.platform` branch (an earlier version
+    used Windows' `NUL` / POSIX's `/dev/null`, but `link.symlink_to("NUL")`
+    on Windows writes a RELATIVE reparse target resolved against the link's
+    own parent directory, not the `NUL` DOS device name, so it pointed at a
+    nonexistent path and hit the `FileNotFoundError` branch instead of the
+    `not a block device` branch this test means to exercise)."""
+    real_target = tmp_path / "not-a-block-device.img"
+    real_target.write_bytes(b"stand-in for a real, non-block target")
     link = tmp_path / "by-id-stand-in"
-    char_device = "NUL" if sys.platform == "win32" else "/dev/null"
-    link.symlink_to(char_device)
+    link.symlink_to(real_target)
     refusal = flash_cmd._yocto_wic_block_device_refusal(str(link))
     assert refusal is not None
     assert "not a block device" in refusal

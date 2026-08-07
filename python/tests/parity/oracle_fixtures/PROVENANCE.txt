@@ -619,3 +619,34 @@ produces:
 `_UNFROZEN` and `_PLATFORM_BOUND` are both EMPTY. Every case in this package
 now replays without a Rust binary except the two harness self-tests, which
 take the binary as their SUBJECT and never could.
+
+--------------------------------------------------------------------------
+
+2026-08-07, PR #511 fix round: TWO KEYS RENAMED, NOTHING RE-CAPTURED, one
+prior round wrongly changed the VALUES on the same rename and this pass
+restores them.
+
+  test_flash_matches_the_rust_oracle[multi-segment-interface-is-allowed]#0
+    -> test_openocd_program_word_diverges_from_the_oracle_by_exactly_the_brace[multi-segment-interface-is-allowed]#0
+
+  test_flash_matches_the_rust_oracle[openocd-forced-bin-appends-base]#0
+    -> test_openocd_program_word_diverges_from_the_oracle_by_exactly_the_brace[openocd-forced-bin-appends-base]#0
+
+Moving these two cases out of the byte-diff CASES table in
+test_flash_oracle_parity.py was the maintainer-authorised fix for the
+unconditional-brace change to `openocd_program_word` -- they are documented,
+by-exactly-one-brace divergences from the oracle now, not exact matches, so
+they needed a dedicated test rather than a slot in the byte-diff table. That
+move is correct and stays. What the same commit ALSO did, wrongly, was
+change the recorded VALUES under the new keys: `buildRoot` and the two
+`message` strings went from the oracle's actual win32-native
+`<ORACLE-ROOT-0>\.\build` form to a POSIX-shaped `<ORACLE-ROOT-0>/./build`
+that the win32 CAPTURE never produced. `oracle_fixtures.py`'s own
+`CAPTURE_PLATFORM = "win32"` and `normalise_scrubbed_path_separators` short-
+circuits on the capture platform (`REPLAY_IS_CAPTURE_PLATFORM`) -- so on
+Windows nothing reconciles a doctored `/` fixture against live `\` output,
+and the two cases failed there. Restored both values to their byte-identical
+e402952 form (`<ORACLE-ROOT-0>\.\build`, `...\build\a.elf`,
+`...\build\a.bin`); verified by matching every case in this store by NAME
+(not key) against e402952 -- 54 cases, 56 total entries on both sides,
+zero value diffs once these two were restored.
