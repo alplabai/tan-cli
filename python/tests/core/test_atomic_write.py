@@ -17,7 +17,7 @@ from tan.core import atomic_write as atomic_write_mod
 from tan.core.atomic_write import atomic_write_text
 
 
-def test_fsyncs_the_temp_file_before_renaming_it_into_place(tmp_path):
+def test_fsyncs_the_temp_file_before_renaming_it_into_place(tmp_path, monkeypatch):
     """The core of tan-cli#516: `os.replace`'s atomicity guarantee covers the
     RENAME only, not whether the renamed-to content has reached stable
     storage. FAILS against a bare `write` + `os.replace` implementation --
@@ -30,17 +30,20 @@ def test_fsyncs_the_temp_file_before_renaming_it_into_place(tmp_path):
         calls.append(fd)
         return real_fsync(fd)
 
-    atomic_write_mod.os.fsync = spy_fsync
-    try:
-        atomic_write_text(str(target), "hello\n")
-    finally:
-        atomic_write_mod.os.fsync = real_fsync
+    # `monkeypatch.setattr`, not a raw `atomic_write_mod.os.fsync = ...`
+    # assignment -- `os` is one shared module object, so a bare assignment
+    # patches EVERY module's `os.fsync` process-wide (including a parallel
+    # test's) and only gets restored if this test's own `finally` runs;
+    # `monkeypatch` restores it unconditionally, even on a failure inside
+    # `atomic_write_text` itself, and scopes the patch to this test alone.
+    monkeypatch.setattr(atomic_write_mod.os, "fsync", spy_fsync)
+    atomic_write_text(str(target), "hello\n")
 
     assert calls, "atomic_write_text must fsync the temp file before the rename"
     assert target.read_text(encoding="utf-8") == "hello\n"
 
 
-def test_fsyncs_the_directory_after_a_successful_rename(tmp_path):
+def test_fsyncs_the_directory_after_a_successful_rename(tmp_path, monkeypatch):
     """Covers the rename ENTRY surviving a crash, on top of the content fsync
     above -- POSIX only; Windows has no directory handle to fsync and
     `os.replace`/`MoveFileExW` already journal the rename itself."""
@@ -55,11 +58,10 @@ def test_fsyncs_the_directory_after_a_successful_rename(tmp_path):
             dir_fds_opened.append(path)
         return real_open(path, flags, *args, **kwargs)
 
-    atomic_write_mod.os.open = spy_open
-    try:
-        atomic_write_text(str(target), "hello\n")
-    finally:
-        atomic_write_mod.os.open = real_open
+    # See the fsync test above: `monkeypatch.setattr`, not a raw module
+    # attribute assignment, so the patch cannot leak past this test.
+    monkeypatch.setattr(atomic_write_mod.os, "open", spy_open)
+    atomic_write_text(str(target), "hello\n")
 
     assert dir_fds_opened, "atomic_write_text must open+fsync the containing directory"
 

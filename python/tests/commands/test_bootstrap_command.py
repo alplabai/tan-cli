@@ -2110,7 +2110,7 @@ def _stale_west_config(tmp_path):
     return new_sdk, config
 
 
-def test_reconcile_west_manifest_path_fsyncs_before_replacing_the_config(tmp_path):
+def test_reconcile_west_manifest_path_fsyncs_before_replacing_the_config(tmp_path, monkeypatch):
     """tan-cli#516: the pre-fix code wrote the temp sibling with a bare
     `Path.write_text` + `os.replace` and never called `os.fsync` anywhere --
     atomic with respect to the RENAME only, so a crash between the rename
@@ -2127,11 +2127,12 @@ def test_reconcile_west_manifest_path_fsyncs_before_replacing_the_config(tmp_pat
         calls.append(fd)
         return real_fsync(fd)
 
-    atomic_write_mod.os.fsync = spy_fsync
-    try:
-        assert reconcile_west_manifest_path(str(new_sdk)) == ("rewrote", "v0.6.0", "v0.7.0")
-    finally:
-        atomic_write_mod.os.fsync = real_fsync
+    # `monkeypatch.setattr`, not a raw `atomic_write_mod.os.fsync = ...`
+    # assignment -- `os` is one shared module object, so a bare assignment
+    # patches EVERY module's `os.fsync` process-wide and only unwinds if this
+    # test's own `finally` runs; `monkeypatch` restores it unconditionally.
+    monkeypatch.setattr(atomic_write_mod.os, "fsync", spy_fsync)
+    assert reconcile_west_manifest_path(str(new_sdk)) == ("rewrote", "v0.6.0", "v0.7.0")
 
     assert calls, "reconcile_west_manifest_path must fsync the temp before renaming it into place"
     assert get_manifest_path(config.read_text(encoding="utf-8")) == "v0.7.0"
