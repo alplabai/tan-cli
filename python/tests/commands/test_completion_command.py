@@ -333,29 +333,57 @@ def test_format_json_before_subcommand_reads_off_ctx_obj():
 # ---------------------------------------------------------------------------
 
 
+def _case_arm_lines(script: str, label_line_substr: str) -> list[str]:
+    """Collect a bash/zsh `case` arm IN FULL: the pattern label
+    (e.g. `doctor)`) on its own line, then every following line through the
+    terminating `;;`, inclusive.
+
+    Filtering on the label alone (the pre-existing shape of this test) only
+    ever matches the label line itself -- `doctor)` -- which never contains a
+    flag name; the flags live on the NEXT line
+    (`COMPREPLY=( $(compgen -W "$global_flags --build --fix" -- "$cur") )` in
+    bash, `_arguments '--build[...]' ...` in zsh). A `"target-kind" not in
+    line` assertion over label-only lines is true no matter what the arm body
+    says, so it could not have caught the regression it was written for."""
+    lines = script.splitlines()
+    out: list[str] = []
+    capturing = False
+    for line in lines:
+        if not capturing and label_line_substr in line:
+            capturing = True
+        if capturing:
+            out.append(line)
+            if ";;" in line:
+                capturing = False
+    return out
+
+
 def test_doctor_completion_no_longer_offers_target_kind_or_server():
     """`doctor_cmd.py` deliberately did not port the debug half
     (`--target-kind`/`--server`) -- but the captured scripts still offered
     both, so accepting the completion's own suggestion was a guaranteed exit
     2 (`cli.parse-error`). `support-bundle`/`debug-config` genuinely still
-    carry both and must be untouched."""
-    for script in (BASH_SCRIPT, ZSH_SCRIPT, FISH_SCRIPT):
-        # Isolate the `doctor` arm/line, not a substring hit inside
-        # `debug-config`'s or `support-bundle`'s (which legitimately contain
-        # `--target-kind`/`--server` too).
-        doctor_lines = [
-            line
-            for line in script.splitlines()
-            if "doctor)" in line
-            or "'doctor:" in line
-            or "__fish_seen_subcommand_from doctor'" in line
-        ]
-        assert doctor_lines, script[:200]
-        for line in doctor_lines:
-            # Bare substrings, not "--target-kind"/"--server": fish spells
-            # its flags `-l target-kind`/`-l server` (no double dash).
-            assert "target-kind" not in line, line
-            assert "server" not in line, line
+    carry both and must be untouched.
+
+    bash/zsh arms span two lines (label, then body) so the whole arm is
+    collected via `_case_arm_lines`; fish's `complete -c tan -n
+    '__fish_seen_subcommand_from doctor' -l ...` is a single line per flag
+    and the substring filter already sees the flags directly."""
+    doctor_lines = _case_arm_lines(BASH_SCRIPT, "doctor)")
+    assert doctor_lines and any("compgen" in line for line in doctor_lines), doctor_lines
+    doctor_lines += _case_arm_lines(ZSH_SCRIPT, "doctor)")
+    assert any("_arguments" in line for line in doctor_lines), doctor_lines
+    doctor_lines += [
+        line
+        for line in FISH_SCRIPT.splitlines()
+        if "__fish_seen_subcommand_from doctor'" in line
+    ]
+    assert any("-l build" in line for line in doctor_lines), doctor_lines
+    for line in doctor_lines:
+        # Bare substrings, not "--target-kind"/"--server": fish spells its
+        # flags `-l target-kind`/`-l server` (no double dash).
+        assert "target-kind" not in line, line
+        assert "server" not in line, line
 
 
 def test_debug_config_and_support_bundle_still_keep_target_kind_and_server():
@@ -426,6 +454,100 @@ def test_bash_format_completion_still_works_with_no_leading_flag():
 def test_bash_format_completion_narrow_command_still_gets_the_narrow_list():
     reply = _bash_complete(["tan", "--sdk-root", "/x", "size", "--format", ""])
     assert reply == ["text", "json"]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#503: the zsh counterpart of the subcommand-scan loop above. Unlike
+# `_bash_complete`, which drives the emitted script in a real `bash -c`, the
+# zsh loop had no live-shell test at all -- every zsh assertion elsewhere in
+# this file is a static string check on `ZSH_SCRIPT`'s text, never an actual
+# `zsh` parsing and running it. This drives the REAL snippet (lines lifted
+# verbatim out of `ZSH_SCRIPT`, not retyped) in a real `zsh`.
+# ---------------------------------------------------------------------------
+
+
+def _zsh_available() -> bool:
+    import shutil as _shutil
+
+    return _shutil.which("zsh") is not None
+
+
+def _zsh_subcmd_scan_snippet() -> str:
+    """The `subcmd` scan loop plus the `case "$subcmd"` that picks the wide
+    vs narrow `--format` value list, extracted VERBATIM from the emitted
+    `ZSH_SCRIPT` (between `local subcmd="" i=2` and the `_arguments -C` call
+    that follows it) -- so this exercises the committed source, not a
+    hand-written stand-in for it."""
+    lines = ZSH_SCRIPT.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip().startswith('local subcmd='))
+    # `startswith`, not `in`: a comment a few lines ABOVE `start` also mentions
+    # "`_arguments -C`" in prose, and a substring search from index 0 matches
+    # that comment first, well before `start` -- yielding a negative/empty
+    # slice and an always-empty snippet.
+    end = next(
+        i
+        for i, line in enumerate(lines)
+        if i > start and line.strip().startswith("_arguments -C")
+    )
+    return "\n".join(lines[start:end])
+
+
+def _zsh_scan(argv: list[str]) -> tuple[str, bool]:
+    """Run `_zsh_subcmd_scan_snippet()` in a real `zsh -f -c` and return
+    `(subcmd, wide)`: `subcmd` is what the loop resolved `$words[i]` to, and
+    `wide` is whether the `case "$subcmd"` arm it took spliced in the
+    IDE-oriented `--format` values (`diagnostic-v1`/`sarif`)."""
+    import subprocess as sp
+
+    words = " ".join(f'"{w}"' for w in argv)
+    body = _zsh_subcmd_scan_snippet()
+    script = (
+        "myfunc() {\n"
+        f"  local -a words=({words})\n"
+        "  local -a global_args=()\n"
+        f"{body}\n"
+        '  print -r -- "SUBCMD=$subcmd"\n'
+        '  if [[ "${global_args[*]}" == *diagnostic-v1* ]]; then\n'
+        '    print -r -- "WIDE=1"\n'
+        "  else\n"
+        '    print -r -- "WIDE=0"\n'
+        "  fi\n"
+        "}\nmyfunc\n"
+    )
+    proc = sp.run(  # noqa: S603, S607 -- fixed script, no shell metacharacters
+        ["zsh", "-f", "-c", script], capture_output=True, text=True, timeout=10
+    )
+    assert proc.returncode == 0, proc.stderr
+    fields = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+    return fields.get("SUBCMD", ""), fields.get("WIDE") == "1"
+
+
+@pytest.mark.skipif(not _zsh_available(), reason="no zsh on this host")
+def test_zsh_format_completion_finds_the_subcommand_past_a_leading_global_flag():
+    """`tan --sdk-root /x validate --format <TAB>` must still resolve
+    `validate` as the subcommand (not `--sdk-root`, its value, or the empty
+    about-to-be-typed word) and therefore pick the WIDE `--format` list."""
+    subcmd, wide = _zsh_scan(["tan", "--sdk-root", "/x", "validate", "--format", ""])
+    assert subcmd == "validate"
+    assert wide is True
+
+
+@pytest.mark.skipif(not _zsh_available(), reason="no zsh on this host")
+def test_zsh_format_completion_still_works_with_no_leading_flag():
+    """Regression guard: the ordinary, no-global-flag shape must still work
+    after the scan replaces a fixed-index read."""
+    subcmd, wide = _zsh_scan(["tan", "validate", "--format", ""])
+    assert subcmd == "validate"
+    assert wide is True
+
+
+@pytest.mark.skipif(not _zsh_available(), reason="no zsh on this host")
+def test_zsh_format_completion_narrow_command_still_gets_the_narrow_list():
+    """`size` is not one of the IDE-oriented commands, so it must keep the
+    narrow `text json` list even past a leading global flag."""
+    subcmd, wide = _zsh_scan(["tan", "--sdk-root", "/x", "size", "--format", ""])
+    assert subcmd == "size"
+    assert wide is False
 
 
 # ---------------------------------------------------------------------------

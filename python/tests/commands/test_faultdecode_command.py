@@ -654,6 +654,84 @@ def test_an_idle_open_stdin_pipe_falls_through_to_the_no_dump_refusal():
     assert (out + err) != ""
 
 
+def _run_with_stdin_written_then_held_open(
+    args: list[str], payload: str
+) -> tuple[int, str, str]:
+    """Like `_run_with_stdin_held_open`, but the parent WRITES `payload` into
+    the pipe -- and flushes it -- BEFORE holding the write end open for the
+    rest of the child's life, never closing it.
+
+    This is tan-cli#503's own regression, distinct from tan-cli#388's idle
+    pipe: a producer that writes something and then stalls (still connected --
+    a monitor process streaming bytes as they arrive, say) makes the read end
+    `select`-readable the instant the first byte lands, whether or not it
+    ever closes. A fix that bounds only a READINESS probe (`select.select`)
+    sees "readable" and then calls the real `sys.stdin.read()` unbounded --
+    which still blocks forever waiting for an EOF a never-closed pipe will
+    never deliver. Only bounding the WHOLE read, not just the readiness
+    check, terminates here (`_read_implicit_stdin`)."""
+    proc = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+        [sys.executable, "-m", "tan", "faultdecode", *args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        proc.stdin.write(payload)
+        proc.stdin.flush()
+        rc = proc.wait(timeout=_OPEN_STDIN_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail(
+            f"tan faultdecode {' '.join(args)} did not exit within "
+            f"{_OPEN_STDIN_TIMEOUT_S}s after the producer wrote {payload!r} "
+            "and held the pipe open (tan-cli#503)"
+        )
+    finally:
+        # Order matters: read what the child produced BEFORE closing the
+        # pipes, and close stdin last so nothing here is mistaken for the
+        # EOF the child was supposed not to need.
+        out = proc.stdout.read()
+        err = proc.stderr.read()
+        proc.stdout.close()
+        proc.stderr.close()
+        proc.stdin.close()
+    return rc, out, err
+
+
+def test_a_producer_that_writes_then_holds_the_pipe_open_never_hangs_the_read():
+    """tan-cli#503's own regression, with registers on the command line (the
+    shape the checkpoint's own bug report was filed against: "every
+    flag-bearing invocation" hung, not just a bare pipe). The producer writes
+    a dump line and then never closes -- `select` reports the fd readable
+    after that write, so the old `_stdin_offers_input` readiness gate passed,
+    and the unbounded `sys.stdin.read()` that followed it hung forever
+    waiting for an EOF that was never coming. This must still answer, and
+    still use the flag values (the stalled dump is not awaited)."""
+    rc, out, err = _run_with_stdin_written_then_held_open(
+        ["--cfsr", "0x8200", "--format", "json"], "CFSR=0x00008200\n"
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert payload["command"] == "faultdecode"
+    assert payload["data"]["fault_detected"] is True
+
+
+def test_a_producer_that_writes_then_holds_open_with_no_flags_also_terminates():
+    """Same shape with NO flags on the command line, so the implicit stdin
+    read is the command's only possible source of registers: a write that
+    never reaches EOF within the bound is not a usable dump (there is no
+    partial-parse contract), so this still terminates -- refusing for lack
+    of registers -- rather than waiting indefinitely for the close that will
+    never come."""
+    rc, out, err = _run_with_stdin_written_then_held_open([], "CFSR=0x00008200\n")
+    assert rc == 2, err
+    assert "no fault registers supplied" in err
+    assert (out + err) != ""
+
+
 # --------------------------------------------------------------------------
 # Every `--format json` command must have an envelope to emit (tan-cli#399)
 # --------------------------------------------------------------------------

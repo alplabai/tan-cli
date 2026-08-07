@@ -201,6 +201,63 @@ All notable changes to `tan` are documented here. Format follows
   surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
   `--format json` and tan's default text output, so that silent gap has a
   signal without making the field mandatory. (#520)
+- **`tan faultdecode` dropped a piped/pasted dump whenever any register flag
+  was also given, hung on an open stdin pipe in two different ways, and
+  could crash instead of refusing cleanly on a closed one.** Several
+  defects, closed together:
+  - A piped/pasted dump's `CFSR`/`BFAR`/etc was silently discarded whenever
+    ANY of `--cfsr`/`--hfsr`/.../`--ufsr` was also given, even though the
+    command's own help promises "Explicit flags win over a parsed dump" --
+    which is only true if the dump is still read when flags are present
+    too. The implicit stdin read is now attempted unconditionally; an
+    explicit flag still wins register-by-register via the existing merge.
+  - The implicit-stdin auto-consume used a `select.select` readiness probe
+    bounded to a quarter second, then handed off to a plain, UNBOUNDED
+    `sys.stdin.read()`. `select` reports a pipe readable the instant its
+    first byte lands, whether or not the writer ever closes it -- so a
+    producer that writes something and then stalls (stays connected, never
+    closes) still hung the read indefinitely past the bounded probe,
+    reproducing the exact class of hang the probe was added to fix. The
+    read itself is now done on a background daemon thread and joined with
+    the same timeout, bounding both "is anything coming" and "what did it
+    send" on every platform, including Windows (where `select` accepts
+    sockets only) and a `fileno`-less in-memory stdin.
+  - `_read_dump`/`resolve_symbol`/`can_prompt` (the last shared by `doctor
+    --fix` and `scaffold`) dereferenced `sys.stdin`/`sys.stderr` bare;
+    with fd 0/2 closed (a daemon/service parent, some CI runners, a Windows
+    `pythonw`/frozen no-console launch) both are `None`, not merely
+    non-a-tty, and `.isatty()` on `None` raised `AttributeError` instead of
+    the coded refusal the caller should have gotten.
+  - `resolve_symbol`'s `addr2line`-class tool probe used `shutil.which`,
+    which inserts the current directory ahead of `$PATH` on Windows, so a
+    decoy `addr2line.exe`/`llvm-addr2line.exe`/`arm-zephyr-eabi-addr2line.exe`
+    sitting at a checked-out project's root was reported "available" and
+    then spawned by bare name (reopening the same hole a second way). Now
+    uses `doctor_cmd.on_path` and spawns the resolved absolute path.
+  - `_parse_hexint` accepted a negative/out-of-range hex value (`int(text,
+    16)` happily parses a leading `-`), corrupting the downstream bit scan
+    and the JSON report's `0x{v:08x}` formatting; now rejected at parse
+    time with a coded refusal. `tan.core.faultdecode.parse_dump`'s own
+    `0x[0-9A-Fa-f]+` regex alternative had the identical unbounded-width
+    gap on the OTHER entry point a register value can arrive by (a pasted
+    dump, not a flag) and needed the same bound; an over-wide match there
+    is now skipped rather than reaching `decode()`.
+  - `BFSR.LSPERR`/`MMFSR.MLSPERR` had no `root_cause` branch, so an
+    escalated lazy-FP-stacking fault fell through to the generic `FORCED`
+    message and reported "its own status bits are clear" while they were
+    the very bits set.
+  - The emitted bash/zsh/fish completion scripts advertised `tan doctor
+    --target-kind`/`--server`, which `doctor_cmd.py` deliberately never
+    ported; removed from `doctor`'s arm on all three shells (unchanged for
+    `support-bundle`/`debug-config`, which genuinely still take both).
+    bash/zsh's `--format` value-list selection assumed the subcommand
+    always sat at a fixed word index, silently offering the narrow list
+    whenever a global flag (e.g. `--sdk-root`) preceded it; both now scan
+    for the real subcommand. fish's `generate --target` value list was
+    hand-typed and missing 3 of the 12 real values (`os-topology` -- a
+    member of the default/`--all` set -- `composed-route-table`,
+    `ipc-contract-h`); now spliced from `generate_cmd`'s own tables.
+    (#503)
 
 ## [0.5.1] — 2026-08-04
 

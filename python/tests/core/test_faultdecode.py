@@ -286,3 +286,37 @@ def test_lsperr_alone_without_forced_is_unaffected():
     assert report.root_cause == (
         "LSPERR set (BFSR): Bus fault during lazy floating-point state preservation."
     )
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503 follow-up: `parse_dump`'s `0x[0-9A-Fa-f]+` alternative has no
+# width cap -- `faultdecode_cmd._parse_hexint` bounds a value entering via a
+# flag, but this is the SECOND, independent entry point a value can arrive
+# by, and it must reject an over-wide match the same way.
+# --------------------------------------------------------------------------
+
+
+def test_parse_dump_skips_a_value_wider_than_32_bits():
+    """An over-wide hex run (more than 8 hex digits, i.e. > 0xFFFFFFFF) is
+    dropped, not clamped or wrapped -- the same "refuse, don't corrupt"
+    contract `_parse_hexint` applies on the flag path, so a value that
+    reaches `decode()` from either entry point is always a well-formed
+    32-bit word."""
+    found = port.parse_dump("cfsr: 0x1FFFFFFFFF\n")
+    assert "cfsr" not in found
+
+
+def test_parse_dump_accepts_the_maximum_32_bit_value():
+    """The boundary itself, 0xFFFFFFFF, must still parse -- the guard is
+    `value > 0xFFFFFFFF`, not `>=`, so this is not an off-by-one rejection of
+    a legitimate all-ones register word."""
+    found = port.parse_dump("cfsr: 0xFFFFFFFF\n")
+    assert found["cfsr"] == 0xFFFFFFFF
+
+
+def test_parse_dump_over_wide_value_does_not_suppress_a_later_valid_token():
+    """One bad match must not poison the whole parse: an over-wide CFSR is
+    skipped, but a well-formed HFSR later in the same text is still found."""
+    found = port.parse_dump("cfsr: 0x1FFFFFFFFF\nhfsr: 0x40000000\n")
+    assert "cfsr" not in found
+    assert found["hfsr"] == 0x40000000
