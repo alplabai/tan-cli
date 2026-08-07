@@ -933,7 +933,9 @@ def _dispatch(
     # tan-cli#483: a slice already held for `${TOOLCHAIN_ROOT}` keeps that
     # verdict -- a bad `app:` is checked below only for the slices demotion
     # left alone, so the two never disagree about the same index.
-    missing_app_dirs = {i: msg for i, msg in _missing_app_dirs(plan).items() if i not in held}
+    missing_app_dirs = {
+        i: msg for i, msg in _missing_app_dirs(plan, build_root).items() if i not in held
+    }
 
     held_outcomes = {
         i: SliceOutcome(
@@ -1023,48 +1025,54 @@ def _dispatch(
 _APP_DIR_REQUIRED_BACKENDS = frozenset({"zephyr", "baremetal"})
 
 
-def _missing_app_dirs(plan: BuildPlan) -> dict[int, str]:
-    """Slice indices whose `cores.<id>.app` resolved to a directory that does
-    not exist on disk (tan-cli#483), each mapped to the refusal message.
+def _missing_app_dirs(plan: BuildPlan, build_root: Path) -> dict[int, str]:
+    """Slice indices whose `cores.<id>.app` resolved to a path that is not a
+    real, existing directory (tan-cli#483), each mapped to the refusal
+    message.
 
-    Checked HERE, against the plan `_dispatch` already has in hand, not
-    inside `execute_slices` (`tan/commands/build/execute.py`): by the time a
-    real `tan build` reaches this function, `apply_plan_token_substitution`
-    has already resolved `appDir` to a real absolute path -- or held the
-    slice back as a `${TOOLCHAIN_ROOT}` demotion before `_dispatch` ever
-    computes `runnable` below. `execute_slices`'s own extensive unit-test
-    suite dispatches synthetic plans with a placeholder `appDir` (`"app"`,
-    never meant to exist on disk) straight through, so an existence check
-    inside that lower-level primitive would misfire on every one of them;
-    this level only ever sees a plan that went through the real
-    substitution pass.
+    Checked HERE, not inside `execute_slices`: by now `apply_plan_token_
+    substitution` has resolved `appDir` to a real path, or held the slice
+    back as a `${TOOLCHAIN_ROOT}` demotion -- `execute_slices`'s own tests
+    feed it synthetic plans with a placeholder `appDir` never meant to
+    exist. Neither `orchestrator.py`'s `_zephyr_app_dir` nor
+    `_resolve_app_path` checks existence (both FROZEN, `tan/planner/**`);
+    unfixed there, a nonexistent `app:` makes `_zephyr_app_dir`'s
+    CMakeLists.txt-fallback probe silently find the PROJECT ROOT's own
+    CMakeLists.txt instead.
 
-    Neither `tan/planner/orchestrator.py`'s `_zephyr_app_dir` (the west
-    command's own app-dir resolution) nor `_resolve_app_path` checks
-    existence -- both are FROZEN to this unit (`tan/planner/**`). Left
-    unfixed there, a nonexistent `cores.<id>.app` makes `_zephyr_app_dir`'s
-    own CMakeLists.txt-fallback probe find the PROJECT ROOT's CMakeLists.txt
-    (the parent of the nonexistent dir) and hand `west build` that instead,
-    silently, naming neither the configured path nor the substitution --
-    this check is what stops that plan ever reaching dispatch.
+    Anchored on `build_root`, not the tan process's own CWD: `appDir` is a
+    plan path like `buildDir`/`command.cwd`, under the same anchoring
+    contract (`build-plan-v1.schema.json`, issue #596) `execute_slices`
+    already confines every slice's `cwd` to. The real CWD would refuse a
+    valid relative `appDir` from anywhere but the project (e.g.
+    `--build-root` from a parent dir), and misname it in the refusal.
 
-    EXISTENCE only, not contents. The schema text also requires a zephyr app
-    dir to contain `prj.conf` or `CMakeLists.txt` (`CMakeLists.txt` for
-    baremetal) -- deliberately NOT enforced here: audited against every
-    `examples/**/board.yaml` on alp-sdk `dev` (tan-cli#483 comments), 96 of
-    104 enabled zephyr/baremetal core entries name `app: ./src`, a
-    sources-only directory holding neither file, because the real
-    `CMakeLists.txt` sits at the example root and pulls `src/` in via
-    `target_sources(app PRIVATE src/main.c)` -- that is the SHIPPED
-    convention `_zephyr_app_dir`'s own fallback exists to serve, not an
-    aberration, and a contents check would refuse the majority of the SDK's
-    own examples over their normal shape."""
+    A slice with no `command` (the planner already refused one --
+    `board-tree-missing`, `yocto-recipe-missing`, `no-command`, ...) is
+    skipped, mirroring the `${TOOLCHAIN_ROOT}` filter above: nothing was
+    going to dispatch for it, so reporting this instead would mask the
+    planner's own warning and flip an otherwise-`ok` exit code.
+
+    EXISTENCE only, not the schema's `prj.conf`/`CMakeLists.txt` contents
+    requirement: 96 of 105 enabled zephyr/baremetal examples on alp-sdk
+    `dev` are `app: ./src`, sources-only -- the shipped convention
+    `_zephyr_app_dir`'s own fallback serves, which a contents check would
+    refuse en masse."""
     missing: dict[int, str] = {}
     for i, sl in enumerate(plan.slices):
-        if sl.backend not in _APP_DIR_REQUIRED_BACKENDS or sl.app_dir is None:
+        if (
+            sl.backend not in _APP_DIR_REQUIRED_BACKENDS
+            or sl.app_dir is None
+            or sl.command is None
+        ):
             continue
-        if not Path(sl.app_dir).is_dir():
-            missing[i] = f"core `{sl.core_id}`: app directory does not exist: {sl.app_dir}"
+        app_dir_path = Path(sl.app_dir)
+        if not app_dir_path.is_absolute():
+            app_dir_path = build_root / app_dir_path
+        if not app_dir_path.exists():
+            missing[i] = f"core `{sl.core_id}`: app directory does not exist: {app_dir_path}"
+        elif not app_dir_path.is_dir():
+            missing[i] = f"core `{sl.core_id}`: app path is not a directory: {app_dir_path}"
     return missing
 
 
