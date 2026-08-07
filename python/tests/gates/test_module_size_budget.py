@@ -611,7 +611,29 @@ _MODULE_BUDGET: dict[str, int] = {
     # `sys.stdin.isatty()` at the top-level input-gathering step now guards
     # `sys.stdin is None` first (a console-less launcher raises
     # `AttributeError` there otherwise).
-    "tan/commands/new_som_cmd.py": 1250,
+    # 1342, not 1250, closing the tan-cli#496 round-2 review's remaining
+    # findings against that same PR's own fix: (blocker 1+2) `_yaml_scalar`
+    # now calls `yaml.safe_dump(value, width=float("inf"))` instead of
+    # PyYAML's default 80-column fold -- the old width silently truncated
+    # any `--default-board`/`--default-hw-rev` past 80 columns into the
+    # generated preset (reported as success) and, longer still, could land
+    # the cut inside an emitted quoted scalar, corrupting `preset_text` into
+    # invalid YAML; (blocker 3) `_rollback_write_failure` gates the preset
+    # branch on a new `preset_write_attempted` flag the caller sets before
+    # the write starts, not on membership in `written` (appended only AFTER
+    # a successful `write_text`) -- a write that fails PARTWAY (ENOSPC/
+    # EDQUOT/EFBIG/EIO) left a partially-written file `written` never knew
+    # about, unrolled-back; (major 1) the top-level "no real terminal" gate
+    # now checks `sys.stderr.isatty()` too, not only `sys.stdin` -- every
+    # `_interactive` prompt rides stderr (defect 6), so a redirected stderr
+    # with a real stdin terminal used to block on a question nobody could
+    # see; (major 2) `yaml.safe_load(preset_text)` is now guarded (a
+    # `yaml.YAMLError` routes through `fail()` instead of an unhandled
+    # traceback), and the new shared `_has_control_char` helper rejects DEL
+    # (0x7F) alongside the C0 range at every call site, closing the one
+    # value shape (a raw DEL byte in `--display-name`) that used to reach
+    # that unguarded parse and crash it.
+    "tan/commands/new_som_cmd.py": 1342,
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside

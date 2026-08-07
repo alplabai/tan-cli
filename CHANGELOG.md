@@ -264,6 +264,45 @@ All notable changes to `tan` are documented here. Format follows
     `mkdir()` structurally, before anything reaches disk for it) --
     cleanup is now reported only for a path the rollback finds actually
     exists. (#496)
+- **`tan new-som`: the previous round's own YAML-injection fix reintroduced
+  the same class of defect it was closing, plus a rollback gap and a
+  narrower prompt/control-character check.** Found on review of (#496):
+  - **`--default-board`/`--default-hw-rev` could still be silently
+    truncated into the generated preset, reported as success.**
+    `_yaml_scalar`'s new PyYAML-emitter rendering still called
+    `yaml.safe_dump(value)` at PyYAML's default 80-column fold width and
+    kept only the first line -- fine under 80 columns, but anything longer
+    was cut, and the cut half was simply dropped from the SoM preset with
+    no error. At greater length the cut could land INSIDE an emitted
+    quoted scalar, corrupting `preset_text` into invalid YAML and crashing
+    the self-check's `yaml.safe_load` with a raw `ScannerError` -- exit 1,
+    zero bytes on stdout under `--format json`. `_yaml_scalar` now renders
+    with `width=float("inf")`, so the emitter never folds and the full
+    value always survives on one line.
+  - **A write that failed PARTWAY through could leave a half-written
+    preset on disk, unrolled-back.** The write-failure rollback gated the
+    entire preset branch on membership in a `written` list the caller only
+    appended to AFTER `Path.write_text` returned successfully -- an
+    `OSError` from mid-write (`ENOSPC`/`EDQUOT`/`EFBIG`/`EIO`) left a
+    physically created, partially-written file on disk but raised before
+    that append ran, so the rollback treated the file as never touched.
+    The caller now sets a `preset_write_attempted` flag the instant the
+    write is about to start, and the rollback gates on that instead.
+  - **The "no real terminal" gate checked only `stdin`, never `stderr`.**
+    Every interactive prompt rides stderr (the earlier fix in this same
+    round), so a real stdin terminal with a redirected stderr had no way
+    to show the human the question and blocked on it silently. The gate
+    now refuses unless both `stdin` and `stderr` are real terminals,
+    mirroring `tan.core.consent.can_prompt`'s own rule.
+  - **A raw DEL byte (0x7F) in `--display-name` reached the unguarded
+    preset self-check and crashed it.** The control-character refusal only
+    checked `ord(ch) < 0x20`; DEL is a control character too, just outside
+    that range, and an unescaped DEL inside a rendered double-quoted YAML
+    scalar made `yaml.safe_load(preset_text)` raise a raw `ReaderError` --
+    exit 1, zero bytes on stdout under `--format json`. The control-
+    character check (now a shared `_has_control_char` helper) rejects DEL
+    alongside the C0 range, and the self-check's `yaml.safe_load` call is
+    now itself guarded as a backstop. (#496)
 
 ## [0.5.1] — 2026-08-04
 

@@ -985,6 +985,29 @@ def _marker_sdk(root: Path) -> Path:
     return root
 
 
+def _marker_sdk_no_boards(root: Path) -> Path:
+    """Like `_marker_sdk`, but WITHOUT `metadata/boards/` -- `_known_board_names`
+    then returns `None` (its own "not resolvable" branch), so an arbitrary
+    `--default-board` reaches `_render_preset` unchecked against a known-name
+    set, the same as a checkout mid-port that has not declared any boards
+    yet. Needed to reach `_yaml_scalar`/the render self-check with a
+    long/hostile `--default-board` at all: `_marker_sdk`'s one real board
+    name would otherwise refuse any other value long before render
+    (tan-cli#496 round-2 blockers 1+2)."""
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    schemas = root / "metadata" / "schemas"
+    schemas.mkdir(parents=True, exist_ok=True)
+    (schemas / "som-preset-v1.schema.json").write_text(
+        json.dumps({"type": "object", "properties": {"sku": {"pattern": "^E1M-[A-Z0-9-]+$"}}}),
+        encoding="utf-8",
+    )
+    (schemas / "soc-spec-v1.schema.json").write_text(
+        json.dumps({"type": "object"}), encoding="utf-8"
+    )
+    return root
+
+
 def _dry_run_argv(sdk: Path, out: Path, *extra: str) -> list[str]:
     return [
         "--sku", "E1M-XTST1",
@@ -1266,6 +1289,178 @@ def test_default_hw_rev_out_of_pattern_is_failed_not_internal_error(tmp_path):
     assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
     assert payload["data"] == {"subcommand": "new-som"}
     assert "R1" in payload["issues"][0]["message"]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#496 round-2: the review's own fix reintroduced the same class of
+# defect it was closing
+# ---------------------------------------------------------------------------
+
+
+def test_default_board_long_value_is_not_truncated(tmp_path):
+    """Round-2 blocker 1: `_yaml_scalar` used to call
+    `yaml.safe_dump(value)` at PyYAML's DEFAULT 80-column `best_width` and
+    keep only `.splitlines()[0]` -- fine under 80 columns, but PyYAML folds
+    anything longer at a space, so a `--default-board` past that width was
+    SILENTLY TRUNCATED into the generated preset and reported as a clean
+    success. A boards-less checkout (`_marker_sdk_no_boards`) is needed to
+    even reach render with a value this long -- `_marker_sdk`'s one real
+    board name would otherwise refuse it long before `_yaml_scalar` runs."""
+    sdk = _marker_sdk_no_boards(tmp_path / "sdk")
+    out = tmp_path / "out"
+    long_board = " ".join(["word"] * 30)
+    assert len(long_board) > 80, "the value must actually cross PyYAML's fold width"
+    argv = [
+        a
+        for a in _dry_run_argv(sdk, out, "--format", "json", "--default-board", long_board)
+        if a != "--dry-run"
+    ]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        result.exception,
+        result.output,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    preset_path = Path(payload["data"]["written"][0])
+    import yaml
+
+    doc = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
+    assert doc["default_board"] == long_board, "the full value must survive, not just line 1"
+
+
+def test_default_board_very_long_value_does_not_crash_the_self_check(tmp_path):
+    """Round-2 blocker 2: at greater length the fold from blocker 1 can land
+    INSIDE an emitted quoted scalar, so keeping only line 1 leaves an
+    UNTERMINATED quote -- `preset_text` is then not valid YAML at all, and
+    the unguarded `yaml.safe_load(preset_text)` self-check raised a raw
+    `yaml.scanner.ScannerError`: exit 1, zero bytes on stdout under
+    `--format json` (the `json.loads(result.stdout)` below IS that
+    assertion -- it raises on the pre-fix crash). Measured repro value from
+    the review."""
+    sdk = _marker_sdk_no_boards(tmp_path / "sdk")
+    out = tmp_path / "out"
+    long_board = "word " * 30
+    argv = [
+        a
+        for a in _dry_run_argv(sdk, out, "--format", "json", "--default-board", long_board)
+        if a != "--dry-run"
+    ]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        result.exception,
+        result.output,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+
+
+def test_rollback_undoes_a_write_that_fails_partway_through(tmp_path, monkeypatch):
+    """Round-2 blocker 3: `_rollback_write_failure` used to gate the ENTIRE
+    preset branch on `preset_path in written`, and `written.append
+    (preset_path)` only ran AFTER `Path.write_text` returned successfully.
+    A write that fails PARTWAY (ENOSPC/EDQUOT/EFBIG/EIO -- the file is
+    already created and partially written by the time the exception is
+    raised) never reaches that append, so the gate skipped rollback
+    entirely and left the partial file behind. Simulated here by monkey-
+    patching `Path.write_text` to write a partial marker to disk and then
+    raise, reproducing "file exists, partially written, exception raised
+    before bookkeeping" without needing a real full disk."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    preset_path = out / "metadata" / "e1m_modules" / "E1M-XTST1.yaml"
+
+    real_write_text = Path.write_text
+
+    def _fail_partway(self, data, *args, **kwargs):
+        if self == preset_path:
+            real_write_text(self, "PARTIAL-GARBAGE", *args, **kwargs)
+            raise OSError("simulated ENOSPC partway through the write")
+        return real_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _fail_partway)
+    argv = [a for a in _dry_run_argv(sdk, out, "--format", "json") if a != "--dry-run"]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        result.exception,
+        result.output,
+    )
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
+    assert not preset_path.exists(), (
+        "a write that fails partway must be rolled back, not left as a "
+        "partially-written file on disk"
+    )
+
+
+def test_interactive_gate_also_checks_stderr_not_only_stdin(tmp_path, monkeypatch):
+    """Round-2 major 1: the missing-flags gate checked only
+    `sys.stdin.isatty()`, never `sys.stderr` -- but every `_interactive`
+    prompt rides stderr (defect 6: `err=True`), so a real stdin terminal
+    with a REDIRECTED stderr had no way to show the human the question and
+    would block on it silently.
+
+    `CliRunner` gives `sys.stdin`/`sys.stderr` separate `_NamedTextIOWrapper`
+    INSTANCES of the same class (`name="<stdin>"` / `name="<stderr>"`), so a
+    class-level `isatty` patch keyed on that name can make them disagree --
+    stdin a real terminal, stderr not -- the exact split a stdin-only gate
+    cannot see. Without the fix, `_interactive` would then run against
+    `CliRunner`'s empty stdin and raise `EOFError` instead of this command's
+    own coded refusal."""
+    monkeypatch.setattr(
+        "typer.testing._NamedTextIOWrapper.isatty", lambda self: self.name == "<stdin>"
+    )
+    sdk = _marker_sdk(tmp_path / "sdk")
+    result = runner.invoke(
+        app, ["--dry-run", "--sdk-root", str(sdk), "--output-root", str(tmp_path / "out")]
+    )
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        result.exception,
+        result.output,
+    )
+    assert result.exit_code == 1, result.output
+    assert "--sku" in result.output and "--soc-ref" in result.output and "--family" in result.output
+
+
+def test_display_name_del_byte_is_refused_not_an_uncaught_reader_error(tmp_path):
+    """Round-2 major 2: `--display-name`'s control-character refusal only
+    checked `ord(ch) < 0x20`, so a raw DEL byte (0x7F) -- also a control
+    character, just outside the C0 range -- passed it, reached the rendered
+    YAML double-quoted scalar unescaped (`_yaml_dquote` only escapes `\\`
+    and `"`), and crashed the previously-unguarded
+    `yaml.safe_load(preset_text)` self-check with a raw
+    `yaml.reader.ReaderError`: exit 1, zero bytes on stdout under
+    `--format json` (the `json.loads(result.stdout)` below IS that
+    assertion -- it raises on the pre-fix crash)."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    hostile = "X\x7fY"
+    argv = [
+        a
+        for a in _dry_run_argv(sdk, out, "--format", "json", "--display-name", hostile)
+        if a != "--dry-run"
+    ]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        result.exception,
+        result.output,
+    )
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
+    assert "control characters" in payload["issues"][0]["message"]
+    assert not (out / "metadata").exists(), "a refused display name must write nothing"
 
 
 def test_format_json_failure_path_carries_a_new_som_code(tmp_path):

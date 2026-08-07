@@ -251,12 +251,29 @@ def _internal_error(subject: str, schema: str, errors: list[str], json_mode: boo
     raise typer.Exit(int(ExitCode.RUNTIME_FAILURE))
 
 
+def _has_control_char(value: str) -> bool:
+    r"""True if ``value`` carries a C0 control character (0x00-0x1F) or DEL
+    (0x7F) -- the full ASCII control set, not just C0.
+
+    tan-cli#496 round-2 major 2: DEL alone used to pass the narrower
+    `ord(ch) < 0x20` check every call site here used to write inline, reach
+    a rendered YAML double-quoted scalar unescaped (`_yaml_dquote` below
+    only escapes `\` and `"`), and crash the unguarded
+    `yaml.safe_load(preset_text)` self-check with a raw
+    `yaml.reader.ReaderError` -- exit 1, zero bytes on stdout under
+    `--format json` (measured: `--display-name $'X\x7fY'`). One shared
+    check closes it at every call site instead of widening each inline
+    comparison by hand.
+    """
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
 def _yaml_dquote(value: str) -> str:
     r"""Escape ``value`` for embedding in a YAML double-quoted scalar.
 
     YAML double-quoted style uses C-like escapes, so `\` and `"` are the
     only characters that need escaping here (control characters are
-    rejected up front by the command's validation).
+    rejected up front by the command's validation, `_has_control_char`).
     """
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -282,10 +299,27 @@ def _yaml_scalar(value: str) -> str:
     caller pre-refuses those before render time, so this is the backstop,
     not the primary gate (`fail()`-worded messages belong at the call site,
     which knows the flag name).
+
+    tan-cli#496 round-2 blocker 1: this used to call `yaml.safe_dump(value)`
+    at PyYAML's DEFAULT 80-column `best_width` and keep only
+    `.splitlines()[0]` -- fine for a value that fits in 80 columns, but
+    PyYAML folds anything longer at a space, so any `--default-board`/
+    `--default-hw-rev` past that width was SILENTLY TRUNCATED into the
+    generated preset and reported as a clean success (a SoM vendor
+    hardware fact, corrupted with no error). Blocker 2: at greater length
+    the fold can land INSIDE an emitted quoted scalar, so the truncated
+    text is not even valid YAML -- `new_som`'s unguarded
+    `yaml.safe_load(preset_text)` self-check then raised a raw
+    `yaml.scanner.ScannerError`, exit 1 with zero bytes on stdout under
+    `--format json` (measured: `--default-board "$(python3 -c "print('word
+    '*30)")"`). `width=float("inf")` tells the emitter never to fold at
+    all, so whatever style it picks always lands on ONE content line --
+    `dumped[0]` then keeps the full value, and any trailing lines are only
+    PyYAML's own `...` document-end marker, never truncated content.
     """
-    if any(ord(ch) < 0x20 for ch in value):
+    if _has_control_char(value):
         raise ValueError("must not contain newlines or other control characters")
-    dumped = yaml.safe_dump(value).splitlines()
+    dumped = yaml.safe_dump(value, width=float("inf")).splitlines()
     return dumped[0] if dumped else "''"
 
 
@@ -683,16 +717,16 @@ def _rollback_write_failure(
     preset_path: Path,
     preset_existed_before: bool,
     preset_backup: bytes | None,
+    preset_write_attempted: bool,
     soc_path: Path,
     soc_doc,
-    written: list[Path],
 ) -> list[str]:
     """Undo whatever THIS invocation actually touched after a write failure,
     and report exactly what could not be undone -- never more. Returns a
     description string per candidate that could not be undone; an empty
     list means the rollback is clean.
 
-    Two tan-cli#496 fixes live here:
+    Three tan-cli#496 fixes live here:
 
     * **Defect 2.** `preset_path` is RESTORED to its original bytes when it
       pre-existed (a `--force` re-scaffold whose SoC-spec write then
@@ -711,9 +745,22 @@ def _rollback_write_failure(
       unlink anyway, got a second `NotADirectoryError`, and told the
       caller "this may be a half-written scaffold" for a path that was
       never written at all.
+    * **tan-cli#496 round-2 blocker 3.** The preset branch below is gated
+      on `preset_write_attempted`, a flag the caller sets the instant the
+      preset write is ABOUT to start -- not on membership in a `written`
+      list the caller only appended to AFTER `write_text` returned
+      successfully. `Path.write_text` opens the file (truncating any
+      pre-existing content) and issues one `write()` call; an `OSError`
+      from THAT call (`ENOSPC`/`EDQUOT`/`EFBIG`/`EIO`) leaves a physically
+      created, partially-written file on disk but raises before the
+      caller's `written.append(preset_path)` ever ran. Gating on `written`
+      alone treated that file as never touched by this run and left the
+      partial write unrolled-back; `preset_write_attempted` covers that
+      case too, on top of the "wrote fine, the SoC-spec write after it
+      failed" case a `written` check alone already caught.
     """
     cleanup_failures: list[str] = []
-    if preset_path in written:
+    if preset_write_attempted:
         if preset_existed_before:
             if preset_backup is None:
                 cleanup_failures.append(
@@ -900,17 +947,34 @@ def new_som(
             for flag, value in (("--sku", sku), ("--soc-ref", soc_ref), ("--family", family))
             if value is None
         ]
-        # `sys.stdin` is a bare reference, not a guaranteed stream: it is
-        # `None` under a console-less launcher (e.g. a frozen build run
-        # without a console, or any host that closes standard streams
-        # instead of redirecting them to `os.devnull`), and `None.isatty()`
-        # is an `AttributeError` -- an unhandled traceback instead of this
-        # command's own coded refusal, in exactly the "no real terminal"
-        # case this check exists to name cleanly.
-        if sys.stdin is None or not sys.stdin.isatty():
+        # `sys.stdin`/`sys.stderr` are bare references, not guaranteed
+        # streams: either is `None` under a console-less launcher (e.g. a
+        # frozen build run without a console, or any host that closes
+        # standard streams instead of redirecting them to `os.devnull`),
+        # and `None.isatty()` is an `AttributeError` -- an unhandled
+        # traceback instead of this command's own coded refusal, in
+        # exactly the "no real terminal" case this check exists to name
+        # cleanly.
+        #
+        # tan-cli#496 round-2 major 1: BOTH streams are checked, not only
+        # `stdin`. `_interactive`'s prompts are `err=True` (defect 6 above)
+        # -- the question rides stderr, the answer rides stdin -- so a
+        # redirected/piped stderr with a real stdin terminal has no way to
+        # show the human the question, and the old stdin-only gate admitted
+        # exactly that shape, blocking on a prompt nobody could see. This
+        # mirrors `tan.core.consent.can_prompt`'s own "a prompt is a
+        # question-and-answer pair; each half needs its own real terminal"
+        # rule.
+        if (
+            sys.stdin is None
+            or not sys.stdin.isatty()
+            or sys.stderr is None
+            or not sys.stderr.isatty()
+        ):
             fail(
-                "stdin is not a terminal, so interactive prompts are "
-                "unavailable; pass the missing required flag(s): " + ", ".join(missing)
+                "stdin or stderr is not a terminal, so interactive prompts "
+                "are unavailable; pass the missing required flag(s): "
+                + ", ".join(missing)
             )
             return
         if json_mode:
@@ -999,7 +1063,7 @@ def new_som(
         vendor = soc_ref.split(":")[0]
     if display_name is None:
         display_name = f"{sku} ({vendor} -- scaffold, silicon facts TBD)"
-    if any(ord(ch) < 0x20 for ch in display_name):
+    if _has_control_char(display_name):
         fail("display name must not contain newlines or other control characters")
         return
     # tan-cli#496 defect 3/5: `default_hw_rev` used to reach the RENDERED
@@ -1022,7 +1086,7 @@ def new_som(
     # don't), so the injection above is closed by refusing control
     # characters -- the one thing a single-line preset value can never
     # legitimately need -- rather than by a charset it does not have.
-    if any(ord(ch) < 0x20 for ch in default_board):
+    if _has_control_char(default_board):
         fail("default board must not contain newlines or other control characters")
         return
 
@@ -1095,7 +1159,20 @@ def new_som(
         # be named explicitly beside it.
         fail(f"could not read {som_schema_path} ({exc})")
         return
-    preset_doc = yaml.safe_load(preset_text)
+    try:
+        preset_doc = yaml.safe_load(preset_text)
+    except yaml.YAMLError as exc:
+        # tan-cli#496 round-2 major 2: this was unguarded -- a value that
+        # slipped past every upfront check above (the DEL byte
+        # `_has_control_char` now rejects; a hypothetical future field
+        # spliced into `_render_preset` without its own check) reached the
+        # rendered document and could still make it unparseable, raising a
+        # raw `yaml.reader.ReaderError`/`yaml.scanner.ScannerError` -- exit
+        # 1, zero bytes on stdout under `--format json`. Backstop, not the
+        # primary gate, same shape as the `_render_preset` `ValueError`
+        # catch just above.
+        fail(f"could not parse the rendered preset skeleton: {exc}")
+        return
     if preset_doc is not None:
         try:
             errors = _schema_errors(preset_doc, som_schema_path)
@@ -1136,6 +1213,14 @@ def new_som(
     # there was nothing to back up, and nothing must be restored either.
     preset_existed_before = preset_path.exists()
     preset_backup: bytes | None = None
+    # tan-cli#496 round-2 blocker 3: set the instant the write is ABOUT to
+    # start, not after it succeeds -- `written.append(preset_path)` below
+    # only runs once `write_text` has already returned, so gating the
+    # rollback on `preset_path in written` alone missed a write that
+    # started, physically created/truncated the file, and THEN raised
+    # (ENOSPC/EDQUOT/EFBIG/EIO) partway through. See
+    # `_rollback_write_failure`'s docstring.
+    preset_write_attempted = False
     if dry_run:
         say(f"Would create {preset_path}")
         if soc_doc is None:
@@ -1147,6 +1232,7 @@ def new_som(
             preset_path.parent.mkdir(parents=True, exist_ok=True)
             if preset_existed_before:
                 preset_backup = preset_path.read_bytes()
+            preset_write_attempted = True
             preset_path.write_text(preset_text, encoding="utf-8", newline="\n")
             written.append(preset_path)
             if soc_doc is not None:
@@ -1162,9 +1248,15 @@ def new_som(
             # finding against this file's OWN earlier fix: only a path that
             # PHYSICALLY EXISTS is ever reported as a cleanup failure, so a
             # target this run never reached disk for is never called
-            # "may be half-written").
+            # "may be half-written") plus round-2 blocker 3's
+            # attempted-not-just-succeeded tracking.
             cleanup_failures = _rollback_write_failure(
-                preset_path, preset_existed_before, preset_backup, soc_path, soc_doc, written
+                preset_path,
+                preset_existed_before,
+                preset_backup,
+                preset_write_attempted,
+                soc_path,
+                soc_doc,
             )
             if cleanup_failures:
                 fail(
