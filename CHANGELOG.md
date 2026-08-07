@@ -201,6 +201,25 @@ All notable changes to `tan` are documented here. Format follows
   surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
   `--format json` and tan's default text output, so that silent gap has a
   signal without making the field mandatory. (#520)
+- **The published `envelope-contract.json` release asset re-packaged five
+  `debug-config-preview-*` goldens that no longer describe the shipping CLI,
+  and `contract/README.md` claimed coverage it did not have.** The five
+  `debug-config-preview-*` fixtures predate `tan-cli#138`'s restored
+  `preLaunchTask` default and `tan-cli#321`'s `debug-config.gdbserver-
+  address-unresolved` issue, so they were marked `xfail(strict=True)` rather
+  than re-recorded (re-recording them would also redden the frozen `crates/`
+  oracle's own copy of the same fixtures). `contract/README.md` is corrected
+  to: name the real, narrower live-parity coverage instead of overstating
+  it (only the bare `zephyr-mcu` invocation and `native-host` get a
+  whole-envelope oracle-parity diff; `zephyr-mcu-sdk-identity`,
+  `baremetal-mcu` and `yocto-userspace` do not); add the missing
+  `data.configuration` row to the "Frozen `data` field names" table; record
+  the `--core m55_hp` the `zephyr-mcu-sdk-identity` fixture actually invokes;
+  and replace an unfiled "filed as a follow-up" claim with the real tracking
+  issue, `tan-cli#529`. `.github/workflows/release.yml`'s "Bundle the
+  envelope contract" step comment is corrected to match: it no longer
+  asserts the re-packaging is "pure" with no possible drift from what ships.
+  (#502)
 
 ## [0.5.1] — 2026-08-04
 
