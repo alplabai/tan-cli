@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from tan.core.build_plan import parse_build_plan
-from tan.commands.build.execute import _pin_west_workspace, execute_slices
+from tan.commands.build.execute import _pin_west_workspace, _resolve_tool, execute_slices
 from tan.commands.build.manifest import PostBuildManifest
 from tan.core.bootstrap import venv_layout
 from tan.core.system_manifest import parse_system_manifest
@@ -238,7 +239,18 @@ def _marker_writing_script(marker: Path) -> list[str]:
     reason="tan-cli#510: the CreateProcess current-directory question is Windows-only",
 )
 def test_a_tool_shadowed_in_the_spawns_cwd_is_not_the_one_spawned(tmp_path, monkeypatch):
-    """tan-cli#510's own open question, settled here rather than asserted:
+    """This is the end-to-end confirmation on a real Windows `CreateProcess`
+    -- SKIPPED everywhere else, including every developer's own machine and
+    every local run of this suite. It does not guard the invariant day to
+    day: the two portable tests below (`test_resolve_tool_never_resolves_
+    the_current_directory` and `test_the_spawned_argv_is_the_resolved_
+    absolute_path_not_the_bare_identity`) are what catch a regression on
+    every platform, and are the ones to look at first if this one is red on
+    CI. Read on for what THIS test specifically settles (a real Windows
+    answer to tan-cli#510's own open question), not for the general
+    guarantee.
+
+    tan-cli#510's own open question, settled here rather than asserted:
     whether `subprocess.Popen(cwd=...)` -- the CHILD's own
     `lpCurrentDirectory` -- changes which directory Windows' `CreateProcess`
     consults when resolving a BARE, unqualified command name. Before the
@@ -299,7 +311,18 @@ def test_a_tool_shadowed_in_the_spawns_cwd_is_not_the_one_spawned(tmp_path, monk
     "question is Windows-only",
 )
 def test_a_tool_shadowed_in_the_parent_processs_cwd_is_not_the_one_spawned(tmp_path, monkeypatch):
-    """tan-cli#510 review, MAJOR 3: the sibling test above plants its shadow
+    """This is the end-to-end confirmation on a real Windows `CreateProcess`
+    -- SKIPPED everywhere else, including every developer's own machine and
+    every local run of this suite. It does not guard the invariant day to
+    day: the two portable tests below (`test_resolve_tool_never_resolves_
+    the_current_directory` and `test_the_spawned_argv_is_the_resolved_
+    absolute_path_not_the_bare_identity`) are what catch a regression on
+    every platform, and are the ones to look at first if this one is red on
+    CI. Read on for what THIS test specifically settles (a real Windows
+    answer to tan-cli#510's own open question), not for the general
+    guarantee.
+
+    tan-cli#510 review, MAJOR 3: the sibling test above plants its shadow
     in the SLICE's own cwd -- the exact directory `Popen(cwd=spawn_cwd)`
     hands the child as `lpCurrentDirectory`. But `CreateProcess`'s DOCUMENTED
     implicit search, with `lpApplicationName=NULL`, consults *"the current
@@ -345,6 +368,117 @@ def test_a_tool_shadowed_in_the_parent_processs_cwd_is_not_the_one_spawned(tmp_p
         "the tool shadowed in the PARENT process's own cwd ran instead of "
         f"the one resolved off PATH -- the running interpreter reported its "
         f"own path as {ran!r}; out[0].message: " + str(out[0].message)
+    )
+
+
+def test_resolve_tool_never_resolves_the_current_directory(tmp_path, monkeypatch):
+    """tan-cli#510's safety property, pinned at the level where it IS
+    portable -- `_resolve_tool`'s own contract -- rather than only on the two
+    `skipif(os.name != "nt")` integration tests above, which never execute
+    on Linux/macOS/CI-on-Linux and therefore never run for the overwhelming
+    majority of contributors. Runs, and must pass, on EVERY platform.
+
+    Constructs the shadow directly against the resolver, no `execute_slices`
+    dispatch involved: an executable named `X` sits in a directory, that
+    directory becomes the process's real cwd (`monkeypatch.chdir`), and `X`
+    is deliberately absent from `PATH`. `_resolve_tool("X", env)` must answer
+    `None` -- the only way it could find `X` at all is by implicitly
+    searching cwd, which is exactly the hazard both `_resolve_tool`'s own
+    docstring and the pre-#510 `_command_on_path` docstring name (a project
+    checked out with its own `west.exe`/`openocd.exe` at its root must never
+    shadow the real tool).
+
+    On POSIX this is the honest statement of the invariant: `shutil.which`
+    never implicitly searches cwd there, so this test exercises the same
+    `search_dirs = os.get_exec_path(env)` path `_resolve_tool` always takes
+    on this platform, with nothing Windows-specific to catch. On Windows it
+    is the identical statement AND it additionally catches the hazard
+    `_resolve_tool`'s docstring calls out by name: stdlib `shutil.which`
+    there inserts `os.curdir` ahead of every `PATH` entry, so a naive future
+    simplification (swapping the hand-rolled `PATHEXT` walk below for a bare
+    `shutil.which` call, "since POSIX already uses it") would make this exact
+    test go red on that platform, portably reproducing the point of the
+    Windows-only integration tests above without needing Windows to prove
+    it."""
+    shadow_dir = tmp_path / "shadow_cwd"
+    shadow_dir.mkdir()
+    shadow_name = "X.exe" if os.name == "nt" else "X"
+    shadow_tool = shadow_dir / shadow_name
+    shadow_tool.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(shadow_tool, 0o755)
+
+    monkeypatch.chdir(shadow_dir)
+
+    # `X` is reachable ONLY through an implicit cwd search -- `PATH` points
+    # at an unrelated, empty directory.
+    empty_path_dir = tmp_path / "empty_path"
+    empty_path_dir.mkdir()
+    env = {"PATH": str(empty_path_dir)}
+
+    resolution = _resolve_tool("X", env)
+    assert resolution.resolved is None, (
+        f"_resolve_tool resolved `X` to {resolution.resolved!r} -- it exists "
+        "only in the process's own current directory and is not on PATH; "
+        "the resolver must never implicitly search cwd"
+    )
+
+
+def test_the_spawned_argv_is_the_resolved_absolute_path_not_the_bare_identity(
+    tmp_path, monkeypatch
+):
+    """tan-cli#510's other half, also pinned portably: it is not enough for
+    `_resolve_tool` to answer correctly (the test above) if the spawn below
+    it hands the platform's own process launcher the plan's bare, unresolved
+    identity anyway -- exactly the pre-#510 defect (`Popen([tool, *args],
+    ...)` with `tool` still e.g. `"west"`, never `resolved_tool`), and
+    exactly what let Windows' `CreateProcess` perform its own separate,
+    unhardened implicit search over the resolved one.
+
+    Spies on `subprocess.Popen` (delegating to the real implementation, so
+    `execute_slices` still runs its real dispatch -- draining output,
+    waiting for exit, everything downstream of the spawn) and asserts what
+    reaches `argv[0]`: the absolute path `_resolve_tool` resolved, never the
+    plan's bare `tool` string. Portable -- no Windows-specific search-order
+    question involved, only "does the spawn use the resolved path" -- and
+    would go red on every platform immediately if the tan-cli#510 fix (the
+    `[resolved_tool, *spawn_args]` line in `execute_slices`) were ever
+    reverted back to spawning `tool`."""
+    import tan.commands.build.execute as execute_module
+
+    tool_dir = tmp_path / "toolbin"
+    tool_dir.mkdir()
+    tool_name = _write_marker_script(tool_dir, "ran")
+    monkeypatch.setenv("PATH", str(tool_dir))
+
+    captured_argv: list[list[str]] = []
+    real_popen = subprocess.Popen
+
+    def _spy_popen(args, **kwargs):
+        captured_argv.append(list(args))
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(execute_module.subprocess, "Popen", _spy_popen)
+
+    cmd = json.dumps({"tool": tool_name, "args": [], "cwd": None})
+    out = execute_slices(
+        parse_build_plan(_plan(cmd, backend="baremetal")),
+        build_root=tmp_path,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+    )
+    assert out[0].status == "succeeded", out[0].message
+    assert len(captured_argv) == 1, captured_argv
+    spawned_tool = captured_argv[0][0]
+    assert spawned_tool != tool_name, (
+        f"Popen was handed the bare identity {tool_name!r} -- the pre-#510 "
+        "defect; it must receive the resolved absolute path instead"
+    )
+    assert Path(spawned_tool).is_absolute(), spawned_tool
+    assert Path(spawned_tool) == tool_dir / tool_name, (
+        f"Popen argv[0] was {spawned_tool!r}, not the resolved path "
+        f"{tool_dir / tool_name}"
     )
 
 
