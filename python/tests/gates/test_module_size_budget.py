@@ -182,7 +182,11 @@ _MODULE_BUDGET: dict[str, int] = {
     # takes the resolution facts and calls the shared `sdk_cmd.
     # sdk_resolution_issues` itself, so no future early return can skip them.
     "tan/commands/flash_cmd.py": 1829,
-    "tan/planner/kconfig.py": 1639,
+    # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
+    # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
+    # companion half -- `needs_dcache_off` now checks
+    # `entry.kind in ("raw_shmem", "rpmsg")` instead of `raw_shmem` alone).
+    "tan/planner/kconfig.py": 1643,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
     # tuple that would need a fourth positional slot for
@@ -330,7 +334,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # and `clean` appends `sdk.global-default-foreign-project` beside
     # `sdk.project-pin-unresolved`.
     "tan/commands/clean_cmd.py": 1013,
-    "tan/planner/loader.py": 996,
+    # 1015, not 996, as of tan-cli#485: `_load_yaml`/`_load_json` route
+    # through the new `strict_loaders.strict_yaml_load`/`strict_json_loads`
+    # (alp-sdk #1127, a duplicate-mapping-key refusal), and the IPC-entry
+    # loop gained the alp-sdk #1088 refusal of `cacheable: true` on a
+    # `kind: rpmsg` entry.
+    "tan/planner/loader.py": 1015,
     # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
     # carries `foreign_global_default_for` through into `_Sdk`, and `init`
     # surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk` writes
@@ -411,7 +420,10 @@ _MODULE_BUDGET: dict[str, int] = {
     # than extracted because this file mirrors an upstream generator --
     # splitting it here would make the next port a hand-merge instead of
     # a diff.
-    "tan/planner/zephyr_board.py": 970,
+    # 975, not 970, as of tan-cli#485: `_resolve_variant` grew a
+    # case/whitespace-insensitive `is_tbd`-shaped TBD check (alp-sdk #1048,
+    # matching `som_metadata.py::_resolve_silicon_variant`'s own copy).
+    "tan/planner/zephyr_board.py": 975,
     "tan/commands/support_bundle_cmd.py": 834,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
@@ -516,7 +528,21 @@ _MIRRORED = ("tan/planner/",)
 # (`debug_config_cmd.py`, findings 4+5: symlink-resolving, `fsync`'d,
 # mode-preserving) is a genuinely NEW one at 81 lines, so the count moves by
 # exactly the net +1 that accounts for.
-_FUNCTION_COUNT_BUDGET = 206
+#
+# 207, not 206, merging in tan-cli#485's review round (independent of the
+# #489 work above -- both landed on top of the same 203 baseline):
+# `project_loader.py:_hwrev_pad_route_overrides` (trimmed to exactly 50
+# lines, at the cap not over it, in #485's first pass) needed its dropped
+# constraint note back -- "same error TYPE and MESSAGE SHAPE as
+# loader.load_board_yaml's SoM-side refusals" is load-bearing: the function
+# INLINES `loader._status_repr` rather than importing it, and that inlining
+# is invisible without the note telling a future editor the two must be kept
+# in sync by hand. +6 lines (50 -> 56), all docstring, so the function
+# crosses the cap again -- the same choice `render_doctor_footer` made the
+# OTHER way, above, when the growth was prose that added nothing a reader
+# couldn't infer; this growth names a real constraint the code doesn't
+# otherwise state anywhere.
+_FUNCTION_COUNT_BUDGET = 207
 _FUNCTION_WORST_BUDGET = 707
 
 

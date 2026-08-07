@@ -94,19 +94,25 @@ import pytest
 from tests.conftest import sdk_root
 
 #: alp-sdk commit this port was last audited against. Bumped from
-#: `0f3cefbe` (origin/dev) by the tan-cli #320 re-sync, which carried
-#: alp-sdk #1080 (`CONFIG_DCACHE=n` for a `raw_shmem` cross-core carve-out,
-#: not just the Ethos-U inference path) and #1025's status half
-#: (`SdkRevisionNotBuildable` -- refuse an hw_rev that EXISTS but is
-#: `status: reserved`/`status: tbd`/status-less) into `tan/planner/`, plus
-#: #1048's `is_tbd()` case/whitespace normalisation (ported inline at each
-#: call site rather than as a shared module -- see loader.py/kconfig.py/
-#: slugs.py/carveout.py; a `tan/planner/sentinels.py` counterpart to
-#: alp-sdk's new top-level `scripts/sentinels.py` has no clean home in this
-#: gate's PINNED_HASHES/HAND_PORT_HASHES taxonomy without also re-auditing
-#: the unrelated `zephyr_board.py`/`alp_project_loader.py` drift sitting
-#: between HAND_PORT_PINNED_SDK_COMMIT and here).
-PINNED_SDK_COMMIT = "f4d87a1f472dffe9fe7dffc247cc55bce71034ba"  # alp-sdk origin/dev
+#: `f4d87a1f` by the tan-cli #485 re-sync (#320 recurred: the #320 pin bump
+#: held two days before alp-sdk landed two more contract-surface commits).
+#: This bump carries alp-sdk #1169 (`_DRIVER_STATUS_SUFFIX` -- a
+#: `<x>_driver_status` on_module field is a maturity tier, never a chip
+#: slug; without the filter the literal string "none" reached
+#: `CONFIG_ALP_SDK_CHIP_NONE=y`, an undeclared Kconfig symbol that aborted
+#: Zephyr's CMake configure on every V2N-family SKU) and #1088 (`kind:
+#: rpmsg` refuses `cacheable: true` -- `<alp/rpc.h>` has no
+#: cache-maintenance implementation -- plus the companion
+#: `_emit_cross_core_shmem_cache` widening to `entry.kind in ("raw_shmem",
+#: "rpmsg")`) into `tan/planner/`. Also carries alp-sdk #1069's `carveout:
+#: false` memory_map exclusion (`carveout.py`, already ported ahead of this
+#: bump) and doc-only wording drift in `buildplan.py`/`orchestrator.py`
+#: (alp-sdk #1214, no behavioural delta). Deliberately NOT bumped to
+#: alp-sdk `origin/dev` tip: this exact commit is the last one before
+#: `validate.py`'s curated-library-registry derivation (alp-sdk #1197,
+#: `f7c69cea`) starts drifting that file too, which is unrelated to
+#: tan-cli#485 and stays for its own audited bump.
+PINNED_SDK_COMMIT = "53557a6030c4f90a5525d29c142190e7e91f2bbb"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -116,32 +122,42 @@ PINNED_SDK_COMMIT = "f4d87a1f472dffe9fe7dffc247cc55bce71034ba"  # alp-sdk origin
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "739a0288487997d6f1be7dc1f47fcf05b34a16386c0c81e8fe4eaadcfb84e3f0",
-    "buildplan.py": "1d8d27be880b876b7c0fa386e2f46317377e30899d02164e3fdd189ad55be438",
-    "carveout.py": "1c62a7e8b9ac6fd4526e2e5bc5e6234c9d4ca5f0a2d019cc85f00392fff91198",
+    "buildplan.py": "50f740465b23bd2aebfdd1f8dc210126b0da6e8d0600f944beb17889d16cbd65",
+    "carveout.py": "cdc9d78544441ae6b05dbdb12c5790d2bf4d5cb97fed481df14b57f215265d18",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "2839a56f86a8ec831bbcdd7836a36a36865b137865c15003671b4ccb3fef3ad9",
+    "kconfig.py": "d80ab84bec3bc1aefe8640a6d5d1b43334447cb4ea87d4c25cee927ebfc2bf17",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "47b823e0fc06cc657a3c3068598b953e342720cf359443651a9996b93be7aaa5",
-    "loader.py": "61eb397822a75ec1a5d662ce888488d0f388bd692e2f26b5f88f305a8e5e9c97",
+    "loader.py": "bd5177c0a9fcb8973fe7f899ef5ec91a2b386ea51a58bd1dc263b2e0c8efb183",
     "manifest.py": "930aa9c453fd86b487f66ec84be8f074a53f22a6077b0310390e176fee7918ba",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
     "models.py": "6d33258874d6f732d66668d30c22fd644e02de2fb9f35e7b497ddd2d81164109",
-    "orchestrator.py": "7d8891d4781b6bdf809340d8428d2b374d3f62fdf6730acc93761093d0943d3d",
+    "orchestrator.py": "01c7d90fc50bf85974fdbd228fac8319d687a121f45bc64c9528dd1fed3debff",
     "partition.py": "97e7646ab7f8692919d1cd529d42be453d7fc3240416f98e202a5920cb6cb029",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "ae8e5244877d3e9ad35f89e6b7782861f810825321052ed9f5770b9762c0281a",
     "secure.py": "a6a5762fbac2f99fc4356f01b3ffedd15d366af6d2ddde0042223b3da749cbe6",
-    "slugs.py": "0cc4c7608a751aa65a8eb1cc2c4c50d868e908ff5d2e11657857e66be10f1b23",
+    "slugs.py": "5c0481e2375bfc0ece96960e6a3c5f51d1fcd1e629ea7a2a50e6581765f6657d",
     "topology.py": "12f5f62d3adeb9e935594934fd2fc2b1fbeaec6f466d6dd89c329c54e844f3b1",
     "validate.py": "2dbe9dcb36ff0ebe4c968ef120983342aa00f02f32b9166f9c1608d1578495e7",
 }
 
-#: alp-sdk commit the HAND-PORTED `tan/planner/` modules below (everything
-#: pinned in HAND_PORT_HASHES) were last audited against -- the commit
-#: `v0.15.0-rc1` names, not the tag itself, so a tag that is later moved
-#: cannot silently repoint what this pins. `zephyr_board.py` and
-#: `project_loader.py` were re-vendored to this point in 947f3d0 / 52fdd01.
+#: alp-sdk commit the SDK-SIDE SOURCE FILES in HAND_PORT_HASHES were last
+#: audited against -- the commit `v0.15.0-rc1` names, not the tag itself, so a
+#: tag that is later moved cannot silently repoint what this pins.
+#: `zephyr_board.py` and `project_loader.py` were re-vendored to this point in
+#: 947f3d0 / 52fdd01.  This pin does NOT claim the `tan/planner/` SIDE is
+#: frozen at that same point, and it is not: tan-cli#485 forward-ported alp-sdk
+#: #1048's case-insensitive TBD match into `zephyr_board.py:109` and
+#: `som_metadata.py:140`, and #1025's status-gate half into
+#: `project_loader.py:196` -- both strictly AFTER 996937ac, both ported
+#: without moving this pin. This test HASHES THE SDK SIDE ONLY
+#: (`upstream = root / rel_path`, never the `tan/planner/` file), so a
+#: hand-port racing ahead of its own recorded audit point like this is
+#: invisible to it by construction -- a real, standing gap in this gate's
+#: coverage that a future audit pass should account for, not a claim that it
+#: doesn't exist.
 HAND_PORT_PINNED_SDK_COMMIT = "996937ac4b452260628cf2c6adad4be31483a3d4"  # alp-sdk v0.15.0-rc1
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
@@ -177,7 +193,135 @@ HAND_PORT_SOURCES: dict[str, str] = {
     "project_emit/hw_info.py": "scripts/alp_project_emit/hw_info.py",
     "project_emit/native_sim.py": "scripts/alp_project_emit/native_sim.py",
     "project_emit/west_libs.py": "scripts/alp_project_emit/west_libs.py",
+    # strict_loaders.py is intentionally NOT in HAND_PORT_HASHES -- see the
+    # STRICT_LOADERS_* block below for why it needs its own pin/root/test
+    # rather than joining this bundle.
+    "strict_loaders.py": "scripts/strict_loaders.py",
 }
+
+
+def test_hand_port_sources_declares_its_one_strict_loaders_exception():
+    """Every `HAND_PORT_SOURCES` value is a key into `HAND_PORT_HASHES` --
+    EXCEPT `scripts/strict_loaders.py`, deliberately (see the STRICT_LOADERS_*
+    block below). Without this assertion, deleting
+    `test_strict_loaders_matches_its_pinned_sdk_source` (or its
+    `STRICT_LOADERS_*` pin) would leave `strict_loaders.py` in
+    `HAND_PORT_SOURCES` -- satisfying `test_every_planner_module_is_tracked_
+    or_declared_exempt`'s coverage check -- with NO staleness hash anywhere
+    checking it, and neither coverage gate would notice: this is the one
+    assertion that catches that specific silent regression."""
+    unhashed = set(HAND_PORT_SOURCES.values()) - set(HAND_PORT_HASHES)
+    assert unhashed == {"scripts/strict_loaders.py"}, (
+        "HAND_PORT_SOURCES names a hand-port source with no staleness hash "
+        f"anywhere: {sorted(unhashed)}. Every HAND_PORT_SOURCES value must be "
+        "a key in HAND_PORT_HASHES, except scripts/strict_loaders.py (which "
+        "has its own STRICT_LOADERS_HASH instead -- see that block's own "
+        "comment for why). If this assertion fails because the set is EMPTY, "
+        "scripts/strict_loaders.py's own STRICT_LOADERS_* pin was deleted or "
+        "renamed -- restore it, don't just widen this assertion."
+    )
+
+
+#: tan-cli#485: `tan/planner/strict_loaders.py` (the alp-sdk #1127
+#: duplicate-key-rejecting YAML/JSON loaders, wired into `loader.py`'s
+#: `_load_yaml`/`_load_json` to close the silent-sku-retarget hazard) was
+#: hand-ported from `scripts/strict_loaders.py` -- a file that does not
+#: exist at all at HAND_PORT_PINNED_SDK_COMMIT (996937ac predates alp-sdk
+#: #1127). It gets its OWN pin/root/test rather than joining
+#: HAND_PORT_HASHES/HAND_PORT_PINNED_SDK_COMMIT, deliberately: auditing the
+#: rest of that bundle between 996937ac and here turned up a REAL, narrower
+#: gap this fix does not close. `scripts/alp_template.py` gained `_safe_join`/
+#: `PathEscapeError` (alp-sdk #1125/#1126); `tan/planner/template.py` has its
+#: own parallel `tan.core.fs_confine.PathEscapeError`/`resolve_confined`,
+#: wired into every catalog-driven WRITE (`scaffold.py:1049`,
+#: `init_cmd.py:804`, `generate_cmd.py:488`, `pinmux_cmd.py:347`) -- so no
+#: write can escape its destination root. What it is NOT wired into is
+#: `template.py`'s catalog-driven READS: `_rendered_bytes` (`:210` joins
+#: `base_dir / record["example"]`, `:214` joins that onto each `rel` and
+#: calls `.read_bytes()`) and `render_to_envelope` (`:1091`, the same join
+#: onto `board.yaml`). Measured with a traversal `rel` against a shared
+#: catalog fixture: `tan`'s `_rendered_bytes` returns the escaped file's
+#: bytes; alp-sdk's raises `PathEscapeError`. Those bytes reach the caller
+#: through `emit_scaffold`'s `[{path, contents}]` envelope, so a malicious or
+#: compromised `--metadata-root`/catalog entry can read an arbitrary file
+#: readable by the `tan` process and hand it back as scaffold content.
+#: Threat model, scoped honestly: this requires a hostile SDK/catalog
+#: checkout, which is already trusted to run arbitrary CMake/west during a
+#: normal build -- meaningfully narrower than #1126's write-bug severity (a
+#: write escape corrupts files outside any project the caller chose; this
+#: read escape discloses them), but real, and not closed by this change.
+#: Folding strict_loaders.py into HAND_PORT_HASHES would force a choice
+#: between silently re-freezing the whole bundle past this gap unaudited
+#: (the exact "bare bump" tan-cli#485 exists to name) or fixing it as a
+#: drive-by inside an unrelated change -- filed separately instead (see
+#: tan-cli#485's own report). (alp-sdk #1069's disjoint per-core slot0
+#: memory layout, the OTHER large delta in this bundle's window, is NOT a
+#: gap: tan-cli#432 already ported it into `zephyr_board.py` byte-for-byte,
+#: confirmed by re-reading the whole file, not just the diff.) Same
+#: tan-cli#296 rationale that split PINNED_SDK_COMMIT from
+#: HAND_PORT_PINNED_SDK_COMMIT in the first place: two audits that drifted
+#: at different rates need two pins, not one shared one.
+STRICT_LOADERS_PINNED_SDK_COMMIT = "26b0040e9a762c16aff5c7c53b2e19cc7583b2a4"  # alp-sdk origin/dev, introduces #1127
+
+#: sha256 of `scripts/strict_loaders.py` at STRICT_LOADERS_PINNED_SDK_COMMIT.
+STRICT_LOADERS_HASH = "29cd2c62836e70abf2fa3f4e8c0939b406bd8cb6b976d9e97bc75d4180e38eef"
+
+#: The env var carrying a checkout pinned at STRICT_LOADERS_PINNED_SDK_COMMIT.
+#: Its own name for the same tan-cli#296 reason HAND_PORT_SDK_ROOT_ENV is not
+#: reused: three different pins now exist in this file (PINNED_SDK_COMMIT,
+#: HAND_PORT_PINNED_SDK_COMMIT, STRICT_LOADERS_PINNED_SDK_COMMIT), and
+#: sharing a root between any two of them silently measures one against the
+#: wrong oracle.
+STRICT_LOADERS_SDK_ROOT_ENV = "ALP_SDK_STRICT_LOADERS_ROOT"
+
+
+def _resolve_strict_loaders_sdk_root() -> pathlib.Path | None:
+    raw = os.environ.get(STRICT_LOADERS_SDK_ROOT_ENV)
+    if raw and (pathlib.Path(raw) / "scripts" / "alp_project.py").is_file():
+        return pathlib.Path(raw).resolve()
+    return None
+
+
+#: Resolved at import time, same reasoning as `SDK` / `HAND_PORT_SDK` above.
+STRICT_LOADERS_SDK: pathlib.Path | None = _resolve_strict_loaders_sdk_root()
+
+
+def test_strict_loaders_matches_its_pinned_sdk_source():
+    """The `strict_loaders.py` half of tan-cli#279's hand-port staleness gate.
+
+    Same shape as `test_hand_ported_planner_modules_match_their_pinned_sdk_source`,
+    scaled down to the one file that needs its own pin -- see the
+    STRICT_LOADERS_PINNED_SDK_COMMIT block above for why. Skips (rather than
+    fails) without STRICT_LOADERS_SDK_ROOT_ENV bound, same posture as the
+    other two freshness tests: a run not set up to do this audit is not
+    broken for not doing it.
+    """
+    if STRICT_LOADERS_SDK is None:
+        pytest.skip(
+            f"{STRICT_LOADERS_SDK_ROOT_ENV} is not set (or does not point "
+            "at a real alp-sdk checkout) -- no bound alp-sdk checkout to "
+            "compare tan/planner/strict_loaders.py against, so this "
+            "staleness gate cannot run. This is a SKIP about the missing "
+            f"root, not a pass: set {STRICT_LOADERS_SDK_ROOT_ENV} to an "
+            f"alp-sdk checkout at STRICT_LOADERS_PINNED_SDK_COMMIT "
+            f"({STRICT_LOADERS_PINNED_SDK_COMMIT}) to actually exercise "
+            "the gate."
+        )
+    upstream = STRICT_LOADERS_SDK / "scripts" / "strict_loaders.py"
+    assert upstream.is_file(), (
+        f"scripts/strict_loaders.py: gone from the bound SDK checkout"
+    )
+    current_hash = hashlib.sha256(upstream.read_bytes()).hexdigest()
+    assert current_hash == STRICT_LOADERS_HASH, (
+        "scripts/strict_loaders.py moved past the alp-sdk commit "
+        f"({STRICT_LOADERS_PINNED_SDK_COMMIT}) tan/planner/strict_loaders.py "
+        f"was last audited against: sha256 {current_hash} != pinned "
+        f"{STRICT_LOADERS_HASH}. Diff it in the bound alp-sdk checkout, port "
+        "the behavioural delta into tan/planner/strict_loaders.py, then "
+        "update STRICT_LOADERS_HASH (and STRICT_LOADERS_PINNED_SDK_COMMIT) "
+        "in this file to re-pin the audit."
+    )
+
 
 #: `tan/planner/`-relative paths with no alp-sdk source at all -- original tan
 #: code, not a port. Empty today: every current file traces to PINNED_HASHES

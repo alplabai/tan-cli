@@ -187,24 +187,53 @@ jobs:
       # exactly this reason. The two MUST be bumped together, or the release
       # gate and the parity gate silently measure different alp-sdks.
       #
-      # Bumped from `v0.15.0-rc1` (#319) to this exact commit for tan-cli#320:
-      # `tan/planner/` was behind `scripts/alp_orchestrate/` on alp-sdk `dev`
-      # (8 files, +267/-33, mostly `kconfig.py` and `sdk_compat.py`) as of
-      # v0.15.0-rc1, so a `sdk_parity: true` run's `pytest tests -q` (no
-      # `--ignore=tests/gates`, unlike `parity.yml`'s own `python-tests` job)
-      # hashed alp_orchestrate/*.py at this OLDER ref and mismatched the
-      # freshly re-pinned `PINNED_HASHES` in
-      # `python/tests/gates/test_planner_relocation_freshness.py`, which now
-      # audits against this same commit. Not a tag -- alp-sdk had not cut one
-      # past v0.15.0-rc1 at the time of this port; re-pin to a real tag once
-      # alp-sdk cuts one at or after this SHA, the same deferred-tag pattern
-      # `parity.yml`'s own `PINNED_SDK_TAG` history used while waiting on
-      # v0.14.0.
+      # Bumped from `v0.15.0-rc1` (#319) to `f4d87a1f` for tan-cli#320, and from
+      # `f4d87a1f` to THIS commit for tan-cli#485 (#320 recurred) --
+      # `parity.yml`'s own `PINNED_SDK_TAG` bumped to the identical
+      # `53557a6030c4f90a5525d29c142190e7e91f2bbb` in the same tan-cli#485
+      # change, so the "MUST be bumped together" rule two paragraphs up holds
+      # again after a brief, deliberate divergence mid-review (an earlier pass
+      # of #485 left `PINNED_SDK_TAG` at `f4d87a1f` while moving THIS ref and
+      # `python/tests/gates/test_planner_relocation_freshness.py`'s
+      # `PINNED_SDK_COMMIT` to `53557a60` together -- correct for the
+      # freshness-gate hash check this ref exists to satisfy, but it left
+      # `parity.yml`'s `python-tests`/`seam1` jobs, which resolve
+      # `ALP_SDK_ROOT` from `PINNED_SDK_TAG` on every `pull_request`/`push`,
+      # testing tan against the OLDER `f4d87a1f` -- and alp-sdk `53557a60` is
+      # also where `examples/multicore/rpmsg-aen/board.yaml` dropped
+      # `cacheable: true`, the exact field tan-cli#485's `loader.py` refusal
+      # now rejects, so every non-dispatch parity run went red: 31 failures,
+      # all tracing to that one fixture, alp-sdk's own repo unchanged).
+      # Re-verified empirically before this final bump: `test_relocated_
+      # planner_modules_match_the_pinned_sdk_audit` PASSES bound to
+      # `53557a60` (FAILS bound to the old `f4d87a1f`, hash mismatch, since
+      # `PINNED_HASHES` moved), and the `test_the_breadth_layer_still_
+      # covers_every_board` artefact-count floor (`>= 2900`) is NOT hit at
+      # `53557a60` (766 passed / 1 failed / 8 skipped across the whole
+      # `test_planner_emit_parity.py` module) -- unlike the `2bc6b400` bump
+      # #425 tried and reverted for exactly that floor.
+      #
+      # `test_an_unresolvable_board_preset_is_a_coded_envelope` in
+      # `python/tests/parity/test_planner_emit_parity.py`, which surfaced
+      # during this same review (its OWN fixture appended a second `preset:`
+      # key onto a board.yaml that already declared one, tripping the new
+      # duplicate-key refusal before reaching its intended "unresolvable
+      # preset" assertion), is FIXED in the same tan-cli#485 change -- the
+      # fixture now substitutes the existing `preset:` value instead of
+      # appending a second one. `python/tests/parity/` carries no repo-level
+      # freeze (that applies to `crates/`, `contract/`, and `test_oracle_
+      # parity.py`'s `CASES` table specifically), so this was in scope to fix
+      # directly rather than route around.
+      #
+      # Not a tag -- alp-sdk had not cut one past v0.15.0-rc1 at the time of
+      # the #320 port; re-pin to a real tag once alp-sdk cuts one at or after
+      # this SHA, the same deferred-tag pattern `parity.yml`'s own
+      # `PINNED_SDK_TAG` history used while waiting on v0.14.0.
       - uses: actions/checkout@v4
         if: ${{ inputs.sdk_parity }}
         with:
           repository: alplabai/alp-sdk
-          ref: f4d87a1f472dffe9fe7dffc247cc55bce71034ba
+          ref: 53557a6030c4f90a5525d29c142190e7e91f2bbb
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
