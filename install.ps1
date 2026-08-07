@@ -71,9 +71,22 @@ if ($System) {
 # itself through `%~dp0`, its own directory, never a baked-in path) -- but the
 # Path update below is not: a relative -Dir would be written into the
 # User/Machine registry Path verbatim, permanently putting a CWD-relative
-# entry on PATH. GetFullPath resolves a relative path against the process's
-# current directory and passes an already-absolute one through unchanged.
-$Dir = [System.IO.Path]::GetFullPath($Dir)
+# entry on PATH.
+#
+# [System.IO.Path]::GetFullPath resolves a relative path against
+# [Environment]::CurrentDirectory, NOT against the shell's own working
+# directory -- and Windows PowerShell 5.1 (the floor this script targets;
+# see the module comment above) never updates that .NET-process-global
+# property on `Set-Location`/`cd`, only $PWD. A user who does `cd .\tools;
+# irm .../install.ps1 | iex -Dir .\bin` would have `.\bin` resolved against
+# wherever the PROCESS started (often $HOME or C:\WINDOWS\system32, not
+# .\tools), silently installing to a directory the user never asked for.
+# PowerShell 7 keeps the two in sync, so this only misbehaves on 5.1 -- which
+# is exactly the case that must not regress. [System.IO.Path]::Combine
+# passes an already-absolute $Dir through unchanged (it returns the second
+# argument verbatim when it is rooted) and anchors a relative one against
+# $PWD.Path, which both 5.1 and 7 keep accurate.
+$Dir = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($PWD.Path, $Dir))
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -460,6 +473,50 @@ try {
 		return $ok
 	}
 
+	# tan-cli#490 -- Move-Item preserves the SOURCE item's ACL rather than
+	# picking up the destination's: $stage/$tmp were extracted/downloaded
+	# unprivileged into the invoking user's own %TEMP%, so every file under
+	# them carries that user's ACEs, and Move-Item carries them straight into
+	# $LibDir/$dest -- under -System that leaves a machine-wide install under
+	# %ProgramFiles% writable by an unprivileged user, a
+	# local-privilege-escalation shape (anything that later runs the
+	# installed `tan` elevated, or another admin, executes what that user can
+	# freely overwrite). Applied in both scopes, not just -System: a moved-in
+	# ACE is wrong regardless of where it lands.
+	#
+	# `icacls /reset`, not a manual Get-Acl/SetAccessRuleProtection/Set-Acl:
+	# a moved item's ACEs keep whatever "inherited" flag they had FROM THE OLD
+	# PARENT -- Windows does not re-evaluate that flag on a move -- so merely
+	# re-enabling inheritance (SetAccessRuleProtection($false, $false)) adds
+	# the new parent's ACEs ALONGSIDE the stale ones rather than replacing
+	# them; the stale entries, inherited-flagged or not, survive either way.
+	# `icacls /reset` clears every ACE the item currently carries and
+	# re-enables inheritance in one step, so what is left is only what the
+	# NEW parent grants -- exactly as if the item had been created there
+	# fresh. /T recurses (ignored on a bare file); /C keeps going past any
+	# single per-file failure instead of aborting the rest of the tree.
+	# Non-fatal and warns rather than rolls back: an install that already
+	# succeeded must not be turned into a failure over a hardening step (e.g.
+	# a filesystem that does not support ACLs at all). Wrapped in its own
+	# try/catch, not just an exit-code check: this whole script runs under
+	# $ErrorActionPreference = "Stop", and PowerShell 7.4+ defaults
+	# $PSNativeCommandUseErrorActionPreference to $true, which turns a
+	# non-zero exit from a NATIVE command (icacls, here) into a terminating
+	# exception under that preference -- without this catch, a single denied
+	# ACE reset would abort the whole script on a 7.4+ host, past the point an
+	# already-successful install had committed and BEFORE the Path update
+	# below ever runs.
+	function Reset-InheritedAcl([string]$root) {
+		try {
+			$icaclsOut = & icacls $root /reset /T /C 2>&1
+			if ($LASTEXITCODE -ne 0) {
+				Write-Host "install.ps1: warning -- could not reset the ACL on $root to inherit from its new parent; it may remain writable by whichever account ran this installer. ($icaclsOut)" -ForegroundColor Yellow
+			}
+		} catch {
+			Write-Host "install.ps1: warning -- could not reset the ACL on $root to inherit from its new parent; it may remain writable by whichever account ran this installer. ($($_.Exception.Message))" -ForegroundColor Yellow
+		}
+	}
+
 	$commitError = $null
 	try {
 		if ($layout -eq "archive") {
@@ -503,9 +560,18 @@ exit /b %ERRORLEVEL%
 		exit 1
 	}
 
-	# Commit succeeded -- backups (including any stale other-layout dest, which
-	# would otherwise shadow $dest on PATH per PATHEXT order) are no longer
-	# needed.
+	# Commit succeeded -- reset the ACL on whatever was actually MOVED into
+	# place (see Reset-InheritedAcl above). $dest under the archive layout is
+	# excluded: it was written fresh via Set-Content directly at its final
+	# home, never moved, so it already inherits $Dir's ACL correctly.
+	if ($layout -eq "archive") {
+		Reset-InheritedAcl $LibDir
+	} else {
+		Reset-InheritedAcl $dest
+	}
+
+	# Backups (including any stale other-layout dest, which would otherwise
+	# shadow $dest on PATH per PATHEXT order) are no longer needed.
 	Remove-Item -LiteralPath $destCmdBak -Force -ErrorAction SilentlyContinue
 	Remove-Item -LiteralPath $destExeBak -Force -ErrorAction SilentlyContinue
 	Remove-Item -LiteralPath $libDirBak -Recurse -Force -ErrorAction SilentlyContinue
@@ -535,6 +601,20 @@ exit /b %ERRORLEVEL%
 # write back using the SAME ValueKind the key already had, so a REG_EXPAND_SZ
 # Path stays REG_EXPAND_SZ and a REG_SZ one stays REG_SZ.
 function Get-PathRegistryKey([bool]$writable) {
+	# Test-only seam (tan-cli#490): the REG_EXPAND_SZ-preserving read/write
+	# below is exactly the code this whole defect is about, and every existing
+	# test runs with -NoModifyPath, so none of them ever reach it -- the one
+	# path that most needs coverage was the one path no test could exercise
+	# without either permanently rewriting the machine running the test suite
+	# (the real User key) or needing elevation the CI runner does not have
+	# (the real Machine key). Pointing this at a scratch HKCU subkey instead
+	# exercises the identical registry mechanics (read UNEXPANDED, write back
+	# with the SAME ValueKind) without touching the real Environment key in
+	# either hive. Never set outside the test suite.
+	if ($env:TAN_INSTALL_TEST_PATH_REGISTRY_KEY) {
+		return [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+			$env:TAN_INSTALL_TEST_PATH_REGISTRY_KEY, $writable)
+	}
 	if ($scope -eq "Machine") {
 		return [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
 			"SYSTEM\CurrentControlSet\Control\Session Manager\Environment", $writable)

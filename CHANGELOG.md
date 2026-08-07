@@ -261,6 +261,41 @@ All notable changes to `tan` are documented here. Format follows
   through to `~/.profile` with a POSIX `export` line neither shell reads or
   parses -- each now gets its own rc file (`~/.config/fish/config.fish`,
   `~/.tcshrc`, `~/.cshrc`) and its own syntax (`set -gx` / `setenv`). (#490)
+- **Three more defects found reviewing the (#490) fixes above, all in
+  `install.ps1`:**
+  - A relative `-Dir` resolved against `[Environment]::CurrentDirectory`,
+    which Windows PowerShell 5.1 -- the floor this script targets -- never
+    updates on `Set-Location`/`cd`, only `$PWD`. `-Dir .\bin` after `cd
+    .\tools` could silently install somewhere the user never asked for
+    (often wherever the PowerShell process itself started). Now anchored
+    against `$PWD.Path`, which both 5.1 and 7 keep accurate, via
+    `[System.IO.Path]::Combine` (an already-absolute `-Dir` passes through
+    unchanged).
+  - The registry-kind-preserving Path write this same issue's
+    highest-priority fix added was never actually exercised by any test:
+    every `install.ps1` test in the suite passes `-NoModifyPath` so it never
+    rewrites the real User/Machine Path on the machine running the suite --
+    which also means none of them ever reached the write.
+    `Get-PathRegistryKey` now has a test-only seam
+    (`TAN_INSTALL_TEST_PATH_REGISTRY_KEY`) that points the read/write at a
+    disposable scratch `HKCU` subkey instead of the real key, and a new test
+    exercises it end-to-end: seeds a `REG_EXPAND_SZ` Path containing a
+    `%VAR%` reference, runs the real write path, and asserts the value kind
+    and the literal `%VAR%` both survive.
+  - `Move-Item` carries the SOURCE item's ACL into `$LibDir`/`$dest` rather
+    than picking up the destination's -- `$stage`/`$tmp` are staged
+    unprivileged in the invoking user's own `%TEMP%`, so under `-System` a
+    machine-wide install under `%ProgramFiles%` was left writable by that
+    unprivileged user, a local-privilege-escalation shape (install.sh's
+    equivalent, a post-commit `chown` to root, already existed; this was the
+    missing Windows half). The commit now runs `icacls /reset` on whatever
+    was actually moved into place -- not a manual
+    `Get-Acl`/`SetAccessRuleProtection`/`Set-Acl`, since a moved item's ACEs
+    keep whatever "inherited" flag they had from the OLD parent and
+    re-enabling inheritance alone would add the new parent's ACEs alongside
+    the stale ones rather than replacing them -- so the item ends up with
+    only what its new parent grants, exactly as if created there fresh.
+    Non-fatal, like the `install.sh` `chown`. (#490)
 
 ## [0.5.1] — 2026-08-04
 

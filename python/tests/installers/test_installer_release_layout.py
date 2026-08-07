@@ -44,10 +44,16 @@ import subprocess
 import sys
 import tarfile
 import threading
+import uuid
 import zipfile
 from pathlib import Path
 
 import pytest
+
+try:
+    import winreg  # Windows-only stdlib module; used only by the registry-kind test below.
+except ImportError:
+    winreg = None
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "install.sh"
@@ -725,6 +731,115 @@ def test_ps1_temp_execute_denied_distinguishes_from_a_broken_binary(release_serv
     assert "security policy" in combined
     # Must not misattribute a host security policy to a missing dependency.
     assert "may be missing a runtime dependency" not in combined
+
+
+@windows_only
+def test_ps1_commit_resets_the_source_temp_acl_after_move(release_server, tmp_path):
+    """tan-cli#490, MAJOR 2: `Move-Item` carries the SOURCE item's ACL into
+    its new home rather than picking up the destination's -- under `-System`
+    that would leave a machine-wide install writable by whichever
+    unprivileged user ran the installer (a local-privilege-escalation
+    shape). Repro's here without needing elevation: grant `Everyone` an
+    explicit ACE on the staging %TEMP% dir (so the downloaded payload
+    inherits it, the same way it would inherit the invoking user's own
+    ownership/ACEs on a real host), then assert that ACE is gone from the
+    installed file -- only whatever `dest`'s own parent grants should remain.
+    """
+    temp_root = tmp_path / "acl-temp"
+    temp_root.mkdir()
+    grant = subprocess.run(
+        ["icacls", str(temp_root), "/grant", "Everyone:(OI)(CI)F"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert grant.returncode == 0, f"could not set up the source ACE: {grant.stdout}\n{grant.stderr}"
+
+    dest = tmp_path / "prog"
+    result = _install_ps1(
+        release_server, dest, tmp_path, "-Version", "v0.4.1",
+        extra_env={"TEMP": str(temp_root), "TMP": str(temp_root)},
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    exe = dest / "tan.exe"
+    assert exe.is_file()
+
+    acl_out = subprocess.run(
+        ["icacls", str(exe)], capture_output=True, text=True, timeout=30
+    ).stdout
+    assert "Everyone" not in acl_out, (
+        f"the installed file still carries the staging %TEMP% dir's explicit ACE:\n{acl_out}"
+    )
+
+
+@windows_only
+def test_ps1_registry_path_write_preserves_expand_sz_and_does_not_expand_vars(release_server, tmp_path):
+    """tan-cli#490's highest-priority defect, and the one no test actually
+    exercised: the fix reads the User/Machine Path UNEXPANDED
+    (`DoNotExpandEnvironmentNames`) and writes it back with the SAME
+    `RegistryValueKind` it already had, instead of round-tripping it through
+    `[Environment]::GetEnvironmentVariable`/`SetEnvironmentVariable`, which
+    would silently collapse a `REG_EXPAND_SZ` Path (one containing `%VAR%`
+    references) to a `REG_SZ` one with those references expanded and frozen.
+
+    Every OTHER test in this file passes `-NoModifyPath` (see `_install_ps1`)
+    specifically so it never touches the real User/Machine Path on the
+    machine running the suite -- which means none of them, across three
+    rounds of fixes to this same file, ever ran this code at all. This test
+    is the one that does, by pointing install.ps1's registry read/write at a
+    disposable scratch HKCU subkey instead (a seam in `Get-PathRegistryKey`,
+    `TAN_INSTALL_TEST_PATH_REGISTRY_KEY`, that exists only for this test) --
+    exercising the exact registry mechanics (open, read raw, write back with
+    the preserved kind) without permanently rewriting the real key in either
+    hive, and without needing the elevation the Machine hive would require.
+    """
+    assert winreg is not None
+    test_subkey = f"Software\\TanInstallTest\\{uuid.uuid4().hex}"
+    hkcu = winreg.HKEY_CURRENT_USER
+    seeded_path = r"%TAN_INSTALL_TEST_VAR%\bin;C:\Windows\system32"
+    key = winreg.CreateKeyEx(hkcu, test_subkey, 0, winreg.KEY_ALL_ACCESS)
+    try:
+        winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, seeded_path)
+        winreg.CloseKey(key)
+
+        dest = tmp_path / "prog"
+        # No -NoModifyPath: this is the one test that must reach the write.
+        result = _run(
+            [
+                PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", str(INSTALL_PS1), "-Dir", str(dest), "-Version", "v0.4.1",
+            ],
+            release_server,
+            tmp_path,
+            extra_env={"TAN_INSTALL_TEST_PATH_REGISTRY_KEY": test_subkey},
+        )
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert (dest / "tan.exe").is_file()
+
+        read_key = winreg.OpenKey(hkcu, test_subkey, 0, winreg.KEY_READ)
+        try:
+            new_value, new_kind = winreg.QueryValueEx(read_key, "Path")
+        finally:
+            winreg.CloseKey(read_key)
+
+        # The kind must survive the round-trip -- this is the defect itself:
+        # SetEnvironmentVariable always writes REG_SZ regardless of what was
+        # there before.
+        assert new_kind == winreg.REG_EXPAND_SZ
+        # The pre-existing %VAR% reference must still be LITERAL, not expanded
+        # to whatever TAN_INSTALL_TEST_VAR happened to resolve to (usually
+        # nothing, which GetEnvironmentVariable would have collapsed to "").
+        assert "%TAN_INSTALL_TEST_VAR%" in new_value
+        assert r"C:\Windows\system32" in new_value
+        # And the install actually did its job: $Dir was appended.
+        assert str(dest) in new_value.split(";")
+    finally:
+        try:
+            winreg.DeleteKey(hkcu, test_subkey)
+        except OSError:
+            pass
+        try:
+            winreg.DeleteKey(hkcu, "Software\\TanInstallTest")
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
