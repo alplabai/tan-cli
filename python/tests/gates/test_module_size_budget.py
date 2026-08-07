@@ -228,7 +228,81 @@ _MODULE_BUDGET: dict[str, int] = {
     # always forces the J-Link arm) and the same accept-and-ignore shape #513
     # fixed for the J-Link arm, previously still open one branch over. Net
     # growth is comments explaining both, plus one new refusal message.
-    "tan/core/flash_plan.py": 2263,
+    # 2313, not 2263, as of tan-cli#520: `plan_swd_probe`'s J-Link arm calls
+    # `validate_flow_d_preflight_args(fa, method="swd_probe")` at plan-build
+    # time (so a malformed `expect_dpidr`/`jlink_device` pairing surfaces
+    # under `--dry-run` too, mirroring Flow D's own plan-time call) and its
+    # openocd/pyocd arm gained the same accept-and-ignore refusal #513 already
+    # gave `jlink_serial` on that arm, one field over: `expect_dpidr`/
+    # `jlink_device` are JLinkExe-only concepts, so landing on openocd/pyocd
+    # with either set must refuse rather than silently drop the wrong-board
+    # guard. `validate_flow_d_preflight_args`/`flow_d_preflight_script`
+    # themselves gained an optional `method` parameter (defaulting to
+    # `FLOW_D_METHOD`, so every Flow D call site is untouched) so the refusal
+    # text names the right backend -- reused, not copied, into a second
+    # checker. Net growth is almost entirely docstring/comment explaining the
+    # reuse and the two new refusal shapes; the two new guard bodies are a
+    # handful of lines each.
+    # 2390, not 2313, after the fixture-parity finding on the same issue:
+    # `jlink_device` on `swd_probe` ALREADY meant the write's own `-device`
+    # profile (`_resolve_jlink_device`), oracle-pinned with no `expect_dpidr`
+    # anywhere near it (`tests/parity/…jlink-bin-artefact-uses-loadbin`) --
+    # pairing it with `expect_dpidr` the way Flow D's DIFFERENT `jlink_device`
+    # is paired moved that frozen fixture's answer (measured, then reverted).
+    # `validate_flow_d_preflight_args` gained a keyword-only `require_device_
+    # key` (default `True`, Flow D's shape unchanged) and `flow_d_preflight_
+    # script` a keyword-only `read_device` override so `expect_dpidr` alone
+    # arms `swd_probe`'s preflight, reusing the ALREADY-RESOLVED write device
+    # instead of a second `flash_args` key -- `FlashPlan` gained one new
+    # optional field, `preflight_device`, to carry it from `plan_swd_probe` to
+    # the caller without a second resolve. Net growth is mostly the docstring
+    # explaining why the naive pairing was wrong and what replaced it.
+    # 2410, not 2390, as of the tan-cli#520 REVIEW round (BLOCKER 1):
+    # `flow_d_preflight_script`'s caller-supplied `read_device` (`swd_probe`'s
+    # `FlashPlan.preflight_device`, i.e. `_resolve_jlink_device`'s unvalidated
+    # return value) reached a Commander script LINE with no charset guard at
+    # all -- safe while it only ever reached argv, not once it reached a
+    # line-based script an embedded newline could splice extra commands into,
+    # ahead of the wrong-board abort. Now `validate_identifier`-checked,
+    # unconditionally, regardless of which of the two sources (Flow D's own
+    # paired `jlink_device`, already checked inside `validate_flow_d_
+    # preflight_args`, or `swd_probe`'s caller-supplied override) it came
+    # from -- net growth is almost entirely the docstring/comment explaining
+    # the hole and why the fix applies to both sources rather than one.
+    # 2438, not 2410, as of the tan-cli#520 REVIEW round 2 MAJOR fix:
+    # `_resolve_jlink_device` now validates `flash_args.jlink_device` at PLAN
+    # time (`validate_identifier`, the same guard `jlink_serial` already gets
+    # a few lines below in `plan_swd_probe`) instead of relying solely on
+    # `flow_d_preflight_script`'s own write-time-only defensive check --
+    # closing a `--dry-run`-vs-real-run disagreement on the identical
+    # manifest, plus a second hole where the unvalidated value still reached
+    # `data.entries[].message` verbatim on an UNARMED (no `expect_dpidr`)
+    # write. Also adds the `SWD_PROBE_METHOD` constant (nit: a bare
+    # `"swd_probe"` literal at the one code call site that still had it,
+    # where the sibling backend already has `FLOW_D_METHOD`). Net growth is
+    # mostly the docstring explaining why plan time, not just write time.
+    # 2453, not 2438, as of the tan-cli#520 REVIEW round 3, finding 1:
+    # round 2's `validate_identifier` call lived INSIDE `_resolve_jlink_
+    # device`, which only `plan_swd_probe`'s J-Link arm ever calls -- so the
+    # openocd/pyocd arm accepted an unvalidated `jlink_device` outright, and
+    # `--dry-run` (which always forces the J-Link arm) still disagreed with a
+    # real run on an openocd-only host for the identical manifest. `plan_
+    # swd_probe` now validates `jlink_device`'s charset itself, unconditionally,
+    # before the arm split -- mirroring the `jlink_serial` guard a few lines
+    # above it -- and `_resolve_jlink_device`'s own call is kept as the
+    # documented defensive repeat rather than deleted. Net growth is the new
+    # guard plus both functions' docstrings explaining why the earlier
+    # choke point was insufficient and why the later one is now redundant
+    # but kept.
+    # 2458, not 2453, as of PR #528 review nits: the `device_precheck`
+    # guard's own comment now says "charset AND type" instead of
+    # "charset-only" -- `fa_str_checked` already refused a non-string
+    # `jlink_device` (`true`/`-8`/a list/a map) before this line was ever
+    # added, the earlier wording just undersold what the hoist actually
+    # unified across both arms; a separate stale-drift correction to a
+    # related comment in `flash_cmd.py` is its own entry below. Comment-only;
+    # net growth is the corrected explanation.
+    "tan/core/flash_plan.py": 2458,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
@@ -283,7 +357,63 @@ _MODULE_BUDGET: dict[str, int] = {
     # `GD32G553MEY7TR` is the CORRECT device, not a foreign default, and
     # substituting the SoC's generic attach profile there would have been a
     # raw memory write misreported as a successful flash.
-    "tan/commands/flash_cmd.py": 2170,
+    # 2207, not 2170, as of tan-cli#520: `_flash_entry` gains a `swd_probe`
+    # call site for the read-only DPIDR preflight, placed immediately before
+    # the one spawn (`_execute`) that can write for this entry -- there is no
+    # earlier mutating step to hoist ahead of on this path (unlike Flow D's
+    # SETOOLS auto-sign, #512), so this position already satisfies "before
+    # anything that writes or mutates" without needing a hoist of its own.
+    # `_flow_d_preflight` (the shared runner both backends now call) gained an
+    # optional `method` keyword (default `FLOW_D_METHOD`) threaded into every
+    # one of its refusal messages, replacing the hardcoded MRAM wording with
+    # backend-neutral "write"/"write to" phrasing so a `swd_probe` refusal
+    # does not claim to be aborting an MRAM write it was never going to make.
+    # Net growth is mostly comment explaining the ordering invariant and the
+    # call-site's own no-op-when-unarmed safety argument.
+    # 2217, not 2207, same round: `_flow_d_preflight`/its `flow_d_preflight_
+    # script` call site gained a keyword-only `read_device` passthrough
+    # (`plan.preflight_device`, `swd_probe`'s call site) so the preflight can
+    # use the already-resolved write device instead of a second `flash_args`
+    # key -- see the `flash_plan.py` entry above for why that key was already
+    # taken.
+    # 2290, not 2217, as of the tan-cli#520 REVIEW round: BLOCKER 2 re-gates
+    # the swd_probe preflight call site on `plan.preflight_device is not
+    # None` instead of `method == "swd_probe"` alone, so an openocd/pyocd-arm
+    # entry no longer derives Flow D's PAIRED `require_device_key` shape by
+    # accident (a working manifest used to hard-fail at write time only,
+    # disagreeing with a green `--dry-run`); minor 3 branches `_flow_d_
+    # preflight`'s refusal wording on `method` so Flow D's original "write
+    # MRAM" phrasing survives byte-for-byte instead of silently becoming
+    # backend-neutral prose nothing pins; and the review's own design point
+    # adds a NEW non-fatal `flash.dpidr-preflight-unarmed` warning `Issue`
+    # (`_Entry.preflight_unarmed`, read by `_run`'s own entry loop) for a
+    # confirmed swd_probe J-Link write that ran with no `expect_dpidr` armed,
+    # so that silent gap now has a signal without making the field mandatory.
+    # 2298, not 2290, same round: the duplicated `method == "swd_probe" and
+    # plan.preflight_device is not None` condition (nit: two copies that had
+    # to stay in lockstep) is now one local, `swd_probe_took_jlink_arm`, read
+    # by both the preflight call site and the unarmed-warning signal; the
+    # bare `"swd_probe"` literal there is now the imported `SWD_PROBE_
+    # METHOD` constant.
+    # 2312, not 2298, as of the tan-cli#520 REVIEW round 3, finding 2: the
+    # `flash.dpidr-preflight-unarmed` warning built above was appended to
+    # `issues` only -- `_run`'s caller prints only `text_lines` in the
+    # DEFAULT, non-JSON mode, so a plain `tan flash` gave no signal at all
+    # that the wrong-board guard never armed. The warning message is now
+    # built once and appended to both `text_lines` and `issues`, matching
+    # `flash.entries-skipped`'s own shape a few lines below. Net growth is
+    # the new `text_lines.append` call plus the comment explaining why the
+    # warning was JSON-only and why that mattered on the bench.
+    # 2317, not 2312, as of PR #528 review nits: the BLOCKER 2 preflight
+    # comment's "the plan-time guard just below `plan_swd_probe`'s arm split
+    # only ever checks `expect_dpidr`, never `jlink_device`, on that arm"
+    # claim went stale once `flash_plan.py`'s round-four hoist
+    # (`device_precheck`, `flash_plan.py:1225`) started checking
+    # `jlink_device`'s charset/type ahead of that same split, on both arms --
+    # corrected to say so while keeping the underlying conclusion (no
+    # preflight-only meaning for `jlink_device` on the openocd/pyocd arm)
+    # unchanged. Comment-only; net growth is the correction.
+    "tan/commands/flash_cmd.py": 2317,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -292,6 +422,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # rebase re-derived it on the merged tree rather than keeping either
     # side's number by ownership.
     "tan/planner/kconfig.py": 1643,
+
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
     # tuple that would need a fourth positional slot for
@@ -719,7 +850,28 @@ _MIRRORED = ("tan/planner/",)
 # `ast`-walk rather than summed from the two branches' comments on faith --
 # the arithmetic and the measurement disagree by one, and the measurement
 # wins.
-_FUNCTION_COUNT_BUDGET = 209
+#
+# 206, not 205, as of tan-cli#520: `flash_plan.py:flow_d_preflight_script`
+# crossed 50 lines (44 -> 51) once it gained a `read_device` keyword-only
+# parameter, doubled its docstring to explain the two ways it can now be
+# armed (Flow D's paired `jlink_device` vs `swd_probe`'s caller-supplied
+# device), and picked up one extra local (`paired_device`) to distinguish the
+# two. `_FUNCTION_WORST_BUDGET` is untouched -- 51 lines is nowhere near it.
+#
+# 207, not 206, as of the tan-cli#520 REVIEW round 2 MAJOR fix:
+# `flash_plan.py:_resolve_jlink_device` crossed 50 lines (49 -> 69) once it
+# gained the plan-time `validate_identifier` call plus the docstring
+# explaining why write-time-only validation (round 1's fix) let `--dry-run`
+# and a real run disagree on an identical hostile manifest.
+# `_FUNCTION_WORST_BUDGET` is untouched -- 69 lines is nowhere near it.
+#
+# MEASURED, not summed: the two histories above are disjoint subsets of the
+# same 203 baseline -- the `ours` side counts #485/#489/#487/#511, the
+# `theirs` side counts tan-cli#520's own two crossings -- so neither total
+# survives rebasing #520's work onto the `dev` tip that now carries all of
+# the former. Re-walked with the gate's own `ast` logic (span > 50 over all
+# of `tan/`, planner included) against this exact tree.
+_FUNCTION_COUNT_BUDGET = 211
 _FUNCTION_WORST_BUDGET = 707
 
 

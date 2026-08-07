@@ -66,6 +66,7 @@ from tan.core.flash_plan import (
     FLOW_D_METHOD,
     PIPE,
     SKIP,
+    SWD_PROBE_METHOD,
     FlashInputs,
     FlashPlan,
     FlashPlanError,
@@ -74,6 +75,7 @@ from tan.core.flash_plan import (
     ManifestError,
     YOCTO_WIC_METHODS,
     _DEV_ROOT,
+    _fa_has_key,
     backend_for,
     display_argv,
     fa_bool_checked,
@@ -142,6 +144,14 @@ class _Entry:
     status: str
     rc: int
     message: str
+    #: tan-cli#520 REVIEW (design point): set on a CONFIRMED, real, `swd_probe`
+    #: J-Link write whose `flash_args.expect_dpidr` was absent -- i.e. the
+    #: wrong-board preflight genuinely did not run for this write, not merely
+    #: that it ran and passed. `_run` reads this to append its own
+    #: `flash.dpidr-preflight-unarmed` warning `Issue` alongside this entry's
+    #: `ok` one. NOT part of the envelope contract -- `as_dict()` never emits
+    #: it, only `_run`'s own `issues` list reads it.
+    preflight_unarmed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -1156,8 +1166,18 @@ def _flash_entry(
     kind, entry_id = target.kind, target.id
     lines: list[str] = []
 
-    def entry(method: str | None, status: str, rc: int, message: str) -> _Entry:
-        return _Entry(kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message)
+    def entry(
+        method: str | None,
+        status: str,
+        rc: int,
+        message: str,
+        *,
+        preflight_unarmed: bool = False,
+    ) -> _Entry:
+        return _Entry(
+            kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
+            preflight_unarmed=preflight_unarmed,
+        )
 
     # No flash_method -> silent skip. A helper carrying `update_channel` instead
     # (the AEN cc3501e_otp, programmed over the bridge SPI) gets a clearer reason
@@ -1461,6 +1481,77 @@ def _flash_entry(
                 lines.append(f"  FAIL: {refusal}")
                 return 1, entry(method, "failed", 1, refusal), lines
 
+    # tan-cli#520: `swd_probe`'s J-Link arm gets the identical read-only DPIDR
+    # preflight Flow D has via #512 -- reusing `_flow_d_preflight` (the same
+    # runner, `method="swd_probe"` so a refusal names the right backend)
+    # rather than growing a second implementation. Placed HERE, immediately
+    # before the one spawn (`_execute`, just below) that can ever write for
+    # this entry: unlike Flow D there is no earlier mutating step (no SETOOLS
+    # auto-sign) to hoist ahead of on this path, so this position already
+    # satisfies #512's "before anything that writes or mutates" rule -- it is
+    # not the ordering bug #512 fixed, because that bug was specifically about
+    # a mutating step that does not exist here. Reached only on a genuine,
+    # non-dry-run write: the `plan.planning_only or ctx.dry_run` return above
+    # already exits for a preview (`plan_swd_probe` never sets
+    # `planning_only`, so a real run always reaches this line unconfirmed --
+    # `swd_probe` targets an external helper MCU's own flash, not persistent
+    # SoC MRAM, and has no `flash_args.confirm` gate to hide behind).
+    #
+    # Gated on `plan.preflight_device is not None` -- NOT merely
+    # `method == "swd_probe"` (tan-cli#520 REVIEW, BLOCKER 2). `preflight_
+    # device` is set ONLY by `plan_swd_probe`'s J-Link branch; it is `None`
+    # for the openocd/pyocd arm. Calling `_flow_d_preflight` unconditionally
+    # for every `swd_probe` entry passed `read_device=None` on THAT arm,
+    # which `flow_d_preflight_script` reads as "derive `require_device_key`
+    # from `read_device is None`" -- i.e. `True`, Flow D's PAIRED shape -- so
+    # a manifest that legitimately sets `flash_args.jlink_device` (e.g. as a
+    # J-Link fallback profile) while `flash_args.use_openocd: true` forces
+    # this arm for real got refused at WRITE time for an absent
+    # `expect_dpidr` it was never asked to pair, even though `--dry-run` on
+    # the exact same manifest stayed green (the plan-time guard just below
+    # `plan_swd_probe`'s arm split checks `expect_dpidr` on that arm, and
+    # only that -- `jlink_device` has no preflight-only meaning on the
+    # openocd/pyocd arm, since it is not paired with `expect_dpidr` there.
+    # This no longer means "never checked" though: the round-four hoist
+    # (`flash_plan.py:1225`, ahead of this same split) added a `jlink_device`
+    # charset-and-type guard that runs unconditionally on BOTH arms -- a
+    # shape check, not a preflight pairing, so it does not change the
+    # conclusion here). Gating on `preflight_device`
+    # instead means this call never runs at all for that arm, matching
+    # `plan_swd_probe`'s own plan-time guard exactly: `expect_dpidr` set on
+    # the openocd/pyocd arm still refuses (that check, unaffected by this
+    # fix); `expect_dpidr` absent there now stays a true no-op, both under
+    # `--dry-run` and for real.
+    # tan-cli#520 REVIEW, design point: `expect_dpidr` stays OPTIONAL (making
+    # it required would refuse every shipped preset -- none carries a SW-DP
+    # ID today, and tan is forbidden from deriving one, the same I-26
+    # reasoning `_resolve_jlink_device` already documents), but that leaves a
+    # SILENT gap: a confirmed J-Link `swd_probe` write with no `expect_dpidr`
+    # runs with no wrong-board guard and no signal that it did. Recorded
+    # here, before the preflight call, and surfaced as a non-fatal warning
+    # `Issue` on the eventual SUCCESS return below (never on a refusal --
+    # armed-and-mismatched already gets its own `flash.entry-failed`) so a
+    # `--format json` consumer can tell "this write had no wrong-board check"
+    # from an ordinary clean flash.
+    # tan-cli#520 REVIEW round 2, nit: this ONE condition decides both
+    # whether the preflight call below runs AND whether an unarmed write can
+    # warn -- hoisted to a single local so the two can never drift apart (two
+    # copies of "did the J-Link arm actually run" silently going out of sync
+    # would let the warning fire on an entry whose preflight DID run, or stay
+    # silent on one where it did not).
+    swd_probe_took_jlink_arm = method == SWD_PROBE_METHOD and plan.preflight_device is not None
+    swd_probe_preflight_unarmed = swd_probe_took_jlink_arm and not _fa_has_key(
+        flash_args, "expect_dpidr"
+    )
+    if swd_probe_took_jlink_arm:
+        refusal = _flow_d_preflight(
+            inputs, ctx.venv_bin, ctx.workspace, method=method,
+            read_device=plan.preflight_device,
+        )
+        if refusal is not None:
+            lines.append(f"  FAIL: {refusal}")
+            return 1, entry(method, "failed", 1, refusal), lines
+
     outcome = _execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace)
     if outcome.success:
         # tan-cli#373: `setools_note` is set here only when THIS run's own
@@ -1471,18 +1562,39 @@ def _flash_entry(
         # `unresolved_message` on a failure.
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         lines.append(f"  ok: {ok_message}")
-        return 0, entry(method, "ok", 0, ok_message), lines
+        return (
+            0,
+            entry(method, "ok", 0, ok_message, preflight_unarmed=swd_probe_preflight_unarmed),
+            lines,
+        )
     msg = _execute_message(outcome, method, entry_id)
     lines.append(f"  FAIL: {msg}")
     return 1, entry(method, "failed", 1, msg), lines
 
 
 def _flow_d_preflight(
-    inputs: FlashInputs, venv_bin: Path | None = None, workspace: str | None = None
+    inputs: FlashInputs,
+    venv_bin: Path | None = None,
+    workspace: str | None = None,
+    method: str = FLOW_D_METHOD,
+    *,
+    read_device: str | None = None,
 ) -> str | None:
     """Connect read-only with the manifest's ATTACH device profile and confirm
-    the SW-DP IDR before any MRAM write. Returns a refusal message, or `None`
+    the SW-DP IDR before any write. Returns a refusal message, or `None`
     to proceed.
+
+    Shared by Flow D (`alif_mram_jlink`, an MRAM write) and `swd_probe`'s
+    J-Link arm (a GD32 bridge write; tan-cli#520) -- `method` selects which
+    backend a refusal names, and both `method` and `read_device` are threaded
+    straight through to `flow_d_preflight_script`/`validate_flow_d_
+    preflight_args`, the ONE definition of this preflight's shape. `method`
+    defaults to `FLOW_D_METHOD` and `read_device` to `None` so every existing
+    Flow D call site is unaffected. `read_device` (`swd_probe` only): the
+    ALREADY-RESOLVED write device (`FlashPlan.preflight_device`) -- passing it
+    arms the preflight off `flash_args.expect_dpidr` ALONE, since `swd_probe`
+    has no separate preflight-only device field the way Flow D's `jlink_
+    device` is (see `validate_flow_d_preflight_args`'s `require_device_key`).
 
     ABSENT-BY-DEFAULT, on purpose: a manifest that declares BOTH no `expect_dpidr`
     AND no attach-profile `jlink_device` gets no preflight, because tan has no
@@ -1505,12 +1617,20 @@ def _flow_d_preflight(
     restores, not just documents.
     """
     try:
-        prepared = flow_d_preflight_script(inputs)
+        prepared = flow_d_preflight_script(inputs, method, read_device=read_device)
     except FlashPlanError as err:
         return str(err)
     if prepared is None:
         return None
     script, expected = prepared
+    # tan-cli#520 REVIEW, minor 3: Flow D's refusal text named its write
+    # target explicitly ("write MRAM") before this function served a second
+    # backend; a bare generalisation to backend-neutral "write" would have
+    # SILENTLY changed wording a bench operator reads, with nothing pinning
+    # the string to catch it. Branched on `method` instead, so Flow D's exact
+    # original wording is byte-for-byte unchanged and `swd_probe` gets its
+    # own correct noun (it writes the GD32 bridge's own flash, not MRAM).
+    verb = "write MRAM" if method == FLOW_D_METHOD else "write"
     binary = next((n for n in ("JLinkExe", "JLink") if _tool_available(n, venv_bin)), None)
     if binary is None:
         # Unreachable via `_flash_entry`: the tool gate already required
@@ -1518,7 +1638,7 @@ def _flow_d_preflight(
         # same as the probe above), and kept because the alternative to a
         # refusal here would be proceeding to the WRITE with the identity
         # unconfirmed.
-        return f"{FLOW_D_METHOD}: no J-Link binary on PATH or in the workspace venv for the DPIDR preflight."
+        return f"{method}: no J-Link binary on PATH or in the workspace venv for the DPIDR preflight."
     resolved = _programs_resolved_in_venv([binary], venv_bin)
     on_path_bin = venv_bin if resolved != [binary] else None
     # No `-ExitOnError`: a failed connect is the SIGNAL being read here, not an
@@ -1530,8 +1650,8 @@ def _flow_d_preflight(
         return None
     if not banner.strip():
         return (
-            f"{FLOW_D_METHOD}: the read-only DPIDR preflight produced no output "
-            f"({outcome.stderr.strip() or 'probe silent'}); refusing to write MRAM "
+            f"{method}: the read-only DPIDR preflight produced no output "
+            f"({outcome.stderr.strip() or 'probe silent'}); refusing to {verb} "
             "without confirming which board is attached."
         )
     # `expected` is confirmed absent (checked above) -- but "absent" covers two
@@ -1552,8 +1672,8 @@ def _flow_d_preflight(
     # guessing the wiring is innocent.
     if not _dp_id_reported(banner) and _connect_failed_outright(banner):
         return (
-            f"{FLOW_D_METHOD}: the read-only DPIDR preflight's connect reported no "
-            f"SW-DP ID at all (expected {expected}) -- refusing to write MRAM to an "
+            f"{method}: the read-only DPIDR preflight's connect reported no "
+            f"SW-DP ID at all (expected {expected}) -- refusing to {verb} to an "
             "unidentified board. This looks like the J-Link probe still "
             "re-enumerating after a previous JLinkExe session closed, not a wiring "
             "or probe-selection problem -- wait a couple of seconds and retry."
@@ -1586,8 +1706,8 @@ def _flow_d_preflight(
         # matched on this same banner, so it cannot fail to find a value here.
         actual = _dp_id_value(banner) or "an ID this preflight could not parse back out"
         return (
-            f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
-            f"-- the probe reported {actual} instead. Refusing to write MRAM to an "
+            f"{method}: expected SW-DP IDR {expected} was not reported on connect "
+            f"-- the probe reported {actual} instead. Refusing to {verb} to an "
             "unidentified board. Check the wiring and "
             "which board is physically attached -- do NOT treat pinning "
             "flash_args.jlink_serial alone as the fix: some OEM J-Link probes share a "
@@ -1602,8 +1722,8 @@ def _flow_d_preflight(
     # `jlink_serial` pinning a probe IS the actual fix here when it is unset
     # on a multi-probe host (tan-cli#353), so the original sentence survives.
     return (
-        f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
-        "-- refusing to write MRAM to an unidentified board. Check the probe "
+        f"{method}: expected SW-DP IDR {expected} was not reported on connect "
+        f"-- refusing to {verb} to an unidentified board. Check the probe "
         "selection (flash_args.jlink_serial) and the wiring. If jlink_serial is "
         "unset the script selects NO probe, which on a host carrying more than "
         "one J-Link cannot connect at all (tan-cli#353)."
@@ -1936,6 +2056,33 @@ def _run(
         if entry.status == "planned":
             # `status` alone is prose no automated consumer parses.
             issues.append(Issue("flash.confirm-required", "warning", entry.message))
+        if entry.preflight_unarmed:
+            # tan-cli#520 REVIEW, design point: `expect_dpidr` stays optional
+            # (no shipped preset carries a SW-DP ID for tan to require), but a
+            # confirmed `swd_probe` J-Link write that ran with none armed had
+            # NO signal at all that its wrong-board guard never ran -- this
+            # closes that without making the field mandatory.
+            #
+            # tan-cli#520 REVIEW round 3, finding 2: appended to `text_lines`
+            # too, not only `issues` -- `_run`'s caller prints only
+            # `text_lines` in the DEFAULT, non-JSON mode (`--format json` is
+            # opt-in), so this warning used to be invisible on a plain
+            # `tan flash`: the exact bench operator this preflight exists to
+            # protect (a cloned probe serial reaching the wrong board) saw a
+            # bare `ok: swd_probe[...] flashed via J-Link` with no hint the
+            # wrong-board guard never armed. Every other `flash.*` issue is
+            # already text-visible this way -- `flash.confirm-required` rides
+            # the entry's own message into `lines` above,
+            # `flash.entries-skipped`/`flash.nothing-matched` append to
+            # `text_lines` explicitly below -- this one was the outlier.
+            message = (
+                f"{entry.id}: swd_probe wrote with no flash_args.expect_dpidr set -- "
+                "the read-only SW-DP ID preflight did not run, so a cloned/shared "
+                "probe serial could still have reached the wrong board. Set "
+                "flash_args.expect_dpidr to arm it."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.dpidr-preflight-unarmed", "warning", message))
         entries.append(entry.as_dict())
         if rc < 0:
             continue  # silently skipped -- not counted, does not set flashed_anything

@@ -1540,6 +1540,453 @@ def test_swd_probe_openocd_elf_message_omits_an_address_the_tool_never_received(
     assert "0x08000000" not in plan.ok_message
 
 
+# ── swd_probe J-Link DPIDR preflight (tan-cli#520) ───────────────────────────
+#
+# swd_probe flashes an external helper MCU (the GD32G553 supervisor) over its
+# own SWD header, and -- like Flow D's MRAM write -- had NO wrong-board guard
+# at all: on the alplab-gw bench, serial `603000869` answers BOTH a real
+# E1M-AEN801 J-Link (SW-DP `0x4C013477`) and a GD32 bridge probe on a
+# different board entirely (SW-DP `0x0BE12477`), so `jlink_serial` alone
+# cannot disambiguate them even when correctly pinned (#513). These reuse
+# Flow D's own `validate_flow_d_preflight_args`/`flow_d_preflight_script`
+# (`method="swd_probe"`, `require_device_key=False` -- `swd_probe`'s
+# `jlink_device` already means the write's OWN `-device` profile, oracle-
+# pinned with no `expect_dpidr` anywhere near it, so it cannot ALSO be
+# Flow D's paired preflight-only read-device key) rather than growing a
+# second checker.
+
+
+def test_swd_probe_jlink_device_alone_still_reaches_the_write_no_preflight_required():
+    """The regression this design decision exists to prevent: `jlink_device`
+    on `swd_probe` already means the write's own `-device` profile
+    (oracle-pinned: `tests/parity/test_flash_oracle_parity.py`'s
+    `jlink-bin-artefact-uses-loadbin` sets `jlink_device: NRF_DUMMY` with no
+    `expect_dpidr` at all and expects `ok: true`/no refusal). Naively pairing
+    `expect_dpidr` with `jlink_device` the way Flow D pairs its OWN (distinct)
+    `jlink_device` would retroactively demand a preflight of every manifest
+    that only ever set the write device -- this proves it still does not."""
+    plan = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="NRF_DUMMY"), lambda name: name == "JLinkExe"
+    )
+    assert plan.argv[0] == "JLinkExe"
+    assert plan.preflight_device == "NRF_DUMMY"
+
+
+@pytest.mark.parametrize("bad_value", ["", None], ids=["empty-string", "null"])
+def test_swd_probe_expect_dpidr_present_but_null_or_empty_refuses(bad_value):
+    """Mirrors Flow D's own `test_flow_d_preflight_present_but_null_or_empty_
+    expect_dpidr_refuses`: a PRESENT `expect_dpidr` that resolves to `None`
+    must refuse loudly rather than silently falling through to "no preflight
+    armed" -- the one guard standing between a wrong-board attach and a GD32
+    write. Fails against the pre-fix source (measured: `expect_dpidr` was not
+    read by `plan_swd_probe` at all, so this raised nothing)."""
+    inp = _swd_inputs(expect_dpidr=bad_value)
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert "expect_dpidr" in str(raised.value)
+
+
+def test_swd_probe_expect_dpidr_is_refused_on_the_openocd_arm():
+    """The same accept-and-ignore shape #513 closed for `jlink_serial`, one
+    field over: the DPIDR read is a JLinkExe-only primitive, so a manifest
+    naming `expect_dpidr` that lands on the openocd/pyocd arm must refuse,
+    not silently drop the wrong-board guard. Fails against the pre-fix source
+    (measured: `expect_dpidr` was not read anywhere in `plan_swd_probe`, so
+    this built an openocd plan with `ok: true` and no preflight ever armed)."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", expect_dpidr="0x4C013477")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert "expect_dpidr" in str(raised.value)
+    assert "openocd/pyocd" in str(raised.value)
+
+
+def test_swd_probe_no_expect_dpidr_still_reaches_the_openocd_arm_unaffected():
+    """The unaffected case, mirroring `test_swd_probe_no_serial_still_
+    reaches_the_openocd_arm_unaffected`: a manifest naming no `expect_dpidr`
+    at all keeps working on the openocd/pyocd arm exactly as before."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553")
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert plan.argv[0] == "openocd"
+
+
+def test_swd_probe_armed_preflight_reuses_the_resolved_write_device():
+    """`flow_d_preflight_script`'s `read_device` override, exercised through
+    the public seam `plan_swd_probe` writes into (`FlashPlan.preflight_
+    device`) -- the preflight's own connect script must use the SAME device
+    the write already resolved, not a second manifest field."""
+    inp = _swd_inputs(expect_dpidr="0x4C013477", jlink_device="GD32G553MEY7TR")
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert plan.preflight_device == "GD32G553MEY7TR"
+    script, expected = flash_plan.flow_d_preflight_script(
+        inp, "swd_probe", read_device=plan.preflight_device
+    )
+    assert expected == "0x4C013477"
+    assert "device GD32G553MEY7TR" in script
+    # Read-only: no write command anywhere in the preflight script.
+    assert "loadfile" not in script
+    assert "loadbin" not in script
+    assert "\nr\n" not in script
+    assert "\nhalt" not in script
+
+
+def test_swd_probe_wrong_board_refuses_before_any_write(tmp_path, monkeypatch):
+    """tan-cli#520, the headline defect. A CONFIRMED, non-dry-run `swd_probe`
+    entry whose read-only DPIDR preflight catches a wrong-board mismatch must
+    abort BEFORE the real GD32 bridge write -- reusing Flow D's own
+    `_flow_d_preflight` runner (`method="swd_probe"`), the same fix #512 gave
+    Flow D's MRAM write.
+
+    `_spawn_jlink` is the ONE spawn site the preflight probe and the eventual
+    real write share -- stubbed here to a canned "a different board answered"
+    banner (the GD32 bridge's real measured SW-DP ID, `0x0BE12477`, versus an
+    `expect_dpidr` deliberately set to the AEN E8's, `0x4C013477`) and to
+    RECORD every script it is asked to run. The load-bearing assertion is on
+    that record, not just the exit code: exactly ONE JLinkExe session must
+    run (the read-only preflight, `si SWD`/`connect`/`exit`, no `loadfile`/
+    `loadbin`), never a second one carrying the write's own script.
+
+    Verified to fail against the pre-fix source (measured: with no preflight
+    wired for `swd_probe` at all, `_spawn_jlink` is called exactly once -- but
+    with the WRITE script, `loadfile ... \\nr\\ng\\nqc`, not the read-only
+    one -- and reports `status: failed` because the STUBBED spawn always
+    returns `success=False`, not because any preflight ran; the load-bearing
+    proof is the recorded script's own content, not the status/exit code,
+    which is `failed`/1 either way here)."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe,
+   flash_args: {jlink_device: GD32G553MEY7TR, expect_dpidr: "0x4C013477",
+                base: "0x08000000"}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+
+    calls: list[str] = []
+
+    def _fake_spawn_jlink(argv, script, capture, timeout, venv_bin=None, workspace=None):
+        calls.append(script)
+        return flash_cmd._Outcome(
+            success=False,
+            stdout="Connecting to target via SWD\nFound SW-DP with ID 0x0BE12477\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _fake_spawn_jlink)
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 1
+    entry = data["entries"][0]
+    assert entry["status"] == "failed"
+    assert "expected SW-DP IDR 0x4C013477" in entry["message"], entry["message"]
+    assert "0x0BE12477" in entry["message"], entry["message"]
+    assert any(i.code == "flash.entry-failed" for i in issues)
+    # The load-bearing proof that nothing was written: exactly one JLinkExe
+    # session ran at all (the preflight), and its script never carries a
+    # write command.
+    assert len(calls) == 1, calls
+    assert "loadfile" not in calls[0]
+    assert "loadbin" not in calls[0]
+    assert calls[0].splitlines()[0] == "si SWD"
+
+
+def test_swd_probe_jlink_device_charset_guarded_at_plan_time():
+    """tan-cli#520 REVIEW round 2, MAJOR. `_resolve_jlink_device` used to
+    return `flash_args.jlink_device` VERBATIM (`fa_str_checked`, no charset
+    guard -- safe while the value only ever reached ARGV, a list element,
+    newline-inert). Round 1's fix validated it only inside `flow_d_preflight_
+    script`'s CONSUMER, at real-write time -- so `plan_swd_probe` itself
+    (called for `--dry-run` too) still built a plan with the hostile value
+    uninspected. Now `_resolve_jlink_device` validates it directly, at PLAN
+    time, the same place `jlink_serial` already is (a few lines below in the
+    same function) -- so this refuses at the FIRST point `plan_swd_probe` can
+    reach it, not several call-frames downstream.
+
+    Fails against the round-1 source a90e4df (measured: `plan_swd_probe`
+    itself raised nothing here -- the hostile value only got caught later,
+    inside `flow_d_preflight_script`, and only when THAT function actually
+    ran, which `--dry-run` never reaches)."""
+    hostile = "GD32G553MEY7TR\nloadfile /tmp/evil.bin 0x08000000\nr\ng"
+    inp = _swd_inputs(jlink_device=hostile, expect_dpidr="0x0BE12477")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert "jlink_device" in str(raised.value)
+
+
+def test_swd_probe_hostile_jlink_device_refuses_identically_dry_run_and_real():
+    """tan-cli#520 REVIEW round 2, MAJOR's own headline measurement: the SAME
+    manifest must not get two different verdicts depending on `--dry-run`.
+    `--dry-run` always forces the J-Link arm (`plan_swd_probe`'s own
+    bypass), so BOTH modes now reach the same plan-time guard and refuse for
+    the same reason.
+
+    Fails against the round-1 source a90e4df (measured: `dry_run=True`
+    returned a plan with `planning_only=True` and no refusal at all --
+    `flow_d_preflight_script`, the only validator that round added, is never
+    called under `--dry-run`; `dry_run=False` on a J-Link host refused only
+    once execution reached the write-time preflight consumer)."""
+    hostile = "GD32G553MEY7TR\nloadfile /tmp/evil.bin 0x08000000\nr\ng"
+    args = {"jlink_device": hostile, "expect_dpidr": "0x0BE12477", "base": "0x08000000"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="b", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="b", sku="S", dry_run=False)
+    with pytest.raises(FlashPlanError) as dry_raised:
+        flash_plan.plan_swd_probe(dry, lambda name: name == "JLinkExe")
+    with pytest.raises(FlashPlanError) as real_raised:
+        flash_plan.plan_swd_probe(real, lambda name: name == "JLinkExe")
+    assert "jlink_device" in str(dry_raised.value)
+    assert "jlink_device" in str(real_raised.value)
+    assert str(dry_raised.value) == str(real_raised.value)
+
+
+def test_swd_probe_openocd_arm_hostile_jlink_device_refuses_identically_dry_run_and_real():
+    """tan-cli#520 REVIEW round 3, finding 1. The test just above forces the
+    J-Link arm on BOTH calls (`which()` always reports `JLinkExe` present),
+    so it never exercises the openocd/pyocd arm at all -- which is exactly
+    why the charset guard living only inside `_resolve_jlink_device` (called
+    from the J-Link arm alone) went uncaught: on a host where `which()` finds
+    only `openocd`, a real run took the openocd/pyocd arm, which never calls
+    `_resolve_jlink_device` and never reads `jlink_device` at all, while
+    `--dry-run` (which always forces the J-Link arm regardless of `which()`)
+    still reached the guard and refused. Same manifest, two different
+    verdicts depending on host tooling and `--dry-run` alone.
+
+    `which` here reports NO J-Link binary present (only `openocd`), so the
+    real call is forced onto the openocd/pyocd arm while `--dry-run` still
+    forces the J-Link arm on its own -- the two calls below therefore
+    exercise the two DIFFERENT arms of the split, and both must refuse for
+    the identical reason now that the guard is hoisted above it.
+
+    Fails against the round-2 source (measured: `dry_run=True` raised
+    `FlashPlanError` naming `jlink_device`; `dry_run=False` with only
+    `openocd` on `PATH` returned a plan with `ok_message` reading `swd_probe
+    [c]: gd32g553 flashed via openocd @ 0x08000000`, the hostile value never
+    inspected)."""
+    hostile = "GD32G553MEY7TR\nloadfile /tmp/evil.bin 0x08000000\nr\ng"
+    args = {"jlink_device": hostile, "interface": "cmsis-dap", "target": "gd32g553"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="c", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="c", sku="S", dry_run=False)
+    which_openocd_only = lambda name: name == "openocd"  # noqa: E731
+    with pytest.raises(FlashPlanError) as dry_raised:
+        flash_plan.plan_swd_probe(dry, which_openocd_only)
+    with pytest.raises(FlashPlanError) as real_raised:
+        flash_plan.plan_swd_probe(real, which_openocd_only)
+    assert "jlink_device" in str(dry_raised.value)
+    assert "jlink_device" in str(real_raised.value)
+    assert str(dry_raised.value) == str(real_raised.value)
+
+
+def test_swd_probe_preflight_read_device_defensive_guard_still_independent():
+    """The BELT-AND-BRACES half of BLOCKER 1 (round 1's fix, kept per the
+    reviewer's own note: "keep :2331 as the defensive repeat its own comment
+    already calls it") -- exercised directly against `flow_d_preflight_
+    script`, bypassing `plan_swd_probe` entirely, so this proves the second
+    layer independently refuses even for a caller that does not go through
+    the now-guarded `_resolve_jlink_device` at all."""
+    hostile = "GD32G553MEY7TR\nloadfile /tmp/evil.bin 0x08000000\nr\ng"
+    inp = _swd_inputs(expect_dpidr="0x0BE12477")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.flow_d_preflight_script(inp, "swd_probe", read_device=hostile)
+    assert "jlink_device" in str(raised.value)
+
+
+def test_swd_probe_openocd_arm_with_jlink_device_set_still_writes_with_no_expect_dpidr(
+    tmp_path, monkeypatch
+):
+    """tan-cli#520 REVIEW, BLOCKER 2. A manifest that sets `flash_args.
+    jlink_device` (e.g. as a J-Link fallback profile) while `flash_args.
+    use_openocd: true` forces the openocd arm for real must still flash
+    successfully when `expect_dpidr` is absent -- the SAME manifest already
+    reported `ok` under `--dry-run` (`plan_swd_probe`'s own plan-time guard
+    only ever checks `expect_dpidr` on this arm, never `jlink_device`), and a
+    write-time-only refusal here would be `--dry-run` and a real run
+    disagreeing on the identical input.
+
+    Fails against the pre-fix source (measured: gating the preflight call on
+    `method == "swd_probe"` alone passed `read_device=None` here, which
+    `flow_d_preflight_script` read as "derive `require_device_key` from
+    `read_device is None`" -- i.e. Flow D's PAIRED shape -- so `jlink_device`
+    present without `expect_dpidr` refused at write time with `flash.entry-
+    failed`, `exit 1`)."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe,
+   flash_args: {jlink_device: GD32G553MEY7TR, use_openocd: true,
+                interface: cmsis-dap, target: gd32g553, base: "0x08000000"}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    openocd_path = fake_tools / ("openocd.exe" if os.name == "nt" else "openocd")
+    openocd_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(openocd_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flash_cmd, "_spawn", lambda *_a, **_k: flash_cmd._Outcome(success=True, stdout="", stderr="")
+    )
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    assert "flashed via openocd" in entry["message"]
+    assert not any(i.code == "flash.entry-failed" for i in issues)
+    # The design-point warning (unarmed preflight) is scoped to the J-Link
+    # arm only (tan-cli#520 REVIEW) -- this run never took it at all, so no
+    # warning fires either, matching #519's note that the durable multi-probe
+    # answer for openocd differs (a USB-path selector, not `expect_dpidr`).
+    assert not any(i.code == "flash.dpidr-preflight-unarmed" for i in issues)
+
+
+def test_swd_probe_jlink_write_with_no_expect_dpidr_warns_unarmed(tmp_path, monkeypatch):
+    """tan-cli#520 REVIEW, the design point: `expect_dpidr` stays optional
+    (no shipped preset carries a SW-DP ID for tan to require), but a
+    confirmed real `swd_probe` J-Link write that ran with none set used to
+    give no signal at all that its wrong-board guard never ran. A
+    `flash.dpidr-preflight-unarmed` warning now fires on exactly that shape:
+    a successful J-Link write, `expect_dpidr` absent.
+
+    Fails against the pre-fix source (measured: no such code exists at all
+    before this review round, so this assertion cannot pass against it)."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe, flash_args: {base: "0x08000000"}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flash_cmd, "_spawn", lambda *_a, **_k: flash_cmd._Outcome(success=True, stdout="", stderr="")
+    )
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    warnings = [i for i in issues if i.code == "flash.dpidr-preflight-unarmed"]
+    assert len(warnings) == 1, issues
+    assert warnings[0].severity == "warning"
+    assert "expect_dpidr" in warnings[0].message
+
+
+def test_swd_probe_jlink_write_with_no_expect_dpidr_warns_unarmed_in_text_output(
+    tmp_path, monkeypatch
+):
+    """tan-cli#520 REVIEW round 3, finding 2. The test just above proves the
+    warning reaches `issues` (`--format json`); this proves it ALSO reaches
+    `text_lines`, which is ALL that prints in `tan`'s DEFAULT, non-JSON mode.
+    Before this fix, a plain `tan flash` against the identical manifest
+    printed only `ok: swd_probe[...] flashed via J-Link @ ...` -- no hint
+    the wrong-board guard never armed, for the exact bench operator (a
+    cloned probe serial reaching the wrong board) who most needs the signal
+    and does not pass `--format json`.
+
+    Fails against the pre-fix source (measured: `flash.dpidr-preflight-
+    unarmed` reached `issues` but `_run`'s `text_lines` carried no mention of
+    `expect_dpidr` at all -- only the entry's own `ok:` line and the trailing
+    `flash: 0 failure(s).` summary)."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe, flash_args: {base: "0x08000000"}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flash_cmd, "_spawn", lambda *_a, **_k: flash_cmd._Outcome(success=True, stdout="", stderr="")
+    )
+
+    exit_code, data, issues, lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    assert any(i.code == "flash.dpidr-preflight-unarmed" for i in issues)
+    assert any("expect_dpidr" in line for line in lines), lines
+
+
 # ── yocto_wic target/compress validation (tan-cli#487) ──────────────────────
 
 

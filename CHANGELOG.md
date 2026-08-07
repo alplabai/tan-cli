@@ -177,6 +177,30 @@ All notable changes to `tan` are documented here. Format follows
   gets on Flow D. The openocd/pyocd arm has no probe-serial selector of its
   own, so a manifest naming `jlink_serial` now refuses explicitly on that arm
   instead of silently dropping the field. (#513)
+- **`swd_probe` had no wrong-board guard at all, on the one backend most
+  likely to run on a multi-probe host.** #513 made the J-Link arm honour
+  `jlink_serial`, but `JLinkExe` selects a probe only by serial, and an
+  OEM-cloned serial shared by two physical probes cannot be disambiguated by
+  serial alone even when pinned. The J-Link arm now gets the identical
+  read-only DPIDR preflight #512 gave Flow D's MRAM write, reusing (not
+  copying) `validate_flow_d_preflight_args`/`flow_d_preflight_script`:
+  `flash_args.expect_dpidr` arms it, and a mismatch refuses before any write.
+  Armed by `expect_dpidr` alone on this backend, not paired with
+  `jlink_device` the way Flow D's is -- `swd_probe`'s `jlink_device` already
+  names the write's own `-device` profile, a different field with a
+  different job (and is now itself validated at PLAN time, ahead of the
+  J-Link-vs-openocd/pyocd arm split rather than only inside the arm that
+  reads it, so a hostile value gets the same verdict under `--dry-run` and
+  for real regardless of which arm a given host takes, and can no longer
+  forge lines in `data.entries[].message`). The openocd/pyocd arm gets the
+  same accept-and-ignore refusal `jlink_serial` already has there:
+  `expect_dpidr` is a JLinkExe-only concept, so a manifest naming it that
+  lands on that arm now refuses explicitly instead of silently dropping the
+  guard. `expect_dpidr` stays optional -- no shipped preset carries a SW-DP
+  ID for tan to require -- but a confirmed J-Link write with none set now
+  surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
+  `--format json` and tan's default text output, so that silent gap has a
+  signal without making the field mandatory. (#520)
 
 ## [0.5.1] — 2026-08-04
 

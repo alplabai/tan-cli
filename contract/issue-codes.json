@@ -518,6 +518,14 @@
       "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.dpidr-preflight-unarmed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#520's review round (design point): swd_probe's J-Link arm read-only DPIDR preflight (flash_args.expect_dpidr) stays OPTIONAL -- no shipped alp-sdk preset carries a SW-DP ID for tan to require, and tan is forbidden from deriving one (the I-26 reasoning _resolve_jlink_device documents) -- but a confirmed, real swd_probe J-Link write with expect_dpidr absent used to run with no wrong-board guard AND no signal that it had none. This warning fires on exactly that case (real write, J-Link arm taken, expect_dpidr absent), letting a --format json consumer tell an unguarded write from an ordinary clean flash without making the field mandatory. Deliberately a warning, not an error: the write itself is not wrong, only unconfirmed as to which board received it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "flash.entry-failed",
       "status": "reserved",
       "severity": "error",
