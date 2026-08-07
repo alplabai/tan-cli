@@ -163,7 +163,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # explaining why its own copy of the guard stays (per-condition reporting)
     # even though the crash it originally cited is now closed one call site
     # earlier.
-    "tan/commands/doctor_cmd.py": 3588,
+    # 3600, not 3588, as of tan-cli#488 ROUND 5: rounds 3/4 guarded
+    # `sys.stdin` in `fix_suppressed_issue`'s local tty check but left the
+    # NEXT operand of the same `and` chain, `sys.stderr`, unguarded -- a live
+    # non-tty stdin with a detached stderr still raised the identical
+    # `AttributeError`. `fix_suppressed_issue` gained the matching
+    # `sys.stderr is not None` guard plus a docstring paragraph explaining the
+    # recurrence.
+    "tan/commands/doctor_cmd.py": 3600,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -496,7 +503,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # and the final `emit()` read -- mirroring `doctor_cmd.doctor`'s identical
     # fix for the same defect class -- so a raise anywhere in it produces the
     # `build.internal-failure` envelope instead of a raw traceback.
-    "tan/commands/build_cmd.py": 1720,
+    # 1732, not 1720, as of tan-cli#488 round 5 class sweep: `_dispatch`'s
+    # `_Heartbeat(enabled=...)` read a bare `sys.stderr.isatty()`, the exact
+    # unguarded shape `tan.core.consent.can_prompt` was fixed for -- a
+    # detached-stdio `tan build`/`tan run` raised the same `AttributeError`
+    # arming the heartbeat, before a single slice ever dispatched. Gained a
+    # `sys.stderr is not None` guard plus a docstring paragraph.
+    "tan/commands/build_cmd.py": 1732,
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
@@ -628,7 +641,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
     # resolved, the same cost `project_pin_issue` above already justified.
-    "tan/commands/new_som_cmd.py": 1057,
+    # 1064, not 1057, as of tan-cli#488 round 5 class sweep: the "pipe / CI,
+    # fail fast" branch read a bare `sys.stdin.isatty()`; a detached stdin
+    # raised `AttributeError` instead of reaching the clean, named refusal
+    # this branch exists to give. Gained a `sys.stdin is None or` guard plus
+    # a short comment.
+    "tan/commands/new_som_cmd.py": 1064,
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside

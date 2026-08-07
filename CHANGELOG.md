@@ -258,7 +258,27 @@ All notable changes to `tan` are documented here. Format follows
     instead of the correct `doctor.fix-suppressed` warning (exit 4). The
     `is not None` guard now lives in `can_prompt` itself -- the one place
     every caller (`doctor`, `scaffold`) reaches it -- rather than duplicated
-    per call site. (#488)
+    per call site.
+  - The `is not None` guard above landed on `sys.stdin` only, leaving
+    `sys.stderr` -- the NEXT operand of the identical `and` chain, in the
+    same `can_prompt` function and in `fix_suppressed_issue`'s own duplicate
+    -- still a bare `.isatty()`. A host with a live, non-tty stdin and a
+    detached stderr (each handle can be detached independently by whatever
+    spawned the process) still crashed with the identical `AttributeError`,
+    one operand later; verified against the real binary with a `pty.fork()`
+    child (a genuine tty on stdin, stderr closed before `exec`), not a
+    monkeypatched mock. Both call sites now guard `sys.stderr is not None`
+    too. Sweeping the rest of `tan/` for the same unguarded-`isatty()`
+    shape found and fixed three further, independent sites, none of them
+    masked by this one: `build_cmd._dispatch`'s `_Heartbeat` arming (a
+    detached-stdio `tan build`/`tan run` crashed before a single slice
+    dispatched, reported as a fabricated `build.internal-failure`);
+    `faultdecode_cmd._read_dump`'s implicit stdin auto-consume (now treats a
+    detached stdin the same as one offering nothing, `""`) and its explicit
+    `--file -` read (now refused with a clear `--file` message instead of a
+    raw crash); and `new_som_cmd.new_som`'s non-interactive-stdin refusal
+    (now reaches its own named "stdin is not a terminal" message instead of
+    crashing first). (#488)
 
 ## [0.5.1] — 2026-08-04
 

@@ -353,6 +353,39 @@ def test_explicit_flag_wins_over_a_parsed_dump():
     assert "PRECISERR" not in result.output
 
 
+# --------------------------------------------------------------------------
+# `sys.stdin` itself, not just its `.isatty()`, can be `None` (tan-cli#488
+# round 5 class sweep): a process launched with its standard handles
+# detached -- a GUI launcher, a `pythonw`-style spawn, or a shell that closed
+# fd 0 before exec. `CliRunner` can only ever hand the command a real, if
+# captured, stdin object, so these call `_read_dump` directly -- the one
+# place this defect actually lives.
+# --------------------------------------------------------------------------
+
+
+def test_read_dump_auto_consume_returns_no_dump_when_stdin_is_none(monkeypatch):
+    """The IMPLICIT auto-consume path (`... | tan faultdecode`, no `--file`):
+    a detached `sys.stdin` has nothing to offer, same as a closed pipe or a
+    real tty -- `_read_dump` must answer `""`, not
+    `AttributeError: 'NoneType' object has no attribute 'isatty'`."""
+    from tan.commands.faultdecode_cmd import _read_dump
+
+    monkeypatch.setattr(sys, "stdin", None)
+    assert _read_dump(None, auto_consume_stdin=True) == ""
+
+
+def test_read_dump_file_dash_refuses_cleanly_when_stdin_is_none(monkeypatch):
+    """`--file -` NAMES stdin explicitly, so a detached `sys.stdin` there
+    cannot silently fall back to `""` (that would tell the caller "no fault
+    detected" for a request that was never actually served) -- it must
+    refuse with a clear, coded message instead of a raw `AttributeError`."""
+    from tan.commands.faultdecode_cmd import _read_dump
+
+    monkeypatch.setattr(sys, "stdin", None)
+    with pytest.raises(typer.BadParameter, match="stdin is detached"):
+        _read_dump("-", auto_consume_stdin=True)
+
+
 def test_symbolication_is_skipped_gracefully_for_a_non_elf_file():
     with tempfile.NamedTemporaryFile(suffix=".elf", delete=False, mode="w") as handle:
         handle.write("not an elf")

@@ -781,7 +781,14 @@ def new_som(
             for flag, value in (("--sku", sku), ("--soc-ref", soc_ref), ("--family", family))
             if value is None
         ]
-        if not sys.stdin.isatty():
+        # tan-cli#488 round 5 class sweep: `sys.stdin` itself, not just the
+        # result of calling `.isatty()` on it, can be `None` -- a process
+        # launched with its standard handles detached (a GUI launcher, a
+        # `pythonw`-style spawn, or a shell that closed fd 0 before exec). A
+        # bare `sys.stdin.isatty()` there raises `AttributeError: 'NoneType'
+        # object has no attribute 'isatty'` instead of reaching the clean,
+        # named refusal this branch exists to give a pipe/CI caller.
+        if sys.stdin is None or not sys.stdin.isatty():
             fail(
                 "stdin is not a terminal, so interactive prompts are "
                 "unavailable; pass the missing required flag(s): " + ", ".join(missing)

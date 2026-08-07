@@ -2774,6 +2774,15 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
     own docstring); the copy here stays only because this function explains
     each tripped condition individually, not merely whether the aggregate
     gate passed.
+
+    tan-cli#488 round 5: `sys.stderr`, the NEXT operand of this same `and`
+    chain, was left unguarded through rounds 3 and 4 -- `sys.stderr` can be
+    `None` independently of `sys.stdin` (each handle is detached on its own
+    by whatever spawned the process), so a host with a live, non-tty stdin
+    and a detached stderr still crashed here with the identical
+    `AttributeError`, one operand later. `can_prompt` now guards both; this
+    copy must match it exactly or the two diverge on the very host this
+    function exists to explain.
     """
     reasons = []
     if json_mode:
@@ -2783,7 +2792,10 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
     if non_interactive:
         reasons.append("`--non-interactive`")
     if not json_mode and not (
-        sys.stdin is not None and sys.stdin.isatty() and sys.stderr.isatty()
+        sys.stdin is not None
+        and sys.stdin.isatty()
+        and sys.stderr is not None
+        and sys.stderr.isatty()
     ):
         reasons.append("no interactive terminal (stdin/stderr not a tty -- piped, redirected, or CI)")
     return Issue(

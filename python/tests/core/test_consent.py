@@ -121,3 +121,21 @@ def test_a_none_stdin_withholds_consent_without_raising(monkeypatch):
     monkeypatch.setattr(sys, "stdin", None)
     monkeypatch.setattr(sys, "stderr", _FakeStream(True))
     assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False
+
+
+def test_a_none_stderr_withholds_consent_without_raising(monkeypatch):
+    """tan-cli#488 round 5: the guard added for `sys.stdin` above landed on
+    ONLY that operand, leaving `sys.stderr` -- the very next operand of the
+    identical `and` chain in `can_prompt` -- to crash on the exact same
+    detached-process shape. Each std handle is detached independently by
+    whatever spawned the process (a GUI launcher may leave stdin redirected
+    to a real file while stderr alone is unbound), so `sys.stdin is not
+    None` does not imply `sys.stderr is not None`. Verified for real, not
+    just here: `python/scripts` has no repro harness for a genuine detached
+    tty, but a `pty.fork()` child with a real tty on stdin and stderr closed
+    before `exec` reproduces `tan doctor --fix` crashing with
+    `AttributeError: 'NoneType' object has no attribute 'isatty'` against the
+    unfixed code -- this test binds the same condition directly."""
+    monkeypatch.setattr(sys, "stdin", _FakeStream(True))
+    monkeypatch.setattr(sys, "stderr", None)
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False

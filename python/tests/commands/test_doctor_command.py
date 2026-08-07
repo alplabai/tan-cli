@@ -3107,6 +3107,93 @@ def test_fix_suppressed_issue_does_not_crash_when_stdin_is_none(monkeypatch):
     assert "no interactive terminal" in issue.message
 
 
+def test_fix_suppressed_issue_does_not_crash_when_stderr_is_none(monkeypatch):
+    """tan-cli#488 round 5: the sibling site of the same defect, in the same
+    function. Round 4 guarded `sys.stdin is not None` here (the test above)
+    but left `sys.stderr.isatty()` -- the NEXT operand of the identical `and`
+    chain -- unguarded, so a host whose `stdin` is real (redirected to a real
+    file, `.isatty()` returns `False` there rather than raising) but whose
+    `stderr` alone is `None` still raised `AttributeError: 'NoneType' object
+    has no attribute 'isatty'` one operand later. `sys.stdin` is left as
+    whatever pytest's own capture already replaced it with (a real object,
+    never `None`) precisely so this test cannot pass by accident via the
+    OTHER guard."""
+    monkeypatch.setattr(doctor_cmd.sys, "stderr", None)
+    issue = doctor_cmd.fix_suppressed_issue(non_interactive=False, ci=False, json_mode=False)
+    assert issue.code == "doctor.fix-suppressed"
+    assert "no interactive terminal" in issue.message
+
+
+def test_doctor_fix_with_stderr_none_does_not_crash_before_reaching_fix_suppressed_issue(
+    monkeypatch, tmp_path
+):
+    """tan-cli#488 round 5, the CLI-level twin of the unit test above: proves
+    `can_prompt` itself (`tan.core.consent`) -- not just `fix_suppressed_issue`
+    -- tolerates a `None` `sys.stderr` when `sys.stdin` genuinely IS a tty.
+    `doctor()`'s `fix_allowed = fix and can_prompt(...)` (doctor_cmd.py:3467)
+    calls the REAL, unmonkeypatched `can_prompt` before `fix_suppressed_issue`
+    ever runs, so a guard added only inside `fix_suppressed_issue` would leave
+    THIS call to crash first, caught only by `doctor()`'s outer
+    `except Exception` and reported as a fabricated `doctor.internal-failure`
+    (exit 5) instead of the correct `doctor.fix-suppressed` warning (exit 4)
+    -- exactly the round-2 regression `can_prompt` was centralised to close,
+    recurring one operand later.
+
+    `_NamedTextIOWrapper.isatty` is forced `True` (the same technique
+    `test_doctor_no_color_flag_reaches_the_render_and_suppresses_ansi` uses)
+    so `CliRunner`'s captured `sys.stdin` -- which `can_prompt` must reach and
+    pass before it ever reads `sys.stderr` -- answers `True`, matching the
+    real detached-process shape this defect needs: a live, non-tty-refusing
+    stdin with stderr alone detached. `sys.stderr` is set to `None` as a side
+    effect inside `_collect`, the same pattern
+    `test_doctor_fix_with_stdin_none_does_not_crash_before_reaching_fix_suppressed_issue`
+    uses for `sys.stdin`, for the identical reason: `CliRunner.invoke`'s own
+    `isolation()` context manager swaps `sys.stderr` for its own captured
+    stream at the START of every invocation, so a monkeypatch applied before
+    `invoke()` is silently overwritten before `doctor()` ever runs.
+
+    Unlike `sys.stdin`, `sys.stderr` cannot simply stay `None` for the rest
+    of the invocation: `doctor()` itself keeps writing to it afterwards (the
+    summary footer), and `CliRunner.invoke`'s own `finally: sys.stderr.flush()`
+    runs once the command returns -- both would raise the same `AttributeError`
+    for a reason that has nothing to do with this defect. `fix_suppressed_issue`
+    is the LAST consumer of the `None` stderr in `doctor()`'s call order (after
+    `can_prompt`), so wrapping it to restore the real stream in a `finally`,
+    once its own body has run with `sys.stderr` still `None`, isolates the
+    `None` window to exactly the two calls this test targets."""
+    from typer.testing import _NamedTextIOWrapper
+
+    monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    real_stderr_box: list[object] = []
+
+    def _collect_stub(*a, **k):  # noqa: ARG001
+        real_stderr_box.append(doctor_cmd.sys.stderr)
+        doctor_cmd.sys.stderr = None
+        return stub_checks
+
+    real_fix_suppressed_issue = doctor_cmd.fix_suppressed_issue
+
+    def _fix_suppressed_issue_wrapper(*a, **k):
+        try:
+            return real_fix_suppressed_issue(*a, **k)
+        finally:
+            doctor_cmd.sys.stderr = real_stderr_box[0]
+
+    monkeypatch.setattr(doctor_cmd, "_collect", _collect_stub)
+    monkeypatch.setattr(doctor_cmd, "fix_suppressed_issue", _fix_suppressed_issue_wrapper)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+
+    assert "doctor.internal-failure" not in result.stderr, result.stderr
+    assert "AttributeError" not in result.stderr, result.stderr
+    assert "`--fix` was requested but not run" in result.stderr, result.stderr
+    assert "no interactive terminal" in result.stderr, result.stderr
+    assert result.exit_code == 4, result.stderr  # hostPrerequisites is still a Fail; not 5
+
+
 def test_doctor_fix_with_stdin_none_does_not_crash_before_reaching_fix_suppressed_issue(
     monkeypatch, tmp_path
 ):

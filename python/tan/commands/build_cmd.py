@@ -876,6 +876,16 @@ def _dispatch(
     _build_then_run` has its own `--format json` support but does not yet
     thread it here (out of this file's scope to add -- see `run_cmd.py:258`),
     so its call keeps the default `False`.
+
+    tan-cli#488 round 5 class sweep: `sys.stderr` can be `None` -- a process
+    launched with its standard handles detached (a GUI launcher, a
+    `pythonw`-style spawn, or a shell that closed fd 2 before exec) -- the
+    same condition `tan.core.consent.can_prompt` guards against. A bare
+    `sys.stderr.isatty()` here raised the identical `AttributeError:
+    'NoneType' object has no attribute 'isatty'` for a detached-stdio
+    `tan build`/`tan run`, caught only by `build()`'s own outer `except
+    Exception` and reported as a fabricated `build.internal-failure` instead
+    of simply running with the heartbeat disabled.
     # ponytail: the one live gap this leaves -- `tan run --format json` with
     # a REAL terminal still attached to stderr would arm the heartbeat where
     # it should stay silent. stdout (the envelope channel) is untouched
@@ -967,7 +977,9 @@ def _dispatch(
     # that also inherited the terminal's stderr). `__enter__`/`__exit__` run
     # regardless of what happens inside, so a dispatch that raises still
     # stops the thread and blanks any line it had printed.
-    with _Heartbeat(enabled=not json_mode and sys.stderr.isatty()) as heartbeat:
+    with _Heartbeat(
+        enabled=not json_mode and sys.stderr is not None and sys.stderr.isatty()
+    ) as heartbeat:
         dispatched = iter(
             execute_slices(
                 replace(plan, slices=runnable),

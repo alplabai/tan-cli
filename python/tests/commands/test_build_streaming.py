@@ -172,6 +172,42 @@ def test_heartbeat_line_never_wraps_on_a_narrow_terminal(monkeypatch):
     assert all(len(row) <= width for row in term.rows), term.rows
 
 
+def test_dispatch_does_not_crash_arming_the_heartbeat_when_stderr_is_none(monkeypatch):
+    """tan-cli#488 round 5 class sweep: `_dispatch` computes `_Heartbeat`'s
+    `enabled=` with a bare `sys.stderr.isatty()` (tan-cli#287), the exact
+    unguarded shape `tan.core.consent.can_prompt` was fixed for -- `sys.stderr`
+    can be `None` (a process launched with its standard handles detached: a
+    GUI launcher, a `pythonw`-style spawn, or a shell that closed fd 2 before
+    exec), and a bare `.isatty()` on it raises `AttributeError: 'NoneType'
+    object has no attribute 'isatty'` before a single slice ever dispatches --
+    caught only by `build()`'s outer `except Exception` and reported as a
+    fabricated `build.internal-failure` for a detached-stdio `tan build` that
+    should simply run with the heartbeat disabled.
+
+    An empty-slices plan is enough to reach the `with _Heartbeat(...)` line
+    without needing a real toolchain or Zephyr tree -- `execute_slices` on a
+    zero-slice plan returns immediately, so this stays a real call into
+    `_dispatch`, not a stand-in for it."""
+    from tan.core.build_plan import BuildPlan
+
+    plan = BuildPlan(
+        schema_version=1,
+        generated_by="test",
+        board_yaml="board.yaml",
+        sku="sku",
+        build_root="build",
+        slices=[],
+        shared_artefacts=[],
+        warnings=[],
+    )
+    monkeypatch.setattr(sys, "stderr", None)
+
+    outcomes, issues = build_cmd._dispatch(plan, [], build_cmd.Path("/tmp"), None, None, json_mode=False)
+
+    assert outcomes == []
+    assert issues == []
+
+
 # --- CLI, subprocess: the JSON path is untouched -------------------------
 
 

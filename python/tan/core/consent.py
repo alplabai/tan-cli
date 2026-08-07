@@ -65,6 +65,18 @@ def can_prompt(*, non_interactive: bool, ci: bool, json_mode: bool) -> bool:
     so duplicating the `is not None` check downstream (as doctor_cmd.py's
     `fix_suppressed_issue` still does, for its own separate per-condition
     explanation) does not help -- this call is the one that crashes first.
+
+    tan-cli#488 round 5: the SAME detachment guards ONLY `sys.stdin`, not
+    `sys.stderr` -- the very next operand of this same `and` chain, and just
+    as reachable: the identical detached-process shape can leave `sys.stdin`
+    live (redirected to a real, non-tty file) while `sys.stderr` alone is
+    unbound, since each handle is detached independently by whatever spawned
+    the process. Verified against the real binary, not a mock: a `pty.fork()`
+    child with a genuine tty on stdin (`isatty() is True`, so the chain
+    reaches this line) and `stderr` closed before `exec` crashed
+    `tan doctor --fix` with exactly this `AttributeError` -- `sys.stdin is not
+    None` alone does not protect the `sys.stderr.isatty()` call one line
+    below it.
     """
     return (
         not non_interactive
@@ -72,5 +84,6 @@ def can_prompt(*, non_interactive: bool, ci: bool, json_mode: bool) -> bool:
         and not json_mode
         and sys.stdin is not None
         and sys.stdin.isatty()
+        and sys.stderr is not None
         and sys.stderr.isatty()
     )
