@@ -249,23 +249,22 @@ _MODULE_BUDGET: dict[str, int] = {
     # instead of needing a real regular file under a literal `/dev/`-rooted
     # path (Linux-only tmpfs `/dev/shm`; neither macOS nor Windows have an
     # equivalent).
-    # 2255, not 2112, as of tan-cli#512/#514. #512: the read-only DPIDR
-    # preflight moved ahead of the SETOOLS auto-sign inside `_flash_entry`
-    # (a wrong-board refusal must not have already mutated the customer's
-    # SETOOLS install), plus its own docstring explaining the ordering
-    # invariant and its old call site's replacement comment; and the
-    # wrong-DP-ID message now names the ACTUAL SW-DP ID the probe reported,
-    # not only the expected one (`_dp_id_value`, `_DP_ID_RE` gained a capture
-    # group). #514: `swd_probe` no longer reaches `flash_plan`'s foreign-part
-    # `_DEFAULT_JLINK_DEVICE` fallback for a manifest that resolves a real
-    # SoC variant -- two new IO-layer helpers (`_sdk_jlink_device_for_core`,
-    # `_resolve_swd_probe_jlink_device`) read the SDK's published
-    # `variants[].debug.jlink_device` ahead of that fallback, through the
-    # same shared primitives `tan debug-config` already uses, so there is no
-    # second, driftable reader. The fallback itself is untouched -- it is
-    # oracle-parity-pinned across 14 recorded fixtures; see both functions'
-    # own docstrings.
-    "tan/commands/flash_cmd.py": 2255,
+    # 2170, not 2112, as of tan-cli#512: the read-only DPIDR preflight moved
+    # ahead of the SETOOLS auto-sign inside `_flash_entry` (a wrong-board
+    # refusal must not have already mutated the customer's SETOOLS install),
+    # plus its own docstring explaining the ordering invariant and its old
+    # call site's replacement comment; and the wrong-DP-ID message now names
+    # the ACTUAL SW-DP ID the probe reported, not only the expected one
+    # (`_dp_id_value`, `_DP_ID_RE` gained a capture group). A #514 change
+    # (resolving `swd_probe`'s `jlink_device` from SDK metadata ahead of
+    # `flash_plan`'s `_DEFAULT_JLINK_DEVICE` fallback) landed and was
+    # REVERTED in the same round: #514's premise was wrong -- `swd_probe`
+    # only ever flashes the GD32 supervisor MCU on E1M-X V2N/V2N-M1
+    # (`helper_firmware:` in alp-sdk metadata, never a SoC-core slice), so
+    # `GD32G553MEY7TR` is the CORRECT device, not a foreign default, and
+    # substituting the SoC's generic attach profile there would have been a
+    # raw memory write misreported as a successful flash.
+    "tan/commands/flash_cmd.py": 2170,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks

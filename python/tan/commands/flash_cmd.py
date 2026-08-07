@@ -59,7 +59,6 @@ from typing import Any, Callable
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_ladder
-from tan.commands.build_output import read_sdk_som_and_soc
 from tan.commands.doctor_cmd import on_path
 from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.flash_plan import (
@@ -75,7 +74,6 @@ from tan.core.flash_plan import (
     ManifestError,
     YOCTO_WIC_METHODS,
     _DEV_ROOT,
-    _fa_has_key,
     backend_for,
     display_argv,
     fa_bool_checked,
@@ -96,7 +94,6 @@ from tan.core.flash_plan import (
     validate_flow_d_shape,
 )
 from tan.core.global_flags import accept_global_flags
-from tan.core.size import resolve_variant
 from tan.core.setools import (
     find_app_gen_toc,
     missing_tool_message,
@@ -918,79 +915,6 @@ class _Context:
     setools_dir: str | None = None
 
 
-def _sdk_jlink_device_for_core(sdk_root: str, sku: str, core_id: str) -> str | None:
-    """tan-cli#514: the SDK's published attach-profile J-Link device
-    (`variants[].debug.jlink_device`, keyed by core id) for `sku`'s SoM
-    preset -- the SAME metadata block `tan debug-config` already resolves for
-    the identical SoM/core (`debug_config_cmd._fill_debug_probe_identity_
-    from_sdk`), read here through the SAME shared primitives
-    (`build_output.read_sdk_som_and_soc` + `size.resolve_variant`) rather
-    than a second, driftable reader.
-
-    `resolve_variant`'s `sku=None` deliberately disables its reverse `sku in
-    alp_module_skus` fallback, mirroring `debug_config_cmd._sdk_variant_
-    debug_block`'s own precedent: a drifted/`TBD` preset must resolve NO
-    identity here rather than possibly a WRONG one that plans a real write
-    against a different part's attach profile.
-
-    Best-effort throughout, never raises: an empty `sku`, an unreadable SoM
-    preset/SoC JSON, an unresolved variant, or a `debug.jlink_device` that
-    names no entry for `core_id` all return `None`, leaving the caller's
-    existing fallback untouched.
-    """
-    if not sku:
-        return None
-    walked = read_sdk_som_and_soc(os.path.join(sdk_root, "metadata"), sku)
-    if walked is None:
-        return None
-    _silicon, silicon_variant, variants, _soc_flash_mb, _soc_cores = walked
-    variant = resolve_variant(silicon_variant, None, variants)
-    if variant is None:
-        return None
-    debug = variant.get("debug")
-    if not isinstance(debug, dict):
-        return None
-    jlink_device = debug.get("jlink_device")
-    if not isinstance(jlink_device, dict):
-        return None
-    device = jlink_device.get(core_id)
-    return device if isinstance(device, str) and device else None
-
-
-def _resolve_swd_probe_jlink_device(flash_args: Any, ctx: _Context, entry_id: str) -> Any:
-    """tan-cli#514: fill `flash_args.jlink_device` from the SDK's published
-    per-variant attach profile BEFORE `flash_plan._resolve_jlink_device` ever
-    runs -- ahead of ITS OWN `_DEFAULT_JLINK_DEVICE` fallback, which names a
-    DIFFERENT SoM family's part (the V2N carrier's GD32 supervisor MCU) and
-    is not a plausible default for an AEN or NX91 project that never asked
-    for it.
-
-    **Oracle parity forces that fallback to stay** (`flash_plan._resolve_
-    jlink_device`'s own docstring): 14 recorded `test_flash_oracle_parity.py`
-    cases reach it verbatim, every one of them via a synthetic `sdk_root`
-    carrying no `metadata/e1m_modules/**` -- `_sdk_jlink_device_for_core`
-    cannot resolve a variant for any of them, so none of them move. This is
-    the resolution-order fix AHEAD of that fallback, not a change to it or
-    its value.
-
-    A no-op whenever `flash_args` already names `jlink_device` (an explicit
-    manifest value always wins, and a malformed one is left for `_resolve_
-    jlink_device`'s own strict accessor to refuse, unchanged) or `target` (by
-    KEY PRESENCE, matching `_resolve_jlink_device`'s own check exactly --
-    that combination is its OpenOCD/pyOCD refusal branch, which this must
-    never silently pre-empt by handing it a J-Link device profile it never
-    asked for), or when the SDK metadata resolves nothing for this SKU/core.
-    """
-    if _fa_has_key(flash_args, "jlink_device") or _fa_has_key(flash_args, "target"):
-        return flash_args
-    device = _sdk_jlink_device_for_core(ctx.sdk_root, ctx.sku, entry_id)
-    if device is None:
-        return flash_args
-    merged = dict(flash_args)
-    merged["jlink_device"] = device
-    return merged
-
-
 def _resolve_flow_d_atoc_address(flash_args: Any, build_root: str, sdk_root: str) -> Any:
     """Fill in `flash_args.atoc_address` from the `app-gen-toc` build report
     (`flash_args.atoc_map`, an `app-package-map.txt` path) when the manifest
@@ -1354,15 +1278,6 @@ def _flash_entry(
         return 1, entry(method, "failed", 1, gate.message), lines
 
     flash_args = target.flash_args
-    # tan-cli#514: resolve `flash_args.jlink_device` from the SDK's per-variant
-    # attach profile BEFORE `swd_probe`'s own plan-builder ever runs -- ahead
-    # of `flash_plan._resolve_jlink_device`'s foreign-part fallback. A no-op
-    # on every manifest that already names `jlink_device`/`target`, or that
-    # resolves no SoC variant at all (unconditional on `--dry-run`/confirm:
-    # pure metadata IO, no hardware touched, and a preview should show the
-    # real resolved device too).
-    if method == "swd_probe":
-        flash_args = _resolve_swd_probe_jlink_device(flash_args, ctx, entry_id)
     # Set only on the Flow D SETOOLS-auto-sign path below, and only when THIS
     # run's own sign actually ran -- carried past the `if` block so the
     # eventual success message (tan-cli#373) can name which SETOOLS install
