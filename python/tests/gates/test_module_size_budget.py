@@ -198,7 +198,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # board.yaml) gained a next-step sentence naming `tan doctor`/`tan init`/
     # `tan examples`, each appended as its own wrapped string literal rather
     # than lengthening an existing line.
-    "tan/commands/build_cmd.py": 1612,
+    #
+    # 1695, not 1612, as of tan-cli#483: `_missing_app_dirs` (a new
+    # module-level function, with docstring) checks every zephyr/baremetal
+    # slice's resolved `cores.<id>.app` for existence, and `_dispatch` grew
+    # a second held-back-outcome path beside the existing `${TOOLCHAIN_ROOT}`
+    # demotion one -- same shape, not a new convention -- to fail just the
+    # bad slice rather than the whole plan.
+    "tan/commands/build_cmd.py": 1695,
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append

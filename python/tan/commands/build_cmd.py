@@ -849,7 +849,13 @@ def _dispatch(
     *,
     json_mode: bool = False,
 ) -> tuple[list[SliceOutcome], list[Issue]]:
-    """Run the plan's slices, holding back the ones token substitution demoted.
+    """Run the plan's slices, holding back the ones token substitution demoted
+    -- and, since tan-cli#483, the ones whose `cores.<id>.app` resolved to a
+    directory that does not exist ([`_missing_app_dirs`]) -- both HELD
+    per-slice, matching the same per-slice fail/skip shape
+    `execute_slices`'s own unknown-backend/missing-tool checks already use,
+    rather than refusing the whole plan over one bad core: a two-core project
+    with one good `app:` and one bad one still builds the good core.
 
     Arms its own [`_Heartbeat`] around the dispatch (tan-cli#287), rather
     than taking one from the caller: `execute_slices` (below) is a single,
@@ -924,6 +930,11 @@ def _dispatch(
     action = resolve_action(plan.execution_policy, "missing_tool", PolicyAction.SKIP)
     failed = action is PolicyAction.FAIL
 
+    # tan-cli#483: a slice already held for `${TOOLCHAIN_ROOT}` keeps that
+    # verdict -- a bad `app:` is checked below only for the slices demotion
+    # left alone, so the two never disagree about the same index.
+    missing_app_dirs = {i: msg for i, msg in _missing_app_dirs(plan).items() if i not in held}
+
     held_outcomes = {
         i: SliceOutcome(
             plan.slices[i].core_id,
@@ -934,8 +945,21 @@ def _dispatch(
         )
         for i, d in held.items()
     }
+    # A bad app dir is not a host-provisioning gap `executionPolicy` was ever
+    # meant to arbitrate (contrast the demotion above) -- it is the plan
+    # naming a path that does not exist, so it always FAILS the one slice
+    # rather than silently skipping it forward, matching the Expected
+    # section of tan-cli#483 ("not a warning that lets the build proceed").
+    held_outcomes.update(
+        {
+            i: SliceOutcome(plan.slices[i].core_id, "failed", None, msg, output_artefact="")
+            for i, msg in missing_app_dirs.items()
+        }
+    )
 
-    runnable = [sl for i, sl in enumerate(plan.slices) if i not in held]
+    runnable = [
+        sl for i, sl in enumerate(plan.slices) if i not in held and i not in missing_app_dirs
+    ]
     # tan-cli#287: TTY + text-mode only (never `--format json` -- stdout is
     # untouched either way, this is belt-and-suspenders for a machine caller
     # that also inherited the terminal's stderr). `__enter__`/`__exit__` run
@@ -967,22 +991,81 @@ def _dispatch(
         issues: list[Issue] = []
         for i, sl in enumerate(plan.slices):
             demotion = held.get(i)
-            if demotion is None:
-                outcomes.append(next(dispatched))
-                continue
-            outcomes.append(held_outcomes[i])
-            issues.append(
-                Issue(
-                    # Same code as the plan-fatal sibling on purpose: the
-                    # extension needs no new vocabulary, only a severity that
-                    # says whether this stopped the build.
-                    "build.toolchain-root-unresolved",
-                    "error" if failed else "warning",
-                    f"slice `{sl.core_id}` {'failed' if failed else 'skipped'}: "
-                    f"{demotion.reason}",
+            if demotion is not None:
+                outcomes.append(held_outcomes[i])
+                issues.append(
+                    Issue(
+                        # Same code as the plan-fatal sibling on purpose: the
+                        # extension needs no new vocabulary, only a severity
+                        # that says whether this stopped the build.
+                        "build.toolchain-root-unresolved",
+                        "error" if failed else "warning",
+                        f"slice `{sl.core_id}` {'failed' if failed else 'skipped'}: "
+                        f"{demotion.reason}",
+                    )
                 )
-            )
+                continue
+            app_dir_message = missing_app_dirs.get(i)
+            if app_dir_message is not None:
+                outcomes.append(held_outcomes[i])
+                issues.append(Issue("build.app-dir-missing", "error", app_dir_message))
+                continue
+            outcomes.append(next(dispatched))
     return outcomes, issues
+
+
+#: `os` values the schema requires `cores.<id>.app` to resolve to a real
+#: directory for (`metadata/schemas/board.schema.json`
+#: `$defs/core_entry/properties/app`) -- `os: yocto` dispatches by
+#: `recipe:` (a bitbake recipe name), never by this directory
+#: (`tan/planner/orchestrator.py:338-353`), so checking it there would
+#: refuse a buildable yocto slice over a path the build never reads.
+_APP_DIR_REQUIRED_BACKENDS = frozenset({"zephyr", "baremetal"})
+
+
+def _missing_app_dirs(plan: BuildPlan) -> dict[int, str]:
+    """Slice indices whose `cores.<id>.app` resolved to a directory that does
+    not exist on disk (tan-cli#483), each mapped to the refusal message.
+
+    Checked HERE, against the plan `_dispatch` already has in hand, not
+    inside `execute_slices` (`tan/commands/build/execute.py`): by the time a
+    real `tan build` reaches this function, `apply_plan_token_substitution`
+    has already resolved `appDir` to a real absolute path -- or held the
+    slice back as a `${TOOLCHAIN_ROOT}` demotion before `_dispatch` ever
+    computes `runnable` below. `execute_slices`'s own extensive unit-test
+    suite dispatches synthetic plans with a placeholder `appDir` (`"app"`,
+    never meant to exist on disk) straight through, so an existence check
+    inside that lower-level primitive would misfire on every one of them;
+    this level only ever sees a plan that went through the real
+    substitution pass.
+
+    Neither `tan/planner/orchestrator.py`'s `_zephyr_app_dir` (the west
+    command's own app-dir resolution) nor `_resolve_app_path` checks
+    existence -- both are FROZEN to this unit (`tan/planner/**`). Left
+    unfixed there, a nonexistent `cores.<id>.app` makes `_zephyr_app_dir`'s
+    own CMakeLists.txt-fallback probe find the PROJECT ROOT's CMakeLists.txt
+    (the parent of the nonexistent dir) and hand `west build` that instead,
+    silently, naming neither the configured path nor the substitution --
+    this check is what stops that plan ever reaching dispatch.
+
+    EXISTENCE only, not contents. The schema text also requires a zephyr app
+    dir to contain `prj.conf` or `CMakeLists.txt` (`CMakeLists.txt` for
+    baremetal) -- deliberately NOT enforced here: audited against every
+    `examples/**/board.yaml` on alp-sdk `dev` (tan-cli#483 comments), 96 of
+    104 enabled zephyr/baremetal core entries name `app: ./src`, a
+    sources-only directory holding neither file, because the real
+    `CMakeLists.txt` sits at the example root and pulls `src/` in via
+    `target_sources(app PRIVATE src/main.c)` -- that is the SHIPPED
+    convention `_zephyr_app_dir`'s own fallback exists to serve, not an
+    aberration, and a contents check would refuse the majority of the SDK's
+    own examples over their normal shape."""
+    missing: dict[int, str] = {}
+    for i, sl in enumerate(plan.slices):
+        if sl.backend not in _APP_DIR_REQUIRED_BACKENDS or sl.app_dir is None:
+            continue
+        if not Path(sl.app_dir).is_dir():
+            missing[i] = f"core `{sl.core_id}`: app directory does not exist: {sl.app_dir}"
+    return missing
 
 
 def _backend_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[Issue]:
