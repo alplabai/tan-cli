@@ -49,6 +49,7 @@ from .models import (
 from .partition import _known_flash_devices
 from .paths import BOARD_SCHEMA, METADATA_ROOT, REPO
 from .som_metadata import _sku_family, resolve_memory_map
+from .strict_loaders import DuplicateKeyError, strict_json_loads, strict_yaml_load
 from .topology import _default_os_from_core_type
 from .validate import (
     _enforce_loader_rules,
@@ -100,8 +101,8 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise OrchestratorError(f"file not found: {path}")
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as e:
+        data = strict_yaml_load(path.read_text(encoding="utf-8"), source=path)
+    except (yaml.YAMLError, DuplicateKeyError) as e:
         raise OrchestratorError(f"failed to parse {path}: {e}") from e
     if not isinstance(data, dict):
         raise OrchestratorError(
@@ -113,8 +114,8 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise OrchestratorError(f"file not found: {path}")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
+        return strict_json_loads(path.read_text(encoding="utf-8"), source=path)
+    except (json.JSONDecodeError, DuplicateKeyError) as e:
         raise OrchestratorError(f"failed to parse {path}: {e}") from e
 
 
@@ -644,6 +645,24 @@ def _validate_topology_cores(
             cacheable=entry.get("cacheable"),
             address=entry.get("address"),
         ))
+
+    # alp-sdk #1088: `kind: rpmsg` has no cache-maintenance layer.
+    # `cfg->cacheable` is stored on the backend struct
+    # (`src/backends/rpc/{zephyr,yocto}_drv.c`) and never read again -- no
+    # `sys_cache_*` call exists anywhere under `src/` or `include/`.
+    # `cacheable: true` on a rpmsg entry would therefore select a code path
+    # that promises coherency it can't deliver, which is worse than no flag
+    # at all -- reject it here rather than silently honouring it.  Real fix
+    # (sys_cache_data_flush_range / sys_cache_data_invd_range in
+    # <alp/rpc.h>) remains open; see alp-sdk #1088.
+    for e in ipc_entries:
+        if e.kind == "rpmsg" and e.cacheable:
+            raise OrchestratorError(
+                f"ipc entry '{e.name}': kind: rpmsg does not support "
+                f"cacheable: true -- <alp/rpc.h> has no cache-maintenance "
+                f"implementation yet (#1088).  The D-cache is forced off "
+                f"for this carve-out's endpoints instead; remove "
+                f"`cacheable: true` (or set it to false).")
 
     # Loader rule §4.5.6: every ipc endpoint must be a core with
     # os != off.
