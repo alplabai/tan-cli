@@ -459,7 +459,10 @@ _MODULE_BUDGET: dict[str, int] = {
     # function-length ratchet's 50-line cap (49 lines) rather than paying
     # that ratchet too, matching this file's own established precedent
     # (`doctor_render.py:render_doctor_footer`, above).
-    "tan/commands/build_cmd.py": 1703,
+    # 1706, not 1703, as of tan-cli#510: `_missing_tool_issues`'s match
+    # dropped its `endswith("` not found")` half (the message now carries a
+    # `-- searched ...` tail) and gained its own two-line explanation of why.
+    "tan/commands/build_cmd.py": 1706,
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
@@ -670,7 +673,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # ("assign every leftover draft item to every leftover existing slot in
     # order") was rejected, not just what shipped.
     "tan/core/debug_launch.py": 1275,
-    "tan/commands/build/execute.py": 941,
+    # 1003, not 941, as of tan-cli#510: `_command_on_path`/`_tool_is_
+    # available` (a bool-only availability check, and a spawn that repeated
+    # a SEPARATE, unhardened PATH lookup) were replaced by one
+    # `_resolve_tool` returning the resolved absolute path AND what it
+    # searched -- the spawn now runs that path, never the bare identity, and
+    # the missingTool refusal names the search. The per-slice resolved-tool
+    # note appended ahead of `output_artefact` resolution accounts for the
+    # rest.
+    "tan/commands/build/execute.py": 1003,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather

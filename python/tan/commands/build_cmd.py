@@ -1103,11 +1103,14 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
 
     Matched on `outcome.message` rather than re-probing PATH a second time:
     `execute_slices`' missing-tool branch (`build/execute.py`) is the ONLY
-    skip/fail reason shaped exactly `` tool `{tool}` not found `` -- a
+    skip/fail reason that STARTS `` tool `{tool}` not found `` -- a
     null-command skip reads `` has no command `` (and its reason already
     lives in `plan.warnings`, I-11), and an unknown-backend one is caught
     structurally by `_backend_issues` above -- so this recovers exactly the
-    missing-tool cases and nothing else.
+    missing-tool cases and nothing else. `startswith` only, not also
+    `endswith` (tan-cli#510 dropped that half): the message now carries a
+    `-- searched ...` tail naming what `_resolve_tool` walked, so it no
+    longer ends on the literal `` not found ``.
 
     tan-cli#283: without this, `tan build` on a host missing `west`/`bitbake`
     reported each slice's specific reason only in `data.slices[].reason` --
@@ -1116,9 +1119,9 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     issues = []
     for sl, outcome in zip(plan.slices, outcomes, strict=True):
         message = outcome.message
-        if message is None or not (
-            message.startswith("tool `") and message.endswith("` not found")
-        ):
+        if message is None or not message.startswith("tool `"):
+            continue
+        if "` not found" not in message:
             continue
         failed = outcome.status == "failed"
         issues.append(

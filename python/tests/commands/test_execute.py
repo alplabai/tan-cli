@@ -7,6 +7,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from tan.core.build_plan import parse_build_plan
 from tan.commands.build.execute import _pin_west_workspace, execute_slices
 from tan.commands.build.manifest import PostBuildManifest
@@ -122,6 +124,83 @@ def test_missing_tool_is_skipped_per_policy(tmp_path):
     out = execute_slices(parse_build_plan(_plan(cmd)), build_root=tmp_path,
                          env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None)
     assert out[0].status == "skipped"
+
+
+def test_missing_tool_names_what_was_searched(tmp_path, monkeypatch):
+    """tan-cli#510 acceptance: "a customer who can see the searched PATH
+    entries fixes it themselves; one who can't opens a support ticket" --
+    the refusal must carry more than "not found"."""
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path-dir"))
+    cmd = '{"tool": "definitely-not-a-real-tool-xyz", "args": [], "cwd": null}'
+    out = execute_slices(parse_build_plan(_plan(cmd)), build_root=tmp_path,
+                         env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None)
+    assert out[0].status == "skipped"
+    assert out[0].message.startswith("tool `definitely-not-a-real-tool-xyz` not found")
+    assert "searched" in out[0].message
+    assert str(tmp_path / "empty-path-dir") in out[0].message
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="tan-cli#510: the CreateProcess current-directory question is Windows-only",
+)
+def test_a_tool_shadowed_in_the_spawns_cwd_is_not_the_one_spawned(tmp_path, monkeypatch):
+    """tan-cli#510's own open question, settled here rather than asserted:
+    whether `subprocess.Popen(cwd=...)` -- the CHILD's own
+    `lpCurrentDirectory` -- changes which directory Windows' `CreateProcess`
+    consults when resolving a BARE, unqualified command name. Before this
+    fix, `execute_slices` spawned `Popen([tool, *args], cwd=spawn_cwd)` with
+    `tool` still the plan's bare identity -- exactly the scenario
+    `_resolve_tool`'s own docstring (and, before this fix, `_command_on_path`'s)
+    names: "a project checked out with its own `west.exe`/`openocd.exe` at
+    its root can never get spawned in place of the real tool". This
+    reproduces that layout against the REAL dispatch path (`execute_slices`,
+    never a mocked `Popen`) so a real Windows `CreateProcess` answers the
+    question, rather than a guess about it standing in.
+
+    Only runnable on a real `windows-latest` CI host, not this sandbox
+    (Linux) -- see this repo's own `python-tests` matrix
+    (`.github/workflows/parity.yml`), which is where this test's verdict
+    comes from. A `.bat` in each directory is the simplest REAL executable
+    this test can author without a compiler; Windows' `CreateProcess`
+    launches a `.bat`/`.cmd` directly (via `%COMSPEC%`) with no `shell=True`
+    needed."""
+    real_dir = tmp_path / "real_on_path"
+    real_dir.mkdir()
+    marker = tmp_path / "which_ran.txt"
+    (real_dir / "tan510shadowtool.bat").write_text(
+        f'@echo real>"{marker}"\r\n', encoding="utf-8"
+    )
+
+    # The slice's OWN `cwd` (`command.cwd`, confined under `build_root`) --
+    # the exact directory `Popen(cwd=...)` hands the child as
+    # `lpCurrentDirectory` -- carries a DIFFERENT program under the SAME
+    # bare name.
+    slice_cwd = tmp_path / "build" / "c1"
+    slice_cwd.mkdir(parents=True)
+    (slice_cwd / "tan510shadowtool.bat").write_text(
+        f'@echo shadow>"{marker}"\r\n', encoding="utf-8"
+    )
+
+    # PATH carries ONLY the real tool's directory -- the shadow is
+    # reachable exclusively through a search that consults the CHILD's own
+    # cwd, which is precisely the behaviour tan-cli#510 asks whether
+    # Windows' `CreateProcess` exhibits.
+    monkeypatch.setenv("PATH", str(real_dir))
+
+    cmd = json.dumps({"tool": "tan510shadowtool", "args": [], "cwd": "build/c1"})
+    out = execute_slices(
+        parse_build_plan(_plan(cmd, backend="baremetal")),
+        build_root=tmp_path,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+    )
+    assert out[0].status == "succeeded", out[0].message
+    assert marker.read_text(encoding="utf-8").strip() == "real", (
+        "the tool shadowed in the slice's own cwd ran instead of the one "
+        "resolved off PATH -- see out[0].message: " + str(out[0].message)
+    )
 
 
 def test_bare_west_tool_is_rewritten_to_the_workspace_venv_and_dispatches(tmp_path, monkeypatch):

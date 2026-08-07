@@ -59,7 +59,15 @@ def test_the_refusal_message_matches_the_oracle_verbatim(tmp_path):
     """Confirmed against the compiled oracle's own runtime string (`cargo
     test -p alp-tan-cli --bin tan
     native_execute_refuses_a_zephyr_slice_whose_configure_never_loaded_zephyr
-    -- --nocapture`), not transcribed from source alone."""
+    -- --nocapture`), not transcribed from source alone.
+
+    tan-cli#510, a DELIBERATE divergence from that frozen string (the same
+    class `execute.py`'s own module docstring records for tan-cli#307): every
+    dispatched outcome now carries a trailing `` (`<tool>` resolved to
+    `<resolved>`) `` note, appended by `execute_slices` after this guard's
+    own message is built. `sys.executable` is already absolute, so identity
+    and resolution are the same string here -- the note still appends,
+    proving the port's new behaviour rather than a lucky no-op."""
     out = execute_slices(
         parse_build_plan(_plan(_TRUE_CMD)),
         build_root=tmp_path,
@@ -73,7 +81,8 @@ def test_the_refusal_message_matches_the_oracle_verbatim(tmp_path):
         "CMakeLists.txt must call `find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})` "
         "before `project()`; without it CMake builds a plain host binary, not firmware. "
         "Scaffold a working app with `tan init --template zephyr-app`, or point the "
-        "core's `app:` at one that does."
+        "core's `app:` at one that does. "
+        f"(`{sys.executable}` resolved to `{sys.executable}`)"
     )
 
 
