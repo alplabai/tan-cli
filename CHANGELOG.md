@@ -7,7 +7,98 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [0.5.2] — Unreleased
 
+### Changed
+
+- **`tan debug-config --core <id>` now refuses a `--core` matching no build
+  slice even when `--target-kind` is given explicitly**, not only when it is
+  omitted. Previously an explicit `--core` was only checked against
+  `build/system-manifest.yaml` when `tan` had to infer the target class
+  itself; naming `--target-kind` bypassed that check entirely, so a
+  mistyped or stale `--core` on an otherwise-built project silently produced
+  a launch configuration pointing at a generic pre-build path that does not
+  exist (`${workspaceFolder}/build/app/zephyr/zephyr.elf`) instead of the
+  real per-core artefact. A customer preparing a launch config for a core
+  named in `board.yaml` but not yet built by THIS project is now refused
+  (`debug-config.core-unknown`, exit 2) rather than getting a placeholder
+  config back at exit 0 -- run `tan build` for that core first, or drop
+  `--target-kind` to let it infer. (#489)
+
 ### Fixed
+
+- **`tan debug-config` could destroy a customer's hand-authored
+  `.vscode/launch.json`, in three separate ways, plus two smaller merge
+  gaps found reviewing the fix.** All under (#489):
+  - The write used a truncating `open(path, "w")`: any failure between the
+    truncate and the flush (a full disk, a quota/`RLIMIT_FSIZE` hit, an I/O
+    error, or the process dying) destroyed the file, and the next run then
+    refused *permanently* at the malformed-JSON guard. Rewritten as a
+    temp-sibling write, `fsync`'d before an `os.replace` onto the REAL
+    (symlink-resolved) target, with a POSIX directory `fsync` after --
+    matching, and closing gaps in, `bootstrap_cmd.reconcile_west_manifest_path`'s
+    own pattern. A symlinked `launch.json` (dotfile-managed, or shared
+    across worktrees) now keeps the link and updates the real file, instead
+    of the link being replaced by a plain file holding stale content. A
+    launch.json `tan` creates now lands at the umask-filtered default a
+    plain `open(path, "w")` would have produced, not `mkstemp`'s own
+    hardcoded `0600`; a rewrite carries the existing file's own mode across
+    the swap.
+  - Merging a fresh draft into an existing `configFiles`/`setupCommands`
+    list matched entries by POSITION, so a shorter or differently-ordered
+    resolved list silently deleted the customer's own extra entries (a
+    hand-added second OpenOCD `.cfg`, extra `setupCommands` for a remote
+    gdb session) and could pair unrelated entries, both destroying one and
+    duplicating another. Matching is now by IDENTITY (a dict's own `text`
+    field, or a scalar's own value), wherever the matching entry sits, with
+    position kept as a fallback for a draft item that matches nothing
+    already in the file -- placed at the first free slot ANCHORED between
+    the nearest identity matches before and after it in the draft, not at
+    its own raw index. The anchor-relative placement matters as soon as any
+    entry in the list identity-matches: an index-relative fallback (a draft
+    item's own position against the SAME position in the existing list)
+    stays correct only while nothing before it in the draft has also
+    matched something -- once it has, the two index spaces drift apart, and
+    a value that keeps replacing a PRIOR run's own single resolved value
+    (e.g. a rebuilt `runners.yaml` naming a different `--config`, alongside
+    an unrelated `interface/...cfg` entry every run resolves identically)
+    fell through to "append", so `configFiles` accumulated every revision a
+    project had ever been built with instead of holding only the current
+    one, on any board with more than one `--config` argument or a
+    non-empty `openocd_search`.
+  - `debug-config.sdk-identity-key-absent` misattributed "no core id was
+    resolved to look up the SDK's per-core `jlink_device` map with" as "the
+    SDK publishes no `device` value for this SoM at all" -- telling a
+    customer on a never-built project to file a metadata bug when the
+    working remedy was `--core <id>`. Split into
+    `debug-config.sdk-identity-core-unresolved` for that case (and the
+    sibling case of an unrecognised `--core`, which now names the cores the
+    SDK does publish); `sdk-identity-key-absent` still fires, correctly,
+    when the SDK's identity block genuinely carries no `jlink_device` map at
+    all.
+  - `--pre-launch-task ''` (documented as "omit the key entirely") was a
+    silent no-op against an EXISTING `launch.json` already carrying one from
+    a prior run -- the merge only visits keys the fresh draft carries, and
+    the opt-out's own implementation removes the key from the draft rather
+    than marking it for removal. `create_launch_json_write_plan` now takes
+    an explicit set of keys to omit from the merged result. **This is the
+    one place in this whole fix where `tan` deliberately REMOVES
+    hand-authored content**: if a customer had themselves typed a
+    `preLaunchTask` value into the entry `tan` merges into, `--pre-launch-task
+    ''` now deletes it -- correct, and the flag's own documented meaning, but
+    worth stating plainly rather than only as "a key from a prior run".
+
+  Known, accepted limitation: position is still a heuristic, not real
+  provenance. A customer's hand-added `configFiles`/`setupCommands` entry
+  that matches nothing in the fresh draft AND sits in the SAME
+  anchor-bracketed window an unmatched draft item is placed into can still
+  be overwritten -- e.g. `["mine.cfg"] + ["board/x.cfg"] -> ["board/x.cfg"]`,
+  with no identity match anywhere on either side to anchor `mine.cfg`
+  against, exactly the way the pre-#489 code always overwrote whatever sat
+  at that lone position. `sdk-identity-overwrite` discloses the one case a
+  caller can identify (an SDK-filled, not build-resolved, single value)
+  rather than hiding it behind `ok: true`. Closing this further needs a
+  real provenance record ("did `tan` write THIS value, in a prior run"),
+  which nothing here or on disk keeps today; tracked as a follow-up (#518),
+  not built in this change.
 
 - **Two release gates went red on every open PR the moment `v0.5.1` was
   tagged.** `version-identity` refused a tree still claiming `0.5.1` once
