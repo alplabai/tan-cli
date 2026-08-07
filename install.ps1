@@ -75,17 +75,23 @@ if ($System) {
 #
 # [System.IO.Path]::GetFullPath resolves a relative path against
 # [Environment]::CurrentDirectory, NOT against the shell's own working
-# directory -- and Windows PowerShell 5.1 (the floor this script targets;
-# see the module comment above) never updates that .NET-process-global
-# property on `Set-Location`/`cd`, only $PWD. A user who does `cd .\tools;
+# directory -- and NEITHER Windows PowerShell 5.1 NOR PowerShell 7+ updates
+# that .NET-process-global property on `Set-Location`/`cd`, only $PWD. This is
+# not a 5.1-only quirk that 7 fixed: $PWD is PowerShell's own provider-scoped
+# location (it has to be, since a provider path like `HKCU:\` or `Cert:\` has
+# no meaning as a filesystem CurrentDirectory at all), and that stays
+# decoupled from .NET's CurrentDirectory on every version -- measured directly
+# (PowerShell 7.4.6: `Set-Location` into a subdirectory, then compare
+# `$PWD.Path` against `[Environment]::CurrentDirectory`) confirms the two
+# diverge on 7 exactly as they do on 5.1. A user who does `cd .\tools;
 # irm .../install.ps1 | iex -Dir .\bin` would have `.\bin` resolved against
 # wherever the PROCESS started (often $HOME or C:\WINDOWS\system32, not
-# .\tools), silently installing to a directory the user never asked for.
-# PowerShell 7 keeps the two in sync, so this only misbehaves on 5.1 -- which
-# is exactly the case that must not regress. [System.IO.Path]::Combine
-# passes an already-absolute $Dir through unchanged (it returns the second
-# argument verbatim when it is rooted) and anchors a relative one against
-# $PWD.Path, which both 5.1 and 7 keep accurate.
+# .\tools), silently installing to a directory the user never asked for, on
+# EITHER PowerShell version -- which is exactly the case that must not
+# regress. [System.IO.Path]::Combine passes an already-absolute $Dir through
+# unchanged (it returns the second argument verbatim when it is rooted) and
+# anchors a relative one against $PWD.Path, which both 5.1 and 7 keep
+# accurate.
 $Dir = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($PWD.Path, $Dir))
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

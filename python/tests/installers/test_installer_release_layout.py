@@ -842,6 +842,71 @@ def test_ps1_registry_path_write_preserves_expand_sz_and_does_not_expand_vars(re
             pass
 
 
+@windows_only
+def test_ps1_relative_dir_is_resolved_against_pwd_not_process_startup_dir(release_server, tmp_path):
+    """tan-cli#490 review, round four's MAJOR-1: a relative `-Dir` used to be
+    resolved via `[System.IO.Path]::GetFullPath($Dir)`, which anchors against
+    `[Environment]::CurrentDirectory` -- the PROCESS's startup directory --
+    not against `$PWD`, the directory a `Set-Location`/`cd` actually moves.
+    `cd .\\tools; irm .../install.ps1 | iex -Dir .\\bin` would then silently
+    install wherever the PowerShell process itself started (often `$HOME` for
+    a fresh `irm | iex` invocation), never `.\\tools\\bin` as asked.
+
+    This is reproduced here as a genuine divergence between the *process's
+    own* starting directory and the directory a subsequent `Set-Location`
+    leaves `$PWD` pointing at -- `subprocess.run(..., cwd=workdir)` starts the
+    `pwsh` PROCESS in `workdir` (standing in for wherever `irm | iex` itself
+    began), and the script passed via `-Command` then does the user's own
+    `cd .\\tools` before invoking install.ps1 with a `-Dir` relative to
+    THAT. A correct fix must install under `workdir/tools/bin`; the pre-fix
+    behaviour installed under `workdir/bin` instead.
+
+    install.ps1's own module comment once claimed PowerShell 7 keeps
+    `[Environment]::CurrentDirectory` and `$PWD` in sync, so only Windows
+    PowerShell 5.1 needed this fix -- that claim does not hold: measured
+    directly against a real PowerShell 7 (`Set-Location` into a
+    subdirectory, then compare `$PWD.Path` with
+    `[Environment]::CurrentDirectory`), the two diverge on 7 exactly as they
+    do on 5.1. This test therefore does not gate on the PowerShell version at
+    all -- whatever `pwsh`/`powershell` the CI runner has must resolve `-Dir`
+    correctly.
+    """
+    workdir = tmp_path / "work"
+    subdir = workdir / "tools"
+    subdir.mkdir(parents=True)
+    ps_command = (
+        f"Set-Location -LiteralPath '{subdir}'; "
+        f"& '{INSTALL_PS1}' -Dir '.\\bin' -NoModifyPath -Version v0.4.1"
+    )
+    result = subprocess.run(
+        [
+            PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-Command", ps_command,
+        ],
+        cwd=workdir,  # the pwsh PROCESS itself starts here, never moves
+        env={
+            **os.environ,
+            "TAN_INSTALL_BASE_URL": release_server,
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
+        },
+        capture_output=True, text=True, timeout=180,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    wrong_install = workdir / "bin" / "tan.exe"
+    right_install = subdir / "bin" / "tan.exe"
+    assert not wrong_install.is_file(), (
+        f"installed at {wrong_install} -- resolved against the pwsh PROCESS's "
+        f"own startup directory ({workdir}) instead of $PWD ({subdir}), the "
+        f"exact tan-cli#490 regression"
+    )
+    assert right_install.is_file(), (
+        f"expected the install under {subdir / 'bin'} (where Set-Location left "
+        f"$PWD); {result.stdout}\n{result.stderr}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # install.sh
 # ---------------------------------------------------------------------------

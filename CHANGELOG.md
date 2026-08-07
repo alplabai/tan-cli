@@ -264,13 +264,13 @@ All notable changes to `tan` are documented here. Format follows
 - **Three more defects found reviewing the (#490) fixes above, all in
   `install.ps1`:**
   - A relative `-Dir` resolved against `[Environment]::CurrentDirectory`,
-    which Windows PowerShell 5.1 -- the floor this script targets -- never
-    updates on `Set-Location`/`cd`, only `$PWD`. `-Dir .\bin` after `cd
+    which NEITHER Windows PowerShell 5.1 nor PowerShell 7+ updates on
+    `Set-Location`/`cd` -- only `$PWD` does, on both. `-Dir .\bin` after `cd
     .\tools` could silently install somewhere the user never asked for
-    (often wherever the PowerShell process itself started). Now anchored
-    against `$PWD.Path`, which both 5.1 and 7 keep accurate, via
-    `[System.IO.Path]::Combine` (an already-absolute `-Dir` passes through
-    unchanged).
+    (often wherever the PowerShell process itself started), on either
+    version. Now anchored against `$PWD.Path`, which both 5.1 and 7 keep
+    accurate, via `[System.IO.Path]::Combine` (an already-absolute `-Dir`
+    passes through unchanged).
   - The registry-kind-preserving Path write this same issue's
     highest-priority fix added was never actually exercised by any test:
     every `install.ps1` test in the suite passes `-NoModifyPath` so it never
@@ -296,6 +296,21 @@ All notable changes to `tan` are documented here. Format follows
     the stale ones rather than replacing them -- so the item ends up with
     only what its new parent grants, exactly as if created there fresh.
     Non-fatal, like the `install.sh` `chown`. (#490)
+- **The relative-`-Dir` fix directly above shipped with zero test coverage,
+  justified by a comment claiming PowerShell 7 keeps
+  `[Environment]::CurrentDirectory` and `$PWD` in sync so only Windows
+  PowerShell 5.1 needed it.** That claim does not hold: measured directly
+  (PowerShell 7.4.6, `Set-Location` into a subdirectory, then compare
+  `$PWD.Path` against `[Environment]::CurrentDirectory`), the two diverge on
+  7 exactly as they do on 5.1 -- the comment was the only thing standing
+  between the missing test and a reader believing the gap was intentional.
+  `install.ps1`'s module comment is corrected, and a new regression test
+  (`test_ps1_relative_dir_is_resolved_against_pwd_not_process_startup_dir`)
+  starts `pwsh` in one directory, `Set-Location`s into a subdirectory
+  mid-script (mirroring `cd .\tools; irm ... | iex -Dir .\bin`), and asserts
+  the install lands under the subdirectory rather than wherever the `pwsh`
+  PROCESS itself started -- `windows_only` like the rest of this file's ps1
+  coverage. (#490)
 
 ## [0.5.1] — 2026-08-04
 
