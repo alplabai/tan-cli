@@ -286,6 +286,72 @@ def test_a_malformed_existing_launch_json_refuses_to_write(tmp_path):
     assert launch_json(tmp_path).read_text(encoding="utf-8") == "{ this is not json"
 
 
+def test_a_write_failure_leaves_the_existing_launch_json_byte_identical(
+    monkeypatch, capsys, tmp_path
+):
+    """tan-cli#489 (1+2): a failure between the temp write and the atomic
+    replace must never touch the customer's real file. Before the fix,
+    `open(launch_json_path, "w")` truncated the file to zero before a byte of
+    `plan.content` was written -- any failure past that point (ENOSPC, a
+    quota/RLIMIT_FSIZE hit, an I/O error, or the process dying) destroyed the
+    customer's hand-authored configurations with no way for tan to repair it.
+    Driven in-process (monkeypatching `os.replace`) rather than via subprocess
+    + RLIMIT_FSIZE, which is POSIX-only and would not run on Windows/macOS the
+    same way -- the property under test (the real path is never truncated) is
+    identical either way, and this is portable."""
+    import types
+
+    from tan.commands import debug_config_cmd
+
+    launch_json(tmp_path).parent.mkdir()
+    original = (
+        "{\n"
+        '  "version": "0.2.0",\n'
+        '  "configurations": [\n'
+        "    {\n"
+        '      "name": "My own hand-written config",\n'
+        '      "type": "cppdbg",\n'
+        '      "request": "launch"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+    )
+    launch_json(tmp_path).write_text(original, encoding="utf-8")
+
+    def boom_replace(_src, _dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(debug_config_cmd.os, "replace", boom_replace)
+
+    with pytest.raises(typer.Exit) as exit_info:
+        debug_config_cmd.debug_config(
+            types.SimpleNamespace(obj=None),
+            target_kind=ZEPHYR_MCU,
+            server=JLINK,
+            core=None,
+            pre_launch_task=None,
+            gdbserver_address=None,
+            svd=None,
+            preview=False,
+            project=str(tmp_path),
+            board_yaml=None,
+            sdk_root=None,
+            output_format="json",
+            quiet=False,
+        )
+
+    assert exit_info.value.exit_code == 3
+    env = json.loads(capsys.readouterr().out)
+    assert env["issues"][0]["code"] == "debug-config.write-failure"
+    # The whole point: the ORIGINAL file, byte for byte, not merely "still
+    # parses" -- a truncating write followed by a failed re-populate could
+    # still leave valid-but-wrong JSON.
+    assert launch_json(tmp_path).read_text(encoding="utf-8") == original
+    # No leftover temp file: the failure path cleans up after itself.
+    leftovers = list(launch_json(tmp_path).parent.glob("*.tan-tmp"))
+    assert leftovers == [], leftovers
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -697,7 +763,13 @@ def test_jlink_device_stays_the_placeholder_with_no_core_and_no_build(tmp_path):
     """alp-sdk#1026 review finding #3: `jlink_device` is keyed BY core id, so
     on a project that has never been built AND passes no `--core`,
     `identity_core` is `None` and `device` must stay the placeholder -- there
-    is no core to index the map with, and no "only entry" guess."""
+    is no core to index the map with, and no "only entry" guess.
+
+    tan-cli#489 (4): the issue reported for WHY it stayed a placeholder must
+    not misattribute this to "the SDK publishes no `device` value" --
+    `write_sdk_fixture`'s own `e8.json` publishes one for every core it has
+    (`m55_hp`/`m55_he`); the only missing input is which core to look up, and
+    the message must say so and name the working remedy (`--core`)."""
     pytest.importorskip("yaml")
     Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
     write_sdk_fixture(tmp_path)
@@ -711,6 +783,46 @@ def test_jlink_device_stays_the_placeholder_with_no_core_and_no_build(tmp_path):
     )
     assert env["exitCode"] == 0
     assert env["data"]["configuration"]["device"] == "<resolved-device>"
+    codes = [i["code"] for i in env["issues"]]
+    assert "debug-config.sdk-identity-key-absent" not in codes, (
+        "misattributes 'no core to look up with' as 'the SDK publishes no "
+        f"value at all': {env['issues']!r}"
+    )
+    issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-core-unresolved"),
+        None,
+    )
+    assert issue is not None, env["issues"]
+    assert "--core" in issue["message"]
+
+
+def test_jlink_device_names_the_known_cores_for_a_core_the_map_has_no_entry_for(tmp_path):
+    """tan-cli#489 (4) refinement: an EXPLICIT `--core` the SDK's published map
+    has no entry for is the same underlying cause (no usable lookup key) as
+    the no-core case above, sharing the same code -- but the message can, and
+    must, name the cores the SDK DOES publish, since a core WAS given here."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    write_sdk_fixture(tmp_path)
+
+    env = envelope(
+        run_cli(
+            tmp_path,
+            "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "m55_typo",
+            "--sdk-root", "./sdk", "--preview", "--format", "json",
+        )
+    )
+    assert env["exitCode"] == 0
+    assert env["data"]["configuration"]["device"] == "<resolved-device>"
+    codes = [i["code"] for i in env["issues"]]
+    assert "debug-config.sdk-identity-key-absent" not in codes, env["issues"]
+    issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-core-unresolved"),
+        None,
+    )
+    assert issue is not None, env["issues"]
+    assert "m55_typo" in issue["message"]
+    assert "m55_hp" in issue["message"] and "m55_he" in issue["message"]
 
 
 def test_write_discloses_when_sdk_identity_overwrites_a_hand_filled_device(tmp_path):
@@ -788,6 +900,92 @@ def test_an_all_placeholder_config_files_list_keeps_a_hand_added_second_entry():
         "board/alp.cfg",
         "interface/cmsis-dap.cfg",
     ]
+
+
+def test_a_hand_added_second_config_file_survives_a_resolved_one_element_draft():
+    """tan-cli#489 (3): the guard above only covers an ALL-placeholder
+    incoming list. Here the incoming `configFiles` is a single RESOLVED
+    entry (a real build's `runners.yaml` registered only one `--config`),
+    which cannot take that guard's branch -- the per-index merge below it
+    used to silently truncate the customer's second `.cfg`, attaching to
+    half a target."""
+    draft = create_launch_draft(ZEPHYR_MCU, "openocd", None)
+    draft["configFiles"] = ["board/renesas_rzv2n.cfg"]
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (OpenOCD)",
+                    "configFiles": ["board/renesas_rzv2n.cfg", "interface/jlink.cfg"],
+                }
+            ],
+        }
+    )
+
+    plan = create_launch_json_write_plan(existing, draft)
+
+    assert plan.written_configuration["configFiles"] == [
+        "board/renesas_rzv2n.cfg",
+        "interface/jlink.cfg",
+    ]
+
+
+def test_a_hand_written_setup_commands_list_survives_a_one_element_draft(tmp_path):
+    """tan-cli#489 (3): `setupCommands` is the case the all-placeholder guard
+    can NEVER reach -- its elements are dicts, never `<...>` strings, so
+    `all(_is_unresolved(v) for v in next_value)` is always False. Reproduces
+    the issue's own measured scenario: a real remote-gdb `setupCommands` list
+    (pretty-printing + a sysroot + a solib-search-path) reduced to the
+    draft's single hardcoded element, silently, at exit 0."""
+    launch_json(tmp_path).parent.mkdir()
+    launch_json(tmp_path).write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Yocto Remote Debug",
+                        "type": "cppdbg",
+                        "setupCommands": [
+                            {"text": "-enable-pretty-printing", "ignoreFailures": True},
+                            {
+                                "text": "-gdb-set sysroot "
+                                "/opt/poky/4.0/sysroots/cortexa55-poky-linux"
+                            },
+                            {
+                                "text": "set solib-search-path "
+                                "/opt/poky/4.0/sysroots/cortexa55-poky-linux/usr/lib"
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = envelope(
+        run_cli(
+            tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER,
+            "--gdbserver-address", "192.168.1.42:2345", "--format", "json",
+        )
+    )
+
+    assert env["exitCode"] == 0
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    setup_commands = on_disk["configurations"][0]["setupCommands"]
+    assert setup_commands == [
+        # The customer's own `ignoreFailures` key survives -- our draft never
+        # writes that key, so a wholesale per-index replace would have
+        # dropped it even on the one element that DID match.
+        {"text": "-enable-pretty-printing", "ignoreFailures": True},
+        {"text": "-gdb-set sysroot /opt/poky/4.0/sysroots/cortexa55-poky-linux"},
+        {
+            "text": "set solib-search-path "
+            "/opt/poky/4.0/sysroots/cortexa55-poky-linux/usr/lib"
+        },
+    ], setup_commands
 
 
 def test_select_slice_ignores_a_qualified_native_sim_lookalike():
@@ -1229,6 +1427,67 @@ def test_an_omitted_target_kind_with_a_core_matching_nothing_refuses(tmp_path):
     assert "its cores: m55_hp, m55_he" in message, message
     assert env["data"]["launchJsonPath"] == str(Path(tmp_path, ".vscode", "launch.json"))
     assert not launch_json(tmp_path).exists()
+
+
+def test_an_explicit_target_kind_with_a_core_matching_nothing_also_refuses(tmp_path):
+    """tan-cli#489 (5): the `--target-kind`-EXPLICIT counterpart of the test
+    above. `infer_target_kind` (and ITS OWN `--core`-vs-manifest guard) only
+    runs when `--target-kind` is OMITTED -- passing it explicitly used to
+    bypass that guard entirely, so a mistyped `--core` on a real, BUILT
+    two-core project sailed through in silence: exit 0, `device` still the
+    placeholder, and `executable` pointing at
+    `${workspaceFolder}/build/app/zephyr/zephyr.elf`, a path this project's
+    build never produced (measured in the issue). FAILS against the pre-fix
+    code, which reported `exitCode: 0`, `ok: true`, `issues: []` here."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n",
+        encoding="utf-8",
+    )
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root))
+
+    env = envelope(
+        run_cli(
+            tmp_path,
+            "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "m55_typo",
+            "--format", "json",
+        )
+    )
+
+    assert env["exitCode"] == 2, env
+    assert env["issues"][0]["code"] == "debug-config.core-unknown"
+    message = env["issues"][0]["message"]
+    assert "does not match any slice" in message, message
+    assert "its cores: m55_hp, m55_he" in message, message
+    # Unlike the omitted-`--target-kind` refusal above (which fires before
+    # target/server are known and so reports the `zephyr-mcu`/`none`
+    # placeholder pair), this one already HAS a real target/server resolved
+    # -- report them, not the placeholder.
+    assert env["data"]["targetKind"] == ZEPHYR_MCU and env["data"]["server"] == JLINK
+    assert not launch_json(tmp_path).exists()
+
+
+def test_an_explicit_core_matching_a_real_slice_still_resolves(tmp_path):
+    """The regression-safety pairing for the fix above: a `--core` that DOES
+    name a real slice must keep working exactly as before -- this is a
+    validation floor, not a new requirement to name every slice explicitly."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root))
+
+    env = envelope(
+        run_cli(
+            tmp_path,
+            "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "m55_he",
+            "--preview", "--format", "json",
+        )
+    )
+
+    assert env["exitCode"] == 0, env
+    assert env["data"]["configuration"]["executable"] == (
+        "${workspaceFolder}/build/m55_he-zephyr/build/zephyr/zephyr.elf"
+    )
 
 
 def test_an_omitted_target_kind_with_core_naming_the_native_sim_slice_infers_native_host(tmp_path):

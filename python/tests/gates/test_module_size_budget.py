@@ -231,7 +231,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # resolved to a literal ... a 'code=' keyword argument is not a
     # resolvable code literal" -- each wrapper's own literal is the only
     # shape the gate can verify against the registry.
-    "tan/commands/debug_config_cmd.py": 1402,
+    # 1402 -> 1535: tan-cli#489 fixed three data-loss/misattribution defects
+    # in one bounded change: (1+2) the launch.json write moved from a
+    # truncating `open(path, "w")` to a temp-sibling + `os.replace` (matching
+    # `bootstrap_cmd.reconcile_west_manifest_path`'s own pattern); (4) split
+    # `sdk-identity-key-absent` off a new `_sdk_identity_core_unresolved_issue`
+    # for the "no core to index the SDK's per-core identity with" case, which
+    # it used to misattribute; (5) `_explicit_core_unknown_failure` closes the
+    # silent `--core`-vs-manifest gap `infer_target_kind`'s own guard cannot
+    # reach once `--target-kind` is given explicitly.
+    "tan/commands/debug_config_cmd.py": 1535,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -326,7 +335,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # matching nothing) carry a bare reason code the caller maps to a new
     # issue code -- and `_core_not_in_manifest_message` grew a `slices`
     # parameter to name the cores the build actually produced.
-    "tan/core/debug_launch.py": 1068,
+    # 1109, not 1068, as of tan-cli#489: (3) `_merge_value`'s list branch grew
+    # a no-truncation tail-append plus a recursive dict branch (a per-index
+    # merge used to silently delete a customer's extra `setupCommands`/
+    # `configFiles` entries and their hand-added keys); (5)
+    # `explicit_core_unknown_message` is the `--target-kind`-explicit
+    # counterpart of `_core_not_in_manifest_message` above, kept in `tan.core`
+    # rather than duplicated in the command module per this file's own
+    # pure-logic convention.
+    "tan/core/debug_launch.py": 1109,
     "tan/commands/build/execute.py": 941,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
@@ -422,7 +439,17 @@ _MIRRORED = ("tan/planner/",)
 # than left to bump this budget a second time. `run_fix` (`doctor_cmd.py`)
 # also grew this pass, but it was already over 50 lines before it, so it
 # never moved the COUNT either way.
-_FUNCTION_COUNT_BUDGET = 203
+#
+# 205, not 203, as of tan-cli#489: two more functions crossed 50 lines --
+# `debug_config_cmd.py:_fill_debug_probe_identity_from_sdk` (52 -> 57), which
+# now also returns the `known_jlink_cores` set item (4)'s
+# `sdk-identity-core-unresolved` message needs, and
+# `debug_launch.py:_merge_value` (44 -> 53), whose list branch gained the
+# no-truncation tail-append plus a recursive dict branch (item (3): a
+# per-index merge used to silently delete a customer's own `setupCommands`/
+# `configFiles` entries). `_run` (`debug_config_cmd.py`) also grew, 320 -> 382,
+# but was already over the cap, so it does not move this count.
+_FUNCTION_COUNT_BUDGET = 205
 _FUNCTION_WORST_BUDGET = 707
 
 

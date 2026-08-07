@@ -167,6 +167,25 @@ def _core_not_in_manifest_message(core: str, slices: list[dict[str, Any]]) -> st
     )
 
 
+def explicit_core_unknown_message(core: str, slices: list[dict[str, Any]]) -> str:
+    """tan-cli#489 (5): the `--target-kind`-EXPLICIT counterpart of
+    [`_core_not_in_manifest_message`] above. An explicit `--target-kind`
+    bypasses [`infer_target_kind`] (and ITS OWN `--core`-vs-manifest guard,
+    the function above) entirely, so `debug_config_cmd.py` calls this
+    directly once it has resolved a real target/server of its own to report,
+    instead of the placeholder pair `_core_not_in_manifest_message`'s caller
+    reports. Not private (unlike its sibling): the command module is the
+    caller here, so pure logic stays in `tan.core` per this file's own
+    convention rather than duplicating the "list the cores this build
+    produced" formatting there."""
+    cores = ", ".join(dict.fromkeys(s["core_id"] for s in slices))
+    return (
+        f"--core {core} does not match any slice in this project's own "
+        f"build/system-manifest.yaml (its cores: {cores}); pass a --core "
+        "value this project's build actually produced."
+    )
+
+
 def _ambiguous_target_classes_message(targets: set[str]) -> str:
     # The mapped --target-kind SPELLINGS (`zephyr-mcu`), never the raw
     # manifest `os` value (`zephyr`) -- pasting the bare `os` value into
@@ -720,10 +739,32 @@ def _merge_value(existing: Any, next_value: Any) -> Any:
         # per element, so an entry we did resolve wins.
         if next_value and existing and all(_is_unresolved(v) for v in next_value):
             return list(existing)
-        return [
+        merged = [
             _merge_value(existing[i] if i < len(existing) else None, item)
             for i, item in enumerate(next_value)
         ]
+        # tan-cli#489 (3): the per-index merge above must never TRUNCATE. A
+        # SHORTER incoming list is not a signal that the customer's extra
+        # entries should be deleted -- `setupCommands`' draft hardcodes ONE
+        # element (`create_launch_draft`) while a real cppdbg session's
+        # customer-authored list can hold any number, and this guard's own
+        # `all(_is_unresolved(...))` above can never fire for it: every
+        # element is a dict, never a `<...>` string. Anything past
+        # `len(next_value)` in `existing` has no corresponding incoming item
+        # -- it is the customer's own, untouched by this run -- so it is kept
+        # verbatim, at its original position, rather than merged against
+        # nothing.
+        if len(existing) > len(next_value):
+            merged.extend(existing[len(next_value) :])
+        return merged
+    if isinstance(next_value, dict) and isinstance(existing, dict):
+        # tan-cli#489 (3): recurse instead of replacing wholesale. A dict
+        # *inside* a list element (`setupCommands`' `{"text": ..., "ignoreFailures":
+        # ...}`) can carry a customer-added key our own draft never writes;
+        # only [`_merge_configuration`]'s "visit only the incoming keys"
+        # discipline preserves it, the same protection top-level launch-config
+        # keys already had.
+        return _merge_configuration(existing, next_value)
     if _is_unresolved(next_value) and _is_resolved(existing):
         return existing
     return next_value
