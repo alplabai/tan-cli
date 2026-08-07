@@ -16,6 +16,56 @@ All notable changes to `tan` are documented here. Format follows
   tests failed because `latest` began resolving to a tag its hardcoded
   `RELEASES` snapshot did not carry. Both are the checks working as
   designed; both needed the post-release follow-up they describe.
+- **Three `tan flash` interpolations onto the real write path had no
+  control-character/metacharacter guard, while every sibling field on the
+  same lines already did.** `jlink_serial` was read with the tolerant
+  `fa_str` and interpolated verbatim into `SelectEmuBySN {serial}` in both
+  the MRAM-write script and the read-only DPIDR preflight -- a newline there
+  both injects arbitrary J-Link Commander lines and prefixes them onto the
+  preflight ahead of its wrong-board abort. The artefact/ATOC paths reached
+  `loadbin`/`loadfile`/`verifybin` lines quoted by `commander_path`, but
+  quoting only stops whitespace token-splitting, not a literal newline
+  ending the Commander line early. `jlink_serial` now goes through
+  `fa_str_checked` + `validate_identifier` (which also fixes a bare numeric
+  serial, the canonical SEGGER spelling, being silently dropped), and the
+  artefact/ATOC paths are rejected outright if they contain a `"` or a
+  control character. (#486)
+- **`tan flash`'s write path could send a write somewhere the operator did
+  not intend, or claim `ok:true`/exit 0 over one that never happened.** Six
+  defects, closed together: (1) `yocto_wic`'s `/dev/` target guard was a
+  bare `startswith`, so `/dev/../home/<user>/important.img` passed and `dd`
+  overwrote the file -- the target is now lexically normalized, plus a
+  second, write-time-only `stat.S_ISBLK` gate catches a real file that
+  merely lives lexically under a genuine `/dev/` subtree; (2) an
+  out-of-vocabulary `flash_args.compress`, or a `.wic.zst`/`.wic.bz2`/
+  `.wic.lzo` artefact with no `compress` key at all, silently fell through
+  to a raw `dd` of the still-compressed stream -- both now refuse instead,
+  without touching the genuinely-uncompressed `.wic` path; (3) a relative
+  `--sdk-root` made `tan validate` an artefact against one base and the
+  spawned flasher read it from another -- `sdk_root` is now absolutised the
+  same way `build_root` already is; (4) text mode discarded every
+  tan-authored failure diagnosis (timeout, spawn failure, J-Link
+  script-write failure), and dropped a killed child's output captured
+  before the kill; (5) Flow D's SETOOLS auto-sign ran for real on any
+  non-dry-run invocation even with the confirm gate unarmed, writing into
+  the customer's SETOOLS install on a run that goes on to refuse the MRAM
+  write it was signing for; (6) `swd_probe`'s success message asserted
+  `"@ <base>"` unconditionally, even for an ELF/HEX write where no tool ever
+  received a base address. A seventh, separately-tracked shape --
+  `flash.nothing-matched` misdiagnosing a run where every matched target
+  was legitimately skipped before dispatch (an unresolved `TBD` flash_arg,
+  no flash_method, or a missing tool under `--skip-missing-tools`) -- now
+  reports the new warning code `flash.entries-skipped` instead; `ok`/exit
+  code are unchanged (still success) for that shape.
+  - **Three of these turn a previously-succeeding `tan flash` into a
+    refusal (exit 1).** Most likely to surprise someone: a `.wic.zst`
+    artefact that used to flash successfully on a `dd`-only host (no
+    `bmaptool`) now refuses -- it was silently writing a compressed image
+    straight to the block device. The other two: an explicit
+    `flash_args.compress` value outside `"gz" | "xz"`, and a `/dev/`-rooted
+    target that does not exist and whose parent is not `/dev` itself (a
+    typo, a dangling symlink, or a traversal that would have resolved
+    outside `/dev/`). (#487)
 
 ## [0.5.1] — 2026-08-04
 
