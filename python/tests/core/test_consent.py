@@ -139,3 +139,25 @@ def test_a_none_stderr_withholds_consent_without_raising(monkeypatch):
     monkeypatch.setattr(sys, "stdin", _FakeStream(True))
     monkeypatch.setattr(sys, "stderr", None)
     assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False
+
+
+def test_a_stderr_with_no_isatty_method_withholds_consent_without_raising(monkeypatch):
+    """tan-cli#488 round 6: the `is not None` guards above only cover a
+    *detached* (`None`) handle -- not a handle that EXISTS and simply lacks
+    `.isatty()`, which is exactly what `sys.stderr` becomes under `--format
+    json` (`tan.cli.main`'s `_TeeStderr`: `write`/`flush`/`getvalue` only).
+    `can_prompt`'s own `not json_mode` operand happens to short-circuit
+    ahead of this today (`_TeeStderr` is only ever installed when
+    `json_mode` is `True`), so this exact function was never observed to
+    crash on it in practice -- but the sibling copy in
+    `build_cmd._dispatch` had no such guard in front of it and DID crash on
+    a real `tan run --format json` (see `test_build_streaming.py`'s
+    matching regression). This test binds the shape directly rather than
+    relying on the incidental short-circuit to keep protecting it."""
+
+    class _NoIsatty:
+        pass
+
+    monkeypatch.setattr(sys, "stdin", _FakeStream(True))
+    monkeypatch.setattr(sys, "stderr", _NoIsatty())
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False

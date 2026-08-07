@@ -145,7 +145,7 @@ from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, venv_python, west_program, west_workspace_dir
-from tan.env import TEXT_WRAP_MIN_WIDTH, use_color
+from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -2783,6 +2783,23 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
     `AttributeError`, one operand later. `can_prompt` now guards both; this
     copy must match it exactly or the two diverge on the very host this
     function exists to explain.
+
+    tan-cli#488 round 6: `is not None` still was not the whole guard -- it
+    stops a detached (`None`) handle from crashing `.isatty()`, but not a
+    handle that EXISTS and simply has no `.isatty()` method, exactly the
+    shape `sys.stderr` takes under `--format json` (`tan.cli.main`'s
+    `_TeeStderr`, which implements `write`/`flush`/`getvalue` only). The
+    `not json_mode` guard in front of this whole condition means this
+    particular copy was never observed to reach that shape in practice --
+    but `tan.commands.build_cmd._dispatch` hand-rolled the identical
+    `is not None and .isatty()` pair with no `json_mode` operand ahead of
+    it, and that one DID crash on a real `tan run --format json`
+    (`AttributeError: '_TeeStderr' object has no attribute 'isatty'`,
+    measured), one caller away from the same fate here. Both operands now
+    route through `tan.env.stdin_is_tty`/`stderr_is_tty` -- the one shared
+    probe (tan-cli#288) already used by `use_color`/`wrap_width` above and
+    now by `can_prompt` too -- instead of a fourth hand-rolled copy of a
+    guard three of the previous four rounds already got wrong once.
     """
     reasons = []
     if json_mode:
@@ -2791,12 +2808,7 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
         reasons.append("`--ci`")
     if non_interactive:
         reasons.append("`--non-interactive`")
-    if not json_mode and not (
-        sys.stdin is not None
-        and sys.stdin.isatty()
-        and sys.stderr is not None
-        and sys.stderr.isatty()
-    ):
+    if not json_mode and not (stdin_is_tty() and stderr_is_tty()):
         reasons.append("no interactive terminal (stdin/stderr not a tty -- piped, redirected, or CI)")
     return Issue(
         "doctor.fix-suppressed",

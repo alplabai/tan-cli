@@ -208,6 +208,49 @@ def test_dispatch_does_not_crash_arming_the_heartbeat_when_stderr_is_none(monkey
     assert issues == []
 
 
+def test_dispatch_does_not_crash_arming_the_heartbeat_when_stderr_has_no_isatty(monkeypatch):
+    """tan-cli#488 round 6: the round-5 guard above (the test immediately
+    above this one) only stopped a `None` `sys.stderr` from crashing this
+    line -- it never covered a `sys.stderr` that EXISTS and simply has no
+    `.isatty()` method, which is exactly what `tan.cli.main` installs under
+    `--format json` (`_TeeStderr`: `write`/`flush`/`getvalue` only). Every
+    `tan run --format json` against a real project crashed here with
+    `AttributeError: '_TeeStderr' object has no attribute 'isatty'` --
+    `run_cmd._run` calls `_build` with no `json_mode` of its own, so
+    `_dispatch` always saw the `json_mode=False` default and reached the
+    bare `.isatty()` unconditionally (measured against the real binary,
+    exit 5, `run.internal-failure`, before a single slice dispatched). This
+    is the one shape `test_dispatch_does_not_crash_arming_the_heartbeat_when_
+    stderr_is_none` above cannot catch: monkeypatching `sys.stderr` to
+    `None` never exercises a stderr that has attributes but not this one."""
+
+    class _NoIsatty:
+        def write(self, _text: str) -> int:  # pragma: no cover - never called
+            return 0
+
+        def flush(self) -> None:  # pragma: no cover - never called
+            pass
+
+    from tan.core.build_plan import BuildPlan
+
+    plan = BuildPlan(
+        schema_version=1,
+        generated_by="test",
+        board_yaml="board.yaml",
+        sku="sku",
+        build_root="build",
+        slices=[],
+        shared_artefacts=[],
+        warnings=[],
+    )
+    monkeypatch.setattr(sys, "stderr", _NoIsatty())
+
+    outcomes, issues = build_cmd._dispatch(plan, [], build_cmd.Path("/tmp"), None, None, json_mode=False)
+
+    assert outcomes == []
+    assert issues == []
+
+
 # --- CLI, subprocess: the JSON path is untouched -------------------------
 
 

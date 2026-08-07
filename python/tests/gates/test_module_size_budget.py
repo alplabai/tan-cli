@@ -170,7 +170,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # `AttributeError`. `fix_suppressed_issue` gained the matching
     # `sys.stderr is not None` guard plus a docstring paragraph explaining the
     # recurrence.
-    "tan/commands/doctor_cmd.py": 3600,
+    # 3612, not 3600, as of tan-cli#488 ROUND 6: rounds 3-5's `is not None`
+    # guards stopped a detached (`None`) `sys.stdin`/`sys.stderr` from
+    # crashing `fix_suppressed_issue`'s local tty check, but not a handle
+    # that EXISTS and simply has no `.isatty()` -- exactly what `sys.stderr`
+    # is under `--format json` (`tan.cli.main`'s `_TeeStderr`). The local
+    # `sys.stdin is not None and sys.stdin.isatty() and sys.stderr is not
+    # None and sys.stderr.isatty()` check is now `stdin_is_tty() and
+    # stderr_is_tty()` (imported from `tan.env`, the shared probe tan-cli#288
+    # already built for this exact class), plus a docstring paragraph
+    # recording the recurrence and why this copy was never itself observed
+    # to crash (its own `not json_mode` guard in front) even though the
+    # sibling copy in `build_cmd._dispatch` did.
+    "tan/commands/doctor_cmd.py": 3612,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -509,7 +521,30 @@ _MODULE_BUDGET: dict[str, int] = {
     # detached-stdio `tan build`/`tan run` raised the same `AttributeError`
     # arming the heartbeat, before a single slice ever dispatched. Gained a
     # `sys.stderr is not None` guard plus a docstring paragraph.
-    "tan/commands/build_cmd.py": 1732,
+    # 1754, not 1732, as of tan-cli#488 ROUND 6: round 5's `sys.stderr is not
+    # None` guard stopped a detached (`None`) stderr from crashing this line,
+    # but not a stderr that EXISTS and simply has no `.isatty()` -- exactly
+    # what `sys.stderr` is under `--format json` (`tan.cli.main`'s
+    # `_TeeStderr`). Measured against the real binary: `tan run --format
+    # json --sdk-root <sdk>` from a real project crashed with `AttributeError:
+    # '_TeeStderr' object has no attribute 'isatty'` (exit 5,
+    # `run.internal-failure`) before a single slice dispatched, on every run
+    # -- `run_cmd._run` calls `_build` with no `json_mode` of its own, so
+    # `_dispatch` always saw the `json_mode=False` default and never
+    # short-circuited past this line. `enabled=not json_mode and sys.stderr
+    # is not None and sys.stderr.isatty()` is now `enabled=not json_mode and
+    # stderr_is_tty()`, importing the shared probe `tan.env` already built
+    # for this exact class (tan-cli#288) instead of a fourth hand-rolled
+    # copy, which also collapses back onto one line under the 100-column
+    # limit. Also corrects six stale `run_cmd._build_then_run` docstring/
+    # comment references (a name that was never real in `run_cmd.py`, which
+    # has only ever defined `_run`) to the actual name while editing the
+    # same paragraphs, and two `run_cmd.py:258` line citations that pointed
+    # at `_run`'s docstring line rather than its actual `_build(` call site
+    # (`run_cmd.py:267`). Net growth is almost entirely the docstring
+    # recording the round-6 recurrence and the residual `json_mode`-
+    # threading gap this round deliberately still leaves open.
+    "tan/commands/build_cmd.py": 1754,
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
@@ -947,7 +982,18 @@ _MIRRORED = ("tan/planner/",)
 # grew further with the `resolved_ran` branch (defect 3) but does not move
 # this count. `_FUNCTION_WORST_BUDGET` is untouched -- nothing here is close
 # to 707.
-_FUNCTION_COUNT_BUDGET = 215
+#
+# 216, not 215, as of tan-cli#488 ROUND 6: `tan/core/consent.py:can_prompt`
+# crossed 50 lines (45 -> 60) with the docstring paragraph explaining why
+# `is not None` was never the whole guard -- a stream that EXISTS but lacks
+# `.isatty()` (`_TeeStderr` under `--format json`) still crashes it, the
+# same class `build_cmd._dispatch` and `doctor_cmd.fix_suppressed_issue`
+# were fixed for in this same round. `fix_suppressed_issue` (76 -> 88) and
+# `_dispatch` (186 -> 209) both grew too, but were already over the cap, so
+# neither moves this count. `_FUNCTION_WORST_BUDGET` is untouched --
+# measured (AST walk, all of `tan/` including `tan/planner/`) at 701 lines
+# worst (`bootstrap_cmd.py:_run`), under the 707 ceiling.
+_FUNCTION_COUNT_BUDGET = 216
 _FUNCTION_WORST_BUDGET = 707
 
 

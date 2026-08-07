@@ -108,6 +108,7 @@ from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
 from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
+from tan.env import stderr_is_tty
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -254,7 +255,7 @@ class _Heartbeat:
     with the stream it was standing in for.
 
     Armed by [`_dispatch`] itself, not handed down by its caller: `_build`'s
-    two callers -- `build_cmd.build` and `run_cmd._build_then_run` -- both
+    two callers -- `build_cmd.build` and `run_cmd._run` -- both
     bottleneck through `_dispatch` before any slice runs, so constructing
     the heartbeat there covers `tan run`'s identical silent-CMake window
     too, not just a direct `tan build` (tan-cli#287 follow-up).
@@ -862,20 +863,20 @@ def _dispatch(
     EAGER call that can run for minutes -- the loop after it only walks
     results `execute_slices` already computed -- and this function is the
     one seam every route into the build engine shares. `_build`'s two
-    callers, `build_cmd.build` (`tan build`) and `run_cmd._build_then_run`
+    callers, `build_cmd.build` (`tan build`) and `run_cmd._run`
     (`tan run`), both bottleneck through here before any slice runs, so
     arming the heartbeat at THIS level, not one up, is what covers `tan
     run`'s identical silent-CMake window too -- the gap the previous
     revision (a `_Heartbeat` built in `build()` and threaded down as
-    `on_output`) left, since `run_cmd.py:258` calls `_build` with no
+    `on_output`) left, since `run_cmd.py:267` calls `_build` with no
     `on_output` of its own.
 
     `json_mode` is the one thing this function cannot discover for itself
     (`sys.stderr.isatty()` it checks directly, same as `build()` used to).
-    `build()` passes its real value straight through. `run_cmd.
-    _build_then_run` has its own `--format json` support but does not yet
-    thread it here (out of this file's scope to add -- see `run_cmd.py:258`),
-    so its call keeps the default `False`.
+    `build()` passes its real value straight through. `run_cmd._run` takes
+    its own `json_mode` parameter but does not yet thread it into this call
+    (out of this file's scope to add -- see `run_cmd.py:267`), so its call
+    keeps the default `False`.
 
     tan-cli#488 round 5 class sweep: `sys.stderr` can be `None` -- a process
     launched with its standard handles detached (a GUI launcher, a
@@ -886,11 +887,34 @@ def _dispatch(
     `tan build`/`tan run`, caught only by `build()`'s own outer `except
     Exception` and reported as a fabricated `build.internal-failure` instead
     of simply running with the heartbeat disabled.
+
+    tan-cli#488 round 6: the round-5 fix only added `sys.stderr is not
+    None` in front of the same bare `.isatty()` call -- which stops a
+    `None` stderr from crashing this line, but not a stderr that EXISTS and
+    simply has no `.isatty()` method at all. `tan.cli.main` installs exactly
+    that shape under `--format json`: `sys.stderr` becomes `_TeeStderr`
+    (`cli.py`'s tee, `write`/`flush`/`getvalue` only, no `isatty`), which is
+    not `None`, so round 5's guard let the call through and
+    `run_cmd._run` -> `_build` -> here crashed with `AttributeError:
+    '_TeeStderr' object has no attribute 'isatty'` on every `tan run
+    --format json` -- exit 5, `run.internal-failure`, before a single slice
+    ever dispatched (measured against the real binary). This is the exact
+    condition `tan.env.stderr_is_tty` already exists to guard (tan-cli#288)
+    and `use_color`/`wrap_width` already share -- a `None` check does not
+    cover a stream that exists but lacks the method, which is the whole
+    class this line, `tan.core.consent.can_prompt` and `doctor_cmd.
+    fix_suppressed_issue` all shared the same wrong shape for. Now routed
+    through the one shared probe instead of a fourth hand-rolled copy.
     # ponytail: the one live gap this leaves -- `tan run --format json` with
     # a REAL terminal still attached to stderr would arm the heartbeat where
-    # it should stay silent. stdout (the envelope channel) is untouched
-    # either way; thread `json_mode` through `run_cmd._build_then_run` if
-    # that combination is ever hit for real.
+    # it should stay silent (`run_cmd._run` does not thread its own
+    # `json_mode` into `_build`, so `_dispatch` always sees the default
+    # `False` on that path -- see `run_cmd.py:267`). stdout (the envelope
+    # channel) is untouched either way, and the crash this round fixes is
+    # closed regardless of `json_mode`'s value, since `stderr_is_tty()` is
+    # false for a `_TeeStderr` on its own merits; threading `json_mode`
+    # through `run_cmd._run` is a separate, narrower polish left for its own
+    # change, out of this file's scope to add.
 
     A demoted slice still names a literal `${TOOLCHAIN_ROOT}` in its own
     fields because this host resolved no toolchain. `execute_slices` does not
@@ -977,9 +1001,7 @@ def _dispatch(
     # that also inherited the terminal's stderr). `__enter__`/`__exit__` run
     # regardless of what happens inside, so a dispatch that raises still
     # stops the thread and blanks any line it had printed.
-    with _Heartbeat(
-        enabled=not json_mode and sys.stderr is not None and sys.stderr.isatty()
-    ) as heartbeat:
+    with _Heartbeat(enabled=not json_mode and stderr_is_tty()) as heartbeat:
         dispatched = iter(
             execute_slices(
                 replace(plan, slices=runnable),
@@ -1146,7 +1168,7 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
 def _build(
     *,
     # Defaulted so `mode` stays optional for the OTHER caller of this engine:
-    # `run_cmd._build_then_run` builds unconditionally (there is no `tan run
+    # `run_cmd._run` builds unconditionally (there is no `tan run
     # --plan`/`--materialise`) and has no mode to pass.
     mode: str = _MODE_NATIVE,
     plan_from: str | None,
@@ -1154,7 +1176,7 @@ def _build(
     sdk_root: str | None,
     sdk_root_for_stamp: str | None,
     board_yaml: str | None,
-    # Defaulted for the same reason as `mode`: `run_cmd._build_then_run`
+    # Defaulted for the same reason as `mode`: `run_cmd._run`
     # calls this with no format preference of its own today. Threaded
     # straight through to `_dispatch`, which is where the heartbeat this
     # gates is actually armed -- see that function's own docstring.
@@ -1618,7 +1640,7 @@ def build(
         # tan-cli#287: the heartbeat that covers a silent slice (a first-build
         # CMake configure, measured at 234.2s with nothing printed) is armed
         # inside `_dispatch`, not here -- `_build`'s OTHER caller,
-        # `run_cmd._build_then_run`, bottlenecks through the identical
+        # `run_cmd._run`, bottlenecks through the identical
         # `_dispatch` call and needs the same cover for a silent `tan run`. See
         # `_dispatch`'s own docstring for the TTY/`json_mode` gating (unchanged:
         # still never armed for `--format json`, stdout is untouched either way)

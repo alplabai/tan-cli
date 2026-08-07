@@ -269,16 +269,38 @@ All notable changes to `tan` are documented here. Format follows
     child (a genuine tty on stdin, stderr closed before `exec`), not a
     monkeypatched mock. Both call sites now guard `sys.stderr is not None`
     too. Sweeping the rest of `tan/` for the same unguarded-`isatty()`
-    shape found and fixed three further, independent sites, none of them
-    masked by this one: `build_cmd._dispatch`'s `_Heartbeat` arming (a
-    detached-stdio `tan build`/`tan run` crashed before a single slice
-    dispatched, reported as a fabricated `build.internal-failure`);
+    shape found three further, independent sites and closed two of them:
     `faultdecode_cmd._read_dump`'s implicit stdin auto-consume (now treats a
     detached stdin the same as one offering nothing, `""`) and its explicit
     `--file -` read (now refused with a clear `--file` message instead of a
     raw crash); and `new_som_cmd.new_som`'s non-interactive-stdin refusal
     (now reaches its own named "stdin is not a terminal" message instead of
-    crashing first). (#488)
+    crashing first). The third, `build_cmd._dispatch`'s `_Heartbeat` arming,
+    only had its `None` case guarded by this same sweep -- `sys.stderr is
+    not None and sys.stderr.isatty()` still crashed on a stderr that EXISTS
+    but has no `.isatty()` at all, which is exactly what `--format json`
+    installs (`_TeeStderr`); that site was not actually closed until round
+    6, below. (#488)
+- **Round 6: the round-5 sweep's own `is not None` guards left the actual
+  crash open on the one site that mattered most.** `sys.stderr is not None
+  and sys.stderr.isatty()` (`build_cmd._dispatch`) and the equivalent
+  `sys.stdin`/`sys.stderr` pair in `tan.core.consent.can_prompt` and
+  `doctor_cmd.fix_suppressed_issue` all stop a *detached* (`None`) handle
+  from crashing `.isatty()`, but not a handle that EXISTS and simply lacks
+  the method -- exactly what `sys.stderr` becomes under `--format json`
+  (`tan.cli.main` tees it through `_TeeStderr`, which implements only
+  `write`/`flush`/`getvalue`). Measured against the real binary: every `tan
+  run --format json` against a real project crashed with `AttributeError:
+  '_TeeStderr' object has no attribute 'isatty'` (exit 5,
+  `run.internal-failure`) before a single slice dispatched, because
+  `run_cmd._run` calls `_build` with no `json_mode` of its own, so
+  `_dispatch` always saw the `json_mode=False` default and reached the bare
+  `.isatty()` unconditionally. All three sites now route through
+  `tan.env.stdin_is_tty`/`stderr_is_tty` -- promoted from the module-private
+  `_stderr_is_tty` tan-cli#288 already built for this exact
+  try/except-guarded probe, plus a new `stdin_is_tty` alongside it -- instead
+  of each hand-rolling a fourth (and fifth) copy of a guard three of the
+  previous five rounds already got wrong once. (#488)
 
 ## [0.5.1] — 2026-08-04
 
