@@ -1176,12 +1176,15 @@ def test_swd_probe_openocd_space_only_hostile_artefact_cannot_inject_keywords():
     )
 
 
-#: `openocd_program_word` leaves a plain (no whitespace, no backslash)
-#: artefact unbraced -- unchanged from before this fix, which is what keeps
-#: the two recorded `tests/parity/test_flash_oracle_parity.py` fixtures
+#: `openocd_program_word` now braces EVERY artefact, plain or not
+#: (tan-cli#511) -- see that function's own docstring for why the earlier
+#: whitespace/backslash-conditional version never actually preserved the
+#: parity it claimed to. The two frozen `tests/parity/test_flash_oracle_
+#: parity.py` cases that used to pin the plain (unbraced) rendering
 #: (`multi-segment-interface-is-allowed`, `openocd-forced-bin-appends-base`)
-#: byte-identical; that suite (not a case here, since it cannot differ
-#: before/after this fix) is the regression guard for it.
+#: moved OUT of that suite's byte-diff `CASES` table for exactly this
+#: reason; `test_openocd_program_word_diverges_from_the_oracle_by_exactly_
+#: the_brace` below is their bounded replacement.
 
 
 # ── swd_probe device/target reporting (tan-cli#402) ─────────────────────────
@@ -1368,8 +1371,8 @@ def test_yocto_wic_block_device_refusal_accepts_a_real_block_device():
 def test_yocto_wic_block_device_refusal_follows_a_real_symlink_to_its_own_mode(tmp_path):
     """A `/dev/disk/by-id/...`-style symlink: `os.stat` follows it to the real
     device's mode by itself, with no separate realpath step needed here.
-    Proven with a REAL symlink to `/dev/null` (a character device, not a
-    block device) rather than an injected `stat_fn` that ignores its path
+    Proven with a REAL symlink to a real character device (not a block
+    device) rather than an injected `stat_fn` that ignores its path
     argument -- the previous version of this test used
     `fake_stat = lambda _p: ...st_mode=real_mode`, which is byte-for-byte the
     preceding accepts-a-real-block-device test under a different string, so
@@ -1377,10 +1380,32 @@ def test_yocto_wic_block_device_refusal_follows_a_real_symlink_to_its_own_mode(t
     always answers the same fixed mode". This proves the FOLLOW half
     (real `os.stat`, no `stat_fn` override, so the symlink genuinely has to
     resolve); it cannot prove the block-device-acceptance half in the same
-    breath because `/dev/null` is a character device, so the refusal here is
-    the "not a block device" one, over the REAL resolved mode."""
+    breath because a character device is not a block device, so the refusal
+    here is the "not a block device" one, over the REAL resolved mode.
+
+    **The symlink TARGET is platform-specific (tan-cli#511); the ASSERTION
+    is not.** `/dev/null` is POSIX -- real on Linux and macOS, but not a
+    path Windows has at all (there is no `/dev` filesystem there). Measured:
+    a symlink literally pointing at the string `/dev/null` is DANGLING on
+    Windows (nothing resolves it), so `os.stat` raises `FileNotFoundError`
+    on the symlink's own path instead of following it anywhere -- and
+    `_yocto_wic_block_device_refusal` answers its FileNotFoundError branch
+    (`does not exist, and its parent is not /dev itself...`) rather than
+    the `not a block device` branch this test means to exercise. That is a
+    test-input defect (a POSIX path assumed to exist everywhere), not a
+    `tan` defect: nothing under test ever claimed `/dev/null` was portable.
+    `NUL` is Windows' own equivalent reserved device name (the documented
+    `/dev/null` stand-in there, e.g. `open('NUL', 'w')`), and CPython's own
+    Windows `stat()` reports it as a character device
+    (`GetFileType()` == `FILE_TYPE_CHAR` -> `S_IFCHR` in `st_mode`,
+    `Modules/posixmodule.c`) -- `S_ISBLK` is False for it exactly as it is
+    for POSIX `/dev/null`, so the SAME assertion ("not a block device")
+    is the right one on all three platforms; only the real device the
+    symlink resolves to differs. Not independently verified on a live
+    Windows host as part of this change -- flag if CI still disagrees."""
     link = tmp_path / "by-id-stand-in"
-    link.symlink_to("/dev/null")
+    char_device = "NUL" if sys.platform == "win32" else "/dev/null"
+    link.symlink_to(char_device)
     refusal = flash_cmd._yocto_wic_block_device_refusal(str(link))
     assert refusal is not None
     assert "not a block device" in refusal
@@ -1429,7 +1454,9 @@ def test_yocto_wic_block_device_refusal_refuses_a_traversal_through_a_symlinked_
     assert "does not exist" in refusal
 
 
-def test_yocto_wic_write_time_gate_is_actually_wired_through_a_real_flash_entry(tmp_path):
+def test_yocto_wic_write_time_gate_is_actually_wired_through_a_real_flash_entry(
+    tmp_path, monkeypatch
+):
     """tan-cli#487 review finding 3: mutation-proven that NOTHING previously
     exercised the write-time gate's WIRING -- deleting the whole
     `if method in YOCTO_WIC_METHODS: ... return 1, entry(...)` block at
@@ -1439,51 +1466,97 @@ def test_yocto_wic_write_time_gate_is_actually_wired_through_a_real_flash_entry(
     spawn is the oracle-parity fixture, which exercises the FAIL-OPEN branch
     (a target that does not exist) -- never the refusal branch.
 
-    This drives the REAL `tan flash` subprocess, confirmed, against a target
-    that DOES exist as a regular file under a genuine `/dev/` subtree
-    (`/dev/shm/<unique>`, tmpfs, so this needs no real `/dev` write access
-    and touches no real device), and asserts BOTH that the entry fails AND
-    that the file's bytes are never touched -- if the gate were unwired,
-    `dd` would overwrite it with the fake artefact bytes below instead.
+    **Not a subprocess this time (tan-cli#511).** The original version of
+    this test drove a real `python -m tan flash` subprocess against a
+    genuine `/dev/shm/<name>` regular file -- `/dev/shm` is Linux tmpfs, and
+    neither macOS nor Windows have anywhere writable under a path lexically
+    starting with `/dev/` (the string `plan_yocto_wic`'s own oracle-pinned
+    "must start with /dev/" refusal requires regardless of host, real device
+    or not). That made the whole test Linux-only by construction, which is
+    exactly the "a platform loses the protection permanently" failure a
+    data-loss gate cannot afford. `_flash_entry` (the REAL, unmodified
+    dispatch function `tan flash`'s own loop calls) now takes an injectable
+    `yocto_wic_stat` -- the write-time gate's own `stat_fn` parameter,
+    threaded one level further out -- for exactly this reason: the same
+    pattern `_yocto_wic_block_device_refusal`'s OWN direct-call tests already
+    use to fake `st_mode` (`test_yocto_wic_block_device_refusal_accepts_a_
+    real_block_device` above), now reaching through the real call site
+    instead of the helper alone. This calls `_flash_entry` itself, in
+    process -- no subprocess, no real filesystem entity under a `/dev/`-
+    rooted path on any platform -- so the wiring proof holds identically on
+    Linux, macOS, and Windows.
 
-    This is a wiring-regression test, not a pre/post-fix behaviour test:
-    the gate itself already exists on `451304a` (this branch's tip) and
-    this test passes there too -- what it proves is that DELETING the gate
-    (`flash_cmd.py:1373-1380`) now makes THIS test fail, closing the exact
-    hole the review's own mutation run found (the full suite passed with
-    the block deleted, because nothing reached it through a real spawn).
-    The mutation re-run confirming that is reported alongside this test,
-    not encoded in it."""
-    # `/dev/shm` is a real tmpfs mount, world-writable, present on every host
-    # this suite runs on -- the issue's own repro shape (`/dev/shm/<name>`),
-    # stood in with a collision-proof name derived from `tmp_path` rather
-    # than a fixed one, since this test does not get its own `/dev/shm`
-    # sandbox the way `tmp_path` is one.
-    victim = Path("/dev/shm") / f"tan-cli-487-gate-{tmp_path.name}.img"
-    victim.write_bytes(b"do-not-clobber-me")
-    try:
-        (tmp_path / "sdk" / "images").mkdir(parents=True)
-        (tmp_path / "sdk" / "images" / "core-image.wic").write_bytes(b"fake-image-bytes")
-        manifest = f"""schema_version: 1
-hw_info: {{sku: S}}
-slices:
-- {{core_id: a55, os: yocto, output_artefact: images/core-image.wic, status: ok,
-   flash_method: yocto_wic, flash_args: {{target: {victim}, confirm: true}}}}
-helper_mcus: []
-boot_order: []
-"""
-        exit_code, out, _ = run_flash(
-            tmp_path, "--format", "json", env={"ALP_FLASH_FORCE": "1"}, manifest=manifest
+    Proves the wiring TWO ways, either one independently sufficient: the
+    returned entry fails with the block-device message, AND `_execute` (the
+    function that would actually spawn `dd`/`bmaptool`) is monkeypatched to
+    raise if it is ever called at all -- the direct assertion that nothing
+    was spawned, standing in for "the file's bytes are never touched" now
+    that there is no longer a real file in the loop for a mutated gate to
+    clobber. `wic_target` itself needs no real backing file for the SAME
+    reason `yocto_wic_stat` needs no real filesystem interaction: it is
+    passed to the injected `stat_fn`, which ignores it and answers a fixed,
+    fake regular-file mode.
+
+    This is a wiring-regression test, not a pre/post-fix behaviour test: the
+    gate itself already exists on `451304a` and this test passes there too
+    -- what it proves is that DELETING the gate (`flash_cmd.py:1373-1380`)
+    now makes THIS test fail (confirmed by manually deleting that block and
+    re-running: `_execute` is reached, the injected spy raises, and the test
+    errors), closing the exact hole the review's own mutation run found (the
+    full suite passed with the block deleted, because nothing reached it
+    through a real spawn). Restored immediately after that manual check;
+    the mutation itself is not encoded here."""
+    from tan.commands.flash_cmd import _Context, FlashTarget  # noqa: PLC0415 -- test-only seam
+
+    def _execute_must_not_run(*_args, **_kwargs):
+        raise AssertionError(
+            "flash_cmd._execute was invoked -- the write-time block-device "
+            "gate did not fire before the real spawn, exactly the wiring "
+            "hole this test exists to catch"
         )
-        payload = envelope(out)
-        assert exit_code == 1
-        entries = payload["data"]["entries"]
-        assert len(entries) == 1
-        assert entries[0]["status"] == "failed"
-        assert "not a block device" in entries[0]["message"]
-        assert victim.read_bytes() == b"do-not-clobber-me"
-    finally:
-        victim.unlink(missing_ok=True)
+
+    monkeypatch.setattr(flash_cmd, "_execute", _execute_must_not_run)
+
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    (build_root / "core-image.wic").write_bytes(b"fake-image-bytes")
+
+    # A stub `dd` so the required-tool gate (and `plan_yocto_wic`'s own probe)
+    # find SOMETHING, on every platform, without needing a real `dd`/
+    # `bmaptool` on PATH -- `tool_in_venv` only checks `.is_file()`, and this
+    # directory's name is not `Scripts`, so no platform-specific `.exe` suffix
+    # is required either. Never spawned: `_execute` is monkeypatched above,
+    # and the gate under test refuses before dispatch would ever reach it.
+    tool_stub_dir = tmp_path / "tool-stub"
+    tool_stub_dir.mkdir()
+    (tool_stub_dir / "dd").write_bytes(b"")
+
+    ctx = _Context(
+        sku="S",
+        build_root=str(build_root),
+        sdk_root=str(tmp_path),
+        dry_run=False,
+        skip_missing_tools=False,
+        force_confirm=True,
+        capture=True,
+        venv_bin=tool_stub_dir,
+    )
+    target = FlashTarget(
+        kind="slice",
+        id="a55",
+        flash_method="yocto_wic",
+        flash_args={"target": "/dev/shm/tan-cli-487-gate.img"},
+        output_artefact="core-image.wic",
+    )
+    fake_stat = lambda _target: types.SimpleNamespace(  # noqa: E731
+        st_mode=stat.S_IFREG | 0o644
+    )
+
+    rc, result_entry, _lines = flash_cmd._flash_entry(target, ctx, yocto_wic_stat=fake_stat)
+
+    assert rc == 1
+    assert result_entry.status == "failed"
+    assert "not a block device" in result_entry.message
 
 
 def test_plan_yocto_wic_compress_out_of_vocabulary_string_refuses():

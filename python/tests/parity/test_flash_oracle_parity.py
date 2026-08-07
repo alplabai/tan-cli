@@ -19,6 +19,7 @@ Two message texts are structurally out of reach and are diffed by CODE + EXIT
 rather than byte-for-byte; both are called out on the case that covers them.
 """
 import os
+import re
 import shutil
 import subprocess
 
@@ -163,14 +164,48 @@ boot_order: []
         _slice("swd_probe", '{use_openocd: true, interface: cmsis-dap, target: "../../x"}'),
         ["--dry-run"],
     ),
-    (
-        "multi-segment-interface-is-allowed",
-        _slice(
-            "swd_probe",
-            "{use_openocd: true, interface: ftdi/olimex-arm-usb-ocd-h, target: gd32g553}",
-        ),
-        ["--dry-run"],
-    ),
+    # No `multi-segment-interface-is-allowed` case here, deliberately
+    # (tan-cli#486 / tan-cli#487 / tan-cli#511 -- MAINTAINER-AUTHORISED
+    # divergence, not a port defect to chase back to parity). It used to pin
+    # the openocd `-c program <artefact> verify ...` word BYTE-IDENTICAL to
+    # the oracle's own unbraced rendering, on the strength of
+    # `openocd_program_word`'s old whitespace-or-backslash predicate leaving
+    # a plain path unbraced. That predicate never actually preserved the
+    # parity it claimed to: both frozen fixtures are captured on
+    # `oracle_fixtures.CAPTURE_PLATFORM = "win32"`
+    # (`tests/parity/oracle_fixtures.py:75`), so the `<ORACLE-ROOT-0>`
+    # scratch root each one interpolates is a native Windows path and
+    # carries a backslash UNCONDITIONALLY -- on the one platform these
+    # fixtures are actually anchored to, the predicate could never once
+    # observe its own "no backslash" branch. It only LOOKED preserved on a
+    # Linux replay, where `compare()`'s `normalise_scrubbed_path_separators`
+    # flattens `\\`->`/` in `entries[].message` before the diff and the
+    # locally-built path never contains a literal backslash to begin with --
+    # both sides answer `False` there by coincidence, not because bracing
+    # was genuinely conditional.
+    #
+    # Left unbraced, the oracle's own rendering is the exact defect
+    # `openocd_program_word`'s docstring documents (measured against real
+    # `tclsh`, not inferred): unbraced, `C:\Program Files\alp\build\
+    # zephyr.elf` splits into `program` / `C:Program` / `Files\x07lp\
+    # x08uildzephyr.elf` (`\a`->BEL, `\b`->BS), so `program` receives the
+    # filename `C:Program`; and a space-bearing artefact
+    # `/build/evil.elf verify exit 0x20000000` injects extra Tcl keywords,
+    # rendering `program /build/evil.elf verify exit 0x20000000 verify
+    # reset exit`. Both are honest-input failures -- a Windows user's
+    # default install path, no attacker required -- so the port now braces
+    # every artefact unconditionally (`openocd_program_word`, tan-cli#511)
+    # and no longer matches the oracle's raw interpolation byte-for-byte.
+    # Standing instruction: do not "restore parity" here while the oracle
+    # still interpolates the artefact raw into an unquoted Jim Tcl word --
+    # that would be reintroducing the defect, not fixing a port bug. Pinned
+    # instead, as a BOUNDED exact-difference case, in
+    # `test_openocd_program_word_diverges_from_the_oracle_by_exactly_the_
+    # brace` below.
+    #
+    # No `openocd-forced-bin-appends-base` case here either, for the
+    # identical reason -- it exercises the same `program {...}` word, just
+    # on the `.bin`/`base` arm. Also pinned in that same bounded test.
     ("newline-in-base-is-refused", _slice("swd_probe", '{base: "0x8000\\n r"}'), ["--dry-run"]),
     # ── per-backend argv ────────────────────────────────────────────────────
     ("no-artefact-real-run-fails", "\n".join(
@@ -219,14 +254,6 @@ boot_order: []
 """, ["--dry-run"]),
     ("pyocd-forced-elf-omits-base",
      _slice("swd_probe", "{use_pyocd: true, interface: cmsis-dap, target: t}"), ["--dry-run"]),
-    ("openocd-forced-bin-appends-base", """schema_version: 1
-hw_info: {sku: S}
-slices:
-- {core_id: c1, os: zephyr, output_artefact: a.bin, status: ok, flash_method: swd_probe,
-   flash_args: {use_openocd: true, interface: cmsis-dap, target: gd32g553}}
-helper_mcus: []
-boot_order: []
-""", ["--dry-run"]),
     ("openocd-missing-interface-and-target",
      _slice("swd_probe", "{use_openocd: true}"), ["--dry-run"]),
     # ── the confirm gate (I-30) ─────────────────────────────────────────────
@@ -670,6 +697,103 @@ def _available(payload):
     message = payload["data"]["entries"][0]["message"]
     listed = message.split("Available: [", 1)[1].rstrip("]")
     return {token.strip().strip('"') for token in listed.split(",")}
+
+
+#: `(case_id, manifest, extra)` for the two cases `openocd_program_word`'s
+#: unconditional bracing (tan-cli#511) moved OUT of the byte-diff `CASES`
+#: table above -- see the standing divergence note there for why. Kept as
+#: their own list (not folded into `CASES`) because they need a DIFFERENT
+#: comparator: not "match byte-for-byte" but "match except this one word".
+_OPENOCD_BRACE_DIVERGENCE_CASES = [
+    (
+        "multi-segment-interface-is-allowed",
+        _slice(
+            "swd_probe",
+            "{use_openocd: true, interface: ftdi/olimex-arm-usb-ocd-h, target: gd32g553}",
+        ),
+        ["--dry-run"],
+    ),
+    (
+        "openocd-forced-bin-appends-base",
+        """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: a.bin, status: ok, flash_method: swd_probe,
+   flash_args: {use_openocd: true, interface: cmsis-dap, target: gd32g553}}
+helper_mcus: []
+boot_order: []
+""",
+        ["--dry-run"],
+    ),
+]
+
+#: The exact `-c program <word>` artefact token, isolated so the assertion
+#: below can wrap ONLY it -- not "somewhere in the message a `{` appeared",
+#: which would also pass for a brace that landed on the wrong word entirely.
+_PROGRAM_WORD_RE = re.compile(r"(?<=-c program )(\S+)(?= verify)")
+
+
+def _braced_program_word(message: str) -> str:
+    """`message` with its unbraced oracle `-c program <word>` wrapped in
+    `{...}`, matching what `openocd_program_word` now always does. The
+    oracle's own word never contains whitespace (that is the whole reason it
+    was left unbraced under the old predicate), so `\\S+` captures it whole."""
+    return _PROGRAM_WORD_RE.sub(lambda m: "{" + m.group(1) + "}", message, count=1)
+
+
+@pytest.mark.parametrize(
+    "case_id, manifest, extra",
+    _OPENOCD_BRACE_DIVERGENCE_CASES,
+    ids=[c[0] for c in _OPENOCD_BRACE_DIVERGENCE_CASES],
+)
+def test_openocd_program_word_diverges_from_the_oracle_by_exactly_the_brace(
+    case_id, manifest, extra, work_dir
+):
+    """The ONE bounded envelope divergence unconditional bracing introduces
+    (tan-cli#511), in the shape of `test_unknown_method_diverges_by_exactly_
+    the_flow_d_registry_key` above: run BOTH sides for real (frozen replay
+    for rust, exactly like every other case in this module) and assert the
+    whole envelope matches EXCEPT that the python `-c program` word is the
+    oracle's own word wrapped in `{...}` -- and that nothing else moved.
+    `multi-segment-interface-is-allowed` and `openocd-forced-bin-appends-
+    base` used to be plain `CASES` entries (byte-diffed whole); they moved
+    here when bracing went unconditional -- see the standing divergence note
+    above `CASES` -- so a SECOND, unexpected drift in either envelope still
+    fails this suite, which is the whole point of a bounded exact-difference
+    test over simply dropping the coverage."""
+    (work_dir / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+    from .oracle import _run, normalise_path_separators, python_command  # noqa: PLC0415
+
+    argv = _argv(extra)
+    roots = (work_dir, work_dir)
+    r_code, r_out = rust_run(argv, work_dir, work_dir, scrub_roots=roots)
+    p_code, p_out = _run(python_command(), argv, work_dir, work_dir)
+    p_out = oracle_fixtures.scrub(p_out, *roots)
+    r_out = normalise_path_separators(r_out)
+    p_out = normalise_path_separators(p_out)
+    r_out = oracle_fixtures.normalise_scrubbed_path_separators(r_out)
+    p_out = oracle_fixtures.normalise_scrubbed_path_separators(p_out)
+
+    assert r_code == p_code == 0, f"{case_id}: rust={r_code} python={p_code}"
+
+    r_entries = r_out["data"]["entries"]
+    p_entries = p_out["data"]["entries"]
+    assert len(r_entries) == len(p_entries) == 1, f"{case_id}: {r_entries} vs {p_entries}"
+    r_message = r_entries[0]["message"]
+    p_message = p_entries[0]["message"]
+    assert p_message == _braced_program_word(r_message), (
+        f"{case_id}: expected ONLY the -c program word to gain braces; "
+        f"rust={r_message!r} python={p_message!r}"
+    )
+
+    # Everything OUTSIDE that one message must still be identical -- blank
+    # both sides' message (already proven equal-modulo-brace above) and diff
+    # the WHOLE remaining envelope.
+    r_out["data"]["entries"][0]["message"] = None
+    p_out["data"]["entries"][0]["message"] = None
+    assert r_out == p_out, f"{case_id}: unexpected divergence beyond the brace: {r_out!r} != {p_out!r}"
 
 
 #: Cases whose ENVELOPE cannot match byte-for-byte, with the reason. Diffed on

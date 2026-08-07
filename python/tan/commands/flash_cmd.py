@@ -1133,8 +1133,26 @@ def _resolve_flow_d_atoc_via_setools(
     )
 
 
-def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[str]]:
-    """Dispatch + run one target. Returns `(rc, entry, text-lines)`."""
+def _flash_entry(
+    target: FlashTarget,
+    ctx: _Context,
+    *,
+    yocto_wic_stat: Callable[[str], os.stat_result] = os.stat,
+) -> tuple[int, _Entry, list[str]]:
+    """Dispatch + run one target. Returns `(rc, entry, text-lines)`.
+
+    `yocto_wic_stat` is the write-time block-device gate's `stat_fn`
+    (`_yocto_wic_block_device_refusal`'s own parameter), threaded through
+    here -- not called from anywhere else in this function -- purely so a
+    test can reach the REAL dispatch path with an injected mode, exactly the
+    way that helper's own direct-call tests already fake `st_mode`, without
+    needing a literal `/dev/`-rooted regular file to exist on disk (`/dev/shm`
+    is Linux-only tmpfs; neither macOS nor Windows have anywhere writable
+    under a path lexically starting with `/dev/`, and `plan_yocto_wic`'s own
+    `must start with /dev/` refusal -- oracle-pinned wording, see that
+    function -- means the target STRING has to start with `/dev/` regardless
+    of host, even though nothing here actually touches a real device). The
+    real dispatch default (`os.stat`) is unchanged for every existing caller."""
     kind, entry_id = target.kind, target.id
     lines: list[str] = []
 
@@ -1402,7 +1420,7 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
     if method in YOCTO_WIC_METHODS:
         wic_target = fa_str(flash_args, "target")
         if wic_target is not None:
-            refusal = _yocto_wic_block_device_refusal(wic_target)
+            refusal = _yocto_wic_block_device_refusal(wic_target, stat_fn=yocto_wic_stat)
             if refusal is not None:
                 lines.append(f"  FAIL: {refusal}")
                 return 1, entry(method, "failed", 1, refusal), lines

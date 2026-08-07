@@ -584,37 +584,6 @@
    }
   }
  ],
- "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[multi-segment-interface-is-allowed]#0": [
-  0,
-  {
-   "command": "flash",
-   "data": {
-    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
-    "entries": [
-     {
-      "id": "c1",
-      "kind": "slice",
-      "message": "would run openocd -f interface/ftdi/olimex-arm-usb-ocd-h.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>\\.\\build\\a.elf verify reset exit",
-      "method": "swd_probe",
-      "rc": 0,
-      "status": "ok"
-     }
-    ],
-    "schemaVersion": "1"
-   },
-   "exitCode": 0,
-   "issues": [],
-   "ok": true,
-   "project": {
-    "boardYaml": null,
-    "root": "<ORACLE-ROOT-0>"
-   },
-   "sdk": {
-    "root": "./sdk",
-    "sourceTier": "sdkRootFlag"
-   }
-  }
- ],
  "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[negative-base-is-refused]#0": [
   1,
   {
@@ -837,37 +806,6 @@
       "message": "flash: slice 'idle' has no flash_method; skipping",
       "rc": -1,
       "status": "skipped"
-     }
-    ],
-    "schemaVersion": "1"
-   },
-   "exitCode": 0,
-   "issues": [],
-   "ok": true,
-   "project": {
-    "boardYaml": null,
-    "root": "<ORACLE-ROOT-0>"
-   },
-   "sdk": {
-    "root": "./sdk",
-    "sourceTier": "sdkRootFlag"
-   }
-  }
- ],
- "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[openocd-forced-bin-appends-base]#0": [
-  0,
-  {
-   "command": "flash",
-   "data": {
-    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
-    "entries": [
-     {
-      "id": "c1",
-      "kind": "slice",
-      "message": "would run openocd -f interface/cmsis-dap.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>\\.\\build\\a.bin verify reset exit 0x08000000",
-      "method": "swd_probe",
-      "rc": 0,
-      "status": "ok"
      }
     ],
     "schemaVersion": "1"
@@ -1697,6 +1635,68 @@
     }
    ],
    "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_openocd_program_word_diverges_from_the_oracle_by_exactly_the_brace[multi-segment-interface-is-allowed]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>/./build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run openocd -f interface/ftdi/olimex-arm-usb-ocd-h.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>/./build/a.elf verify reset exit",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_openocd_program_word_diverges_from_the_oracle_by_exactly_the_brace[openocd-forced-bin-appends-base]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>/./build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run openocd -f interface/cmsis-dap.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>/./build/a.bin verify reset exit 0x08000000",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
    "project": {
     "boardYaml": null,
     "root": "<ORACLE-ROOT-0>"

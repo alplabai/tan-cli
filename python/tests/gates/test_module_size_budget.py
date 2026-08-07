@@ -198,7 +198,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # `compress`, so those refusals must not fire on that arm at all), which
     # nets a few lines of comment explaining why, over and above the code
     # move itself.
-    "tan/core/flash_plan.py": 2123,
+    # 2161, not 2123, as of tan-cli#511: `openocd_program_word` braces every
+    # artefact unconditionally instead of only when it carries whitespace or
+    # a backslash -- the conditional predicate never actually preserved the
+    # oracle parity its docstring claimed (both frozen fixtures are captured
+    # on `CAPTURE_PLATFORM = "win32"`, so their `<ORACLE-ROOT-0>` scratch
+    # root always carries a backslash; the predicate could never once
+    # observe "no backslash" on the platform it was pinned to). Net growth
+    # is almost entirely docstring: the rationale for why unconditional
+    # bracing was measured-safe, the Fable-advisory finding that made it so,
+    # and the one Tcl brace-counting glass jaw (an odd trailing backslash
+    # count) it deliberately still leaves fail-safe.
+    "tan/core/flash_plan.py": 2161,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
@@ -230,7 +241,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # this used to share a wrong answer with moved to
     # `tests/commands/test_flash_command.py` (see their own docstring for the
     # divergence rationale).
-    "tan/commands/flash_cmd.py": 2094,
+    # 2112, not 2094, as of tan-cli#511: `_flash_entry` gained a keyword-only
+    # `yocto_wic_stat` (default `os.stat`, threaded into
+    # `_yocto_wic_block_device_refusal`'s own `stat_fn`) plus its docstring
+    # addition, so a test can reach the write-time block-device gate's real
+    # call site with an injected mode -- portably, on every CI platform,
+    # instead of needing a real regular file under a literal `/dev/`-rooted
+    # path (Linux-only tmpfs `/dev/shm`; neither macOS nor Windows have an
+    # equivalent).
+    "tan/commands/flash_cmd.py": 2112,
     "tan/planner/kconfig.py": 1639,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
@@ -480,7 +499,17 @@ _MIRRORED = ("tan/planner/",)
 # reader re-widens it by "simplifying" the condition). Body growth is small
 # (one `if`/`return` pair); the docstring is the reason. `_FUNCTION_WORST_
 # BUDGET` is untouched -- 66 lines is nowhere near it.
-_FUNCTION_COUNT_BUDGET = 204
+#
+# 205, not 204, as of tan-cli#511: `flash_plan.py:openocd_program_word`
+# crossed 50 lines (36 -> 74). The body is a single line, unchanged
+# (`return f"{{{text}}}"`, now shorter than before -- the predicate it used
+# to branch on is gone); the docstring is the entire growth, recording why
+# the conditional it replaces never actually preserved the parity fixture
+# it claimed to (the CAPTURE_PLATFORM finding), and the one Tcl brace-
+# counting edge case (an odd trailing backslash count) unconditional
+# bracing deliberately still leaves fail-safe rather than special-cased
+# away. `_FUNCTION_WORST_BUDGET` is untouched -- 74 lines is nowhere near it.
+_FUNCTION_COUNT_BUDGET = 205
 _FUNCTION_WORST_BUDGET = 707
 
 

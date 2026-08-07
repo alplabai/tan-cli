@@ -832,9 +832,9 @@ def validate_openocd_word(text: str, label: str) -> None:
 
 
 def openocd_program_word(text: str) -> str:
-    """Brace `text` for OpenOCD's `-c program {...} verify ...` word when
-    (and only when) leaving it unbraced would corrupt or split it -- i.e.
-    `text` contains whitespace or a backslash (tan-cli#486 review).
+    """Brace `text` for OpenOCD's `-c program {...} verify ...` word,
+    UNCONDITIONALLY (tan-cli#486 / tan-cli#487 / tan-cli#511 -- see below for
+    why this is no longer conditional).
 
     `validate_openocd_word` closes the injection hole but leaves the artefact
     at the mercy of Jim Tcl's own WORD-level rules the moment it is left
@@ -846,27 +846,65 @@ def openocd_program_word(text: str) -> str:
     of whether it also has whitespace, silently mangling any Windows-style
     path (`C:\\Program Files\\alp\\build\\zephyr.elf` -> `C:Program` /
     `Files\\x07lp\\x08uildzephyr.elf` -- `\\a`->BEL, `\\b`->BS -- verified
-    against `tclsh`).
+    against `tclsh`). Both are real, honest-input failures: a Windows user's
+    default install path (`C:\\Program Files\\...`) or an artefact whose
+    directory happens to contain a space needs no attacker at all to trip
+    either one.
 
-    A matched brace pair is the fix (the review's own suggestion): Jim Tcl
-    performs NO substitution -- command, variable, OR backslash -- on the
-    material between braces, and treats the whole braced span as ONE word
-    regardless of embedded whitespace. This is safe here BECAUSE
-    `validate_openocd_word` has already rejected `{`/`}` (along with
-    `[`/`]`/`$`/`;`/`"`/control characters) for every caller of this
-    function -- nothing inside `text` can prematurely close the brace or
-    smuggle a substitution past it.
+    A matched brace pair is the fix: Jim Tcl performs NO substitution --
+    command, variable, OR backslash -- on the material between braces, and
+    treats the whole braced span as ONE word regardless of embedded
+    whitespace. This is safe here BECAUSE `validate_openocd_word` has already
+    rejected `{`/`}` (along with `[`/`]`/`$`/`;`/`"`/control characters) for
+    every caller of this function -- nothing inside `text` can prematurely
+    close the brace or smuggle a substitution past it.
 
-    Conditional, not unconditional: bracing a value that contains NEITHER
-    whitespace nor a backslash changes nothing about how Jim Tcl parses it
-    (a single already-atomic word reads identically braced or not), so
-    leaving those alone keeps every already-recorded `program <path> verify
-    ...` parity fixture byte-identical -- neither of the two recorded
-    openocd `program` lines contains whitespace or a backslash. Bracing
-    UNCONDITIONALLY was measured to move both of those fixtures (extra `{`/
-    `}` in the rendered message) and was rejected for exactly that reason.
+    **Unconditional now, not conditional on whitespace/backslash (tan-cli#511
+    Fable advisory).** The conditional version's own justification -- "leaves
+    every already-recorded `program <path> verify ...` parity fixture
+    byte-identical, since neither recorded case contains whitespace or a
+    backslash" -- was never actually true: both frozen fixtures were captured
+    with `oracle_fixtures.CAPTURE_PLATFORM = "win32"`
+    (`tests/parity/oracle_fixtures.py:75`), so the `<ORACLE-ROOT-0>` scratch
+    root each one interpolates is a native Windows path and carries
+    backslashes UNCONDITIONALLY -- the predicate this docstring used to
+    describe could never once observe the "no backslash" branch on the one
+    platform the fixtures are actually anchored to. The Linux-green replay
+    that made it LOOK preserved was an artefact of `compare()`'s own
+    `normalise_scrubbed_path_separators`, which flattens `\\`->`/` in both
+    sides' `entries[].message` before the diff -- plus a POSIX build root
+    that never contains a literal backslash to begin with, so the predicate
+    happened to answer `False` on BOTH sides there and the diff passed by
+    coincidence, not because bracing was truly conditional. On a real
+    Windows run -- the platform the fixtures are pinned to -- the predicate
+    is unconditionally `True` (every path carries `\\`) and always was; it
+    never preserved the parity it was written to protect. So the two cases
+    that exercise this ("multi-segment-interface-is-allowed",
+    "openocd-forced-bin-appends-base") moved OUT of the byte-diff oracle
+    table entirely -- see `tests/parity/test_flash_oracle_parity.py`'s
+    `CASES` for the standing divergence note -- into a bounded
+    exact-difference test that pins the ONLY token allowed to move.
+    Bracing every artefact, with no predicate at all, is therefore not a
+    behaviour change bought at the price of losing coverage: the coverage
+    the predicate was defending never existed.
+
+    **The one glass jaw this trades in, on purpose: a value ending in an ODD
+    number of backslashes.** Jim Tcl's own brace-counting (unrelated to the
+    backslash-substitution rule above, which never runs on braced material)
+    still walks a braced word looking for the UNESCAPED close brace, and
+    counts a run of backslashes immediately before a `}` to decide whether
+    that `}` is escaped. A `text` ending in an odd number of `\\` (impossible
+    for a real file path -- no filesystem lets a name end in `\\`, and
+    `validate_openocd_word` does not need to reject it specially) leaves the
+    closing `}` this function appends looking escaped to that counting rule,
+    so the brace never closes and OpenOCD reports a parse error. FAIL-SAFE
+    (a parse error before anything is written, not a mis-parsed argv), and
+    unreachable by any real artefact path -- documented here, not "fixed" by
+    stripping the guard, because there is no guard: this is an inherent
+    property of Tcl brace-counting that bracing cannot itself avoid, and a
+    future reader must not mistake it for a bug in this function.
     """
-    return f"{{{text}}}" if any(c.isspace() for c in text) or "\\" in text else text
+    return f"{{{text}}}"
 
 
 #: `char::escape_debug`'s named escapes, which is what Rust's `{:?}` for a
@@ -1127,11 +1165,11 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     pyocd = not force_openocd and (inp.dry_run or which("pyocd"))
     if openocd:
         validate_openocd_word(inp.artefact, "the flash artefact path")
-        # `openocd_program_word` braces the artefact when (and only when)
-        # leaving it unbraced would let Jim Tcl's own word-splitting or
-        # backslash substitution corrupt it -- see its docstring (tan-cli#486
-        # review). Safe here because `validate_openocd_word` just rejected
-        # every character (`{`/`}` included) that could escape the brace.
+        # `openocd_program_word` braces the artefact UNCONDITIONALLY -- see
+        # its docstring (tan-cli#486 review, unconditional as of tan-cli#511)
+        # for why a conditional predicate never actually preserved anything.
+        # Safe here because `validate_openocd_word` just rejected every
+        # character (`{`/`}` included) that could escape the brace.
         program = f"program {openocd_program_word(inp.artefact)} verify"
         if do_reset:
             program += " reset"
