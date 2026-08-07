@@ -136,7 +136,12 @@ def _resolve_silicon_variant(
     variants = soc_spec.get("variants") or []
 
     declared = sku_preset.get("silicon_variant")
-    if declared and declared != "TBD":
+    # alp-sdk #1048: case/whitespace-insensitive TBD match ("tbd", "Tbd",
+    # " TBD " all match) -- a bare `!= "TBD"` let an all-lowercase
+    # `silicon_variant: tbd` read as a real order_code instead of being
+    # dropped as the placeholder it was hand-typed to mean.
+    declared_is_tbd = isinstance(declared, str) and declared.strip().upper() == "TBD"
+    if declared and not declared_is_tbd:
         for v in variants:
             if v.get("order_code") == declared:
                 return v

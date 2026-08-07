@@ -250,7 +250,11 @@ _MODULE_BUDGET: dict[str, int] = {
     # path (Linux-only tmpfs `/dev/shm`; neither macOS nor Windows have an
     # equivalent).
     "tan/commands/flash_cmd.py": 2112,
-    "tan/planner/kconfig.py": 1639,
+    # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
+    # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
+    # companion half -- `needs_dcache_off` now checks
+    # `entry.kind in ("raw_shmem", "rpmsg")` instead of `raw_shmem` alone).
+    "tan/planner/kconfig.py": 1643,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
     # tuple that would need a fourth positional slot for
@@ -363,7 +367,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # and `clean` appends `sdk.global-default-foreign-project` beside
     # `sdk.project-pin-unresolved`.
     "tan/commands/clean_cmd.py": 1013,
-    "tan/planner/loader.py": 996,
+    # 1015, not 996, as of tan-cli#485: `_load_yaml`/`_load_json` route
+    # through the new `strict_loaders.strict_yaml_load`/`strict_json_loads`
+    # (alp-sdk #1127, a duplicate-mapping-key refusal), and the IPC-entry
+    # loop gained the alp-sdk #1088 refusal of `cacheable: true` on a
+    # `kind: rpmsg` entry.
+    "tan/planner/loader.py": 1015,
     # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
     # carries `foreign_global_default_for` through into `_Sdk`, and `init`
     # surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk` writes
@@ -402,7 +411,10 @@ _MODULE_BUDGET: dict[str, int] = {
     # than extracted because this file mirrors an upstream generator --
     # splitting it here would make the next port a hand-merge instead of
     # a diff.
-    "tan/planner/zephyr_board.py": 970,
+    # 975, not 970, as of tan-cli#485: `_resolve_variant` grew a
+    # case/whitespace-insensitive `is_tbd`-shaped TBD check (alp-sdk #1048,
+    # matching `som_metadata.py::_resolve_silicon_variant`'s own copy).
+    "tan/planner/zephyr_board.py": 975,
     "tan/commands/support_bundle_cmd.py": 834,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
@@ -491,7 +503,20 @@ _MIRRORED = ("tan/planner/",)
 # also grew this pass, but it was already over 50 lines before it, so it
 # never moved the COUNT either way.
 #
-# 204, not 203, as of the tan-cli#487 REVIEW round (finding 1):
+# 204, not 203, as of tan-cli#485's review round: `project_loader.py:
+# _hwrev_pad_route_overrides` (trimmed to exactly 50 lines, at the cap not
+# over it, in #485's first pass) needed its dropped constraint note back --
+# "same error TYPE and MESSAGE SHAPE as loader.load_board_yaml's SoM-side
+# refusals" is load-bearing: the function INLINES `loader._status_repr`
+# rather than importing it, and that inlining is invisible without the note
+# telling a future editor the two must be kept in sync by hand. +6 lines
+# (50 -> 56), all docstring, this budget raised rather than re-trimmed --
+# the same choice `render_doctor_footer` made the OTHER way, above, when the
+# growth was prose that added nothing a reader couldn't infer; this growth
+# names a real constraint the code doesn't otherwise state anywhere. This
+# step landed on `dev` via tan-cli#521, independently of the two steps below.
+#
+# 205, not 204, as of the tan-cli#487 REVIEW round (finding 1):
 # `flash_cmd.py:_yocto_wic_block_device_refusal` crossed 50 lines (41 -> 66)
 # once its docstring grew to explain the narrowed ENOENT fail-open (the
 # review's own point -- a blanket fail-open was the bug, and the function
@@ -500,7 +525,7 @@ _MIRRORED = ("tan/planner/",)
 # (one `if`/`return` pair); the docstring is the reason. `_FUNCTION_WORST_
 # BUDGET` is untouched -- 66 lines is nowhere near it.
 #
-# 205, not 204, as of tan-cli#511: `flash_plan.py:openocd_program_word`
+# 206, not 205, as of tan-cli#511: `flash_plan.py:openocd_program_word`
 # crossed 50 lines (36 -> 74). The body is a single line, unchanged
 # (`return f"{{{text}}}"`, now shorter than before -- the predicate it used
 # to branch on is gone); the docstring is the entire growth, recording why
@@ -509,7 +534,14 @@ _MIRRORED = ("tan/planner/",)
 # counting edge case (an odd trailing backslash count) unconditional
 # bracing deliberately still leaves fail-safe rather than special-cased
 # away. `_FUNCTION_WORST_BUDGET` is untouched -- 74 lines is nowhere near it.
-_FUNCTION_COUNT_BUDGET = 205
+# These last two steps landed on tan-cli#487/#511's own branch, disjoint from
+# tan-cli#521's `project_loader.py` step above -- merging #521's dev tip into
+# #511 (tan-cli#511's PR merge) lands all three functions in the same tree at
+# once, so the budget here is 203 + 1 (#521) + 2 (#487/#511) = 206, not
+# either side's pre-merge number on its own. Re-measured against the merged
+# tree with the gate's own `ast`-walk, not summed from the two branches'
+# comments on faith.
+_FUNCTION_COUNT_BUDGET = 206
 _FUNCTION_WORST_BUDGET = 707
 
 
