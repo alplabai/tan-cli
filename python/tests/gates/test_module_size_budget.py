@@ -170,18 +170,86 @@ _MODULE_BUDGET: dict[str, int] = {
     # nothing stopped that gate from being loosened again.
     "tan/commands/bootstrap_cmd.py": 2917,
     "tan/core/bootstrap.py": 1890,
-    "tan/core/flash_plan.py": 1808,
-    # 1829, not 1808, as of the tan-cli#464 stage-2 review round: `_resolve_sdk`/
-    # `resolve_sdk_root_ladder_safe` now return a named `_SdkResolution`
-    # instead of a growing tuple, and `flash` appends
-    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
-    # -- flashing real hardware against the silently-wrong SDK is the highest
-    # cost of any command on this ladder. Grew again when review found the
-    # manifest-not-found gate returned through `_error` BEFORE either warning
-    # was computed, so the dominant refusal reported neither -- `_error` now
-    # takes the resolution facts and calls the shared `sdk_cmd.
-    # sdk_resolution_issues` itself, so no future early return can skip them.
-    "tan/commands/flash_cmd.py": 1829,
+    # 1987, not 1808, as of tan-cli#486 and its review round: two guard
+    # functions (`validate_commander_path`, closing the J-Link Commander
+    # newline/`"`-injection hole on the artefact/atoc/serial interpolations,
+    # and `validate_openocd_word`, closing the OpenOCD `-c` Jim Tcl `[...]`
+    # command-substitution hole on the artefact) plus their call sites and
+    # docstrings across `jlink_commander_script`, `plan_swd_probe`,
+    # `plan_alif_mram_jlink` and `flow_d_preflight_script`; then the review
+    # round added `openocd_program_word` (braces the OpenOCD artefact word
+    # against Jim Tcl's own word-splitting/backslash substitution),
+    # `validate_identifier`'s `destination` override (so `jlink_serial`'s
+    # refusal names the J-Link Commander script it actually reaches, not
+    # OpenOCD), `validate_commander_path`'s `"` rejection, and hoisting
+    # `jlink_serial` validation into `validate_flow_d_shape` so a hostile
+    # value refuses at `--dry-run` time instead of only deep inside
+    # `plan_alif_mram_jlink`/`flow_d_preflight_script`.
+    # 2107, not 1987, as of tan-cli#487: `_resolve_dev_root` (a PURE lexical
+    # `/dev/` traversal-collapse check, replacing the bare `startswith`
+    # `plan_yocto_wic` used to trust) plus `YOCTO_WIC_METHODS`/
+    # `_KNOWN_UNSUPPORTED_COMPRESSION_SUFFIXES` and the `compress` vocabulary
+    # refusal it feeds -- a still-compressed stream must never reach `dd` raw
+    # -- plus the `swd_probe` success messages now withholding `@ {base}` for
+    # a non-`.bin` artefact on both the J-Link and openocd/pyocd arms.
+    # 2123, not 2107, as of the tan-cli#487 REVIEW round (finding 2): the
+    # `compress` vocabulary refusals moved from ahead of tool selection into
+    # the `elif dd:` arm (bmaptool decompresses natively and never reads
+    # `compress`, so those refusals must not fire on that arm at all), which
+    # nets a few lines of comment explaining why, over and above the code
+    # move itself.
+    # 2161, not 2123, as of tan-cli#511: `openocd_program_word` braces every
+    # artefact unconditionally instead of only when it carries whitespace or
+    # a backslash -- the conditional predicate never actually preserved the
+    # oracle parity its docstring claimed (both frozen fixtures are captured
+    # on `CAPTURE_PLATFORM = "win32"`, so their `<ORACLE-ROOT-0>` scratch
+    # root always carries a backslash; the predicate could never once
+    # observe "no backslash" on the platform it was pinned to). Net growth
+    # is almost entirely docstring: the rationale for why unconditional
+    # bracing was measured-safe, the Fable-advisory finding that made it so,
+    # and the one Tcl brace-counting glass jaw (an odd trailing backslash
+    # count) it deliberately still leaves fail-safe.
+    "tan/core/flash_plan.py": 2161,
+    # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
+    # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
+    # perform -- it is pure), `_timeout_stderr` (folds a killed child's
+    # partial captured output into the timeout report instead of discarding
+    # it), the `_execute_message` gate fix so a text-mode run surfaces a
+    # tan-authored diagnosis instead of a bare `flash command failed`,
+    # absolutising `ctx.sdk_root` so an artefact anchored on a relative
+    # `--sdk-root` resolves against the SAME base the flasher spawns from,
+    # and gating Flow D's SETOOLS auto-sign on the SAME confirm check the
+    # MRAM write it feeds already requires.
+    # 2075, not 1996, as of the tan-cli#487 REVIEW round: finding 1 narrows
+    # `_yocto_wic_block_device_refusal`'s ENOENT fail-open to "target's
+    # parent is `/dev` itself" instead of any target, with a new refusal
+    # message and its rationale; finding 4 absolutises `resolved_sdk` ONCE,
+    # before `venv_bin_dir`/`west_workspace_dir` as well as `ctx.sdk_root`
+    # (the original fix only covered the latter); finding 5 threads a
+    # `captured` flag through `_half_lines`/`_pipeline_stderr`/
+    # `_timed_out_stderr` so an uncaptured (text-mode) pipeline failure does
+    # not emit a body-less header; and nit 1 adds a TOCTOU-boundedness
+    # comment beside the write-time gate.
+    # 2098, not 2075, as of tan-cli#487 defect 7: the aggregate "did anything
+    # flash" check after `_flash_entry`'s loop split into a THIRD branch --
+    # `plan.targets` non-empty but every one of them was skipped INSIDE
+    # `_flash_entry` (an unresolved `TBD` flash_arg, no flash_method, or a
+    # missing tool under `--skip-missing-tools`) -- so it stops reporting
+    # `flash.nothing-matched` on a run that carried no `--core`/`--helper`
+    # filter and genuinely matched a target. New code `flash.entries-skipped`,
+    # `ok`/exit code unchanged (still SUCCESS). The five oracle-parity cases
+    # this used to share a wrong answer with moved to
+    # `tests/commands/test_flash_command.py` (see their own docstring for the
+    # divergence rationale).
+    # 2112, not 2094, as of tan-cli#511: `_flash_entry` gained a keyword-only
+    # `yocto_wic_stat` (default `os.stat`, threaded into
+    # `_yocto_wic_block_device_refusal`'s own `stat_fn`) plus its docstring
+    # addition, so a test can reach the write-time block-device gate's real
+    # call site with an injected mode -- portably, on every CI platform,
+    # instead of needing a real regular file under a literal `/dev/`-rooted
+    # path (Linux-only tmpfs `/dev/shm`; neither macOS nor Windows have an
+    # equivalent).
+    "tan/commands/flash_cmd.py": 2112,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -542,7 +610,58 @@ _MIRRORED = ("tan/planner/",)
 # OTHER way, above, when the growth was prose that added nothing a reader
 # couldn't infer; this growth names a real constraint the code doesn't
 # otherwise state anywhere.
-_FUNCTION_COUNT_BUDGET = 207
+# 204, not 203, as of tan-cli#485's review round: `project_loader.py:
+# _hwrev_pad_route_overrides` (trimmed to exactly 50 lines, at the cap not
+# over it, in #485's first pass) needed its dropped constraint note back --
+# "same error TYPE and MESSAGE SHAPE as loader.load_board_yaml's SoM-side
+# refusals" is load-bearing: the function INLINES `loader._status_repr`
+# rather than importing it, and that inlining is invisible without the note
+# telling a future editor the two must be kept in sync by hand. +6 lines
+# (50 -> 56), all docstring, this budget raised rather than re-trimmed --
+# the same choice `render_doctor_footer` made the OTHER way, above, when the
+# growth was prose that added nothing a reader couldn't infer; this growth
+# names a real constraint the code doesn't otherwise state anywhere. This
+# step landed on `dev` via tan-cli#521, independently of the two steps below.
+#
+# 205, not 204, as of the tan-cli#487 REVIEW round (finding 1):
+# `flash_cmd.py:_yocto_wic_block_device_refusal` crossed 50 lines (41 -> 66)
+# once its docstring grew to explain the narrowed ENOENT fail-open (the
+# review's own point -- a blanket fail-open was the bug, and the function
+# needs to say precisely which shape still fails open and why, or the next
+# reader re-widens it by "simplifying" the condition). Body growth is small
+# (one `if`/`return` pair); the docstring is the reason. `_FUNCTION_WORST_
+# BUDGET` is untouched -- 66 lines is nowhere near it.
+#
+# 206, not 205, as of tan-cli#511: `flash_plan.py:openocd_program_word`
+# crossed 50 lines (36 -> 74). The body is a single line, unchanged
+# (`return f"{{{text}}}"`, now shorter than before -- the predicate it used
+# to branch on is gone); the docstring is the entire growth, recording why
+# the conditional it replaces never actually preserved the parity fixture
+# it claimed to (the CAPTURE_PLATFORM finding), and the one Tcl brace-
+# counting edge case (an odd trailing backslash count) unconditional
+# bracing deliberately still leaves fail-safe rather than special-cased
+# away. `_FUNCTION_WORST_BUDGET` is untouched -- 74 lines is nowhere near it.
+# These last two steps landed on tan-cli#487/#511's own branch, disjoint from
+# tan-cli#521's `project_loader.py` step above -- merging #521's dev tip into
+# #511 (tan-cli#511's PR merge) lands all three functions in the same tree at
+# once, so the budget here is 203 + 1 (#521) + 2 (#487/#511) = 206, not
+# either side's pre-merge number on its own. Re-measured against the merged
+# tree with the gate's own `ast`-walk, not summed from the two branches'
+# comments on faith.
+#
+# 209, not 206 and not 207, merging tan-cli#489's branch with the `dev` tip
+# that now carries BOTH tan-cli#521 (#485's `project_loader.py` step) and
+# tan-cli#511 (#487's `_yocto_wic_block_device_refusal` and #511's
+# `openocd_program_word`). The two comment histories above each describe a
+# DIFFERENT subset of the same 203 baseline and overlap on #485's single
+# step, so neither side's total survives the merge and neither does the
+# naive union of them: 207 + 206 - 203 = 210, which is WRONG. The real
+# figure is 203 + 1 (#485, counted once) + 3 (#489) + 2 (#487/#511) = 209,
+# and it was re-measured against the merged tree with the gate's own
+# `ast`-walk rather than summed from the two branches' comments on faith --
+# the arithmetic and the measurement disagree by one, and the measurement
+# wins.
+_FUNCTION_COUNT_BUDGET = 209
 _FUNCTION_WORST_BUDGET = 707
 
 

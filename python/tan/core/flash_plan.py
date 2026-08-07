@@ -41,6 +41,7 @@ without argument.
 from __future__ import annotations
 
 import os
+import posixpath
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -695,7 +696,9 @@ def flash_args_has_tbd(value: Any) -> bool:
 # ── validators ──────────────────────────────────────────────────────────────
 
 
-def validate_identifier(text: str, field_name: str) -> None:
+def validate_identifier(
+    text: str, field_name: str, *, destination: str = "a spawned command / OpenOCD Tcl script"
+) -> None:
     """Reject anything that is not a plain identifier, or a `/`-separated path
     of plain identifier segments.
 
@@ -711,6 +714,14 @@ def validate_identifier(text: str, field_name: str) -> None:
     `.`/`..`, and every one of those carries a character (`/` leading -> an empty
     segment, `:`, `\\`, `.`) the charset already rejects. Cross-checked against
     the oracle on `a;b`, `../x`, `/x`, `\\x`, `C:/x`, `a//b`, `.`.
+
+    `destination` lets a caller whose value never goes near OpenOCD say so.
+    The default names OpenOCD because `interface`/`target` -- the callers
+    that shaped this message originally -- legitimately reach its `-c` Tcl
+    string; `jlink_serial` (tan-cli#486 review) does not, and reusing the
+    default gave a captured refusal envelope the sentence "refusing to
+    interpolate it into a spawned command / OpenOCD Tcl script" for a value
+    that only ever reaches a J-Link Commander `SelectEmuBySN` line.
     """
     segments = text.split("/")
     ok = bool(text) and all(
@@ -720,8 +731,7 @@ def validate_identifier(text: str, field_name: str) -> None:
         raise FlashPlanError(
             f"flash_args.{field_name} = {_quoted(text)} is not a plain identifier or "
             "'/'-separated path of plain identifiers (letters, digits, '-', '_' per "
-            "segment) -- refusing to interpolate it into a spawned command / OpenOCD "
-            "Tcl script."
+            f"segment) -- refusing to interpolate it into {destination}."
         )
 
 
@@ -743,6 +753,158 @@ def validate_address(text: str, field_name: str) -> None:
             f"flash_args.{field_name} = {_quoted(text)} is not a plain hex/decimal "
             "address -- refusing to interpolate it into a J-Link/OpenOCD command."
         )
+
+
+def validate_commander_path(text: str, label: str) -> None:
+    """Reject a control character (`\\x00`-`\\x1f`, or DEL `\\x7f`) or a literal
+    `"` in a value bound for a J-Link Commander script LINE -- `loadbin`/
+    `loadfile`/`verifybin`'s path argument, or `SelectEmuBySN`'s serial
+    (tan-cli#486).
+
+    Deliberately narrower than `validate_identifier`: this guards a real
+    filesystem path (`atoc`, the flash artefact), which legitimately carries
+    spaces, `:`, `\\`, and drive letters -- rejecting those would turn a real
+    Windows-style path into a refusal. What must never reach the script is a
+    literal newline/CR: `commander_path`'s conditional quoting only stops
+    SEGGER's whitespace tokeniser from splitting a spaced path into two
+    tokens, it does nothing to stop an embedded newline from ending the
+    quoted string's own Commander LINE and starting a new, attacker-chosen
+    one -- quoting controls tokenisation within a line, not where lines end.
+    A tab/formfeed/vertical-tab is technically a control character too but is
+    already forced through the quoting path by `commander_path`'s `c.isspace()`
+    check; rejecting the narrower "line-ending" set here (which still catches
+    every one of them, since `isspace()` control chars are also `< 0x20`)
+    keeps this guard doing ONE job instead of duplicating that quoting
+    decision.
+
+    `"` is rejected too (tan-cli#486 review): a value carrying BOTH a `"` and
+    a space defeats `commander_path`'s own conditional quoting from the
+    inside -- `/b/a" halt "z.bin` renders `loadbin "/b/a" halt "z.bin", 0x8000`,
+    where the embedded quote closes the wrapper early and `halt` reads back
+    as a bare token mid-line, exactly what this function's own claim to
+    "control tokenisation within a line" promises will not happen. `"` is a
+    reserved character in a Windows filename and vanishingly rare on POSIX,
+    so rejecting it costs a real path nothing.
+    """
+    if any(ord(c) < 0x20 or ord(c) == 0x7F or c == '"' for c in text):
+        raise FlashPlanError(
+            f"{label} = {_quoted(text)} contains a control character or a "
+            'literal \'"\' -- refusing to interpolate it into a J-Link '
+            "Commander script line, where either would let it end the "
+            "current line/quoted token and start a new, unintended one "
+            "regardless of quoting."
+        )
+
+
+#: The Jim Tcl bytes that are dangerous UNQUOTED in an OpenOCD `-c` word:
+#: `[`/`]` trigger command substitution (Jim Tcl ships `exec`, so this is
+#: arbitrary HOST command execution, not just an extra OpenOCD command);
+#: `$` triggers variable substitution; `;` separates commands; `"`/`{`/`}`
+#: change how the rest of the word is quoted/grouped. Everything else --
+#: spaces, `:`, `\\`, letters, digits, `.` -- is left alone; a real artefact
+#: path routinely carries all of them and none is special to Jim Tcl outside
+#: an already-quoted/braced word.
+_OPENOCD_TCL_UNSAFE = frozenset('[]$;"{}')
+
+
+def validate_openocd_word(text: str, label: str) -> None:
+    """Reject a control character or a Jim Tcl metacharacter in a value bound
+    for OpenOCD's `-c` command string (tan-cli#486).
+
+    `interface`/`target` already go through `validate_identifier` for exactly
+    this reason; the flash artefact cannot, because it is a real filesystem
+    path (spaces, `:`, `\\`, drive letters all legitimate) rather than a
+    plain identifier. This is the path-shaped equivalent: it blocks the
+    substitution/separator characters Jim Tcl treats specially in an
+    unquoted word, and control characters (a smuggled newline could inject an
+    extra Tcl command the same way it does in a J-Link Commander script),
+    while leaving every character a real path needs untouched.
+    """
+    bad = sorted({c for c in text if ord(c) < 0x20 or ord(c) == 0x7F or c in _OPENOCD_TCL_UNSAFE})
+    if bad:
+        raise FlashPlanError(
+            f"{label} = {_quoted(text)} contains {_str_list_debug(bad)}, a Jim Tcl "
+            "metacharacter or control character -- refusing to interpolate it "
+            "into OpenOCD's -c command string, where it could inject an extra "
+            "command or trigger [...] command substitution (arbitrary host "
+            "command execution)."
+        )
+
+
+def openocd_program_word(text: str) -> str:
+    """Brace `text` for OpenOCD's `-c program {...} verify ...` word,
+    UNCONDITIONALLY (tan-cli#486 / tan-cli#487 / tan-cli#511 -- see below for
+    why this is no longer conditional).
+
+    `validate_openocd_word` closes the injection hole but leaves the artefact
+    at the mercy of Jim Tcl's own WORD-level rules the moment it is left
+    unbraced: whitespace splits an unquoted word on Tcl's normal command
+    boundary (`program a.elf verify exit 0x20000000` parses as five words --
+    `program`/`a.elf`/`verify`/`exit`/`0x20000000` -- so a space-only hostile
+    artefact injects extra keywords with no metacharacter in sight), and
+    Jim Tcl performs backslash substitution on every unbraced word regardless
+    of whether it also has whitespace, silently mangling any Windows-style
+    path (`C:\\Program Files\\alp\\build\\zephyr.elf` -> `C:Program` /
+    `Files\\x07lp\\x08uildzephyr.elf` -- `\\a`->BEL, `\\b`->BS -- verified
+    against `tclsh`). Both are real, honest-input failures: a Windows user's
+    default install path (`C:\\Program Files\\...`) or an artefact whose
+    directory happens to contain a space needs no attacker at all to trip
+    either one.
+
+    A matched brace pair is the fix: Jim Tcl performs NO substitution --
+    command, variable, OR backslash -- on the material between braces, and
+    treats the whole braced span as ONE word regardless of embedded
+    whitespace. This is safe here BECAUSE `validate_openocd_word` has already
+    rejected `{`/`}` (along with `[`/`]`/`$`/`;`/`"`/control characters) for
+    every caller of this function -- nothing inside `text` can prematurely
+    close the brace or smuggle a substitution past it.
+
+    **Unconditional now, not conditional on whitespace/backslash (tan-cli#511
+    Fable advisory).** The conditional version's own justification -- "leaves
+    every already-recorded `program <path> verify ...` parity fixture
+    byte-identical, since neither recorded case contains whitespace or a
+    backslash" -- was never actually true: both frozen fixtures were captured
+    with `oracle_fixtures.CAPTURE_PLATFORM = "win32"`
+    (`tests/parity/oracle_fixtures.py:75`), so the `<ORACLE-ROOT-0>` scratch
+    root each one interpolates is a native Windows path and carries
+    backslashes UNCONDITIONALLY -- the predicate this docstring used to
+    describe could never once observe the "no backslash" branch on the one
+    platform the fixtures are actually anchored to. The Linux-green replay
+    that made it LOOK preserved was an artefact of `compare()`'s own
+    `normalise_scrubbed_path_separators`, which flattens `\\`->`/` in both
+    sides' `entries[].message` before the diff -- plus a POSIX build root
+    that never contains a literal backslash to begin with, so the predicate
+    happened to answer `False` on BOTH sides there and the diff passed by
+    coincidence, not because bracing was truly conditional. On a real
+    Windows run -- the platform the fixtures are pinned to -- the predicate
+    is unconditionally `True` (every path carries `\\`) and always was; it
+    never preserved the parity it was written to protect. So the two cases
+    that exercise this ("multi-segment-interface-is-allowed",
+    "openocd-forced-bin-appends-base") moved OUT of the byte-diff oracle
+    table entirely -- see `tests/parity/test_flash_oracle_parity.py`'s
+    `CASES` for the standing divergence note -- into a bounded
+    exact-difference test that pins the ONLY token allowed to move.
+    Bracing every artefact, with no predicate at all, is therefore not a
+    behaviour change bought at the price of losing coverage: the coverage
+    the predicate was defending never existed.
+
+    **The one glass jaw this trades in, on purpose: a value ending in an ODD
+    number of backslashes.** Jim Tcl's own brace-counting (unrelated to the
+    backslash-substitution rule above, which never runs on braced material)
+    still walks a braced word looking for the UNESCAPED close brace, and
+    counts a run of backslashes immediately before a `}` to decide whether
+    that `}` is escaped. A `text` ending in an odd number of `\\` (impossible
+    for a real file path -- no filesystem lets a name end in `\\`, and
+    `validate_openocd_word` does not need to reject it specially) leaves the
+    closing `}` this function appends looking escaped to that counting rule,
+    so the brace never closes and OpenOCD reports a parse error. FAIL-SAFE
+    (a parse error before anything is written, not a mis-parsed argv), and
+    unreachable by any real artefact path -- documented here, not "fixed" by
+    stripping the guard, because there is no guard: this is an inherent
+    property of Tcl brace-counting that bracing cannot itself avoid, and a
+    future reader must not mistake it for a bug in this function.
+    """
+    return f"{{{text}}}"
 
 
 #: `char::escape_debug`'s named escapes, which is what Rust's `{:?}` for a
@@ -864,6 +1026,7 @@ def commander_path(path: str) -> str:
 def jlink_commander_script(artefact: str, base: str, do_reset: bool) -> str:
     """The J-Link Commander script: reset/halt, load (`loadbin`+base for `.bin`,
     else `loadfile`), optional reset-and-go, quit-close."""
+    validate_commander_path(artefact, "the flash artefact path")
     lines = ["r", "halt"]
     # `is_raw_bin` reads the extension via `os.path.splitext` -- checked on
     # the UNQUOTED artefact, before `commander_path` may wrap it in `"..."`,
@@ -971,7 +1134,20 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
             # ({device})`, i.e. it resolved the device from metadata and then
             # threw it away in the prose half, reporting every successful
             # `swd_probe` write as a GD32G553 whatever it had programmed.
-            ok_message=f"swd_probe[{core}]: {device} flashed via J-Link @ {base}",
+            #
+            # `@ {base}` only for a raw `.bin` (tan-cli#487, the address half
+            # of #402's device fix): `jlink_commander_script` itself withholds
+            # `base` from `loadfile` for an ELF/HEX (`base` is a load OFFSET,
+            # meaningful only for a raw binary -- see that function and the
+            # openocd/pyocd arm below), so asserting it here unconditionally
+            # named an address the tool never received on every non-`.bin`
+            # write -- either the compiled-in `_DEFAULT_BASE` or whatever the
+            # manifest's `base` happened to be, neither of which this run used.
+            ok_message=(
+                f"swd_probe[{core}]: {device} flashed via J-Link @ {base}"
+                if is_bin
+                else f"swd_probe[{core}]: {device} flashed via J-Link"
+            ),
             jlink_script=jlink_commander_script(inp.artefact, base, do_reset),
         )
 
@@ -988,7 +1164,13 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     openocd = not force_pyocd and (inp.dry_run or which("openocd"))
     pyocd = not force_openocd and (inp.dry_run or which("pyocd"))
     if openocd:
-        program = f"program {inp.artefact} verify"
+        validate_openocd_word(inp.artefact, "the flash artefact path")
+        # `openocd_program_word` braces the artefact UNCONDITIONALLY -- see
+        # its docstring (tan-cli#486 review, unconditional as of tan-cli#511)
+        # for why a conditional predicate never actually preserved anything.
+        # Safe here because `validate_openocd_word` just rejected every
+        # character (`{`/`}` included) that could escape the brace.
+        program = f"program {openocd_program_word(inp.artefact)} verify"
         if do_reset:
             program += " reset"
         # `base` is a load OFFSET, meaningful only for a raw `.bin`; ELF/HEX
@@ -1019,8 +1201,19 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     # message could contradict it. `target` is the only device identity this
     # path has -- it is literally what OpenOCD/pyOCD were pointed at -- so it
     # is what the line records, together with which of the two ran.
+    #
+    # `@ {base}` only for a raw `.bin` (tan-cli#487, the address half of #402):
+    # the argv just above deliberately withholds `base` for an ELF/HEX on
+    # BOTH tools (openocd's `program ... exit` with no trailing address;
+    # pyOCD's `if is_bin` guard on `--base-address`), so asserting it here
+    # unconditionally named an address neither tool ever received.
     return FlashPlan(
-        argv=argv, ok_message=f"swd_probe[{core}]: {target} flashed via {tool} @ {base}"
+        argv=argv,
+        ok_message=(
+            f"swd_probe[{core}]: {target} flashed via {tool} @ {base}"
+            if is_bin
+            else f"swd_probe[{core}]: {target} flashed via {tool}"
+        ),
     )
 
 
@@ -1106,6 +1299,61 @@ def plan_baremetal_cmake_flash(inp: FlashInputs, which: Callable[[str], bool]) -
 
 PIPE = "|"
 
+#: The directory a `yocto_wic` flash target must resolve beneath (tan-cli#487,
+#: porting alp-sdk's `_DEV_ROOT` -- security fix 3aa65cd7 / #1112, the half of
+#: that commit tan-cli#486's sibling-hardening pass dropped). A module
+#: constant, not a literal in the check, so a test can exercise the real
+#: resolution logic without touching a host's actual `/dev`.
+_DEV_ROOT = "/dev"
+
+#: The two registry keys `plan_yocto_wic` answers for -- exported so
+#: `tan.commands.flash_cmd` can scope its write-time block-device gate
+#: (tan-cli#487, see that module's `_yocto_wic_block_device_refusal`) to
+#: exactly this backend without re-typing the strings.
+YOCTO_WIC_METHODS = ("yocto_wic_to_sd_or_emmc", "yocto_wic")
+
+#: Suffixes `plan_yocto_wic` RECOGNISES as a real compression codec it
+#: cannot decompress (tan-cli#487, defect 2, shape 2) -- named verbatim from
+#: the issue's own examples. Deliberately NOT "every suffix that isn't gz/
+#: xz/wic": an unrecognised suffix might be a customer's own naming
+#: convention for a genuinely uncompressed artefact, and refusing THAT would
+#: trade a silent raw-dd for a false-positive refusal on a legitimate plain
+#: `.wic`.
+_KNOWN_UNSUPPORTED_COMPRESSION_SUFFIXES = ("zst", "bz2", "lzo")
+
+
+def _resolve_dev_root(target: str) -> str | None:
+    """LEXICAL canonicalization of `target`: `posixpath.normpath` on a
+    POSIX-normalized copy of the string -- collapses a `..` traversal
+    (`/dev/../home/u/x`) on every host, including Windows, where
+    `pathlib`/`os.path` would instead reinterpret the string as an NT path.
+    Pure -- no filesystem access -- so safe to run unconditionally, including
+    for a `--dry-run` preview of a target that is not plugged in yet.
+
+    Returns the normalized path when it resolves at or beneath `_DEV_ROOT`,
+    else `None`. The caller keeps using the ORIGINAL `target` string for the
+    refusal message and for the argv actually spawned -- never this return
+    value -- so a target that is itself a symlink (`/dev/by-id/mmc-foo`)
+    still reaches `dd`/`bmaptool` under the name the caller asked for.
+
+    Ported from alp-sdk's `_resolve_dev_root` (`scripts/flash_backends/
+    yocto_wic.py`) MINUS its real-filesystem symlink-chase layer: this
+    module is pure by convention (see its own docstring's "NO IO"), so that
+    half lives in `tan.commands.flash_cmd`'s IO side instead, as a SEPARATE,
+    write-time-only block-device `stat` gate
+    (`_yocto_wic_block_device_refusal`) -- see that function's docstring for
+    why, and for the one shape this lexical-only layer alone cannot catch (a
+    real, existing regular file lexically living under a real `/dev/`
+    subtree, e.g. `/dev/shm/<name>`)."""
+    normalized = posixpath.normpath(target.replace(os.sep, "/") if os.sep != "/" else target)
+    root = _DEV_ROOT.rstrip("/")
+    # Strictly BENEATH the root, not equal to it -- `_DEV_ROOT` itself is not
+    # a device (matches the old bare `startswith("/dev/")` check, which also
+    # rejected the bare string `"/dev"`: it has no trailing slash to match).
+    if normalized.startswith(root + "/"):
+        return normalized
+    return None
+
 
 def plan_yocto_wic(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     """`yocto_wic_to_sd_or_emmc` / `yocto_wic`: bmaptool (preferred) or dd to a
@@ -1115,24 +1363,80 @@ def plan_yocto_wic(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     target = fa_str(fa, "target")
     if target is None:
         raise FlashPlanError("yocto_wic: flash_args.target is required (e.g. /dev/sdb)")
-    if not target.startswith("/dev/"):
+    if _resolve_dev_root(target) is None:
         raise FlashPlanError(
             f"yocto_wic: refusing target '{target}' -- must start with /dev/ to avoid "
             "clobbering a regular file. Set flash_args.target to a real block device."
         )
     artefact = inp.artefact
     compress = fa_str(fa, "compress")
-    if compress is None:
-        suffix = os.path.splitext(artefact)[1].lstrip(".")
-        compress = suffix if suffix in ("gz", "xz") else None
+    suffix = os.path.splitext(artefact)[1].lstrip(".").lower()
     confirm = inp.force_confirm or _default(fa_bool_checked(fa, "confirm"), False)
     planning_only = inp.dry_run or not confirm
 
     bmaptool = which("bmaptool")
     dd = which("dd")
     if bmaptool or (planning_only and not dd):
+        # tan-cli#487 review finding 2: `compress` is a `dd`-fallback-only
+        # concern -- bmaptool decompresses natively and never reads it -- so
+        # the vocabulary refusals below must not fire here. Before this fix
+        # they ran unconditionally, ahead of tool selection, so a stock Yocto
+        # `IMAGE_FSTYPES` artefact like `core-image.wic.zst` hard-refused a
+        # `bmaptool copy core-image.wic.zst /dev/sdb` even on a bmap-tools
+        # host -- a live regression on the arm this module's own docstring
+        # calls "preferred".
         argv: tuple[str, ...] = ("bmaptool", "copy", artefact, target)
     elif dd:
+        # `compress` is validated HERE, not before tool selection -- see the
+        # bmaptool arm above. The suffix-refusal message below does NOT
+        # suggest `flash_args.compress` as a fix for an UNSUPPORTED codec:
+        # that used to send the operator straight into the compress-value
+        # refusal a few lines down (the exact same codec, now explicit,
+        # is still not "gz"|"xz") -- a dead-end loop tan-cli#487's review
+        # caught.
+        if compress is None:
+            if suffix in ("gz", "xz"):
+                compress = suffix
+            elif suffix in _KNOWN_UNSUPPORTED_COMPRESSION_SUFFIXES:
+                # tan-cli#487, defect 2, shape 2: no `compress` key at all,
+                # but a suffix (`.wic.zst`, `.wic.bz2`, `.wic.lzo`) this
+                # backend RECOGNISES as a real codec it just cannot
+                # decompress via `dd` -- the old auto-detect missed it (only
+                # "gz"/"xz" are recognised), so `compress` silently resolved
+                # to `None`, which reads as "genuinely uncompressed" and
+                # raw-`dd`s the compressed stream. An UNRECOGNISED suffix
+                # (anything else) is left alone -- there is no way to tell
+                # "genuinely uncompressed" from "a codec this list simply
+                # does not know about" for those, and guessing wrong in THAT
+                # direction would refuse a legitimate plain `.wic`.
+                raise FlashPlanError(
+                    f"yocto_wic: artefact suffix '.{suffix}' looks compressed but "
+                    'is not supported by the dd fallback -- the vocabulary is '
+                    '"gz" | "xz". Decompress the artefact first, or install '
+                    "bmaptool (preferred -- it decompresses natively)."
+                )
+            # else: no `compress` key and an unrecognised/absent suffix --
+            # genuinely uncompressed, `compress` stays `None`.
+        elif compress not in ("gz", "xz"):
+            # tan-cli#487, defect 2, shape 1 (an explicit out-of-vocabulary
+            # `compress`) and shape 3 (that same bad explicit value SHADOWING
+            # a suffix that would have auto-detected correctly -- a genuinely
+            # `.wic.gz` artefact with `compress: zst` never even reaches the
+            # `if compress is None` branch above, so the bad explicit value
+            # wins and the auto-detect that WOULD have been right never
+            # runs). Both used to fall through to the `else` branch below and
+            # raw-`dd` the still-compressed stream onto the block device --
+            # silently, `ok:true`, exit 0, and the board then silently does
+            # not boot. That `else` branch is the CORRECT path for a
+            # genuinely uncompressed `.wic`; it must never be reached for a
+            # value the manifest actually SET to something this backend
+            # cannot decompress. The documented vocabulary is "gz" | "xz" |
+            # None (alp-sdk `scripts/flash_backends/yocto_wic.py:46`).
+            raise FlashPlanError(
+                f"yocto_wic: flash_args.compress '{compress}' is not supported -- the "
+                'vocabulary is "gz" | "xz" (omit the key to auto-detect from the '
+                "artefact suffix instead)."
+            )
         bs = _default(fa_str(fa, "bs"), "4M")
         dd_cmd = ["dd", f"of={target}", f"bs={bs}", "conv=fsync", "status=progress"]
         if compress == "gz":
@@ -1216,6 +1520,12 @@ def plan_xspi_flashwriter(inp: FlashInputs, which: Callable[[str], bool]) -> Fla
 #: unarmed for every real AEN entry, which is the bug this comment replaces.
 FLOW_D_KEYS = ("jlink_flash_device",)
 FLOW_D_METHOD = "alif_mram_jlink"
+
+#: `jlink_serial`'s `validate_identifier(..., destination=...)` override
+#: (tan-cli#486 review): it is interpolated into a J-Link Commander
+#: `SelectEmuBySN` line, never an OpenOCD Tcl script -- the default
+#: `destination` names the wrong interpreter for this one field.
+_JLINK_SERIAL_DESTINATION = "a J-Link Commander script line (SelectEmuBySN)"
 
 
 def flow_d_available(flash_args: Any) -> bool:
@@ -1483,6 +1793,22 @@ def validate_flow_d_shape(fa: Any, artefact: str, is_file: Callable[[str], bool]
     # the entry takes afterward.
     fa_int_checked(fa, "jlink_speed")
     fa_bool_checked(fa, "confirm")
+    # tan-cli#486 review: `jlink_serial` is the same class of "checkable
+    # early" field as `jlink_speed`/`confirm` just above -- it does not
+    # depend on `atoc`/`atoc_address` either -- but was left validated only
+    # deep inside `plan_alif_mram_jlink`/`flow_d_preflight_script`, which is
+    # exactly the #373 gap those two comments describe: a hostile
+    # `jlink_serial` (e.g. embedded newlines forming extra Commander
+    # commands) reported `ok:true` from `tan flash --dry-run`, and on a real
+    # confirmed run reached the customer's SETOOLS install via
+    # `_resolve_flow_d_atoc_via_setools` -- which runs BEFORE this
+    # function -- before ever being refused. Validating (and discarding the
+    # result, like the two lines above) here closes that gap regardless of
+    # which path the entry takes afterward; the late call sites keep their
+    # own check too, defensively, since it is pure and costs nothing to repeat.
+    serial = fa_str_checked(fa, "jlink_serial", False)
+    if serial is not None:
+        validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
     return FlowDShape(device=device, app_address=app_address, artefact=resolved_artefact)
 
 
@@ -1570,7 +1896,19 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     # Probe serial: the ONLY disambiguator when a bench carries more than one
     # J-Link. No default -- a bench-wide serial can be shared by two probes that
     # differ only by USB path, and a silent default can select the wrong board.
-    serial = fa_str(fa, "jlink_serial")
+    # `fa_str_checked`, not the tolerant `fa_str` (tan-cli#486): a NUMERIC
+    # serial -- the canonical SEGGER spelling -- is a bare YAML integer, which
+    # `fa_str` treats as "absent" and silently drops the SelectEmuBySN line
+    # on a bench with more than one probe attached. `validate_identifier`
+    # then closes the same newline-injection hole `jlink_flash_device` above
+    # is already guarded against: `serial` is interpolated verbatim into
+    # `SelectEmuBySN {serial}`, a J-Link Commander script LINE. Also already
+    # validated by `validate_flow_d_shape` above (tan-cli#486 review, #373
+    # gap) -- repeated here defensively; the check is pure and this is the
+    # value actually used below.
+    serial = fa_str_checked(fa, "jlink_serial", False)
+    if serial is not None:
+        validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
     # The expected SW-DP IDR. When the manifest supplies one, the Commander
     # script connects with the READ profile first and the caller ABORTS unless
     # that ID appears -- writing MRAM on the wrong attached board is the one
@@ -1607,6 +1945,12 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
         # itself is unchanged, because refusing would break every correct
         # single-probe host.
         pass
+    # tan-cli#486: quoting (below) is not escaping -- a newline embedded in
+    # either path still ends the quoted string's own Commander LINE and
+    # starts a new, attacker-chosen one. Validated on the UNQUOTED value,
+    # same as `jlink_commander_script`'s own artefact guard.
+    validate_commander_path(artefact, "the flash artefact path")
+    validate_commander_path(atoc, "flash_args.atoc")
     # Quoted (tan-cli#369) ONLY for these Commander-script lines, when either
     # actually contains whitespace -- `artefact`/`atoc` themselves are left
     # unquoted for `ok_message` and every other use above.
@@ -1739,8 +2083,17 @@ def flow_d_preflight_script(inp: FlashInputs) -> tuple[str, str] | None:
     fa = inp.flash_args
     speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
     lines = []
-    serial = fa_str(fa, "jlink_serial")
+    # `fa_str_checked` + `validate_identifier`, not the tolerant `fa_str`
+    # (tan-cli#486) -- same fix as `plan_alif_mram_jlink`'s write script, and
+    # more load-bearing HERE: an injected line prefixed onto this READ-ONLY
+    # preflight (see the module docstring's "the identity is confirmed while
+    # the session is still read-only" comment in `flash_cmd`) would run
+    # before the wrong-board abort ever gets a chance to fire. Also already
+    # validated by `validate_flow_d_shape`, which `_flash_entry` runs before
+    # this preflight (tan-cli#486 review) -- repeated here defensively.
+    serial = fa_str_checked(fa, "jlink_serial", False)
     if serial is not None:
+        validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
         lines.append(f"SelectEmuBySN {serial}")
     lines += ["si SWD", f"speed {speed}", f"device {read_device}", "connect", "exit"]
     return "\n".join(lines) + "\n", expected
