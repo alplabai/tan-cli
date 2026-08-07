@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import json
+
 import pytest
 
 from tan.core.build_plan import PlanParseError, parse_build_plan
@@ -159,6 +161,14 @@ def _plan_with_command(command_json: str) -> str:
         ('{"tool": "west", "args": [5], "cwd": null}', "command.args"),  # I1: args element is an int
         ('{"tool": "west", "args": [], "cwd": 5}', "command.cwd"),  # I1: cwd is an int -> was TypeError
         ('5', "command"),  # command itself is not an object or null
+        # tan-cli#510 review, MAJOR 4: a relative path carrying a separator
+        # is neither a bare identity to look up on PATH nor an
+        # already-resolved absolute path -- `_resolve_tool` ("bin/sh", cwd
+        # /usr) answered `resolved='bin/sh'` (checked against TAN's own
+        # cwd), which the spawn then re-resolved against the CHILD's cwd --
+        # two different directories deciding what "the tool" means, the
+        # exact defect #510 exists to close. Refused at parse time instead.
+        ('{"tool": "bin/sh", "args": [], "cwd": null}', "command.tool"),
     ],
 )
 def test_rejects_a_malformed_command(command_json, fragment):
@@ -170,6 +180,21 @@ def test_rejects_a_malformed_command(command_json, fragment):
         parse_build_plan(_plan_with_command(command_json))
     assert e.value.code == "build.plan-invalid"
     assert fragment in e.value.message
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "west",  # a bare identity -- untouched
+        "/usr/bin/west",  # POSIX absolute -- untouched
+    ],
+)
+def test_accepts_an_identity_or_an_absolute_tool(tool):
+    """tan-cli#510 review, MAJOR 4's refusal is scoped to a RELATIVE path
+    carrying a separator only -- a bare identity (no separator at all) and
+    an already-absolute path must both still parse."""
+    plan = parse_build_plan(_plan_with_command(json.dumps({"tool": tool, "args": [], "cwd": None})))
+    assert plan.slices[0].command.tool == tool
 
 
 def _plan_with_env(env_json: str) -> str:

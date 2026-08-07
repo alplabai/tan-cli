@@ -32,6 +32,16 @@ ABOVE the project wins over the workspace `tan bootstrap` actually created,
 purely because west never consults the workspace tan itself resolved. Fixed
 Python-side only -- see [`_pin_west_workspace`].
 
+**tan-cli#510, a second DELIBERATE divergence from the frozen Rust oracle.**
+`execute/mod.rs:696`'s spawn is still `Command::new(&tool)` -- the bare
+identity, handed straight to the platform's own resolver, whose Windows
+search order includes a current-directory step ADR-0020 says an executor
+must not consult. This port instead resolves `tool` to an absolute path with
+a hardened lookup FIRST ([`_resolve_tool`]) and spawns that -- see this
+module's own `_ToolResolution` docstring for why one resolver, not two. Not
+back-ported to `crates/`, which ships to nobody (`docs/ROADMAP.md`); fixed
+Python-side only.
+
 **How the post-build write reaches `tan run` without a `build_cmd.py` change.**
 The Rust oracle's executor (`execute/mod.rs::execute_slices_outcome`) returns
 a `NativeBuildOutcome` bundling the dispatch result with the write's two
@@ -157,6 +167,25 @@ class SliceOutcome:
     #: Real on-disk build directory (west's nested `<cwd>/build`, absolute).
     #: `None` for every other status.
     build_dir: str | None = None
+    #: The absolute path `_resolve_tool` actually resolved `command.tool` to
+    #: -- MAJOR 1 of the tan-cli#510 review. `None` when no tool was ever
+    #: resolved (unknown-backend/null-command/missing-tool/cwd/mkdir
+    #: refusals, all decided before resolution runs) OR when resolution
+    #: succeeded but landed on the SAME string the plan already named
+    #: (`tool == resolved`) -- information-free by construction, and the
+    #: dominant Zephyr shape once `west_program` has already rewritten
+    #: `tool` to the workspace venv's own absolute `west`. Carried as its own
+    #: field -- `data.slices[].resolvedTool` -- rather than folded into
+    #: `message`: `message` is the source of BOTH `data.slices[].reason`
+    #: (`build_cmd.py`) and the persisted `system-manifest.yaml`
+    #: `slices[].reason` (alp-sdk `metadata/schemas/system-manifest-v1.
+    #: schema.json`, "why a slice was skipped/failed") -- a resolved path is
+    #: neither, and stuffing it into `reason` silently added a key to every
+    #: green build's envelope and on-disk manifest. See `_text_recap` in
+    #: `build_cmd.py` for where this is surfaced in default text (failed and
+    #: cancelled slices only -- a success confirms the right tool already,
+    #: with nothing left to explain).
+    resolved_tool: str | None = None
 
 
 def _skip_or_fail(core_id: str, action: PolicyAction, message: str) -> SliceOutcome:
@@ -334,7 +363,7 @@ class _ToolResolution:
     searched: str
 
 
-def _resolve_tool(tool: str) -> _ToolResolution:
+def _resolve_tool(tool: str, env: dict[str, str]) -> _ToolResolution:
     """Resolve `command.tool` -- an identity per ADR-0020 (never a path in a
     well-formed plan), or an absolute path a caller already resolved
     (`west_program`'s workspace-venv rewrite, `execute_slices` below) -- to
@@ -356,22 +385,46 @@ def _resolve_tool(tool: str) -> _ToolResolution:
     project checked out with its own `west.exe`/`openocd.exe` at its root
     can never get spawned in place of the real tool.
 
+    `env` -- MAJOR 2 of the tan-cli#510 review: this used to read
+    `os.environ["PATH"]` directly, 46 lines before `execute_slices`
+    assembled the slice's OWN `env` (the one the spawn below actually gets),
+    so a plan that pinned a different `PATH` in `command.env` resolved
+    against the PARENT's PATH and then spawned a DIFFERENT binary than the
+    one the check just approved -- the pre-fix `Command::new(&tool)` case
+    this whole issue exists to close, reintroduced one call up. Callers pass
+    the FULLY ASSEMBLED slice env (post `assemble_slice_env`/
+    `with_venv_on_path`), never `os.environ` -- a plan that pins a PATH is
+    asking for that PATH to be used, matching pre-fix POSIX `Popen`, which
+    always selected via `os.get_exec_path(env)` (the spawn's OWN env), never
+    the calling process's.
+
     `searched` is populated on every return, including a hit: a missingTool
     refusal that can only say "not found" is a support ticket; one that
     names the literal PATH entries this walked is a fix the customer
     applies themselves (tan-cli#510 acceptance)."""
     if Path(tool).is_absolute():
-        exists = Path(tool).exists()
-        return _ToolResolution(tool if exists else None, f"`{tool}` (given as an absolute path)")
+        if Path(tool).exists():
+            return _ToolResolution(tool, f"`{tool}` (given as an absolute path)")
+        # tan-cli#510 review, minor: the old wording ("searched `<path>`
+        # (given as an absolute path)") echoed the same path back as if a
+        # search had run one -- nothing was searched, the path was just
+        # checked. Naming the miss plainly avoids the tautology.
+        return _ToolResolution(None, f"`{tool}` -- that path does not exist")
 
     if os.name != "nt":
-        path = os.environ.get("PATH", "")
-        return _ToolResolution(shutil.which(tool), f"PATH: {path}")
+        # `os.get_exec_path(env)` mirrors what a POSIX `Popen(..., env=env)`
+        # itself consults to resolve a bare argv[0] (`os.defpath` when `env`
+        # carries no `PATH` at all) -- the same fallback `shutil.which`'s own
+        # `path=None` default would use from `os.environ`, reproduced here
+        # against `env` instead.
+        search_dirs = os.get_exec_path(env)
+        path = os.pathsep.join(search_dirs)
+        return _ToolResolution(shutil.which(tool, path=path), f"PATH: {path}")
 
-    path = os.environ.get("PATH")
+    path = env.get("PATH")
     if not path:
         return _ToolResolution(None, "PATH is unset")
-    pathext = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep) if e]
+    pathext = [e for e in env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep) if e]
     names = [tool] if Path(tool).suffix else [tool + ext for ext in pathext]
     for directory in path.split(os.pathsep):
         if not directory:
@@ -636,37 +689,6 @@ def execute_slices(
             # `"west"`) is never touched, matching the Rust oracle's own
             # `cmd.tool == "west"` exact-match precedence.
             tool = west_program(str(build_root), sdk_root)
-        # tan-cli#510: resolve the identity to an absolute path with the
-        # SAME hardened lookup the availability check used to only report a
-        # bool for, and spawn THAT -- never the bare `tool` -- below. `tool`
-        # itself stays exactly what it was (the plan's identity, or west's
-        # venv rewrite just above): `with_venv_on_path` and every message
-        # that follows still needs to say what the PLAN named, not what it
-        # resolved to, and [`_ToolResolution`]'s own docstring is why a
-        # second, divergent resolution must never be written here again.
-        resolution = _resolve_tool(tool)
-        if resolution.resolved is None:
-            outcomes.append(
-                _skip_or_fail(
-                    sl.core_id,
-                    resolve_action(policy, "missing_tool", PolicyAction.SKIP),
-                    f"tool `{tool}` not found -- searched {resolution.searched}",
-                )
-            )
-            continue
-        resolved_tool = resolution.resolved
-
-        # Deliberately AFTER the missing-tool skip above (not right after
-        # `cwd.mkdir`): the wipe is destructive, and the tool-availability
-        # check is the only thing standing between "this slice is about to
-        # be rebuilt" and "this slice is about to be skipped" -- running the
-        # wipe first would delete the last good `zephyr.elf` for a rebuild
-        # that then never happens on a host missing `west`.
-        sdk_switch_issues.extend(
-            _maybe_pristine_stale_sdk_build_dir(
-                sl.core_id, cwd, sl.command.cwd, sl.command.args, sdk_stamp_key_str, on_output
-            )
-        )
 
         # tan-cli#308: the zephyr gap-fillers are computed PER SLICE (not
         # once for the whole run, unlike `workspace_dir`/`zephyr_base`
@@ -678,6 +700,20 @@ def execute_slices(
         # unconditionally -- computing this once, outside the loop, would
         # silently clobber the plan's own richer module list on every slice
         # that DOES pin it.
+        #
+        # Computed HERE, BEFORE tool resolution -- MAJOR 2 of the tan-cli#510
+        # review: `_resolve_tool` used to run on `os.environ` directly, 46
+        # lines before this assembly ever built the env the spawn below
+        # actually gets, so a plan pinning its own `PATH` in `command.env`
+        # was checked against the PARENT's PATH and then spawned against a
+        # DIFFERENT one -- an identical plan, run with `env: {"PATH":
+        # "<planbin>:..."}` and a different `dualtool` on the parent's own
+        # PATH, resolved and reported the PARENT's copy while the CHILD (had
+        # it been spawned unresolved, pre-fix) would have run the plan's. A
+        # plan that pins `PATH` is asking for that PATH to be used --
+        # matching pre-fix POSIX `Popen`, which always selected the spawned
+        # binary via `os.get_exec_path(env)` (the SPAWN's own env), never
+        # the calling process's.
         slice_gap_fillers = [
             *gap_fillers,
             *zephyr_env_overrides(
@@ -701,6 +737,44 @@ def execute_slices(
         # would have, unless the user activated the venv. A no-op when
         # `tool` did not resolve to an absolute venv path above.
         env = with_venv_on_path(env, tool)
+
+        # tan-cli#510: resolve the identity to an absolute path with the
+        # SAME hardened lookup the availability check used to only report a
+        # bool for, and spawn THAT -- never the bare `tool` -- below. `tool`
+        # itself stays exactly what it was (the plan's identity, or west's
+        # venv rewrite just above): `with_venv_on_path` and every message
+        # that follows still needs to say what the PLAN named, not what it
+        # resolved to, and [`_ToolResolution`]'s own docstring is why a
+        # second, divergent resolution must never be written here again.
+        # Resolved against THIS slice's own fully assembled `env`
+        # (MAJOR 2), not `os.environ` -- see the env-assembly comment above.
+        resolution = _resolve_tool(tool, env)
+        if resolution.resolved is None:
+            outcomes.append(
+                _skip_or_fail(
+                    sl.core_id,
+                    resolve_action(policy, "missing_tool", PolicyAction.SKIP),
+                    f"tool `{tool}` not found -- searched {resolution.searched}",
+                )
+            )
+            continue
+        resolved_tool = resolution.resolved
+        # MAJOR 1 of the tan-cli#510 review: `None` (never surfaced) whenever
+        # resolution landed on the exact string the plan already named --
+        # see [`SliceOutcome.resolved_tool`]'s own docstring.
+        outcome_resolved_tool = resolved_tool if resolved_tool != tool else None
+
+        # Deliberately AFTER the missing-tool skip above (not right after
+        # `cwd.mkdir`): the wipe is destructive, and the tool-availability
+        # check is the only thing standing between "this slice is about to
+        # be rebuilt" and "this slice is about to be skipped" -- running the
+        # wipe first would delete the last good `zephyr.elf` for a rebuild
+        # that then never happens on a host missing `west`.
+        sdk_switch_issues.extend(
+            _maybe_pristine_stale_sdk_build_dir(
+                sl.core_id, cwd, sl.command.cwd, sl.command.args, sdk_stamp_key_str, on_output
+            )
+        )
 
         if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in slice_env:
             # tan-cli#336: a dangling `$ZEPHYR_BASE` inherited from the
@@ -810,7 +884,11 @@ def execute_slices(
                     _terminate(proc)
                     outcomes.append(
                         SliceOutcome(
-                            sl.core_id, "cancelled", None, f"slice `{sl.core_id}` cancelled"
+                            sl.core_id,
+                            "cancelled",
+                            None,
+                            f"slice `{sl.core_id}` cancelled",
+                            resolved_tool=outcome_resolved_tool,
                         )
                     )
                     continue
@@ -820,13 +898,17 @@ def execute_slices(
             # here, is a directory, lacks the executable bit, or is not a
             # valid executable format -- any of these raise here rather than
             # at the `_resolve_tool` precheck. A failed slice, never a
-            # crash.
+            # crash. The base message already names both `tool` and
+            # `resolved_tool` explicitly (it IS the substance of what failed,
+            # not a redundant echo of it) -- `resolved_tool=` below still
+            # carries the SAME fact in the dedicated structured field.
             outcomes.append(
                 SliceOutcome(
                     sl.core_id,
                     "failed",
                     None,
                     f"failed to launch `{tool}` resolved to `{resolved_tool}`: {err}",
+                    resolved_tool=outcome_resolved_tool,
                 )
             )
             continue
@@ -898,17 +980,6 @@ def execute_slices(
                 f"that does."
             )
 
-        # tan-cli#510: name which binary actually ran, on every dispatched
-        # outcome -- appended, not replacing, whatever `message` already
-        # says. A success confirms the right tool ran; a failure or a
-        # wrong-tool build is exactly the case naming it exists to make
-        # legible instead of leaving the reader to re-derive it from the
-        # plan's bare identity. Reaches `data.slices[].reason` (JSON) and
-        # the per-slice text-mode line the same way every other per-slice
-        # fact already does -- no new reporting channel.
-        resolved_note = f"`{tool}` resolved to `{resolved_tool}`"
-        message = resolved_note if message is None else f"{message} ({resolved_note})"
-
         # On success, resolve the real on-disk artefact west produced so the
         # post-build manifest points downstream consumers (`run`/`size`/
         # `flash`/`image`) at the elf that exists, not a plan-time guess.
@@ -933,6 +1004,7 @@ def execute_slices(
                 message,
                 output_artefact,
                 slice_build_dir,
+                resolved_tool=outcome_resolved_tool,
             )
         )
 

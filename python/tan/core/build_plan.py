@@ -6,6 +6,7 @@ optional-but-always-emitted ones default cleanly, and an unsupported
 schemaVersion is REFUSED rather than silently hand-ported around."""
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from tan.core.plan_exec import ExecutionPolicy, PolicyAction
@@ -172,6 +173,27 @@ def _command(raw: Any, context: str) -> SliceCommand | None:
     tool = raw.get("tool")
     if not isinstance(tool, str):
         raise PlanParseError("build.plan-invalid", f"`{context}.tool` must be a string")
+    # tan-cli#510 review, MAJOR 4: `command.tool` is an IDENTITY per ADR-0020
+    # (a bare name to look up, e.g. `west`) or an ALREADY-RESOLVED absolute
+    # path a producer computed -- never a relative path. A relative path
+    # carrying a separator (`bin/sh`) is neither: `_resolve_tool`
+    # (`build/execute.py`) answers `Path(tool).is_absolute()` False for it,
+    # so it falls into the bare-identity PATH search, which checks it
+    # against THIS process's cwd -- but the spawn below hands it to
+    # `subprocess.Popen(cwd=spawn_cwd)`, resolved against the CHILD's cwd
+    # instead. Two different directories deciding what "the tool" even
+    # means is the exact defect this issue exists to close; refused here,
+    # at parse time, rather than reaching that check/spawn split at all. A
+    # bare `west` (no separator) is untouched -- it is exactly the identity
+    # shape this refusal is not about.
+    if not Path(tool).is_absolute() and ("/" in tool or "\\" in tool):
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`{context}.tool` (`{tool}`) is a relative path, not an identity -- "
+            f"`command.tool` must be either a bare identity to look up on PATH "
+            f"(e.g. `west`) or an already-resolved absolute path; a relative path "
+            f"carrying a separator is neither.",
+        )
     args = raw.get("args", [])
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         raise PlanParseError("build.plan-invalid", f"`{context}.args` must be a list of strings")

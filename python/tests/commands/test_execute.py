@@ -203,6 +203,123 @@ def test_a_tool_shadowed_in_the_spawns_cwd_is_not_the_one_spawned(tmp_path, monk
     )
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="tan-cli#510 review MAJOR 3: the CreateProcess current-directory "
+    "question is Windows-only",
+)
+def test_a_tool_shadowed_in_the_parent_processs_cwd_is_not_the_one_spawned(tmp_path, monkeypatch):
+    """tan-cli#510 review, MAJOR 3: the sibling test above plants its shadow
+    in the SLICE's own cwd -- the exact directory `Popen(cwd=spawn_cwd)`
+    hands the child as `lpCurrentDirectory`. But `CreateProcess`'s DOCUMENTED
+    implicit search, with `lpApplicationName=NULL`, consults *"the current
+    directory for the parent process"* -- the CALLING process's own real cwd
+    at the moment it calls `CreateProcess`, which `lpCurrentDirectory` does
+    NOT retroactively change (that argument only decides where the CHILD
+    starts once created). On that reading the sibling test is green before
+    AND after the fix and settles nothing: `_resolve_tool`'s own docstring
+    names the actual scenario -- "a project checked out with its own
+    `west.exe` at its root" -- and that project is TAN's OWN cwd (this test
+    process's), never the slice's.
+
+    Isolated from the sibling test's own scenario: the slice's `cwd` here is
+    the plain `build_root` (`command.cwd: null`), which never gets a shadow
+    binary at all -- the ONLY place `tan510shadowtool2` exists outside `PATH`
+    is the directory `monkeypatch.chdir` makes this TEST PROCESS's real cwd
+    before the call, so a pass here can only be explained by the parent
+    process's own cwd, never the slice's."""
+    real_dir = tmp_path / "real_on_path"
+    real_dir.mkdir()
+    marker = tmp_path / "which_ran_parent.txt"
+    (real_dir / "tan510shadowtool2.bat").write_text(
+        f'@echo real>"{marker}"\r\n', encoding="utf-8"
+    )
+
+    parent_shadow_dir = tmp_path / "parent_shadow"
+    parent_shadow_dir.mkdir()
+    (parent_shadow_dir / "tan510shadowtool2.bat").write_text(
+        f'@echo shadow>"{marker}"\r\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(parent_shadow_dir)
+
+    monkeypatch.setenv("PATH", str(real_dir))
+
+    cmd = json.dumps({"tool": "tan510shadowtool2", "args": [], "cwd": None})
+    out = execute_slices(
+        parse_build_plan(_plan(cmd, backend="baremetal")),
+        build_root=tmp_path,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+    )
+    assert out[0].status == "succeeded", out[0].message
+    assert marker.read_text(encoding="utf-8").strip() == "real", (
+        "the tool shadowed in the PARENT process's own cwd ran instead of "
+        "the one resolved off PATH -- see out[0].message: " + str(out[0].message)
+    )
+
+
+def _write_marker_script(directory: Path, marker_text: str) -> str:
+    """A real, minimal executable that prints `marker_text` -- a `.bat` on
+    Windows (`CreateProcess` launches it directly via `%COMSPEC%`, no
+    `shell=True` needed), a `chmod +x` shell script everywhere else. Returns
+    the bare filename (no directory, no extension needed to look it up by
+    identity), matching the `tan510shadowtool*` convention above."""
+    if os.name == "nt":
+        path = directory / "tan510dualtool.bat"
+        path.write_text(f"@echo {marker_text}\r\n", encoding="utf-8")
+    else:
+        path = directory / "tan510dualtool"
+        path.write_text(f"#!/bin/sh\necho {marker_text}\n", encoding="utf-8")
+        os.chmod(path, 0o755)
+    return path.name
+
+
+def test_tool_resolves_against_the_slices_own_env_not_the_parents(tmp_path, monkeypatch):
+    """tan-cli#510 review, MAJOR 2: `_resolve_tool` used to read
+    `os.environ["PATH"]` directly, 46 lines before `execute_slices` ever
+    assembled the slice's OWN `env` -- the one the spawn actually gets --
+    so an IDENTICAL plan with `env: {"PATH": "<planbin>"}` and a DIFFERENT
+    `dualtool` on the parent's own PATH resolved (and, pre-fix, spawned)
+    the PARENT's copy. A plan that pins `PATH` is asking for that PATH to
+    be used -- matching pre-fix POSIX `Popen`, which always selected via
+    `os.get_exec_path(env)` (the spawn's own env), never the calling
+    process's."""
+    parent_bin = tmp_path / "parent_bin"
+    parent_bin.mkdir()
+    plan_bin = tmp_path / "plan_bin"
+    plan_bin.mkdir()
+
+    tool_name = _write_marker_script(parent_bin, "PARENT")
+    assert _write_marker_script(plan_bin, "PLAN") == tool_name
+
+    monkeypatch.setenv("PATH", str(parent_bin))
+
+    output: list[str] = []
+    plan = {
+        "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml", "sku": "S",
+        "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
+        "executionPolicy": {"missingTool": "skip", "nullCommand": "skip", "unknownBackend": "fail"},
+        "slices": [{
+            "coreId": "c1", "backend": "baremetal", "buildDir": "build/c1", "appDir": "app",
+            "configArtefacts": [], "toolchain": None, "artifacts": [], "debug": {},
+            "command": {"tool": tool_name, "args": [], "cwd": None},
+            "env": {"PATH": str(plan_bin)}, "envAppendPath": {},
+        }],
+    }
+    out = execute_slices(
+        parse_build_plan(json.dumps(plan)),
+        build_root=tmp_path,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=output.append,
+    )
+    assert out[0].status == "succeeded", out[0].message
+    joined = "\n".join(output)
+    assert "PLAN" in joined, joined
+    assert "PARENT" not in joined, joined
+
+
 def test_bare_west_tool_is_rewritten_to_the_workspace_venv_and_dispatches(tmp_path, monkeypatch):
     """tan-cli#289 / #106: on a host where `tan bootstrap` completed but the
     venv is not on PATH -- every GUI-launched VS Code -- a `tool: "west"`

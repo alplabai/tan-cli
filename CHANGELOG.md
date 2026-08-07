@@ -201,6 +201,54 @@ All notable changes to `tan` are documented here. Format follows
   surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
   `--format json` and tan's default text output, so that silent gap has a
   signal without making the field mandatory. (#520)
+- **`tan build` spawned a slice's `command.tool` by its bare identity, never
+  the absolute path it had just resolved -- ADR-0020 says the executor
+  resolves by explicit path, never PATH, and the check/spawn split let the
+  platform's own resolver disagree with the check that ran one line
+  earlier.** Windows' `CreateProcess` implicit search (no
+  `lpApplicationName`) includes a current-directory step the check was
+  written specifically to exclude, so a project checked out with its own
+  `west.exe` at its root could get spawned in place of the real tool. Fixed
+  by having ONE resolver (`_resolve_tool`) answer both "is it available" and
+  "what absolute path is it", and spawning that path, never the bare
+  identity. A review round on the first attempt found four further defects,
+  all fixed here too:
+  - The resolved-tool note originally appended to every dispatched outcome's
+    `message`, corrupting two contracts at once: `message` is the source of
+    BOTH `data.slices[].reason` (the JSON envelope) and the persisted
+    `build/system-manifest.yaml` `slices[].reason`, whose alp-sdk-owned
+    schema defines the field as "why a slice was skipped/failed" -- every
+    green build began writing a `reason` onto `status: ok` slices, a silent
+    envelope/on-disk contract change with a consumer already modelling it
+    (`alp-sdk-vscode`'s `ManifestSlice.reason`). The resolved path now lives
+    in its own additive field, `data.slices[].resolvedTool` (always
+    present, `null` when identical to the plan's own `tool` -- the dominant
+    Zephyr shape, since `west_program` already rewrites `tool` to the
+    workspace venv's own absolute `west`), never in `reason`. Default text
+    shows it only on a failed or cancelled slice; a success prints nothing
+    extra.
+  - `_resolve_tool` read `os.environ["PATH"]` directly, 46 lines before the
+    slice's own `env` was assembled -- an identical plan with a
+    `command.env` `PATH` and a different same-named tool on the PARENT's
+    PATH resolved (and, pre-fix, would have spawned) the parent's copy
+    instead of the plan's own. Tool resolution now runs against the SAME
+    fully-assembled slice `env` the spawn itself uses, matching pre-fix
+    POSIX `Popen`'s own `os.get_exec_path(env)` selection.
+  - The Windows-only shadow-tool regression test planted its shadow binary
+    in the SLICE's own spawn `cwd`, but `CreateProcess`'s documented
+    implicit search consults the current directory of the CALLING
+    (parent) process, not `lpCurrentDirectory` -- so that test was green
+    before and after the fix and proved nothing. A sibling test now plants
+    the shadow in the test process's own cwd via `monkeypatch.chdir`,
+    leaving the original slice-cwd case in place alongside it.
+  - A non-absolute `command.tool` containing a path separator (e.g.
+    `bin/sh`) used to reach `_resolve_tool`, which checked it against TAN's
+    own cwd, while the spawn then re-resolved the same string against the
+    CHILD's cwd -- two different directories deciding what "the tool" means,
+    the exact class of defect this fix exists to close. Refused at PLAN
+    PARSE time instead (`build.plan-invalid`): `command.tool` is an identity
+    (a bare name to look up) or an already-resolved absolute path, and a
+    relative path with a separator is neither. (#510)
 
 ## [0.5.1] — 2026-08-04
 

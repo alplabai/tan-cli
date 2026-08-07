@@ -231,6 +231,103 @@ def test_a_two_slice_plan_reports_one_executed_and_one_skipped(project):
     assert slices[1]["status"] == "skipped"
 
 
+def _one_slice_plan(tool: str, exit_code: int) -> dict:
+    """A single, real slice naming `tool` by whatever identity the caller
+    gives it (bare or absolute) -- minimal scaffolding for the
+    `resolvedTool` cases below, which need to control the exact `tool`
+    string rather than reuse `two_slice_plan`'s fixed `sys.executable`."""
+    return {
+        "schemaVersion": 1,
+        "generatedBy": "tests/commands/test_build_command.py",
+        "boardYaml": "board.yaml",
+        "sku": "E1M-TEST",
+        "buildRoot": "build",
+        "executionPolicy": {"unknownBackend": "fail", "missingTool": "skip", "nullCommand": "skip"},
+        "sharedArtefacts": [],
+        "slices": [
+            {
+                "coreId": "only",
+                "backend": "baremetal",
+                "buildDir": "build/only",
+                "appDir": None,
+                "configArtefacts": [],
+                "toolchain": {"id": "baremetal"},
+                "artifacts": {"elf": None},
+                "debug": {"console": "rtt"},
+                "command": {"tool": tool, "args": [], "cwd": None},
+                "env": {},
+                "envAppendPath": {},
+            }
+        ],
+        "warnings": [],
+    }
+
+
+def _write_dualtool_script(directory: Path, exit_code: int) -> str:
+    """A real, minimal executable named `tan510dualtool[.bat]`, resolvable
+    off `PATH` by that bare identity -- distinct from `sys.executable`
+    (already absolute, so `tool == resolved_tool` and `resolvedTool` would
+    be suppressed by construction) specifically so resolution lands on a
+    DIFFERENT string than the plan named."""
+    if os.name == "nt":
+        path = directory / "tan510dualtool.bat"
+        path.write_text(f"@exit /b {exit_code}\r\n", encoding="utf-8")
+    else:
+        path = directory / "tan510dualtool"
+        path.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
+        os.chmod(path, 0o755)
+    return path.stem if os.name == "nt" else path.name
+
+
+def test_resolved_tool_is_reported_in_json_but_not_in_text_on_success(
+    project, tmp_path, monkeypatch
+):
+    """tan-cli#510 review, MAJOR 1: `data.slices[].resolvedTool` is a NEW,
+    additive field -- always present -- carrying the absolute path a bare
+    identity resolved to; on a SUCCESS it must add nothing to default text
+    (only `data.slices[].reason`/the manifest's `reason:` would be
+    corrupted by that, which is exactly what the review's round-1 finding
+    was)."""
+    tool_dir = tmp_path / "toolbin"
+    tool_dir.mkdir()
+    tool_name = _write_dualtool_script(tool_dir, 0)
+    monkeypatch.setenv("PATH", str(tool_dir))
+
+    plan = write_plan(project, _one_slice_plan(tool_name, 0))
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    slice_ = env["data"]["slices"][0]
+    assert slice_["status"] == "ok"
+    assert "reason" not in slice_
+    assert slice_["resolvedTool"] is not None
+    assert slice_["resolvedTool"] != tool_name
+    assert Path(slice_["resolvedTool"]).is_absolute()
+
+    text_proc = run_tan("build", "--plan-from", str(plan), "--execute", cwd=project)
+    # The precise appended-note shape, not a bare "resolved" substring: the
+    # post-build manifest write's OWN best-effort failure note (no alp-sdk
+    # checkout resolves for this scratch `board.yaml`) legitimately contains
+    # the word "resolved" too, and is not what this test is about.
+    assert "resolved to `" not in text_proc.stderr, text_proc.stderr
+
+
+def test_resolved_tool_note_appears_in_default_text_only_on_failure(project, tmp_path, monkeypatch):
+    """tan-cli#510 review, MAJOR 1's other half: shown in default text for a
+    FAILED slice (never folded into `reason` -- see `_text_recap`'s own
+    docstring), so a customer reading plain stderr output, not just the JSON
+    envelope, can see which binary actually ran."""
+    tool_dir = tmp_path / "toolbin"
+    tool_dir.mkdir()
+    tool_name = _write_dualtool_script(tool_dir, 7)
+    monkeypatch.setenv("PATH", str(tool_dir))
+
+    plan = write_plan(project, _one_slice_plan(tool_name, 7))
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", cwd=project)
+    assert "failed: only" in proc.stderr
+    assert "resolved to `" in proc.stderr, proc.stderr
+
+
 def test_every_artefact_is_on_disk_before_the_first_slice_is_spawned(project):
     # I-20. The probe IS the first slice dispatched; it exits non-zero the
     # moment any artefact -- shared, its own, or the OTHER slice's -- is not

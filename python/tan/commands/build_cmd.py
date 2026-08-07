@@ -827,11 +827,24 @@ def _acquire_plan(
 
 def _slice_result(core_id: str, backend: str, outcome: SliceOutcome) -> dict:
     """One `data.slices[]` entry. `rc`/`reason` are OMITTED when absent, not
-    null -- Rust's `skip_serializing_if = "Option::is_none"`."""
+    null -- Rust's `skip_serializing_if = "Option::is_none"`.
+
+    `resolvedTool` is the ONE exception to that rule (tan-cli#510 review,
+    MAJOR 1): a NEW, additive field, ALWAYS present -- `null` rather than
+    omitted when [`SliceOutcome.resolved_tool`] is `None` -- because unlike
+    `rc`/`reason` it has no Rust oracle counterpart to mirror
+    `skip_serializing_if` against; a consumer that wants to know which
+    binary actually ran should not need to distinguish "the key is absent"
+    from "nothing to report" for a field this port alone defines. Never
+    folded into `reason`: that field is also the persisted
+    `system-manifest.yaml` `slices[].reason` (`_write_manifest_after_dispatch`
+    in `build/execute.py`), whose alp-sdk-owned schema defines it as "why a
+    slice was skipped/failed" -- a resolved path is neither."""
     result = {
         "coreId": core_id,
         "backend": backend,
         "status": _WIRE_STATUS.get(outcome.status, "failed"),
+        "resolvedTool": outcome.resolved_tool,
     }
     if outcome.exit_code is not None:
         result["rc"] = outcome.exit_code
@@ -1693,8 +1706,21 @@ def _text_recap(mode: str, data: dict | None) -> None:
     slices = data.get("slices", [])
     for result in slices:
         reason = f" -- {result['reason']}" if "reason" in result else ""
+        # tan-cli#510 review, MAJOR 1: shown for a failed/cancelled slice
+        # only (`missingTool`'s own refusal already names what it searched
+        # in `reason` above, unaffected by this) -- a success needs nothing
+        # more explained, and `resolvedTool` is already `null` whenever it
+        # would just echo back the plan's own `tool` identity (see
+        # `SliceOutcome.resolved_tool`'s docstring). Deliberately NOT folded
+        # into `reason` itself -- see `_slice_result`'s own docstring for why.
+        resolved_tool = result.get("resolvedTool")
+        resolved_note = (
+            f" (resolved to `{resolved_tool}`)"
+            if result["status"] == "failed" and resolved_tool
+            else ""
+        )
         print(
-            f"{result['status']}: {result['coreId']} [{result['backend']}]{reason}",
+            f"{result['status']}: {result['coreId']} [{result['backend']}]{reason}{resolved_note}",
             file=sys.stderr,
         )
     # tan-cli#283: a one-line summary AFTER every per-slice line, so a

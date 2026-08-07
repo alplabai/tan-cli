@@ -61,13 +61,14 @@ def test_the_refusal_message_matches_the_oracle_verbatim(tmp_path):
     native_execute_refuses_a_zephyr_slice_whose_configure_never_loaded_zephyr
     -- --nocapture`), not transcribed from source alone.
 
-    tan-cli#510, a DELIBERATE divergence from that frozen string (the same
-    class `execute.py`'s own module docstring records for tan-cli#307): every
-    dispatched outcome now carries a trailing `` (`<tool>` resolved to
-    `<resolved>`) `` note, appended by `execute_slices` after this guard's
-    own message is built. `sys.executable` is already absolute, so identity
-    and resolution are the same string here -- the note still appends,
-    proving the port's new behaviour rather than a lucky no-op."""
+    tan-cli#510 review (MAJOR 1): a round-1 attempt at this fix appended a
+    trailing `` (`<tool>` resolved to `<resolved>`) `` note to `message`
+    itself, which put the resolved path into `data.slices[].reason` AND the
+    persisted `system-manifest.yaml` `slices[].reason` -- corrupting both
+    contracts. The resolved path now lives in its own field
+    (`SliceOutcome.resolved_tool` / `data.slices[].resolvedTool`), never in
+    `message`, so this string is unconditionally the oracle's, byte for
+    byte, with nothing appended."""
     out = execute_slices(
         parse_build_plan(_plan(_TRUE_CMD)),
         build_root=tmp_path,
@@ -81,9 +82,14 @@ def test_the_refusal_message_matches_the_oracle_verbatim(tmp_path):
         "CMakeLists.txt must call `find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})` "
         "before `project()`; without it CMake builds a plain host binary, not firmware. "
         "Scaffold a working app with `tan init --template zephyr-app`, or point the "
-        "core's `app:` at one that does. "
-        f"(`{sys.executable}` resolved to `{sys.executable}`)"
+        "core's `app:` at one that does."
     )
+    # `sys.executable` is already absolute, so identity and resolution are
+    # the same string -- `resolved_tool` stays `None` (suppressed, not just
+    # unappended): showing it here would be information-free by
+    # construction, the same reasoning `SliceOutcome.resolved_tool`'s own
+    # docstring gives.
+    assert out[0].resolved_tool is None
 
 
 def test_a_non_zephyr_backend_is_never_subject_to_the_guard(tmp_path):
