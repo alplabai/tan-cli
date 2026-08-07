@@ -106,3 +106,18 @@ def test_stdout_tty_ness_is_deliberately_not_consulted(monkeypatch, ttys):
     assert can_prompt(non_interactive=False, ci=False, json_mode=False) is True
     monkeypatch.setattr(sys, "stdout", _FakeStream(True))
     assert can_prompt(non_interactive=False, ci=False, json_mode=False) is True
+
+
+def test_a_none_stdin_withholds_consent_without_raising(monkeypatch):
+    """tan-cli#488: `sys.stdin` itself -- not just the truth-table's
+    `_FakeStream(tty=False)` -- can be `None` (a process launched with its
+    standard handles detached: a GUI launcher, a `pythonw`-style spawn, or a
+    shell that closed fd 0 before exec, `0<&-`). Every case above patches
+    `sys.stdin` to a stub that always HAS an `.isatty()` method, so none of
+    them can catch a bare `sys.stdin.isatty()` regressing -- this is the one
+    test that binds `sys.stdin` to `None` itself and asserts `can_prompt`
+    answers `False`, not `AttributeError: 'NoneType' object has no attribute
+    'isatty'`."""
+    monkeypatch.setattr(sys, "stdin", None)
+    monkeypatch.setattr(sys, "stderr", _FakeStream(True))
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False

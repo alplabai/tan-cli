@@ -2761,6 +2761,19 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
     its standard handles detached), and a bare `sys.stdin.isatty()` there
     raises `AttributeError: 'NoneType' object has no attribute 'isatty'` for
     the same reason the `_TeeStderr` case above already gets its own guard.
+
+    tan-cli#488 round 3: this was, for one round, the ONLY place that guard
+    existed -- `can_prompt` itself (`tan.core.consent`) still called the bare
+    `sys.stdin.isatty()`. Since `doctor()` calls `can_prompt` BEFORE it ever
+    calls this function (`fix_allowed = fix and can_prompt(...)`, evaluated
+    ahead of the `fix_suppressed_issue(...)` call site below it), a `None`
+    `sys.stdin` crashed there first, and this function's own guard never ran
+    at all -- caught only by `doctor()`'s outer `except Exception`, which
+    discarded the whole diagnosis. `can_prompt` now carries the identical
+    guard (the fix belongs there, once, not duplicated per caller -- see its
+    own docstring); the copy here stays only because this function explains
+    each tripped condition individually, not merely whether the aggregate
+    gate passed.
     """
     reasons = []
     if json_mode:

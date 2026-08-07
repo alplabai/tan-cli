@@ -246,7 +246,19 @@ All notable changes to `tan` are documented here. Format follows
     `schemaVersion`-mismatch message's trailing period doubled up with the
     warning that wraps it ("...outright.. Falling back to"), and a bare
     `sys.stdin.isatty()` in the `--fix` consent-suppression message crashed
-    on a host whose `stdin` handle is `None` (a GUI-launched process). (#488)
+    on a host whose `stdin` handle is `None` (a GUI-launched process).
+  - The `None`-`stdin` guard above closed only the symptom's SECOND call
+    site. `doctor()` calls the shared `can_prompt` gate
+    (`tan.core.consent`) to decide `fix_allowed` BEFORE it ever reaches the
+    consent-suppression message, and that shared gate still called the bare
+    `sys.stdin.isatty()` -- so a detached-stdio host (`tan doctor --fix`
+    with fd 0 closed before exec, `0<&-`) still crashed, one call earlier,
+    caught only by `doctor()`'s outer handler as a fabricated
+    `doctor.internal-failure` (exit 5) that discarded the whole diagnosis
+    instead of the correct `doctor.fix-suppressed` warning (exit 4). The
+    `is not None` guard now lives in `can_prompt` itself -- the one place
+    every caller (`doctor`, `scaffold`) reaches it -- rather than duplicated
+    per call site. (#488)
 
 ## [0.5.1] — 2026-08-04
 

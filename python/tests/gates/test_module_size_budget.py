@@ -154,7 +154,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # its trailing period (it is always read back through a string that
     # supplies its own), and `sys.stdin.isatty()` gained an `is not None`
     # guard alongside the existing `sys.stderr` one.
-    "tan/commands/doctor_cmd.py": 3575,
+    # 3588, not 3575, as of tan-cli#488 ROUND 3: round 2's `is not None` guard
+    # landed only inside `fix_suppressed_issue`'s own local duplicate of the
+    # tty check, one call AFTER `doctor()`'s `fix_allowed = fix and
+    # can_prompt(...)` had already crashed on the same `None` `sys.stdin` --
+    # the real fix moved into `can_prompt` itself (`tan.core.consent`, not
+    # counted here), and `fix_suppressed_issue`'s docstring grew a correction
+    # explaining why its own copy of the guard stays (per-condition reporting)
+    # even though the crash it originally cited is now closed one call site
+    # earlier.
+    "tan/commands/doctor_cmd.py": 3588,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch

@@ -3107,6 +3107,55 @@ def test_fix_suppressed_issue_does_not_crash_when_stdin_is_none(monkeypatch):
     assert "no interactive terminal" in issue.message
 
 
+def test_doctor_fix_with_stdin_none_does_not_crash_before_reaching_fix_suppressed_issue(
+    monkeypatch, tmp_path
+):
+    """tan-cli#488 round 3: the sibling test above proves `fix_suppressed_issue`
+    itself tolerates `sys.stdin is None` -- but that function is only ever
+    reached AFTER `doctor()`'s own `fix_allowed = fix and can_prompt(...)`
+    (doctor_cmd.py:3454) has already called the UNGUARDED `can_prompt`
+    (`tan.core.consent`). A `sys.stdin is None` guard added only inside
+    `fix_suppressed_issue` -- and not in `can_prompt` itself -- leaves that
+    earlier call to crash first, caught only by `doctor()`'s outer
+    `except Exception`, which discards the whole diagnosis and reports
+    `doctor.internal-failure` (exit 5) instead of the correct
+    `doctor.fix-suppressed` warning. Drives the REAL, unmonkeypatched
+    `can_prompt` through the actual CLI dispatch -- not a direct call to
+    `fix_suppressed_issue` -- because that earlier call site is exactly what
+    round 2 left unfixed. Text mode, not `--format json`: `can_prompt` short-
+    circuits past both `isatty()` reads under `json_mode=True`, so the crash
+    is only reachable in text mode (measured against a real
+    `tan doctor --fix` run with stdin closed before exec, `0<&-`).
+
+    Sets `sys.stdin = None` from INSIDE the stubbed `_collect` -- not before
+    `runner.invoke` -- because `CliRunner.invoke`'s own isolation() context
+    manager swaps `sys.stdin` for its own captured stream at the start of
+    every invocation (and restores it after), so a monkeypatch applied
+    before `invoke()` is silently overwritten the moment the command
+    actually runs, and this test would pass whether or not the bug is
+    fixed (measured). `_collect` runs and returns before `doctor()` ever
+    reaches `can_prompt` (line 3454), so setting it as a side effect there
+    lands exactly where a real detached-stdio host already has
+    `sys.stdin is None` by the time `--fix`'s consent gate is evaluated."""
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+
+    def _collect_stub(*a, **k):  # noqa: ARG001
+        doctor_cmd.sys.stdin = None
+        return stub_checks
+
+    monkeypatch.setattr(doctor_cmd, "_collect", _collect_stub)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+
+    assert "doctor.internal-failure" not in result.stderr, result.stderr
+    assert "AttributeError" not in result.stderr, result.stderr
+    assert "`--fix` was requested but not run" in result.stderr, result.stderr
+    assert "no interactive terminal" in result.stderr, result.stderr
+    assert result.exit_code == 4, result.stderr  # hostPrerequisites is still a Fail; not 5
+
+
 def test_doctor_fix_format_json_is_no_longer_a_silent_no_op(monkeypatch, tmp_path):
     """The exact reported shape: `doctor --fix --format json` on an
     unhealthy host used to be byte-for-byte identical to plain `tan doctor`.

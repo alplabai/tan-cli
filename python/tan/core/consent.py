@@ -53,11 +53,24 @@ def can_prompt(*, non_interactive: bool, ci: bool, json_mode: bool) -> bool:
 
     A command with a documented default takes it when this returns `False`; one
     without a default fails instead of asking.
+
+    tan-cli#488: `sys.stdin` itself, not just the result of calling `.isatty()`
+    on it, can be `None` -- a process launched with its standard handles
+    detached (a GUI launcher, `pythonw`-style spawn, or a shell that closed fd
+    0 before exec, `0<&-`) leaves `sys.stdin` unbound rather than merely
+    non-interactive, and a bare `sys.stdin.isatty()` then raises
+    `AttributeError: 'NoneType' object has no attribute 'isatty'`. This is the
+    ONE place that guard belongs: every caller of `can_prompt` (`doctor_cmd`,
+    `scaffold_cmd`) reaches this line before any caller-side guard could run,
+    so duplicating the `is not None` check downstream (as doctor_cmd.py's
+    `fix_suppressed_issue` still does, for its own separate per-condition
+    explanation) does not help -- this call is the one that crashes first.
     """
     return (
         not non_interactive
         and not ci
         and not json_mode
+        and sys.stdin is not None
         and sys.stdin.isatty()
         and sys.stderr.isatty()
     )
