@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1510,12 +1511,26 @@ def test_an_unresolvable_board_preset_is_a_coded_envelope(tmp_path):
     source = SIMPLE_BOARD
     if source is None:
         pytest.skip("this checkout ships no examples/*/board.yaml")
+    text = source.read_text(encoding="utf-8")
+    # tan-cli#485: SUBSTITUTE the existing `preset:` value rather than
+    # APPENDING a second `preset:` line. `SIMPLE_BOARD` is any real example
+    # with exactly one live core, and every one of those already declares
+    # `preset: <name>` -- appending a second key made this fixture's own YAML
+    # invalid the moment `loader.py` gained the alp-sdk #1127 duplicate-key
+    # refusal (same commit, 53557a60, that this file's `preset:` line already
+    # relies on for parity elsewhere): alp-sdk's own front door
+    # (`alp_project.py --emit carrier-netlist`) refuses the byte-identical
+    # appended fixture with `error[ALP-B000]: YAML parse error: duplicate key
+    # 'preset'`, not the unresolvable-preset refusal this test means to probe.
+    # Falls back to appending only if a future `SIMPLE_BOARD` candidate ever
+    # declares no `preset:` at all (an inline-board example) -- the original
+    # shape, still correct for that case since there is no key to collide with.
+    substituted, n = re.subn(
+        r"(?m)^preset:\s*\S+\s*$", "preset: no-such-carrier-board", text, count=1)
+    text = substituted if n == 1 else (
+        text.rstrip("\n") + "\npreset: no-such-carrier-board\n")
     board = tmp_path / "board.yaml"
-    board.write_text(
-        source.read_text(encoding="utf-8").rstrip("\n")
-        + "\npreset: no-such-carrier-board\n",
-        encoding="utf-8",
-    )
+    board.write_text(text, encoding="utf-8")
     envelope = _tan_generate_failing(
         ["--target", "carrier-netlist", "--board-yaml", str(board)],
         tmp_path / "carrier-netlist.json",
