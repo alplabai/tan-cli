@@ -459,7 +459,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # function-length ratchet's 50-line cap (49 lines) rather than paying
     # that ratchet too, matching this file's own established precedent
     # (`doctor_render.py:render_doctor_footer`, above).
-    "tan/commands/build_cmd.py": 1703,
+    # 1706, not 1703, as of tan-cli#510: `_missing_tool_issues`'s match
+    # dropped its `endswith("` not found")` half (the message now carries a
+    # `-- searched ...` tail) and gained its own two-line explanation of why.
+    # 1732, not 1706, as of the tan-cli#510 REVIEW round: `_slice_result`
+    # gained the new, always-present `resolvedTool` field plus the docstring
+    # explaining why it is the one exception to "omitted when absent", and
+    # `_text_recap` gained the resolved-tool note it now composes for a
+    # failed/cancelled slice (never folded into `reason` -- see both
+    # functions' own docstrings).
+    "tan/commands/build_cmd.py": 1732,
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
@@ -718,7 +727,40 @@ _MODULE_BUDGET: dict[str, int] = {
     # ("assign every leftover draft item to every leftover existing slot in
     # order") was rejected, not just what shipped.
     "tan/core/debug_launch.py": 1275,
-    "tan/commands/build/execute.py": 941,
+    # 1003, not 941, as of tan-cli#510: `_command_on_path`/`_tool_is_
+    # available` (a bool-only availability check, and a spawn that repeated
+    # a SEPARATE, unhardened PATH lookup) were replaced by one
+    # `_resolve_tool` returning the resolved absolute path AND what it
+    # searched -- the spawn now runs that path, never the bare identity, and
+    # the missingTool refusal names the search. The per-slice resolved-tool
+    # note appended ahead of `output_artefact` resolution accounts for the
+    # rest.
+    # 1075, not 1003, as of the tan-cli#510 REVIEW round: that per-slice
+    # resolved-tool note (appended to `message`) is GONE -- `resolved_tool`
+    # is now a dedicated `SliceOutcome` field, computed once per slice and
+    # threaded through every outcome constructor -- but the review's other
+    # three findings cost more lines than that removal saved: `_resolve_tool`
+    # takes an `env` parameter and resolves against it (MAJOR 2, moving the
+    # whole env-assembly block earlier in the loop plus its own explanatory
+    # comment), the env-assembly-before-resolution reordering itself carries
+    # a paragraph explaining why (MAJOR 2), `SliceOutcome.resolved_tool` and
+    # a second `execute.py` module-docstring divergence paragraph (mirroring
+    # the existing tan-cli#307 one) are both new, and the absolute-path-miss
+    # message split into two non-circular returns (the review's minor
+    # finding) plus the `os.get_exec_path(env)` POSIX comment (MAJOR 2).
+    # 1119, not 1075, as of the tan-cli#510 REVIEW ROUND 3: the missing-tool
+    # refusal's searched-`PATH` text was reaching the persisted
+    # `system-manifest.yaml` `reason` (a support-ticket-forwarded artefact),
+    # not just the transient message/envelope -- `SliceOutcome` gained a
+    # `manifest_message` field (and its own docstring) plus a short-form
+    # value threaded through the missing-tool call site and
+    # `_write_manifest_after_dispatch`'s `reason=` line; `SliceOutcome.
+    # resolved_tool`'s docstring also grew a paragraph documenting a
+    # deliberate ambiguity the review flagged as a NIT (an already-absolute
+    # `tool` that fails to launch reports `resolvedTool: null`,
+    # indistinguishable from "never resolved" without a separate field this
+    # port does not add).
+    "tan/commands/build/execute.py": 1119,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather
@@ -931,7 +973,23 @@ _MIRRORED = ("tan/planner/",)
 # `_FUNCTION_WORST_BUDGET` is untouched -- `_rollback_write_failure` is 61
 # lines and `new_som` (grown to 506) is still well under `bootstrap_cmd.
 # _run`'s 701, itself under the recorded 707.
-_FUNCTION_COUNT_BUDGET = 212
+# 213, not 211, as of the tan-cli#510 REVIEW round: two functions crossed 50
+# lines, both docstring/parameter growth, not new branching:
+# `build/execute.py:_resolve_tool` (47 -> 71) gained an `env` parameter
+# (MAJOR 2: resolve against the slice's OWN assembled env, not
+# `os.environ`) plus the docstring explaining why, and split its absolute-
+# path miss into its own non-circular message (the review's own minor
+# finding); `build_cmd.py:_text_recap` (48 -> 61) gained the resolved-tool
+# note it prints for a failed/cancelled slice (MAJOR 1: carried in the new
+# `resolvedTool` field, never folded into `reason`, so `_text_recap` is
+# where the note is actually composed for default text). Neither is
+# anywhere near `_FUNCTION_WORST_BUDGET`. Re-walked with the gate's own
+# `ast` logic against this exact tree, not computed from the diff alone.
+#
+# 214 on the merged tree, MEASURED by AST walk -- neither side's number: #496
+# contributed one crossing (212) and tan-cli#530's resolver two (213), and the
+# union is 214, not either. Taking either side here fails the gate.
+_FUNCTION_COUNT_BUDGET = 214
 _FUNCTION_WORST_BUDGET = 707
 
 
