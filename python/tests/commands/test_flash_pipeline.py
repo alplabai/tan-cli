@@ -194,6 +194,7 @@ def test_pipeline_stderr_attributes_each_half_and_puts_the_failed_one_last():
     text = flash_cmd._pipeline_stderr(
         flash_cmd._Half("gunzip", 1, "gunzip: core-image.wic.gz: unexpected end of file\n"),
         flash_cmd._Half("dd", 0, "\n0+61 records in\n0+1 records out\n"),
+        captured=True,
     )
 
     assert text.splitlines() == [
@@ -209,6 +210,7 @@ def test_a_healthy_pipeline_keeps_the_natural_left_to_right_order():
     text = flash_cmd._pipeline_stderr(
         flash_cmd._Half("gunzip", 0, "gunzip: 62.1% -- replaced with core-image.wic\n"),
         flash_cmd._Half("dd", 0, "0+61 records in\n"),
+        captured=True,
     )
 
     assert text.splitlines() == [
@@ -226,6 +228,7 @@ def test_when_both_halves_fail_the_upstream_one_is_reported_last():
     text = flash_cmd._pipeline_stderr(
         flash_cmd._Half("gunzip", 1, "gunzip: core-image.wic.gz: unexpected end of file\n"),
         flash_cmd._Half("dd", 1, "dd: /dev/sdx: Input/output error\n"),
+        captured=True,
     )
 
     assert text.splitlines() == [
@@ -240,6 +243,7 @@ def test_a_silent_successful_half_contributes_no_section():
     text = flash_cmd._pipeline_stderr(
         flash_cmd._Half("gunzip", 0, ""),
         flash_cmd._Half("dd", 3, "dd: /dev/sdx: Permission denied\n"),
+        captured=True,
     )
 
     assert text.splitlines() == ["dd exited rc=3:", "dd: /dev/sdx: Permission denied"]
@@ -249,9 +253,61 @@ def test_a_half_killed_before_it_reported_an_rc_says_so():
     text = flash_cmd._pipeline_stderr(
         flash_cmd._Half("gunzip", None, ""),
         flash_cmd._Half("dd", 0, "0+61 records in\n"),
+        captured=True,
     )
 
     assert text.splitlines() == ["dd exited rc=0:", "0+61 records in", "gunzip exited rc=unknown:"]
+
+
+def test_pipeline_stderr_drops_a_body_less_header_when_uncaptured():
+    """tan-cli#487 review finding 5: in an UNCAPTURED (text-mode) pipeline
+    neither half's stderr is ever piped (`_spawn_pipeline` only pipes it
+    when `capture=True`), so a failed half with an EMPTY `.stderr` here is
+    not "it exited 9 and said nothing" (a real diagnosis) -- it is "this
+    process never listened", and the old unconditional header produced a
+    dangling `"<program> exited rc=1:"` with nothing following, contradicting
+    `_execute_message`'s own docstring claim that an ordinary text-mode
+    failure leaves `outcome.stderr` empty. A half with real (non-empty)
+    stderr still reports it regardless of `captured` -- there is nothing to
+    suppress when there IS a body. Fails against the pre-fix source (measured:
+    `["python exited rc=1:"]`, a header with no body)."""
+    text = flash_cmd._pipeline_stderr(
+        flash_cmd._Half("python", 0, ""),
+        flash_cmd._Half("python", 1, ""),
+        captured=False,
+    )
+    assert text == ""
+
+
+def test_pipeline_stderr_uncaptured_still_reports_a_half_that_actually_spoke():
+    """The case the fix above must not take away: `captured=False` suppresses
+    only a BODY-LESS header. A half whose `.stderr` is non-empty (e.g. the
+    wrapped-console text-mode branch of `_spawn`'s sibling helpers, which DO
+    populate it even without capture) still reports in full."""
+    text = flash_cmd._pipeline_stderr(
+        flash_cmd._Half("gunzip", 1, "gunzip: unexpected end of file\n"),
+        flash_cmd._Half("dd", 0, ""),
+        captured=False,
+    )
+    assert text.splitlines() == [
+        "gunzip exited rc=1:",
+        "gunzip: unexpected end of file",
+    ]
+
+
+def test_timed_out_stderr_uncaptured_still_names_the_timeout():
+    """tan-cli#487 defect 4's worst case: an eMMC/SD write killed at
+    `_FLASH_TIMEOUT_S = 900.0` in TEXT mode (`captured=False`), where the
+    operator has no reason to suspect a truncated image on the card. The
+    killed half's stderr was never piped in text mode, so `_half_lines`
+    contributes nothing for it (see the body-less-header test above) -- but
+    the sentence naming the failure mode must survive that suppression
+    regardless, since it is the only diagnosis a text-mode timeout ever
+    gets. Fails if that sentence is dropped (measured: an empty string)."""
+    text = flash_cmd._timed_out_stderr(
+        flash_cmd._Half("gunzip", None, ""), 900.0, captured=False
+    )
+    assert text == "timed out after 900s and was killed\n"
 
 
 @pytest.mark.parametrize(

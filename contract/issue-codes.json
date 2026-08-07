@@ -945,6 +945,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.entries-skipped",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#487 defect 7: `_flash_entry` can legitimately skip a target it dispatched to (an unresolved `TBD` flash_arg, no flash_method, or a missing tool under `--skip-missing-tools`) -- a real per-entry diagnosis already in `data.entries[]` -- but the aggregate 'did anything flash' check only knew about the planner's OWN skip buckets (`plan.refused`/`plan.refused_skipped`), which an entry-level skip never populates, so it fell through to `flash.nothing-matched` on a run that carried no `--core`/`--helper` filter and DID match a target. This code names the real cause instead. Deliberately a warning, not an error: `ok`/exit code stay SUCCESS for this shape (see `test_tbd_sentinel_never_reaches_a_flasher` and its siblings in `python/tests/commands/test_flash_command.py`) -- unlike the build-skip sibling `flash.nothing-flashed` below, an entry-level skip is not a run that failed to program a real target, it is a target that was never a customer flash target to begin with (an unfinished helper's wiring, a host missing a tool it was told to tolerate). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "flash.internal-failure",
       "status": "reserved",
       "severity": "error",
