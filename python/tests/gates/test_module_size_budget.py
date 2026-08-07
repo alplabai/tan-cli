@@ -146,7 +146,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # `doctor.internal-failure` instead of a raw traceback on a deleted
     # working directory) plus five pre-try defaults for the names its
     # exception handler and final `emit()` read.
-    "tan/commands/doctor_cmd.py": 3531,
+    # 3575, not 3531, as of tan-cli#488 ROUND 2 (the six remaining findings a
+    # first pass reported fixed but left half-done): `west_check` gained a
+    # `resolved_ran` parameter and a new branch (a resolved-but-unspawnable
+    # west can no longer report `pass`, closing the one branch defect 1's own
+    # `ran` fix did not touch), the `schemaVersion`-mismatch message dropped
+    # its trailing period (it is always read back through a string that
+    # supplies its own), and `sys.stdin.isatty()` gained an `is not None`
+    # guard alongside the existing `sys.stderr` one.
+    "tan/commands/doctor_cmd.py": 3575,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -473,7 +481,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # function-length ratchet's 50-line cap (49 lines) rather than paying
     # that ratchet too, matching this file's own established precedent
     # (`doctor_render.py:render_doctor_footer`, above).
-    "tan/commands/build_cmd.py": 1703,
+    # 1720, not 1703, as of tan-cli#488 defect 8: `build()`'s resolution
+    # prologue (`Path.cwd()` through `Project.resolved(...)`) moved inside a
+    # `try`, with pre-try safe defaults for every name the exception handler
+    # and the final `emit()` read -- mirroring `doctor_cmd.doctor`'s identical
+    # fix for the same defect class -- so a raise anywhere in it produces the
+    # `build.internal-failure` envelope instead of a raw traceback.
+    "tan/commands/build_cmd.py": 1720,
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
@@ -594,7 +608,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # "record-shaped" line makes stderr not a tty, which already returns
     # `None` and skips wrapping wholesale.
     "tan/commands/sdk_cmd.py": 1274,
-    "tan/commands/validate_cmd.py": 1093,
+    # 1122, not 1093, as of tan-cli#488 defect 8: `validate()`'s whole body
+    # (from the SDK-root ladder through the final `_emit(...)`) moved inside a
+    # `try`/`except typer.Exit: raise`/`except Exception`, so the identical
+    # unguarded-prologue shape `build_cmd.build` already had (`os.path.abspath`
+    # calling `os.getcwd()` on a deleted cwd) now also produces a
+    # `validate.internal-failure` envelope instead of a raw traceback.
+    "tan/commands/validate_cmd.py": 1122,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
@@ -893,7 +913,14 @@ _MIRRORED = ("tan/planner/",)
 # `doctor` (269 -> 286) and `_collect` (343 -> 380) both grew too, but were
 # already over the cap, so neither moves this count. `_FUNCTION_WORST_BUDGET`
 # is untouched -- 380 lines is nowhere near 707.
-_FUNCTION_COUNT_BUDGET = 214
+#
+# 215, not 214, as of tan-cli#488 ROUND 2: `doctor_cmd.py:fix_suppressed_issue`
+# crossed 50 lines with its `sys.stdin is not None` guard and the docstring
+# paragraph explaining it (defect 6). `west_check` (already over the cap)
+# grew further with the `resolved_ran` branch (defect 3) but does not move
+# this count. `_FUNCTION_WORST_BUDGET` is untouched -- nothing here is close
+# to 707.
+_FUNCTION_COUNT_BUDGET = 215
 _FUNCTION_WORST_BUDGET = 707
 
 

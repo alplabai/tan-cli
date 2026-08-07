@@ -201,6 +201,52 @@ All notable changes to `tan` are documented here. Format follows
   surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
   `--format json` and tan's default text output, so that silent gap has a
   signal without making the field mandatory. (#520)
+- **`tan doctor` could return the wrong verdict outright -- a pass on a host
+  that cannot build, and a refusal on one that can.** Eight defects, fixed in
+  two passes:
+  - `westResolved` treated a `west` launcher that resolves but cannot be
+    EXECUTED (a relocated/renamed workspace, a deleted `.venv/bin/python`) the
+    same as one that ran and printed something unparseable, and reported
+    `pass` -- `tan build` then died with `FileNotFoundError`/
+    `ModuleNotFoundError` on the very first slice. `probe_status` now tells
+    "could not be spawned" apart from "ran fine", and the sibling `west`
+    check (bare-PATH-only) no longer reports `pass` for that same
+    unspawnable binary either -- both checks now agree.
+  - `hostPrerequisites` keyed macOS off a `windows`/posix bool with no
+    `macos` arm, so a stock Mac (no `wget`, no standalone `xz`) failed
+    `tan doctor` over tools alp-sdk's manifest never asks macOS for, while
+    `tan bootstrap` on the identical manifest succeeded. Now host-keyed,
+    matching `tan bootstrap`'s own reader.
+  - `_load_manifest` never read `schemaVersion`, so an SDK whose manifest
+    `tan bootstrap` refuses outright still reported `hostPrerequisites: pass`
+    with zero tools probed and no warning.
+  - `sdkProvenance` and a build's `${SDK_ROOT}` token substitution both
+    misattributed an ENCLOSING git repository's commit to a vendored SDK with
+    no `.git` of its own (an extracted release archive inside a customer's
+    own app repo, a supported setup) -- printing a foreign commit as the
+    SDK's own, and, in the build path, able to fire a false
+    `sdkCommit` mismatch or miss a real one. Both sites now compare the
+    resolved `git rev-parse --show-toplevel` against the SDK root itself and
+    treat a mismatch as no signal.
+  - The `west` check re-probed a bare `"west"` instead of the already
+    PATH-resolved binary, reopening the cwd-injection gap `on_path` exists to
+    close.
+  - The `fdt` check asked tan's OWN interpreter instead of the workspace
+    venv's -- a permanent false red on the shipped PyInstaller freeze (`fdt`
+    is not a bundled dependency there) and a possible false green under
+    `python -m tan` (a stray local `fdt.py` on the cwd).
+  - `zephyr_python_floor` blamed an unset `$ZEPHYR_BASE` for a floor read
+    failure even when a workspace HAD resolved and `$ZEPHYR_BASE` was never
+    consulted at all -- now names the real cause.
+  - A working directory deleted out from under the process escaped `doctor`'s
+    (and `build`'s and `validate`'s) resolution prologue as a raw traceback
+    with empty stdout instead of the coded internal-failure envelope every
+    other failure gets.
+  - Two smaller finish-up fixes found reviewing the above: the
+    `schemaVersion`-mismatch message's trailing period doubled up with the
+    warning that wraps it ("...outright.. Falling back to"), and a bare
+    `sys.stdin.isatty()` in the `--fix` consent-suppression message crashed
+    on a host whose `stdin` handle is `None` (a GUI-launched process). (#488)
 
 ## [0.5.1] — 2026-08-04
 

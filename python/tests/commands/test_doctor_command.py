@@ -372,6 +372,12 @@ def test_collect_warns_bootstrap_manifest_and_falls_back_on_an_unsupported_schem
     assert manifest_warn is not None, [c.name for c in checks]
     assert manifest_warn.status == "warn"
     assert "schemaVersion 2" in manifest_warn.detail
+    # tan-cli#488 defect 2: `_load_manifest`'s schemaVersion-mismatch message
+    # used to end with its own period, and this check's own `f"... rejected:
+    # {loaded.error}. Falling back to ..."` appends another -- rendering
+    # "...outright.. Falling back to" (a double stop) in the assembled detail.
+    assert ".. Falling back to" not in manifest_warn.detail, manifest_warn.detail
+    assert "outright. Falling back to" in manifest_warn.detail, manifest_warn.detail
 
 
 def test_collect_reports_no_manifest_read_when_none_resolves(tmp_path, monkeypatch):
@@ -544,47 +550,71 @@ def test_west_resolved_FAILS_when_nothing_resolves_anywhere():
 
 
 def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_path, monkeypatch):
-    """The proof the unit tests below cannot give: two actual host states, run
+    """The proof the unit tests below cannot give: real host states, run
     through `_collect` + `exit_code_for`, asserting the EXIT CODE.
 
     `west_check(found=None)` is ONE input covering three different host states
-    (venv has west / venv lacks it / no venv at all). A test that calls the
-    check twice with the same argument is two inputs, not two states, and it is
-    exactly what let five "refuses a host that works" defects ship green out of
-    this file. The state that actually shipped broken -- venv lacks it too --
-    was constructed by no fixture at all.
+    (venv has a genuinely runnable west / venv holds a west that CANNOT run /
+    no venv at all). A test that calls the check twice with the same argument
+    is two inputs, not two states, and it is exactly what let five "refuses a
+    host that works" defects ship green out of this file. The state that
+    actually shipped broken -- venv lacks it entirely -- was constructed by no
+    fixture at all.
 
-    So: build two real trees, differing only in whether the venv holds a west,
-    keep PATH scrubbed in both, and assert 0 vs 4.
+    tan-cli#488 round 2, defect 5: this test's ORIGINAL two-state form (have a
+    genuinely runnable west / have none at all) PASSES unmodified against
+    `origin/dev`'s pre-fix `doctor_cmd.py` -- measured -- because neither of
+    those two states is the one tan-cli#488 defects 1 and 3 actually broke.
+    "have" was always a full pass and "lack" was always a full fail, on both
+    the buggy and the fixed code; a test built entirely from states that never
+    disagree between the two versions pins nothing. The state that DOES
+    disagree -- a venv whose `west` launcher file survives but cannot be
+    EXECUTED -- is added below as a third real tree, so this integration-level
+    test (not just the narrower unit tests it sits beside) actually fails
+    against the pre-fix code.
+
+    So: build three real trees -- runnable west / unrunnable west / no venv at
+    all -- keep PATH scrubbed in all three, and assert the exit code and both
+    the `westResolved` and `west` verdicts for each.
     """
-    def _tree(name: str, *, with_west: bool) -> Path:
+    def _tree(name: str, *, west: str | None) -> Path:
+        """`west` selects the venv's west launcher: `"runnable"` (a real,
+        spawnable binary), `"unrunnable"` (a 0-byte non-executable file at the
+        right name -- resolves via `is_file()`, cannot actually run), or
+        `None` (no `.venv` west at all)."""
         ws = tmp_path / name
         (ws / ".west").mkdir(parents=True)
         bin_dir = ws / ".venv" / ("Scripts" if os.name == "nt" else "bin")
         bin_dir.mkdir(parents=True)
-        if with_west:
+        if west == "runnable":
             # A GENUINELY runnable west (tan-cli#488 defect 1): a 0-byte,
             # non-executable file at the right name used to be enough to
             # satisfy this fixture's "builds work" state, because
             # `west_resolved_check` treated ANY resolved path as `pass`
             # regardless of whether it could actually be spawned. Now it
-            # cannot -- see `test_a_resolved_but_unrunnable_west_fails_not_
-            # passes` below for that exact regression, planted deliberately.
+            # cannot.
             _write_runnable_west(bin_dir)
+        elif west == "unrunnable":
+            layout = venv_layout(os.name == "nt")
+            (bin_dir / layout.west).write_text("", encoding="utf-8")
         return ws
 
-    # west is on NEITHER PATH in both states -- that is the constant under test.
+    # west is on NEITHER PATH in any state -- that is the constant under test.
     monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
 
-    have = _tree("have", with_west=True)
-    lack = _tree("lack", with_west=False)
+    have = _tree("have", west="runnable")
+    broken = _tree("broken", west="unrunnable")
+    lack = _tree("lack", west=None)
 
     def _run(ws: Path) -> tuple[list[doctor_cmd.Check], int]:
         checks = doctor_cmd._collect(None, workspace_root=str(ws))
         return checks, int(doctor_cmd.exit_code_for(checks))
 
-    # STATE 1 -- the DEFAULT post-bootstrap state. Builds work; must not refuse.
-    checks, _ = _run(have)
+    # STATE 1 -- the DEFAULT post-bootstrap state. `west`/`westResolved` must
+    # not be why this host refuses (`_collect` here has no SDK/prerequisites
+    # context, so OTHER checks can still fail the overall exit code -- that is
+    # not this test's subject; only the west PAIR's own verdicts are).
+    checks, _code = _run(have)
     by_name = {c.name: c.status for c in checks}
     assert by_name.get("westResolved") == "pass", "venv holds a west: westResolved must pass"
     # tan-cli#299 second half, at `_collect` level: `west` (bare-PATH-only)
@@ -595,7 +625,25 @@ def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_pa
         "a passing `west` check must not surface as an issue at all"
     )
 
-    # STATE 2 -- nothing anywhere. No slice can run; must refuse.
+    # STATE 2 -- tan-cli#488 defects 1 AND 3: the venv's `west` FILE survives
+    # (`is_file()` true, so both checks resolve a path) but cannot actually be
+    # spawned. Pre-fix, `westResolved` treated `version is None` as `pass`
+    # unconditionally (defect 1), and `west_check`'s own
+    # `found is None and resolved is not None` branch reported `pass`
+    # regardless of whether `resolved` could run (defect 3) -- both checks
+    # green, exit 0, on a host where the first real `west build` dies with
+    # `FileNotFoundError`/`ModuleNotFoundError`.
+    checks, code = _run(broken)
+    by_name = {c.name: c.status for c in checks}
+    assert by_name.get("westResolved") == "fail", (
+        "a west that resolves but cannot run must FAIL, not pass"
+    )
+    assert by_name.get("west") != "pass", (
+        "west must not report pass for a binary westResolved just failed on"
+    )
+    assert code == 4, "a host where no build slice can run must not exit 0"
+
+    # STATE 3 -- nothing anywhere. No slice can run; must refuse.
     checks, code = _run(lack)
     by_name = {c.name: c.status for c in checks}
     assert by_name.get("westResolved") == "fail", "no west anywhere: westResolved must FAIL"
@@ -696,6 +744,24 @@ def test_west_check_probes_the_resolved_path_not_a_bare_name_reprobe(tmp_path, m
     detail = doctor_cmd.west_check(None, None, None).detail
     assert "actually resolves it through the workspace venv" not in detail
     assert "westResolved" in detail
+
+
+def test_west_check_does_not_pass_a_resolved_but_unspawnable_west():
+    """tan-cli#488 defect 3: `found is None and resolved is not None` used to
+    report `pass` unconditionally -- correct only when the resolved binary can
+    actually run. `westResolved` (tan-cli#488 defect 1) now FAILS the
+    identical binary when it cannot be spawned; this check must not still call
+    it `pass`, which is the exact headline symptom ("pass on an unrunnable
+    west") surviving in the one branch defect 1's own fix did not touch.
+    """
+    check = doctor_cmd.west_check(None, None, None, "/ws/.venv/bin/west", False)
+    assert check.status != "pass", check.detail
+    assert "/ws/.venv/bin/west" in check.detail
+    assert "westResolved" in check.detail
+
+    # `resolved_ran` defaults to `True` -- every pre-existing 4-argument call
+    # site (this file's own unit tests above) keeps its prior "pass" meaning.
+    assert doctor_cmd.west_check(None, None, None, "/ws/.venv/bin/west").status == "pass"
 
 
 def test_west_resolved_passes_and_names_the_resolved_binary_and_version():
@@ -3025,6 +3091,20 @@ def test_fix_suppressed_issue_never_reads_isatty_under_json_mode(monkeypatch):
     issue = doctor_cmd.fix_suppressed_issue(non_interactive=False, ci=False, json_mode=True)
     assert issue.code == "doctor.fix-suppressed"
     assert "--format json" in issue.message
+
+
+def test_fix_suppressed_issue_does_not_crash_when_stdin_is_none(monkeypatch):
+    """tan-cli#488 defect 6: `sys.stdin` itself -- not just `sys.stderr` (see
+    the sibling test above) -- can be `None`: a GUI-launched/`pythonw`-style
+    process, or any host that runs tan with its standard handles detached. A
+    bare `sys.stdin.isatty()` there raised `AttributeError: 'NoneType' object
+    has no attribute 'isatty'`. Only reachable with `json_mode=False` -- that
+    is the one case the `isatty()` pair is read at all.
+    """
+    monkeypatch.setattr(doctor_cmd.sys, "stdin", None)
+    issue = doctor_cmd.fix_suppressed_issue(non_interactive=False, ci=False, json_mode=False)
+    assert issue.code == "doctor.fix-suppressed"
+    assert "no interactive terminal" in issue.message
 
 
 def test_doctor_fix_format_json_is_no_longer_a_silent_no_op(monkeypatch, tmp_path):

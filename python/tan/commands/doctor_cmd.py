@@ -786,6 +786,7 @@ def west_check(
     version: tuple[int, int] | None,
     floor: tuple[int, int] | None,
     resolved: str | None = None,
+    resolved_ran: bool = True,
 ) -> Check:
     """`west` -- present on BARE PATH, or resolvable through the SAME
     resolver `westResolved` uses (`tan.core.venv.west_program`).
@@ -835,9 +836,22 @@ def west_check(
     compatible in practice and refusing a host on a version string we could
     not parse is a worse failure than letting the real invocation report its
     own.
+
+    **`resolved_ran` -- a resolved-but-unspawnable west is not a `pass`
+    (tan-cli#488 defect 3).** `resolved` only proves `westResolved` found a
+    file at that path; it says nothing about whether that file can actually
+    run. Before this parameter existed, `found is None and resolved is not
+    None` returned `pass` unconditionally -- including for a `west` whose
+    launcher survives a relocated workspace but whose interpreter does not,
+    the exact host `westResolved` (tan-cli#488 defect 1) now reports `fail`
+    for. That paired one check correctly failing an unbuildable host with its
+    sibling still calling it a `pass`, the headline "pass on an unrunnable
+    west" symptom surviving in this one branch. Defaults to `True` so every
+    existing 4-argument call site (this file's own unit tests, modelling the
+    ordinary "ran fine" case) keeps its prior meaning unchanged.
     """
     if found is None:
-        if resolved is not None:
+        if resolved is not None and resolved_ran:
             return Check(
                 "west",
                 "pass",
@@ -849,6 +863,16 @@ def west_check(
                 f"`bin`/`Scripts` directory holds the `west` launcher) would "
                 f"additionally put it on bare PATH, for tools that spawn it "
                 f"directly rather than through tan.",
+            )
+        if resolved is not None:
+            return Check(
+                "west",
+                "warn",
+                f"`west` is not on bare PATH. It resolves to {resolved} through the "
+                f"workspace venv, but `westResolved` above found that binary could "
+                f"not be executed there -- no build slice can run it. `westResolved` "
+                f"is the check that owns this failure; see it for the remedy.",
+                "Run `tan bootstrap` to recreate the workspace venv.",
             )
         return Check(
             "west",
@@ -2363,10 +2387,14 @@ def _load_manifest(sdk_root: str | None) -> ManifestLoad:
         return ManifestLoad(
             fallback,
             "tan's built-in fallback list",
+            # tan-cli#488 defect 2: no trailing period -- this string is
+            # always read back through `f"... rejected: {loaded.error}. Falling
+            # back to ..."` (below), which supplies its own; a period here
+            # rendered "...outright.. Falling back to" (double stop).
             f"{path} declares schemaVersion {schema_version}, but this `tan` "
             f"supports only {BOOTSTRAP_MANIFEST_SCHEMA_VERSION}. Update `tan`, or "
             f"pin an SDK whose metadata/bootstrap.json this version understands; "
-            f"`tan bootstrap` already refuses this manifest outright.",
+            f"`tan bootstrap` already refuses this manifest outright",
             is_real=False,
         )
     prerequisites = facts.get("prerequisites")
@@ -2726,6 +2754,13 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
     against a real `tan doctor --fix --format json --ci` run). `json_mode`
     is already a complete, accurate reason on its own; there is nothing the
     tty state could add under it.
+
+    tan-cli#488 defect 6: `sys.stdin` is guarded with `is not None` before
+    `.isatty()` -- `sys.stdin` itself, not just `sys.stderr`, can be `None`
+    (a GUI-launched/`pythonw`-style process, or any host that runs tan with
+    its standard handles detached), and a bare `sys.stdin.isatty()` there
+    raises `AttributeError: 'NoneType' object has no attribute 'isatty'` for
+    the same reason the `_TeeStderr` case above already gets its own guard.
     """
     reasons = []
     if json_mode:
@@ -2734,7 +2769,9 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
         reasons.append("`--ci`")
     if non_interactive:
         reasons.append("`--non-interactive`")
-    if not json_mode and not (sys.stdin.isatty() and sys.stderr.isatty()):
+    if not json_mode and not (
+        sys.stdin is not None and sys.stdin.isatty() and sys.stderr.isatty()
+    ):
         reasons.append("no interactive terminal (stdin/stderr not a tty -- piped, redirected, or CI)")
     return Issue(
         "doctor.fix-suppressed",
@@ -3079,12 +3116,19 @@ def _collect(
     # instead of a permanent warn. Only passed when it is a real venv
     # binary (an absolute path); `west_program`'s bare-`"west"` fallback
     # carries no information `west_exe` above does not already have.
+    #
+    # tan-cli#488 defect 3: `west_resolved_ran` (computed above, the same
+    # `probe_status` result `westResolved` itself was fixed to consult for
+    # defect 1) also passed through -- so a resolved-but-unspawnable west
+    # cannot report `pass` here while `westResolved` reports `fail` for the
+    # identical binary.
     _add(
         west_check(
             west_exe,
             west_version,
             _parse_two(str(facts.get("_pipSpec") or "")),
             resolved_west if os.path.isabs(resolved_west) else None,
+            west_resolved_ran,
         )
     )
 

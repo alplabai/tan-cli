@@ -320,6 +320,32 @@ def test_validate_offline_unreadable_board_yaml_is_still_internal_failure(tmp_pa
     assert [i["code"] for i in envelope["issues"]] == ["validate.internal-failure"]
 
 
+def test_a_deleted_working_directory_still_produces_an_envelope(monkeypatch):
+    """tan-cli#488 defect 8: `validate()`'s prologue -- `_resolve_board_path`
+    through `resolve_sdk_root_ladder` -- used to run entirely OUTSIDE any
+    guard that turns a raise into an envelope: `os.path.abspath(root)` (feeding
+    the SDK-root ladder) calls `os.getcwd()`, which throws `FileNotFoundError`
+    when the working directory has been removed out from under the process (a
+    cleanup script racing a `tan validate` run in the same shell), and that
+    raise used to unwind through typer's own traceback renderer instead --
+    empty stdout, no error on either side of the CLI/extension seam. Mirrors
+    `doctor_cmd`'s identical regression test; `build_cmd` already had it (its
+    own `Path.cwd()` fix), `validate_cmd` did not.
+    """
+    def gone():
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(validate_cmd.os, "getcwd", gone)
+
+    result = runner.invoke(app, ["validate", "--format", "json"])
+    assert result.stdout, "must never be empty stdout"
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "validate"
+    assert payload["ok"] is False
+    assert result.exit_code == payload["exitCode"] == int(ExitCode.INTERNAL_FAILURE)
+    assert any(i["code"] == "validate.internal-failure" for i in payload["issues"]), payload["issues"]
+
+
 def test_unknown_format_is_rejected_and_lists_all_four_choices(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _write(tmp_path, "som:\n  sku: E1M-AEN701\n")
