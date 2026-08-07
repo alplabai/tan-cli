@@ -45,6 +45,7 @@ from tan.commands.bootstrap_cmd import (
     resolve_python_floor,
     workspace_orphan_refusal,
 )
+from tan.core import atomic_write as atomic_write_mod
 from tan.core.bootstrap import (
     INCOMPATIBLE,
     LINUX,
@@ -2093,6 +2094,75 @@ def test_an_unreadable_west_config_is_a_failure_never_a_silent_no_op(tmp_path):
     (topdir / ".west" / "config").mkdir(parents=True)  # present, unreadable
     outcome, _old, detail = reconcile_west_manifest_path(str(sdk))
     assert outcome == "failed" and detail
+
+
+def _stale_west_config(tmp_path):
+    """A topdir whose `.west/config` still points at `v0.6.0`, plus a fresh
+    `v0.7.0` checkout that would reconcile onto it -- the shared setup every
+    tan-cli#516 test below rewrites."""
+    topdir = tmp_path / "top"
+    (topdir / "v0.6.0").mkdir(parents=True)
+    new_sdk = topdir / "v0.7.0"
+    new_sdk.mkdir()
+    (topdir / ".west").mkdir()
+    config = topdir / ".west" / "config"
+    config.write_text("[manifest]\npath = v0.6.0\n", encoding="utf-8")
+    return new_sdk, config
+
+
+def test_reconcile_west_manifest_path_fsyncs_before_replacing_the_config(tmp_path):
+    """tan-cli#516: the pre-fix code wrote the temp sibling with a bare
+    `Path.write_text` + `os.replace` and never called `os.fsync` anywhere --
+    atomic with respect to the RENAME only, so a crash between the rename
+    landing and the temp's data reaching stable storage could leave
+    `.west/config` -- the topdir's ONLY manifest pointer, shared by every SDK
+    version under it -- renamed to its real name with truncated or missing
+    content. FAILS against the unfixed code: `calls` stays empty because
+    `os.fsync` is never invoked on that path."""
+    new_sdk, config = _stale_west_config(tmp_path)
+    real_fsync = os.fsync
+    calls: list[int] = []
+
+    def spy_fsync(fd):
+        calls.append(fd)
+        return real_fsync(fd)
+
+    atomic_write_mod.os.fsync = spy_fsync
+    try:
+        assert reconcile_west_manifest_path(str(new_sdk)) == ("rewrote", "v0.6.0", "v0.7.0")
+    finally:
+        atomic_write_mod.os.fsync = real_fsync
+
+    assert calls, "reconcile_west_manifest_path must fsync the temp before renaming it into place"
+    assert get_manifest_path(config.read_text(encoding="utf-8")) == "v0.7.0"
+
+
+def test_a_west_config_fsync_failure_is_reported_and_leaves_the_original_untouched(
+    tmp_path, monkeypatch
+):
+    """A failure INSIDE the durability sequence (`os.fsync`, after the temp's
+    own buffer already holds the rewritten content but before it is durable or
+    the rename happens) must surface as `"failed"`, must leave the real
+    `.west/config` byte-identical -- not partially rewritten -- and must not
+    leak the temp sibling. FAILS against the unfixed code for the reverse
+    reason: it never calls `os.fsync` at all, so patching it to raise changes
+    nothing and the write silently SUCCEEDS where this test expects a
+    reported failure."""
+    new_sdk, config = _stale_west_config(tmp_path)
+    original = config.read_text(encoding="utf-8")
+
+    def boom_fsync(_fd):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(atomic_write_mod.os, "fsync", boom_fsync)
+
+    outcome, old, detail = reconcile_west_manifest_path(str(new_sdk))
+
+    assert outcome == "failed" and detail
+    assert old == "v0.6.0"
+    assert config.read_text(encoding="utf-8") == original
+    leftovers = list(config.parent.glob("*.tan-tmp"))
+    assert leftovers == [], leftovers
 
 
 # ---------------------------------------------------------------------------

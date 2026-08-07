@@ -168,7 +168,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # f-string was the exact shape that printed a stringified `None` and then
     # advised dropping a `--workspace` the invocation never carried, and
     # nothing stopped that gate from being loosened again.
-    "tan/commands/bootstrap_cmd.py": 2917,
+    # 2919, not 2917, as of tan-cli#516: `reconcile_west_manifest_path`'s
+    # write moved from a bare `Path.write_text` + `os.replace` (no `fsync` at
+    # all) to the new shared `atomic_write_text` (`tan/core/atomic_write.py`),
+    # plus a comment explaining the durability gap the old shape had. Net
+    # growth is small -- the call site itself SHRANK (the caller's own
+    # temp-cleanup `except` is gone, `atomic_write_text` does its own) -- the
+    # import line and the expanded rationale comment account for the +2.
+    "tan/commands/bootstrap_cmd.py": 2919,
     "tan/core/bootstrap.py": 1890,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
@@ -871,7 +878,18 @@ _MIRRORED = ("tan/planner/",)
 # survives rebasing #520's work onto the `dev` tip that now carries all of
 # the former. Re-walked with the gate's own `ast` logic (span > 50 over all
 # of `tan/`, planner included) against this exact tree.
-_FUNCTION_COUNT_BUDGET = 211
+#
+# 212, not 211, as of tan-cli#516: the new shared `tan/core/atomic_write.py:
+# atomic_write_text` (54 lines, docstring included) is a genuinely NEW
+# function over the cap -- `reconcile_west_manifest_path`'s own body did not
+# cross it either before or after this change, so this is a pure +1, not a
+# replacement. `_FUNCTION_WORST_BUDGET` is untouched: `atomic_write_text` at
+# 54 lines is nowhere near it, and re-measuring the CURRENT worst
+# (`bootstrap_cmd.py:_run`) with this gate's own `ast` walk finds 701 lines,
+# not 707 -- unrelated to this change (that function is untouched here) and
+# still comfortably under the recorded ceiling, so the ceiling is left as
+# recorded rather than tightened on faith.
+_FUNCTION_COUNT_BUDGET = 212
 _FUNCTION_WORST_BUDGET = 707
 
 
