@@ -97,7 +97,13 @@ def two_projects(tmp_path_factory):
         )
 
     pointer = json.loads((home / ".alp" / "sdk-default").read_text(encoding="utf-8"))
-    assert pointer["writtenFor"] == str(proj_b), (
+    # Posix on BOTH sides. tan writes `writtenFor` posix-normalised on every
+    # platform; `str(proj_b)` is native, so on Windows this compared
+    # `C:/Users/.../projB` against `C:\\Users\\...\\projB` and failed a
+    # precondition that was actually met. The assertions below already
+    # normalised -- this one was the omission, and it is exactly the
+    # windows-only shape this repo keeps getting bitten by.
+    assert pointer["writtenFor"].replace("\\", "/") == str(proj_b).replace("\\", "/"), (
         "precondition unmet: the shared pointer must name B, the last writer"
     )
 
