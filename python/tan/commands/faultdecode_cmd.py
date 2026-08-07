@@ -46,6 +46,7 @@ original's `click.BadParameter`/`click.UsageError`, both exit 2).
 from __future__ import annotations
 
 import json as _json
+import queue
 import subprocess
 import sys
 import threading
@@ -168,69 +169,76 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
     return parsed
 
 
-#: How long the IMPLICIT stdin auto-consume waits for a non-TTY stdin to
-#: deliver something -- bytes, or EOF, either of which ends the read --
-#: before giving up and decoding from the flags alone (tan-cli#388).
+#: How long the IMPLICIT stdin auto-consume waits, IDLE -- i.e. since the
+#: last line arrived, not since the read began -- for a non-TTY stdin to
+#: deliver another line or EOF before giving up and decoding from whatever
+#: arrived so far, plus the flags (tan-cli#388, tan-cli#503).
 #:
 #: Not 0: `producer | tan faultdecode` races the producer's first write
 #: against this process's own startup, and losing that race would drop a
 #: dump the user really did pipe. Not unbounded either -- unbounded is the
-#: defect this bounds, for the WHOLE read, not just a readiness check (see
-#: `_read_implicit_stdin`). A quarter second is far longer than a scheduler
-#: hiccup and far shorter than the indefinite block a held-open pipe used to
-#: cause.
+#: defect this bounds. And not a TOTAL budget for the whole read either --
+#: that was tan-cli#503's own regression: a fixed budget cuts off a
+#: slow-but-steady producer (a serial capture, a script draining a device)
+#: mid-dump just because it kept writing past the window, silently
+#: truncating a report that would have arrived in full a moment later. Each
+#: line arriving resets the window (see `_read_implicit_stdin`), so a
+#: steadily-producing writer is read to completion regardless of how long
+#: that takes in total; only a producer that goes idle for a whole window,
+#: or never writes at all, is cut off. A quarter second is far longer than a
+#: scheduler hiccup and far shorter than the indefinite block a held-open,
+#: silent pipe used to cause.
 _STDIN_READY_TIMEOUT_S = 0.25
 
 
 def _read_implicit_stdin() -> str:
-    """Read whatever an IMPLICIT (no `--file`) piped stdin offers, the whole
-    operation bounded to `_STDIN_READY_TIMEOUT_S` (tan-cli#388, tan-cli#503).
+    """Read whatever an IMPLICIT (no `--file`) piped stdin offers, bounded by
+    IDLE time (`_STDIN_READY_TIMEOUT_S` since the LAST line, not since the
+    read began) rather than a fixed total budget (tan-cli#388, tan-cli#503).
 
-    `sys.stdin.read()` blocks until EOF, not until bytes merely become
-    available -- bounding only a READINESS probe (`select.select`) is not
-    enough: a producer that writes and then holds the pipe open (never
-    closes it) makes the fd report readable, and an unbounded `read()`
-    issued after that still blocks forever. Doing the read on a background
-    daemon thread and joining it with a timeout bounds both "is anything
-    coming" and "what did it send", on every platform, including Windows
-    (`select` there accepts sockets only) and a `fileno`-less in-memory
-    stdin (`CliRunner`).
+    A daemon thread reads `sys.stdin` line by line (never one unbounded
+    `read()`, which blocks past readiness until EOF -- fatal for a pipe held
+    open and never closed) and hands each line to the main thread over a
+    `Queue` the instant it arrives. The main thread loops on `queue.get
+    (timeout=_STDIN_READY_TIMEOUT_S)`, so the window resets on every line: a
+    producer writing faster than it elapses is read to EOF however long that
+    takes in total; only a producer that goes idle for a whole window, or
+    never writes at all, is cut off, keeping every line already queued.
 
-    The thread reads LINE BY LINE, not with one unbounded `read()`, and
-    appends each line as it arrives -- so a line the producer already wrote
-    and flushed is visible the instant `reader.join()` times out, even
-    though the thread is still blocked in `readline()` awaiting a NEXT line
-    that may never come. A single `got.append(stdin.read())` only appends
-    once `read()` RETURNS at EOF, so a timeout on a still-open pipe used to
-    discard the append entirely -- tan-cli#503's own follow-on regression:
-    the fix for the unbounded-read hang made the process terminate, but at
-    the cost of silently decoding nothing from a dump that had, in fact,
-    fully arrived before the timeout fired.
+    An earlier shape called `reader.join(_STDIN_READY_TIMEOUT_S)` once and
+    kept whatever had accumulated by then -- a TOTAL budget, not a stall
+    detector, that silently truncated a slow-but-steady producer's dump the
+    instant it kept writing past the window (tan-cli#503's own regression).
 
-    The thread is a daemon: it may still be parked in `readline()` when the
-    timeout fires, and abandoning it there is correct for a producer that
-    never sends another line -- that read genuinely never finishes, so
-    nothing already-decoded is lost by not waiting for it. Every line that
-    DID arrive inside the window is still returned and decoded; only the
-    wait for the NEXT one is bounded. (A final, newline-less partial line
-    still in flight at the timeout is the one exception -- `readline` is
-    blocking on it, so it was never appended.)
+    The reader thread stays daemon: abandoning it mid-`readline()` when the
+    main thread gives up is correct for a producer that sends nothing more.
+    A final, newline-less partial line still in flight at the timeout is the
+    one exception -- `readline` blocks on it, so it was never queued.
     """
-    lines: list[str] = []
+    q: queue.Queue[str | None] = queue.Queue()
 
     def _drain() -> None:
         try:
             while True:
                 line = sys.stdin.readline()
-                if not line:  # EOF
+                q.put(line if line else None)  # None is the EOF sentinel
+                if not line:
                     break
-                lines.append(line)
         except (OSError, ValueError):  # pragma: no cover - env-dependent
-            pass
+            q.put(None)
 
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
-    reader.join(_STDIN_READY_TIMEOUT_S)
+
+    lines: list[str] = []
+    while True:
+        try:
+            item = q.get(timeout=_STDIN_READY_TIMEOUT_S)
+        except queue.Empty:
+            break  # idle for a whole window: give up, keep what arrived
+        if item is None:
+            break  # EOF: the producer closed its end
+        lines.append(item)
     return "".join(lines)
 
 
@@ -248,11 +256,14 @@ def _read_dump(file_: str | None) -> str:
     `faultdecode()`'s `pick()` exists precisely to let a flag override a
     parsed value register-by-register (tan-cli#503) -- a piped CFSR/BFAR must
     not be silently dropped just because `--hfsr` was also given. This is safe
-    against the tan-cli#388 hang because `_read_implicit_stdin` bounds the
-    ENTIRE read (not just a readiness check) to `_STDIN_READY_TIMEOUT_S`: an
-    idle-or-stalled open pipe with nothing (more) to contribute costs a
-    quarter second, not the process, so gating the read on "were there
-    already flags" was never load-bearing for #388 -- it only cost the merge.
+    against the tan-cli#388 hang because `_read_implicit_stdin` bounds every
+    IDLE gap in the read (not just an initial readiness check) to
+    `_STDIN_READY_TIMEOUT_S`: an idle-or-stalled open pipe with nothing (more)
+    to contribute costs at most a quarter second, not the process, so gating
+    the read on "were there already flags" was never load-bearing for #388 --
+    it only cost the merge. A producer that keeps writing is read to
+    completion however long that takes in total (tan-cli#503's own follow-on
+    regression, see `_read_implicit_stdin`).
     """
     if file_ == "-":
         if sys.stdin is None:  # fd 0 closed (tan-cli#503): nothing to read.

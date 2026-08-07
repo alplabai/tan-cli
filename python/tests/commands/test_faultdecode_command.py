@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -765,6 +766,114 @@ def test_a_producer_that_writes_then_holds_open_merges_with_an_explicit_flag():
     assert data["addresses"]["bfar"] == "0xdeadbeef"
     assert data["addresses"]["bfar_valid"] is True
     assert "Precise data bus fault" in data["root_cause"]
+
+
+def _run_with_stdin_streamed_slowly(
+    args: list[str], chunks: list[str], gap_s: float
+) -> tuple[int, str, str]:
+    """Spawn `python -m tan faultdecode <args>` and WRITE `chunks` into stdin
+    one at a time, sleeping `gap_s` between writes (each flushed), then close
+    stdin (EOF) once every chunk has been sent -- a slow-but-steady producer,
+    not a stalled one.
+
+    Fails the test rather than hanging the suite if the child does not exit
+    once its stdin has been closed. A regressed (total-budget-bound) reader
+    can make the child exit -- and close its end of the pipe -- WHILE this
+    is still mid-write: that surfaces here as a `BrokenPipeError`/`OSError`
+    on a later `write()`/`flush()`, which is treated as "no more to send"
+    rather than an unhandled crash, so the assertions in the caller see the
+    real (truncated) output and fail on the missing register, not on a
+    pipe-plumbing exception that would obscure what the test is proving."""
+    proc = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+        [sys.executable, "-m", "tan", "faultdecode", *args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        for chunk in chunks:
+            try:
+                proc.stdin.write(chunk)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                break  # the child already exited and closed its end
+            time.sleep(gap_s)
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        rc = proc.wait(timeout=_OPEN_STDIN_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail(
+            f"tan faultdecode {' '.join(args)} did not exit within "
+            f"{_OPEN_STDIN_TIMEOUT_S}s after a slow producer finished writing "
+            f"{chunks!r} (tan-cli#503)"
+        )
+    finally:
+        out = proc.stdout.read()
+        err = proc.stderr.read()
+        proc.stdout.close()
+        proc.stderr.close()
+    return rc, out, err
+
+
+def test_a_slow_but_steady_producer_is_read_in_full():
+    """tan-cli#503 round 3's own regression: `reader.join(_STDIN_READY_TIMEOUT_S)`
+    bounded the WHOLE implicit-stdin read as a single fixed budget, not the
+    IDLE time between writes. A producer whose first line lands inside that
+    quarter-second window but that keeps writing past it -- a serial capture,
+    a script draining a device one line at a time -- had every line after the
+    cutoff silently discarded, at exit 0, with no signal the dump was
+    truncated: the bench case this whole issue is about.
+
+    Each of the three lines below arrives well inside `_STDIN_READY_TIMEOUT_S`
+    of the one before it (a fraction of the idle window, so the fix's
+    idle-reset never itself times out mid-dump), but the cumulative wall-clock
+    time to write all three is several times the OLD fixed budget. All three
+    registers must still be decoded -- proving the bound resets on every line
+    instead of counting down from the start of the read."""
+    from tan.commands.faultdecode_cmd import _STDIN_READY_TIMEOUT_S
+
+    # Each gap is well inside the idle window (so the fix's own reset never
+    # times out mid-dump), but four of them (0.6 * 0.25s = 0.15s each, three
+    # gaps between four lines) sum to 0.45s -- 1.8x the OLD fixed total
+    # budget -- so a regression back to a total-budget bound would truncate
+    # this before the last line, not just run slow.
+    gap = _STDIN_READY_TIMEOUT_S * 0.6
+    chunks = [
+        "CFSR: 0x00008200\n",
+        "BFAR: 0xdeadbeef\n",
+        "MMFAR: 0xcafef00d\n",
+        "HFSR: 0x40000000\n",
+    ]
+    rc, out, err = _run_with_stdin_streamed_slowly(["--format", "json"], chunks, gap)
+    assert rc == 0, (rc, out, err)
+    payload = json.loads(out)
+    assert payload["command"] == "faultdecode"
+    data = payload["data"]
+    assert data["inputs"]["cfsr"] == "0x00008200"
+    assert data["inputs"]["hfsr"] == "0x40000000"
+    assert data["addresses"]["bfar"] == "0xdeadbeef"
+    assert data["addresses"]["bfar_valid"] is True
+    assert data["addresses"]["mmfar"] == "0xcafef00d"
+
+
+def test_a_producer_that_opens_the_pipe_and_never_writes_still_does_not_hang():
+    """The other half of the idle-bound: a producer that opens the write end
+    and sends NOTHING (not even a partial line) must still time out and let
+    the command answer, exactly as it did before the idle-vs-total-budget
+    fix -- resetting the window on each line must not turn into never timing
+    out when no line ever arrives to reset it on. Same shape as
+    `test_an_idle_open_stdin_pipe_falls_through_to_the_no_dump_refusal`;
+    kept here, beside the slow-producer test, so both halves of the
+    tan-cli#503 round 3 fix are pinned side by side."""
+    rc, out, err = _run_with_stdin_held_open([])
+    assert rc == 2
+    assert "no fault registers supplied" in err
+    assert (out + err) != ""
 
 
 # --------------------------------------------------------------------------

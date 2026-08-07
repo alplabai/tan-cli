@@ -233,12 +233,20 @@ All notable changes to `tan` are documented here. Format follows
     delivered inside the bounded window survives the timeout that abandons
     the thread; only an unfinished, newline-less line still in flight when
     the timeout fires is lost, not everything that came before it.
-  - `_read_dump`/`resolve_symbol`/`can_prompt` (the last shared by `doctor
-    --fix` and `scaffold`) dereferenced `sys.stdin`/`sys.stderr` bare;
-    with fd 0/2 closed (a daemon/service parent, some CI runners, a Windows
-    `pythonw`/frozen no-console launch) both are `None`, not merely
-    non-a-tty, and `.isatty()` on `None` raised `AttributeError` instead of
-    the coded refusal the caller should have gotten.
+  - `_read_dump`/`resolve_symbol`/`can_prompt` dereferenced `sys.stdin`/
+    `sys.stderr` bare; with fd 0/2 closed (a daemon/service parent, some CI
+    runners, a Windows `pythonw`/frozen no-console launch) both are `None`,
+    not merely non-a-tty, and `.isatty()` on `None` raised `AttributeError`
+    instead of the coded refusal the caller should have gotten. `can_prompt`
+    is the ONE shared gate `doctor --fix` and `scaffold` both call through,
+    so both callers get the guard from this one fix -- but it is not the
+    only bare `sys.stdin`/`sys.stderr` dereference issue #503's own defect 3
+    named: `doctor_cmd.fix_suppressed_issue`'s own direct
+    `sys.stdin.isatty() and sys.stderr.isatty()` and
+    `new_som_cmd.new_som`'s own direct `sys.stdin.isatty()` are separate call
+    sites that do not go through `can_prompt`, and both are still unguarded
+    as of this change -- the class is closed for `can_prompt`'s two callers'
+    *shared* gate, not for `doctor`/`new-som` outright.
   - `resolve_symbol`'s `addr2line`-class tool probe used `shutil.which`,
     which inserts the current directory ahead of `$PATH` on Windows, so a
     decoy `addr2line.exe`/`llvm-addr2line.exe`/`arm-zephyr-eabi-addr2line.exe`
