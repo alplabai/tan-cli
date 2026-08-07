@@ -222,6 +222,17 @@ All notable changes to `tan` are documented here. Format follows
     the same timeout, bounding both "is anything coming" and "what did it
     send" on every platform, including Windows (where `select` accepts
     sockets only) and a `fileno`-less in-memory stdin.
+  - That daemon-thread fix had its own follow-on regression: the thread
+    collected the read with a single `got.append(sys.stdin.read())`, which
+    only appends once `read()` RETURNS at EOF -- so a producer that writes a
+    complete, flushed dump and then holds the pipe open (never sends EOF)
+    still lost the ENTIRE payload the instant the bounded `join()` timed
+    out, reporting "no fault registers supplied" even though the CFSR the
+    engineer piped in had, in fact, fully arrived. The thread now reads
+    line-by-line and appends each line as it lands, so whatever was
+    delivered inside the bounded window survives the timeout that abandons
+    the thread; only an unfinished, newline-less line still in flight when
+    the timeout fires is lost, not everything that came before it.
   - `_read_dump`/`resolve_symbol`/`can_prompt` (the last shared by `doctor
     --fix` and `scaffold`) dereferenced `sys.stdin`/`sys.stderr` bare;
     with fd 0/2 closed (a daemon/service parent, some CI runners, a Windows

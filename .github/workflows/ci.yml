@@ -151,6 +151,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12" # pyproject's requires-python floor
+      # tan-cli#503: `tests/commands/test_completion_command.py`'s zsh-driven
+      # cases (`test_zsh_format_completion_*`) are `skipif(not zsh on PATH)` --
+      # a skip, not a failure, so a runner image that happens to lack zsh
+      # would silently stop exercising the real emitted `_zsh_subcmd_scan_snippet`
+      # loop and no one would see red for it. Installed explicitly rather than
+      # assumed present, so this job's `pytest` run is the thing that actually
+      # runs that loop, not a hope about the ubuntu-latest image's contents.
+      - name: ensure zsh is on PATH (zsh-driven completion tests)
+        run: |
+          if ! command -v zsh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends zsh
+          fi
       # `pip install -e ./python` and NOT a hand-listed dependency set: this job
       # must fail when the DECLARED dependencies are wrong, which is the defect
       # that shipped (`tan/cli.py` imports `click.testing`, typer stopped

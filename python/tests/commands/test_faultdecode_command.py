@@ -719,17 +719,52 @@ def test_a_producer_that_writes_then_holds_the_pipe_open_never_hangs_the_read():
     assert payload["data"]["fault_detected"] is True
 
 
-def test_a_producer_that_writes_then_holds_open_with_no_flags_also_terminates():
+def test_a_producer_that_writes_then_holds_open_with_no_flags_decodes_the_piped_dump():
     """Same shape with NO flags on the command line, so the implicit stdin
-    read is the command's only possible source of registers: a write that
-    never reaches EOF within the bound is not a usable dump (there is no
-    partial-parse contract), so this still terminates -- refusing for lack
-    of registers -- rather than waiting indefinitely for the close that will
-    never come."""
-    rc, out, err = _run_with_stdin_written_then_held_open([], "CFSR=0x00008200\n")
-    assert rc == 2, err
-    assert "no fault registers supplied" in err
-    assert (out + err) != ""
+    read is the command's only possible source of registers. This must still
+    terminate (never wait for the close that is never coming) -- but a full
+    line the producer already wrote and flushed before stalling is NOT lost
+    just because the pipe stays open afterwards: `_read_implicit_stdin`
+    appends each line as it arrives, so a line delivered inside the bounded
+    window survives the timeout that abandons the reader thread.
+
+    This pins tan-cli#503's own follow-on regression: an earlier fix bounded
+    the whole read with a single `got.append(stdin.read())`, which only
+    appends once `read()` RETURNS at EOF -- so a timeout on a still-open pipe
+    discarded the ENTIRE payload, even a complete, already-flushed line,
+    silently misdiagnosing "no fault registers supplied" instead of decoding
+    the CFSR that was, in fact, fully delivered."""
+    rc, out, err = _run_with_stdin_written_then_held_open(
+        ["--format", "json"], "CFSR=0x00008200\n"
+    )
+    assert rc == 0, (rc, out, err)
+    payload = json.loads(out)
+    assert payload["command"] == "faultdecode"
+    assert payload["data"]["fault_detected"] is True
+    assert payload["data"]["inputs"]["cfsr"] == "0x00008200"
+
+
+def test_a_producer_that_writes_then_holds_open_merges_with_an_explicit_flag():
+    """The exact scenario tan-cli#503's evidence block reproduced against the
+    oracle: a piped CFSR/BFAR dump plus an explicit `--hfsr` flag must MERGE,
+    not have the dump dropped just because a flag was also given. Before this
+    fix the (buggy) behaviour was worse than dropping the dump outright: it
+    reported a confident WRONG root cause (`Forced HardFault ... its own
+    status bits are clear`) at exit 0, when the piped CFSR was in fact a
+    precise bus fault with BFAR valid."""
+    rc, out, err = _run_with_stdin_written_then_held_open(
+        ["--hfsr", "0x40000000", "--format", "json"],
+        "CFSR: 0x00008200\nBFAR: 0xdeadbeef\n",
+    )
+    assert rc == 0, (rc, out, err)
+    payload = json.loads(out)
+    assert payload["command"] == "faultdecode"
+    data = payload["data"]
+    assert data["inputs"]["cfsr"] == "0x00008200"
+    assert data["inputs"]["hfsr"] == "0x40000000"
+    assert data["addresses"]["bfar"] == "0xdeadbeef"
+    assert data["addresses"]["bfar_valid"] is True
+    assert "Precise data bus fault" in data["root_cause"]
 
 
 # --------------------------------------------------------------------------

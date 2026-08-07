@@ -135,13 +135,20 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
     dozen bogus flags and the wrong root cause, and `report_to_json`'s
     ``f"0x{v:08x}"`` printed the malformed, non-hex ``"0x-0008200"`` on the
     JSON contract. Refusing here gives the caller a coded refusal instead of a
-    confident wrong diagnosis -- but this is NOT the one place a register
-    value enters the command: `tan.core.faultdecode.parse_dump` greps a pasted
-    dump through its own regex and is a second, independent entry point.
-    Its ``0x[0-9A-Fa-f]+`` alternative has no width cap either, so it needed
-    (and, as of tan-cli#503, has) the identical bound applied at parse time,
-    in `parse_dump` itself, keeping `decode()` a pure function of well-formed
-    32-bit words regardless of which of the two paths a value arrived by.
+    confident wrong diagnosis -- but this is NOT the only place a register or
+    address value enters the command: `tan.core.faultdecode.parse_dump` greps
+    a pasted dump through its own regex and is a second, independent entry
+    point, and its `_DUMP_RE`'s ``0x[0-9A-Fa-f]+`` alternative still has no
+    WIDTH cap on the regex itself (`core/faultdecode.py:309` matches a run of
+    any length, greedily) -- it is bounded a different way, by a RANGE check
+    on the parsed integer (`value > 0xFFFFFFFF: continue`) after the match,
+    not by narrowing what the regex accepts. Not literally identical to this
+    function's bound either: this rejects a leading `-` outright, where
+    `parse_dump`'s alternative cannot match one in the first place (no `-` in
+    its character class), so there is nothing for that half of the check to
+    reject there. Both paths still agree on the outcome that matters:
+    `decode()` only ever sees a well-formed 32-bit word, regardless of which
+    of the two entry points supplied it.
     """
     if value is None:
         return None
@@ -180,41 +187,51 @@ def _read_implicit_stdin() -> str:
     operation bounded to `_STDIN_READY_TIMEOUT_S` (tan-cli#388, tan-cli#503).
 
     `sys.stdin.read()` blocks until EOF, not until bytes merely become
-    available -- so bounding only a READINESS probe (e.g. `select.select`)
-    is not enough: a producer that writes one byte and then holds the pipe
-    open (never closes it) makes the fd report readable, and a raw,
-    unbounded `sys.stdin.read()` issued after that still blocks forever
-    waiting for an EOF that is never coming. That was tan-cli#503's own
-    regression -- the readiness check was bounded, the read that followed it
-    was not, and a producer holding the pipe open past its first byte hung
-    the process exactly like the tan-cli#388 bug this was supposed to fix.
+    available -- bounding only a READINESS probe (`select.select`) is not
+    enough: a producer that writes and then holds the pipe open (never
+    closes it) makes the fd report readable, and an unbounded `read()`
+    issued after that still blocks forever. Doing the read on a background
+    daemon thread and joining it with a timeout bounds both "is anything
+    coming" and "what did it send", on every platform, including Windows
+    (`select` there accepts sockets only) and a `fileno`-less in-memory
+    stdin (`CliRunner`).
 
-    Doing the read itself on a background daemon thread and joining it with
-    a timeout bounds BOTH questions -- "is anything coming" and "what did it
-    send" -- with the one guarantee, on every platform: this covers Windows
-    (where `select.select` accepts sockets only) and a `fileno`-less
-    in-memory stdin (`CliRunner`) the same way it covers a real POSIX pipe,
-    because none of them need a working `select` in the first place.
+    The thread reads LINE BY LINE, not with one unbounded `read()`, and
+    appends each line as it arrives -- so a line the producer already wrote
+    and flushed is visible the instant `reader.join()` times out, even
+    though the thread is still blocked in `readline()` awaiting a NEXT line
+    that may never come. A single `got.append(stdin.read())` only appends
+    once `read()` RETURNS at EOF, so a timeout on a still-open pipe used to
+    discard the append entirely -- tan-cli#503's own follow-on regression:
+    the fix for the unbounded-read hang made the process terminate, but at
+    the cost of silently decoding nothing from a dump that had, in fact,
+    fully arrived before the timeout fired.
 
-    The thread is a daemon because it may still be parked in `read()` when
-    the timeout fires; it holds nothing but stdin, and abandoning it there
-    is correct for a producer that never closes its end -- that read
-    genuinely never finishes, so nothing already-decoded is lost by not
-    waiting for it. Whatever DID arrive inside the window is still returned
-    and still decoded; only the wait is bounded, never the payload.
+    The thread is a daemon: it may still be parked in `readline()` when the
+    timeout fires, and abandoning it there is correct for a producer that
+    never sends another line -- that read genuinely never finishes, so
+    nothing already-decoded is lost by not waiting for it. Every line that
+    DID arrive inside the window is still returned and decoded; only the
+    wait for the NEXT one is bounded. (A final, newline-less partial line
+    still in flight at the timeout is the one exception -- `readline` is
+    blocking on it, so it was never appended.)
     """
-    got: list[str] = []
+    lines: list[str] = []
 
     def _drain() -> None:
         try:
-            got.append(sys.stdin.read())
+            while True:
+                line = sys.stdin.readline()
+                if not line:  # EOF
+                    break
+                lines.append(line)
         except (OSError, ValueError):  # pragma: no cover - env-dependent
             pass
 
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
     reader.join(_STDIN_READY_TIMEOUT_S)
-    return got[0] if got else ""
+    return "".join(lines)
 
 
 def _read_dump(file_: str | None) -> str:
