@@ -209,7 +209,26 @@ _MODULE_BUDGET: dict[str, int] = {
     # bracing was measured-safe, the Fable-advisory finding that made it so,
     # and the one Tcl brace-counting glass jaw (an odd trailing backslash
     # count) it deliberately still leaves fail-safe.
-    "tan/core/flash_plan.py": 2161,
+    # 2199, not 2161, as of tan-cli#513: `jlink_commander_script` gains an
+    # optional `serial` parameter that emits a leading `SelectEmuBySN` line
+    # (matching Flow D's own shape) and `plan_swd_probe`'s J-Link arm now
+    # resolves/validates `flash_args.jlink_serial` the same way Flow D
+    # already does, instead of silently dropping it -- net growth is mostly
+    # docstring explaining why this mirrors Flow D's guard verbatim.
+    # 2263, not 2199, as of the tan-cli#513 REVIEW round: (1) the J-Link arm's
+    # argv now also carries `-SelectEmuBySN {serial}` -- not only the
+    # Commander script's leading line -- because that arm's own `-AutoConnect
+    # 1` (Flow D's argv has none) means JLinkExe can start connecting before
+    # the script is ever read, so the script line alone did not provably
+    # precede the connect; and (2) `jlink_serial` is now resolved/validated
+    # BEFORE the J-Link-vs-openocd/pyocd arm split, with an explicit refusal
+    # when it is set but the resolved arm is openocd/pyocd (neither has a
+    # probe-serial selector of its own), closing both the host-dependent
+    # refusal (a hostile value was refused only under `--dry-run`, which
+    # always forces the J-Link arm) and the same accept-and-ignore shape #513
+    # fixed for the J-Link arm, previously still open one branch over. Net
+    # growth is comments explaining both, plus one new refusal message.
+    "tan/core/flash_plan.py": 2263,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's

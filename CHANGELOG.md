@@ -157,6 +157,26 @@ All notable changes to `tan` are documented here. Format follows
     target that does not exist and whose parent is not `/dev` itself (a
     typo, a dangling symlink, or a traversal that would have resolved
     outside `/dev/`). (#487)
+- **Flow D's read-only DPIDR preflight ran AFTER the SETOOLS auto-sign, so a
+  wrong-board refusal had already mutated the customer's SETOOLS install** --
+  `app-gen-toc` rewrites `app-package-map.txt` rather than appending, so a
+  refusal on the intended abort still destroyed prior sign records first. The
+  preflight is now hoisted ahead of the sign, gated on the identical confirm
+  condition; the mismatch refusal also now names the ACTUAL SW-DP ID the
+  probe reported, not only the expected one -- the useful datum on a bench
+  where a cloned USB serial answers from two physical probes. (#512)
+- **`swd_probe` accepted `flash_args.jlink_serial` and silently ignored it on
+  every arm, so it could not select a probe on a host with more than one
+  J-Link.** `JLinkExe` selects a probe only by serial -- it has no USB-port
+  equivalent -- and an OEM-cloned serial shared by two different physical
+  probes is a measured bench condition, not a hypothetical one. The J-Link
+  arm now emits `SelectEmuBySN {serial}` in both the Commander script (ahead
+  of every other line) and as a `-SelectEmuBySN` argv word (the script line
+  alone does not provably precede this arm's own `-AutoConnect`), through the
+  same `fa_str_checked` + `validate_identifier` guard `jlink_serial` already
+  gets on Flow D. The openocd/pyocd arm has no probe-serial selector of its
+  own, so a manifest naming `jlink_serial` now refuses explicitly on that arm
+  instead of silently dropping the field. (#513)
 
 ## [0.5.1] — 2026-08-04
 
