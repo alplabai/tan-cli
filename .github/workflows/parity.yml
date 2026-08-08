@@ -252,7 +252,19 @@ env:
   # MUST agree (see that file's comment) -- and the CI-wired byte-parity gate
   # SCRIPTS (kconfig-fixture, toolchain-lock, scaffold) were re-verified PASS
   # against `53557a60` locally before this bump too.
-  PINNED_SDK_TAG: 53557a6030c4f90a5525d29c142190e7e91f2bbb
+  #
+  # 53557a60 -> f30f4d4b (tan-cli#544/#545): REQUIRED by the ports in this
+  # commit, not a routine refresh. tan's planner now reserves the AEN `atoc`
+  # band (alp-sdk#1289) and bounds-checks storage against the SoM's regions
+  # (alp-sdk#1331); `53557a60` predates BOTH (measured: `_AEN_ATOC_KIB` and
+  # `_reserved_spans` are absent from its `scripts/gen_zephyr_board.py` and
+  # `scripts/alp_orchestrate/partition.py`, present at `f30f4d4b`). Left at
+  # `53557a60`, the parity layer would read tan's own port as divergence from
+  # the pinned SDK and go red on a correct change. All three pin sites move
+  # together, as the paragraph above requires: this one, `ci.yml`'s
+  # `sdk_parity` checkout ref, and `test_planner_relocation_freshness.py`'s
+  # `PINNED_SDK_COMMIT`.
+  PINNED_SDK_TAG: f30f4d4ba76c235cbb2b2cc713666cb858677e03
 
 jobs:
   seam1-plan-shape:

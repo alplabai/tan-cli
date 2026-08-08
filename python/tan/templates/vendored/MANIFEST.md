@@ -9,7 +9,29 @@ from an un-revendored SDK change.
 
 ## Source
 
-- **Current vendor point (all templates):** **`v0.15.0-rc1`** (`996937ac`) —
+- **Current vendor point (all templates):** **`v0.15.0`** (`e2928b9f`) —
+  re-vendored for tan-cli#544/#545 (the alp-sdk#1289 ATOC reservation and
+  alp-sdk#1331 storage bounds-check ports), which move `PINNED_SDK_TAG` onto
+  alp-sdk `dev`. Two things changed beyond the usual doc-link bump:
+  - **A real content change**, not a link move: the V2N101 scaffold READMEs now
+    document `west flash --host <board-ip>` where they said bare `west flash`.
+  - **`edge-ai`'s `testcase.yaml` was REMOVED** from both SKUs: `--emit
+    scaffold` no longer produces one (the catalog record carries
+    `testcase_yaml: None`), so the vendored copies were stale files tan shipped
+    that the SDK had stopped emitting.
+
+  **tan-cli#384's deliberate edit is RETIRED by this bump.** It pinned every
+  README's doc links at `v0.15.0-rc1` because the emit's own `v0.15.0` was a tag
+  "alp-sdk has never cut". alp-sdk HAS since cut `v0.15.0`, so the emit's bytes
+  are browsable and the divergence healed — `scaffold_byte_parity.py`'s own
+  doctrine requires a healed entry to be forced out rather than left as a dead
+  excuse, so it is gone. `un_edit_doc_link_ref` is kept for the next
+  pre-release vendor point. tan-cli#379's `list(PREPEND EXTRA_CONF_FILE ...)`
+  edit is UNCHANGED and still declared.
+
+  Superseded provenance below.
+
+- **Previous vendor point:** **`v0.15.0-rc1`** (`996937ac`) —
   the release tag, re-vendored to match `parity.yml`'s `PINNED_SDK_TAG` move
   off `v0.14.0`. Same seven `README.md` files as the v0.14.0 bump below and
   NOTHING else: every changed line differs only by the doc-version link
@@ -57,7 +79,7 @@ from an un-revendored SDK change.
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
 - Repo: `alplabai/alp-sdk`
-- Ref: `v0.15.0-rc1` (release tag — `git checkout v0.15.0-rc1` reproduces the
+- Ref: `v0.15.0` (release tag — `git checkout v0.15.0` reproduces the
   exact pinned commit; `dev`'s tip does not)
 - Commit: **v0.15.0-rc1 (`996937ac`)** — the seven READMEs above. History below.
 - Previous: **v0.14.0 (`ef79eab0`)** — the release tag, re-vendored for tan

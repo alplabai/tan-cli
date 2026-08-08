@@ -992,7 +992,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # 975, not 970, as of tan-cli#485: `_resolve_variant` grew a
     # case/whitespace-insensitive `is_tbd`-shaped TBD check (alp-sdk #1048,
     # matching `som_metadata.py::_resolve_silicon_variant`'s own copy).
-    "tan/planner/zephyr_board.py": 975,
+    #
+    # 1004, not 975, as of tan-cli#544: the alp-sdk#1289 ATOC port
+    # adds an `atoc` region to BOTH AEN partition paths -- the disjoint-slot0
+    # tuple and the stock tuple -- plus the constant's sizing note. Raised
+    # rather than extracted, for the reason the paragraph above already gives:
+    # this file is the mirror of alp-sdk's generator and has to stay diffable
+    # against it, so splitting the partition tables here would make the next
+    # port a hand-merge instead of a diff.
+    "tan/planner/zephyr_board.py": 1004,
     "tan/commands/support_bundle_cmd.py": 834,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
@@ -1274,7 +1282,16 @@ _MIRRORED = ("tan/planner/",)
 # 219 on the merged tree, MEASURED by AST walk over all of `tan/` including
 # `tan/planner/` -- neither #488's 218 nor dev's 214: the two branches' crossings
 # are disjoint and `new_som_cmd.py`'s gate resolution adds none of its own.
-_FUNCTION_COUNT_BUDGET = 219
+#
+# 220, not 219, as of tan-cli#544: `zephyr_board.py:_aen_flash_partitions`
+# crossed the cap adding the `atoc` region to both AEN paths and the note
+# explaining why `atoc` must stay LAST (the `offset != total_kib * 1024`
+# assertion is what keeps the band flush against the App MRAM window top,
+# which is the whole point of alp-sdk#1289). Paid rather than extracted:
+# splitting a partition table across helpers to satisfy a line count would
+# make the layout harder to read than the thing it emits, and this function
+# has to stay diffable against alp-sdk's.
+_FUNCTION_COUNT_BUDGET = 220
 _FUNCTION_WORST_BUDGET = 707
 
 

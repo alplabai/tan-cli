@@ -310,7 +310,26 @@ def _twister_yaml(
 # two symmetric image slots derive from the variant's actual MRAM size.
 _AEN_MCUBOOT_KIB = 64
 _AEN_SCRATCH_KIB = 64
-_AEN_STORAGE_KIB = 128
+_AEN_STORAGE_KIB = 96
+
+# The SE-owned band at the very TOP of the App MRAM window (alp-sdk#1289).
+#
+# Alif's SETOOLS top-anchors the generated ATOC application package at the App
+# MRAM window end and grows it DOWNWARD, sized to the package. Placement
+# happens at PROVISIONING time, not link time, so there is no compile-time
+# constant to carve around -- only a band to reserve.
+#
+# 32 KiB, bounded by four independent measurements (bench-observed 5552 B, an
+# E7 DFP transcript at 13552 B, a 23696 B computed worst case, and an on-silicon
+# boundary scan). The full evidence and the UNVERIFIED 8-image assumption live
+# with the authoritative copy in alp-sdk's scripts/gen_zephyr_board.py -- not
+# duplicated here, so the two cannot drift in their reasoning as well as their
+# code.
+#
+# Taken OUT of storage (128 -> 96 + 32): mcuboot + scratch + storage + atoc
+# still sums to the old 256 KiB, so `image_kib` is unchanged and no committed
+# AEN board's slot geometry moves.
+_AEN_ATOC_KIB = 32
 
 # Per-role documentation asymmetries in the committed AEN board tree.
 # These are prose choices (which sibling's ITCM comment got the
@@ -392,6 +411,7 @@ def _aen_flash_partitions(
             ("image-0", f"{role}_slot0"),
             ("reserved", "reserved"),
             ("storage", "storage"),
+            ("atoc", "atoc"),
         ):
             region = by_name.get(region_name)
             if region is None or not isinstance(region.get("base"), int):
@@ -402,7 +422,8 @@ def _aen_flash_partitions(
             out.append((label, region["base"] - mram_base, region["size_kib"]))
         return out
 
-    reserved = _AEN_MCUBOOT_KIB + _AEN_SCRATCH_KIB + _AEN_STORAGE_KIB
+    reserved = (_AEN_MCUBOOT_KIB + _AEN_SCRATCH_KIB + _AEN_STORAGE_KIB
+                + _AEN_ATOC_KIB)
     remaining = total_kib - reserved
     if remaining <= 0 or remaining % 2:
         raise ZephyrBoardEmitError(
@@ -419,6 +440,10 @@ def _aen_flash_partitions(
         ("image-1", image_kib),
         ("image-scratch", _AEN_SCRATCH_KIB),
         ("storage", _AEN_STORAGE_KIB),
+        # LAST, and must stay last: the band SETOOLS top-anchors the ATOC
+        # into (alp-sdk#1289). The offset==total assertion below keeps it
+        # flush against the window top.
+        ("atoc", _AEN_ATOC_KIB),
     ):
         out.append((label, offset, size_kib))
         offset += size_kib * 1024
@@ -787,12 +812,14 @@ def _aen_dts(
         "image-scratch": "scratch ",
         "reserved": "reserved",
         "storage": "storage ",
+        "atoc": "atoc    ",
     }
     trailers = {
         "image-0": "   (primary slot, code-partition)",
         "image-1": "   (secondary slot for OTA)",
         "reserved": "   (ex-scratch; unused, OTA deferred)",
         "storage": "    (settings / NVS)",
+        "atoc": "    (SE-owned: SETOOLS top-anchors the ATOC here -- do NOT write, alp-sdk#1289)",
     }
     for label, off, size in partitions:
         lines.append(
@@ -849,6 +876,7 @@ def _aen_dts(
         "image-scratch": "scratch_partition",
         "reserved": "reserved_partition",
         "storage": "storage_partition",
+        "atoc": "atoc_partition",
     }
     partition_dt_labels = {
         "mcuboot": "mcuboot",
@@ -857,6 +885,7 @@ def _aen_dts(
         "image-scratch": "image-scratch",
         "reserved": "reserved",
         "storage": "storage",
+        "atoc": "atoc",
     }
     for i, (label, off, size) in enumerate(partitions):
         node = partition_node_labels[label]

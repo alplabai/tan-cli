@@ -77,6 +77,14 @@ RUST = rust_binary()
 #: `xfail(strict=True)` discipline as `test_contract_envelopes.py`'s dict of
 #: the same name. Every reason states which side is authoritative.
 DELIBERATE_DIVERGENCE: dict[tuple[str, str], str] = {
+    ("edge-ai-starter", "README.md"): (
+        "tan-cli#544 re-vendor: crates/ is frozen at alp-sdk v0.14.0 and the "
+        "Python tree is now captured at v0.15.0. edge-ai's README carries no "
+        "version-pinned links (it diffed clean across the v0.14.0 and "
+        "v0.15.0-rc1 bumps for exactly that reason), so this is REAL prose "
+        "drift in the SDK example between those two refs, not a link move. "
+        "Python is authoritative; the oracle is frozen and cannot follow."
+    ),
     # tan-cli#309: `minimal-app`'s pre-fix shape sent `west build` at a plain
     # `add_executable` with no `find_package(Zephyr ...)` -- a silent host
     # binary for a core declared `os: zephyr` (see `tan.core.scaffold`'s
@@ -168,6 +176,13 @@ DELIBERATE_DIVERGENCE: dict[tuple[str, str], str] = {
 #: file-list gate stayed green). Entries here excuse both gates, because a file
 #: only one side writes necessarily fails the content one too.
 FILE_SET_DIVERGENCE: dict[tuple[str, str], str] = {
+    ("edge-ai-starter", "testcase.yaml"): (
+        "tan-cli#544 re-vendor: `--emit scaffold` no longer produces a "
+        "testcase.yaml for edge-ai -- the catalog record carries "
+        "`testcase_yaml: None` -- so the Python tree dropped the two stale "
+        "copies it was still shipping. The frozen v0.14.0 oracle still has "
+        "them. Python is authoritative; the oracle is frozen and cannot follow."
+    ),
     # tan-cli#379: the `iot` scaffold's README links `native_sim.conf` and its
     # documented native_sim build passes `-DEXTRA_CONF_FILE=native_sim.conf`;
     # `testcase.yaml`'s `extra_args` REQUIRES it (it is what flips

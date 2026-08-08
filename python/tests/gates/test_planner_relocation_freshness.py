@@ -112,7 +112,7 @@ from tests.conftest import sdk_root
 #: `validate.py`'s curated-library-registry derivation (alp-sdk #1197,
 #: `f7c69cea`) starts drifting that file too, which is unrelated to
 #: tan-cli#485 and stays for its own audited bump.
-PINNED_SDK_COMMIT = "53557a6030c4f90a5525d29c142190e7e91f2bbb"  # alp-sdk origin/dev
+PINNED_SDK_COMMIT = "f30f4d4ba76c235cbb2b2cc713666cb858677e03"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart

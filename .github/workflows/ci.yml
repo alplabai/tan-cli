@@ -246,7 +246,11 @@ jobs:
         if: ${{ inputs.sdk_parity }}
         with:
           repository: alplabai/alp-sdk
-          ref: 53557a6030c4f90a5525d29c142190e7e91f2bbb
+          # Bumped 53557a60 -> f30f4d4b with parity.yml's PINNED_SDK_TAG and
+          # test_planner_relocation_freshness.py's PINNED_SDK_COMMIT, which this
+          # ref MUST agree with (see the paragraph above). tan-cli#544/#545 port
+          # alp-sdk#1289 + #1331, and 53557a60 predates both.
+          ref: f30f4d4ba76c235cbb2b2cc713666cb858677e03
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
