@@ -840,30 +840,34 @@ _MODULE_BUDGET: dict[str, int] = {
     # three-sentence message naming `tan doctor`/`tan init`/`tan build` and
     # `tan --help`, since exiting 2 at a user who typed the binary's own name
     # with nowhere to go next is the most-hit dead end in the CLI.
-    # 964, not 856, as of tan-cli#491's three-defect envelope-contract fix:
-    # `_TeeStderr.isatty()` (delegates to the real stream, guarding
-    # `AttributeError`/`ValueError` the same way `tan.env._stderr_is_tty`
-    # already does -- +19), `_wants_json` rewritten with the same
-    # arity-aware, `--`-respecting walk tan-cli#394 already gave `_wants_help`
-    # (+27), and the new `_interrupted_envelope`/`_SIGINT_EXIT_CODE` machinery
-    # plus the one new branch in `main()`'s `SystemExit` handler that reports
-    # a real Ctrl-C as `cli.interrupted` at an in-range exit code instead of
-    # a false `cli.parse-error` at exit 130 (+62).
-    # 1022, not 964, as of the tan-cli#491 review round: closed the BLOCKER
-    # (the arity-aware `_wants_json` walk credited a global flag like
-    # `--sdk-root` with consuming `--format` as its own value even where
-    # `root` never declares it, so a genuine Click parse failure answered
-    # zero stdout bytes instead of the coded envelope both the oracle and
-    # pre-fix `main` gave it -- fixed by refusing to consume a hyphen-leading
-    # next token as any option's value, +30) and MAJOR 1 (`_TeeStderr.
-    # isatty()`'s delegation let Typer/Click's Rich renderer colour a captured
-    # usage error, which `_usage_error_envelope` then folded verbatim into
-    # `data.message` -- ANSI escapes inside a JSON field; now unconditionally
-    # `False`, +19 net for the corrected docstring) plus a new `fileno()`
-    # (+19) so `monitor_cmd._stdout_sink`'s `return sys.stderr` branch is
-    # reachable again (MAJOR 2, `tan/commands/monitor_cmd.py` itself did not
-    # grow -- the fix lives entirely in the class this file already owns).
-    "tan/cli.py": 1022,
+    # 965, not 856, as of tan-cli#491's surviving envelope-contract fixes:
+    # `_TeeStderr` gained `isatty()` (unconditionally `False` -- delegating to
+    # the real stream let Typer/Click's Rich renderer colour a captured usage
+    # error, which `_usage_error_envelope` then folds verbatim into
+    # `data.message`, landing raw ANSI escapes in a JSON field) and `fileno()`
+    # (delegates to the real stream, so `monitor_cmd._stdout_sink`'s `return
+    # sys.stderr` branch is reachable), plus the new
+    # `_interrupted_envelope`/`_SIGINT_EXIT_CODE` machinery and the one new
+    # branch in `main()`'s `SystemExit` handler that reports a real Ctrl-C as
+    # `cli.interrupted` at an in-range exit code instead of a false
+    # `cli.parse-error` at exit 130.
+    #
+    # `_wants_json` itself is UNCHANGED from its pre-#491 shape (a plain
+    # adjacent-pair textual scan): two review rounds each tried an
+    # arity-aware, `--`-respecting rewrite mirroring `_wants_help`'s, and each
+    # introduced a regression the other's fix reintroduced -- round one's walk
+    # made `tan --sdk-root --format json build` (a genuine Click parse
+    # failure, since `root` never declares `--sdk-root`) answer zero stdout
+    # bytes instead of the coded envelope both the oracle and the original
+    # scan give it; round two's hyphen guard, added to fix exactly that, was
+    # modelled on `clap`'s `allow_hyphen_values`-off default, which is not how
+    # Click's own parser behaves -- Click DOES resolve a hyphen-leading next
+    # token as a value-taking option's value unconditionally (the same thing
+    # `_wants_help`'s own `_value_taking_options` walk already assumes), so
+    # the guard reopened the original forwarded/value-position hijack the
+    # rewrite existed to close. Reverted to the textual scan rather than
+    # attempting a third variant.
+    "tan/cli.py": 965,
 }
 
 #: Some of these are `tan/planner/**`, which is a hash-audited MIRROR of

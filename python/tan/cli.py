@@ -635,74 +635,17 @@ def root(
 
 
 def _wants_json(argv: list[str]) -> bool:
-    """Whether `--format json` / `--format=json` appears in an OPTION
-    position -- not as some other option's VALUE, and not past a `--`
-    terminator (tan-cli#491, the same fix `_wants_help` already got in
-    tan-cli#394; see that function's own docstring for the full mechanism).
-
-    Needed because a usage error (bare invocation, an unknown command, a bad
-    flag) means Click exits via its own machinery before any option ever
-    gets parsed into something this code could otherwise trust -- so `main()`
-    has to make this call from the raw argv, mirroring Rust's `wants_json`
-    (crates/tan-cli/src/main.rs). Unlike Rust's, though, that raw scan used
-    to be arity-blind: a plain adjacent-pair match, with no notion that
-    `--format`'s own VALUE position could hold something else, or that a `--`
-    forwards everything after it verbatim to a west child rather than to
-    tan's own parser. Two live vectors: `tan quality -- --format json`
-    forwards `--format json` to `west alp-quality` (tan's own `--format`
-    stays `text`), and a `--sdk-root --format` sequence puts the literal
-    token `--format` in ANOTHER option's value slot. Both used to flip
-    `main()` into JSON mode for a run whose resolved command was text mode,
-    so a real, coded refusal (`quality.profile-required`) got replaced on
-    stdout by an unrequested `cli.parse-error` envelope the caller never
-    asked for and that mislabels what actually happened.
-
-    Walking argv with the real arity table instead means a `--format` (or an
-    adjacent `json`) sitting in another option's value position is skipped
-    over rather than matched, and nothing after a `--` is ever considered --
-    the same two guarantees `_wants_help` already makes for `--help`.
-
-    A value-taking option is only credited with consuming the NEXT token when
-    that token does not itself look like another option (does not start with
-    `-`) -- tan-cli#491's own regression: this is what the oracle's real
-    parser does (clap does not swallow a hyphen-leading token as some OTHER
-    option's value without `allow_hyphen_values`, confirmed empirically --
-    `target/debug/tan --sdk-root --format json build` answers "a value is
-    required for '--sdk-root <PATH>' but none was supplied" as a coded
-    envelope, never treating `--format` as `--sdk-root`'s value), and this
-    port's own `--sdk-root`/`--project`/`--board-yaml`/`--target` are
-    global-flag names that EVERY command declares (`accept_global_flags`), so
-    `takes_value` includes them for whichever subcommand name this scan finds
-    anywhere in argv -- unconditional two-token consumption there walked
-    `--sdk-root --format json build` past `--format` entirely (crediting it
-    as `--sdk-root`'s value, then losing sync on the literal `json` that
-    followed), so `_wants_json` returned `False` for an argv Click *itself*
-    goes on to refuse as a genuine parse error ("No such option: --sdk-root",
-    since `root` never declares it either) -- zero bytes on stdout for a run
-    both the oracle and pre-fix `main` answer with a `cli.parse-error`
-    envelope. Skipping only a non-hyphen next token preserves every original
-    motivating case (`--name bogus`, `--destination json` when NOT preceded
-    by `--format`) while no longer crediting `--sdk-root`/`--project`/etc.
-    with swallowing a token that is itself a recognised flag.
+    """Textual scan for ``--format json`` / ``--format=json``, mirroring
+    Rust's ``wants_json`` (crates/tan-cli/src/main.rs). Needed because a
+    usage error (bare invocation, an unknown command, a bad flag) means Click
+    exits via its own machinery before any option ever gets parsed into
+    something this code could otherwise trust.
     """
-    takes_value = _value_taking_options(
-        next((token for token in argv if token in _SUBCOMMAND_NAMES), None)
-    )
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        if token == "--":
-            return False
-        if token == "--format=json":
+    for i, arg in enumerate(argv):
+        if arg == "--format=json":
             return True
-        if token == "--format" and i + 1 < len(argv) and argv[i + 1] == "json":
+        if arg == "--format" and i + 1 < len(argv) and argv[i + 1] == "json":
             return True
-        consumes_next = (
-            token in takes_value
-            and i + 1 < len(argv)
-            and not argv[i + 1].startswith("-")
-        )
-        i += 2 if consumes_next else 1
     return False
 
 

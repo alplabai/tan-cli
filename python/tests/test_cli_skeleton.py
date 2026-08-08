@@ -322,7 +322,7 @@ def test_sigint_during_a_json_run_reports_interrupted_not_a_parse_error(monkeypa
     # Patched on the TYPE, not the `app` instance: `app(prog_name="tan")`
     # dispatches through `type(app).__call__`, which an instance-level
     # attribute never intercepts -- and `app` itself must stay a real
-    # `Typer` object, since `_wants_json`'s own `_value_taking_options` reads
+    # `Typer` object, since `_wants_help`'s own `_value_taking_options` reads
     # `get_command(app)` earlier in this same call.
     monkeypatch.setattr(type(cli.app), "__call__", _raise_sigint)
     monkeypatch.setattr(sys, "argv", ["tan", "flash", "--format", "json"])

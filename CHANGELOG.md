@@ -52,28 +52,6 @@ All notable changes to `tan` are documented here. Format follows
   `AttributeError` this whole class exists to stop, unconditionally, on
   every `--format json` `tan monitor` session -- see that fix below, which
   this one silently defeated until now. (#491)
-- **`_wants_json` was an arity-blind textual scan of the WHOLE process
-  argv**, so a `--format json` forwarded past `--` to a west child (`tan
-  quality -- --format json`), or sitting in another option's value position,
-  flipped the entire run into JSON mode even though the resolved command was
-  text mode -- replacing a real, coded refusal with an unrequested
-  `cli.parse-error` envelope on stdout for a caller that never asked for
-  JSON. Rewritten with the same arity-aware, `--`-respecting walk tan-cli#394
-  already gave the sibling `_wants_help` scan -- but the arity table itself
-  over-trusted a subcommand's own declared params: every command declares
-  global flags like `--sdk-root` (`accept_global_flags`), which `root` does
-  NOT declare pre-subcommand, so `tan --sdk-root --format json build`
-  credited `--sdk-root` with consuming `--format` as its own value and lost
-  sync on the `json` that followed -- `_wants_json` answered `False` for an
-  argv Click itself goes on to refuse as a genuine parse error, and the run
-  fell into the un-wrapped text-mode branch: zero bytes on stdout for a
-  `cli.parse-error` both the oracle and the pre-fix scan answer with a coded
-  envelope. A value-taking option credits itself with consuming the next
-  token only when that token does not itself look like another option (does
-  not start with `-`) -- the same thing the oracle's real parser does
-  (`clap` does not swallow a hyphen-leading token as some OTHER option's
-  value without `allow_hyphen_values`, confirmed against `target/debug/tan`).
-  (#491)
 - **An interrupted `--format json` run (Ctrl-C) reported the command line as
   invalid.** SIGINT never reaches `tan.cli.main` as a raw
   `KeyboardInterrupt` -- Typer's own command wrapper converts it to
