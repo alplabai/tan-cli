@@ -235,6 +235,54 @@ def test_the_yaml_12_core_schema_governs_the_passthrough_not_pyyamls_yaml_11():
     }
 
 
+def test_signed_hex_octal_and_binary_literals_resolve_as_integers():
+    # tan-cli#499: `_CORE_RESOLVERS`' int regex applied a leading sign only to
+    # the plain-decimal branch, and had no `0b` branch at all -- both
+    # transcribed the YAML 1.2 SPEC core schema rather than the oracle's own
+    # `serde_yaml::parse_signed_int`, which strips a sign BEFORE testing the
+    # radix prefixes and accepts `0b`. Measured against the compiled binary
+    # (`target/debug/tan image`, `tan 0.4.1`): `mask: 0b1010` -> `10`,
+    # `off: -0x1E` -> `-30`, `pos: +0x1E` -> `30`, `noct: -0o17` -> `-15`.
+    hw_info, boot_order = raw_passthrough(
+        "schema_version: 1\nhw_info:\n"
+        "  sku: s\n  mask: 0b1010\n  off: -0x1E\n  pos: +0x1E\n  noct: -0o17\n"
+        "  eeprom:\n    straps: 0b0101\n"
+        "boot_order: [0b11, 0x10]\n"
+    )
+    assert hw_info == {
+        "sku": "s",
+        "mask": 10,
+        "off": -30,
+        "pos": 30,
+        "noct": -15,
+        "eeprom": {"straps": 5},
+    }
+    assert boot_order == [3, 16]
+
+
+def test_uppercase_prefixes_and_underscore_grouping_still_stay_strings():
+    # The oracle-measured counterpart to the fix above: `parse_signed_int`
+    # accepts a LOWERCASE `0b`/`0o`/`0x` prefix only, and its grammar has no
+    # underscore-grouping at all -- PyYAML's OWN `construct_yaml_int` would
+    # resolve both if this file leaned on it instead of gating with a regex.
+    hw_info, _ = raw_passthrough(
+        "schema_version: 1\nhw_info:\n"
+        "  a: 0B11\n  b: 0XA5\n  c: 0x1_F\n  d: 0b1_0\n  e: 0o1_7\n  f: 1_000\n"
+        "  g: '0x'\n  h: '0b'\n  i: '0o'\n"
+    )
+    assert hw_info == {
+        "a": "0B11",
+        "b": "0XA5",
+        "c": "0x1_F",
+        "d": "0b1_0",
+        "e": "0o1_7",
+        "f": "1_000",
+        "g": "0x",
+        "h": "0b",
+        "i": "0o",
+    }
+
+
 def test_an_integer_serde_yaml_cannot_hold_drops_the_whole_passthrough():
     # `serde_yaml::Value` spans i64::MIN..=u64::MAX; outside it the Value parse
     # fails and `raw_passthrough` yields its defaults, silently dropping BOTH

@@ -109,6 +109,21 @@ def _serde_type_name(value: Any) -> str:
 #:                                          oracle exits 0)
 #:   `0o17`                 1.1 string    -> 1.2 int 15
 #: `0x…` is an int in both. The regexes are the core schema's own.
+#:
+#: tan-cli#499: the `int` row is the oracle's ACTUAL resolver
+#: (`serde_yaml::parse_signed_int`), not the YAML 1.2 spec core schema this
+#: comment's header claims to transcribe -- `parse_signed_int` strips a
+#: leading `+`/`-` BEFORE testing the radix prefixes (the spec-literal regex
+#: below applied the sign only to the bare-decimal branch, leaving a signed
+#: `0x`/`0o` value a STRING) and also accepts `0b`, which the spec regex has
+#: no branch for at all. Verified against the compiled binary:
+#: `mask: 0b1010` -> int `10`, `off: -0x1E` -> int `-30`, `pos: +0x1E` -> int
+#: `30`, `noct: -0o17` -> int `-15`. Kept as a REGEX gate rather than handed
+#: to PyYAML's own `construct_yaml_int` on a match: the oracle leaves an
+#: uppercase prefix (`0B11`, `0XA5`) or an underscore-grouped literal
+#: (`0x1_F`, `0b1_0`, `0o1_7`, `1_000`) as a STRING, where PyYAML's
+#: constructor strips underscores and accepts uppercase prefixes and would
+#: resolve every one of those to an int the oracle does not.
 _CORE_RESOLVERS = (
     ("tag:yaml.org,2002:null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
     (
@@ -118,7 +133,7 @@ _CORE_RESOLVERS = (
     ),
     (
         "tag:yaml.org,2002:int",
-        r"^(?:[-+]?(?:0|[1-9][0-9]*)|0o[0-7]+|0x[0-9a-fA-F]+)$",
+        r"^[-+]?(?:0|[1-9][0-9]*|0b[01]+|0o[0-7]+|0x[0-9a-fA-F]+)$",
         list("-+0123456789"),
     ),
     (

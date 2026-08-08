@@ -149,6 +149,18 @@ All notable changes to `tan` are documented here. Format follows
   `image.slice-unsafe-name` warning-skip the equally-invalid `../x` shape
   already takes. A separator anywhere in `core_id`/`os` is now rejected the
   same way. (#499)
+- **`system-manifest.yaml`'s int resolver left a `0b` binary literal, or any
+  sign-prefixed `0x`/`0o`/`0b` value, as a STRING where the oracle produces
+  an integer.** `_CORE_RESOLVERS`' int regex transcribed the YAML 1.2 SPEC
+  core schema rather than the oracle's actual `serde_yaml::parse_signed_int`,
+  which strips a leading sign BEFORE testing the radix prefixes and accepts
+  `0b` -- so `mask: 0b1010` reached `data.hw_info` (and the persisted
+  `bundle-manifest.json`) as the string `"0b1010"` where the oracle reports
+  the integer `10`, and a sign-prefixed hex/octal offset (`off: -0x1E`) had
+  the same problem. Measured against the compiled binary and fixed to match
+  exactly, including what must STILL stay a string: an uppercase prefix
+  (`0B11`, `0XA5`) or underscore-grouping (`0x1_F`, `1_000`), neither of
+  which the oracle's grammar accepts. (#499)
 
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
