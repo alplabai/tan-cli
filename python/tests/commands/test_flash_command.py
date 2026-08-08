@@ -802,6 +802,50 @@ def test_a_tool_that_does_not_exist_is_a_failed_spawn_not_a_traceback():
     assert "could not spawn" in outcome.stderr
 
 
+# ── text mode TEES the transcript too (tan-cli#522 review, MAJOR 1) ────────
+
+
+def test_spawn_text_mode_tees_the_transcript_for_the_qualification_to_read():
+    """`_spawn`'s live-console branch used to hand the child's stdout fd
+    straight to the OS (`subprocess.run(stdout=sink)`) and never redirect
+    stderr at all -- `outcome.stdout`/`.stderr` stayed `""` regardless of
+    what the child said, so `_flow_d_reset_qualified_message` (tan-cli#522)
+    had no transcript to qualify against outside `--format json`. The
+    live-console branch now TEES both streams via `_Tee`: still streamed to
+    the console live, but also collected into the `_Outcome`. Fails against
+    the pre-fix source (measured: `outcome.stdout == outcome.stderr == ""`
+    here even though the child printed both markers)."""
+    from tan.commands.flash_cmd import _spawn
+
+    argv = _stub(
+        "import sys; "
+        "print('****** Error: Failed to halt CPU'); "
+        "print('CPU is not halted', file=sys.stderr)"
+    )
+    outcome = _spawn(argv, capture=False, timeout=5.0)
+    assert outcome.success is True
+    assert "Failed to halt CPU" in outcome.stdout, outcome
+    assert "CPU is not halted" in outcome.stderr, outcome
+
+
+def test_spawn_text_mode_timeout_still_folds_in_the_teed_output_before_the_kill():
+    """The timeout sibling of the test above: `Popen.wait`'s own
+    `TimeoutExpired` carries no output at all (unlike `subprocess.run
+    (capture_output=True)`'s), so `_spawn` builds one BY HAND from what the
+    tees had already collected before the kill -- the same
+    `before-the-kill` guarantee tan-cli#487 gave the JSON-mode/wrapped-
+    console branches, now true on the live-console branch too."""
+    from tan.commands.flash_cmd import _spawn
+
+    argv = _stub(
+        "import sys, time; print('before-the-kill'); sys.stdout.flush(); time.sleep(30)"
+    )
+    outcome = _spawn(argv, capture=False, timeout=1.0)
+    assert outcome.success is False
+    assert "before-the-kill" in outcome.stderr
+    assert "timed out after 1s and was killed" in outcome.stderr
+
+
 # ── `_execute_message` text-mode gate + the TimeoutExpired partial output ──
 # (tan-cli#487, defect 4)
 
@@ -1495,7 +1539,7 @@ def test_swd_probe_no_serial_still_reaches_the_openocd_arm_unaffected():
 def test_swd_probe_openocd_emits_adapter_usb_location_when_set():
     """tan-cli#519, the headline defect: the OpenOCD arm read no
     probe-selection field at all -- `flash_args.openocd_usb_location` must
-    now render as its own `-c "adapter usb location <path>"` word, ahead of
+    now render as its own `-c "adapter usb location {<path>}"` word, ahead of
     the target config and the `program` command (both can trigger a connect).
     Fails against the pre-fix source (measured: `openocd_usb_location` was
     not read anywhere in `plan_swd_probe`, so this key had no effect at
@@ -1504,7 +1548,7 @@ def test_swd_probe_openocd_emits_adapter_usb_location_when_set():
     plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
     assert "-c" in plan.argv
     idx = plan.argv.index("-c")
-    assert plan.argv[idx + 1] == "adapter usb location 3-4.4.3"
+    assert plan.argv[idx + 1] == "adapter usb location {3-4.4.3}"
     # Ahead of the target config, which can trigger the connect.
     target_idx = plan.argv.index("target/gd32g553.cfg")
     assert idx < target_idx
@@ -1537,7 +1581,25 @@ def test_swd_probe_openocd_usb_location_accepts_a_real_usb_topology_path():
     takes -- dots and dashes, no slashes."""
     inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", openocd_usb_location="3-4.4.3")
     plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
-    assert "adapter usb location 3-4.4.3" in plan.argv
+    assert "adapter usb location {3-4.4.3}" in plan.argv
+
+
+def test_swd_probe_openocd_usb_location_whitespace_is_braced_not_split():
+    """tan-cli#519 review, MINOR: `openocd_usb_location` used to be the one
+    unbraced `-c` word interpolation in this module -- `validate_openocd_word`
+    rejects every Jim Tcl metacharacter and control character but not plain
+    whitespace, so `"3-4.4.3 verify"` (no metacharacter in sight) reached the
+    tool as `-c "adapter usb location 3-4.4.3 verify"`, a Tcl command with TWO
+    words where OpenOCD expects one -- the exact whitespace-splits-a-word
+    class `openocd_program_word`'s own docstring names, and #511's answer to
+    it was unconditional bracing. Fails against the pre-fix source (measured:
+    the argv word is `adapter usb location 3-4.4.3 verify`, unbraced, with no
+    refusal at all)."""
+    inp = _swd_inputs(
+        interface="cmsis-dap", target="gd32g553", openocd_usb_location="3-4.4.3 verify"
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert "adapter usb location {3-4.4.3 verify}" in plan.argv
 
 
 def test_swd_probe_pyocd_emits_uid_flag_when_set():
@@ -1573,6 +1635,45 @@ def test_swd_probe_pyocd_uid_is_charset_guarded(bad):
     assert "pyocd_uid" in str(raised.value)
 
 
+def test_swd_probe_pyocd_uid_accepts_a_plugin_prefixed_form():
+    """tan-cli#519 review, MINOR: the plain `validate_identifier` guard
+    refuses `:`, but pyOCD's own `-u`/`--uid` documents an OPTIONAL
+    `<plugin>:<uid>` prefix to disambiguate an otherwise-ambiguous UID --
+    confirmed against a real installed pyOCD 0.44.1 (`pyocd flash --help`:
+    "Optionally prefixed with '<probe-type>:' where <probe-type> is the name
+    of a probe plugin"; `pyocd list --plugins` names `jlink`/`stlink`/
+    `cmsisdap`/`picoprobe`/`remote`, all plain identifiers themselves).
+    Fails against the pre-fix source (measured: `jlink:603000869` -- the
+    exact shape needed to disambiguate the alplab-gw bench's two
+    cloned-serial probes -- raised `FlashPlanError` naming `pyocd_uid`)."""
+    inp = _swd_inputs(
+        use_pyocd=True, interface="cmsis-dap", target="stm32h7x", pyocd_uid="jlink:603000869"
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+    assert "--uid" in plan.argv
+    assert plan.argv[plan.argv.index("--uid") + 1] == "jlink:603000869"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "jlink:st:link",  # more than one colon -- not the documented shape
+        ":603000869",  # empty plugin half
+        "jlink:",  # empty uid half
+        "jl.nk:603000869",  # hostile plugin half
+        "jlink:60300;869",  # hostile uid half
+    ],
+)
+def test_swd_probe_pyocd_uid_plugin_prefix_still_charset_guards_both_halves(bad):
+    """The widening above is exactly one shape -- a single `<plugin>:<uid>`
+    split with BOTH halves charset-clean -- not a blanket colon allowance.
+    Anything else carrying a colon still refuses, with the same message."""
+    inp = _swd_inputs(use_pyocd=True, interface="cmsis-dap", target="stm32h7x", pyocd_uid=bad)
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+    assert "pyocd_uid" in str(raised.value)
+
+
 def test_swd_probe_jlink_refuses_a_stray_openocd_usb_location():
     """The wrong-arm refusal, `jlink_serial`-side: `openocd_usb_location` set
     while the run actually takes the J-Link arm must refuse loudly, not
@@ -1602,6 +1703,23 @@ def test_swd_probe_openocd_refuses_a_stray_pyocd_uid():
     assert "pyocd_uid" in str(raised.value)
 
 
+def test_swd_probe_openocd_refuses_a_stray_pyocd_uid_when_pyocd_is_also_on_path():
+    """BLOCKER regression: the refusal above (`lambda n: n == "openocd"`)
+    cannot catch this, because it leaves pyOCD unavailable -- exactly the one
+    case where the arm split's `if openocd: ... elif pyocd: ...` precedence
+    doesn't matter. On a host with BOTH tools on PATH, OpenOCD always wins the
+    arm regardless, so a `pyocd_uid`-only refusal keyed off pyOCD
+    *availability* (`not pyocd`) stayed silent here -- `pyocd` was True, the
+    guard never fired, and the run silently landed on OpenOCD with no probe
+    selector of any kind, dropping `pyocd_uid` on the floor. This is the
+    accept-and-ignore shape #513/#519 exist to close, re-created by testing
+    availability instead of the arm this run actually takes."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", pyocd_uid="abc123")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n in ("openocd", "pyocd"))
+    assert "pyocd_uid" in str(raised.value)
+
+
 def test_swd_probe_pyocd_refuses_a_stray_openocd_usb_location():
     """The CROSS-arm refusal, the other direction: `openocd_usb_location` set
     while the run lands on pyOCD must also refuse."""
@@ -1628,6 +1746,67 @@ def test_swd_probe_usb_location_charset_guard_is_not_host_dependent():
         flash_plan.plan_swd_probe(dry, lambda n: n == "openocd")
     with pytest.raises(FlashPlanError):
         flash_plan.plan_swd_probe(real, lambda n: n == "openocd")
+
+
+# ── MAJOR 2 (tan-cli#519/#522 review): --dry-run and a real run must agree ─
+
+
+def test_swd_probe_dry_run_and_real_run_agree_when_only_openocd_is_on_path():
+    """`--dry-run` used to force the J-Link arm UNCONDITIONALLY (`_JLINK_
+    BINARIES[0]`, no `which()` call at all), so a manifest naming
+    `flash_args.openocd_usb_location` refused on EVERY preview -- even on a
+    host that genuinely has openocd (and pyocd) and no J-Link at all, where
+    a REAL run takes neither of this arm's wrong-arm refusals and reports
+    `ok`. Same manifest, same simulated host (only openocd/pyocd `which()`-
+    findable, no J-Link): dry-run and a real run must now agree, byte-for-
+    byte. Fails against the pre-fix source (measured: the dry-run call
+    raised `FlashPlanError` naming `openocd_usb_location` and 'this run is
+    taking the J-Link path'; the real-run call returned an `openocd` plan)."""
+    which_openocd_and_pyocd = lambda n: n in ("openocd", "pyocd")  # noqa: E731
+    args = {"interface": "cmsis-dap", "target": "gd32g553", "openocd_usb_location": "3-4.4.3"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+
+    dry_plan = flash_plan.plan_swd_probe(dry, which_openocd_and_pyocd)
+    real_plan = flash_plan.plan_swd_probe(real, which_openocd_and_pyocd)
+
+    assert dry_plan.argv[0] == "openocd"
+    assert dry_plan.argv == real_plan.argv
+
+
+def test_swd_probe_dry_run_and_real_run_agree_when_only_openocd_is_on_path_pyocd_uid_side():
+    """The `pyocd_uid` sibling of the test above -- a manifest naming that
+    field instead must ALSO agree between `--dry-run` and a real run on the
+    SAME (openocd-only, no pyocd, no J-Link) host: both refuse, for the
+    identical reason (pyOCD is not the arm this host/manifest combination
+    takes on either side -- OpenOCD wins the arm split whenever it is
+    available, per tan-cli#519's own BLOCKER fix)."""
+    which_openocd_only = lambda n: n == "openocd"  # noqa: E731
+    args = {"interface": "cmsis-dap", "target": "gd32g553", "pyocd_uid": "abc123"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+
+    with pytest.raises(FlashPlanError) as dry_raised:
+        flash_plan.plan_swd_probe(dry, which_openocd_only)
+    with pytest.raises(FlashPlanError) as real_raised:
+        flash_plan.plan_swd_probe(real, which_openocd_only)
+    assert "pyocd_uid" in str(dry_raised.value)
+    assert str(dry_raised.value) == str(real_raised.value)
+
+
+def test_swd_probe_dry_run_still_defaults_to_jlink_when_neither_new_field_is_set():
+    """The case MAJOR 2's fix must not disturb: a manifest naming NEITHER
+    `openocd_usb_location` NOR `pyocd_uid` keeps the unconditional, replay-
+    host-independent J-Link default under `--dry-run` -- unaffected by
+    whatever this box's own PATH happens to hold (`which` here reports
+    every tool absent, including J-Link itself). This is what every
+    `swd_probe` case in `tests/parity/test_flash_oracle_parity.py` relies on
+    for a host-independent `--dry-run` preview."""
+    dry = FlashInputs(
+        artefact="/build/zephyr.bin", flash_args={}, core_id="cm7", sku="S", dry_run=True
+    )
+    plan = flash_plan.plan_swd_probe(dry, lambda n: False)
+    assert plan.argv[0] == "JLinkExe"
 
 
 # ── swd_probe success message asserts no address for ELF/HEX (tan-cli#487) ──
@@ -4915,6 +5094,56 @@ def test_flow_d_ok_message_keeps_pin_reset_when_the_transcript_says_nothing_of_t
     assert exit_code == 0, data
     assert data["entries"][0]["status"] == "ok", data
     assert "verified and PIN-reset" in data["entries"][0]["message"], data
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the fake JLinkExe below is a POSIX shell script (#!/bin/sh)",
+)
+def test_flow_d_ok_message_qualifies_a_reset_in_text_mode_too(tmp_path, monkeypatch):
+    """tan-cli#522 review, MAJOR 1 -- the SAME defect as `test_flow_d_ok_
+    message_qualifies_a_reset_the_transcript_says_failed`, but in the mode a
+    standalone bench operator actually reads: `--format json` (`capture=
+    True`) is what `alp-sdk-vscode` uses, but text mode is the DEFAULT human
+    invocation, and it was left unfixed -- `outcome.stdout`/`.stderr` were
+    always empty there (`_spawn`'s live-console branch never captured
+    anything), so the qualification silently never fired and the last line
+    an operator read was verbatim the sentence #522 was filed against.
+
+    Stubbing `subprocess.run` (the sibling test's technique) does not reach
+    this bug at all: `_spawn`'s live-console branch calls `subprocess.Popen`
+    directly, so this test spawns a REAL fake `JLinkExe` -- a tiny POSIX
+    shell script that prints the same busy-resident transcript -- instead.
+    Fails against the pre-fix source (measured: the entry message ends
+    `verified and PIN-reset` here too, in text mode, same as JSON mode
+    before that fix landed)."""
+    work = _flow_d_reset_report_setup(tmp_path, monkeypatch)
+    jlink_path = work / "faketools" / "JLinkExe"
+    jlink_path.write_text(
+        "#!/bin/sh\n"
+        "echo 'RSetType 2'\n"
+        "echo 'r'\n"
+        "echo 'VC_CORERESET did not halt CPU'\n"
+        "echo 'WARNING: CPU could not be halted'\n"
+        "echo '****** Error: Failed to halt CPU'\n"
+        "echo 'g'\n"
+        "echo 'CPU is not halted' 1>&2\n",
+        encoding="utf-8",
+    )
+    os.chmod(jlink_path, 0o755)
+
+    exit_code, data, _issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(work / "sdk"), board_yaml=None,
+        core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=False,
+        cwd=str(work),
+    )
+
+    assert exit_code == 0, data
+    assert data["entries"][0]["status"] == "ok", data
+    message = data["entries"][0]["message"]
+    assert "verified" in message, message
+    assert "verified and PIN-reset" not in message, message
+    assert "did not halt" in message, message
 
 
 def test_flow_d_reset_qualified_message_is_a_pure_substring_swap():

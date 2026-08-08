@@ -321,7 +321,29 @@ _MODULE_BUDGET: dict[str, int] = {
     # per-field docstring/comment explaining why the shape is two distinct
     # fields rather than one neutral one (the tools genuinely select probes
     # differently) plus the four refusal messages themselves.
-    "tan/core/flash_plan.py": 2568,
+    # 2662, not 2568, as of the tan-cli#519/#522 review round (BLOCKER +
+    # MAJOR 2 + two minors): the OpenOCD/pyOCD arm split now resolves the
+    # taken arm ONCE (`chosen`, mirroring the `if openocd: ... elif pyocd:
+    # ...` argv-build precedence) instead of letting each of the two new
+    # wrong-arm refusals ask its own tool-AVAILABILITY question in isolation
+    # -- the original #519 shape stayed silent on a host with BOTH openocd
+    # and pyocd present, since OpenOCD always wins the arm there but a
+    # `pyocd_uid`-only refusal keyed off pyOCD merely being available never
+    # fired; `--dry-run`'s J-Link default is now bypassed (real `which()`
+    # consulted) specifically when `openocd_usb_location`/`pyocd_uid` is
+    # named, so a preview and a real run on the same host agree, instead of
+    # `--dry-run` unconditionally assuming J-Link and refusing every preview
+    # naming either field; the OpenOCD `-c` word for `openocd_usb_location`
+    # is now braced (`openocd_program_word`, reused verbatim) the same way
+    # the flash artefact's own `-c` word already is, closing the one
+    # remaining unbraced `-c` interpolation this module had; and
+    # `validate_pyocd_uid` widens the plain `validate_identifier` charset
+    # guard by exactly one shape, pyOCD's own documented `<plugin>:<uid>`
+    # probe selector, which the plain guard's `:` refusal previously
+    # over-rejected. Net growth is almost entirely docstring/comment
+    # explaining each of the four fixes and why the narrower (not the
+    # broadest possible) version of each was chosen.
+    "tan/core/flash_plan.py": 2662,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
@@ -440,12 +462,30 @@ _MODULE_BUDGET: dict[str, int] = {
     # CAPTURED `outcome.stdout`/`.stderr` for the one tail
     # `plan_alif_mram_jlink` always appends and swaps it for an honest
     # sentence when the transcript names a halt failure -- a targeted
-    # substring swap, not a general transcript-scraping layer, and a no-op in
-    # text mode (nothing is captured there) or for any other backend's
-    # message (neither carries the tail this matches). Net growth is the new
-    # helper plus its docstring and the one call site in the ok-outcome
-    # branch.
-    "tan/commands/flash_cmd.py": 2371,
+    # substring swap, not a general transcript-scraping layer, and (as first
+    # shipped) a no-op in text mode, since nothing was captured there --
+    # corrected below, this was MAJOR 1 of the next review round. Net growth
+    # is the new helper plus its docstring and the one call site in the
+    # ok-outcome branch.
+    # 2486, not 2371, as of the tan-cli#519/#522 review round, MAJOR 1: text
+    # mode -- the DEFAULT, standalone invocation, not only `--format json` --
+    # left `outcome.stdout`/`.stderr` empty in every branch of `_spawn`, so
+    # the qualification above never reached an operator reading the console,
+    # which is exactly the sentence #522 was filed against. The live-console
+    # branch now TEES a written child's combined output (still streamed to
+    # the console live, via the new `_Tee` helper on a background thread,
+    # exactly as before -- just also collected) instead of only streaming it;
+    # the wrapped-console branch (no OS-level stderr handle -- a pytest/
+    # embedded capture object) now threads its ALREADY-captured
+    # `proc.stdout`/`.stderr` through instead of only `print()`-replaying and
+    # discarding them; and a `Popen.wait`-timeout on the live-console branch
+    # now builds its own `TimeoutExpired` with the tees' partial output
+    # (`Popen.wait`'s own carries none) so `_timeout_stderr` sees the same
+    # shape on all three spawn variants. Net growth is `_Tee` itself (a
+    # `_Drain`-shaped background-thread reader, teeing instead of only
+    # draining) plus the docstring explaining why each of the three branches
+    # needed a different fix.
+    "tan/commands/flash_cmd.py": 2486,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks

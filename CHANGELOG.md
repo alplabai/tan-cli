@@ -763,19 +763,32 @@ All notable changes to `tan` are documented here. Format follows
   an ABSENT feature, not (#513)'s accept-and-ignore shape (that fix covered
   only the J-Link arm's `flash_args.jlink_serial`). Two new fields, not one
   neutral field reused across all three tools: `flash_args.
-  openocd_usb_location` renders as its own `adapter usb location <path>` `-c`
-  word, ahead of the target config (OpenOCD selects a probe by USB path);
-  `flash_args.pyocd_uid` renders as pyOCD's own `--uid <value>`. `JLinkExe`
-  keeps `jlink_serial` (serial-only; it has no USB-path selector at all) --
-  the three fields are different identifiers for different tools, not three
-  spellings of one. Each new field is charset-guarded the way #486 already
-  guards `interface`/`target`/`jlink_serial` (`validate_openocd_word` for the
-  Tcl word, `validate_identifier` for the argv-only `pyocd_uid`), and each is
-  now REFUSED, not silently dropped, when set on an arm that cannot honour it
-  -- mirroring #513's own wrong-arm refusal, in both directions between all
-  three arms. This matters most on the alplab-gw bench, where two physically
-  different probes enumerate with the same OEM-cloned serial and only a USB
-  path can tell them apart. (#519)
+  openocd_usb_location` renders as its own `adapter usb location {<path>}` `-c`
+  word (braced, matching the flash artefact's own `-c` word, so whitespace in
+  the value cannot split it into extra Tcl words), ahead of the target config
+  (OpenOCD selects a probe by USB path); `flash_args.pyocd_uid` renders as
+  pyOCD's own `--uid <value>`. `JLinkExe` keeps `jlink_serial` (serial-only;
+  it has no USB-path selector at all) -- the three fields are different
+  identifiers for different tools, not three spellings of one. Each new field
+  is charset-guarded the way #486 already guards `interface`/`target`/
+  `jlink_serial` (`validate_openocd_word` for the Tcl word, `validate_
+  identifier` for the argv-only `pyocd_uid`), and each is refused, not
+  silently dropped, when set on an arm that cannot honour it -- mirroring
+  #513's own wrong-arm refusal. The OpenOCD/pyOCD split itself resolves the
+  arm ONCE, by the SAME `if openocd: ... elif pyocd: ...` precedence the argv
+  build uses, rather than by each field's own tool-availability check in
+  isolation -- the original version of this fix used availability alone,
+  which stayed silent on a host with BOTH tools present (OpenOCD always wins
+  the arm there, but a `pyocd_uid`-only refusal keyed off pyOCD merely being
+  *available* never fired, silently dropping the probe selector on exactly
+  the shared-serial, multi-probe host this fix was written for -- caught in
+  review before this reached anyone). This matters most on the alplab-gw
+  bench, where two physically different probes enumerate with the same
+  OEM-cloned serial and only a USB path can tell them apart. `--dry-run`
+  previews these two fields the same way a real run on the same host would
+  (falling back to a host-independent J-Link default only when no probe tool
+  at all is found), rather than always assuming J-Link and refusing every
+  preview that names either field. (#519)
 - **`tan flash`'s Flow D (`alif_mram_jlink`) reported `verified and
   PIN-reset` even on a run whose reset chain ended in `Failed to halt CPU`**
   -- the documented busy-resident case, where an image that never idles keeps
@@ -786,14 +799,22 @@ All notable changes to `tan` are documented here. Format follows
   a new one). `data.entries[].message` is what a `--format json` consumer
   renders as the flash outcome, and the identical string used to cover both
   a landed reset and a failed one. The message now reads the transcript
-  `--format json` already captures for this one tail (`; verified and
-  PIN-reset`) and swaps it for `; verified; reset requested, core was busy
-  and did not halt` when the transcript names the halt failure -- a
-  targeted substring swap scoped to Flow D's own message shape, not a
-  general transcript-scraping layer. Text-mode runs are unaffected (nothing
-  is captured there to read), and every other backend's `ok_message` is
-  unaffected (none of them assert a distinct post-write step -- a reset --
-  that can diverge from the exit code the way Flow D's did). (#522)
+  (`; verified and PIN-reset`) and swaps it for `; verified; reset requested,
+  core was busy and did not halt` when the transcript names the halt
+  failure -- a targeted substring swap scoped to Flow D's own message shape,
+  not a general transcript-scraping layer. Text-mode runs -- the default,
+  standalone invocation, not only `--format json` -- get the same qualified
+  message: `tan flash`'s live-console spawn now TEES a written child's output
+  (streamed to the console as it happens, exactly as before, and collected)
+  instead of only streaming it, so the transcript this qualification reads is
+  populated regardless of `--format`. **A parallel, unfixed risk, noted here
+  rather than fixed in this change (out of scope): `swd_probe`'s own J-Link
+  arm asserts `{device} flashed via J-Link @ {base}` from the exit code
+  alone, and `jlink_commander_script` gives it no `verifybin` at all (`r`/
+  `halt` before the load, `r`/`g` after) -- the same intent-vs-observed gap
+  this fix closes for Flow D, on a backend with no verify step to fall back
+  on if a future review finds the same halt-survives-nonzero-exit shape
+  there.** (#522)
 
 
 

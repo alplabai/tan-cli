@@ -358,14 +358,29 @@ def _spawn(
     workspace: str | None = None,
 ) -> _Outcome:
     """One process. Captured in JSON mode (the output is kept for the failure
-    message and never re-spawned), inherited-to-stderr in text mode so a long
-    write streams live.
+    message and never re-spawned), TEED to stderr in text mode -- streamed live
+    to the console AND collected, so a transcript-dependent qualification
+    (`_flow_d_reset_qualified_message`, tan-cli#522) has the same evidence to
+    read regardless of `--format`.
 
     In text mode the child's stdout is redirected to **stderr**, not inherited:
     stdout is the envelope channel for this process even when this run is not
     using it, and a flash tool that prints to stdout would otherwise put
     non-envelope bytes there. Rust can inherit safely because its text path
     never writes an envelope at all; here the same process object owns both.
+
+    tan-cli#522 review, MAJOR 1: `outcome.stdout`/`.stderr` used to be empty
+    in EVERY text-mode branch of this function -- the wrapped-console branch
+    (`sink is None`) captured the full transcript via `capture_output=True`
+    and then only ever `print()`-replayed it, throwing the strings away
+    before they reached the `_Outcome`; the live-console branch (`sink` real)
+    handed the child's stdout fd straight to `subprocess.run(stdout=sink)`,
+    an OS-level redirect this process never saw a byte of. Both are fixed
+    below: the wrapped-console branch now threads its already-captured
+    `proc.stdout`/`.stderr` through; the live-console branch replaces the OS-
+    level redirect with [`_Tee`] on a `Popen`, which forwards each chunk to
+    the console as it arrives (the same "streams live" guarantee this
+    function always promised) while also accumulating it.
 
     `venv_bin` (tan-cli#289/#59), when given, is prepended onto the child's
     PATH -- `env=None` (the default, passed through unchanged) means
@@ -413,9 +428,44 @@ def _spawn(
                 print(proc.stdout, end="", file=sys.stderr)
             if proc.stderr:
                 print(proc.stderr, end="", file=sys.stderr)
-            return _Outcome(success=proc.returncode == 0, returncode=proc.returncode)
-        proc = subprocess.run(list(argv), stdout=sink, timeout=timeout, env=env, cwd=workspace)
-        return _Outcome(success=proc.returncode == 0, returncode=proc.returncode)
+            return _Outcome(
+                success=proc.returncode == 0,
+                stdout=proc.stdout or "",
+                stderr=proc.stderr or "",
+                returncode=proc.returncode,
+            )
+        try:
+            proc = subprocess.Popen(  # noqa: S603 -- argv comes from the pure planner
+                list(argv),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                cwd=workspace,
+            )
+        except OSError as err:
+            return _Outcome(success=False, stderr=f"could not spawn: {err}", captured=capture)
+        out_tee = _Tee(proc.stdout, sink)
+        err_tee = _Tee(proc.stderr, sink)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            # `Popen.wait`'s own `TimeoutExpired` carries no output (unlike
+            # `subprocess.run(capture_output=True)`'s) -- built by hand here so
+            # the shared handler below sees the same shape either way.
+            raise subprocess.TimeoutExpired(
+                list(argv), timeout, output=out_tee.text(), stderr=err_tee.text()
+            ) from None
+        return _Outcome(
+            success=proc.returncode == 0,
+            stdout=out_tee.text(),
+            stderr=err_tee.text(),
+            returncode=proc.returncode,
+        )
     except subprocess.TimeoutExpired as exc:
         return _Outcome(
             success=False,
@@ -443,11 +493,12 @@ def _timeout_stderr(exc: subprocess.TimeoutExpired, timeout: float) -> str:
     wrapped console (a pytest/embedded capture object with no OS-level
     stderr handle) a multi-GB `.wic` write killed mid-transfer used to report
     only `flash command failed` with no hint a truncated image is now on the
-    card. The third spawn variant (`stdout=sink`, direct-to-console
-    streaming) never sets `capture_output`, so `exc.stdout`/`.stderr` are
-    `None` there and this falls back to the bare sentence, unchanged --
-    nothing was lost that this function could recover, since that variant's
-    own output already reached the console directly.
+    card. The third spawn variant (live console, [`_Tee`]-backed) used to have
+    no output here either -- `Popen.wait`'s own `TimeoutExpired` carries none
+    -- but `_spawn` now builds one BY HAND from what the tees had already
+    collected before the kill (tan-cli#522 review, MAJOR 1), so this handler
+    sees the same shape on all three spawn variants and needs no branch of
+    its own to tell them apart.
 
     `_text`, not a bare `isinstance(chunk, str)` check: measured,
     `subprocess.TimeoutExpired.stdout`/`.stderr` are `bytes` even when the
@@ -576,6 +627,65 @@ def _pipeline_returncode(left_rc: int | None, right_rc: int | None) -> int:
         if rc:
             return rc
     return 0 if left_rc is not None and right_rc is not None else -1
+
+
+class _Tee:
+    """One text-mode `Popen` child stream (stdout or stderr), read to EOF on a
+    background thread -- forwarding every chunk to `sink` AS it arrives (so a
+    live console still sees the child's output as it happens, unchanged from
+    before this class existed) while also accumulating it, so the caller has
+    the same transcript a `--format json` capture would have produced
+    (tan-cli#522 review, MAJOR 1: `_flow_d_reset_qualified_message` needs a
+    transcript to qualify Flow D's reset claim against, and text mode's own
+    `_spawn` branch had none at all).
+
+    `stream.read(n)` in a loop, not one blocking `.read()` ([`_Drain`]'s own
+    choice below): a bounded chunk read is what makes the forwarding live --
+    a single `.read()` blocks until EOF, which is exactly the "capture, then
+    replay after the child exits" shape this class exists to avoid on the
+    live-console path (the `sink is None` branch of `_spawn` already does
+    that replay deliberately; this is the OTHER branch, where a real console
+    is present and can show output as it is produced).
+
+    Two independent threads (one per stream, both writing to the same `sink`)
+    means the console's stdout/stderr interleaving is no longer OS-arbitrated
+    the way direct fd inheritance was -- each thread's own chunks stay in
+    order with themselves, but the two streams may interleave differently
+    than before. Both still land on the SAME console, visibly, in real time;
+    nothing is silently withheld from the operator."""
+
+    def __init__(self, stream, sink) -> None:
+        self._chunks: list[str] = []
+        self._stream = stream
+        self._sink = sink
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+
+    def _read(self) -> None:
+        try:
+            for chunk in iter(lambda: self._stream.read(4096), ""):
+                self._chunks.append(chunk)
+                try:
+                    self._sink.write(chunk)
+                    self._sink.flush()
+                except (OSError, ValueError):
+                    # The console went away mid-write (a closed pipe, a torn-
+                    # down pytest capture). Keep reading and accumulating --
+                    # the transcript this thread is building still matters
+                    # even when nobody can watch it live any more.
+                    pass
+        except (OSError, ValueError):
+            pass
+
+    def join(self, timeout: float | None = None) -> None:
+        self._thread.join(timeout=timeout)
+
+    def text(self) -> str:
+        """Everything this stream said, joined. Joins first ([`_Drain.text`]'s
+        own reasoning): reading `_chunks` while the thread may still be
+        appending is exactly the read that could observe a partial list."""
+        self.join()
+        return "".join(self._chunks)
 
 
 class _Drain:
@@ -932,14 +1042,19 @@ def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
     so an operator reading it cannot tell the two apart -- and on this board
     the reset is what would have started the freshly-written image.
 
-    Scoped to a substring match on the CAPTURED transcript only
-    (`outcome.stdout`/`.stderr`, populated only under `--format json`'s
-    single-spawn capture -- see `_Outcome`/`_spawn`): a text-mode run streams
-    JLinkExe's own output straight to the operator's console already (that
-    console IS the diagnosis there), so `outcome.stdout`/`.stderr` are empty
-    and this is a no-op, same as `_execute_message`'s own capture-mode split.
-    Not a general transcript-scraping layer: this reads only the one tail
-    `plan_alif_mram_jlink` always appends, and only for `FLOW_D_METHOD`."""
+    Scoped to a substring match on the CAPTURED transcript
+    (`outcome.stdout`/`.stderr` -- see `_Outcome`/`_spawn`). tan-cli#522
+    review, MAJOR 1: this used to be populated ONLY under `--format json`'s
+    single-spawn capture, so in text mode -- the default human invocation --
+    this was a silent no-op and the qualification never reached the operator
+    reading the console, even though JLinkExe's own transcript streamed
+    straight past them there too. `_spawn`'s live-console branch now TEES
+    that same transcript (streamed live to the console AND collected, via
+    [`_Tee`]) instead of only streaming it, so `outcome.stdout`/`.stderr` are
+    populated in every mode and this function needs no mode split of its
+    own. Not a general transcript-scraping layer: this reads only the one
+    tail `plan_alif_mram_jlink` always appends, and only for
+    `FLOW_D_METHOD`."""
     if _FLOW_D_VERIFIED_AND_RESET not in ok_message:
         return ok_message
     transcript = outcome.stdout + outcome.stderr
