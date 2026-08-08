@@ -585,14 +585,37 @@ else
 	# tan-cli#490: if the only thing this noexec probe accomplished was to
 	# create an install dir that pre-fix would never have existed, do not
 	# leave it behind on a refused install -- `rm -rf "$stage"` first so a
-	# staged-but-failed retry_dir under it (if any) is gone, then remove the
-	# FIRST new ancestor recorded above (round 9): that is a superset of the
-	# old `rmdir "$INSTALL_DIR"`, which only ever removed the (by-then-empty)
-	# leaf and left any intermediate parent `mkdir -p` also created behind.
+	# staged-but-failed retry_dir under it (if any) is gone, then walk the
+	# chain from $INSTALL_DIR up to the first new ancestor recorded above
+	# (round 9), `rmdir`-ing each one non-recursively (round 10 -- see
+	# below): that is a superset of the old `rmdir "$INSTALL_DIR"`, which
+	# only ever removed the (by-then-empty) leaf and left any intermediate
+	# parent `mkdir -p` also created behind, WITHOUT round 9's own
+	# unguarded `rm -rf` risking a shared ancestor another process wrote to
+	# during this same window.
 	if [ "$install_dir_created_for_retry" = "1" ]; then
 		rm -rf "$stage" 2>/dev/null || true
 		if [ -n "$install_dir_first_new_ancestor" ]; then
-			rm -rf "$install_dir_first_new_ancestor" 2>/dev/null || true
+			# tan-cli#490 review: `rm -rf` here is an UNGUARDED recursive
+			# delete of a path that, with the default $INSTALL_DIR
+			# ($HOME/.local/bin), is $HOME/.local itself -- a shared XDG
+			# root other tools keep state under (share/, state/, lib/, ...).
+			# Anything written under it by another process during this
+			# retry window (a concurrent install, an unrelated tool) was
+			# destroyed along with the orphan this run created. Walk leaf
+			# ($INSTALL_DIR) up to the recorded first-new-ancestor removing
+			# each directory with a NON-recursive `rmdir`: it fails
+			# harmlessly the instant a directory holds anything this run
+			# did not put there (another process's write, or content that
+			# already existed), which is exactly the wanted semantics --
+			# remove only what this run created, and stop the moment
+			# something else is in the way.
+			install_dir_walk_remove="$INSTALL_DIR"
+			while :; do
+				rmdir "$install_dir_walk_remove" 2>/dev/null || true
+				[ "$install_dir_walk_remove" = "$install_dir_first_new_ancestor" ] && break
+				install_dir_walk_remove="$(dirname -- "$install_dir_walk_remove")"
+			done
 		else
 			rmdir "$INSTALL_DIR" 2>/dev/null || true
 		fi

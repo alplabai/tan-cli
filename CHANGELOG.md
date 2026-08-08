@@ -428,17 +428,33 @@ All notable changes to `tan` are documented here. Format follows
     argument-parsing path, surviving here. MEASURED: `--dir <dir>/orph/deep/
     bin` refused left `<dir>/orph` and `<dir>/orph/deep` on disk. The gate
     now walks up from `$INSTALL_DIR` to the first ancestor that does not
-    exist yet and removes that one, recursively, on refusal -- the same
-    "first new ancestor" trick as the argument-parsing fix.
+    exist yet, `rmdir`-ing each one NON-recursively, on refusal -- the same
+    "first new ancestor" trick as the argument-parsing fix, without ever
+    recursively deleting anything: an initial version of this fix used
+    `rm -rf` on the first-new-ancestor, which with the default
+    `$INSTALL_DIR` (`$HOME/.local/bin`) is `$HOME/.local` itself -- a shared
+    XDG root other tools keep state under -- and destroyed any write another
+    process made under it during the retry window (MEASURED: a write
+    injected via the retry gate's own `mktemp` call survived pre-`rm -rf`
+    and was destroyed by it). `rmdir` fails harmlessly the instant a
+    directory holds anything this run did not create, which is exactly the
+    wanted semantics.
   - `install.ps1` had the identical intermediate-parent orphan as the
     `install.sh` finding above, one level higher: `New-Item -ItemType
     Directory -Force -Path $Dir`, unconditional and run before the health
     check even starts, is the `mkdir -p` equivalent and creates every
     missing parent of `$Dir`, with nothing removing them on a subsequent
     health-check refusal. `$Dir`'s first not-yet-existing ancestor is now
-    recorded before that `New-Item` call and removed, recursively, if the
-    health check then refuses. (Inspected, not executed against a real
-    `pwsh` -- none was available in this environment.)
+    recorded before that `New-Item` call and, on a subsequent health-check
+    refusal, each directory from `$Dir` up to that ancestor is removed with
+    a NON-recursive `[System.IO.Directory]::Delete($p, $false)` -- the same
+    `rm -rf`-on-a-shared-ancestor data-loss risk as the `install.sh` finding
+    above, here on the default `$Dir` (`%LOCALAPPDATA%\Programs\tan`),
+    whose first-new-ancestor is `%LOCALAPPDATA%\Programs` -- a root other
+    per-user installers populate -- and with a wider window (the whole
+    checksums fetch/download/sha256/extract sequence). Verified end-to-end
+    against real `pwsh 7.4.6`: a write injected while `$Dir` exists but
+    before the health check completes survives the refusal cleanup.
   - `install.ps1`'s round-8 `Add-Type` fix gated and try/catch-wrapped the
     `SendMessageTimeout` P/Invoke *call*, but left the `Add-Type` statement
     that COMPILES the helper class itself sitting at column 0: unconditional,

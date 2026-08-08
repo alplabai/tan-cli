@@ -469,8 +469,29 @@ try {
 		# (or its freshly-created parents) behind -- see the New-Item comment
 		# above. Only reached when $dirFirstNewAncestor was actually recorded,
 		# i.e. $Dir did not exist before this run.
+		#
+		# tan-cli#490 review, round 10: `-Recurse` here was an UNGUARDED
+		# recursive delete of a path that, with the default $Dir
+		# (%LOCALAPPDATA%\Programs\tan), is %LOCALAPPDATA%\Programs itself --
+		# a shared per-user root other installers populate. The whole
+		# checksums fetch, asset download, sha256 check, and extraction all
+		# fall inside this window (seconds to minutes on a real ~40 MB
+		# asset), so anything another process wrote under that shared root
+		# meanwhile was destroyed along with the orphan this run created.
+		# Walk leaf ($Dir) up to the recorded first-new-ancestor, deleting
+		# each directory NON-recursively: [System.IO.Directory]::Delete with
+		# recursive=$false throws the instant a directory holds anything
+		# this run did not put there (another process's write, or content
+		# that already existed), which is exactly the wanted semantics --
+		# remove only what this run created, and stop the moment something
+		# else is in the way.
 		if ($dirFirstNewAncestor) {
-			Remove-Item -LiteralPath $dirFirstNewAncestor -Recurse -Force -ErrorAction SilentlyContinue
+			$dirWalkRemove = $Dir
+			while ($true) {
+				try { [System.IO.Directory]::Delete($dirWalkRemove, $false) } catch { }
+				if ($dirWalkRemove -eq $dirFirstNewAncestor) { break }
+				$dirWalkRemove = Split-Path -Path $dirWalkRemove -Parent
+			}
 		}
 		if (Test-AccessDeniedSignature $verifyWin32Code) {
 			if ($retried) {
