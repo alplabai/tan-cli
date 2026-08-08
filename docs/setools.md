@@ -100,6 +100,13 @@ connect, before ever writing MRAM, and refuses when it doesn't match. Set
 both when your bench has more than one probe, or when a shared/cloned serial
 is a possibility; do not rely on `jlink_serial` alone to disambiguate.
 
+The `swd_probe` backend (the GD32G553 supervisor bridge, not this doc's Flow
+D) gets the identical read-only preflight, but `flash_args.expect_dpidr`
+arms it **alone** there — `swd_probe`'s own `flash_args.jlink_device` already
+names the write's own `-device` profile, so it is not a second, preflight-only
+field the way Flow D's is. Set `flash_args.expect_dpidr` on a `swd_probe`
+entry whenever the same cloned-serial risk applies (tan-cli#520).
+
 ## Related
 
 - `docs/adr/` — architecture decisions this backend follows (no new hardware

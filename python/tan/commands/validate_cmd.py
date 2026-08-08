@@ -869,255 +869,285 @@ def validate(
     """
     root, board_path = _resolve_board_path(project, board_yaml)
 
-    # Resolved BEFORE the board.yaml guard, though it is guard 2, because the
-    # `sdk` block is not a guard result -- it reports what this RUN resolved,
-    # and the oracle emits it on the board-yaml-missing refusal too (measured:
-    # a valid `--sdk-root` + an empty directory answers
-    # `validate.board-yaml-missing` WITH `sdk.sourceTier: "sdkRootFlag"`).
-    # Guard ORDER is unchanged -- board.yaml still refuses first.
-    #
-    # `os.path.abspath`, not `Path(root)`: the ladder WALKS ANCESTORS, and
-    # `Path(".").parents` is EMPTY -- the default `--project` would never
-    # discover the sibling `../alp-sdk` every workspace layout puts there.
-    # Lexical (not `.resolve()`) for the same reason `build_output.normalise`
-    # is: a project reached through a symlink keeps the name the user typed.
-    #
-    # Skipped entirely under `--offline`: no subprocess, so no interpreter and
-    # no checkout to report, and the oracle emits no `sdk` there even when one
-    # would resolve (measured with a sibling checkout AND with an explicit
-    # `--sdk-root`).
-    resolved_sdk: Path | None = None
-    sdk_info: SdkInfo | None = None
-    # tan-cli#478. OUTSIDE the `offline` branch: that path consults no
-    # pointer, so this stays empty -- but every emit site reads it, so no
-    # future early return can drop the pair (tan-cli#464 review).
-    sdk_context_issues: list[Issue] = []
-    if not offline:
-        sdk_resolution = resolve_sdk_root_ladder(sdk_root, Path(os.path.abspath(root)))
-        resolved_sdk = sdk_resolution.path
-        sdk_tier = sdk_resolution.tier
-        # tan-cli#257/#258, at this call site because `resolve_sdk_root_ladder`
-        # deliberately does not do it: an explicit `--sdk-root` comes back
-        # verbatim and unvalidated, which is right for a caller that only
-        # REPORTS the tier and wrong for this one, which spawns out of it. An
-        # unresolvable explicit root is no root at all -- guard 2 below then
-        # gives the refusal the oracle gives, instead of the SDK's own
-        # `can't open file ...validate_board_yaml.py` reaching the status map
-        # as a verdict about the customer's board.
-        if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk):
-            resolved_sdk = None
-        if resolved_sdk is not None:
-            sdk_info = SdkInfo(str(resolved_sdk), sdk_tier)
-        # tan-cli#478: `validate` SPAWNS out of the resolved root, so a
-        # foreign `globalDefault` means another project's schemas decided
-        # `clean` for this board.yaml. Reported `ok: true`, `issues: []`.
-        sdk_context_issues = sdk_resolution_issues(
-            sdk_resolution.broken_project_pin,
-            sdk_tier,
-            sdk_resolution.foreign_global_default_for,
-        )
+    # tan-cli#488 defect 8: the identical unguarded prologue `build_cmd.build`
+    # had (see its own comment there) -- everything below this point is now
+    # inside a try, so a raise from ANYWHERE in it (guard resolution, the SDK
+    # ladder, the offline read, the spawn) still produces the
+    # `validate.internal-failure` envelope below instead of a raw traceback
+    # with empty stdout. `typer.Exit` is re-raised untouched -- `fail()`/`_emit()`
+    # already raise it as their OWN normal control flow (every guard above and
+    # below is a `fail(...)` call), and it subclasses `Exception` via
+    # `click.exceptions.Exit(RuntimeError)`, so a bare `except Exception` here
+    # would swallow a NORMAL exit and re-report it as `internal-failure`.
+    try:
 
-    def fail(code: str, message: str, exit_code: ExitCode) -> None:
+        # Resolved BEFORE the board.yaml guard, though it is guard 2, because the
+        # `sdk` block is not a guard result -- it reports what this RUN resolved,
+        # and the oracle emits it on the board-yaml-missing refusal too (measured:
+        # a valid `--sdk-root` + an empty directory answers
+        # `validate.board-yaml-missing` WITH `sdk.sourceTier: "sdkRootFlag"`).
+        # Guard ORDER is unchanged -- board.yaml still refuses first.
+        #
+        # `os.path.abspath`, not `Path(root)`: the ladder WALKS ANCESTORS, and
+        # `Path(".").parents` is EMPTY -- the default `--project` would never
+        # discover the sibling `../alp-sdk` every workspace layout puts there.
+        # Lexical (not `.resolve()`) for the same reason `build_output.normalise`
+        # is: a project reached through a symlink keeps the name the user typed.
+        #
+        # Skipped entirely under `--offline`: no subprocess, so no interpreter and
+        # no checkout to report, and the oracle emits no `sdk` there even when one
+        # would resolve (measured with a sibling checkout AND with an explicit
+        # `--sdk-root`).
+        resolved_sdk: Path | None = None
+        sdk_info: SdkInfo | None = None
+        # tan-cli#478. Declared OUTSIDE the `offline` branch: that path consults
+        # no pointer, so this stays empty -- but `fail()` and the success `_emit`
+        # both read it unconditionally below, so no future early return can drop
+        # the pair (tan-cli#464 review).
+        sdk_context_issues: list[Issue] = []
+        if not offline:
+            sdk_resolution = resolve_sdk_root_ladder(sdk_root, Path(os.path.abspath(root)))
+            resolved_sdk = sdk_resolution.path
+            sdk_tier = sdk_resolution.tier
+            # tan-cli#257/#258, at this call site because `resolve_sdk_root_ladder`
+            # deliberately does not do it: an explicit `--sdk-root` comes back
+            # verbatim and unvalidated, which is right for a caller that only
+            # REPORTS the tier and wrong for this one, which spawns out of it. An
+            # unresolvable explicit root is no root at all -- guard 2 below then
+            # gives the refusal the oracle gives, instead of the SDK's own
+            # `can't open file ...validate_board_yaml.py` reaching the status map
+            # as a verdict about the customer's board.
+            if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk):
+                resolved_sdk = None
+            if resolved_sdk is not None:
+                sdk_info = SdkInfo(str(resolved_sdk), sdk_tier)
+            # tan-cli#478: `validate` SPAWNS out of the resolved root, so a
+            # foreign `globalDefault` means another project's schemas decided
+            # `clean` for this board.yaml. Reported `ok: true`, `issues: []`.
+            sdk_context_issues = sdk_resolution_issues(
+                sdk_resolution.broken_project_pin,
+                sdk_tier,
+                sdk_resolution.foreign_global_default_for,
+            )
+
+        def fail(code: str, message: str, exit_code: ExitCode) -> None:
+            _emit(
+                output_format=output_format,
+                root=root,
+                board_path=board_path,
+                outcome=OUTCOME_FAILED,
+                issues=[*sdk_context_issues, Issue(f"validate.{code}", "error", message)],
+                exit_code=exit_code,
+                sdk=sdk_info,
+            )
+
+        if not Path(board_path).exists():
+            # Ordered BEFORE the SDK guard and the spawn, deliberately -- the same
+            # order `run_spawn` puts its own three guards in. (The SDK is RESOLVED
+            # above this, which is not the same thing: resolving fills the `sdk`
+            # block the oracle reports on this very refusal; refusing is what stays
+            # ordered, and no guard fires before this one.) MEASURED against the
+            # oracle (`target/debug/tan.exe`, tan 0.4.1-dev) in an empty directory:
+            # exit 2, `validate.board-yaml-missing`, `outcome: "failed"` -- and the
+            # oracle reaches this guard on both paths, `--offline` or not. Anything
+            # that short-circuits above this check answers a DIFFERENT question in
+            # the one case a brand-new user hits first: before #376 a "not ported
+            # yet" stub did, and an SDK guard hoisted above it would answer "no
+            # alp-sdk checkout" to a project that has no board.yaml either way.
+            #
+            # tan-cli#350 (DELIBERATE divergence -- the oracle is byte-identical
+            # here, down to exit code and message): the oracle's own wording,
+            # "board.yaml path could not be resolved or the file does not
+            # exist.", names no remedy and, worse, is fronted in text mode by
+            # "validate: validation failure" -- a VERDICT that implies something
+            # was checked and found wrong. Nothing was validated; there is no
+            # board.yaml to validate. This is the state every user is in before
+            # `tan init`, and the old wording sent them looking for a defect in a
+            # file that does not exist. The message below names WHERE tan looked
+            # and the two remedies every sibling guard names for its own missing
+            # input (`build` names `--sdk-root`, `doctor` names `tan init` /
+            # `--board-yaml <path>` for this exact guard -- see
+            # `doctor_cmd.py`'s `_board_yaml_check`). The exit code (2) and issue
+            # CODE (`validate.board-yaml-missing`) are UNCHANGED: a
+            # found-but-invalid board.yaml still exits 2 as
+            # `validate.schema-violation` and still prints "validate: validation
+            # failure" below -- the issue code is how a machine consumer (or a
+            # human reading `--format json`) tells the two apart, since the exit
+            # code alone does not.
+            fail(
+                "board-yaml-missing",
+                f"no board.yaml found at {board_path} -- run `tan init` to create "
+                "one, or pass --board-yaml <path> to point at an existing file.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+            return
+
+        #: The validator argv, for `data.commandLine`. Stays `""` on the offline
+        #: path and on every guard -- nothing ran.
+        command_line = ""
+
+        if offline:
+            try:
+                text = Path(board_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as err:
+                # Not a tan bug: an unreadable or non-UTF-8 file is the user's to fix.
+                fail(
+                    "internal-failure",
+                    f"could not read board.yaml: {err}",
+                    ExitCode.INTERNAL_FAILURE,
+                )
+                return
+
+            try:
+                result = validate_board_text(text)
+            except BoardShapeError as err:
+                fail(
+                    "schema-violation",
+                    f"board.yaml is not valid: {err}",
+                    ExitCode.VALIDATION_FAILURE,
+                )
+                return
+            except Exception as err:  # never a bare traceback; the envelope is the contract
+                fail(
+                    "internal-failure",
+                    f"validator failed unexpectedly: {err}",
+                    ExitCode.INTERNAL_FAILURE,
+                )
+                return
+        else:
+            if resolved_sdk is None:
+                # The oracle's guard 2, message included in substance (its own
+                # wording names only `--sdk-root`; the two other tiers this port's
+                # ladder resolves are named here for the same reason
+                # `trace_cmd.py`'s identical guard names them).
+                #
+                # tan-cli#381, FIFTH site: this line hardcoded "pin one with `tan
+                # sdk switch <version|path>`" -- a subcommand that refuses outright
+                # in this build (`sdk_cmd._run_not_ported`, `sdk.not-ported`). It
+                # was not missed by the #305 sweep or the #381 sweep; it did not
+                # EXIST when either ran. #376 wrote it here, from the oracle's own
+                # (honest, there) wording, while #381 was cleaning the other four.
+                # That is the whole mechanism, so the fix is not just this string:
+                # `test_sdk_onboarding_dead_end.py`'s AST sweep now walks every
+                # string literal under `python/tan/` and fails on the phrase, which
+                # is what catches the SIXTH site before a human has to.
+                fail(
+                    "sdk-root-unresolved",
+                    "alp-sdk root is unresolved. Use --sdk-root, place the project "
+                    f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. "
+                    "`tan validate --offline` runs the structural checks that need "
+                    "no SDK.",
+                    ExitCode.VALIDATION_FAILURE,
+                )
+                return
+
+            script = os.path.join(str(resolved_sdk), *VALIDATOR_SCRIPT)
+            python_binary = _planner_python(os.path.abspath(root), str(resolved_sdk))
+
+            # The oracle's guard 3 (`validate.rs:124-129`), the one #376 left out.
+            # AFTER the SDK guard because both of its inputs come from the resolved
+            # checkout: the floor is that checkout's own declared
+            # `pythonMinVersion`, and `_planner_python` prefers its workspace venv.
+            # BEFORE the spawn because the whole point is to replace alp-sdk's
+            # `dataclass() got an unexpected keyword argument 'slots'` traceback --
+            # which arrives as validator exit 1 WITH a traceback, i.e. `failed`
+            # with the traceback's last line quoted at the user -- with a message
+            # naming the actual defect. `command_line` is still `""` here: nothing
+            # ran, exactly as on guards 1 and 2 and as the oracle reports.
+            floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
+            if (too_old := _python_too_old(python_binary, floor)) is not None:
+                fail("python-too-old", too_old, ExitCode.VALIDATION_FAILURE)
+                return
+
+            # Verbatim from `run_spawn`'s own `format!` -- this string is reported,
+            # never re-parsed, so it is built beside the argv rather than from it.
+            command_line = f"{python_binary} {script} --input {board_path}"
+            try:
+                out = subprocess.run(
+                    [python_binary, script, "--input", board_path],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    # The validator never reads stdin; without this a child that
+                    # somehow prompts would block forever behind the timeout.
+                    stdin=subprocess.DEVNULL,
+                    timeout=VALIDATOR_TIMEOUT_S,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                # The child STARTED, so this is a verdict that never arrived, not a
+                # launch failure: `failed` at exit 2, per tan-cli#262.
+                result = _Result(
+                    OUTCOME_FAILED,
+                    (
+                        (
+                            "error",
+                            f"the SDK validator did not finish within "
+                            f"{VALIDATOR_TIMEOUT_S}s and was killed: {command_line}",
+                        ),
+                    ),
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as err:
+                # The one RUNTIME_FAILURE (1) case #262 carved out: the subprocess
+                # could not even be started (no interpreter on PATH, the script
+                # unreadable). Nothing validated anything, so this is not a verdict.
+                fail(
+                    "spawn-failed",
+                    f"could not run the SDK validator ({command_line}): {err}",
+                    ExitCode.RUNTIME_FAILURE,
+                )
+                return
+            else:
+                result = analyze_validator_output(out.returncode, out.stderr)
+                if result.outcome != OUTCOME_CLEAN and not result.findings:
+                    # `to_cli_issues`' synthesis: a non-clean run must never reach a
+                    # consumer as "exit 2, zero issues", which reads as no problem.
+                    result = _Result(
+                        result.outcome, (_synthesised_finding(result.outcome, out.stderr),)
+                    )
+
+        issues = [
+            *sdk_context_issues,
+            *(
+                Issue(f"validate.{result.outcome}", severity, message)
+                for severity, message in result.findings
+            ),
+        ]
+        exit_code = (
+            ExitCode.SUCCESS
+            if result.outcome == OUTCOME_CLEAN
+            else ExitCode.VALIDATION_FAILURE
+        )
+        _emit(
+            output_format=output_format,
+            root=root,
+            board_path=board_path,
+            outcome=result.outcome,
+            issues=issues,
+            exit_code=exit_code,
+            command_line=command_line,
+            # `None` on the offline path (never resolved) -- the two committed
+            # conformance fixtures are offline runs and stay `sdk`-less.
+            sdk=sdk_info,
+        )
+    except typer.Exit:
+        raise
+    except Exception as err:  # never a bare traceback; the envelope is the contract
         _emit(
             output_format=output_format,
             root=root,
             board_path=board_path,
             outcome=OUTCOME_FAILED,
-            issues=[*sdk_context_issues, Issue(f"validate.{code}", "error", message)],
-            exit_code=exit_code,
-            sdk=sdk_info,
-        )
-
-    if not Path(board_path).exists():
-        # Ordered BEFORE the SDK guard and the spawn, deliberately -- the same
-        # order `run_spawn` puts its own three guards in. (The SDK is RESOLVED
-        # above this, which is not the same thing: resolving fills the `sdk`
-        # block the oracle reports on this very refusal; refusing is what stays
-        # ordered, and no guard fires before this one.) MEASURED against the
-        # oracle (`target/debug/tan.exe`, tan 0.4.1-dev) in an empty directory:
-        # exit 2, `validate.board-yaml-missing`, `outcome: "failed"` -- and the
-        # oracle reaches this guard on both paths, `--offline` or not. Anything
-        # that short-circuits above this check answers a DIFFERENT question in
-        # the one case a brand-new user hits first: before #376 a "not ported
-        # yet" stub did, and an SDK guard hoisted above it would answer "no
-        # alp-sdk checkout" to a project that has no board.yaml either way.
-        #
-        # tan-cli#350 (DELIBERATE divergence -- the oracle is byte-identical
-        # here, down to exit code and message): the oracle's own wording,
-        # "board.yaml path could not be resolved or the file does not
-        # exist.", names no remedy and, worse, is fronted in text mode by
-        # "validate: validation failure" -- a VERDICT that implies something
-        # was checked and found wrong. Nothing was validated; there is no
-        # board.yaml to validate. This is the state every user is in before
-        # `tan init`, and the old wording sent them looking for a defect in a
-        # file that does not exist. The message below names WHERE tan looked
-        # and the two remedies every sibling guard names for its own missing
-        # input (`build` names `--sdk-root`, `doctor` names `tan init` /
-        # `--board-yaml <path>` for this exact guard -- see
-        # `doctor_cmd.py`'s `_board_yaml_check`). The exit code (2) and issue
-        # CODE (`validate.board-yaml-missing`) are UNCHANGED: a
-        # found-but-invalid board.yaml still exits 2 as
-        # `validate.schema-violation` and still prints "validate: validation
-        # failure" below -- the issue code is how a machine consumer (or a
-        # human reading `--format json`) tells the two apart, since the exit
-        # code alone does not.
-        fail(
-            "board-yaml-missing",
-            f"no board.yaml found at {board_path} -- run `tan init` to create "
-            "one, or pass --board-yaml <path> to point at an existing file.",
-            ExitCode.VALIDATION_FAILURE,
-        )
-        return
-
-    #: The validator argv, for `data.commandLine`. Stays `""` on the offline
-    #: path and on every guard -- nothing ran.
-    command_line = ""
-
-    if offline:
-        try:
-            text = Path(board_path).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as err:
-            # Not a tan bug: an unreadable or non-UTF-8 file is the user's to fix.
-            fail(
-                "internal-failure",
-                f"could not read board.yaml: {err}",
-                ExitCode.INTERNAL_FAILURE,
-            )
-            return
-
-        try:
-            result = validate_board_text(text)
-        except BoardShapeError as err:
-            fail(
-                "schema-violation",
-                f"board.yaml is not valid: {err}",
-                ExitCode.VALIDATION_FAILURE,
-            )
-            return
-        except Exception as err:  # never a bare traceback; the envelope is the contract
-            fail(
-                "internal-failure",
-                f"validator failed unexpectedly: {err}",
-                ExitCode.INTERNAL_FAILURE,
-            )
-            return
-    else:
-        if resolved_sdk is None:
-            # The oracle's guard 2, message included in substance (its own
-            # wording names only `--sdk-root`; the two other tiers this port's
-            # ladder resolves are named here for the same reason
-            # `trace_cmd.py`'s identical guard names them).
-            #
-            # tan-cli#381, FIFTH site: this line hardcoded "pin one with `tan
-            # sdk switch <version|path>`" -- a subcommand that refuses outright
-            # in this build (`sdk_cmd._run_not_ported`, `sdk.not-ported`). It
-            # was not missed by the #305 sweep or the #381 sweep; it did not
-            # EXIST when either ran. #376 wrote it here, from the oracle's own
-            # (honest, there) wording, while #381 was cleaning the other four.
-            # That is the whole mechanism, so the fix is not just this string:
-            # `test_sdk_onboarding_dead_end.py`'s AST sweep now walks every
-            # string literal under `python/tan/` and fails on the phrase, which
-            # is what catches the SIXTH site before a human has to.
-            fail(
-                "sdk-root-unresolved",
-                "alp-sdk root is unresolved. Use --sdk-root, place the project "
-                f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. "
-                "`tan validate --offline` runs the structural checks that need "
-                "no SDK.",
-                ExitCode.VALIDATION_FAILURE,
-            )
-            return
-
-        script = os.path.join(str(resolved_sdk), *VALIDATOR_SCRIPT)
-        python_binary = _planner_python(os.path.abspath(root), str(resolved_sdk))
-
-        # The oracle's guard 3 (`validate.rs:124-129`), the one #376 left out.
-        # AFTER the SDK guard because both of its inputs come from the resolved
-        # checkout: the floor is that checkout's own declared
-        # `pythonMinVersion`, and `_planner_python` prefers its workspace venv.
-        # BEFORE the spawn because the whole point is to replace alp-sdk's
-        # `dataclass() got an unexpected keyword argument 'slots'` traceback --
-        # which arrives as validator exit 1 WITH a traceback, i.e. `failed`
-        # with the traceback's last line quoted at the user -- with a message
-        # naming the actual defect. `command_line` is still `""` here: nothing
-        # ran, exactly as on guards 1 and 2 and as the oracle reports.
-        floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
-        if (too_old := _python_too_old(python_binary, floor)) is not None:
-            fail("python-too-old", too_old, ExitCode.VALIDATION_FAILURE)
-            return
-
-        # Verbatim from `run_spawn`'s own `format!` -- this string is reported,
-        # never re-parsed, so it is built beside the argv rather than from it.
-        command_line = f"{python_binary} {script} --input {board_path}"
-        try:
-            out = subprocess.run(
-                [python_binary, script, "--input", board_path],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                # The validator never reads stdin; without this a child that
-                # somehow prompts would block forever behind the timeout.
-                stdin=subprocess.DEVNULL,
-                timeout=VALIDATOR_TIMEOUT_S,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            # The child STARTED, so this is a verdict that never arrived, not a
-            # launch failure: `failed` at exit 2, per tan-cli#262.
-            result = _Result(
-                OUTCOME_FAILED,
-                (
-                    (
-                        "error",
-                        f"the SDK validator did not finish within "
-                        f"{VALIDATOR_TIMEOUT_S}s and was killed: {command_line}",
-                    ),
-                ),
-            )
-        except (OSError, ValueError, subprocess.SubprocessError) as err:
-            # The one RUNTIME_FAILURE (1) case #262 carved out: the subprocess
-            # could not even be started (no interpreter on PATH, the script
-            # unreadable). Nothing validated anything, so this is not a verdict.
-            fail(
-                "spawn-failed",
-                f"could not run the SDK validator ({command_line}): {err}",
-                ExitCode.RUNTIME_FAILURE,
-            )
-            return
-        else:
-            result = analyze_validator_output(out.returncode, out.stderr)
-            if result.outcome != OUTCOME_CLEAN and not result.findings:
-                # `to_cli_issues`' synthesis: a non-clean run must never reach a
-                # consumer as "exit 2, zero issues", which reads as no problem.
-                result = _Result(
-                    result.outcome, (_synthesised_finding(result.outcome, out.stderr),)
+            issues=[
+                Issue(
+                    "validate.internal-failure",
+                    "error",
+                    f"validator failed unexpectedly: {type(err).__name__}: {err}",
                 )
-
-    issues = [
-        *sdk_context_issues,
-        *(
-            Issue(f"validate.{result.outcome}", severity, message)
-            for severity, message in result.findings
-        ),
-    ]
-    exit_code = (
-        ExitCode.SUCCESS
-        if result.outcome == OUTCOME_CLEAN
-        else ExitCode.VALIDATION_FAILURE
-    )
-    _emit(
-        output_format=output_format,
-        root=root,
-        board_path=board_path,
-        outcome=result.outcome,
-        issues=issues,
-        exit_code=exit_code,
-        command_line=command_line,
-        # `None` on the offline path (never resolved) -- the two committed
-        # conformance fixtures are offline runs and stay `sdk`-less.
-        sdk=sdk_info,
-    )
+            ],
+            exit_code=ExitCode.INTERNAL_FAILURE,
+        )
 
 
 # tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was

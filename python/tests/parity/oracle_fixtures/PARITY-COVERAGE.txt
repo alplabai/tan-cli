@@ -186,6 +186,21 @@ assumed.
               tan-cli#403) which the oracle does not offer for any command.
               Pinned in both directions, so either side changing is seen.
               This is why the scripts are not compared byte-for-byte.
+              TWO MORE DECLARED DIVERGENCES, tan-cli#503, same reason the
+              scripts stay verb-list-only and not byte-for-byte: (1) `doctor`
+              no longer offers `--target-kind`/`--server` on any of the three
+              shells -- the oracle's clap declares both for `doctor`
+              (`crates/tan-cli/src/cli.rs`), but `doctor_cmd.py` deliberately
+              never ported that debug half, and completing a flag the Python
+              command rejects at exit 2 is worse than not offering it.
+              `support-bundle`/`debug-config` are untouched and still carry
+              both on all three shells. (2) fish's `generate --target` value
+              list now carries all 12 real values (spliced from
+              `generate_cmd`'s own tables, same mechanism as the `--format`
+              splice above) where the oracle's own captured script only ever
+              offered 9, silently missing `os-topology` (a member of the
+              default/`--all` set -- a bare `tan generate` runs it),
+              `composed-route-table` and `ipc-contract-h`.
   doctor      STILL UNCOVERED, and not merely unwritten. Its envelope is
               decided by the HOST: measured on darwin, the oracle's own
               check list carries `zephyrSdkAvailableForHost ... macos-

@@ -26,15 +26,44 @@ def no_color_requested() -> bool:
     return os.environ.get("NO_COLOR") is not None
 
 
-def _stderr_is_tty() -> bool:
+def stderr_is_tty() -> bool:
     """The one place that probes `sys.stderr.isatty()` -- `AttributeError`
     when stderr has been replaced by something that doesn't implement it,
     `ValueError` when it has been closed. Shared by `use_color` and
     `wrap_width` below so neither hand-rolls its own copy of this
     try/except (tan-cli#288, the exact drift this module's own docstring
-    exists to prevent)."""
+    exists to prevent).
+
+    tan-cli#488 round 6: promoted from `_stderr_is_tty` (module-private) to
+    a public name once `tan.core.consent.can_prompt`,
+    `tan.commands.doctor_cmd.fix_suppressed_issue` and
+    `tan.commands.build_cmd._dispatch` each turned out to hand-roll the exact
+    `X is not None and X.isatty()` shape this function already guards against
+    -- a `None` check alone stops the `AttributeError` from a detached
+    handle, but not from a handle that exists and simply has no `.isatty()`
+    at all, which is exactly what `tan.cli`'s `_TeeStderr` is under
+    `--format json`. Duplicating the try/except a fourth time is the same
+    drift this module's own docstring already names; importing the one
+    version is the fix, not writing a fifth."""
     try:
         return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def stdin_is_tty() -> bool:
+    """The `stdin` counterpart of `stderr_is_tty` above, same rationale and
+    same exception pair: `AttributeError` when `sys.stdin` is `None` (a
+    detached-stdio process) or has been replaced by something with no
+    `.isatty()`, `ValueError` when it has been closed. `tan.core.consent.
+    can_prompt` and `tan.commands.doctor_cmd.fix_suppressed_issue` each used
+    to hand-roll `sys.stdin is not None and sys.stdin.isatty()` -- correct
+    for today's `None`-or-real-stream shape, but the same one-operand-short
+    pattern the stderr side was fixed for tan-cli#488 round 5/6; sharing this
+    helper closes both sides the same way instead of leaving stdin's copy to
+    rediscover the lesson on its own."""
+    try:
+        return sys.stdin.isatty()
     except (AttributeError, ValueError):
         return False
 
@@ -47,7 +76,7 @@ def use_color(no_color: bool, ci: bool) -> bool:
     now delegates here."""
     if no_color or ci or no_color_requested():
         return False
-    return _stderr_is_tty()
+    return stderr_is_tty()
 
 
 #: The floor a resolved terminal width may never drop below, moved here from
@@ -95,6 +124,6 @@ def wrap_width() -> int | None:
     output decides, so a future command adopting this seam should ask which
     of the two it is rather than copying whichever neighbour it read first.
     """
-    if not _stderr_is_tty():
+    if not stderr_is_tty():
         return None
     return max(shutil.get_terminal_size(fallback=(100, 24)).columns, TEXT_WRAP_MIN_WIDTH)
