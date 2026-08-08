@@ -3410,9 +3410,7 @@ def doctor(
         sdk_broken_pin = sdk_resolution.broken_project_pin
         sdk_foreign_default = sdk_resolution.foreign_global_default_for
         sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
-        sdk = (
-        SdkInfo.from_resolution(sdk_root, sdk_resolution) if sdk_root is not None else None
-    )
+        sdk = SdkInfo.from_resolution(sdk_root, sdk_resolution) if sdk_root is not None else None
         # tan-cli#344: a dangling `~/.alp/sdk-default` is a distinct fact from
         # "nothing configured" -- computed unconditionally (one small file read)
         # so `sdk_check` can name it in the one branch (`sdk_root is None`) where

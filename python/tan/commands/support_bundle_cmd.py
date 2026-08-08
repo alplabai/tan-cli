@@ -900,16 +900,13 @@ def support_bundle(
         # both carry `sdkResolution`/the foreign-default pair now, but
         # `outcome.text` (every `_Outcome` constructor above) never did --
         # the default `tan support-bundle` with no `--format` stayed silent.
-        # Read off `outcome.issues` rather than recomputed from `outcome.sdk`:
-        # `resolve_debug_project_context`'s `context.sdk` is a bare
-        # `SdkInfo(sdk_root, sdk_tier)` (the legacy site
-        # `test_sdk_info_is_built_from_a_resolution.py` ledgers for
-        # `inspect_cmd.py`, shared by every caller of that resolver), so it
-        # carries neither `foreign_global_default_for` nor
-        # `broken_project_pin` -- recomputing from it would silently print
-        # nothing. `_run`'s success path already builds `issues` from
-        # `context`'s own (correctly carried) fields; this only ever
-        # re-prints what is already there.
+        # Read off `outcome.issues`, which every `_Outcome` constructor above
+        # now builds from `context`'s own carried
+        # `broken_project_pin`/`sdk_tier`/`foreign_global_default_for` --
+        # including the three early-return failure paths. Re-deriving here
+        # from `outcome.sdk` instead would be a second copy of the same
+        # decision in the one command whose whole purpose is explaining a
+        # broken machine; this only ever re-prints what is already there.
         for issue in outcome.issues:
             if issue.code.startswith("sdk."):
                 typer.echo(issue.message, err=True)

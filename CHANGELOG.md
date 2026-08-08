@@ -48,7 +48,13 @@ All notable changes to `tan` are documented here. Format follows
   the drop). Text mode has no `Envelope` to lean on -- `diff`/`inspect`/
   `trace`/`support-bundle`/`validate` and the three `west`-forwarding verbs
   all write straight to stderr (or, for `west`-forwarding, hand stdio to the
-  child) -- so each now prints the same warning first. `validate`'s own
+  child) -- so each now prints the same warning first, including the two
+  `west` verbs that refuse BEFORE spawning anything: `--profile` (`quality`)
+  and one-of `--check`/`--preview`/`--apply` (`migrate`) are required by the
+  child's own argparse, so a bare `tan quality` / `tan migrate` is the run
+  that reaches that refusal, and it had disclosed the pair in `--format json`
+  while printing the flag error alone on the default text path.
+  `validate`'s own
   JSON/SARIF/diagnostic-v1 documents keep the advisory OUT of
   `data.issueCount` and out of the board-anchored formats, so a CI job
   uploading SARIF does not annotate line 1 of a customer's board.yaml with a

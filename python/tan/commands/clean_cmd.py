@@ -735,9 +735,7 @@ def _run(
     # tan-cli#236: `boardYaml` reported only when the file really exists.
     project = Project.resolved(workspace_root, board_yaml)
     resolved_sdk = resolve_sdk(sdk_root_arg, workspace_root)
-    sdk = (
-        SdkInfo.from_resolution(resolved_sdk.path, resolved_sdk) if resolved_sdk else None
-    )
+    sdk = SdkInfo.from_resolution(resolved_sdk.path, resolved_sdk) if resolved_sdk else None
     pin_issue = (
         project_pin_issue(resolved_sdk.broken_project_pin, resolved_sdk.tier)
         if resolved_sdk

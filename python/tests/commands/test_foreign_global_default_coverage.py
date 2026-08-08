@@ -310,6 +310,65 @@ def test_a_missing_board_yaml_keeps_its_own_verdict_wording(two_projects):
     )
 
 
+#: The two `west`-forwarding verbs whose child declares a REQUIRED flag
+#: (tan-cli#454), as the bare argv a customer actually types. Both refuse
+#: BEFORE `west` is ever spawned, so neither needs a real toolchain here --
+#: which is exactly why the refusal is the path that must still disclose.
+REQUIRED_FLAG_REFUSALS = (
+    ("quality", ("quality",)),
+    ("migrate", ("migrate",)),
+)
+
+
+@pytest.mark.parametrize(
+    "name,argv", REQUIRED_FLAG_REFUSALS, ids=[n for n, _ in REQUIRED_FLAG_REFUSALS]
+)
+def test_a_required_flag_refusal_discloses_it_in_default_text_mode_too(
+    name, argv, two_projects
+):
+    """PR #504 review: `_refuse_required`'s text branch printed
+    `f"{subcommand}: {message}"` and NOTHING ELSE, while its `--format json`
+    branch disclosed the pair through `Envelope.__init__`'s seam.
+
+    This is not an exotic path. `--profile` (`quality`) and one-of
+    `--check`/`--preview`/`--apply` (`migrate`) are REQUIRED by the child's
+    own argparse, so a bare `tan quality` / `tan migrate` -- the first thing
+    anyone types -- lands here, and `_plan` would have run `west` out of the
+    OTHER project's checkout. Measured against this same two-project fixture
+    before the fix:
+
+        quality: `--profile` is required (`west alp-quality --profile ...`).
+        # ... and nothing else on stderr, while --format json carried
+        # ['quality.profile-required', 'sdk.global-default-foreign-project']
+
+    Both directions are asserted here: the text path must say it, and the
+    JSON path must keep saying it, so a future "just print it in text" fix
+    that drops the envelope copy fails too.
+    """
+    sub_a, proj_b, _new_sdk_b, env_extra = two_projects
+
+    proc = run_tan_with_env(*argv, cwd=sub_a, env_extra=env_extra)
+
+    assert proc.returncode == 2, proc.stderr
+    assert "machine-global default SDK" in proc.stderr, (
+        f"DEFECT (tan-cli#478): `tan {name}`'s required-flag refusal ran in "
+        f"DEFAULT text mode and never disclosed the foreign global default "
+        f"it resolved:\n{proc.stderr}"
+    )
+    assert str(proj_b).replace("\\", "/") in proc.stderr, (
+        f"`tan {name}` warned, but did not name the project the pointer was "
+        f"written for:\n{proc.stderr}"
+    )
+
+    env = _envelope(run_tan_with_env(*argv, "--format", "json", cwd=sub_a, env_extra=env_extra))
+    assert env["sdk"]["sourceTier"] == "globalDefault", (
+        "precondition unmet: the refusal did not resolve through the shared pointer"
+    )
+    assert "sdk.global-default-foreign-project" in codes(env), (
+        f"`tan {name}`'s JSON refusal stopped disclosing it"
+    )
+
+
 #: Commands that cannot be driven bare in this fixture: they need an argument,
 #: a built project, hardware, or they mutate the very pointer under test.
 #: Everything else is enumerated from the CLI itself, so command 33 is covered

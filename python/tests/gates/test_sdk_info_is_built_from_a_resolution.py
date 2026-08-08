@@ -44,8 +44,10 @@ PACKAGE = REPO / "python" / "tan"
 #: `<module path relative to python/>: <how many raw sites>`. Lower a number
 #: when you convert one; never raise one.
 #:
-#: `envelope.py` is skipped entirely -- `from_resolution`'s own `cls(...)` is
-#: the seam, and this gate only looks at `SdkInfo(` by name.
+#: `tan/envelope.py` is skipped entirely -- `from_resolution`'s own `cls(...)`
+#: is the seam, and this gate only looks at `SdkInfo(` by name. Matched by
+#: PATH, not by `path.name`: a future `tan/<anything>/envelope.py` would
+#: otherwise be exempt from the gate for the sake of its filename.
 LEGACY_RAW_CONSTRUCTIONS: dict[str, int] = {
     "tan/commands/bootstrap_cmd.py": 4,
     "tan/commands/run_cmd.py": 1,
@@ -74,7 +76,7 @@ def _raw_sdk_info_sites(path: pathlib.Path) -> list[int]:
 def _scan() -> dict[str, list[int]]:
     found: dict[str, list[int]] = {}
     for path in sorted(PACKAGE.rglob("*.py")):
-        if path.name == "envelope.py":
+        if path == PACKAGE / "envelope.py":
             continue
         sites = _raw_sdk_info_sites(path)
         if sites:

@@ -182,10 +182,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # recording the recurrence and why this copy was never itself observed
     # to crash (its own `not json_mode` guard in front) even though the
     # sibling copy in `build_cmd._dispatch` did.
-    # +2, tan-cli#478: `SdkInfo.from_resolution` wrapped over the ternary.
-    # The seam is what lets `Envelope.__init__` disclose a foreign global
-    # default without this command knowing the issue exists.
-    "tan/commands/doctor_cmd.py": 3614,
+    "tan/commands/doctor_cmd.py": 3612,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -610,10 +607,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # one new decoder test (`test_tee_decodes_a_multibyte_utf8_sequence_
     # split_across_a_read1_boundary`, MINOR 2) proving the incremental
     # decoder against a naive per-chunk one.
-    # +4, tan-cli#478: `SdkInfo.from_resolution` wrapped over the ternary.
-    # The seam is what lets `Envelope.__init__` disclose a foreign global
-    # default without this command knowing the issue exists.
-    "tan/commands/flash_cmd.py": 2633,
+    # +2, tan-cli#478: `SdkInfo.from_resolution` -- the seam that lets
+    # `Envelope.__init__` disclose a foreign global default without this
+    # command knowing the issue exists -- does not fit on one line here
+    # (101 chars against the 100 `[tool.ruff] line-length`), so the ternary
+    # wraps. `doctor_cmd.py`/`clean_cmd.py`/`inspect_cmd.py` took the same
+    # conversion at 97/92/93 chars and kept their one-liners, which is why
+    # only this one moves a number.
+    "tan/commands/flash_cmd.py": 2631,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -895,10 +896,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
     # `sdk.project-pin-unresolved`.
-    # 1013 -> 1015, tan-cli#478: `SdkInfo.from_resolution` wrapped over two
-    # lines. Found by the new constructor gate, which caught this site on
-    # its first run -- it was not in the hand-written enumeration.
-    "tan/commands/clean_cmd.py": 1015,
+    "tan/commands/clean_cmd.py": 1013,
     # 1015, not 996, as of tan-cli#485: `_load_yaml`/`_load_json` route
     # through the new `strict_loaders.strict_yaml_load`/`strict_json_loads`
     # (alp-sdk #1127, a duplicate-mapping-key refusal), and the IPC-entry
@@ -1048,7 +1046,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # `foreign_global_default_for` keyword-only fields `_run`'s success path
     # already threads, defaulted so the outer exception guard (which never
     # resolved a project context) keeps its prior empty-list behaviour.
-    "tan/commands/support_bundle_cmd.py": 935,
+    "tan/commands/support_bundle_cmd.py": 932,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring

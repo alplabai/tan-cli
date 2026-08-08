@@ -309,6 +309,26 @@ def _spawn_captured(plan: _Forward) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _echo_sdk_resolution(sdk: SdkInfo | None) -> None:
+    """tan-cli#478: the SDK-resolution pair on stderr, for the text paths.
+
+    Every `--format json` path in this module gets the pair for free from
+    `Envelope.__init__`'s central seam. NO text path does -- neither
+    `_run_text` (which hands stdio to the child) nor `_refuse_required`'s
+    refusal (which never builds an envelope at all) reaches `Envelope`. Both
+    call this instead of open-coding the loop, so a third text path cannot
+    be added that discloses in JSON and stays silent on the screen: that is
+    precisely how `_refuse_required` shipped silent while `_run_text` did
+    not.
+    """
+    if sdk is None:
+        return
+    for issue in sdk_resolution_issues(
+        sdk.broken_project_pin, sdk.source_tier, sdk.foreign_global_default_for
+    ):
+        typer.echo(issue.message, err=True)
+
+
 def _run_text(plan: _Forward, sdk: SdkInfo | None) -> None:
     """Inherit stdio: the child streams its own progress and may prompt.
 
@@ -322,11 +342,7 @@ def _run_text(plan: _Forward, sdk: SdkInfo | None) -> None:
     is printed BEFORE the spawn -- once stdio is handed to the child, tan
     has no stream left of its own to write a warning to.
     """
-    if sdk is not None:
-        for issue in sdk_resolution_issues(
-            sdk.broken_project_pin, sdk.source_tier, sdk.foreign_global_default_for
-        ):
-            typer.echo(issue.message, err=True)
+    _echo_sdk_resolution(sdk)
     try:
         result = subprocess.run(plan.full_argv, cwd=plan.run_cwd, env=plan.env, check=False)
     except OSError as err:
@@ -389,6 +405,11 @@ def _refuse_required(
             )
         )
     else:
+        # tan-cli#478 (PR #504 review): this branch printed the refusal ALONE
+        # while the JSON branch above disclosed the SDK-resolution pair -- and
+        # a bare `tan quality` / `tan migrate` lands here, having resolved the
+        # checkout `_plan` would have run `west` out of. Order as `_run_text`.
+        _echo_sdk_resolution(context.sdk)
         typer.echo(f"{subcommand}: {message}", err=True)
     raise typer.Exit(int(ExitCode.VALIDATION_FAILURE))
 
