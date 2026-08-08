@@ -420,7 +420,14 @@ def test_macos_reads_its_own_prerequisites_list_not_posixs(tmp_path, monkeypatch
     on a host `tan bootstrap` accepts.
     """
     monkeypatch.setattr(doctor_cmd.sys, "platform", "darwin")
-    monkeypatch.setattr(doctor_cmd.os, "name", "posix")
+    # `_FixedOsName` (not a bare `os.name` mutation) -- mutating the real,
+    # process-wide `os` module makes `pathlib.Path.__new__` re-pick
+    # `PosixPath` on every call anywhere in the process, including `_collect`'s
+    # own `Path(sdk_root)` -- and `PosixPath` cannot be instantiated on
+    # Windows at all (`NotImplementedError`), which reddened this test on the
+    # `windows-latest` CI leg even though the property under test is
+    # platform-independent. See `_FixedOsName`'s docstring below.
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
     _write_bootstrap_json(
         tmp_path,
         {
@@ -449,7 +456,9 @@ def test_macos_falls_back_to_posix_when_the_manifest_declares_no_macos_list(
     entirely) must still read `posix` on macOS -- the behaviour every SDK had
     before that release, not a refusal."""
     monkeypatch.setattr(doctor_cmd.sys, "platform", "darwin")
-    monkeypatch.setattr(doctor_cmd.os, "name", "posix")
+    # See the comment in `test_macos_reads_its_own_prerequisites_list_not_posixs`
+    # -- `_FixedOsName`, never a bare `os.name` mutation.
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
     _write_bootstrap_json(
         tmp_path,
         {
