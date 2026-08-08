@@ -55,11 +55,59 @@ _NO_TOOLCHAIN_ADVICE = (
 )
 
 
+def _is_own_git_checkout(sdk_root: Path) -> bool:
+    """Whether `sdk_root` is itself the TOP of a git checkout, not merely
+    nested somewhere inside an unrelated ENCLOSING one (tan-cli#488 defect 4,
+    mirroring `doctor_cmd._is_own_git_checkout` -- the SAME defect, the SAME
+    fix, duplicated here rather than imported because this is the second of
+    the two sites the issue names, not a shared library call).
+
+    `git -C <root> ...` discovery walks UPWARD looking for a `.git`, so an SDK
+    with no `.git` of its own -- an extracted release archive vendored under a
+    customer's own application repository, a setup this port explicitly
+    supports (`sdk_cmd.check_sdk_readiness`'s own docstring names exactly this
+    shape) -- answers every git query with the ENCLOSING repo's state instead
+    of "not a checkout". `git_short_head` below calls this first and returns
+    no signal (`""`) rather than misattributing a foreign repository's HEAD as
+    the SDK's own -- which, left unguarded, both stamps a build plan's
+    `sdkCommit` with the wrong provenance and lets `sdk_commit_mismatches` fire
+    a false split-brain refusal (or miss a real one) keyed off the enclosing
+    app repo's commit instead of the SDK's.
+
+    Compares the RESOLVED `--show-toplevel` against the RESOLVED `sdk_root`:
+    lexical string comparison alone would false-negative on a symlinked or
+    differently-cased path to the same directory.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(sdk_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if out.returncode != 0:
+        return False
+    top = out.stdout.strip()
+    if not top:
+        return False
+    try:
+        return Path(top).resolve() == Path(sdk_root).resolve()
+    except OSError:
+        return False
+
+
 def git_short_head(sdk_root: Path) -> str:
     """`git rev-parse --short HEAD`. Empty string when git is missing, the
-    checkout has no `.git`, or the command otherwise fails -- all NO SIGNAL,
-    never a hard failure: an SDK checkout with no `.git` (a release tarball)
-    is a normal, supported setup."""
+    checkout has no `.git` OF ITS OWN (see `_is_own_git_checkout` --
+    tan-cli#488 defect 4), or the command otherwise fails -- all NO SIGNAL,
+    never a hard failure: an SDK checkout with no `.git` (a release tarball,
+    including one vendored inside a customer's own git repository) is a
+    normal, supported setup."""
+    if not _is_own_git_checkout(sdk_root):
+        return ""
     try:
         out = subprocess.run(
             ["git", "-C", str(sdk_root), "rev-parse", "--short", "HEAD"],

@@ -106,3 +106,58 @@ def test_stdout_tty_ness_is_deliberately_not_consulted(monkeypatch, ttys):
     assert can_prompt(non_interactive=False, ci=False, json_mode=False) is True
     monkeypatch.setattr(sys, "stdout", _FakeStream(True))
     assert can_prompt(non_interactive=False, ci=False, json_mode=False) is True
+
+
+def test_a_none_stdin_withholds_consent_without_raising(monkeypatch):
+    """tan-cli#488: `sys.stdin` itself -- not just the truth-table's
+    `_FakeStream(tty=False)` -- can be `None` (a process launched with its
+    standard handles detached: a GUI launcher, a `pythonw`-style spawn, or a
+    shell that closed fd 0 before exec, `0<&-`). Every case above patches
+    `sys.stdin` to a stub that always HAS an `.isatty()` method, so none of
+    them can catch a bare `sys.stdin.isatty()` regressing -- this is the one
+    test that binds `sys.stdin` to `None` itself and asserts `can_prompt`
+    answers `False`, not `AttributeError: 'NoneType' object has no attribute
+    'isatty'`."""
+    monkeypatch.setattr(sys, "stdin", None)
+    monkeypatch.setattr(sys, "stderr", _FakeStream(True))
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False
+
+
+def test_a_none_stderr_withholds_consent_without_raising(monkeypatch):
+    """tan-cli#488 round 5: the guard added for `sys.stdin` above landed on
+    ONLY that operand, leaving `sys.stderr` -- the very next operand of the
+    identical `and` chain in `can_prompt` -- to crash on the exact same
+    detached-process shape. Each std handle is detached independently by
+    whatever spawned the process (a GUI launcher may leave stdin redirected
+    to a real file while stderr alone is unbound), so `sys.stdin is not
+    None` does not imply `sys.stderr is not None`. Verified for real, not
+    just here: `python/scripts` has no repro harness for a genuine detached
+    tty, but a `pty.fork()` child with a real tty on stdin and stderr closed
+    before `exec` reproduces `tan doctor --fix` crashing with
+    `AttributeError: 'NoneType' object has no attribute 'isatty'` against the
+    unfixed code -- this test binds the same condition directly."""
+    monkeypatch.setattr(sys, "stdin", _FakeStream(True))
+    monkeypatch.setattr(sys, "stderr", None)
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False
+
+
+def test_a_stderr_with_no_isatty_method_withholds_consent_without_raising(monkeypatch):
+    """tan-cli#488 round 6: the `is not None` guards above only cover a
+    *detached* (`None`) handle -- not a handle that EXISTS and simply lacks
+    `.isatty()`, which is exactly what `sys.stderr` becomes under `--format
+    json` (`tan.cli.main`'s `_TeeStderr`: `write`/`flush`/`getvalue` only).
+    `can_prompt`'s own `not json_mode` operand happens to short-circuit
+    ahead of this today (`_TeeStderr` is only ever installed when
+    `json_mode` is `True`), so this exact function was never observed to
+    crash on it in practice -- but the sibling copy in
+    `build_cmd._dispatch` had no such guard in front of it and DID crash on
+    a real `tan run --format json` (see `test_build_streaming.py`'s
+    matching regression). This test binds the shape directly rather than
+    relying on the incidental short-circuit to keep protecting it."""
+
+    class _NoIsatty:
+        pass
+
+    monkeypatch.setattr(sys, "stdin", _FakeStream(True))
+    monkeypatch.setattr(sys, "stderr", _NoIsatty())
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False

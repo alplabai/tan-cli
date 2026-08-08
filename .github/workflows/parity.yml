@@ -184,10 +184,10 @@ env:
   #   `tests/parity/bootstrap_manifest_parity.py` itself survives as a
   #   manual diagnostic tool (see its module doc), not run in CI.
   #
-  # HELD at f4d87a1f (tan-cli#425). The pin IS 7 contract-surface commits
-  # behind alp-sdk dev and the freshness warning is correct -- but bumping it
-  # to `2bc6b400` was tried and REVERTED: it reds 77 SDK-bound tests on all
-  # three OS legs, e.g.
+  # HELD at f4d87a1f from tan-cli#425 through tan-cli#485 (moved again below,
+  # to `53557a60`, in #485's own fix). The `2bc6b400` bump #425 tried and
+  # REVERTED stays recorded here as the precedent the #485 bump was checked
+  # against: it reds 77 SDK-bound tests on all three OS legs, e.g.
   #
   #   test_planner_emit_parity.py::test_the_breadth_layer_still_covers_every_board
   #     AssertionError: only 2194 artefacts were compared byte for byte
@@ -229,7 +229,30 @@ env:
   # Windows host this time -- none of the vendored templates' SDK inputs
   # changed in this range, so the Windows-only limitation this comment
   # elsewhere notes did not block the check for THIS bump specifically).
-  PINNED_SDK_TAG: f4d87a1f472dffe9fe7dffc247cc55bce71034ba
+  #
+  # f4d87a1f -> 53557a60 (tan-cli#485, #320 recurred): this is #485's own
+  # suggested step 1, and NOT the same trap #425 hit bumping toward
+  # `2bc6b400` -- that bump broke the emit-parity breadth-layer artefact-count
+  # floor (`>= 2900`); this one does not (measured: 766 passed / 1 failed / 8
+  # skipped against `python/tests/parity/test_planner_emit_parity.py`'s whole
+  # module at `53557a60`, well clear of the floor -- the one failure is
+  # `test_an_unresolvable_board_preset_is_a_coded_envelope`, a pre-existing
+  # fixture defect this same tan-cli#485 change surfaces and fixes in the same
+  # diff, unrelated to this pin). Left at `f4d87a1f`, `python-tests` and this
+  # job's own steps are ref-independent-red on every PR and push instead of
+  # just the dispatch-tested ref: alp-sdk `53557a60` (the SAME commit
+  # `PINNED_SDK_COMMIT` above now targets) is also where alp-sdk dropped
+  # `cacheable: true` from `examples/multicore/rpmsg-aen/board.yaml` -- the
+  # exact field this tan-cli#485 change's `loader.py` refusal now rejects.
+  # Bound to the OLD `f4d87a1f`, tan correctly refuses alp-sdk's OWN fixture
+  # (which at that ref still carries the flag `53557a60` deleted), a 31-test
+  # failure with nothing wrong on either side, just two repos measured a
+  # half-step apart. `ci.yml`'s `sdk_parity` checkout re-pinned to the same
+  # `53557a60` in the matching tan-cli commit, for the same reason -- the two
+  # MUST agree (see that file's comment) -- and the CI-wired byte-parity gate
+  # SCRIPTS (kconfig-fixture, toolchain-lock, scaffold) were re-verified PASS
+  # against `53557a60` locally before this bump too.
+  PINNED_SDK_TAG: 53557a6030c4f90a5525d29c142190e7e91f2bbb
 
 jobs:
   seam1-plan-shape:
@@ -518,6 +541,36 @@ jobs:
           ref: ${{ steps.hand_port_audit.outputs.commit }}
           path: alp-sdk-hand-port-audit
 
+      # tan-cli#485: a THIRD pin, STRICT_LOADERS_PINNED_SDK_COMMIT, for
+      # `strict_loaders.py` alone -- see the gate file's own STRICT_LOADERS_*
+      # comment for why it could not join HAND_PORT_HASHES (that bundle's
+      # other three files carry unrelated, unaudited drift including alp-sdk
+      # #1069's dual-M55 boot memory layout; folding strict_loaders.py in
+      # would force re-freezing HAND_PORT_HASHES past that unaudited, or
+      # porting an unrelated hardware-sensitive feature as a drive-by).
+      - name: resolve strict-loaders audit commit (from the gate's own pin)
+        id: strict_loaders_audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          gate=python/tests/gates/test_planner_relocation_freshness.py
+          commit=$(grep -oE '^STRICT_LOADERS_PINNED_SDK_COMMIT = "[0-9a-f]{40}"' "$gate" \
+              | grep -oE '[0-9a-f]{40}')
+          n=$(printf '%s\n' "$commit" | grep -c .)
+          if [ "$n" -ne 1 ]; then
+            echo "::error::expected exactly ONE ^STRICT_LOADERS_PINNED_SDK_COMMIT in ${gate}, found ${n}: ${commit}"
+            exit 1
+          fi
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "::notice::strict-loaders-relocation-freshness audited against alp-sdk ${commit}"
+
+      - name: clone alp-sdk at the strict-loaders audit commit
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.strict_loaders_audit.outputs.commit }}
+          path: alp-sdk-strict-loaders-audit
+
       # `python/tests/gates/` (dependency-declaration, frozen issue-codes,
       # hardware-facts allowlist, planner-relocation self-consistency) does not
       # run in ANY CI workflow today. The freshness gate in particular
@@ -557,8 +610,9 @@ jobs:
       # Deliberately NOT the full `python/tests` suite here (ports + parity,
       # minutes not seconds, needs its own alp-sdk checkout) -- that now runs
       # in the `python-tests` job further down this file, which deliberately
-      # `--ignore=tests/gates`: this JOB already arms all five gate files (8
-      # collected tests) across the three steps below -- four of them in this
+      # `--ignore=tests/gates`: this JOB already arms all five gate files (9
+      # collected tests, tan-cli#485 added the STRICT_LOADERS_* one) across the
+      # three steps below -- five of them in this
       # step against the FROZEN audit commit(s), `test_jlink_aen_device_freshness`
       # live and blocking in its own step, and `test_planner_relocation_freshness`
       # additionally live and warn-only on `repository_dispatch`. Each is bound
@@ -573,6 +627,7 @@ jobs:
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk-planner-audit
           ALP_SDK_HAND_PORT_ROOT: ${{ github.workspace }}/alp-sdk-hand-port-audit
+          ALP_SDK_STRICT_LOADERS_ROOT: ${{ github.workspace }}/alp-sdk-strict-loaders-audit
         run: |
           set -euo pipefail
           python3 -m pytest tests/gates -v --deselect tests/gates/test_jlink_aen_device_freshness.py | tee /tmp/gates.log
@@ -591,9 +646,10 @@ jobs:
           # see that test's own comment for why the enforcement belongs here,
           # not there).
           for t in test_relocated_planner_modules_match_the_pinned_sdk_audit \
-                   test_hand_ported_planner_modules_match_their_pinned_sdk_source; do
+                   test_hand_ported_planner_modules_match_their_pinned_sdk_source \
+                   test_strict_loaders_matches_its_pinned_sdk_source; do
             if ! grep -qF "test_planner_relocation_freshness.py::${t} PASSED" /tmp/gates.log; then
-              echo "::error::${t} did not PASS in this job -- both ALP_SDK_ROOT and ALP_SDK_HAND_PORT_ROOT are bound here, so a SKIP means the oracle checkout this job cloned did not resolve (or the test regressed to fail-open), not an absent root."
+              echo "::error::${t} did not PASS in this job -- ALP_SDK_ROOT, ALP_SDK_HAND_PORT_ROOT and ALP_SDK_STRICT_LOADERS_ROOT are all bound here, so a SKIP means the oracle checkout this job cloned did not resolve (or the test regressed to fail-open), not an absent root."
               exit 1
             fi
           done
@@ -1366,3 +1422,98 @@ jobs:
             exit 1
           fi
           python -m pytest -q --ignore=tests/gates
+
+  # tan-cli#485 (#320 recurred): the ONE signal that actually catches
+  # tan/planner/ drift -- this `python-tests` job, dispatched by an alp-sdk
+  # push and bound to the ref that just landed rather than PINNED_SDK_TAG --
+  # was red on SIX CONSECUTIVE alp-sdk pushes before #485 was filed, and
+  # nothing acted on any of them: a `repository_dispatch` run has no PR to
+  # post a red X on, so the failure sat in the Actions tab unseen. #485's own
+  # framing: "the pin bump that closed #320 held two days" -- because the
+  # warn-only pin-freshness step (seam1, below) had already said the pin was
+  # stale, and nobody was looking. This job turns the ALREADY-RED signal into
+  # something a human is notified about, without touching that step's
+  # deliberately-warn-only design (parity.yml's own comment above it argues
+  # that rationale is sound, and #485 does not propose changing it -- the
+  # open question of whether the WARNING itself should become blocking is
+  # #509's decision to make, not this job's).
+  #
+  # Deliberately narrow: files or refreshes ONE tracking issue (never a new
+  # one per failing push -- six failures should read as one incident, not
+  # six), only on `repository_dispatch` (a `pull_request`/`push` failure
+  # already has a natural PR/commit to notice it on), and only turns
+  # green->red edges and red->red repeats into a comment -- it does not
+  # relabel, close, or otherwise manage the issue's lifecycle, which stays a
+  # human decision.
+  notify-planner-drift:
+    name: "file/refresh a tracking issue when the dispatched suite is red"
+    needs: python-tests
+    if: always() && github.event_name == 'repository_dispatch' && needs.python-tests.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: file or refresh the tan/planner drift issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_REF: ${{ github.event.client_payload.sdk_ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="tan/planner drift: the dispatched parity suite is red against alp-sdk"
+          # A fixed, grep-able marker rather than matching on the free-text
+          # title -- title wording can be edited by a maintainer without
+          # breaking de-dup.
+          marker="<!-- tan-cli-planner-drift-tracker -->"
+          body=$(cat <<EOF
+          $marker
+
+          The \`python-tests\` job (\`python -- pytest across python/\`) failed on a
+          \`repository_dispatch\` run triggered by an alp-sdk push -- this run tests
+          \`tan/planner/\` against the ref alp-sdk just pushed
+          (\`${SDK_REF:-<unknown, see run>}\`), not the pinned
+          \`PINNED_SDK_TAG\`/\`PINNED_SDK_COMMIT\` this repo's own PRs are measured
+          against. That distinction is the point: a \`pull_request\` run staying
+          green here proves nothing about whether \`tan/planner/\` still matches
+          alp-sdk's current \`scripts/alp_orchestrate/\` -- only this job does.
+
+          Run: ${RUN_URL}
+
+          Next step: diff \`scripts/alp_orchestrate/\` between
+          \`python/tests/gates/test_planner_relocation_freshness.py\`'s
+          \`PINNED_SDK_COMMIT\` and the ref above, port the behavioural delta into
+          \`tan/planner/\`, add a test that fails against the unported code, then
+          re-pin \`PINNED_HASHES\`/\`PINNED_SDK_COMMIT\` (see tan-cli#485 for the
+          worked example). A bump with no matching port re-freezes the hashes and
+          buys about two days (#320's own history).
+
+          This issue is filed/refreshed automatically by \`parity.yml\`'s
+          \`notify-planner-drift\` job; it does not self-close on a green run --
+          close it by hand once the port lands.
+          EOF
+          )
+          # NOT `gh issue list --search "... in:body"`: GitHub's search
+          # tokenizes on hyphens and ANDs the tokens, so a multi-word marker
+          # like this one is not an exact-phrase match -- measured live,
+          # `--search "alp-sdk-planner-change in:body"` returned 5 issues
+          # (only one of which actually contains that string), because
+          # "alp", "sdk", "planner" and "change" each independently appear
+          # across several unrelated open issues and GitHub ANDs the token
+          # set, not the phrase. `.[0].number` on that result comments on
+          # whichever issue happens to sort first, forever, silently
+          # de-duping against the wrong issue. Server-side filter on the
+          # LABEL set this job itself creates the issue with -- exact match,
+          # no tokenizing -- to keep the candidate list small, then filter
+          # CLIENT-SIDE on the literal marker string for the exact match.
+          existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+              --label bug,ci,python-port --json number,body \
+              --jq '[.[] | select(.body | contains("tan-cli-planner-drift-tracker"))][0].number' \
+              || true)
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+            echo "::notice::updated existing drift-tracking issue #${existing}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" \
+                --body "${body}" --label bug,ci,python-port
+            echo "::notice::filed a new drift-tracking issue"
+          fi

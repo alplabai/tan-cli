@@ -18,8 +18,10 @@ device, and the Flow D cases all stop at a refusal or a confirm-gated no-op.
 """
 import json
 import os
+import stat
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -304,6 +306,150 @@ boot_order: []
     assert codes(payload) == ["flash.slice-skipped", "flash.nothing-flashed"]
     assert payload["data"]["entries"] == []
 
+
+# ── tan-cli#487 defect 7: an entry-level skip must not be diagnosed as
+# "nothing matched the requested filters" ───────────────────────────────────
+#
+# `_flash_entry` can legitimately skip a target it DID dispatch to (an
+# unresolved `TBD` flash_arg, no flash_method, or a missing tool under
+# `--skip-missing-tools`) and correctly reports the real reason on that one
+# entry (`entries[0].status == "skipped"`, `rc == -1`, a specific message).
+# The aggregate "did anything flash" check used to know only about the
+# PLANNER's own skip buckets (`plan.refused`/`plan.refused_skipped`), which an
+# entry-level skip never populates -- so on a run with NO `--core`/`--helper`
+# filter at all it fell through to `flash.nothing-matched`, contradicting
+# that very message on a manifest that genuinely matched a target.
+#
+# The shipped Rust oracle carries the SAME misdiagnosis (verified by running
+# it: `flash.nothing-matched`, `exitCode 0`, on all five shapes below), which
+# is why none of these five cases appear in
+# `tests/parity/test_flash_oracle_parity.py` any more -- the maintainer
+# authorised a deliberate divergence from that frozen answer for exactly this
+# shape (see that file's own divergence note beside `helper-no-flash-method`).
+# Do NOT "restore parity" by moving these back.
+#
+# `ok`/exit code are DELIBERATELY unchanged here -- still SUCCESS, the same
+# pinned contract `test_tbd_sentinel_never_reaches_a_flasher` above asserts.
+# Only the issue code and message were wrong, and only those are fixed.
+
+_HELPER_487 = """schema_version: 1
+hw_info: {{sku: E1M-AEN801}}
+slices: []
+helper_mcus:
+- {{name: h1, chip: cc3501e, firmware_path: fw.bin, flash_method: {method},
+   flash_args: {args}}}
+boot_order: []
+"""
+
+
+def _h487(method, args="{}"):
+    return _HELPER_487.format(method=method, args=args)
+
+
+@pytest.mark.parametrize(
+    "manifest,expected_message_fragment",
+    [
+        pytest.param(_h487('""'), "has no flash_method", id="helper-no-flash-method"),
+        pytest.param(
+            """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: cc3501e_otp, chip: cc3501e, firmware_path: fw.bin,
+   update_channel: alp_ota_spi_otp}
+boot_order: []
+""",
+            "is Alp-OTA-updated",
+            id="helper-update-channel-is-not-a-flash-target",
+        ),
+        pytest.param(
+            _h487("swd_probe", "{mode: TBD, device: TBD}"),
+            "unresolved 'TBD' flash_arg",
+            id="flash-args-tbd-mapping",
+        ),
+        pytest.param(
+            _h487("swd_probe", "TBD"),
+            "unresolved 'TBD' flash_arg",
+            id="flash-args-tbd-bare-string",
+        ),
+    ],
+)
+def test_an_entry_level_skip_is_diagnosed_as_such_not_as_a_filter_miss(
+    tmp_path, manifest, expected_message_fragment
+):
+    """Four of the five #487 defect-7 shapes: a manifest with exactly ONE
+    helper, no `--core`/`--helper` filter, that helper skips inside
+    `_flash_entry`. Must report `flash.entries-skipped`, never
+    `flash.nothing-matched` -- and the per-entry `entries[0]` must still carry
+    the real, specific reason, unchanged by this fix."""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    assert payload["ok"] is True, payload
+    assert len(payload["data"]["entries"]) == 1, payload
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "skipped", payload
+    assert entry["rc"] == -1, payload
+    assert expected_message_fragment in entry["message"], payload
+    assert codes(payload) == ["flash.entries-skipped"], payload
+    issue = payload["issues"][0]
+    assert issue["severity"] == "warning", payload
+    assert issue["message"] == (
+        "flash: every matched target was skipped before dispatch; nothing "
+        "was flashed. See entries[] for why each one was skipped."
+    ), payload
+    # The old, wrong diagnosis must not reappear alongside the fix.
+    assert "nothing matched the requested filters" not in issue["message"], payload
+
+
+def test_a_missing_tool_skip_under_the_flag_is_also_an_entry_skip(tmp_path):
+    """The fifth #487 defect-7 shape: `--skip-missing-tools` turns the
+    required-tool gate's refusal into an entry-level `rc=-1` skip
+    (`missing-tool-skips-with-flag` in the retired parity case), which hit the
+    identical misdiagnosis -- and must be fixed the identical way."""
+    empty_bin = tmp_path / "no-tools"
+    empty_bin.mkdir()
+    exit_code, out, _ = run_flash(
+        tmp_path,
+        "--format", "json", "--skip-missing-tools",
+        env={"PATH": str(empty_bin)},
+        manifest=OK_SLICE,
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    assert payload["ok"] is True, payload
+    assert len(payload["data"]["entries"]) == 1, payload
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "skipped", payload
+    assert entry["rc"] == -1, payload
+    assert "none found" in entry["message"], payload
+    assert "(skipped via --skip-missing-tools)" in entry["message"], payload
+    assert codes(payload) == ["flash.entries-skipped"], payload
+    assert payload["issues"][0]["severity"] == "warning", payload
+    assert "nothing matched the requested filters" not in payload["issues"][0]["message"], payload
+
+
+def test_an_entry_level_skip_beside_a_real_refusal_still_fails_the_run(tmp_path):
+    """A genuine refusal (`status: failed`) alongside an entry-level skip must
+    still fail the run -- the defect-7 fix must not swallow a real failure
+    just because it sits beside an unrelated skip. `plan.refused` is
+    non-empty here, so neither the new `flash.entries-skipped` branch nor the
+    old `flash.nothing-matched` one fires -- only the pre-existing
+    `flash.slice-not-built` refusal, unchanged."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: a.elf, status: failed,
+   flash_method: swd_probe}
+helper_mcus:
+- {name: h1, chip: x, firmware_path: f.bin}
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1, payload
+    assert payload["ok"] is False, payload
+    assert codes(payload) == ["flash.slice-not-built"], payload
 
 
 _AEN_M55_COLLISION_MANIFEST = """schema_version: 1
@@ -656,6 +802,285 @@ def test_a_tool_that_does_not_exist_is_a_failed_spawn_not_a_traceback():
     assert "could not spawn" in outcome.stderr
 
 
+# ── text mode TEES the transcript too (tan-cli#522 review, MAJOR 1) ────────
+
+
+def test_spawn_text_mode_tees_the_transcript_for_the_qualification_to_read():
+    """`_spawn`'s live-console branch used to hand the child's stdout fd
+    straight to the OS (`subprocess.run(stdout=sink)`) and never redirect
+    stderr at all -- `outcome.stdout`/`.stderr` stayed `""` regardless of
+    what the child said, so `_flow_d_reset_qualified_message` (tan-cli#522)
+    had no transcript to qualify against outside `--format json`. The
+    live-console branch now TEES both streams via `_Tee`: still streamed to
+    the console live, but also collected into the `_Outcome`. Fails against
+    the pre-fix source (measured: `outcome.stdout == outcome.stderr == ""`
+    here even though the child printed both markers)."""
+    from tan.commands.flash_cmd import _spawn
+
+    argv = _stub(
+        "import sys; "
+        "print('****** Error: Failed to halt CPU'); "
+        "print('CPU is not halted', file=sys.stderr)"
+    )
+    outcome = _spawn(argv, capture=False, timeout=5.0)
+    assert outcome.success is True
+    assert "Failed to halt CPU" in outcome.stdout, outcome
+    assert "CPU is not halted" in outcome.stderr, outcome
+
+
+def test_spawn_text_mode_timeout_still_folds_in_the_teed_output_before_the_kill():
+    """The timeout sibling of the test above: `Popen.wait`'s own
+    `TimeoutExpired` carries no output at all (unlike `subprocess.run
+    (capture_output=True)`'s), so `_spawn` builds one BY HAND from what the
+    tees had already collected before the kill -- the same
+    `before-the-kill` guarantee tan-cli#487 gave the JSON-mode/wrapped-
+    console branches, now true on the live-console branch too."""
+    from tan.commands.flash_cmd import _spawn
+
+    argv = _stub(
+        "import sys, time; print('before-the-kill'); sys.stdout.flush(); time.sleep(30)"
+    )
+    outcome = _spawn(argv, capture=False, timeout=1.0)
+    assert outcome.success is False
+    assert "before-the-kill" in outcome.stderr
+    assert "timed out after 1s and was killed" in outcome.stderr
+
+
+# ── _Tee round 3 (tan-cli#519/#522 review round 3): bounded join + live read ─
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="`sh -c '... &'` is a POSIX shell shape")
+def test_spawn_returns_promptly_when_the_child_leaves_an_orphaned_pipe_holder():
+    """BLOCKER: `_Tee.text()` used to `.join()` its background reader thread
+    with NO timeout, so anything still holding the child's stdout/stderr
+    pipe open after the DIRECT child exits -- a backgrounded grandchild, say
+    `sleep 20 &` inside a shell script -- blocked the join, and therefore
+    `_spawn`, indefinitely: `proc.wait()` returns on schedule (the direct
+    child is gone) but `out_tee.text()`/`err_tee.text()` afterwards do not,
+    because the read loop on the pipe never sees EOF until the ORPHAN also
+    exits. Measured against the pre-round-3 source: `sh -c 'sleep 20 & echo
+    done; exit 0'` under `_spawn(..., timeout=3)` took 20.00s to return, not
+    ~0s the way `origin/dev`'s OS-level fd redirect did. Bounded here well
+    under that -- `join`'s default timeout is now `_DRAIN_JOIN_S` (2s)."""
+    import time
+
+    from tan.commands.flash_cmd import _spawn
+
+    started = time.monotonic()
+    outcome = _spawn(["sh", "-c", "sleep 20 & echo done; exit 0"], capture=False, timeout=3.0)
+    elapsed = time.monotonic() - started
+    assert outcome.success is True
+    assert elapsed < 10.0, elapsed
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="`sh -c '... &'` is a POSIX shell shape")
+def test_spawn_timeout_path_returns_promptly_despite_an_orphaned_pipe_holder():
+    """The TIMEOUT-path sibling of the test above: `proc.kill()` reaps only
+    the DIRECT child, so a grandchild it left running (`sleep 20 &`) still
+    holds the pipe open after the kill too -- the exact shape that made the
+    `except subprocess.TimeoutExpired` handler's `out_tee.text()`/
+    `err_tee.text()` calls hang past `_spawn`'s own timeout entirely on the
+    pre-round-3 source (measured: `sh -c 'sleep 20 & sleep 30'` under
+    `_spawn(..., timeout=2)` NEVER RETURNED, killed only by an outer test
+    harness timeout). Bounded here the same way."""
+    import time
+
+    from tan.commands.flash_cmd import _spawn
+
+    started = time.monotonic()
+    outcome = _spawn(["sh", "-c", "sleep 20 & sleep 30"], capture=False, timeout=2.0)
+    elapsed = time.monotonic() - started
+    assert outcome.success is False
+    assert "timed out" in outcome.stderr
+    assert elapsed < 10.0, elapsed
+
+
+def test_tee_forwards_each_read1_chunk_immediately_not_buffered_to_a_char_count():
+    """MAJOR 1: the first `_Tee` read a TEXT-mode stream via `.read(4096)`,
+    which blocks until 4096 CHARACTERS are decoded or EOF -- not live.
+    `_Tee` now reads a BINARY stream via `.read1(n)`, which returns whatever
+    the OS has ready, however small, and forwards each `read1()` result to
+    the sink as ITS OWN chunk -- proven here with a fake stream that never
+    returns anywhere close to a full chunk: three separate `read1()` results
+    must arrive as three separate accumulated chunks, not one chunk that
+    only appears after all three were buffered up together first. Fails
+    against the pre-round-3 source (a `TextIOWrapper`-shaped `.read(4096)`
+    loop has no `read1` counterpart to call at all -- this test exercises
+    the class's actual read primitive, not merely its net output)."""
+    import io
+
+    from tan.commands.flash_cmd import _Tee
+
+    class _FakeBinaryStream:
+        def __init__(self, chunks):
+            self._chunks = [*chunks, b""]
+
+        def read1(self, _n):
+            return self._chunks.pop(0)
+
+    stream = _FakeBinaryStream([b"a", b"b", b"c"])
+    sink = io.StringIO()
+    tee = _Tee(stream, sink)
+    assert tee.text() == "abc"
+    assert tee._chunks == ["a", "b", "c"]
+
+
+def test_tee_sink_write_failure_only_drops_console_display_not_the_transcript():
+    """MINOR: `except (OSError, ValueError): pass` around the sink write also
+    caught `UnicodeEncodeError` (a `ValueError` subclass) -- raised when the
+    sink's own narrower encoding cannot represent a character the decoder
+    correctly produced -- and silently discarded the WHOLE chunk, including
+    any clean lines it shared. The transcript (`.text()`) must still collect
+    everything regardless of what the console sink can display."""
+    import io
+
+    from tan.commands.flash_cmd import _Tee
+
+    class _FakeBinaryStream:
+        def __init__(self, chunks):
+            self._chunks = [*chunks, b""]
+
+        def read1(self, _n):
+            return self._chunks.pop(0)
+
+    class _AsciiOnlySink:
+        encoding = "ascii"
+
+        def __init__(self):
+            self.written = []
+
+        def write(self, text: str) -> None:
+            self.written.append(text.encode(self.encoding))  # raises on non-ASCII
+
+        def flush(self) -> None:
+            pass
+
+    stream = _FakeBinaryStream(["clean line\n".encode(), "café\n".encode()])
+    sink = _AsciiOnlySink()
+    tee = _Tee(stream, sink)
+    assert tee.text() == "clean line\ncafé\n"
+
+
+def test_tee_decodes_a_multibyte_utf8_sequence_split_across_a_read1_boundary():
+    """tan-cli#519/#522 review, MINOR 2: `_Tee`'s own docstring promises a
+    multi-byte UTF-8 sequence split across two `read1` calls is "never
+    corrupted or double-counted" -- `codecs.getincrementaldecoder`, not a
+    naive per-chunk `bytes.decode()`. Nothing pinned that: the only decoder
+    test before this one feeds single-byte ASCII chunks (`b"a"`/`b"b"`/
+    `b"c"`), which pass identically under a naive per-chunk decode too, so a
+    regression from the incremental decoder back to a plain `.decode()` per
+    `read1()` result would ship green. Here U+20AC (`€`, 3 UTF-8 bytes) is
+    split 1/2 across the chunk boundary -- confirmed to FAIL against a naive
+    per-chunk decode (`b"A\\xe2".decode("utf-8")` alone raises
+    `UnicodeDecodeError`, measured)."""
+    import io
+
+    from tan.commands.flash_cmd import _Tee
+
+    class _FakeBinaryStream:
+        def __init__(self, chunks):
+            self._chunks = [*chunks, b""]
+
+        def read1(self, _n):
+            return self._chunks.pop(0)
+
+    stream = _FakeBinaryStream([b"A\xe2", b"\x82\xacB"])
+    sink = io.StringIO()
+    tee = _Tee(stream, sink)
+    assert tee.text() == "A€B"
+
+
+# ── `_execute_message` text-mode gate + the TimeoutExpired partial output ──
+# (tan-cli#487, defect 4)
+
+
+def test_execute_message_surfaces_a_tan_authored_diagnosis_in_text_mode():
+    """`_execute_message` used to gate on `outcome.captured`, true ONLY in
+    JSON mode -- so in text mode (the default human invocation of the one
+    command that writes hardware) a TAN-AUTHORED diagnosis (`_spawn`'s
+    timeout/spawn-fail messages, `_spawn_pipeline`'s `_timed_out_stderr`,
+    `_spawn_jlink`'s could-not-write message -- all four populate `outcome.
+    stderr` regardless of mode) was composed and then discarded, reported as
+    a bare `flash command failed`. Fails against the pre-fix source
+    (measured: the message is the bare fallback, `outcome.stderr` unused)."""
+    from tan.commands.flash_cmd import _Outcome, _execute_message
+
+    outcome = _Outcome(
+        success=False, stderr="timed out after 900s and was killed",
+        returncode=-1, captured=False,
+    )
+    message = _execute_message(outcome, "yocto_wic", "a55")
+    assert message == "yocto_wic[a55]: timed out after 900s and was killed"
+
+
+def test_execute_message_text_mode_truly_silent_failure_still_falls_back():
+    """The narrow case that survives (tan-cli#519/#522 review, MAJOR 1): a
+    child that genuinely printed NOTHING on either stream leaves `outcome.
+    stdout`/`.stderr` both empty regardless of mode, so there is still
+    nothing for `_execute_message` to surface and it falls back to the
+    generic sentence. `_Outcome` built by hand here (not via `_spawn`) is
+    still a legitimate stand-in for this one case: a silent child's real
+    `_spawn` outcome has BOTH fields empty too, whichever branch handled it."""
+    from tan.commands.flash_cmd import _Outcome, _execute_message
+
+    outcome = _Outcome(success=False, returncode=1, captured=False)
+    assert _execute_message(outcome, "yocto_wic", "a55") == "yocto_wic[a55]: flash command failed"
+
+
+def test_execute_message_text_mode_now_surfaces_a_real_spawn_diagnosis():
+    """The case round 3's `_Tee`/capture-and-replay fix actually changed,
+    guarded here against a REAL `_spawn` outcome rather than a hand-built
+    `_Outcome` (tan-cli#519/#522 review, MAJOR 1): a text-mode child that
+    prints a diagnosis on stderr and then exits non-zero -- the ordinary
+    failure shape the old test above claimed was "unaffected" -- now has
+    that diagnosis in `outcome.stderr` (both of `_spawn`'s single-tool
+    branches capture the child's transcript in every mode now, not only
+    under `--format json`), so `_execute_message` surfaces it instead of the
+    bare `flash command failed` sentence. Fails against the pre-round-3
+    source (measured: `outcome.stderr` was `""` here, and this asserted the
+    bare fallback)."""
+    from tan.commands.flash_cmd import _execute_message, _spawn
+
+    outcome = _spawn(
+        [
+            sys.executable, "-c",
+            "import sys; print('Error: could not connect to target', file=sys.stderr); "
+            "sys.exit(3)",
+        ],
+        capture=False,
+        timeout=5.0,
+    )
+    assert outcome.stderr.strip() == "Error: could not connect to target"
+    message = _execute_message(outcome, "swd_probe", "e1")
+    assert message == "swd_probe[e1]: Error: could not connect to target"
+
+
+def test_spawn_timeout_folds_in_output_the_child_printed_before_the_kill():
+    """The wrapped-console half of defect 4: `subprocess.TimeoutExpired`
+    carries `.stdout`/`.stderr` from a `capture_output=True` spawn (both the
+    JSON-mode branch and the wrapped-console text-mode branch of `_spawn`
+    use one), which used to be discarded outright on a kill -- only the
+    generic sentence survived. A multi-GB write killed mid-transfer left the
+    operator no reason to suspect a truncated image on the card. Fails
+    against the pre-fix source (measured: `outcome.stderr` is exactly the
+    generic sentence, with `before-the-kill` absent)."""
+    from tan.commands.flash_cmd import _spawn
+
+    outcome = _spawn(
+        [
+            sys.executable, "-c",
+            "import sys, time; print('before-the-kill'); sys.stdout.flush(); time.sleep(30)",
+        ],
+        capture=True, timeout=1.0,
+    )
+    assert outcome.success is False
+    assert "before-the-kill" in outcome.stderr
+    assert "timed out after 1s and was killed" in outcome.stderr
+    # The sentence stays LAST so `_capture_tail`'s trailing-four-lines
+    # truncation keeps it, not an earlier line.
+    assert outcome.stderr.strip().splitlines()[-1] == "timed out after 1s and was killed"
+
+
 # ── _spawn_pipeline (tan-cli#401): the decompressor|dd pipeline verdict ─────
 #
 # `plan_yocto_wic` builds exactly `<decompressor> | dd of=<target> ...` for a
@@ -713,6 +1138,30 @@ def test_spawn_pipeline_both_stages_succeeding_is_a_clean_outcome():
     outcome = flash_cmd._spawn_pipeline(left, right, capture=True, timeout=10.0)
     assert outcome.success is True
     assert outcome.returncode == 0
+
+
+def test_spawn_pipeline_text_mode_ordinary_failure_leaves_the_outcome_and_message_empty():
+    """tan-cli#487 review finding 5: `_execute_message`'s own docstring
+    (`test_execute_message_text_mode_ordinary_stream_failure_is_unaffected`)
+    claims the ordinary text-mode failure leaves BOTH `outcome.stdout`/
+    `.stderr` empty -- true for the single-process `_spawn` path that test
+    covers, but NOT for `_spawn_pipeline` before this fix: neither half's
+    stderr is ever piped in text mode (`capture=False`), yet `_half_lines`
+    still emitted a body-less `"<program> exited rc=<n>:"` header for the
+    failing half, so `outcome.stderr` was non-empty and `_execute_message`
+    reported a dangling-colon header with no body instead of the generic
+    `flash command failed` sentence. Fails against the pre-fix source
+    (measured: `outcome.stderr == '<interpreter> exited rc=1:\\n'`, message
+    `'yocto_wic[a55]: <interpreter> exited rc=1:'`)."""
+    left = _stub("import sys; sys.stdout.write('data'); sys.exit(0)")
+    right = _stub("import sys; sys.stdin.buffer.read(); sys.exit(1)")
+    outcome = flash_cmd._spawn_pipeline(left, right, capture=False, timeout=10.0)
+    assert outcome.success is False
+    assert outcome.returncode == 1
+    assert outcome.stderr == ""
+    assert outcome.stdout == ""
+    message = flash_cmd._execute_message(outcome, "yocto_wic", "a55")
+    assert message == "yocto_wic[a55]: flash command failed"
 
 
 def test_spawn_pipeline_drains_more_than_one_pipe_buffer_without_hanging():
@@ -802,6 +1251,160 @@ def test_jlink_commander_script_leaves_an_unspaced_path_unquoted():
     assert '"' not in script
 
 
+# ── artefact/atoc path + jlink_serial guards (tan-cli#486) ─────────────────
+
+
+def test_jlink_commander_script_refuses_a_newline_embedded_in_the_artefact_path():
+    """`commander_path`'s conditional quoting (tan-cli#369) stops SEGGER's
+    whitespace tokeniser splitting a spaced path into two tokens -- it does
+    NOT stop an embedded newline from ending the quoted string's own
+    Commander LINE and starting a new, attacker-chosen one. Reproduced on the
+    real generator every `swd_probe` write calls."""
+    with pytest.raises(FlashPlanError):
+        flash_plan.jlink_commander_script("/build/zephyr.bin\nerase", "0x08000000", True)
+
+
+def test_jlink_commander_script_still_quotes_a_spaced_path_after_the_new_guard():
+    """tan-cli#486's new control-character guard must not turn a real spaced
+    Windows-style path into a refusal -- only a control character is
+    rejected; whitespace is left to `commander_path`'s existing conditional
+    quoting, unchanged from before this fix."""
+    script = flash_plan.jlink_commander_script(
+        "C:\\Program Files\\alp\\build\\zephyr.bin", "0x08000000", True
+    )
+    assert 'loadbin "C:\\Program Files\\alp\\build\\zephyr.bin", 0x08000000' in script
+
+
+def test_jlink_commander_script_refuses_an_embedded_double_quote():
+    """tan-cli#486 REVIEW, defect 3: a `"` inside an artefact defeats
+    `commander_path`'s own conditional quoting FROM THE INSIDE. Measured:
+    `/b/a" halt "z.bin` (a space AND a `"`) renders
+    `loadbin "/b/a" halt "z.bin", 0x8000` -- the embedded quote closes the
+    wrapper after `/b/a` and `halt` reads back as a bare Commander token
+    mid-line, exactly what `validate_commander_path`'s own docstring claims
+    quoting prevents ("controls tokenisation within a line"). `"` is a
+    reserved character in a Windows filename and vanishingly rare on POSIX,
+    so rejecting it costs a real path nothing."""
+    with pytest.raises(FlashPlanError):
+        flash_plan.jlink_commander_script('/b/a" halt "z.bin', "0x8000", True)
+
+
+def test_validate_commander_path_refuses_a_bare_double_quote_with_no_whitespace():
+    """The charset check itself, isolated from `commander_path`'s conditional
+    quoting: a `"` alone (no space, so `commander_path` would never even
+    consider quoting it) must still refuse -- the character is dangerous the
+    moment ANY sibling value on the same line legitimately needs quoting,
+    not only when this value itself has whitespace."""
+    with pytest.raises(FlashPlanError):
+        flash_plan.validate_commander_path('/build/a"b.bin', "the flash artefact path")
+
+
+def test_swd_probe_jlink_artefact_path_is_charset_guarded_against_a_newline():
+    """tan-cli#486, reproduced on `plan_swd_probe`'s real J-Link write path
+    (not just the pure `jlink_commander_script` generator): a hostile
+    `output_artefact`/`firmware_path` must refuse before a Commander script
+    is ever handed to `JLinkExe`."""
+    inp = FlashInputs(artefact="/build/zephyr.bin\nerase", flash_args={}, core_id="cm7", sku="S")
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+
+
+def test_swd_probe_openocd_artefact_path_is_guarded_against_tcl_substitution():
+    """tan-cli#486: OpenOCD 0.12's Jim Tcl has `exec`; an unescaped `[...]` in
+    the artefact triggers COMMAND SUBSTITUTION while the `-c program ...`
+    word is evaluated -- arbitrary host command execution as the user running
+    `tan flash`, reachable with no probe attached and even if the flash
+    itself would fail. `swd_probe` has no confirm gate, so this must refuse
+    at plan time."""
+    inp = FlashInputs(
+        artefact="/build/[exec calc].bin",
+        flash_args={"interface": "cmsis-dap", "target": "stm32h7x", "base": "0x00000000"},
+        core_id="cm7",
+        sku="S",
+    )
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+
+
+def test_swd_probe_openocd_artefact_path_guard_accepts_a_space():
+    """tan-cli#486 REVIEW: the metacharacter/control-character guard alone
+    does not turn a spaced artefact path into a refusal -- but closing the
+    injection hole is not the same as producing a CORRECT plan. Before this
+    fix OpenOCD's `-c program` word left a spaced artefact UNQUOTED, and Jim
+    Tcl splits an unquoted word on whitespace: `program /build/my app.elf
+    verify reset exit` parses as SEVEN words
+    (`program`/`/build/my`/`app.elf`/`verify`/`reset`/`exit`), so `program`
+    receives `/build/my` and treats `app.elf` as a bogus extra argument. The
+    fix braces the word whenever it carries whitespace (or a backslash) --
+    `openocd_program_word` -- which makes the whole path ONE Jim Tcl word
+    with no substitution performed on its contents. Asserted on the actual
+    built plan, not just "the guard did not reject it"."""
+    flash_plan.validate_openocd_word("/build/my app.elf", "artefact")
+    inp = FlashInputs(
+        artefact="/build/my app.elf",
+        flash_args={"interface": "cmsis-dap", "target": "stm32h7x", "base": "0x00000000"},
+        core_id="cm7",
+        sku="S",
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert plan.argv[-1] == "program {/build/my app.elf} verify reset exit"
+
+
+def test_swd_probe_openocd_windows_path_with_space_is_braced_not_mangled():
+    """tan-cli#486 REVIEW, defect 1's headline example. Unbraced, Jim Tcl's
+    own word-splitting AND backslash substitution both fire on
+    `C:\\Program Files\\alp\\build\\zephyr.elf`: it splits into `program` /
+    `C:Program` / `Files\\x07lp\\x08uildzephyr.elf` (`\\a`->BEL, `\\b`->BS) /
+    `verify` / `reset` / `exit`, so `program` receives the filename
+    `C:Program` and treats the mangled remainder as a bogus offset argument
+    -- verified against `tclsh`. Bracing (triggered here by either the space
+    or the backslash) makes Jim Tcl perform NO substitution on the material
+    between the braces and treat it as one atomic word, so the artefact
+    reaches `program` byte-identical to the manifest value."""
+    inp = FlashInputs(
+        artefact="C:\\Program Files\\alp\\build\\zephyr.elf",
+        flash_args={"interface": "cmsis-dap", "target": "stm32h7x", "base": "0x00000000"},
+        core_id="cm7",
+        sku="S",
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert plan.argv[-1] == (
+        "program {C:\\Program Files\\alp\\build\\zephyr.elf} verify reset exit"
+    )
+
+
+def test_swd_probe_openocd_space_only_hostile_artefact_cannot_inject_keywords():
+    """tan-cli#486 REVIEW, defect 1's second measured example: a hostile
+    artefact carrying no Tcl metacharacter at all -- just spaces -- used to
+    inject extra Tcl keywords once interpolated unquoted:
+    `/build/evil.elf verify exit 0x20000000` rendered `program /build/evil.elf
+    verify exit 0x20000000 verify reset exit`, an extra `verify`/`exit`/
+    address the manifest author never wrote. Bracing on whitespace closes
+    this: the whole hostile string becomes ONE word, i.e. ONE (bogus but
+    inert) filename argument to `program`, not five extra Tcl words."""
+    inp = FlashInputs(
+        artefact="/build/evil.elf verify exit 0x20000000",
+        flash_args={"interface": "cmsis-dap", "target": "stm32h7x", "base": "0x00000000"},
+        core_id="cm7",
+        sku="S",
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert plan.argv[-1] == (
+        "program {/build/evil.elf verify exit 0x20000000} verify reset exit"
+    )
+
+
+#: `openocd_program_word` now braces EVERY artefact, plain or not
+#: (tan-cli#511) -- see that function's own docstring for why the earlier
+#: whitespace/backslash-conditional version never actually preserved the
+#: parity it claimed to. The two frozen `tests/parity/test_flash_oracle_
+#: parity.py` cases that used to pin the plain (unbraced) rendering
+#: (`multi-segment-interface-is-allowed`, `openocd-forced-bin-appends-base`)
+#: moved OUT of that suite's byte-diff `CASES` table for exactly this
+#: reason; `test_openocd_program_word_diverges_from_the_oracle_by_exactly_
+#: the_brace` below is their bounded replacement.
+
+
 # ── swd_probe device/target reporting (tan-cli#402) ─────────────────────────
 
 
@@ -851,6 +1454,1611 @@ def test_swd_probe_openocd_message_names_the_resolved_target_not_gd32g553():
     plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
     assert "stm32h7x" in plan.ok_message
     assert "GD32G553" not in plan.ok_message
+
+
+# ── swd_probe J-Link probe-serial selection (tan-cli#513) ───────────────────
+
+
+def test_swd_probe_jlink_emits_selectemubysn_when_serial_is_set():
+    """tan-cli#513, the headline defect: `flash_args.jlink_serial` was
+    accepted (it passes the #486 charset guard the same as every other
+    backend) and then silently DROPPED on `swd_probe`'s J-Link arm -- neither
+    `SelectEmuBySN` in the Commander script nor `-SelectEmuBySN` in argv, so a
+    bench with more than one J-Link either fails to connect (JLinkExe cannot
+    pick) or, worse, could reach the wrong board on a shared/cloned serial.
+    Fails against the pre-fix source (measured: no `SelectEmuBySN` anywhere in
+    `plan.jlink_script` when `jlink_serial` was set)."""
+    inp = _swd_inputs(jlink_serial="603000869")
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert plan.jlink_script.startswith("SelectEmuBySN 603000869\n")
+
+
+def test_swd_probe_jlink_no_serial_emits_no_selectemubysn():
+    """No default serial, same reasoning as Flow D
+    (`test_flow_d_probe_serial_is_optional_and_has_no_default`): a bench-wide
+    serial can be SHARED by two probes that differ only by USB path, so a
+    silent default can select the wrong board. `swd_probe` has no confirm
+    gate to hide behind either -- this must stay opt-in."""
+    plan = flash_plan.plan_swd_probe(_swd_inputs(), lambda name: name == "JLinkExe")
+    assert "SelectEmuBySN" not in plan.jlink_script
+
+
+def test_swd_probe_jlink_probe_serial_accepts_a_bare_numeric_value():
+    """tan-cli#486's own fix for Flow D, extended to `swd_probe`:
+    `jlink_serial: 603000869` (unquoted -- the canonical SEGGER spelling) is a
+    bare YAML integer. `fa_str_checked`, not the tolerant `fa_str`, is what
+    round-trips it into its decimal string form instead of silently treating
+    it as absent."""
+    plan = flash_plan.plan_swd_probe(_swd_inputs(jlink_serial=603000869), lambda n: n == "JLinkExe")
+    assert plan.jlink_script.startswith("SelectEmuBySN 603000869\n")
+
+
+@pytest.mark.parametrize("bad", ["a;b", "../x", "/x", "C:/x", "a b", "dev\nice"])
+def test_swd_probe_jlink_probe_serial_is_charset_guarded(bad):
+    """tan-cli#513: before this fix `swd_probe` validated `jlink_serial` NOT
+    AT ALL -- the field was dead code on this backend, so a hostile value
+    (e.g. an embedded newline forming an extra Commander command) sailed
+    through with `ok:true`. Fails against the pre-fix source (measured: no
+    refusal for any of these). Same guard-class as Flow D's own
+    `test_flow_d_probe_serial_is_charset_guarded`."""
+    inp = _swd_inputs(jlink_serial=bad)
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+
+
+def test_swd_probe_jlink_probe_serial_refusal_names_jlink_not_openocd():
+    """Mirrors Flow D's own `test_flow_d_probe_serial_refusal_names_jlink_
+    not_openocd` (tan-cli#486 REVIEW, defect 4): `jlink_serial` reaches a
+    J-Link Commander `SelectEmuBySN` line, never an OpenOCD Tcl script, so the
+    refusal must say so -- `swd_probe` shares `_JLINK_SERIAL_DESTINATION`
+    with Flow D rather than hand-rolling a second wording."""
+    inp = _swd_inputs(jlink_serial="dev\nice")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    message = str(raised.value)
+    assert "J-Link Commander" in message
+    assert "SelectEmuBySN" in message
+    assert "OpenOCD" not in message
+
+
+def test_swd_probe_jlink_probe_serial_empty_string_still_opts_out():
+    """`jlink_serial: ""` opts OUT of `SelectEmuBySN` entirely, matching Flow
+    D's own `test_flow_d_probe_serial_empty_string_still_opts_out`."""
+    plan = flash_plan.plan_swd_probe(_swd_inputs(jlink_serial=""), lambda n: n == "JLinkExe")
+    assert "SelectEmuBySN" not in plan.jlink_script
+
+
+def test_swd_probe_jlink_probe_serial_precedes_the_reset_halt_lines():
+    """`SelectEmuBySN` must be the FIRST line of the Commander script -- a
+    probe has to be selected before `r`/`halt` can address it. Also proves
+    `jlink_commander_script`'s new `serial` parameter composes correctly with
+    the rest of the script (reset/halt, load, optional reset-and-go,
+    quit-close) rather than merely being accepted and ignored a second time."""
+    script = flash_plan.jlink_commander_script(
+        "/build/zephyr.bin", "0x08000000", True, serial="603000869"
+    )
+    lines = script.splitlines()
+    assert lines[0] == "SelectEmuBySN 603000869"
+    assert lines[1] == "r"
+    assert lines[2] == "halt"
+
+
+def test_jlink_commander_script_serial_defaults_to_absent():
+    """The new `serial` parameter is optional and defaults to `None` -- every
+    existing call site/test in this file that constructs a Commander script
+    with the original 3-positional-argument shape must render byte-identical
+    to before this fix."""
+    script = flash_plan.jlink_commander_script("/build/zephyr.bin", "0x08000000", True)
+    assert not script.startswith("SelectEmuBySN")
+    assert script.splitlines()[0] == "r"
+
+
+@pytest.mark.parametrize("serial", ["801012345", "000440123456", "J-Link-OB_1", "12345678-9"])
+def test_swd_probe_jlink_probe_serial_real_segger_spellings_still_render(serial):
+    """tan-cli#513 REVIEW: the same four real SEGGER serial spellings Flow D's
+    own `test_flow_d_probe_serial_real_segger_spellings_still_render` pins --
+    `801012345` (bare numeric), `000440123456` (leading-zero string), the
+    on-board-probe name `J-Link-OB_1`, and the hyphenated `12345678-9`. The
+    swd_probe/Flow D asymmetry is exactly the one-path drift that let #486's
+    guard go missing on this arm in the first place; pinning the identical
+    fixture set on both keeps that from silently happening again."""
+    plan = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_serial=serial), lambda n: n == "JLinkExe"
+    )
+    assert plan.jlink_script.startswith(f"SelectEmuBySN {serial}\n")
+    assert "-SelectEmuBySN" in plan.argv
+    assert plan.argv[plan.argv.index("-SelectEmuBySN") + 1] == serial
+
+
+# ── swd_probe J-Link probe-serial: argv selector (tan-cli#513 REVIEW) ───────
+
+
+def test_swd_probe_jlink_argv_includes_selectemubysn_when_serial_is_set():
+    """tan-cli#513 REVIEW, finding 1: this arm's argv carries `-AutoConnect 1`
+    (Flow D's argv has none), so JLinkExe may start connecting to whatever
+    probe autoconnect finds BEFORE the Commander script's own leading
+    `SelectEmuBySN` line is ever read -- the script line alone does not
+    provably precede the connect on every DLL version. `-SelectEmuBySN` must
+    also be passed in argv, which selects at parse time. Fails against the
+    original #513 fix alone (measured: `-SelectEmuBySN` absent from
+    `plan.argv` even though the script line was already present)."""
+    plan = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_serial="603000869"), lambda n: n == "JLinkExe"
+    )
+    assert "-SelectEmuBySN" in plan.argv
+    assert plan.argv[plan.argv.index("-SelectEmuBySN") + 1] == "603000869"
+
+
+def test_swd_probe_jlink_argv_omits_selectemubysn_when_no_serial():
+    """The unaffected case: no `jlink_serial` means no `-SelectEmuBySN` word
+    at all, matching the script's own "absent -> no line" default."""
+    plan = flash_plan.plan_swd_probe(_swd_inputs(), lambda n: n == "JLinkExe")
+    assert "-SelectEmuBySN" not in plan.argv
+
+
+def test_swd_probe_jlink_argv_with_serial_is_byte_identical_apart_from_the_insertion():
+    """tan-cli#513 REVIEW nit: the emit tests must not stop at `startswith` --
+    prove `-SelectEmuBySN <serial>` is a pure INSERTION, disturbing no other
+    argv word (`-device`, `-if SWD`, `-speed`, `-AutoConnect 1`,
+    `-ExitOnError 1`, `-NoGui 1`, `-CommanderScript` all keep their exact
+    values and relative order)."""
+    without = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="STM32H747XI_M7"), lambda n: n == "JLinkExe"
+    )
+    with_serial = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="STM32H747XI_M7", jlink_serial="603000869"),
+        lambda n: n == "JLinkExe",
+    )
+    assert with_serial.argv[:7] == without.argv[:7]
+    assert with_serial.argv[7:9] == ("-SelectEmuBySN", "603000869")
+    assert with_serial.argv[9:] == without.argv[7:]
+
+
+def test_swd_probe_jlink_script_with_serial_is_the_no_serial_script_plus_one_line():
+    """Companion to the argv-identical check just above, for the Commander
+    script half: `SelectEmuBySN {serial}` is a pure PREPEND -- every line
+    after it is byte-identical to the no-serial script."""
+    without = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="STM32H747XI_M7"), lambda n: n == "JLinkExe"
+    )
+    with_serial = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="STM32H747XI_M7", jlink_serial="603000869"),
+        lambda n: n == "JLinkExe",
+    )
+    with_lines = with_serial.jlink_script.splitlines()
+    assert with_lines[0] == "SelectEmuBySN 603000869"
+    assert with_lines[1:] == without.jlink_script.splitlines()
+
+
+# ── swd_probe J-Link probe-serial: openocd/pyocd cannot honour it
+#    (tan-cli#513 REVIEW, finding 2) ─────────────────────────────────────────
+
+
+def test_swd_probe_probe_serial_is_refused_on_a_real_openocd_only_host():
+    """tan-cli#513 REVIEW, finding 2's headline repro: `flash_args: {
+    use_openocd: true, interface: cmsis-dap, target: gd32g553, jlink_serial:
+    "a;b"}` used to keep `jlink` `None` (the J-Link arm was never taken), so
+    the resolve+validate that lived only inside `if jlink is not None:` never
+    ran, and the plan was built and reported `ok` with the hostile value
+    silently dropped. Fails against the original #513 fix alone (measured: no
+    refusal on this exact manifest with only `openocd` on PATH)."""
+    inp = _swd_inputs(use_openocd=True, interface="cmsis-dap", target="gd32g553", jlink_serial="a;b")
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+
+
+def test_swd_probe_probe_serial_charset_guard_is_not_host_dependent():
+    """tan-cli#513 REVIEW, finding 2's host-dependency half: the SAME hostile
+    `jlink_serial` must be refused whether `--dry-run` forces the J-Link arm
+    (which validated it even under the original #513 fix) OR a real run on an
+    openocd-only host takes the fallback arm -- not one and not the other.
+    Fails against the original #513 fix alone (measured: the `--dry-run` case
+    already refused; the real-openocd-only case did not)."""
+    args = {"interface": "cmsis-dap", "target": "gd32g553", "jlink_serial": "dev\nice"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(dry, lambda n: n == "openocd")
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(real, lambda n: n == "openocd")
+
+
+def test_swd_probe_probe_serial_is_refused_on_the_openocd_arm_even_when_valid():
+    """A charset-CLEAN `jlink_serial` must still be refused on the
+    openocd/pyocd arm -- the problem is not the value's shape, it is that
+    `openocd`'s argv (`-f interface/....cfg -f target/....cfg -c program
+    ...`) has no probe-serial word to put it in at all. Accepting a
+    well-formed-but-unusable value and reporting `ok:true` would be the exact
+    accept-and-ignore shape #513 fixed for the J-Link arm."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", jlink_serial="603000869")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    message = str(raised.value)
+    assert "jlink_serial" in message
+    assert "openocd" in message.lower()
+
+
+def test_swd_probe_probe_serial_is_refused_on_the_pyocd_arm_too():
+    """The same refusal on the sibling tool: `pyocd`'s argv (`pyocd flash
+    --target ... [--base-address ...] <artefact>`) has no probe-serial word
+    either."""
+    inp = _swd_inputs(use_pyocd=True, interface="cmsis-dap", target="gd32g553", jlink_serial="603000869")
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+
+
+def test_swd_probe_probe_serial_refusal_precedes_the_interface_target_check():
+    """The `jlink_serial`-on-the-wrong-arm refusal fires even when
+    `interface`/`target` are ALSO missing -- the diagnosis names the field
+    this arm cannot use, not a coincidentally-also-missing one."""
+    inp = _swd_inputs(jlink_serial="603000869")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert "jlink_serial" in str(raised.value)
+
+
+def test_swd_probe_no_serial_still_reaches_the_openocd_arm_unaffected():
+    """The unaffected case: a manifest naming no `jlink_serial` at all must
+    keep working on the openocd/pyocd arm exactly as before this review
+    round -- this refusal is scoped to the field being SET, not to taking the
+    fallback arm in general."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553")
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert plan.argv[0] == "openocd"
+
+
+# ── swd_probe OpenOCD/pyOCD probe selection (tan-cli#519) ───────────────────
+
+
+def test_swd_probe_openocd_emits_adapter_usb_location_when_set():
+    """tan-cli#519, the headline defect: the OpenOCD arm read no
+    probe-selection field at all -- `flash_args.openocd_usb_location` must
+    now render as its own `-c "adapter usb location {<path>}"` word, ahead of
+    the target config and the `program` command (both can trigger a connect).
+    Fails against the pre-fix source (measured: `openocd_usb_location` was
+    not read anywhere in `plan_swd_probe`, so this key had no effect at
+    all)."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", openocd_usb_location="3-4.4.3")
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert "-c" in plan.argv
+    idx = plan.argv.index("-c")
+    assert plan.argv[idx + 1] == "adapter usb location {3-4.4.3}"
+    # Ahead of the target config, which can trigger the connect.
+    target_idx = plan.argv.index("target/gd32g553.cfg")
+    assert idx < target_idx
+
+
+def test_swd_probe_openocd_no_usb_location_emits_no_adapter_line():
+    """The unaffected case: a manifest naming no `openocd_usb_location` keeps
+    the exact argv shape from before this fix -- no stray `-c "adapter usb
+    location ..."` word."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553")
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert not any("adapter usb location" in str(a) for a in plan.argv)
+
+
+@pytest.mark.parametrize("bad", ["a;b", "a$b", "a[b]", "a\nb", 'a"b', "a{b}"])
+def test_swd_probe_openocd_usb_location_is_charset_guarded(bad):
+    """`openocd_usb_location` reaches an OpenOCD `-c` Tcl word verbatim, so it
+    gets the same Jim-Tcl-metacharacter/control-character guard #486 gives
+    every other `-c` word -- `validate_identifier` would also reject the
+    dots a real USB path uses (`3-4.4.3`), so this is `validate_openocd_word`
+    specifically."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", openocd_usb_location=bad)
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert "openocd_usb_location" in str(raised.value)
+
+
+def test_swd_probe_openocd_usb_location_accepts_a_real_usb_topology_path():
+    """The charset guard must not reject the shape a real value actually
+    takes -- dots and dashes, no slashes."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", openocd_usb_location="3-4.4.3")
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert "adapter usb location {3-4.4.3}" in plan.argv
+
+
+def test_swd_probe_openocd_usb_location_whitespace_is_braced_not_split():
+    """tan-cli#519 review, MINOR: `openocd_usb_location` used to be the one
+    unbraced `-c` word interpolation in this module -- `validate_openocd_word`
+    rejects every Jim Tcl metacharacter and control character but not plain
+    whitespace, so `"3-4.4.3 verify"` (no metacharacter in sight) reached the
+    tool as `-c "adapter usb location 3-4.4.3 verify"`, a Tcl command with TWO
+    words where OpenOCD expects one -- the exact whitespace-splits-a-word
+    class `openocd_program_word`'s own docstring names, and #511's answer to
+    it was unconditional bracing. Fails against the pre-fix source (measured:
+    the argv word is `adapter usb location 3-4.4.3 verify`, unbraced, with no
+    refusal at all)."""
+    inp = _swd_inputs(
+        interface="cmsis-dap", target="gd32g553", openocd_usb_location="3-4.4.3 verify"
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert "adapter usb location {3-4.4.3 verify}" in plan.argv
+
+
+def test_swd_probe_pyocd_emits_uid_flag_when_set():
+    """The pyOCD sibling: `flash_args.pyocd_uid` renders as `--uid <value>`,
+    pyOCD's own selector -- different from both `jlink_serial` (serial-only)
+    and `openocd_usb_location` (USB-path-only). Fails against the pre-fix
+    source (measured: `pyocd_uid` was not read anywhere in
+    `plan_swd_probe`)."""
+    inp = _swd_inputs(use_pyocd=True, interface="cmsis-dap", target="stm32h7x", pyocd_uid="abc123")
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+    assert "--uid" in plan.argv
+    assert plan.argv[plan.argv.index("--uid") + 1] == "abc123"
+
+
+def test_swd_probe_pyocd_no_uid_emits_no_uid_flag():
+    """The unaffected case: no `pyocd_uid` means no `--uid` word at all."""
+    inp = _swd_inputs(use_pyocd=True, interface="cmsis-dap", target="stm32h7x")
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+    assert "--uid" not in plan.argv
+
+
+@pytest.mark.parametrize("bad", ["a;b", "a$b", "a.b", "dev\nice"])
+def test_swd_probe_pyocd_uid_is_charset_guarded(bad):
+    """`pyocd_uid` only ever reaches argv (no shell, no Tcl), but it still
+    gets the same `validate_identifier` charset guard every other manifest
+    identifier in this module gets. `a.b`, not `a/b`: `validate_identifier`
+    deliberately ALLOWS a `/`-separated path of plain identifier segments
+    (for OpenOCD's own multi-segment interface configs), so `a/b` is not
+    actually hostile to it -- a bare `.` is."""
+    inp = _swd_inputs(use_pyocd=True, interface="cmsis-dap", target="stm32h7x", pyocd_uid=bad)
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+    assert "pyocd_uid" in str(raised.value)
+
+
+def test_swd_probe_pyocd_uid_accepts_a_plugin_prefixed_form():
+    """tan-cli#519 review, MINOR: the plain `validate_identifier` guard
+    refuses `:`, but pyOCD's own `-u`/`--uid` documents an OPTIONAL
+    `<plugin>:<uid>` prefix to disambiguate an otherwise-ambiguous UID --
+    confirmed against a real installed pyOCD 0.44.1 (`pyocd flash --help`:
+    "Optionally prefixed with '<probe-type>:' where <probe-type> is the name
+    of a probe plugin"; `pyocd list --plugins` names `jlink`/`stlink`/
+    `cmsisdap`/`picoprobe`/`remote`, all plain identifiers themselves).
+    Fails against the pre-fix source (measured: `jlink:603000869` -- the
+    exact shape needed to disambiguate the alplab-gw bench's two
+    cloned-serial probes -- raised `FlashPlanError` naming `pyocd_uid`)."""
+    inp = _swd_inputs(
+        use_pyocd=True, interface="cmsis-dap", target="stm32h7x", pyocd_uid="jlink:603000869"
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+    assert "--uid" in plan.argv
+    assert plan.argv[plan.argv.index("--uid") + 1] == "jlink:603000869"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "jlink:st:link",  # more than one colon -- not the documented shape
+        ":603000869",  # empty plugin half
+        "jlink:",  # empty uid half
+        "jl.nk:603000869",  # hostile plugin half
+        "jlink:60300;869",  # hostile uid half
+    ],
+)
+def test_swd_probe_pyocd_uid_plugin_prefix_still_charset_guards_both_halves(bad):
+    """The widening above is exactly one shape -- a single `<plugin>:<uid>`
+    split with BOTH halves charset-clean -- not a blanket colon allowance.
+    Anything else carrying a colon still refuses, with the same message."""
+    inp = _swd_inputs(use_pyocd=True, interface="cmsis-dap", target="stm32h7x", pyocd_uid=bad)
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+    assert "pyocd_uid" in str(raised.value)
+
+
+def test_swd_probe_jlink_refuses_a_stray_openocd_usb_location():
+    """The wrong-arm refusal, `jlink_serial`-side: `openocd_usb_location` set
+    while the run actually takes the J-Link arm must refuse loudly, not
+    silently drop the field -- the same accept-and-ignore shape #513 closed
+    for `jlink_serial`."""
+    inp = _swd_inputs(openocd_usb_location="3-4.4.3")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "JLinkExe")
+    assert "openocd_usb_location" in str(raised.value)
+
+
+def test_swd_probe_jlink_refuses_a_stray_pyocd_uid():
+    """Same shape, `pyocd_uid`-side."""
+    inp = _swd_inputs(pyocd_uid="abc123")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "JLinkExe")
+    assert "pyocd_uid" in str(raised.value)
+
+
+def test_swd_probe_openocd_refuses_a_stray_pyocd_uid():
+    """The CROSS-arm refusal: `pyocd_uid` set while the run lands on OpenOCD
+    (not pyOCD, not J-Link) must also refuse -- `--uid` is not an OpenOCD
+    primitive either."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", pyocd_uid="abc123")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert "pyocd_uid" in str(raised.value)
+
+
+def test_swd_probe_openocd_refuses_a_stray_pyocd_uid_when_pyocd_is_also_on_path():
+    """BLOCKER regression: the refusal above (`lambda n: n == "openocd"`)
+    cannot catch this, because it leaves pyOCD unavailable -- exactly the one
+    case where the arm split's `if openocd: ... elif pyocd: ...` precedence
+    doesn't matter. On a host with BOTH tools on PATH, OpenOCD always wins the
+    arm regardless, so a `pyocd_uid`-only refusal keyed off pyOCD
+    *availability* (`not pyocd`) stayed silent here -- `pyocd` was True, the
+    guard never fired, and the run silently landed on OpenOCD with no probe
+    selector of any kind, dropping `pyocd_uid` on the floor. This is the
+    accept-and-ignore shape #513/#519 exist to close, re-created by testing
+    availability instead of the arm this run actually takes."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", pyocd_uid="abc123")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n in ("openocd", "pyocd"))
+    assert "pyocd_uid" in str(raised.value)
+
+
+def test_swd_probe_pyocd_refuses_a_stray_openocd_usb_location():
+    """The CROSS-arm refusal, the other direction: `openocd_usb_location` set
+    while the run lands on pyOCD must also refuse."""
+    inp = _swd_inputs(
+        use_pyocd=True, interface="cmsis-dap", target="stm32h7x",
+        openocd_usb_location="3-4.4.3",
+    )
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda n: n == "pyocd")
+    assert "openocd_usb_location" in str(raised.value)
+
+
+def test_swd_probe_usb_location_charset_guard_is_not_host_dependent():
+    """Mirrors `test_swd_probe_probe_serial_charset_guard_is_not_host_dependent`:
+    the charset check runs unconditionally, ahead of the arm split, so a
+    HOSTILE `openocd_usb_location` must be refused whether `--dry-run` forces
+    the J-Link arm or a real run on an openocd-only host takes the fallback
+    arm -- not one and not the other. (The wrong-arm refusal is a SEPARATE
+    guard, exercised on a charset-clean value by the cross-arm tests above.)"""
+    args = {"interface": "cmsis-dap", "target": "gd32g553", "openocd_usb_location": "dev\nice"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(dry, lambda n: n == "openocd")
+    with pytest.raises(FlashPlanError):
+        flash_plan.plan_swd_probe(real, lambda n: n == "openocd")
+
+
+# ── MAJOR 2 (tan-cli#519/#522 review): --dry-run and a real run must agree ─
+
+
+def test_swd_probe_dry_run_and_real_run_agree_when_only_openocd_is_on_path():
+    """`--dry-run` used to force the J-Link arm UNCONDITIONALLY (`_JLINK_
+    BINARIES[0]`, no `which()` call at all), so a manifest naming
+    `flash_args.openocd_usb_location` refused on EVERY preview -- even on a
+    host that genuinely has openocd (and pyocd) and no J-Link at all, where
+    a REAL run takes neither of this arm's wrong-arm refusals and reports
+    `ok`. Same manifest, same simulated host (only openocd/pyocd `which()`-
+    findable, no J-Link): dry-run and a real run must now agree, byte-for-
+    byte. Fails against the pre-fix source (measured: the dry-run call
+    raised `FlashPlanError` naming `openocd_usb_location` and 'this run is
+    taking the J-Link path'; the real-run call returned an `openocd` plan)."""
+    which_openocd_and_pyocd = lambda n: n in ("openocd", "pyocd")  # noqa: E731
+    args = {"interface": "cmsis-dap", "target": "gd32g553", "openocd_usb_location": "3-4.4.3"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+
+    dry_plan = flash_plan.plan_swd_probe(dry, which_openocd_and_pyocd)
+    real_plan = flash_plan.plan_swd_probe(real, which_openocd_and_pyocd)
+
+    assert dry_plan.argv[0] == "openocd"
+    assert dry_plan.argv == real_plan.argv
+
+
+def test_swd_probe_dry_run_and_real_run_agree_when_only_openocd_is_on_path_pyocd_uid_side():
+    """The `pyocd_uid` sibling of the test above -- a manifest naming that
+    field instead must ALSO agree between `--dry-run` and a real run on the
+    SAME (openocd-only, no pyocd, no J-Link) host: both refuse, for the
+    identical reason (pyOCD is not the arm this host/manifest combination
+    takes on either side -- OpenOCD wins the arm split whenever it is
+    available, per tan-cli#519's own BLOCKER fix)."""
+    which_openocd_only = lambda n: n == "openocd"  # noqa: E731
+    args = {"interface": "cmsis-dap", "target": "gd32g553", "pyocd_uid": "abc123"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+
+    with pytest.raises(FlashPlanError) as dry_raised:
+        flash_plan.plan_swd_probe(dry, which_openocd_only)
+    with pytest.raises(FlashPlanError) as real_raised:
+        flash_plan.plan_swd_probe(real, which_openocd_only)
+    assert "pyocd_uid" in str(dry_raised.value)
+    assert str(dry_raised.value) == str(real_raised.value)
+
+
+def test_swd_probe_dry_run_and_real_run_agree_when_only_pyocd_is_on_path_pyocd_uid_side():
+    """tan-cli#519/#522 review round 3, MINOR: the sibling test above
+    (`..._openocd_is_on_path_pyocd_uid_side`) uses `which_openocd_only` --
+    the one host shape where the pre-round-3 and fixed code already agreed
+    BY ACCIDENT (OpenOCD always wins the arm-split precedence, so a
+    `pyocd_uid` manifest is refused on that host either way) -- so it never
+    actually exercised the pyocd-only host this round's MAJOR 2 fix is
+    about. Here, on a PYOCD-only host, `pyocd_uid` is the field that arm CAN
+    honour: `--dry-run` and a real run must both plan the SAME `pyocd`
+    command line, not merely both refuse or both agree by luck. Fails
+    against the pre-round-3 source (measured: the `--dry-run` bypass forced
+    `openocd = True` unconditionally, so `chosen` was always `"openocd"` and
+    the dry-run call raised `FlashPlanError` naming 'this run is not taking
+    the pyOCD path', while the real-run call -- correctly seeing no openocd
+    on PATH -- returned a `pyocd` plan)."""
+    which_pyocd_only = lambda n: n == "pyocd"  # noqa: E731
+    args = {"interface": "cmsis-dap", "target": "stm32h7x", "pyocd_uid": "abc123"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+
+    dry_plan = flash_plan.plan_swd_probe(dry, which_pyocd_only)
+    real_plan = flash_plan.plan_swd_probe(real, which_pyocd_only)
+
+    assert dry_plan.argv[0] == "pyocd"
+    assert dry_plan.argv == real_plan.argv
+
+
+def test_swd_probe_dry_run_and_real_run_agree_when_only_pyocd_is_on_path_openocd_usb_location_side():
+    """The refusal-shape mirror, same host: `openocd_usb_location` needs the
+    OpenOCD arm, which this pyocd-only host does not take on EITHER side, so
+    both must refuse, identically. Fails against the pre-round-3 source
+    (measured: the `--dry-run` bypass forced `openocd = True` unconditionally
+    and planned a full `openocd -f ... -c 'adapter usb location 3-4.4.3' ...`
+    command line for a tool not installed on this host, while the real-run
+    call correctly refused)."""
+    which_pyocd_only = lambda n: n == "pyocd"  # noqa: E731
+    args = {"interface": "cmsis-dap", "target": "gd32g553", "openocd_usb_location": "3-4.4.3"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+
+    with pytest.raises(FlashPlanError) as dry_raised:
+        flash_plan.plan_swd_probe(dry, which_pyocd_only)
+    with pytest.raises(FlashPlanError) as real_raised:
+        flash_plan.plan_swd_probe(real, which_pyocd_only)
+    assert "openocd_usb_location" in str(dry_raised.value)
+    assert str(dry_raised.value) == str(real_raised.value)
+
+
+def test_swd_probe_openocd_usb_location_whitespace_only_is_refused_at_plan_time():
+    """tan-cli#519/#522 review round 3, MINOR: `validate_openocd_word`
+    guards the Jim Tcl/control-character charset only -- whitespace is
+    deliberately left alone there (a real artefact path needs it) -- so a
+    WHITESPACE-ONLY `openocd_usb_location` passed straight through and would
+    have reached OpenOCD as `adapter usb location {  }`, an empty selector.
+    Refused here instead, at plan time, before anything is spawned. Fails
+    against the pre-round-3 source (measured: no error, and `"  "` appeared
+    verbatim in `argv`)."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", openocd_usb_location="  ")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert "openocd_usb_location" in str(raised.value)
+    assert "whitespace" in str(raised.value)
+
+
+def test_swd_probe_dry_run_still_defaults_to_jlink_when_neither_new_field_is_set():
+    """The case MAJOR 2's fix must not disturb: a manifest naming NEITHER
+    `openocd_usb_location` NOR `pyocd_uid` keeps the unconditional, replay-
+    host-independent J-Link default under `--dry-run` -- unaffected by
+    whatever this box's own PATH happens to hold (`which` here reports
+    every tool absent, including J-Link itself). This is what every
+    `swd_probe` case in `tests/parity/test_flash_oracle_parity.py` relies on
+    for a host-independent `--dry-run` preview."""
+    dry = FlashInputs(
+        artefact="/build/zephyr.bin", flash_args={}, core_id="cm7", sku="S", dry_run=True
+    )
+    plan = flash_plan.plan_swd_probe(dry, lambda n: False)
+    assert plan.argv[0] == "JLinkExe"
+
+
+# ── swd_probe success message asserts no address for ELF/HEX (tan-cli#487) ──
+
+
+def test_swd_probe_jlink_bin_message_still_names_the_base_address():
+    """The `.bin` case (unchanged): a raw binary DOES carry a load offset, and
+    `jlink_commander_script`'s `loadfile` line actually gets it -- the message
+    must keep asserting it."""
+    inp = _swd_inputs(jlink_device="STM32H747XI_M7", base="0x08000000")
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert "@ 0x08000000" in plan.ok_message
+
+
+def test_swd_probe_jlink_elf_message_omits_an_address_the_tool_never_received():
+    """tan-cli#487, defect 6: on an ELF/HEX write `jlink_commander_script`'s
+    `loadfile` line deliberately withholds `base` (a load OFFSET, meaningful
+    only for a raw `.bin`), but the success message used to interpolate
+    `@ {base}` unconditionally -- asserting the compiled-in `_DEFAULT_BASE`
+    (or the manifest's `base`) on every ELF/HEX write regardless. Fails
+    against the pre-fix source (measured: `@ 0x08000000` was present)."""
+    inp = FlashInputs(
+        artefact="/build/zephyr.elf", flash_args={"jlink_device": "STM32H747XI_M7"},
+        core_id="cm7", sku="S",
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert "@" not in plan.ok_message
+    assert "0x08000000" not in plan.ok_message
+
+
+def test_swd_probe_openocd_bin_message_still_names_the_base_address():
+    """The `.bin` case (unchanged) on the openocd/pyocd arm."""
+    inp = _swd_inputs(interface="cmsis-dap", target="stm32h7x", base="0x08010000")
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert "@ 0x08010000" in plan.ok_message
+
+
+def test_swd_probe_openocd_elf_message_omits_an_address_the_tool_never_received():
+    """tan-cli#487, defect 6, the openocd/pyocd arm: the argv itself already
+    withholds `base` for a non-`.bin` artefact (`program ... exit`, no
+    trailing address -- see the plan-builder's own comment); the message must
+    agree. Fails against the pre-fix source (measured: `@ 0x08000000` was
+    present)."""
+    inp = FlashInputs(
+        artefact="/build/zephyr.elf",
+        flash_args={"interface": "cmsis-dap", "target": "stm32h7x"},
+        core_id="cm7", sku="S",
+    )
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert "@" not in plan.ok_message
+    assert "0x08000000" not in plan.ok_message
+
+
+# ── swd_probe J-Link DPIDR preflight (tan-cli#520) ───────────────────────────
+#
+# swd_probe flashes an external helper MCU (the GD32G553 supervisor) over its
+# own SWD header, and -- like Flow D's MRAM write -- had NO wrong-board guard
+# at all: on the alplab-gw bench, serial `603000869` answers BOTH a real
+# E1M-AEN801 J-Link (SW-DP `0x4C013477`) and a GD32 bridge probe on a
+# different board entirely (SW-DP `0x0BE12477`), so `jlink_serial` alone
+# cannot disambiguate them even when correctly pinned (#513). These reuse
+# Flow D's own `validate_flow_d_preflight_args`/`flow_d_preflight_script`
+# (`method="swd_probe"`, `require_device_key=False` -- `swd_probe`'s
+# `jlink_device` already means the write's OWN `-device` profile, oracle-
+# pinned with no `expect_dpidr` anywhere near it, so it cannot ALSO be
+# Flow D's paired preflight-only read-device key) rather than growing a
+# second checker.
+
+
+def test_swd_probe_jlink_device_alone_still_reaches_the_write_no_preflight_required():
+    """The regression this design decision exists to prevent: `jlink_device`
+    on `swd_probe` already means the write's own `-device` profile
+    (oracle-pinned: `tests/parity/test_flash_oracle_parity.py`'s
+    `jlink-bin-artefact-uses-loadbin` sets `jlink_device: NRF_DUMMY` with no
+    `expect_dpidr` at all and expects `ok: true`/no refusal). Naively pairing
+    `expect_dpidr` with `jlink_device` the way Flow D pairs its OWN (distinct)
+    `jlink_device` would retroactively demand a preflight of every manifest
+    that only ever set the write device -- this proves it still does not."""
+    plan = flash_plan.plan_swd_probe(
+        _swd_inputs(jlink_device="NRF_DUMMY"), lambda name: name == "JLinkExe"
+    )
+    assert plan.argv[0] == "JLinkExe"
+    assert plan.preflight_device == "NRF_DUMMY"
+
+
+@pytest.mark.parametrize("bad_value", ["", None], ids=["empty-string", "null"])
+def test_swd_probe_expect_dpidr_present_but_null_or_empty_refuses(bad_value):
+    """Mirrors Flow D's own `test_flow_d_preflight_present_but_null_or_empty_
+    expect_dpidr_refuses`: a PRESENT `expect_dpidr` that resolves to `None`
+    must refuse loudly rather than silently falling through to "no preflight
+    armed" -- the one guard standing between a wrong-board attach and a GD32
+    write. Fails against the pre-fix source (measured: `expect_dpidr` was not
+    read by `plan_swd_probe` at all, so this raised nothing)."""
+    inp = _swd_inputs(expect_dpidr=bad_value)
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert "expect_dpidr" in str(raised.value)
+
+
+def test_swd_probe_expect_dpidr_is_refused_on_the_openocd_arm():
+    """The same accept-and-ignore shape #513 closed for `jlink_serial`, one
+    field over: the DPIDR read is a JLinkExe-only primitive, so a manifest
+    naming `expect_dpidr` that lands on the openocd/pyocd arm must refuse,
+    not silently drop the wrong-board guard. Fails against the pre-fix source
+    (measured: `expect_dpidr` was not read anywhere in `plan_swd_probe`, so
+    this built an openocd plan with `ok: true` and no preflight ever armed)."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", expect_dpidr="0x4C013477")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert "expect_dpidr" in str(raised.value)
+    assert "openocd/pyocd" in str(raised.value)
+
+
+def test_swd_probe_no_expect_dpidr_still_reaches_the_openocd_arm_unaffected():
+    """The unaffected case, mirroring `test_swd_probe_no_serial_still_
+    reaches_the_openocd_arm_unaffected`: a manifest naming no `expect_dpidr`
+    at all keeps working on the openocd/pyocd arm exactly as before."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553")
+    plan = flash_plan.plan_swd_probe(inp, lambda n: n == "openocd")
+    assert plan.argv[0] == "openocd"
+
+
+def test_swd_probe_armed_preflight_reuses_the_resolved_write_device():
+    """`flow_d_preflight_script`'s `read_device` override, exercised through
+    the public seam `plan_swd_probe` writes into (`FlashPlan.preflight_
+    device`) -- the preflight's own connect script must use the SAME device
+    the write already resolved, not a second manifest field."""
+    inp = _swd_inputs(expect_dpidr="0x4C013477", jlink_device="GD32G553MEY7TR")
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert plan.preflight_device == "GD32G553MEY7TR"
+    script, expected = flash_plan.flow_d_preflight_script(
+        inp, "swd_probe", read_device=plan.preflight_device
+    )
+    assert expected == "0x4C013477"
+    assert "device GD32G553MEY7TR" in script
+    # Read-only: no write command anywhere in the preflight script.
+    assert "loadfile" not in script
+    assert "loadbin" not in script
+    assert "\nr\n" not in script
+    assert "\nhalt" not in script
+
+
+def test_swd_probe_wrong_board_refuses_before_any_write(tmp_path, monkeypatch):
+    """tan-cli#520, the headline defect. A CONFIRMED, non-dry-run `swd_probe`
+    entry whose read-only DPIDR preflight catches a wrong-board mismatch must
+    abort BEFORE the real GD32 bridge write -- reusing Flow D's own
+    `_flow_d_preflight` runner (`method="swd_probe"`), the same fix #512 gave
+    Flow D's MRAM write.
+
+    `_spawn_jlink` is the ONE spawn site the preflight probe and the eventual
+    real write share -- stubbed here to a canned "a different board answered"
+    banner (the GD32 bridge's real measured SW-DP ID, `0x0BE12477`, versus an
+    `expect_dpidr` deliberately set to the AEN E8's, `0x4C013477`) and to
+    RECORD every script it is asked to run. The load-bearing assertion is on
+    that record, not just the exit code: exactly ONE JLinkExe session must
+    run (the read-only preflight, `si SWD`/`connect`/`exit`, no `loadfile`/
+    `loadbin`), never a second one carrying the write's own script.
+
+    Verified to fail against the pre-fix source (measured: with no preflight
+    wired for `swd_probe` at all, `_spawn_jlink` is called exactly once -- but
+    with the WRITE script, `loadfile ... \\nr\\ng\\nqc`, not the read-only
+    one -- and reports `status: failed` because the STUBBED spawn always
+    returns `success=False`, not because any preflight ran; the load-bearing
+    proof is the recorded script's own content, not the status/exit code,
+    which is `failed`/1 either way here)."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe,
+   flash_args: {jlink_device: GD32G553MEY7TR, expect_dpidr: "0x4C013477",
+                base: "0x08000000"}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+
+    calls: list[str] = []
+
+    def _fake_spawn_jlink(argv, script, capture, timeout, venv_bin=None, workspace=None):
+        calls.append(script)
+        return flash_cmd._Outcome(
+            success=False,
+            stdout="Connecting to target via SWD\nFound SW-DP with ID 0x0BE12477\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _fake_spawn_jlink)
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 1
+    entry = data["entries"][0]
+    assert entry["status"] == "failed"
+    assert "expected SW-DP IDR 0x4C013477" in entry["message"], entry["message"]
+    assert "0x0BE12477" in entry["message"], entry["message"]
+    assert any(i.code == "flash.entry-failed" for i in issues)
+    # The load-bearing proof that nothing was written: exactly one JLinkExe
+    # session ran at all (the preflight), and its script never carries a
+    # write command.
+    assert len(calls) == 1, calls
+    assert "loadfile" not in calls[0]
+    assert "loadbin" not in calls[0]
+    assert calls[0].splitlines()[0] == "si SWD"
+
+
+def test_swd_probe_jlink_device_charset_guarded_at_plan_time():
+    """tan-cli#520 REVIEW round 2, MAJOR. `_resolve_jlink_device` used to
+    return `flash_args.jlink_device` VERBATIM (`fa_str_checked`, no charset
+    guard -- safe while the value only ever reached ARGV, a list element,
+    newline-inert). Round 1's fix validated it only inside `flow_d_preflight_
+    script`'s CONSUMER, at real-write time -- so `plan_swd_probe` itself
+    (called for `--dry-run` too) still built a plan with the hostile value
+    uninspected. Now `_resolve_jlink_device` validates it directly, at PLAN
+    time, the same place `jlink_serial` already is (a few lines below in the
+    same function) -- so this refuses at the FIRST point `plan_swd_probe` can
+    reach it, not several call-frames downstream.
+
+    Fails against the round-1 source a90e4df (measured: `plan_swd_probe`
+    itself raised nothing here -- the hostile value only got caught later,
+    inside `flow_d_preflight_script`, and only when THAT function actually
+    ran, which `--dry-run` never reaches)."""
+    hostile = "GD32G553MEY7TR\nloadfile /tmp/evil.bin 0x08000000\nr\ng"
+    inp = _swd_inputs(jlink_device=hostile, expect_dpidr="0x0BE12477")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert "jlink_device" in str(raised.value)
+
+
+def test_swd_probe_hostile_jlink_device_refuses_identically_dry_run_and_real():
+    """tan-cli#520 REVIEW round 2, MAJOR's own headline measurement: the SAME
+    manifest must not get two different verdicts depending on `--dry-run`.
+    `--dry-run` always forces the J-Link arm (`plan_swd_probe`'s own
+    bypass), so BOTH modes now reach the same plan-time guard and refuse for
+    the same reason.
+
+    Fails against the round-1 source a90e4df (measured: `dry_run=True`
+    returned a plan with `planning_only=True` and no refusal at all --
+    `flow_d_preflight_script`, the only validator that round added, is never
+    called under `--dry-run`; `dry_run=False` on a J-Link host refused only
+    once execution reached the write-time preflight consumer)."""
+    hostile = "GD32G553MEY7TR\nloadfile /tmp/evil.bin 0x08000000\nr\ng"
+    args = {"jlink_device": hostile, "expect_dpidr": "0x0BE12477", "base": "0x08000000"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="b", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="b", sku="S", dry_run=False)
+    with pytest.raises(FlashPlanError) as dry_raised:
+        flash_plan.plan_swd_probe(dry, lambda name: name == "JLinkExe")
+    with pytest.raises(FlashPlanError) as real_raised:
+        flash_plan.plan_swd_probe(real, lambda name: name == "JLinkExe")
+    assert "jlink_device" in str(dry_raised.value)
+    assert "jlink_device" in str(real_raised.value)
+    assert str(dry_raised.value) == str(real_raised.value)
+
+
+def test_swd_probe_openocd_arm_hostile_jlink_device_refuses_identically_dry_run_and_real():
+    """tan-cli#520 REVIEW round 3, finding 1. The test just above forces the
+    J-Link arm on BOTH calls (`which()` always reports `JLinkExe` present),
+    so it never exercises the openocd/pyocd arm at all -- which is exactly
+    why the charset guard living only inside `_resolve_jlink_device` (called
+    from the J-Link arm alone) went uncaught: on a host where `which()` finds
+    only `openocd`, a real run took the openocd/pyocd arm, which never calls
+    `_resolve_jlink_device` and never reads `jlink_device` at all, while
+    `--dry-run` (which always forces the J-Link arm regardless of `which()`)
+    still reached the guard and refused. Same manifest, two different
+    verdicts depending on host tooling and `--dry-run` alone.
+
+    `which` here reports NO J-Link binary present (only `openocd`), so the
+    real call is forced onto the openocd/pyocd arm while `--dry-run` still
+    forces the J-Link arm on its own -- the two calls below therefore
+    exercise the two DIFFERENT arms of the split, and both must refuse for
+    the identical reason now that the guard is hoisted above it.
+
+    Fails against the round-2 source (measured: `dry_run=True` raised
+    `FlashPlanError` naming `jlink_device`; `dry_run=False` with only
+    `openocd` on `PATH` returned a plan with `ok_message` reading `swd_probe
+    [c]: gd32g553 flashed via openocd @ 0x08000000`, the hostile value never
+    inspected)."""
+    hostile = "GD32G553MEY7TR\nloadfile /tmp/evil.bin 0x08000000\nr\ng"
+    args = {"jlink_device": hostile, "interface": "cmsis-dap", "target": "gd32g553"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="c", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="c", sku="S", dry_run=False)
+    which_openocd_only = lambda name: name == "openocd"  # noqa: E731
+    with pytest.raises(FlashPlanError) as dry_raised:
+        flash_plan.plan_swd_probe(dry, which_openocd_only)
+    with pytest.raises(FlashPlanError) as real_raised:
+        flash_plan.plan_swd_probe(real, which_openocd_only)
+    assert "jlink_device" in str(dry_raised.value)
+    assert "jlink_device" in str(real_raised.value)
+    assert str(dry_raised.value) == str(real_raised.value)
+
+
+def test_swd_probe_preflight_read_device_defensive_guard_still_independent():
+    """The BELT-AND-BRACES half of BLOCKER 1 (round 1's fix, kept per the
+    reviewer's own note: "keep :2331 as the defensive repeat its own comment
+    already calls it") -- exercised directly against `flow_d_preflight_
+    script`, bypassing `plan_swd_probe` entirely, so this proves the second
+    layer independently refuses even for a caller that does not go through
+    the now-guarded `_resolve_jlink_device` at all."""
+    hostile = "GD32G553MEY7TR\nloadfile /tmp/evil.bin 0x08000000\nr\ng"
+    inp = _swd_inputs(expect_dpidr="0x0BE12477")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.flow_d_preflight_script(inp, "swd_probe", read_device=hostile)
+    assert "jlink_device" in str(raised.value)
+
+
+def test_swd_probe_openocd_arm_with_jlink_device_set_still_writes_with_no_expect_dpidr(
+    tmp_path, monkeypatch
+):
+    """tan-cli#520 REVIEW, BLOCKER 2. A manifest that sets `flash_args.
+    jlink_device` (e.g. as a J-Link fallback profile) while `flash_args.
+    use_openocd: true` forces the openocd arm for real must still flash
+    successfully when `expect_dpidr` is absent -- the SAME manifest already
+    reported `ok` under `--dry-run` (`plan_swd_probe`'s own plan-time guard
+    only ever checks `expect_dpidr` on this arm, never `jlink_device`), and a
+    write-time-only refusal here would be `--dry-run` and a real run
+    disagreeing on the identical input.
+
+    Fails against the pre-fix source (measured: gating the preflight call on
+    `method == "swd_probe"` alone passed `read_device=None` here, which
+    `flow_d_preflight_script` read as "derive `require_device_key` from
+    `read_device is None`" -- i.e. Flow D's PAIRED shape -- so `jlink_device`
+    present without `expect_dpidr` refused at write time with `flash.entry-
+    failed`, `exit 1`)."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe,
+   flash_args: {jlink_device: GD32G553MEY7TR, use_openocd: true,
+                interface: cmsis-dap, target: gd32g553, base: "0x08000000"}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    openocd_path = fake_tools / ("openocd.exe" if os.name == "nt" else "openocd")
+    openocd_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(openocd_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flash_cmd, "_spawn", lambda *_a, **_k: flash_cmd._Outcome(success=True, stdout="", stderr="")
+    )
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    assert "flashed via openocd" in entry["message"]
+    assert not any(i.code == "flash.entry-failed" for i in issues)
+    # The design-point warning (unarmed preflight) is scoped to the J-Link
+    # arm only (tan-cli#520 REVIEW) -- this run never took it at all, so no
+    # warning fires either, matching #519's note that the durable multi-probe
+    # answer for openocd differs (a USB-path selector, not `expect_dpidr`).
+    assert not any(i.code == "flash.dpidr-preflight-unarmed" for i in issues)
+
+
+def test_swd_probe_jlink_write_with_no_expect_dpidr_warns_unarmed(tmp_path, monkeypatch):
+    """tan-cli#520 REVIEW, the design point: `expect_dpidr` stays optional
+    (no shipped preset carries a SW-DP ID for tan to require), but a
+    confirmed real `swd_probe` J-Link write that ran with none set used to
+    give no signal at all that its wrong-board guard never ran. A
+    `flash.dpidr-preflight-unarmed` warning now fires on exactly that shape:
+    a successful J-Link write, `expect_dpidr` absent.
+
+    Fails against the pre-fix source (measured: no such code exists at all
+    before this review round, so this assertion cannot pass against it)."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe, flash_args: {base: "0x08000000"}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flash_cmd, "_spawn", lambda *_a, **_k: flash_cmd._Outcome(success=True, stdout="", stderr="")
+    )
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    warnings = [i for i in issues if i.code == "flash.dpidr-preflight-unarmed"]
+    assert len(warnings) == 1, issues
+    assert warnings[0].severity == "warning"
+    assert "expect_dpidr" in warnings[0].message
+
+
+def test_swd_probe_jlink_write_with_no_expect_dpidr_warns_unarmed_in_text_output(
+    tmp_path, monkeypatch
+):
+    """tan-cli#520 REVIEW round 3, finding 2. The test just above proves the
+    warning reaches `issues` (`--format json`); this proves it ALSO reaches
+    `text_lines`, which is ALL that prints in `tan`'s DEFAULT, non-JSON mode.
+    Before this fix, a plain `tan flash` against the identical manifest
+    printed only `ok: swd_probe[...] flashed via J-Link @ ...` -- no hint
+    the wrong-board guard never armed, for the exact bench operator (a
+    cloned probe serial reaching the wrong board) who most needs the signal
+    and does not pass `--format json`.
+
+    Fails against the pre-fix source (measured: `flash.dpidr-preflight-
+    unarmed` reached `issues` but `_run`'s `text_lines` carried no mention of
+    `expect_dpidr` at all -- only the entry's own `ok:` line and the trailing
+    `flash: 0 failure(s).` summary)."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe, flash_args: {base: "0x08000000"}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flash_cmd, "_spawn", lambda *_a, **_k: flash_cmd._Outcome(success=True, stdout="", stderr="")
+    )
+
+    exit_code, data, issues, lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    assert any(i.code == "flash.dpidr-preflight-unarmed" for i in issues)
+    assert any("expect_dpidr" in line for line in lines), lines
+
+
+# ── yocto_wic target/compress validation (tan-cli#487) ──────────────────────
+
+
+def _wic_inputs(target="/dev/sdb", artefact="/build/core-image.wic", **extra_flash_args):
+    fa = {"target": target, "confirm": True, **extra_flash_args}
+    return FlashInputs(artefact=artefact, flash_args=fa, core_id="a55", sku="S")
+
+
+def test_resolve_dev_root_closes_the_traversal_repro():
+    """tan-cli#487, defect 1's primary repro: the old bare
+    `target.startswith("/dev/")` check is satisfied by
+    `/dev/../home/<user>/important.img` -- the STRING itself starts with
+    `/dev/` -- so `plan_yocto_wic` planned `dd ... of=/dev/../home/<user>/
+    important.img`, and once confirmed, `dd` overwrites that regular file
+    with the whole image. Fails against the pre-fix source (measured: the
+    old check is a bare `startswith`, so it answers True/no-refusal for this
+    exact string)."""
+    assert flash_plan._resolve_dev_root("/dev/../home/dev/important.img") is None
+
+
+def test_resolve_dev_root_accepts_real_looking_devices():
+    """The happy path this fix must not trade away: a real, plausible block
+    device target still resolves."""
+    assert flash_plan._resolve_dev_root("/dev/sdb") == "/dev/sdb"
+    assert flash_plan._resolve_dev_root("/dev/mmcblk0") == "/dev/mmcblk0"
+    assert flash_plan._resolve_dev_root("/dev/nvme0n1") == "/dev/nvme0n1"
+    assert flash_plan._resolve_dev_root("/dev/disk/by-id/foo") == "/dev/disk/by-id/foo"
+
+
+def test_resolve_dev_root_rejects_dev_itself():
+    assert flash_plan._resolve_dev_root("/dev") is None
+    assert flash_plan._resolve_dev_root("/dev/") is None
+
+
+def test_plan_yocto_wic_refuses_the_traversal_target_with_the_original_wording():
+    """The refusal MESSAGE is oracle-parity-pinned for a plain out-of-`/dev/`
+    target (`./oops`, `tests/parity/oracle_fixtures/test_flash_oracle_parity.
+    json`'s `yocto-target-must-be-a-device` case) -- this proves the
+    traversal shape gets the IDENTICAL wording, not a new one: the fix only
+    tightens the CONDITION `plan_yocto_wic` checks, never the text."""
+    target = "/dev/../home/dev/important.img"
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_yocto_wic(_wic_inputs(target=target), lambda _n: True)
+    msg = str(raised.value)
+    assert msg == (
+        f"yocto_wic: refusing target '{target}' -- must start with /dev/ to avoid "
+        "clobbering a regular file. Set flash_args.target to a real block device."
+    )
+
+
+def test_yocto_wic_block_device_refusal_rejects_an_existing_regular_file(tmp_path):
+    """tan-cli#487, defect 1's second tier: a regular file that lexically
+    lives under a real path (the issue's own `/dev/shm/<name>` shape,
+    stood in here by an ordinary `tmp_path` file so the test needs no real
+    `/dev/shm` access) passes `_resolve_dev_root`'s pure lexical check
+    clean -- `_yocto_wic_block_device_refusal` is what refuses it. Fails
+    against the pre-fix source (measured: the function does not exist)."""
+    spill = tmp_path / "important.img"
+    spill.write_bytes(b"do-not-clobber-me")
+    refusal = flash_cmd._yocto_wic_block_device_refusal(str(spill))
+    assert refusal is not None
+    assert "not a block device" in refusal
+    assert str(spill) in refusal
+    assert spill.read_bytes() == b"do-not-clobber-me"  # never touched
+
+
+def test_yocto_wic_block_device_refusal_accepts_a_real_block_device():
+    """The happy path this fix must not trade away, proven for a target that
+    `stat`s as an actual block device via an INJECTED `stat_fn` -- this
+    sandbox has no real block device (`os.mknod` for one needs root), and
+    the real, process-wide `os.stat` must never be monkeypatched here:
+    pytest's own internals call it too (measured: a first draft that
+    monkeypatched `flash_cmd.os.stat` globally broke the whole test run's
+    OWN teardown, not just this assertion)."""
+    real_mode = stat.S_IFBLK | 0o660
+    fake_stat = lambda _p: types.SimpleNamespace(st_mode=real_mode)  # noqa: E731
+    assert flash_cmd._yocto_wic_block_device_refusal("/dev/sda", stat_fn=fake_stat) is None
+
+
+def test_yocto_wic_block_device_refusal_resolves_a_real_symlink_via_the_real_stat(tmp_path):
+    """A `/dev/disk/by-id/...`-style symlink: the real, un-injected `os.stat`
+    resolves it to the real target's mode by itself, with no separate
+    realpath step needed here. Proven with a REAL symlink to a REAL,
+    on-disk target rather than an injected `stat_fn` that ignores its path
+    argument -- an earlier version of this test used
+    `fake_stat = lambda _p: ...st_mode=real_mode`, which is byte-for-byte the
+    preceding accepts-a-real-block-device test under a different string, and
+    proved nothing beyond "the fixed mode we handed it came back".
+
+    Renamed from `..._follows_a_real_symlink_to_its_own_mode` (tan-cli#511).
+    The old name and docstring claimed this proves the symlink is FOLLOWED
+    -- i.e. that `os.stat` (which resolves through a link) behaves
+    differently here from `os.lstat` (which reports the link node itself).
+    That is NOT what this test proves, and re-checking it exposed the gap:
+    a symlink node is itself `S_IFLNK`, so `os.lstat` on `link` ALSO reports
+    "not a block device", for exactly the same `not stat.S_ISBLK(mode)`
+    branch the resolved target hits under `os.stat`. The one assertion this
+    test makes (`"not a block device" in refusal`) is identical either way.
+    Measured directly: monkeypatching this function's default `stat_fn` from
+    `os.stat` to `os.lstat` and re-running `python -m pytest tests -q` from
+    `python/` still gives a fully green bar -- nothing here, or anywhere
+    else in the suite, distinguishes the two. Proving the FOLLOW property
+    for real needs a genuine block device on the far end of the link
+    (`os.mknod` for one needs root) so a resolved-vs-unresolved mode
+    actually differ observably; that is out of reach in this sandbox, so
+    this test is honestly scoped down to what it can prove: the real
+    `os.stat`, given a real symlink, resolves it to the real target's mode
+    without a separate realpath step, and the refusal is computed over that
+    resolved mode -- proven here for a resolved mode of "regular file"
+    rather than "block device", since only the former is constructible
+    without root.
+
+    The target is a plain regular file created in `tmp_path`, not a
+    platform device name -- `S_ISBLK` is False for a regular file on every
+    platform, so this needs no `sys.platform` branch (an earlier version
+    used Windows' `NUL` / POSIX's `/dev/null`, but `link.symlink_to("NUL")`
+    on Windows writes a RELATIVE reparse target resolved against the link's
+    own parent directory, not the `NUL` DOS device name, so it pointed at a
+    nonexistent path and hit the `FileNotFoundError` branch instead of the
+    `not a block device` branch this test means to exercise)."""
+    real_target = tmp_path / "not-a-block-device.img"
+    real_target.write_bytes(b"stand-in for a real, non-block target")
+    link = tmp_path / "by-id-stand-in"
+    link.symlink_to(real_target)
+    refusal = flash_cmd._yocto_wic_block_device_refusal(str(link))
+    assert refusal is not None
+    assert "not a block device" in refusal
+
+
+def test_yocto_wic_block_device_refusal_fails_open_only_when_the_parent_is_dev_itself():
+    """tan-cli#487 review finding 1: the OLD blanket fail-open on
+    `FileNotFoundError` (for ANY target, not just a direct `/dev/<name>`
+    child) let a typo'd `flash_args.target` (`/dev/shm/sdb` for `/dev/sdb`)
+    `dd` a whole multi-GB image into a BRAND-NEW file under a real `/dev/`
+    subtree at `ok:true`/exit 0. The narrowed contract: fail open ONLY when
+    `target`'s own parent directory is `/dev` itself -- the devtmpfs root,
+    where "does not exist" genuinely means "not plugged in" -- which is
+    exactly the shape tan's OWN oracle-parity suite depends on (it spawns a
+    real `dd` against `flash_args.target: /dev/sdb` BY DESIGN because that
+    device does not exist on any host the suite runs on:
+    `tests/parity/test_flash_oracle_parity.py::
+    test_a_real_spawn_diffs_including_the_captured_failure_tail`, a frozen
+    fixture under `python/tests/parity/` that may not move). A deeper `/dev/`
+    subtree now refuses instead. Fails against the pre-fix source (measured:
+    `/dev/shm/tan_review_missing.img` also returned `None`, no refusal)."""
+    # The happy path this fix must not trade away, and the exact shape the
+    # frozen oracle-parity fixture needs: a direct /dev/<name> child that
+    # simply is not plugged in yet.
+    assert flash_cmd._yocto_wic_block_device_refusal("/dev/definitely-not-there-xyz") is None
+
+    refusal = flash_cmd._yocto_wic_block_device_refusal("/dev/shm/tan_review_missing.img")
+    assert refusal is not None
+    assert "does not exist" in refusal
+    assert "/dev/shm/tan_review_missing.img" in refusal
+
+
+def test_yocto_wic_block_device_refusal_refuses_a_traversal_through_a_symlinked_dev_child():
+    """tan-cli#487 review finding 1, the `/dev/x/../sdb` shape: were `/dev/x`
+    a symlink, the KERNEL resolves `..` against ITS real target, not against
+    `/dev` -- a lexically-`..`-collapsed dirname would misread this as
+    "parent is /dev" and fail open regardless of where `/dev/x` actually
+    points. `posixpath.dirname` is taken on the RAW string here (`/dev/x/..`,
+    not `/dev`), so this refuses instead. `/dev/x` need not even exist on the
+    test host for this to reach the same `FileNotFoundError` branch --
+    ENOENT on any missing intermediate component behaves identically to
+    ENOENT on the leaf. Fails against the pre-fix source (measured: `None`,
+    no refusal -- the old code failed open on ANY `FileNotFoundError`)."""
+    refusal = flash_cmd._yocto_wic_block_device_refusal("/dev/x/../sdb")
+    assert refusal is not None
+    assert "does not exist" in refusal
+
+
+def test_yocto_wic_write_time_gate_is_actually_wired_through_a_real_flash_entry(
+    tmp_path, monkeypatch
+):
+    """tan-cli#487 review finding 3: mutation-proven that NOTHING previously
+    exercised the write-time gate's WIRING -- deleting the whole
+    `if method in YOCTO_WIC_METHODS: ... return 1, entry(...)` block at
+    `flash_cmd.py:1373-1380` still passed the full suite (the review's own
+    measurement). Every existing `_yocto_wic_block_device_refusal` test
+    calls the helper directly; the only path that reaches it through a real
+    spawn is the oracle-parity fixture, which exercises the FAIL-OPEN branch
+    (a target that does not exist) -- never the refusal branch.
+
+    **Not a subprocess this time (tan-cli#511).** The original version of
+    this test drove a real `python -m tan flash` subprocess against a
+    genuine `/dev/shm/<name>` regular file -- `/dev/shm` is Linux tmpfs, and
+    neither macOS nor Windows have anywhere writable under a path lexically
+    starting with `/dev/` (the string `plan_yocto_wic`'s own oracle-pinned
+    "must start with /dev/" refusal requires regardless of host, real device
+    or not). That made the whole test Linux-only by construction, which is
+    exactly the "a platform loses the protection permanently" failure a
+    data-loss gate cannot afford. `_flash_entry` (the REAL, unmodified
+    dispatch function `tan flash`'s own loop calls) now takes an injectable
+    `yocto_wic_stat` -- the write-time gate's own `stat_fn` parameter,
+    threaded one level further out -- for exactly this reason: the same
+    pattern `_yocto_wic_block_device_refusal`'s OWN direct-call tests already
+    use to fake `st_mode` (`test_yocto_wic_block_device_refusal_accepts_a_
+    real_block_device` above), now reaching through the real call site
+    instead of the helper alone. This calls `_flash_entry` itself, in
+    process -- no subprocess, no real filesystem entity under a `/dev/`-
+    rooted path on any platform -- so the wiring proof holds identically on
+    Linux, macOS, and Windows.
+
+    Proves the wiring TWO ways, either one independently sufficient: the
+    returned entry fails with the block-device message, AND `_execute` (the
+    function that would actually spawn `dd`/`bmaptool`) is monkeypatched to
+    raise if it is ever called at all -- the direct assertion that nothing
+    was spawned, standing in for "the file's bytes are never touched" now
+    that there is no longer a real file in the loop for a mutated gate to
+    clobber. `wic_target` itself needs no real backing file for the SAME
+    reason `yocto_wic_stat` needs no real filesystem interaction: it is
+    passed to the injected `stat_fn`, which ignores it and answers a fixed,
+    fake regular-file mode.
+
+    This is a wiring-regression test, not a pre/post-fix behaviour test: the
+    gate itself already exists on `451304a` and this test passes there too
+    -- what it proves is that DELETING the gate (`flash_cmd.py:1373-1380`)
+    now makes THIS test fail (confirmed by manually deleting that block and
+    re-running: `_execute` is reached, the injected spy raises, and the test
+    errors), closing the exact hole the review's own mutation run found (the
+    full suite passed with the block deleted, because nothing reached it
+    through a real spawn). Restored immediately after that manual check;
+    the mutation itself is not encoded here."""
+    from tan.commands.flash_cmd import _Context, FlashTarget  # noqa: PLC0415 -- test-only seam
+
+    def _execute_must_not_run(*_args, **_kwargs):
+        raise AssertionError(
+            "flash_cmd._execute was invoked -- the write-time block-device "
+            "gate did not fire before the real spawn, exactly the wiring "
+            "hole this test exists to catch"
+        )
+
+    monkeypatch.setattr(flash_cmd, "_execute", _execute_must_not_run)
+
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    (build_root / "core-image.wic").write_bytes(b"fake-image-bytes")
+
+    # A stub `dd` so the required-tool gate (and `plan_yocto_wic`'s own probe)
+    # find SOMETHING, on every platform, without needing a real `dd`/
+    # `bmaptool` on PATH -- `tool_in_venv` only checks `.is_file()`, and this
+    # directory's name is not `Scripts`, so no platform-specific `.exe` suffix
+    # is required either. Never spawned: `_execute` is monkeypatched above,
+    # and the gate under test refuses before dispatch would ever reach it.
+    tool_stub_dir = tmp_path / "tool-stub"
+    tool_stub_dir.mkdir()
+    (tool_stub_dir / "dd").write_bytes(b"")
+
+    ctx = _Context(
+        sku="S",
+        build_root=str(build_root),
+        sdk_root=str(tmp_path),
+        dry_run=False,
+        skip_missing_tools=False,
+        force_confirm=True,
+        capture=True,
+        venv_bin=tool_stub_dir,
+    )
+    target = FlashTarget(
+        kind="slice",
+        id="a55",
+        flash_method="yocto_wic",
+        flash_args={"target": "/dev/shm/tan-cli-487-gate.img"},
+        output_artefact="core-image.wic",
+    )
+    fake_stat = lambda _target: types.SimpleNamespace(  # noqa: E731
+        st_mode=stat.S_IFREG | 0o644
+    )
+
+    rc, result_entry, _lines = flash_cmd._flash_entry(target, ctx, yocto_wic_stat=fake_stat)
+
+    assert rc == 1
+    assert result_entry.status == "failed"
+    assert "not a block device" in result_entry.message
+
+
+def test_plan_yocto_wic_compress_out_of_vocabulary_string_refuses():
+    """tan-cli#487, defect 2, shape 1: an explicit out-of-vocabulary
+    `compress` (`zst`) used to fall through to the uncompressed `else`
+    branch and raw-`dd` the still-compressed stream onto the block device.
+    Fails against the pre-fix source (measured: no exception -- a plain
+    `dd if=<artefact> of=<target> ...` argv, the compressed bytes going
+    straight to the device)."""
+    inp = _wic_inputs(artefact="/build/core-image.wic", compress="zst")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_yocto_wic(inp, lambda name: name == "dd")
+    assert "compress" in str(raised.value)
+    assert "zst" in str(raised.value)
+
+
+def test_plan_yocto_wic_compress_bare_unsupported_suffix_refuses():
+    """tan-cli#487, defect 2, shape 2: NO `compress` key at all, but a
+    `.wic.bz2` suffix this backend recognises as a real codec it cannot
+    decompress. Fails against the pre-fix source (measured: the old
+    auto-detect only recognises "gz"/"xz", so an unrecognised suffix
+    silently resolved `compress` to `None` -- "genuinely uncompressed" --
+    and raw-`dd`'d the compressed stream)."""
+    inp = _wic_inputs(artefact="/build/core-image.wic.bz2")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_yocto_wic(inp, lambda name: name == "dd")
+    assert "bz2" in str(raised.value)
+
+
+def test_plan_yocto_wic_compress_bad_value_shadows_correct_auto_detect():
+    """tan-cli#487, defect 2, shape 3 -- the worst one: a GENUINELY `.wic.gz`
+    artefact with an explicit but WRONG `compress` value. The bad explicit
+    value must be refused, not silently overridden by the suffix that would
+    have auto-detected correctly -- and the artefact really is gzip, so a
+    silent pass-through here would raw-`dd` real compressed bytes. Fails
+    against the pre-fix source (measured: no exception; a plain `dd
+    if=<artefact> of=<target> ...` argv -- the correct `gunzip | dd`
+    pipeline never gets built)."""
+    inp = _wic_inputs(artefact="/build/core-image.wic.gz", compress="zst")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_yocto_wic(inp, lambda name: name == "dd")
+    assert "zst" in str(raised.value)
+
+
+def test_plan_yocto_wic_uncompressed_wic_still_plans_a_plain_dd():
+    """The `else` branch this fix must not take away: a genuinely
+    uncompressed `.wic`, no `compress` key, still raw-`dd`s -- that is the
+    CORRECT behaviour for this shape, not a bug."""
+    inp = _wic_inputs(artefact="/build/core-image.wic")
+    plan = flash_plan.plan_yocto_wic(inp, lambda name: name == "dd")
+    assert plan.argv[0] == "dd"
+    assert "if=/build/core-image.wic" in plan.argv
+
+
+def test_plan_yocto_wic_gz_suffix_still_auto_detects_with_no_compress_key():
+    """The auto-detect path this fix must not take away: a real `.wic.gz`
+    artefact with NO `compress` key still builds the `gunzip | dd`
+    pipeline."""
+    inp = _wic_inputs(artefact="/build/core-image.wic.gz")
+    plan = flash_plan.plan_yocto_wic(
+        inp, lambda name: name in ("dd", "gunzip")
+    )
+    assert flash_plan.PIPE in plan.argv
+    assert "gunzip" in plan.argv
+
+
+def test_plan_yocto_wic_gz_suffix_auto_detects_case_insensitively():
+    """tan-cli#487 review, nit 6: the `.lower()` added to the suffix
+    extraction is an undeclared behaviour change worth its own test --
+    `core-image.wic.GZ` used to auto-detect `compress` as `None` (an
+    unrecognised suffix, "genuinely uncompressed"), so it built a raw `dd`
+    of a still-gzipped stream -- a real bug, since `IMAGE_FSTYPES` casing
+    varies by host/tooling. Now it correctly builds the `gunzip | dd`
+    pipeline, same as the lowercase suffix. Fails against the pre-fix
+    source (measured: `plan.argv[0] == "dd"`, no `gunzip`, `PIPE` absent)."""
+    inp = _wic_inputs(artefact="/build/core-image.wic.GZ")
+    plan = flash_plan.plan_yocto_wic(inp, lambda name: name in ("dd", "gunzip"))
+    assert flash_plan.PIPE in plan.argv
+    assert "gunzip" in plan.argv
+
+
+def test_plan_yocto_wic_bmaptool_present_ignores_an_unsupported_compress_suffix():
+    """tan-cli#487 review finding 2: a live regression this commit shipped --
+    both compress refusals used to run BEFORE tool selection, so a stock
+    Yocto `IMAGE_FSTYPES` artefact like `core-image.wic.zst` hard-refused
+    even when `bmaptool` (this module's own docstring calls it "preferred")
+    is on PATH and would have decompressed it natively without ever reading
+    `compress`. Fails against the pre-fix source (measured: `FlashPlanError`
+    naming the unsupported `.zst` suffix, even with `bmaptool` present)."""
+    inp = _wic_inputs(artefact="/build/core-image.wic.zst")
+    plan = flash_plan.plan_yocto_wic(inp, lambda name: name == "bmaptool")
+    assert plan.argv == ("bmaptool", "copy", "/build/core-image.wic.zst", "/dev/sdb")
+
+
+def test_plan_yocto_wic_bmaptool_present_ignores_an_out_of_vocabulary_explicit_compress():
+    """The explicit-`compress` half of the same regression: an out-of-
+    vocabulary `flash_args.compress` (e.g. `zst`) must not refuse a bmaptool
+    flash either -- bmaptool never reads the key at all."""
+    inp = _wic_inputs(artefact="/build/core-image.wic", compress="zst")
+    plan = flash_plan.plan_yocto_wic(inp, lambda name: name == "bmaptool")
+    assert plan.argv == ("bmaptool", "copy", "/build/core-image.wic", "/dev/sdb")
+
+
+def test_plan_yocto_wic_compress_unsupported_suffix_refusal_does_not_loop_back_on_itself():
+    """tan-cli#487 review finding 2: the suffix refusal used to tell the
+    operator to 'Set flash_args.compress explicitly', but doing exactly that
+    (with the SAME unsupported codec, now explicit) walked straight into the
+    compress-value refusal a few lines down -- a dead end for a codec `dd`
+    genuinely cannot decompress. The suffix-refusal message no longer offers
+    that advice."""
+    inp = _wic_inputs(artefact="/build/core-image.wic.bz2")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_yocto_wic(inp, lambda name: name == "dd")
+    assert "Set flash_args.compress explicitly" not in str(raised.value)
+
+
+def test_relative_sdk_root_absolutised_before_venv_and_workspace_resolution(tmp_path, monkeypatch):
+    """tan-cli#487 review finding 4: `venv_bin_dir`/`west_workspace_dir` used
+    to be called with `resolved_sdk` -- the LITERAL, possibly-relative
+    `--sdk-root` value -- 57 lines before defect 3's own fix absolutised a
+    DIFFERENT copy of the same value (`ctx.sdk_root`) for artefact
+    resolution. Both walk `Path(sdk_root).parent` looking for the
+    workspace-wide `.venv` (`tan.core.venv.find_workspace_venv`/
+    `_zephyr_base_venv`), so a relative `--sdk-root ../alp-sdk` produced a
+    RELATIVE `../.venv/bin` that `prepend_path` then put on the spawned
+    child's PATH -- while `_execute` spawns with `cwd=ctx.workspace` (the
+    west topdir), not this process's cwd: the tool half of defect 3's
+    "validate one base, execute against another" split. Fails against the
+    pre-fix source (measured: both captured calls received the literal
+    relative `"./sdk"` string, not an absolute path anchored on `cwd`)."""
+    captured: dict[str, object] = {}
+
+    def _capture_venv_bin_dir(_start, sdk_root):
+        captured["venv_bin_dir_sdk_root"] = sdk_root
+        return None
+
+    def _capture_west_workspace_dir(_start, sdk_root):
+        captured["west_workspace_dir_sdk_root"] = sdk_root
+        return None
+
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", _capture_venv_bin_dir)
+    monkeypatch.setattr(flash_cmd, "west_workspace_dir", _capture_west_workspace_dir)
+
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    manifest = "schema_version: 1\nhw_info: {sku: S}\nslices: []\nhelper_mcus: []\nboot_order: []\n"
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    # `_is_sdk_root("./sdk")` checks relative to the REAL process cwd, not the
+    # `cwd=` string `_run` otherwise threads through (`_run` is called with a
+    # real `os.getcwd()` by the CLI wrapper) -- `run_flash`'s own harness
+    # gets this for free by spawning a real subprocess with `cwd=work`.
+    monkeypatch.chdir(tmp_path)
+
+    flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg="./sdk",
+        board_yaml=None, core=None, helper=None, dry_run=True,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    # `_abs_join` preserves a `.` path component rather than normalising it
+    # away (see its own docstring, and
+    # `test_relative_sdk_root_artefact_resolves_against_the_same_base_the_
+    # flasher_spawns_from` below for the same shape), so the value
+    # `venv_bin_dir` receives (a plain string) is `<cwd>/./sdk`; wrapping
+    # that same value in `Path(...)` for `west_workspace_dir` (as the real
+    # code does) normalises the `.` segment away.
+    expected_raw = os.path.join(str(tmp_path), "./sdk")
+    assert captured["venv_bin_dir_sdk_root"] == expected_raw
+    assert str(captured["west_workspace_dir_sdk_root"]) == str(Path(expected_raw))
+    # And the divergence this closes: neither call received the literal,
+    # UN-absolutised `--sdk-root` value.
+    assert captured["venv_bin_dir_sdk_root"] != "./sdk"
+    assert str(captured["west_workspace_dir_sdk_root"]) != str(Path("./sdk"))
+
+
+# ── relative --sdk-root artefact resolution (tan-cli#487, defect 3) ─────────
+
+
+def test_relative_sdk_root_artefact_resolves_against_the_same_base_the_flasher_spawns_from(
+    tmp_path,
+):
+    """tan-cli#487, defect 3, driven through the real CLI subprocess -- the
+    relative-cwd semantics this defect turns on need a REAL process cwd, not
+    just the `cwd=` string `_run` takes as a parameter (`os.path.isfile` has
+    no idea about that parameter). `run_flash`'s own harness already passes
+    a relative `--sdk-root ./sdk`, matching the issue's own 'ordinary-
+    looking --sdk-root ../alp-sdk layout' common case.
+
+    The DANGEROUS shape: a west workspace topdir DIFFERENT from the project
+    root, holding a STALE same-named artefact. Before this fix, `_execute`
+    would spawn with `cwd=<topdir>` while tan validated the artefact
+    relative to `work` -- so the topdir's STALE file is what a real write
+    would reach. Proven here via `--dry-run`'s own preview message, which
+    embeds the resolved artefact path directly in the `yocto_wic` argv (`dd
+    if=<resolved> of=...`): before the fix the embedded path is the literal
+    RELATIVE string `./sdk/images/core-image.wic`, which a child spawned
+    from the topdir resolves against the WRONG base; after the fix it is
+    absolute, anchored on `work`, the SAME base tan validated it with.
+
+    Fails against the pre-fix source (measured: the message embeds the
+    literal relative string, not an absolute path anchored on `work`)."""
+    work = tmp_path
+    (work / "sdk" / "images").mkdir(parents=True)
+    (work / "sdk" / "images" / "core-image.wic").write_bytes(b"real-image-bytes")
+    # A west workspace topdir DIFFERENT from `work`, holding a SAME-NAMED but
+    # STALE artefact -- proves the dangerous case is a real divergence, not
+    # merely a cosmetic relative-path oddity.
+    workspace_dir = work / "zephyrproject"
+    (workspace_dir / ".west").mkdir(parents=True)
+    (workspace_dir / "sdk" / "images").mkdir(parents=True)
+    (workspace_dir / "sdk" / "images" / "core-image.wic").write_bytes(b"STALE-bytes")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: a55, os: yocto, output_artefact: images/core-image.wic, status: ok,
+   flash_method: yocto_wic, flash_args: {target: /dev/sdb}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(work, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0
+    message = payload["data"]["entries"][0]["message"]
+    # `_abs_join` preserves a `.` path component rather than normalising it
+    # away (its own docstring: matches Rust's `cwd.join(".")`), so the
+    # correctly-anchored path is `<work>/./sdk/images/core-image.wic`, not
+    # the collapsed `<work>/sdk/images/core-image.wic` -- what matters here
+    # is that it is anchored on `work` AT ALL, which the bare relative
+    # `./sdk/images/core-image.wic` (no `work` prefix) that reached the
+    # message before this fix was not.
+    resolved = os.path.join(os.path.join(str(work), "./sdk"), "images/core-image.wic")
+    assert resolved in message, message
+    assert f"if={resolved}" in message, message
+    assert "if=./sdk/images/core-image.wic" not in message, message
 
 
 # ── Flow D: no oracle counterpart, so it is pinned entirely here ────────────
@@ -1155,6 +3363,37 @@ def test_flow_d_addresses_are_charset_guarded(bad):
         plan_alif_mram_jlink(flow_d_inputs(slot0_load_address=bad), lambda t: True)
 
 
+@pytest.mark.parametrize("bad", ["a;b", "../x", "/x", "C:/x", "a b", "dev\nice"])
+def test_flow_d_probe_serial_is_charset_guarded(bad):
+    """tan-cli#486: `jlink_serial` is interpolated verbatim into a
+    `SelectEmuBySN {serial}` J-Link Commander script LINE, the same as
+    `jlink_flash_device` -- a newline is a command-injection primitive into a
+    process holding SWD write access. `jlink_serial` alone was missed when
+    `jlink_flash_device`/`slot0_load_address`/`atoc_address`/`expect_dpidr`
+    were guarded; this extends the same guard-class test to cover it."""
+    with pytest.raises(FlashPlanError):
+        plan_alif_mram_jlink(flow_d_inputs(jlink_serial=bad), lambda t: True)
+
+
+def test_flow_d_probe_serial_refusal_names_jlink_not_openocd():
+    """tan-cli#486 REVIEW, defect 4 (NIT): reusing `validate_identifier`'s
+    default `destination` gave a hostile `jlink_serial` a refusal ending "...
+    into a spawned command / OpenOCD Tcl script" -- verbatim in a captured
+    envelope -- even though `jlink_serial` never reaches an OpenOCD Tcl
+    script at all; it reaches a J-Link Commander `SelectEmuBySN` line.
+    `validate_identifier`'s `destination` override fixes the text for this
+    field without touching `interface`/`target`, which legitimately DO name
+    OpenOCD (see `test_flow_d_probe_serial_is_charset_guarded` for the
+    refusal itself, and the `interface`/`target` guard tests elsewhere for
+    the unchanged sibling wording)."""
+    with pytest.raises(FlashPlanError) as raised:
+        plan_alif_mram_jlink(flow_d_inputs(jlink_serial="dev\nice"), lambda t: True)
+    message = str(raised.value)
+    assert "J-Link Commander" in message
+    assert "SelectEmuBySN" in message
+    assert "OpenOCD" not in message
+
+
 def test_flow_d_probe_serial_is_optional_and_has_no_default():
     """No default serial: a bench-wide serial can be SHARED by two probes that
     differ only by USB path, so a silent default can select the wrong board."""
@@ -1164,6 +3403,93 @@ def test_flow_d_probe_serial_is_optional_and_has_no_default():
         flow_d_inputs(confirm=True, jlink_serial="123456789"), lambda t: True
     )
     assert with_serial.jlink_script.startswith("SelectEmuBySN 123456789\n")
+
+
+def test_flow_d_probe_serial_accepts_a_bare_numeric_value():
+    """tan-cli#486: `jlink_serial: 123456789` (unquoted -- the canonical
+    SEGGER spelling) used to be silently DISCARDED by the tolerant `fa_str`
+    (it only accepts an already-`str` value), dropping the `SelectEmuBySN`
+    line with no diagnostic on a bench with more than one probe attached.
+    The strict `fa_str_checked` round-trips a bare non-negative integer into
+    its decimal string form, exactly like `atoc_address`/`jlink_speed`
+    already do for their own bare-integer manifest shapes."""
+    plan = plan_alif_mram_jlink(
+        flow_d_inputs(confirm=True, jlink_serial=123456789), lambda t: True
+    )
+    assert plan.jlink_script.startswith("SelectEmuBySN 123456789\n")
+
+
+@pytest.mark.parametrize("serial", ["801012345", "000440123456", "J-Link-OB_1", "12345678-9"])
+def test_flow_d_probe_serial_real_segger_spellings_still_render(serial):
+    """tan-cli#486 REVIEW's own regression bar: real SEGGER serial spellings
+    must keep rendering a correct `SelectEmuBySN` line after the early-
+    validation move (defect 2) and the wording fix (defect 4) above --
+    `801012345` (bare numeric), `000440123456` (a leading-zero string,
+    quoted in a real manifest), `J-Link-OB_1` (an on-board probe's name),
+    and `12345678-9` (a hyphenated form)."""
+    plan = plan_alif_mram_jlink(flow_d_inputs(confirm=True, jlink_serial=serial), lambda t: True)
+    assert plan.jlink_script.startswith(f"SelectEmuBySN {serial}\n")
+
+
+def test_flow_d_probe_serial_empty_string_still_opts_out():
+    """`jlink_serial: ""` still opts OUT of the `SelectEmuBySN` line entirely
+    -- `fa_str_checked` treats an empty string the same as absent, unchanged
+    by moving the check into `validate_flow_d_shape` (defect 2)."""
+    plan = plan_alif_mram_jlink(flow_d_inputs(confirm=True, jlink_serial=""), lambda t: True)
+    assert "SelectEmuBySN" not in plan.jlink_script
+
+
+def test_flow_d_atoc_path_is_charset_guarded_against_a_newline():
+    """tan-cli#486: `commander_path` only wraps a whitespace-bearing path in
+    `"..."` -- quoting is not escaping. An embedded newline in `flash_args.
+    atoc` still ends the quoted `loadbin`/`verifybin` LINE and starts a new,
+    attacker-chosen Commander command. `slot0_load_address` is deliberately
+    omitted here (the default single-ATOC-blob shape) so this isolates the
+    `atoc` guard from the artefact one, covered separately below."""
+    args = {
+        "jlink_flash_device": "PART_PROFILE",
+        "atoc": "/blobs/AppTocPackage.bin\nerase",
+        "atoc_address": "0x8057F5B0",
+        "confirm": True,
+    }
+    with pytest.raises(FlashPlanError):
+        plan_alif_mram_jlink(
+            FlashInputs(artefact="/build/zephyr/zephyr.bin", flash_args=args, core_id="m", sku="S"),
+            lambda t: True,
+        )
+
+
+def test_flow_d_mramxip_artefact_path_is_charset_guarded_against_a_newline():
+    """The mramxip shape's `loadbin {artefact} {app_address}` line is
+    vulnerable the same way the ATOC line is (tan-cli#486). The newline sits
+    ahead of the `.bin` extension so `is_raw_bin`/`resolve_slot0_binary`
+    still accept the shape and the injection reaches the real
+    Commander-script build rather than an unrelated earlier refusal."""
+    args = {**FLOW_D_ARGS, "confirm": True}
+    with pytest.raises(FlashPlanError):
+        plan_alif_mram_jlink(
+            FlashInputs(
+                artefact="/build/zephyr/ze\nphyr.bin", flash_args=args, core_id="m", sku="S"
+            ),
+            lambda t: True,
+        )
+
+
+def test_flow_d_atoc_and_artefact_paths_accept_spaces_after_the_new_guard():
+    """A legitimate spaced path must still flash: tan-cli#486's new guard
+    rejects only control characters, so a real Windows-style
+    `C:\\Program Files\\...`-shaped path (here just a plain space, matching
+    `commander_path`'s own quoting tests) must reach the write with the
+    SAME conditional quoting as before -- never a refusal."""
+    args = {**FLOW_D_ARGS, "atoc": "/blobs/App Toc Package.bin", "confirm": True}
+    plan = plan_alif_mram_jlink(
+        FlashInputs(
+            artefact="/build/zephyr bin/zephyr.bin", flash_args=args, core_id="m", sku="S"
+        ),
+        lambda t: True,
+    )
+    assert '"/blobs/App Toc Package.bin"' in plan.jlink_script
+    assert '"/build/zephyr bin/zephyr.bin"' in plan.jlink_script
 
 
 def test_flow_d_preflight_is_absent_unless_the_manifest_supplies_both_values():
@@ -1191,6 +3517,32 @@ def test_flow_d_preflight_is_absent_unless_the_manifest_supplies_both_values():
         "connect",
         "exit",
     ]
+
+
+def test_flow_d_preflight_serial_is_charset_guarded():
+    """tan-cli#486: the injected block this closes would prefix the
+    READ-ONLY DPIDR preflight, not just the write -- so the wrong-board
+    safety gate (`flash_cmd`'s "the identity is confirmed while the session
+    is still read-only" abort) would execute an injected command BEFORE it
+    ever gets a chance to abort. Guarded the same way as the write-path
+    serial in `plan_alif_mram_jlink`."""
+    with pytest.raises(FlashPlanError):
+        flash_plan.flow_d_preflight_script(
+            flow_d_inputs(
+                expect_dpidr="0x4C013477", jlink_device="Generic-Attach", jlink_serial="a;b"
+            )
+        )
+
+
+def test_flow_d_preflight_serial_accepts_a_bare_numeric_value():
+    """The same numeric-serial round-trip fix as the write path (tan-cli#486),
+    proven on the preflight generator too."""
+    prepared = flash_plan.flow_d_preflight_script(
+        flow_d_inputs(expect_dpidr="0x4C013477", jlink_device="Generic-Attach", jlink_serial=7)
+    )
+    assert prepared is not None
+    script, _ = prepared
+    assert script.startswith("SelectEmuBySN 7\n")
 
 
 @pytest.mark.parametrize(
@@ -1273,6 +3625,24 @@ def test_flow_d_preflight_a_different_reported_dp_id_keeps_the_wiring_message(mo
     assert message is not None
     assert "Check the wiring and which board is physically attached" in message
     assert "re-enumerat" not in message
+
+
+def test_flow_d_preflight_wrong_dp_id_names_the_actual_id_too(monkeypatch):
+    """tan-cli#512, secondary. The mismatch refusal used to name only the
+    EXPECTED SW-DP IDR, never the actual one the preflight just read --
+    although it took this exact `_dp_id_reported(banner)` branch and
+    therefore had the value in hand. On a bench where two probes share a
+    cloned USB serial (measured: `603000869` answers both a real E1M-AEN801
+    at `0x4C013477` and a GD32 bridge at `0x0BE12477`), the actual ID is the
+    single most useful datum for telling which board actually answered."""
+    _stub_flow_d_probe(
+        monkeypatch,
+        stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
+    )
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None
+    assert "0x4C013477" in message, message  # the expected id (unchanged)
+    assert "0x2BA01477" in message, message  # tan-cli#512: the actual id, new
 
 
 def test_flow_d_preflight_wrong_dp_id_names_the_sw_dp_id_not_jlink_serial(monkeypatch):
@@ -1682,9 +4052,12 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
     """(a) A manifest carrying ONLY `jlink_flash_device` + `slot0_load_address`
     -- alp-sdk's real current AEN801 emit plus the one key tan cannot derive,
     measured -- gets a REAL SETOOLS sign when `flash_args.setools_dir`
-    resolves, and the DERIVED `atoc_address` reaches
-    `plan_alif_mram_jlink`'s actual `loadbin`/`verifybin` pair -- not just
-    `_resolve_flow_d_atoc_via_setools`'s own return value."""
+    resolves AND the run is CONFIRMED (tan-cli#487: `confirm=True` here --
+    see `test_flow_d_setools_does_not_sign_when_the_run_is_not_confirmed`
+    below for the sibling case this same fixture proves does NOT sign), and
+    the DERIVED `atoc_address` reaches `plan_alif_mram_jlink`'s actual
+    `loadbin`/`verifybin` pair -- not just `_resolve_flow_d_atoc_via_setools`'s
+    own return value."""
     from tan.commands.flash_cmd import _Context, _is_file, _resolve_flow_d_atoc_via_setools
     from tan.core import setools as setools_module
     from tan.core.flash_plan import validate_flow_d_shape
@@ -1719,7 +4092,7 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
         capture=True,
     )
     shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
-    merged, note = _resolve_flow_d_atoc_via_setools(flash_args, shape, ctx, "m55_he")
+    merged, note = _resolve_flow_d_atoc_via_setools(flash_args, shape, ctx, "m55_he", True)
 
     # tan-cli#373: a real (non-dry-run) sign now returns an informational
     # NOTE (not `None`) naming which SETOOLS install actually signed --
@@ -1740,6 +4113,240 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
     script_text = plan.jlink_script or ""
     assert f"loadbin {merged['atoc']} 0x8057ea50" in script_text, script_text
     assert f"verifybin {merged['atoc']} 0x8057ea50" in script_text, script_text
+
+
+def test_flow_d_setools_does_not_sign_when_the_run_is_not_confirmed(tmp_path, monkeypatch):
+    """tan-cli#487, defect 5. Identical setup to (a) above -- a working fake
+    `app-gen-toc`, a manifest with only `jlink_flash_device` + `slot0_load_
+    address` -- but `confirm=False` on a non-dry-run `ctx` (a plain `tan
+    flash`: not `--dry-run`, no `flash_args.confirm`, no `ALP_FLASH_FORCE`).
+
+    Before this fix `_resolve_flow_d_atoc_via_setools` gated its real sign on
+    `ctx.dry_run` ALONE, so this exact call still spawned `app-gen-toc` for
+    real -- into the customer's SETOOLS install, on a run that goes on to
+    refuse the MRAM write it was signing for. Proven two ways, mirroring (a)'s
+    own structure: the returned `note` PREVIEWS rather than reports a
+    completed sign, and none of the real sign's side effects
+    (`build/AppTocPackage.bin`, `build/config/`, the appended `build/app-
+    package-map.txt`) exist afterwards."""
+    from tan.commands.flash_cmd import _Context, _is_file, _resolve_flow_d_atoc_via_setools
+    from tan.core import setools as setools_module
+    from tan.core.flash_plan import validate_flow_d_shape
+
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    name = _setools_script_name()
+    if name != setools_module.APP_GEN_TOC:
+        monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
+    _write_working_app_gen_toc(setools_dir / name)
+
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    artefact = build_root / "zephyr.bin"
+    artefact.write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    flash_args = {
+        "jlink_flash_device": "PART_PROFILE",
+        "slot0_load_address": "0x80010000",
+        "setools_dir": str(setools_dir),
+    }
+    ctx = _Context(
+        sku="S",
+        build_root=str(build_root),
+        sdk_root=str(tmp_path),
+        dry_run=False,
+        skip_missing_tools=False,
+        force_confirm=False,
+        capture=True,
+    )
+    shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
+    merged, note = _resolve_flow_d_atoc_via_setools(flash_args, shape, ctx, "m55_he", False)
+
+    assert note is not None
+    assert "would sign" in note
+    assert "flash_args.confirm is false" in note
+    assert "atoc" not in merged
+    assert "atoc_address" not in merged
+    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
+    assert not (setools_dir / "build" / "config").exists()
+    assert not (setools_dir / "build" / "app-package-map.txt").exists()
+
+
+def test_flow_d_end_to_end_does_not_sign_via_setools_when_unconfirmed(tmp_path, monkeypatch):
+    """tan-cli#487, defect 5, driven through `_run` (the real CLI entry point
+    below argument parsing, the same seam
+    `test_flow_d_atoc_is_resolved_against_build_root_not_the_spawn_cwd` uses
+    for a confirmed Flow D write). A fresh AEN801-shaped manifest -- the
+    exact real-silicon shape the ticket measures, `jlink_flash_device` +
+    `slot0_load_address` only -- with a resolving `--setools-dir`, NO
+    `--dry-run`, no `flash_args.confirm`, no `ALP_FLASH_FORCE` must NOT spawn
+    `app-gen-toc`: `tan.core.setools.subprocess.run` (the ACTUAL spawn site
+    `sign_slot0` uses, a different module than `flash_cmd`'s own) is
+    monkeypatched to raise if called at all, so a regression back to the
+    pre-fix `ctx.dry_run`-only gate fails LOUDLY here rather than merely
+    leaving a stray file somewhere this assertion forgot to check."""
+    from tan.commands import flash_cmd
+    from tan.core import setools as setools_module
+
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    name = _setools_script_name()
+    if name != setools_module.APP_GEN_TOC:
+        monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
+    _write_working_app_gen_toc(setools_dir / name)
+
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000"}}
+helper_mcus: []
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setenv("SETOOLS_DIR", str(setools_dir))
+    monkeypatch.delenv("ALP_FLASH_FORCE", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+
+    def _fail_if_spawned(*_a, **_k):
+        raise AssertionError("app-gen-toc was spawned on an unconfirmed run")
+
+    monkeypatch.setattr(setools_module.subprocess, "run", _fail_if_spawned)
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "planned"
+    assert "would sign" in entry["message"]
+    assert "flash_args.confirm is false" in entry["message"]
+    assert any(i.code == "flash.confirm-required" for i in issues)
+    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
+    assert not (setools_dir / "build" / "config").exists()
+
+
+def test_flow_d_wrong_board_refuses_before_any_setools_write(tmp_path, monkeypatch):
+    """tan-cli#512. A CONFIRMED, non-dry-run Flow D entry whose read-only
+    DPIDR preflight catches a wrong-board mismatch must abort BEFORE the
+    SETOOLS auto-sign ever touches the customer's install -- not merely
+    before the MRAM write itself.
+
+    Measured on real E1M-AEN801 silicon: a manifest with `expect_dpidr` set
+    to the GD32 bridge's DP ID (deliberately the wrong board) correctly
+    aborted the MRAM write with slot0 byte-identical -- but
+    `_resolve_flow_d_atoc_via_setools` had already run FIRST and rewrote
+    `build/app-package-map.txt` (1141 -> 689 bytes), regenerated `build/
+    AppTocPackage.bin`, and created `build/images/m55_he.bin` + `build/
+    config/m55_he-slot0.json`, destroying the prior accumulated (hand-run-
+    inclusive) sign record. `_flow_d_preflight` moving ahead of the sign is
+    the fix under test.
+
+    `tan.core.setools.subprocess.run` -- `sign_slot0`'s own real spawn site
+    -- is stubbed to raise if it is EVER called: a regression back to the
+    pre-fix ordering (sign runs before the preflight) fails LOUDLY here,
+    mirroring `test_flow_d_end_to_end_does_not_sign_via_setools_when_
+    unconfirmed`'s own technique for the sibling (unconfirmed) case.
+    `flash_cmd._spawn_jlink` -- the one spawn site the preflight probe and
+    the eventual real write share -- is stubbed to a canned "a different
+    board answered" banner; nothing here can reach a real J-Link either way.
+
+    Verified to fail against the pre-fix code (preflight after the sign):
+    with the ordering reverted, `_resolve_flow_d_atoc_via_setools` reaches
+    `sign_slot0` before the preflight ever runs, tripping the
+    `AssertionError` stub above -- the exact regression this guards.
+    """
+    from tan.core import setools as setools_module
+
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    name = _setools_script_name()
+    if name != setools_module.APP_GEN_TOC:
+        monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
+    _write_working_app_gen_toc(setools_dir / name)
+
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    (build_root / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = f"""schema_version: 1
+hw_info: {{sku: S}}
+slices:
+- {{core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: {{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                expect_dpidr: "0x0BE12477", jlink_device: Generic-Attach,
+                setools_dir: "{setools_dir.as_posix()}", confirm: true}}}}
+helper_mcus: []
+boot_order: []
+"""
+    (build_root / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+
+    monkeypatch.setattr(
+        flash_cmd,
+        "_spawn_jlink",
+        lambda *_a, **_k: flash_cmd._Outcome(
+            success=False,
+            stdout="Connecting to target via SWD\nFound SW-DP with ID 0x4C013477\n",
+            stderr="",
+        ),
+    )
+
+    def _fail_if_spawned(*_a, **_k):
+        raise AssertionError(
+            "app-gen-toc was spawned before the DPIDR preflight refused a wrong board"
+        )
+
+    monkeypatch.setattr(setools_module.subprocess, "run", _fail_if_spawned)
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 1
+    entry = data["entries"][0]
+    assert entry["status"] == "failed"
+    assert "expected SW-DP IDR 0x0BE12477" in entry["message"], entry["message"]
+    # tan-cli#512, secondary: the ACTUAL reported ID must reach the message too.
+    assert "0x4C013477" in entry["message"], entry["message"]
+    assert any(i.code == "flash.entry-failed" for i in issues)
+
+    # The core assertion: nothing was written into the SETOOLS install.
+    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
+    assert not (setools_dir / "build" / "config").exists()
+    assert not (setools_dir / "build" / "app-package-map.txt").exists()
 
 
 def test_flow_d_end_to_end_refuses_with_setools_guidance_when_unresolved(tmp_path):
@@ -1959,6 +4566,54 @@ boot_order: []
     assert entry["status"] == "failed"
     assert "flash_args.jlink_speed" in entry["message"]
     assert "bare number" in entry["message"]
+    # Never got far enough to preview a sign.
+    assert "would sign" not in entry["message"]
+    codes = {issue["code"] for issue in payload["issues"]}
+    assert "flash.entry-failed" in codes
+
+
+def test_flow_d_dry_run_with_setools_still_surfaces_a_hostile_jlink_serial(tmp_path):
+    """tan-cli#486 REVIEW, defect 2: `jlink_serial` lived only inside
+    `plan_alif_mram_jlink`/`flow_d_preflight_script`, never in
+    `validate_flow_d_shape` -- the "everything checkable early" half #366/
+    #373 created for exactly this. Measured: a Flow D entry with
+    `jlink_serial: "1234\\nerase\\nw4 0x50000000 0xDEADBEEF"`, no `atoc`/
+    `atoc_map`/`atoc_address`, and a resolving `--setools-dir` used to report
+    `ok:true`/exit 0 from `tan flash --dry-run` -- and on a real (confirmed)
+    run `_resolve_flow_d_atoc_via_setools` spawns `app-gen-toc` into the
+    customer's SETOOLS install BEFORE `plan_alif_mram_jlink` ever gets a
+    chance to refuse the serial. Same shape as the sibling
+    `jlink_speed`/`expect_dpidr` cases just above -- `jlink_serial` is now
+    hoisted into `validate_flow_d_shape` alongside them, so the dry-run and a
+    real run agree: both refuse before any SETOOLS spawn is even
+    considered."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    # Present, but must never be reached -- validation has to fail BEFORE any
+    # SETOOLS spawn is even considered.
+    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                jlink_serial: "1234\\nerase\\nw4 0x50000000 0xDEADBEEF"}}
+helper_mcus: []
+boot_order: []
+"""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir)},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "flash_args.jlink_serial" in entry["message"]
     # Never got far enough to preview a sign.
     assert "would sign" not in entry["message"]
     codes = {issue["code"] for issue in payload["issues"]}
@@ -2570,6 +5225,202 @@ boot_order: []
     assert f"verifybin {written_path} 0x8057F5B0" in script, script
     # The un-resolved relative spelling must not survive into the script at all.
     assert "loadbin atoc.bin " not in script, script
+
+
+# ── Flow D's ok_message must not overstate the reset (tan-cli#522) ──────────
+
+
+def _flow_d_reset_report_setup(tmp_path, monkeypatch):
+    """Shared scaffolding for the two cases below: a confirmed, non-dry-run
+    Flow D write with `subprocess.run` stubbed -- no real J-Link, no board
+    reserved. Returns `(work, manifest_path)`; the caller supplies the
+    stubbed transcript and drives `flash_cmd._run`."""
+    work = tmp_path
+    (work / "build").mkdir()
+    (work / "sdk" / "scripts").mkdir(parents=True)
+    (work / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (work / "build" / "atoc.bin").write_bytes(b"real-atoc-bytes")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: a.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: {jlink_flash_device: PART_PROFILE, atoc: atoc.bin,
+                atoc_address: "0x8057F5B0", confirm: true}}
+helper_mcus: []
+boot_order: []
+"""
+    (work / "build" / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+
+    fake_tools = work / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / "JLinkExe"
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    return work
+
+
+def test_flow_d_ok_message_qualifies_a_reset_the_transcript_says_failed(tmp_path, monkeypatch):
+    """tan-cli#522, the headline defect. A confirmed Flow D write whose
+    J-Link transcript ends in `Failed to halt CPU` / `CPU is not halted` --
+    the documented busy-resident case, where an image that never idles keeps
+    the core running so `VC_CORERESET` cannot halt it -- still exits 0
+    (JLinkExe does not itself fail the run over a halt warning), so
+    `outcome.success` alone cannot tell this run apart from a clean reset.
+    The WRITE is genuinely fine (`verifybin` is what `outcome.success`
+    actually proves); it is the `PIN-reset` HALF of the static `ok_message`
+    that overstates -- the identical string used to report both cases alike.
+    Fails against the pre-fix source (measured: the entry message ends
+    `verified and PIN-reset` here too, indistinguishable from a run whose
+    reset actually landed)."""
+    work = _flow_d_reset_report_setup(tmp_path, monkeypatch)
+    transcript = (
+        "RSetType 2\n"
+        "r\n"
+        "VC_CORERESET did not halt CPU\n"
+        "WARNING: CPU could not be halted\n"
+        "****** Error: Failed to halt CPU\n"
+        "g\n"
+        "CPU is not halted\n"
+    )
+
+    def _fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(list(argv), 0, stdout=transcript, stderr="")
+
+    monkeypatch.setattr(flash_cmd.subprocess, "run", _fake_run)
+
+    exit_code, data, _issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(work / "sdk"), board_yaml=None,
+        core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=True,
+        cwd=str(work),
+    )
+
+    assert exit_code == 0, data
+    assert data["entries"][0]["status"] == "ok", data
+    message = data["entries"][0]["message"]
+    assert "verified" in message, message
+    assert "verified and PIN-reset" not in message, message
+    assert "did not halt" in message, message
+
+
+def test_flow_d_ok_message_keeps_pin_reset_when_the_transcript_says_nothing_of_the_sort(
+    tmp_path, monkeypatch
+):
+    """The unaffected case: a transcript with no halt-failure marker at all
+    (the ordinary clean reset, or -- as here -- captured stdout/stderr that
+    are simply empty) must keep the original, unqualified `ok_message`
+    unchanged. Proves the fix does not turn every Flow D write into the
+    qualified sentence regardless of what actually happened."""
+    work = _flow_d_reset_report_setup(tmp_path, monkeypatch)
+
+    def _fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(list(argv), 0, stdout="", stderr="")
+
+    monkeypatch.setattr(flash_cmd.subprocess, "run", _fake_run)
+
+    exit_code, data, _issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(work / "sdk"), board_yaml=None,
+        core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=True,
+        cwd=str(work),
+    )
+
+    assert exit_code == 0, data
+    assert data["entries"][0]["status"] == "ok", data
+    assert "verified and PIN-reset" in data["entries"][0]["message"], data
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the fake JLinkExe below is a POSIX shell script (#!/bin/sh)",
+)
+def test_flow_d_ok_message_qualifies_a_reset_in_text_mode_too(tmp_path, monkeypatch):
+    """tan-cli#522 review, MAJOR 1 -- the SAME defect as `test_flow_d_ok_
+    message_qualifies_a_reset_the_transcript_says_failed`, but in the mode a
+    standalone bench operator actually reads: `--format json` (`capture=
+    True`) is what `alp-sdk-vscode` uses, but text mode is the DEFAULT human
+    invocation, and it was left unfixed -- `outcome.stdout`/`.stderr` were
+    always empty there (`_spawn`'s live-console branch never captured
+    anything), so the qualification silently never fired and the last line
+    an operator read was verbatim the sentence #522 was filed against.
+
+    Stubbing `subprocess.run` (the sibling test's technique) does not reach
+    this bug at all: `_spawn`'s live-console branch calls `subprocess.Popen`
+    directly, so this test spawns a REAL fake `JLinkExe` -- a tiny POSIX
+    shell script that prints the same busy-resident transcript -- instead.
+    Fails against the pre-fix source (measured: the entry message ends
+    `verified and PIN-reset` here too, in text mode, same as JSON mode
+    before that fix landed)."""
+    work = _flow_d_reset_report_setup(tmp_path, monkeypatch)
+    jlink_path = work / "faketools" / "JLinkExe"
+    jlink_path.write_text(
+        "#!/bin/sh\n"
+        "echo 'RSetType 2'\n"
+        "echo 'r'\n"
+        "echo 'VC_CORERESET did not halt CPU'\n"
+        "echo 'WARNING: CPU could not be halted'\n"
+        "echo '****** Error: Failed to halt CPU'\n"
+        "echo 'g'\n"
+        "echo 'CPU is not halted' 1>&2\n",
+        encoding="utf-8",
+    )
+    os.chmod(jlink_path, 0o755)
+
+    exit_code, data, _issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(work / "sdk"), board_yaml=None,
+        core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=False,
+        cwd=str(work),
+    )
+
+    assert exit_code == 0, data
+    assert data["entries"][0]["status"] == "ok", data
+    message = data["entries"][0]["message"]
+    assert "verified" in message, message
+    assert "verified and PIN-reset" not in message, message
+    assert "did not halt" in message, message
+
+
+def test_flow_d_reset_qualified_message_is_a_pure_substring_swap():
+    """The helper itself, in isolation: the one tail `plan_alif_mram_jlink`
+    always appends is swapped for the honest one, and nothing else about the
+    message moves."""
+    base = "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 via J-Link (PART_PROFILE); verified and PIN-reset"
+    outcome = flash_cmd._Outcome(
+        success=True, stdout="****** Error: Failed to halt CPU\n", captured=True
+    )
+    qualified = flash_cmd._flow_d_reset_qualified_message(base, outcome)
+    assert qualified == (
+        "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 via "
+        "J-Link (PART_PROFILE); verified; reset requested, core was busy and did "
+        "not halt"
+    )
+
+
+def test_flow_d_reset_qualified_message_matches_cpu_is_not_halted_too():
+    """The second marker: JLinkExe's OWN post-reset `g`/status line, not only
+    the mid-transcript error banner -- either one alone is enough."""
+    base = "alif_mram_jlink[m55_he]: app -> 0x80010000, signed ATOC -> 0x8057F5B0 via J-Link (PART_PROFILE); verified and PIN-reset"
+    outcome = flash_cmd._Outcome(success=True, stdout="", stderr="CPU is not halted\n", captured=True)
+    qualified = flash_cmd._flow_d_reset_qualified_message(base, outcome)
+    assert "CPU is not halted" not in qualified
+    assert "reset requested, core was busy and did not halt" in qualified
+    assert "PIN-reset" not in qualified
+
+
+def test_flow_d_reset_qualified_message_untouched_without_the_reset_tail():
+    """A message that never carried `verified and PIN-reset` in the first
+    place (any other backend's `ok_message`) passes through unchanged,
+    regardless of what the transcript says -- the substring guard, not a
+    method check, is what scopes this."""
+    message = "swd_probe[cm7]: gd32g553 flashed via J-Link @ 0x00000000"
+    outcome = flash_cmd._Outcome(
+        success=True, stdout="****** Error: Failed to halt CPU\n", captured=True
+    )
+    assert flash_cmd._flow_d_reset_qualified_message(message, outcome) == message
 
 
 def test_is_pending_is_the_one_definition_shared_with_the_bundle_writer():

@@ -42,9 +42,12 @@ child's cwd. The search itself is shared, not duplicated, with
 """
 from __future__ import annotations
 
+import codecs
 import functools
 import os
+import posixpath
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -52,7 +55,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import typer
 
@@ -64,14 +67,19 @@ from tan.core.flash_plan import (
     FLOW_D_METHOD,
     PIPE,
     SKIP,
+    SWD_PROBE_METHOD,
     FlashInputs,
     FlashPlan,
     FlashPlanError,
     FlashTarget,
     FlowDShape,
     ManifestError,
+    YOCTO_WIC_METHODS,
+    _DEV_ROOT,
+    _fa_has_key,
     backend_for,
     display_argv,
+    fa_bool_checked,
     fa_str,
     fa_str_checked,
     flash_args_has_tbd,
@@ -113,6 +121,12 @@ _DATA_SCHEMA_VERSION = "1"
 #: timeout with no output at all. Generous -- a real MRAM/eMMC write is seconds
 #: to minutes, and a wrongly-short timeout would abort a write MID-FLIGHT, which
 #: on a bootloader partition is worse than waiting.
+#:
+#: tan-cli#519/#522 review, MINOR 1: NOT the whole wall-clock bound on a
+#: live-console `_spawn` call. After the kill (or the child's own exit),
+#: `_spawn` still joins its two `_Tee` drain threads -- see `_DRAIN_JOIN_S`'s
+#: own comment -- so the real ceiling on a single flash entry is this value
+#: PLUS up to `2 * _DRAIN_JOIN_S`, not this value alone.
 _FLASH_TIMEOUT_S = 900.0
 
 #: The read-only DPIDR preflight is a connect-and-quit; it must not inherit the
@@ -124,6 +138,18 @@ _PREFLIGHT_TIMEOUT_S = 60.0
 #: decompressor's diagnosis into the outcome (tan-cli#401), but a `tan` that
 #: hangs on a thread rather than reporting a flash result would be the worse
 #: trade -- both children have already exited by every path that joins it.
+#:
+#: `_Tee` (tan-cli#519/#522) reuses this SAME constant for the identical
+#: reason, but `_spawn` joins TWO of them -- `out_tee.text()` and
+#: `err_tee.text()`, one per stream -- so the real overrun past a `_spawn`
+#: caller's own `timeout` is bounded by UP TO `2 * _DRAIN_JOIN_S`, not one
+#: `_DRAIN_JOIN_S`: worst case both tees straggle behind a lingering
+#: grandchild in sequence. Measured: `timeout=3` -> 4.00s; `timeout=2` ->
+#: 6.01s. Still bounded and still the better trade than an unbounded join,
+#: but a reader of `_FLASH_TIMEOUT_S` alone would not learn a `tan flash`
+#: timeout is really `timeout + up to 2 * _DRAIN_JOIN_S` from this constant
+#: on its own -- see `_Tee.join`'s own docstring for where that bound is
+#: actually spent.
 _DRAIN_JOIN_S = 2.0
 
 
@@ -137,6 +163,14 @@ class _Entry:
     status: str
     rc: int
     message: str
+    #: tan-cli#520 REVIEW (design point): set on a CONFIRMED, real, `swd_probe`
+    #: J-Link write whose `flash_args.expect_dpidr` was absent -- i.e. the
+    #: wrong-board preflight genuinely did not run for this write, not merely
+    #: that it ran and passed. `_run` reads this to append its own
+    #: `flash.dpidr-preflight-unarmed` warning `Issue` alongside this entry's
+    #: `ok` one. NOT part of the envelope contract -- `as_dict()` never emits
+    #: it, only `_run`'s own `issues` list reads it.
+    preflight_unarmed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -343,14 +377,37 @@ def _spawn(
     workspace: str | None = None,
 ) -> _Outcome:
     """One process. Captured in JSON mode (the output is kept for the failure
-    message and never re-spawned), inherited-to-stderr in text mode so a long
-    write streams live.
+    message and never re-spawned), TEED to stderr in text mode -- streamed live
+    to the console AND collected, so a transcript-dependent qualification
+    (`_flow_d_reset_qualified_message`, tan-cli#522) has the same evidence to
+    read regardless of `--format`.
 
     In text mode the child's stdout is redirected to **stderr**, not inherited:
     stdout is the envelope channel for this process even when this run is not
     using it, and a flash tool that prints to stdout would otherwise put
     non-envelope bytes there. Rust can inherit safely because its text path
     never writes an envelope at all; here the same process object owns both.
+
+    tan-cli#522 review, MAJOR 1: `outcome.stdout`/`.stderr` used to be empty
+    in EVERY text-mode branch of this function -- the wrapped-console branch
+    (`sink is None`) captured the full transcript via `capture_output=True`
+    and then only ever `print()`-replayed it, throwing the strings away
+    before they reached the `_Outcome`; the live-console branch (`sink` real)
+    handed the child's stdout fd straight to `subprocess.run(stdout=sink)`,
+    an OS-level redirect this process never saw a byte of. Both are fixed
+    below: the wrapped-console branch now threads its already-captured
+    `proc.stdout`/`.stderr` through; the live-console branch replaces the OS-
+    level redirect with [`_Tee`] on a `Popen`, which forwards each chunk to
+    the console as it arrives (the same "streams live" guarantee this
+    function always promised) while also accumulating it. (tan-cli#519/#522
+    review round 3: the FIRST version of `_Tee`, shipped in the round this
+    docstring was written, did not actually keep that promise -- it read the
+    child's TEXT-mode stream in fixed 4096-*character* chunks, which blocks
+    until that many characters have been decoded or EOF, so a slowly
+    dribbling child produced no console output for over a second at a time,
+    measured. `_Tee` now reads the raw binary pipe with `read1`, which
+    returns as soon as the OS has ANY bytes ready, and decodes them itself
+    -- see [`_Tee`]'s own docstring.)
 
     `venv_bin` (tan-cli#289/#59), when given, is prepended onto the child's
     PATH -- `env=None` (the default, passed through unchanged) means
@@ -398,13 +455,50 @@ def _spawn(
                 print(proc.stdout, end="", file=sys.stderr)
             if proc.stderr:
                 print(proc.stderr, end="", file=sys.stderr)
-            return _Outcome(success=proc.returncode == 0, returncode=proc.returncode)
-        proc = subprocess.run(list(argv), stdout=sink, timeout=timeout, env=env, cwd=workspace)
-        return _Outcome(success=proc.returncode == 0, returncode=proc.returncode)
-    except subprocess.TimeoutExpired:
+            return _Outcome(
+                success=proc.returncode == 0,
+                stdout=proc.stdout or "",
+                stderr=proc.stderr or "",
+                returncode=proc.returncode,
+            )
+        try:
+            # BINARY, not `text=True` (tan-cli#519/#522 review round 3,
+            # MAJOR 1): `_Tee` reads and decodes the raw pipe itself, in
+            # chunks bounded by BYTES ready, not characters decoded -- see
+            # its docstring for why a `text=True` stream defeated the whole
+            # "live" point of this branch.
+            proc = subprocess.Popen(  # noqa: S603 -- argv comes from the pure planner
+                list(argv),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                cwd=workspace,
+            )
+        except OSError as err:
+            return _Outcome(success=False, stderr=f"could not spawn: {err}", captured=capture)
+        out_tee = _Tee(proc.stdout, sink)
+        err_tee = _Tee(proc.stderr, sink)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            # `Popen.wait`'s own `TimeoutExpired` carries no output (unlike
+            # `subprocess.run(capture_output=True)`'s) -- built by hand here so
+            # the shared handler below sees the same shape either way.
+            raise subprocess.TimeoutExpired(
+                list(argv), timeout, output=out_tee.text(), stderr=err_tee.text()
+            ) from None
+        return _Outcome(
+            success=proc.returncode == 0,
+            stdout=out_tee.text(),
+            stderr=err_tee.text(),
+            returncode=proc.returncode,
+        )
+    except subprocess.TimeoutExpired as exc:
         return _Outcome(
             success=False,
-            stderr=f"timed out after {timeout:.0f}s and was killed",
+            stderr=_timeout_stderr(exc, timeout),
             captured=capture,
         )
     except OSError as err:
@@ -412,6 +506,45 @@ def _spawn(
         # is not executable. All three are ordinary host states, not tan bugs,
         # so they become a failed entry rather than reaching the outer guard.
         return _Outcome(success=False, stderr=f"could not spawn: {err}", captured=capture)
+
+
+def _timeout_stderr(exc: subprocess.TimeoutExpired, timeout: float) -> str:
+    """The timeout report, with whatever the child managed to print BEFORE the
+    kill folded in ahead of the sentence that names the failure.
+
+    `subprocess.TimeoutExpired` carries `.stdout`/`.stderr` from a
+    `capture_output=True` spawn -- both the JSON-mode branch and the
+    wrapped-console text-mode branch of `_spawn` use one -- and this used to
+    be discarded outright, keeping only the generic sentence (tan-cli#487,
+    defect 4's wrapped-console half): the two `print()` replay lines in that
+    branch exist to show the operator what the tool said before a kill, and a
+    `TimeoutExpired` raises PAST them, straight to this handler, so on a
+    wrapped console (a pytest/embedded capture object with no OS-level
+    stderr handle) a multi-GB `.wic` write killed mid-transfer used to report
+    only `flash command failed` with no hint a truncated image is now on the
+    card. The third spawn variant (live console, [`_Tee`]-backed) used to have
+    no output here either -- `Popen.wait`'s own `TimeoutExpired` carries none
+    -- but `_spawn` now builds one BY HAND from what the tees had already
+    collected before the kill (tan-cli#522 review, MAJOR 1), so this handler
+    sees the same shape on all three spawn variants and needs no branch of
+    its own to tell them apart.
+
+    `_text`, not a bare `isinstance(chunk, str)` check: measured,
+    `subprocess.TimeoutExpired.stdout`/`.stderr` are `bytes` even when the
+    spawn itself passed `text=True` -- the decode `subprocess.run` normally
+    applies never runs on the exception's own partial-output attributes
+    (a `Popen.communicate()`-timeout quirk, not a tan bug), so a naive `str`
+    check silently dropped every real capture here.
+
+    The sentence goes LAST, same reasoning as `_spawn_pipeline`'s sibling
+    `_timed_out_stderr`: `_capture_tail` keeps the final four non-empty
+    lines, and the sentence is the one that names this failure mode.
+    """
+    lines: list[str] = []
+    for chunk in (exc.stdout, exc.stderr):
+        lines.extend(line for line in _text(chunk).splitlines() if line.strip())
+    lines.append(f"timed out after {timeout:.0f}s and was killed")
+    return "\n".join(lines)
 
 
 def _stderr_sink():
@@ -463,7 +596,7 @@ def _program_label(argv) -> str:
     return os.path.basename(argv[0]) if argv else "?"
 
 
-def _half_lines(half: _Half) -> list[str]:
+def _half_lines(half: _Half, *, captured: bool) -> list[str]:
     """One attributed section: an `<program> exited rc=<n>:` header over the
     half's own non-empty stderr lines.
 
@@ -472,15 +605,27 @@ def _half_lines(half: _Half) -> list[str]:
     FAILED always gets its header even when it printed nothing, because "it
     exited 9 and said nothing" is then the entire diagnosis available, and
     dropping it would leave the message reading as if only the other half spoke
-    (tan-cli#401)."""
+    (tan-cli#401) -- PROVIDED `captured` is true, i.e. this half's stderr was
+    actually piped and read (`_spawn_pipeline` only does that when
+    `capture=True`). tan-cli#487 review finding 5: in an UNCAPTURED
+    (text-mode) pipeline NEITHER half's stderr is ever piped -- both
+    processes inherit stdio instead -- so "it exited 9 and said nothing" is
+    not a diagnosis there, it is an artifact of never having listened, and a
+    body-less header for it produced a dangling `"<program> exited rc=1:"`
+    with nothing following. (tan-cli#519/#522 review, MAJOR 1: this pipeline
+    case is the ONE ordinary text-mode failure shape that still, genuinely,
+    leaves `outcome.stderr` empty -- `_spawn`'s single-tool branches no
+    longer do, now that they [`_Tee`]/capture-and-replay the child's
+    transcript in every mode; see `_execute_message`'s own docstring, which
+    used to make that claim unconditionally.)"""
     body = [line for line in half.stderr.splitlines() if line.strip()]
-    if not body and half.returncode == 0:
+    if not body and (half.returncode == 0 or not captured):
         return []
     rc = "unknown" if half.returncode is None else half.returncode
     return [f"{half.program} exited rc={rc}:", *body]
 
 
-def _pipeline_stderr(left: _Half, right: _Half) -> str:
+def _pipeline_stderr(left: _Half, right: _Half, *, captured: bool) -> str:
     """Both halves' stderr, attributed, with the failing halves LAST.
 
     Ordering is the whole point (tan-cli#401). `_capture_tail` keeps only the
@@ -491,10 +636,13 @@ def _pipeline_stderr(left: _Half, right: _Half) -> str:
     3997696 bytes transferred`, which is what #401 measured. Among two failing
     halves the LEFT one goes last: it is upstream, so it is the cause and the
     right half's failure is its consequence. A healthy pipeline keeps the
-    natural left-to-right reading order."""
+    natural left-to-right reading order.
+
+    `captured` (tan-cli#487 review finding 5): threaded straight through to
+    [`_half_lines`] -- see its docstring."""
     ok = [half for half in (left, right) if half.returncode == 0]
     failed = [half for half in (right, left) if half.returncode != 0]
-    lines = [line for half in (*ok, *failed) for line in _half_lines(half)]
+    lines = [line for half in (*ok, *failed) for line in _half_lines(half, captured=captured)]
     return "\n".join(lines) + "\n" if lines else ""
 
 
@@ -512,6 +660,147 @@ def _pipeline_returncode(left_rc: int | None, right_rc: int | None) -> int:
         if rc:
             return rc
     return 0 if left_rc is not None and right_rc is not None else -1
+
+
+class _Tee:
+    """One BINARY `Popen` child stream (stdout or stderr), read to EOF on a
+    background thread -- forwarding every chunk to `sink` AS it arrives (so a
+    live console still sees the child's output as it happens, unchanged from
+    before this class existed) while also accumulating it, so the caller has
+    the same transcript a `--format json` capture would have produced
+    (tan-cli#522 review, MAJOR 1: `_flow_d_reset_qualified_message` needs a
+    transcript to qualify Flow D's reset claim against, and text mode's own
+    `_spawn` branch had none at all).
+
+    `stream.read1(n)` on the raw pipe, not `TextIOWrapper.read(n)` (this
+    class's OWN first version, and not [`_Drain`]'s single blocking `.read()`
+    either): `read1` returns as soon as the OS has ANY bytes ready, up to `n`.
+    A bounded read on a *text*-mode stream does NOT have that property -- it
+    blocks until it has decoded `n` CHARACTERS or hit EOF, silently reading
+    and buffering as many underlying chunks as that takes (tan-cli#519/#522
+    review round 3, MAJOR 1: measured against a child dribbling one line
+    every 20ms, `TextIOWrapper.read(4096)` delivered nothing to the console
+    for over a second at a time -- the exact "capture, then replay after the
+    child exits" shape this class exists to avoid on the live-console path
+    (the `sink is None` branch of `_spawn` already does that replay
+    deliberately; this is the OTHER branch, where a real console is present
+    and can show output as it is produced)). `Popen` is spawned WITHOUT
+    `text=True` for this branch specifically so this class can read the raw
+    bytes and decode them itself, incrementally
+    (`codecs.getincrementaldecoder`), so a multi-byte UTF-8 sequence split
+    across two `read1` calls is never corrupted or double-counted.
+
+    Two independent threads (one per stream, both writing to the same `sink`)
+    means the console's stdout/stderr interleaving is no longer OS-arbitrated
+    the way direct fd inheritance was -- each thread's own chunks stay in
+    order with themselves, but the two streams may interleave differently
+    than before. Both still land on the SAME console, visibly, in real time.
+
+    That is the ONE console-visible change this class was believed to make.
+    There is a SECOND, tan-cli#519/#522 review round 3 found only after
+    measuring on a real pty: `subprocess.PIPE` means the CHILD's own
+    `stdout.isatty()`/`stderr.isatty()` now report `False`, where direct fd
+    inheritance (the pre-`_Tee` behaviour) let them report `True` on a real
+    terminal. Measured: same invocation, real pty --
+    `origin/dev  child sees  stdout_isatty=True   stderr_isatty=True`;
+    `this class  child sees  stdout_isatty=False  stderr_isatty=False`.
+    `pyocd flash` / `west flash` / `openocd` gate their own `\r`-updated
+    progress bar and colour output on `isatty()`, so on a real terminal an
+    operator now loses the live progress indicator for a multi-minute
+    GD32/Alif write -- console output is still complete and still live line-
+    by-line, but the CHILD renders it differently once it can no longer see a
+    tty of its own. Deliberately NOT fixed here (driving this tee through a
+    pty is real machinery, tracked as **tan-cli#541**): the claim this
+    docstring used to make -- "nothing is silently withheld from the
+    operator" -- overstated what changed; the console still sees everything
+    the child prints, but not necessarily in the shape/cadence the child
+    itself would have chosen for a real terminal.
+
+    `join`'s default timeout is `_DRAIN_JOIN_S`, the SAME bound [`_Drain`]
+    uses and for the identical reason (tan-cli#519/#522 review round 3,
+    BLOCKER): a grandchild the killed child leaves behind (a backgrounded
+    `sleep 20 &` inside a shell script `_spawn` ran) still holds this pipe's
+    write end open after `proc.kill()`/`proc.wait()` return -- `kill()` reaps
+    only the direct child -- so the read loop below never sees EOF until that
+    OTHER process exits too. An unbounded `join()` here is what made
+    `_FLASH_TIMEOUT_S` toothless: `proc.wait(timeout=...)` returned on
+    schedule but the subsequent `.text()` call blocked past it, measured
+    hanging past an outer kill entirely on the TimeoutExpired path. A `tan`
+    that hangs on a thread rather than reporting a flash result would be the
+    worse trade -- the exact sentence `_Drain.join`'s own docstring already
+    uses for this same class of problem.
+
+    tan-cli#519/#522 review, MINOR 1: `_DRAIN_JOIN_S` alone documents ONE
+    stream's bound. `_spawn` calls [`text`] on TWO `_Tee`s (stdout's and
+    stderr's), one after the other, so the real overrun past `_spawn`'s own
+    `timeout` is up to `2 * _DRAIN_JOIN_S`, not one -- a straggling
+    grandchild can make BOTH joins spend their full bound in sequence.
+    Measured: `_spawn(..., timeout=3)` -> 4.00s; `timeout=2` -> 6.01s.
+    Bounded and still the right trade, but see `_DRAIN_JOIN_S`'s own comment
+    for why that bound alone understates it by 2x."""
+
+    def __init__(self, stream, sink) -> None:
+        self._chunks: list[str] = []
+        self._stream = stream
+        self._sink = sink
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+
+    def _read(self) -> None:
+        try:
+            for raw in iter(lambda: self._stream.read1(65536), b""):
+                chunk = self._decoder.decode(raw)
+                if chunk:
+                    self._chunks.append(chunk)
+                    self._write(chunk)
+            tail = self._decoder.decode(b"", final=True)
+            if tail:
+                self._chunks.append(tail)
+                self._write(tail)
+        except (OSError, ValueError):
+            pass
+
+    def _write(self, chunk: str) -> None:
+        try:
+            self._sink.write(chunk)
+            self._sink.flush()
+        except UnicodeEncodeError:
+            # The DECODED chunk is a well-formed `str` (the incremental UTF-8
+            # decoder above already replaced anything malformed); this is the
+            # SINK's own narrower encoding rejecting a character it can
+            # represent, not a decode failure. Re-encoded with a lossy
+            # fallback instead of losing the whole chunk (tan-cli#519/#522
+            # review round 3, MINOR): the bare `except (OSError, ValueError):
+            # pass` below used to catch this too -- `UnicodeEncodeError` is a
+            # `ValueError` subclass -- discarding the WHOLE 4KiB chunk from
+            # the console, including whatever clean ASCII lines shared it.
+            try:
+                encoding = getattr(self._sink, "encoding", None) or "utf-8"
+                self._sink.write(chunk.encode(encoding, "backslashreplace").decode(encoding))
+                self._sink.flush()
+            except (OSError, ValueError):
+                pass
+        except (OSError, ValueError):
+            # The console went away mid-write (a closed pipe, a torn-
+            # down pytest capture). Keep reading and accumulating --
+            # the transcript this thread is building still matters
+            # even when nobody can watch it live any more.
+            pass
+
+    def join(self, timeout: float | None = _DRAIN_JOIN_S) -> None:
+        self._thread.join(timeout=timeout)
+
+    def text(self) -> str:
+        """Everything this stream said, joined. Joins first ([`_Drain.text`]'s
+        own reasoning): reading `_chunks` while the thread may still be
+        appending is exactly the read that could observe a partial list.
+        Bounded (see `join`'s own docstring): a straggling grandchild still
+        holding this pipe open means `_chunks` may be incomplete when this
+        returns -- the same tradeoff `_Drain.text` already makes, for the
+        same reason."""
+        self.join()
+        return "".join(self._chunks)
 
 
 class _Drain:
@@ -627,7 +916,7 @@ def _spawn_pipeline(
             killed = _Half(left_label, first.returncode, drain.text())
             return _Outcome(
                 success=False,
-                stderr=_timed_out_stderr(killed, timeout),
+                stderr=_timed_out_stderr(killed, timeout, captured=capture),
                 captured=capture,
             )
         try:
@@ -643,7 +932,7 @@ def _spawn_pipeline(
         return _Outcome(
             success=rc == 0,
             stdout=_text(out),
-            stderr=_pipeline_stderr(left_half, right_half),
+            stderr=_pipeline_stderr(left_half, right_half, captured=capture),
             returncode=rc,
             captured=capture,
         )
@@ -652,7 +941,7 @@ def _spawn_pipeline(
         drain.join()
 
 
-def _timed_out_stderr(left: _Half, timeout: float) -> str:
+def _timed_out_stderr(left: _Half, timeout: float, *, captured: bool) -> str:
     """The timeout report, with whatever the decompressor managed to say BEFORE
     it and the sentence itself LAST.
 
@@ -660,8 +949,15 @@ def _timed_out_stderr(left: _Half, timeout: float) -> str:
     sentence is the one that names this failure mode; first-half output because
     a `gunzip` that printed a diagnosis and then wedged is a different bench
     problem from one that went quiet, and #401's lesson is that captured stderr
-    is never thrown away."""
-    return "\n".join([*_half_lines(left), f"timed out after {timeout:.0f}s and was killed"]) + "\n"
+    is never thrown away.
+
+    `captured`: threaded through to [`_half_lines`] for the same reason
+    [`_pipeline_stderr`] does -- in text mode `left`'s stderr was never piped
+    (it inherited stdio), so a body-less `rc=unknown` header ahead of the
+    sentence would claim a diagnosis this process never actually captured."""
+    return "\n".join(
+        [*_half_lines(left, captured=captured), f"timed out after {timeout:.0f}s and was killed"]
+    ) + "\n"
 
 
 def _terminate(proc) -> None:
@@ -803,12 +1099,111 @@ def _capture_tail(outcome: _Outcome) -> str | None:
 def _execute_message(outcome: _Outcome, method: str, entry_id: str) -> str:
     """In JSON mode reuse the output already captured by the single spawn (never
     re-run the flash); in text mode the child already streamed, so report the
-    rc-style summary."""
-    if outcome.captured:
+    rc-style summary -- UNLESS `outcome` itself carries a TAN-AUTHORED
+    diagnosis (tan-cli#487, defect 4).
+
+    `outcome.captured` alone used to gate this: true only in JSON mode, so in
+    text mode -- the default human invocation of the one command that writes
+    hardware -- `_spawn`'s `timed out ... and was killed`/`could not spawn:
+    <err>`, `_spawn_pipeline`'s `_timed_out_stderr`, and `_spawn_jlink`'s
+    `could not write the J-Link Commander script: <err>` were all composed
+    and then discarded, reported as a bare `flash command failed` even though
+    every one of them populates `outcome.stderr` regardless of mode.
+
+    tan-cli#519/#522 review, MAJOR 1: an ORDINARY text-mode failure -- the
+    child streamed straight to the console and then exited non-zero, with no
+    tan-authored diagnosis at all -- used to leave BOTH `stderr`/`stdout`
+    empty unconditionally, so this always fell through to the bare `flash
+    command failed` sentence. That is no longer true for `_spawn`'s two
+    single-tool branches (the wrapped-console capture-and-replay branch, and
+    the live-console branch now [`_Tee`]s instead of only streaming): both
+    populate `outcome.stdout`/`.stderr` with the child's own transcript in
+    EVERY mode now, so an ordinary text-mode failure whose child printed a
+    diagnosis on stderr/stdout (`Error: could not connect to target`, say)
+    now surfaces that diagnosis here too, in place of the old generic
+    sentence -- a CUSTOMER-VISIBLE change to the exact string
+    `data.entries[].message` (and the text-mode `FAIL:` line) reports for
+    every `_spawn`-backed method (`swd_probe`, `alif_setools`, `west_flash`,
+    ...), declared in this change's own CHANGELOG entry. The bare fallback
+    now survives only for a child that truly prints nothing (both streams
+    genuinely empty) and for `_spawn_pipeline`'s UNCAPTURED text-mode path,
+    which pipes neither half's stderr at all and so still reaches
+    `_Outcome.stderr == ""` unconditionally -- see [`_half_lines`]'s own
+    docstring for that narrower, still-true case."""
+    if outcome.captured or outcome.stderr.strip() or outcome.stdout.strip():
         tail = _capture_tail(outcome)
         if tail:
             return f"{method}[{entry_id}]: {tail}"
     return f"{method}[{entry_id}]: flash command failed"
+
+
+#: The two J-Link Commander phrases that mean the post-write PIN-reset
+#: (`RSetType 2` / `r` / `g`, `plan_alif_mram_jlink`'s own script) asked the
+#: core to halt and it refused -- the documented busy-resident case: an image
+#: that never idles keeps the core running, so `VC_CORERESET` cannot halt it
+#: (tan-cli#522). Matched against whatever JLinkExe printed, not derived from
+#: the exit code -- JLinkExe still exits 0 here (`outcome.success` is `True`;
+#: the WRITE and its `verifybin` genuinely succeeded), so the exit code alone
+#: cannot tell this run apart from one whose reset actually landed.
+_FLOW_D_HALT_FAILURE_MARKERS = ("Failed to halt CPU", "CPU is not halted")
+
+#: The exact tail `plan_alif_mram_jlink` always appends to `ok_message` --
+#: see its own `f"...; verified and PIN-reset"` lines. Matched verbatim so the
+#: qualification below is a targeted substring swap, not a re-derivation of
+#: the message shape.
+_FLOW_D_VERIFIED_AND_RESET = "; verified and PIN-reset"
+_FLOW_D_VERIFIED_ONLY = "; verified; reset requested, core was busy and did not halt"
+
+
+def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
+    """Downgrade Flow D's claimed `PIN-reset` to what the transcript actually
+    shows (tan-cli#522).
+
+    `plan_alif_mram_jlink` composes `ok_message` at PLAN time, before the
+    write has run -- it has no transcript to consult, so it reports the
+    INTENDED outcome ("verified and PIN-reset") unconditionally. The write
+    itself is genuinely fine here (`outcome.success` is `True`, `verifybin`
+    passed), but a busy-resident image can keep the core running straight
+    through `VC_CORERESET`, so the reset half did not take even though
+    JLinkExe still exits 0 -- the identical message otherwise reports every
+    run alike, whether the reset landed or the transcript ended in three
+    lines of J-Link errors. `data.entries[].message` is what a `--format
+    json` consumer renders as the outcome of the flash (the same surface
+    tan-cli#402/#487 fixed for the device/address halves of this message),
+    so an operator reading it cannot tell the two apart -- and on this board
+    the reset is what would have started the freshly-written image.
+
+    Scoped to a substring match on the CAPTURED transcript
+    (`outcome.stdout`/`.stderr` -- see `_Outcome`/`_spawn`). tan-cli#522
+    review, MAJOR 1: this used to be populated ONLY under `--format json`'s
+    single-spawn capture, so in text mode -- the default human invocation --
+    this was a silent no-op and the qualification never reached the operator
+    reading the console, even though JLinkExe's own transcript streamed
+    straight past them there too. `_spawn`'s live-console branch now TEES
+    that same transcript (streamed live to the console AND collected, via
+    [`_Tee`]) instead of only streaming it, so `outcome.stdout`/`.stderr` are
+    populated in every mode and this function needs no mode split of its
+    own. Not a general transcript-scraping layer: this reads only the one
+    tail `plan_alif_mram_jlink` always appends, and only for
+    `FLOW_D_METHOD`.
+
+    tan-cli#519/#522 review, NIT (residual risk, not fixed): the transcript
+    this reads is [`_Tee.text`]'s bounded join, which can be INCOMPLETE if a
+    grandchild the killed child leaves behind still holds the pipe open past
+    `_DRAIN_JOIN_S` -- see that method's own docstring. Should that bound
+    ever truncate a real JLinkExe transcript mid-halt-failure, the marker
+    substring search above finds nothing and this function falls through to
+    `return ok_message` UNCHANGED -- the OPTIMISTIC `"; verified and
+    PIN-reset"` claim, the exact wrong claim tan-cli#522 exists to stop. No
+    plausible JLinkExe repro for this was constructible during this review
+    (a 24 MB transcript drains through the tee in ~0.13s, far under the
+    2s/4s bound), so this is documented risk, not a reproduced defect."""
+    if _FLOW_D_VERIFIED_AND_RESET not in ok_message:
+        return ok_message
+    transcript = outcome.stdout + outcome.stderr
+    if not any(marker in transcript for marker in _FLOW_D_HALT_FAILURE_MARKERS):
+        return ok_message
+    return ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY)
 
 
 # ── per-entry dispatch ──────────────────────────────────────────────────────
@@ -939,7 +1334,7 @@ def _resolve_flow_d_atoc_path(flash_args: Any, build_root: str, sdk_root: str) -
 
 
 def _resolve_flow_d_atoc_via_setools(
-    flash_args: Any, shape: FlowDShape, ctx: _Context, entry_id: str
+    flash_args: Any, shape: FlowDShape, ctx: _Context, entry_id: str, confirm: bool
 ) -> tuple[Any, str | None]:
     """tan-cli#353's remaining half: when Flow D still has no `atoc`/
     `atoc_address` after the explicit-value and `atoc_map` resolutions above
@@ -960,23 +1355,36 @@ def _resolve_flow_d_atoc_via_setools(
     `--dry-run` alike -- this function no longer re-derives or re-checks
     either.
 
+    `confirm` -- the SAME confirm gate `plan_alif_mram_jlink` itself applies
+    to the real MRAM write (`ctx.force_confirm` OR `flash_args.confirm`),
+    computed by the caller BEFORE this function runs. tan-cli#487, defect 5:
+    this function's own real-sign branch used to be gated on `ctx.dry_run`
+    ALONE, so a plain `tan flash` on a fresh manifest -- confirm gate not
+    armed, but also not `--dry-run` -- spawned `app-gen-toc` for REAL: wrote
+    `build/images/<id>.bin` / `build/config/<id>-slot0.json` into the
+    customer's SETOOLS install, APPENDED to the install-wide, hand-run-
+    inclusive `build/app-package-map.txt`, and overwrote the shared `build/
+    AppTocPackage.bin` -- on a run that goes on to hit the confirm gate and
+    refuse the MRAM write it was signing FOR. The SETOOLS auto-sign is
+    itself a real write and must not run just because the run is not ALSO a
+    preview.
+
     Returns `(flash_args, note)`. `note` is `None` on the one path that never
     touched SETOOLS at all -- an already-resolved no-op (an explicit `atoc`/
     `atoc_map`, or `atoc_address` already present). Every path that DOES touch
     SETOOLS returns a non-`None` `note` naming `setools.path`/`setools.source`
-    (tan-cli#373): under `--dry-run` it describes what WOULD be signed and
-    `flash_args` is left with `atoc`/`atoc_address` still absent (signing
-    writes real files into the customer's SETOOLS install and spawns a real
-    tool, which `--dry-run`'s "planning only" contract forbids regardless of
-    how harmless the ATOC step is next to the MRAM write it feeds); on a real
-    run it instead describes what WAS just signed, with `flash_args` fully
-    resolved for `plan_alif_mram_jlink` to consume. The caller (`_flash_entry`)
-    tells the two apart by `ctx.dry_run`, which it already has: the dry-run
-    note is the entry's own terminal message, the real-sign note is an EXTRA
-    line ahead of the real write's own ok/fail message -- previously
-    `setools.source` reached a customer only via a FAILURE
-    (`missing_tool_message`/`unresolved_message`), never on a run that
-    succeeded.
+    (tan-cli#373): under `--dry-run` OR an unconfirmed real run it describes
+    what WOULD be signed and `flash_args` is left with `atoc`/`atoc_address`
+    still absent (signing writes real files into the customer's SETOOLS
+    install and spawns a real tool, which neither a preview nor an unarmed
+    confirm gate may do); a CONFIRMED real run instead describes what WAS
+    just signed, with `flash_args` fully resolved for `plan_alif_mram_jlink`
+    to consume. The caller (`_flash_entry`) tells the two apart by `ctx.
+    dry_run or not confirm`, which it already has: the preview note is the
+    entry's own terminal message, the real-sign note is an EXTRA line ahead
+    of the real write's own ok/fail message -- previously `setools.source`
+    reached a customer only via a FAILURE (`missing_tool_message`/
+    `unresolved_message`), never on a run that succeeded.
 
     Raises `FlashPlanError` for: SETOOLS unresolved, resolved but not a real
     install, no `flash_args.slot0_load_address` to give `app-gen-toc` as its
@@ -1020,13 +1428,17 @@ def _resolve_flow_d_atoc_via_setools(
             "flash_args.atoc_address yourself."
         )
 
-    if ctx.dry_run:
+    if ctx.dry_run or not confirm:
         # Planning only -- report what WOULD be signed without touching the
-        # customer's SETOOLS install or spawning a real tool.
+        # customer's SETOOLS install or spawning a real tool. tan-cli#487:
+        # `not confirm` closes defect 5 -- a real (non-`--dry-run`) run whose
+        # confirm gate is not armed previews exactly like a dry run instead
+        # of signing for real and then refusing the write it signed for.
+        why = "dry-run" if ctx.dry_run else "flash_args.confirm is false"
         return flash_args, (
             f"would sign {shape.artefact} with SETOOLS at {setools.path} (via "
             f"{setools.source}) -> build/config/{entry_id}-slot0.json, then run "
-            "app-gen-toc -- not run under --dry-run"
+            f"app-gen-toc -- not run ({why})"
         )
 
     atoc_path, address = sign_slot0(
@@ -1041,13 +1453,41 @@ def _resolve_flow_d_atoc_via_setools(
     )
 
 
-def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[str]]:
-    """Dispatch + run one target. Returns `(rc, entry, text-lines)`."""
+def _flash_entry(
+    target: FlashTarget,
+    ctx: _Context,
+    *,
+    yocto_wic_stat: Callable[[str], os.stat_result] = os.stat,
+) -> tuple[int, _Entry, list[str]]:
+    """Dispatch + run one target. Returns `(rc, entry, text-lines)`.
+
+    `yocto_wic_stat` is the write-time block-device gate's `stat_fn`
+    (`_yocto_wic_block_device_refusal`'s own parameter), threaded through
+    here -- not called from anywhere else in this function -- purely so a
+    test can reach the REAL dispatch path with an injected mode, exactly the
+    way that helper's own direct-call tests already fake `st_mode`, without
+    needing a literal `/dev/`-rooted regular file to exist on disk (`/dev/shm`
+    is Linux-only tmpfs; neither macOS nor Windows have anywhere writable
+    under a path lexically starting with `/dev/`, and `plan_yocto_wic`'s own
+    `must start with /dev/` refusal -- oracle-pinned wording, see that
+    function -- means the target STRING has to start with `/dev/` regardless
+    of host, even though nothing here actually touches a real device). The
+    real dispatch default (`os.stat`) is unchanged for every existing caller."""
     kind, entry_id = target.kind, target.id
     lines: list[str] = []
 
-    def entry(method: str | None, status: str, rc: int, message: str) -> _Entry:
-        return _Entry(kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message)
+    def entry(
+        method: str | None,
+        status: str,
+        rc: int,
+        message: str,
+        *,
+        preflight_unarmed: bool = False,
+    ) -> _Entry:
+        return _Entry(
+            kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
+            preflight_unarmed=preflight_unarmed,
+        )
 
     # No flash_method -> silent skip. A helper carrying `update_channel` instead
     # (the AEN cc3501e_otp, programmed over the bridge SPI) gets a clearer reason
@@ -1209,27 +1649,80 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
             flash_args = _resolve_flow_d_atoc_path(flash_args, ctx.build_root, ctx.sdk_root)
             shape = validate_flow_d_shape(flash_args, artefact_path, _is_file)
             validate_flow_d_preflight_args(flash_args)
+            # tan-cli#487, defect 5: the SAME confirm gate `plan_alif_mram_
+            # jlink` itself applies to the real MRAM write must ALSO cover
+            # the SETOOLS auto-sign below -- see `_resolve_flow_d_atoc_via_
+            # setools`'s own docstring for why an unconfirmed real run must
+            # not sign for real just because it is not ALSO `--dry-run`.
+            confirm = ctx.force_confirm or bool(fa_bool_checked(flash_args, "confirm"))
+            # tan-cli#512: the read-only DPIDR preflight must run BEFORE the
+            # SETOOLS auto-sign, not after -- `_resolve_flow_d_atoc_via_
+            # setools` is itself a real write into the customer's SETOOLS
+            # install (`app-gen-toc` REWRITES `build/app-package-map.txt`
+            # rather than appending, destroying any prior accumulated sign
+            # record), and the wrong-board case this preflight exists to
+            # catch is exactly the one where nothing should have been
+            # written yet. Measured on real E1M-AEN801 silicon: a wrong-
+            # board `expect_dpidr` correctly aborted the MRAM write with
+            # slot0 byte-identical, but the SETOOLS install had already been
+            # mutated by the sign that ran first.
+            #
+            # Gated on the SAME `not (ctx.dry_run or not confirm)` condition
+            # `_resolve_flow_d_atoc_via_setools`'s own real-sign branch uses
+            # (identically, `plan_alif_mram_jlink` computes this as
+            # `planning_only` for the OLD call site below) -- a preview or an
+            # unconfirmed run gets no preflight probe either, matching the
+            # previous call site's behaviour exactly. The preflight reads
+            # only `expect_dpidr`/`jlink_device`/`jlink_serial`/`jlink_speed`
+            # off `flash_args` (`flow_d_preflight_script`) -- none of which
+            # `_resolve_flow_d_atoc_via_setools` touches (it only ever adds
+            # `atoc`/`atoc_address`) -- so running it against `flash_args` as
+            # it stands here, before the sign, is behaviourally identical to
+            # running it after for every case except the one this fixes.
+            if not ctx.dry_run and confirm:
+                preflight_inputs = FlashInputs(
+                    artefact=artefact_path,
+                    flash_args=flash_args,
+                    core_id=entry_id,
+                    sku=ctx.sku,
+                    dry_run=ctx.dry_run,
+                    force_confirm=ctx.force_confirm,
+                )
+                refusal = _flow_d_preflight(preflight_inputs, ctx.venv_bin, ctx.workspace)
+                if refusal is not None:
+                    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                    lines.append(f"  FAIL: {refusal}")
+                    return 1, entry(method, "failed", 1, refusal), lines
             flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
-                flash_args, shape, ctx, entry_id
+                flash_args, shape, ctx, entry_id, confirm
             )
         except FlashPlanError as err:
             msg = str(err)
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
             lines.append(f"  FAIL: {msg}")
             return 1, entry(method, "failed", 1, msg), lines
-        if setools_note is not None and ctx.dry_run:
-            # `--dry-run` only (see the helper's own docstring): nothing was
+        if setools_note is not None and (ctx.dry_run or not confirm):
+            # Preview only (see the helper's own docstring): nothing was
             # signed, so there is no `atoc`/`atoc_address` to hand
             # `plan_alif_mram_jlink` -- report the preview directly rather
             # than reaching its "both required" refusal over a field this
-            # entry was never asked to fill in by hand. A REAL sign (the
-            # `else` this `and ctx.dry_run` now excludes -- tan-cli#373)
+            # entry was never asked to fill in by hand. A REAL, CONFIRMED
+            # sign (the `else` this condition now excludes -- tan-cli#373)
             # leaves `setools_note` set too, but must NOT return here: it
             # falls through to `meta.build` like every other Flow D entry,
             # carrying the note to the eventual ok message below instead.
+            #
+            # `status`: a clean `--dry-run` preview reports "ok" like every
+            # other preview in this file; an unconfirmed REAL run reports
+            # "planned" (tan-cli#487) so `flash.confirm-required` fires --
+            # I-30's contract that a JSON consumer must be able to tell
+            # "nothing was written" from "programmed the device" applies to
+            # the SETOOLS half of Flow D exactly as it does to the MRAM
+            # write it feeds.
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
             lines.append(f"  {setools_note}")
-            return 0, entry(method, "ok", 0, setools_note), lines
+            status = "ok" if ctx.dry_run else "planned"
+            return 0, entry(method, status, 0, setools_note), lines
 
     inputs = FlashInputs(
         artefact=artefact_path,
@@ -1269,11 +1762,102 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         lines.append(f"  {msg}")
         return 0, entry(method, "planned", 0, msg), lines
 
-    # A real write. Flow D gets its read-only DPIDR preflight FIRST: flashing the
-    # wrong attached board is the one unrecoverable mistake here, so the identity
-    # is confirmed while the session is still read-only, and a mismatch aborts.
-    if method == FLOW_D_METHOD:
-        refusal = _flow_d_preflight(inputs, ctx.venv_bin, ctx.workspace)
+    # tan-cli#512: Flow D's read-only DPIDR preflight used to run HERE --
+    # after `meta.build`, immediately before the real write. It now runs
+    # earlier, above, ahead of the SETOOLS auto-sign that may precede this
+    # point: see the `if not ctx.dry_run and confirm:` block in the
+    # `FLOW_D_METHOD` branch near the top of this function for the fix and
+    # why the sign could not be allowed to run first.
+
+    # tan-cli#487, defect 1's second tier -- see `_yocto_wic_block_device_
+    # refusal`'s own docstring. Scoped to `yocto_wic`/`yocto_wic_to_sd_or_
+    # emmc` only, and to a REAL write only (never a preview): a regular file
+    # lexically living under a genuine `/dev/` subtree is not caught by
+    # `flash_plan._resolve_dev_root`'s pure lexical check alone.
+    #
+    # This `stat` and the spawn below it are two separate syscalls, so there
+    # is a TOCTOU window between them in principle -- but it is bounded: the
+    # only way to turn a refused target into an accepted one inside that
+    # window is to replace it with an actual block device (`mknod`), which
+    # needs root, the same privilege that already owns everything under
+    # `/dev/` in the first place. This gate cannot be raced by an unprivileged
+    # process any more than the directory it inspects can be tampered with by
+    # one.
+    if method in YOCTO_WIC_METHODS:
+        wic_target = fa_str(flash_args, "target")
+        if wic_target is not None:
+            refusal = _yocto_wic_block_device_refusal(wic_target, stat_fn=yocto_wic_stat)
+            if refusal is not None:
+                lines.append(f"  FAIL: {refusal}")
+                return 1, entry(method, "failed", 1, refusal), lines
+
+    # tan-cli#520: `swd_probe`'s J-Link arm gets the identical read-only DPIDR
+    # preflight Flow D has via #512 -- reusing `_flow_d_preflight` (the same
+    # runner, `method="swd_probe"` so a refusal names the right backend)
+    # rather than growing a second implementation. Placed HERE, immediately
+    # before the one spawn (`_execute`, just below) that can ever write for
+    # this entry: unlike Flow D there is no earlier mutating step (no SETOOLS
+    # auto-sign) to hoist ahead of on this path, so this position already
+    # satisfies #512's "before anything that writes or mutates" rule -- it is
+    # not the ordering bug #512 fixed, because that bug was specifically about
+    # a mutating step that does not exist here. Reached only on a genuine,
+    # non-dry-run write: the `plan.planning_only or ctx.dry_run` return above
+    # already exits for a preview (`plan_swd_probe` never sets
+    # `planning_only`, so a real run always reaches this line unconfirmed --
+    # `swd_probe` targets an external helper MCU's own flash, not persistent
+    # SoC MRAM, and has no `flash_args.confirm` gate to hide behind).
+    #
+    # Gated on `plan.preflight_device is not None` -- NOT merely
+    # `method == "swd_probe"` (tan-cli#520 REVIEW, BLOCKER 2). `preflight_
+    # device` is set ONLY by `plan_swd_probe`'s J-Link branch; it is `None`
+    # for the openocd/pyocd arm. Calling `_flow_d_preflight` unconditionally
+    # for every `swd_probe` entry passed `read_device=None` on THAT arm,
+    # which `flow_d_preflight_script` reads as "derive `require_device_key`
+    # from `read_device is None`" -- i.e. `True`, Flow D's PAIRED shape -- so
+    # a manifest that legitimately sets `flash_args.jlink_device` (e.g. as a
+    # J-Link fallback profile) while `flash_args.use_openocd: true` forces
+    # this arm for real got refused at WRITE time for an absent
+    # `expect_dpidr` it was never asked to pair, even though `--dry-run` on
+    # the exact same manifest stayed green (the plan-time guard just below
+    # `plan_swd_probe`'s arm split checks `expect_dpidr` on that arm, and
+    # only that -- `jlink_device` has no preflight-only meaning on the
+    # openocd/pyocd arm, since it is not paired with `expect_dpidr` there.
+    # This no longer means "never checked" though: the round-four hoist
+    # (`flash_plan.py:1225`, ahead of this same split) added a `jlink_device`
+    # charset-and-type guard that runs unconditionally on BOTH arms -- a
+    # shape check, not a preflight pairing, so it does not change the
+    # conclusion here). Gating on `preflight_device`
+    # instead means this call never runs at all for that arm, matching
+    # `plan_swd_probe`'s own plan-time guard exactly: `expect_dpidr` set on
+    # the openocd/pyocd arm still refuses (that check, unaffected by this
+    # fix); `expect_dpidr` absent there now stays a true no-op, both under
+    # `--dry-run` and for real.
+    # tan-cli#520 REVIEW, design point: `expect_dpidr` stays OPTIONAL (making
+    # it required would refuse every shipped preset -- none carries a SW-DP
+    # ID today, and tan is forbidden from deriving one, the same I-26
+    # reasoning `_resolve_jlink_device` already documents), but that leaves a
+    # SILENT gap: a confirmed J-Link `swd_probe` write with no `expect_dpidr`
+    # runs with no wrong-board guard and no signal that it did. Recorded
+    # here, before the preflight call, and surfaced as a non-fatal warning
+    # `Issue` on the eventual SUCCESS return below (never on a refusal --
+    # armed-and-mismatched already gets its own `flash.entry-failed`) so a
+    # `--format json` consumer can tell "this write had no wrong-board check"
+    # from an ordinary clean flash.
+    # tan-cli#520 REVIEW round 2, nit: this ONE condition decides both
+    # whether the preflight call below runs AND whether an unarmed write can
+    # warn -- hoisted to a single local so the two can never drift apart (two
+    # copies of "did the J-Link arm actually run" silently going out of sync
+    # would let the warning fire on an entry whose preflight DID run, or stay
+    # silent on one where it did not).
+    swd_probe_took_jlink_arm = method == SWD_PROBE_METHOD and plan.preflight_device is not None
+    swd_probe_preflight_unarmed = swd_probe_took_jlink_arm and not _fa_has_key(
+        flash_args, "expect_dpidr"
+    )
+    if swd_probe_took_jlink_arm:
+        refusal = _flow_d_preflight(
+            inputs, ctx.venv_bin, ctx.workspace, method=method,
+            read_device=plan.preflight_device,
+        )
         if refusal is not None:
             lines.append(f"  FAIL: {refusal}")
             return 1, entry(method, "failed", 1, refusal), lines
@@ -1287,19 +1871,42 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         # a SUCCESSFUL sign too, not only via `missing_tool_message`/
         # `unresolved_message` on a failure.
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
+        if method == FLOW_D_METHOD:
+            ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
         lines.append(f"  ok: {ok_message}")
-        return 0, entry(method, "ok", 0, ok_message), lines
+        return (
+            0,
+            entry(method, "ok", 0, ok_message, preflight_unarmed=swd_probe_preflight_unarmed),
+            lines,
+        )
     msg = _execute_message(outcome, method, entry_id)
     lines.append(f"  FAIL: {msg}")
     return 1, entry(method, "failed", 1, msg), lines
 
 
 def _flow_d_preflight(
-    inputs: FlashInputs, venv_bin: Path | None = None, workspace: str | None = None
+    inputs: FlashInputs,
+    venv_bin: Path | None = None,
+    workspace: str | None = None,
+    method: str = FLOW_D_METHOD,
+    *,
+    read_device: str | None = None,
 ) -> str | None:
     """Connect read-only with the manifest's ATTACH device profile and confirm
-    the SW-DP IDR before any MRAM write. Returns a refusal message, or `None`
+    the SW-DP IDR before any write. Returns a refusal message, or `None`
     to proceed.
+
+    Shared by Flow D (`alif_mram_jlink`, an MRAM write) and `swd_probe`'s
+    J-Link arm (a GD32 bridge write; tan-cli#520) -- `method` selects which
+    backend a refusal names, and both `method` and `read_device` are threaded
+    straight through to `flow_d_preflight_script`/`validate_flow_d_
+    preflight_args`, the ONE definition of this preflight's shape. `method`
+    defaults to `FLOW_D_METHOD` and `read_device` to `None` so every existing
+    Flow D call site is unaffected. `read_device` (`swd_probe` only): the
+    ALREADY-RESOLVED write device (`FlashPlan.preflight_device`) -- passing it
+    arms the preflight off `flash_args.expect_dpidr` ALONE, since `swd_probe`
+    has no separate preflight-only device field the way Flow D's `jlink_
+    device` is (see `validate_flow_d_preflight_args`'s `require_device_key`).
 
     ABSENT-BY-DEFAULT, on purpose: a manifest that declares BOTH no `expect_dpidr`
     AND no attach-profile `jlink_device` gets no preflight, because tan has no
@@ -1322,12 +1929,20 @@ def _flow_d_preflight(
     restores, not just documents.
     """
     try:
-        prepared = flow_d_preflight_script(inputs)
+        prepared = flow_d_preflight_script(inputs, method, read_device=read_device)
     except FlashPlanError as err:
         return str(err)
     if prepared is None:
         return None
     script, expected = prepared
+    # tan-cli#520 REVIEW, minor 3: Flow D's refusal text named its write
+    # target explicitly ("write MRAM") before this function served a second
+    # backend; a bare generalisation to backend-neutral "write" would have
+    # SILENTLY changed wording a bench operator reads, with nothing pinning
+    # the string to catch it. Branched on `method` instead, so Flow D's exact
+    # original wording is byte-for-byte unchanged and `swd_probe` gets its
+    # own correct noun (it writes the GD32 bridge's own flash, not MRAM).
+    verb = "write MRAM" if method == FLOW_D_METHOD else "write"
     binary = next((n for n in ("JLinkExe", "JLink") if _tool_available(n, venv_bin)), None)
     if binary is None:
         # Unreachable via `_flash_entry`: the tool gate already required
@@ -1335,7 +1950,7 @@ def _flow_d_preflight(
         # same as the probe above), and kept because the alternative to a
         # refusal here would be proceeding to the WRITE with the identity
         # unconfirmed.
-        return f"{FLOW_D_METHOD}: no J-Link binary on PATH or in the workspace venv for the DPIDR preflight."
+        return f"{method}: no J-Link binary on PATH or in the workspace venv for the DPIDR preflight."
     resolved = _programs_resolved_in_venv([binary], venv_bin)
     on_path_bin = venv_bin if resolved != [binary] else None
     # No `-ExitOnError`: a failed connect is the SIGNAL being read here, not an
@@ -1347,8 +1962,8 @@ def _flow_d_preflight(
         return None
     if not banner.strip():
         return (
-            f"{FLOW_D_METHOD}: the read-only DPIDR preflight produced no output "
-            f"({outcome.stderr.strip() or 'probe silent'}); refusing to write MRAM "
+            f"{method}: the read-only DPIDR preflight produced no output "
+            f"({outcome.stderr.strip() or 'probe silent'}); refusing to {verb} "
             "without confirming which board is attached."
         )
     # `expected` is confirmed absent (checked above) -- but "absent" covers two
@@ -1369,8 +1984,8 @@ def _flow_d_preflight(
     # guessing the wiring is innocent.
     if not _dp_id_reported(banner) and _connect_failed_outright(banner):
         return (
-            f"{FLOW_D_METHOD}: the read-only DPIDR preflight's connect reported no "
-            f"SW-DP ID at all (expected {expected}) -- refusing to write MRAM to an "
+            f"{method}: the read-only DPIDR preflight's connect reported no "
+            f"SW-DP ID at all (expected {expected}) -- refusing to {verb} to an "
             "unidentified board. This looks like the J-Link probe still "
             "re-enumerating after a previous JLinkExe session closed, not a wiring "
             "or probe-selection problem -- wait a couple of seconds and retry."
@@ -1394,9 +2009,18 @@ def _flow_d_preflight(
         # selector. The SW-DP ID this preflight already reads IS the true
         # per-silicon discriminator; this remediation says so instead of
         # pointing at the one field that cannot fix this.
+        # tan-cli#512, secondary: name the ACTUAL SW-DP ID this connect just read,
+        # not only the expected one -- on a bench where a USB serial is CLONED
+        # across two physical probes (measured: `603000869` answers both a real
+        # AEN E8 at `0x4C013477` and a GD32 bridge at `0x0BE12477`), the actual ID
+        # is the single most useful datum for working out which board actually
+        # answered. `_dp_id_value` reuses the exact regex `_dp_id_reported` just
+        # matched on this same banner, so it cannot fail to find a value here.
+        actual = _dp_id_value(banner) or "an ID this preflight could not parse back out"
         return (
-            f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
-            "-- refusing to write MRAM to an unidentified board. Check the wiring and "
+            f"{method}: expected SW-DP IDR {expected} was not reported on connect "
+            f"-- the probe reported {actual} instead. Refusing to {verb} to an "
+            "unidentified board. Check the wiring and "
             "which board is physically attached -- do NOT treat pinning "
             "flash_args.jlink_serial alone as the fix: some OEM J-Link probes share a "
             "CLONED serial across more than one physical unit, so jlink_serial cannot "
@@ -1410,8 +2034,8 @@ def _flow_d_preflight(
     # `jlink_serial` pinning a probe IS the actual fix here when it is unset
     # on a multi-probe host (tan-cli#353), so the original sentence survives.
     return (
-        f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
-        "-- refusing to write MRAM to an unidentified board. Check the probe "
+        f"{method}: expected SW-DP IDR {expected} was not reported on connect "
+        f"-- refusing to {verb} to an unidentified board. Check the probe "
         "selection (flash_args.jlink_serial) and the wiring. If jlink_serial is "
         "unset the script selects NO probe, which on a host carrying more than "
         "one J-Link cannot connect at all (tan-cli#353)."
@@ -1433,8 +2057,11 @@ def _hex_in(expected: str, haystack: str) -> bool:
 #: it turned out to be -- "Found SW-DP with ID 0x........" / "DPIDR: 0x........".
 #: Matched loosely on purpose: what this distinguishes is "a real board
 #: answered with a different identity" from "nothing answered", not the exact
-#: firmware/DLL version's phrasing.
-_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*0x[0-9A-Fa-f]+", re.IGNORECASE)
+#: firmware/DLL version's phrasing. The hex value is its own capture group
+#: (tan-cli#512) so `_dp_id_value` can report what was ACTUALLY read, not only
+#: whether something was -- `_dp_id_reported` still just asks whether this
+#: matches at all.
+_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*(0x[0-9A-Fa-f]+)", re.IGNORECASE)
 
 #: SEGGER's own wording for the PROBE itself refusing the connection outright
 #: -- measured verbatim on the rc3 bench run: "Connecting to J-Link ...FAILED:
@@ -1464,6 +2091,16 @@ def _dp_id_reported(banner: str) -> bool:
     return _DP_ID_RE.search(banner) is not None
 
 
+def _dp_id_value(banner: str) -> str | None:
+    """The actual SW-DP ID text the banner reported, verbatim (whatever hex
+    casing/`0x` spelling SEGGER printed), or `None` if `_DP_ID_RE` does not
+    match at all. tan-cli#512: a caller that already knows `_dp_id_reported(
+    banner)` is `True` gets a non-`None` value here by construction -- both
+    read the same regex against the same banner."""
+    match = _DP_ID_RE.search(banner)
+    return match.group(1) if match else None
+
+
 def _connect_failed_outright(banner: str) -> bool:
     """Whether the banner carries SEGGER's own wording for the PROBE itself
     refusing the connection (still re-enumerating, no board reachable at all),
@@ -1482,6 +2119,74 @@ def _is_file(path: str) -> bool:
         return os.path.isfile(path)
     except (OSError, ValueError):
         return False
+
+
+def _yocto_wic_block_device_refusal(
+    target: str, stat_fn: Callable[[str], os.stat_result] = os.stat
+) -> str | None:
+    """tan-cli#487, defect 1's second tier: `flash_plan._resolve_dev_root` is
+    PURE (lexical `..`-collapse only), so a real, EXISTING regular file that
+    merely lives under a genuine `/dev/` subtree (`/dev/shm/<name>`) passes
+    it clean. This runs here, in the IO half, right before the real
+    (non-`planning_only`) spawn: `os.stat` (follows a symlink to its real
+    target, so `/dev/disk/by-id/...` still passes) must show `stat.S_ISBLK`,
+    or refuse.
+
+    Ported from alp-sdk's `_require_block_device` (`scripts/flash_backends/
+    yocto_wic.py`, security fix 3aa65cd7 / #1112) with ONE divergence:
+    alp-sdk refuses when the target cannot be stat'd at all, including
+    "does not exist"; this fails OPEN there instead -- NARROWLY, since
+    tan-cli#487's review (finding 1): a blanket fail-open on ENOENT let a
+    typo'd `flash_args.target` (`/dev/shm/sdb` for `/dev/sdb`) `dd` a
+    multi-GB image into a BRAND-NEW file under a real `/dev/` subtree at
+    `ok:true`, and the same hole reached a dangling symlink under `/dev/`
+    (its target may resolve outside `/dev/` entirely) and `/dev/x/../sdb`
+    through a symlinked `/dev/x` (the kernel resolves that `..` against
+    `/dev/x`'s REAL target, not `/dev`, so a lexical-only guard cannot see
+    where it actually lands). The fail-open now applies ONLY when `target`'s
+    own parent directory is `_DEV_ROOT` itself (`posixpath.dirname`, on the
+    ORIGINAL string -- deliberately not lexically `..`-collapsed first, since
+    collapsing is exactly what lets the `/dev/x/../sdb` shape masquerade as
+    "parent is /dev"): tan's own
+    `test_a_real_spawn_diffs_including_the_captured_failure_tail` (a FROZEN
+    oracle-parity fixture under `python/tests/parity/`, which may not move)
+    spawns a real `dd` against `flash_args.target: /dev/sdb` specifically
+    BECAUSE that device does not exist on any host the suite runs on -- its
+    subject is `dd`'s own captured failure opening the missing SOURCE
+    artefact, not hardware presence -- and `/dev/sdb`'s parent IS `/dev`
+    itself, the devtmpfs root, where "does not exist" genuinely means "not
+    plugged in". Every other shape now refuses instead: a target that does
+    not exist cannot be an EXISTING file this write clobbers either way,
+    which is the data-loss case this gate exists for, but a deeper `/dev/`
+    subtree or a traversal through a symlink cannot tell "not plugged in
+    yet" from a typo or an escape -- and that ambiguity is refused, not
+    guessed. A target that DOES exist still `stat`s successfully and still
+    refuses on `not stat.S_ISBLK(mode)` below regardless of where it lives.
+
+    `stat_fn` defaults to the real `os.stat`, injected only so a test can
+    simulate a block device without monkeypatching the process-wide
+    `os.stat` -- which pytest's own internals also call.
+    """
+    try:
+        mode = stat_fn(target).st_mode
+    except FileNotFoundError:
+        if posixpath.dirname(target) == _DEV_ROOT:
+            return None
+        return (
+            f"yocto_wic: refusing target '{target}' -- does not exist, and its "
+            "parent is not /dev itself, so this cannot tell 'device not "
+            "plugged in yet' from a typo, a dangling symlink, or a traversal "
+            "that resolves outside /dev/ -- refusing rather than letting the "
+            "write create a new file there."
+        )
+    except OSError as err:
+        return f"yocto_wic: refusing target '{target}' -- cannot stat it: {err}."
+    if not stat.S_ISBLK(mode):
+        return (
+            f"yocto_wic: refusing target '{target}' -- not a block device. Regular "
+            "files are not a supported flash target for this backend."
+        )
+    return None
 
 
 # ── the command ─────────────────────────────────────────────────────────────
@@ -1518,6 +2223,31 @@ def _run(
     resolved_sdk = sdk_resolution.path
     tier = sdk_resolution.tier
     sdk = SdkInfo(resolved_sdk, tier) if resolved_sdk is not None else None
+    # tan-cli#487, defect 3 (review finding 4): absolutised ONCE, right after
+    # `resolved_sdk` reaches the envelope's `sdk.root` above -- oracle-
+    # parity-pinned to report a relative `--sdk-root` LITERALLY (e.g.
+    # `"./sdk"`), so `resolved_sdk` itself must stay untouched; `sdk_root_abs`
+    # is the absolutised value every OTHER consumer uses instead. The
+    # original tan-cli#487 fix absolutised only the artefact-resolution half
+    # (`ctx.sdk_root`, further below) and missed `venv_bin_dir`/
+    # `west_workspace_dir` just below THIS comment: both take a `sdk_root`
+    # and walk `Path(sdk_root).parent` to find the workspace-wide `.venv`
+    # (`find_workspace_venv`/`_zephyr_base_venv`), so a relative `--sdk-root
+    # ../alp-sdk` produced a RELATIVE `../.venv/bin` -- `prepend_path` then
+    # put that literal relative string on the spawned child's PATH, while
+    # `_execute` spawns with `cwd=ctx.workspace` (the west topdir), not this
+    # process's own cwd. The exact "validate one base, execute against
+    # another" split defect 3 reports, one layer up from the artefact-path
+    # half already fixed below -- so `sdk_root_abs` is computed HERE, before
+    # every consumer that resolves anything under the SDK root, and reused
+    # (not recomputed) for `ctx.sdk_root` at the bottom of this function.
+    sdk_root_abs = (
+        None
+        if resolved_sdk is None
+        else resolved_sdk
+        if os.path.isabs(resolved_sdk)
+        else _abs_join(cwd, resolved_sdk)
+    )
     if resolved_sdk is None:
         # Faithful to the Python `find_sdk_root() is None` die: `buildRoot` is
         # reported EMPTY on this path, not the value computed above (verified
@@ -1554,9 +2284,11 @@ def _run(
     # tan-cli#289/#59/#61: resolved ONCE for the whole run, keyed on the SAME
     # `app_dir` the oracle uses (`venv_bin_dir`/`west_workspace_dir` both walk
     # the filesystem, so doing this per-target would repeat that walk for
-    # every slice/helper for no reason).
-    venv_bin = venv_bin_dir(app_dir, resolved_sdk)
-    workspace_dir = west_workspace_dir(app_dir, Path(resolved_sdk))
+    # every slice/helper for no reason). `sdk_root_abs`, not `resolved_sdk`
+    # (tan-cli#487 review finding 4) -- see that computation's own comment
+    # above for why the relative form breaks this specific pair of callers.
+    venv_bin = venv_bin_dir(app_dir, sdk_root_abs)
+    workspace_dir = west_workspace_dir(app_dir, Path(sdk_root_abs))
     workspace = str(workspace_dir) if workspace_dir is not None else None
 
     text_lines: list[str] = []
@@ -1591,10 +2323,32 @@ def _run(
         # skip stays visible in the envelope instead of being swallowed.
         issues.append(Issue("flash.slice-skipped", "warning", refusal))
 
+    # tan-cli#487, defect 3: `resolved_sdk` itself stays untouched -- it
+    # already reached the envelope's `sdk.root` above (`sdk = SdkInfo(
+    # resolved_sdk, tier)`), which is oracle-parity-pinned to report a
+    # relative `--sdk-root` LITERALLY (e.g. `"./sdk"`), so it must not be
+    # absolutised there. `ctx.sdk_root` is a DIFFERENT consumer: its only
+    # three readers (`resolve_artefact_path`, `_resolve_flow_d_atoc_address`,
+    # `_resolve_flow_d_atoc_path`) join it onto a manifest-relative artefact
+    # string and then check/read that path from DISK -- while `_execute`
+    # spawns the flasher with `cwd=ctx.workspace` (the west topdir), not this
+    # process's own cwd. A relative `sdk_root` there is validated with
+    # `os.path.isfile` against ONE base (this process's cwd) and then read by
+    # the spawned tool against ANOTHER (the topdir) -- the "validate one file,
+    # write another" split the issue reports, common case an ordinary-looking
+    # `--sdk-root ../alp-sdk` layout, dangerous case a stale same-named file
+    # under the topdir gets flashed instead. `sdk_root_abs` -- computed ONCE,
+    # up where `resolved_sdk` is resolved, per review finding 4 -- covers
+    # every `_resolve_sdk` tier that can carry a relative path, not just
+    # `--sdk-root` (`resolve_sdk_root_ladder_safe`'s `.alp/sdk-path`/
+    # `~/.alp/sdk-default` pins are read verbatim too; `sdk_cmd._pointer_
+    # target` does not absolutise either), and is reused below for
+    # `venv_bin_dir`/`west_workspace_dir` too -- not recomputed here.
+
     ctx = _Context(
         sku=manifest.sku,
         build_root=build_root,
-        sdk_root=resolved_sdk,
+        sdk_root=sdk_root_abs,
         dry_run=dry_run,
         skip_missing_tools=skip_missing_tools,
         force_confirm=force_confirm,
@@ -1614,6 +2368,33 @@ def _run(
         if entry.status == "planned":
             # `status` alone is prose no automated consumer parses.
             issues.append(Issue("flash.confirm-required", "warning", entry.message))
+        if entry.preflight_unarmed:
+            # tan-cli#520 REVIEW, design point: `expect_dpidr` stays optional
+            # (no shipped preset carries a SW-DP ID for tan to require), but a
+            # confirmed `swd_probe` J-Link write that ran with none armed had
+            # NO signal at all that its wrong-board guard never ran -- this
+            # closes that without making the field mandatory.
+            #
+            # tan-cli#520 REVIEW round 3, finding 2: appended to `text_lines`
+            # too, not only `issues` -- `_run`'s caller prints only
+            # `text_lines` in the DEFAULT, non-JSON mode (`--format json` is
+            # opt-in), so this warning used to be invisible on a plain
+            # `tan flash`: the exact bench operator this preflight exists to
+            # protect (a cloned probe serial reaching the wrong board) saw a
+            # bare `ok: swd_probe[...] flashed via J-Link` with no hint the
+            # wrong-board guard never armed. Every other `flash.*` issue is
+            # already text-visible this way -- `flash.confirm-required` rides
+            # the entry's own message into `lines` above,
+            # `flash.entries-skipped`/`flash.nothing-matched` append to
+            # `text_lines` explicitly below -- this one was the outlier.
+            message = (
+                f"{entry.id}: swd_probe wrote with no flash_args.expect_dpidr set -- "
+                "the read-only SW-DP ID preflight did not run, so a cloned/shared "
+                "probe serial could still have reached the wrong board. Set "
+                "flash_args.expect_dpidr to arm it."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.dpidr-preflight-unarmed", "warning", message))
         entries.append(entry.as_dict())
         if rc < 0:
             continue  # silently skipped -- not counted, does not set flashed_anything
@@ -1621,11 +2402,30 @@ def _run(
         if rc > 0:
             failed += 1
 
-    if not flashed_anything and not plan.refused and not plan.refused_skipped:
-        # A refused (or skipped) slice DID match the requested filters -- it was
-        # refused, not absent -- so "nothing matched" would be a misleading
-        # second message on top of the flash.slice-not-built /
-        # flash.slice-skipped issue(s) already pushed above.
+    if not flashed_anything and not plan.refused and not plan.refused_skipped and plan.targets:
+        # tan-cli#487 defect 7: every target this run matched DID reach
+        # `_flash_entry`, which correctly skipped each one there (an
+        # unresolved `TBD` flash_arg, no flash_method, or a missing tool
+        # under `--skip-missing-tools`) -- a real, per-entry diagnosis
+        # already sitting in `entries[]` above. `plan.refused`/`plan.
+        # refused_skipped` are the planner's OWN skip buckets and an
+        # entry-level skip never populates either of them, so this branch
+        # used to fall through to `flash.nothing-matched` below -- which
+        # contradicts that branch's own reasoning (see its comment): the run
+        # had no `--core`/`--helper` filter at all, and something DID match.
+        # `ok`/exit code are UNCHANGED here (still SUCCESS, per `test_
+        # tbd_sentinel_never_reaches_a_flasher` and its siblings) -- this is
+        # a diagnosis fix, not a behaviour change; see each entry's own
+        # `message` for why THAT target didn't run.
+        message = (
+            "flash: every matched target was skipped before dispatch; nothing "
+            "was flashed. See entries[] for why each one was skipped."
+        )
+        text_lines.append(message)
+        issues.append(Issue("flash.entries-skipped", "warning", message))
+    elif not flashed_anything and not plan.refused and not plan.refused_skipped:
+        # `plan.targets` is empty too here (the `if` above already claimed
+        # the non-empty case).
         message = "flash: nothing matched the requested filters."
         text_lines.append(message)
         # A `--core`/`--helper` filter matching nothing used to warn only in text

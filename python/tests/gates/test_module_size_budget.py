@@ -132,7 +132,57 @@ _MODULE_BUDGET: dict[str, int] = {
     # block for the constant this module no longer defines (only imports)
     # is gone, not merely moved, so the net measures out to exactly the
     # pre-existing count.
-    "tan/commands/doctor_cmd.py": 3289,
+    # 3531, not 3289, as of tan-cli#488 (the eight wrong-verdict defects):
+    # `probe_status` (spawn-vs-parse split, `west_resolved_check`'s new `ran`
+    # arm), `_is_own_git_checkout` (the nested-git-repo guard for
+    # `_git_short_commit`/`_git_behind_upstream`), `_module_importable` (asks
+    # the workspace venv's interpreter, not tan's own, for `fdt`), the
+    # `schemaVersion`-first read and the host-keyed (not `windows`-bool-keyed)
+    # tool list in `_load_manifest`/`_collect`, `zephyr_python_floor`'s
+    # three-way fallback split, and the bare-PATH-re-probe fix for `west` --
+    # each earns its own paragraph of "why", which is most of the growth; the
+    # `doctor()` prologue also grew by one `try:` level (the whole
+    # `cwd = Path.cwd()`-onward body, not just `_collect`, now reports
+    # `doctor.internal-failure` instead of a raw traceback on a deleted
+    # working directory) plus five pre-try defaults for the names its
+    # exception handler and final `emit()` read.
+    # 3575, not 3531, as of tan-cli#488 ROUND 2 (the six remaining findings a
+    # first pass reported fixed but left half-done): `west_check` gained a
+    # `resolved_ran` parameter and a new branch (a resolved-but-unspawnable
+    # west can no longer report `pass`, closing the one branch defect 1's own
+    # `ran` fix did not touch), the `schemaVersion`-mismatch message dropped
+    # its trailing period (it is always read back through a string that
+    # supplies its own), and `sys.stdin.isatty()` gained an `is not None`
+    # guard alongside the existing `sys.stderr` one.
+    # 3588, not 3575, as of tan-cli#488 ROUND 3: round 2's `is not None` guard
+    # landed only inside `fix_suppressed_issue`'s own local duplicate of the
+    # tty check, one call AFTER `doctor()`'s `fix_allowed = fix and
+    # can_prompt(...)` had already crashed on the same `None` `sys.stdin` --
+    # the real fix moved into `can_prompt` itself (`tan.core.consent`, not
+    # counted here), and `fix_suppressed_issue`'s docstring grew a correction
+    # explaining why its own copy of the guard stays (per-condition reporting)
+    # even though the crash it originally cited is now closed one call site
+    # earlier.
+    # 3600, not 3588, as of tan-cli#488 ROUND 5: rounds 3/4 guarded
+    # `sys.stdin` in `fix_suppressed_issue`'s local tty check but left the
+    # NEXT operand of the same `and` chain, `sys.stderr`, unguarded -- a live
+    # non-tty stdin with a detached stderr still raised the identical
+    # `AttributeError`. `fix_suppressed_issue` gained the matching
+    # `sys.stderr is not None` guard plus a docstring paragraph explaining the
+    # recurrence.
+    # 3612, not 3600, as of tan-cli#488 ROUND 6: rounds 3-5's `is not None`
+    # guards stopped a detached (`None`) `sys.stdin`/`sys.stderr` from
+    # crashing `fix_suppressed_issue`'s local tty check, but not a handle
+    # that EXISTS and simply has no `.isatty()` -- exactly what `sys.stderr`
+    # is under `--format json` (`tan.cli.main`'s `_TeeStderr`). The local
+    # `sys.stdin is not None and sys.stdin.isatty() and sys.stderr is not
+    # None and sys.stderr.isatty()` check is now `stdin_is_tty() and
+    # stderr_is_tty()` (imported from `tan.env`, the shared probe tan-cli#288
+    # already built for this exact class), plus a docstring paragraph
+    # recording the recurrence and why this copy was never itself observed
+    # to crash (its own `not json_mode` guard in front) even though the
+    # sibling copy in `build_cmd._dispatch` did.
+    "tan/commands/doctor_cmd.py": 3612,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -168,21 +218,405 @@ _MODULE_BUDGET: dict[str, int] = {
     # f-string was the exact shape that printed a stringified `None` and then
     # advised dropping a `--workspace` the invocation never carried, and
     # nothing stopped that gate from being loosened again.
-    "tan/commands/bootstrap_cmd.py": 2917,
+    # 2919, not 2917, as of tan-cli#516: `reconcile_west_manifest_path`'s
+    # write moved from a bare `Path.write_text` + `os.replace` (no `fsync` at
+    # all) to the new shared `atomic_write_text` (`tan/core/atomic_write.py`),
+    # plus a comment explaining the durability gap the old shape had. Net
+    # growth is small -- the call site itself SHRANK (the caller's own
+    # temp-cleanup `except` is gone, `atomic_write_text` does its own) -- the
+    # import line and the expanded rationale comment account for the +2.
+    "tan/commands/bootstrap_cmd.py": 2919,
     "tan/core/bootstrap.py": 1890,
-    "tan/core/flash_plan.py": 1808,
-    # 1829, not 1808, as of the tan-cli#464 stage-2 review round: `_resolve_sdk`/
-    # `resolve_sdk_root_ladder_safe` now return a named `_SdkResolution`
-    # instead of a growing tuple, and `flash` appends
-    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
-    # -- flashing real hardware against the silently-wrong SDK is the highest
-    # cost of any command on this ladder. Grew again when review found the
-    # manifest-not-found gate returned through `_error` BEFORE either warning
-    # was computed, so the dominant refusal reported neither -- `_error` now
-    # takes the resolution facts and calls the shared `sdk_cmd.
-    # sdk_resolution_issues` itself, so no future early return can skip them.
-    "tan/commands/flash_cmd.py": 1829,
-    "tan/planner/kconfig.py": 1639,
+    # 1987, not 1808, as of tan-cli#486 and its review round: two guard
+    # functions (`validate_commander_path`, closing the J-Link Commander
+    # newline/`"`-injection hole on the artefact/atoc/serial interpolations,
+    # and `validate_openocd_word`, closing the OpenOCD `-c` Jim Tcl `[...]`
+    # command-substitution hole on the artefact) plus their call sites and
+    # docstrings across `jlink_commander_script`, `plan_swd_probe`,
+    # `plan_alif_mram_jlink` and `flow_d_preflight_script`; then the review
+    # round added `openocd_program_word` (braces the OpenOCD artefact word
+    # against Jim Tcl's own word-splitting/backslash substitution),
+    # `validate_identifier`'s `destination` override (so `jlink_serial`'s
+    # refusal names the J-Link Commander script it actually reaches, not
+    # OpenOCD), `validate_commander_path`'s `"` rejection, and hoisting
+    # `jlink_serial` validation into `validate_flow_d_shape` so a hostile
+    # value refuses at `--dry-run` time instead of only deep inside
+    # `plan_alif_mram_jlink`/`flow_d_preflight_script`.
+    # 2107, not 1987, as of tan-cli#487: `_resolve_dev_root` (a PURE lexical
+    # `/dev/` traversal-collapse check, replacing the bare `startswith`
+    # `plan_yocto_wic` used to trust) plus `YOCTO_WIC_METHODS`/
+    # `_KNOWN_UNSUPPORTED_COMPRESSION_SUFFIXES` and the `compress` vocabulary
+    # refusal it feeds -- a still-compressed stream must never reach `dd` raw
+    # -- plus the `swd_probe` success messages now withholding `@ {base}` for
+    # a non-`.bin` artefact on both the J-Link and openocd/pyocd arms.
+    # 2123, not 2107, as of the tan-cli#487 REVIEW round (finding 2): the
+    # `compress` vocabulary refusals moved from ahead of tool selection into
+    # the `elif dd:` arm (bmaptool decompresses natively and never reads
+    # `compress`, so those refusals must not fire on that arm at all), which
+    # nets a few lines of comment explaining why, over and above the code
+    # move itself.
+    # 2161, not 2123, as of tan-cli#511: `openocd_program_word` braces every
+    # artefact unconditionally instead of only when it carries whitespace or
+    # a backslash -- the conditional predicate never actually preserved the
+    # oracle parity its docstring claimed (both frozen fixtures are captured
+    # on `CAPTURE_PLATFORM = "win32"`, so their `<ORACLE-ROOT-0>` scratch
+    # root always carries a backslash; the predicate could never once
+    # observe "no backslash" on the platform it was pinned to). Net growth
+    # is almost entirely docstring: the rationale for why unconditional
+    # bracing was measured-safe, the Fable-advisory finding that made it so,
+    # and the one Tcl brace-counting glass jaw (an odd trailing backslash
+    # count) it deliberately still leaves fail-safe.
+    # 2199, not 2161, as of tan-cli#513: `jlink_commander_script` gains an
+    # optional `serial` parameter that emits a leading `SelectEmuBySN` line
+    # (matching Flow D's own shape) and `plan_swd_probe`'s J-Link arm now
+    # resolves/validates `flash_args.jlink_serial` the same way Flow D
+    # already does, instead of silently dropping it -- net growth is mostly
+    # docstring explaining why this mirrors Flow D's guard verbatim.
+    # 2263, not 2199, as of the tan-cli#513 REVIEW round: (1) the J-Link arm's
+    # argv now also carries `-SelectEmuBySN {serial}` -- not only the
+    # Commander script's leading line -- because that arm's own `-AutoConnect
+    # 1` (Flow D's argv has none) means JLinkExe can start connecting before
+    # the script is ever read, so the script line alone did not provably
+    # precede the connect; and (2) `jlink_serial` is now resolved/validated
+    # BEFORE the J-Link-vs-openocd/pyocd arm split, with an explicit refusal
+    # when it is set but the resolved arm is openocd/pyocd (neither has a
+    # probe-serial selector of its own), closing both the host-dependent
+    # refusal (a hostile value was refused only under `--dry-run`, which
+    # always forces the J-Link arm) and the same accept-and-ignore shape #513
+    # fixed for the J-Link arm, previously still open one branch over. Net
+    # growth is comments explaining both, plus one new refusal message.
+    # 2313, not 2263, as of tan-cli#520: `plan_swd_probe`'s J-Link arm calls
+    # `validate_flow_d_preflight_args(fa, method="swd_probe")` at plan-build
+    # time (so a malformed `expect_dpidr`/`jlink_device` pairing surfaces
+    # under `--dry-run` too, mirroring Flow D's own plan-time call) and its
+    # openocd/pyocd arm gained the same accept-and-ignore refusal #513 already
+    # gave `jlink_serial` on that arm, one field over: `expect_dpidr`/
+    # `jlink_device` are JLinkExe-only concepts, so landing on openocd/pyocd
+    # with either set must refuse rather than silently drop the wrong-board
+    # guard. `validate_flow_d_preflight_args`/`flow_d_preflight_script`
+    # themselves gained an optional `method` parameter (defaulting to
+    # `FLOW_D_METHOD`, so every Flow D call site is untouched) so the refusal
+    # text names the right backend -- reused, not copied, into a second
+    # checker. Net growth is almost entirely docstring/comment explaining the
+    # reuse and the two new refusal shapes; the two new guard bodies are a
+    # handful of lines each.
+    # 2390, not 2313, after the fixture-parity finding on the same issue:
+    # `jlink_device` on `swd_probe` ALREADY meant the write's own `-device`
+    # profile (`_resolve_jlink_device`), oracle-pinned with no `expect_dpidr`
+    # anywhere near it (`tests/parity/…jlink-bin-artefact-uses-loadbin`) --
+    # pairing it with `expect_dpidr` the way Flow D's DIFFERENT `jlink_device`
+    # is paired moved that frozen fixture's answer (measured, then reverted).
+    # `validate_flow_d_preflight_args` gained a keyword-only `require_device_
+    # key` (default `True`, Flow D's shape unchanged) and `flow_d_preflight_
+    # script` a keyword-only `read_device` override so `expect_dpidr` alone
+    # arms `swd_probe`'s preflight, reusing the ALREADY-RESOLVED write device
+    # instead of a second `flash_args` key -- `FlashPlan` gained one new
+    # optional field, `preflight_device`, to carry it from `plan_swd_probe` to
+    # the caller without a second resolve. Net growth is mostly the docstring
+    # explaining why the naive pairing was wrong and what replaced it.
+    # 2410, not 2390, as of the tan-cli#520 REVIEW round (BLOCKER 1):
+    # `flow_d_preflight_script`'s caller-supplied `read_device` (`swd_probe`'s
+    # `FlashPlan.preflight_device`, i.e. `_resolve_jlink_device`'s unvalidated
+    # return value) reached a Commander script LINE with no charset guard at
+    # all -- safe while it only ever reached argv, not once it reached a
+    # line-based script an embedded newline could splice extra commands into,
+    # ahead of the wrong-board abort. Now `validate_identifier`-checked,
+    # unconditionally, regardless of which of the two sources (Flow D's own
+    # paired `jlink_device`, already checked inside `validate_flow_d_
+    # preflight_args`, or `swd_probe`'s caller-supplied override) it came
+    # from -- net growth is almost entirely the docstring/comment explaining
+    # the hole and why the fix applies to both sources rather than one.
+    # 2438, not 2410, as of the tan-cli#520 REVIEW round 2 MAJOR fix:
+    # `_resolve_jlink_device` now validates `flash_args.jlink_device` at PLAN
+    # time (`validate_identifier`, the same guard `jlink_serial` already gets
+    # a few lines below in `plan_swd_probe`) instead of relying solely on
+    # `flow_d_preflight_script`'s own write-time-only defensive check --
+    # closing a `--dry-run`-vs-real-run disagreement on the identical
+    # manifest, plus a second hole where the unvalidated value still reached
+    # `data.entries[].message` verbatim on an UNARMED (no `expect_dpidr`)
+    # write. Also adds the `SWD_PROBE_METHOD` constant (nit: a bare
+    # `"swd_probe"` literal at the one code call site that still had it,
+    # where the sibling backend already has `FLOW_D_METHOD`). Net growth is
+    # mostly the docstring explaining why plan time, not just write time.
+    # 2453, not 2438, as of the tan-cli#520 REVIEW round 3, finding 1:
+    # round 2's `validate_identifier` call lived INSIDE `_resolve_jlink_
+    # device`, which only `plan_swd_probe`'s J-Link arm ever calls -- so the
+    # openocd/pyocd arm accepted an unvalidated `jlink_device` outright, and
+    # `--dry-run` (which always forces the J-Link arm) still disagreed with a
+    # real run on an openocd-only host for the identical manifest. `plan_
+    # swd_probe` now validates `jlink_device`'s charset itself, unconditionally,
+    # before the arm split -- mirroring the `jlink_serial` guard a few lines
+    # above it -- and `_resolve_jlink_device`'s own call is kept as the
+    # documented defensive repeat rather than deleted. Net growth is the new
+    # guard plus both functions' docstrings explaining why the earlier
+    # choke point was insufficient and why the later one is now redundant
+    # but kept.
+    # 2458, not 2453, as of PR #528 review nits: the `device_precheck`
+    # guard's own comment now says "charset AND type" instead of
+    # "charset-only" -- `fa_str_checked` already refused a non-string
+    # `jlink_device` (`true`/`-8`/a list/a map) before this line was ever
+    # added, the earlier wording just undersold what the hoist actually
+    # unified across both arms; a separate stale-drift correction to a
+    # related comment in `flash_cmd.py` is its own entry below. Comment-only;
+    # net growth is the corrected explanation.
+    # 2568, not 2458, as of tan-cli#519: `plan_swd_probe` gained the two new
+    # probe-selection fields the OpenOCD/pyOCD arms never had at all --
+    # `flash_args.openocd_usb_location` (an `adapter usb location` `-c` word,
+    # charset-guarded by `validate_openocd_word`) and `flash_args.pyocd_uid`
+    # (a `--uid` argv pair, guarded by `validate_identifier`) -- plus FOUR new
+    # wrong-arm refusals mirroring `jlink_serial`'s own #513 shape (each field
+    # refused on the OTHER two arms, not just accepted-and-ignored), all
+    # hoisted ahead of the `interface`/`target` requirement the same way
+    # `jlink_serial`/`expect_dpidr` already are. Net growth is mostly the
+    # per-field docstring/comment explaining why the shape is two distinct
+    # fields rather than one neutral one (the tools genuinely select probes
+    # differently) plus the four refusal messages themselves.
+    # 2662, not 2568, as of the tan-cli#519/#522 review round (BLOCKER +
+    # MAJOR 2 + two minors): the OpenOCD/pyOCD arm split now resolves the
+    # taken arm ONCE (`chosen`, mirroring the `if openocd: ... elif pyocd:
+    # ...` argv-build precedence) instead of letting each of the two new
+    # wrong-arm refusals ask its own tool-AVAILABILITY question in isolation
+    # -- the original #519 shape stayed silent on a host with BOTH openocd
+    # and pyocd present, since OpenOCD always wins the arm there but a
+    # `pyocd_uid`-only refusal keyed off pyOCD merely being available never
+    # fired; `--dry-run`'s J-Link default is now bypassed (real `which()`
+    # consulted) specifically when `openocd_usb_location`/`pyocd_uid` is
+    # named, so a preview and a real run on the same host agree, instead of
+    # `--dry-run` unconditionally assuming J-Link and refusing every preview
+    # naming either field; the OpenOCD `-c` word for `openocd_usb_location`
+    # is now braced (`openocd_program_word`, reused verbatim) the same way
+    # the flash artefact's own `-c` word already is, closing the one
+    # remaining unbraced `-c` interpolation this module had; and
+    # `validate_pyocd_uid` widens the plain `validate_identifier` charset
+    # guard by exactly one shape, pyOCD's own documented `<plugin>:<uid>`
+    # probe selector, which the plain guard's `:` refusal previously
+    # over-rejected. Net growth is almost entirely docstring/comment
+    # explaining each of the four fixes and why the narrower (not the
+    # broadest possible) version of each was chosen.
+    # 2699, not 2662, as of the tan-cli#519/#522 review round 3 (a second
+    # review pass on the round above, not a new issue): the round-above
+    # MAJOR-2 fix only scoped the J-Link side of the arm split's `--dry-run`
+    # bypass -- the openocd/pyocd side kept `(inp.dry_run or which(...))`
+    # unconditionally, so a manifest naming `openocd_usb_location`/
+    # `pyocd_uid` still hit an unscoped "assume the tool is present" bypass
+    # on THAT side, and `--dry-run` disagreed with a real run in both
+    # directions on a single-tool host (measured: a pyocd-only host preview
+    # planned a full `openocd` command line for a tool not installed there;
+    # the same host refused a `pyocd_uid` preview a real run would accept).
+    # Scoped the same way the J-Link side already was: the unconditional
+    # bypass survives only when NEITHER new field is named. Also a MINOR:
+    # `openocd_usb_location: "  "` (whitespace-only) passed the Tcl-metachar
+    # charset guard untouched and reached OpenOCD as `adapter usb location
+    # {  }`, an empty selector the tool would only reject at runtime; now
+    # refused at plan time. Net growth is the re-scoped bypass's own
+    # docstring plus the whitespace-only guard and its explanation.
+    # 2751, not 2699, as of the tan-cli#519/#522 close-out (a NIT, not a new
+    # issue): a bare host (no J-Link, no OpenOCD, no pyOCD) that names
+    # `flash_args.openocd_usb_location`/`pyocd_uid` used to get two DIFFERENT
+    # misleading refusals depending on mode -- `--dry-run` said "taking the
+    # J-Link path" (its own bare-host preview default), a real run said "not
+    # taking the OpenOCD/pyOCD path" (naming a tool that also is not there).
+    # A shared `_SWD_PROBE_NO_TOOL_FOUND` constant plus a `jlink_is_bare_host_
+    # fallback` flag (threaded through the J-Link branch's own two wrong-arm
+    # checks) and a `chosen is None and new_probe_selector_named` guard (ahead
+    # of the openocd/pyocd arm's own two wrong-arm checks) now both raise the
+    # SAME "no flash tool found" diagnosis the bottom-of-function fallback
+    # already gives this exact host shape when neither field is named. Net
+    # growth is almost entirely the two guards' own docstrings explaining why
+    # a field-specific "not taking the OTHER tool's path" message is the
+    # wrong diagnosis when NO tool resolved at all.
+    "tan/core/flash_plan.py": 2751,
+    # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
+    # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
+    # perform -- it is pure), `_timeout_stderr` (folds a killed child's
+    # partial captured output into the timeout report instead of discarding
+    # it), the `_execute_message` gate fix so a text-mode run surfaces a
+    # tan-authored diagnosis instead of a bare `flash command failed`,
+    # absolutising `ctx.sdk_root` so an artefact anchored on a relative
+    # `--sdk-root` resolves against the SAME base the flasher spawns from,
+    # and gating Flow D's SETOOLS auto-sign on the SAME confirm check the
+    # MRAM write it feeds already requires.
+    # 2075, not 1996, as of the tan-cli#487 REVIEW round: finding 1 narrows
+    # `_yocto_wic_block_device_refusal`'s ENOENT fail-open to "target's
+    # parent is `/dev` itself" instead of any target, with a new refusal
+    # message and its rationale; finding 4 absolutises `resolved_sdk` ONCE,
+    # before `venv_bin_dir`/`west_workspace_dir` as well as `ctx.sdk_root`
+    # (the original fix only covered the latter); finding 5 threads a
+    # `captured` flag through `_half_lines`/`_pipeline_stderr`/
+    # `_timed_out_stderr` so an uncaptured (text-mode) pipeline failure does
+    # not emit a body-less header; and nit 1 adds a TOCTOU-boundedness
+    # comment beside the write-time gate.
+    # 2098, not 2075, as of tan-cli#487 defect 7: the aggregate "did anything
+    # flash" check after `_flash_entry`'s loop split into a THIRD branch --
+    # `plan.targets` non-empty but every one of them was skipped INSIDE
+    # `_flash_entry` (an unresolved `TBD` flash_arg, no flash_method, or a
+    # missing tool under `--skip-missing-tools`) -- so it stops reporting
+    # `flash.nothing-matched` on a run that carried no `--core`/`--helper`
+    # filter and genuinely matched a target. New code `flash.entries-skipped`,
+    # `ok`/exit code unchanged (still SUCCESS). The five oracle-parity cases
+    # this used to share a wrong answer with moved to
+    # `tests/commands/test_flash_command.py` (see their own docstring for the
+    # divergence rationale).
+    # 2112, not 2094, as of tan-cli#511: `_flash_entry` gained a keyword-only
+    # `yocto_wic_stat` (default `os.stat`, threaded into
+    # `_yocto_wic_block_device_refusal`'s own `stat_fn`) plus its docstring
+    # addition, so a test can reach the write-time block-device gate's real
+    # call site with an injected mode -- portably, on every CI platform,
+    # instead of needing a real regular file under a literal `/dev/`-rooted
+    # path (Linux-only tmpfs `/dev/shm`; neither macOS nor Windows have an
+    # equivalent).
+    # 2170, not 2112, as of tan-cli#512: the read-only DPIDR preflight moved
+    # ahead of the SETOOLS auto-sign inside `_flash_entry` (a wrong-board
+    # refusal must not have already mutated the customer's SETOOLS install),
+    # plus its own docstring explaining the ordering invariant and its old
+    # call site's replacement comment; and the wrong-DP-ID message now names
+    # the ACTUAL SW-DP ID the probe reported, not only the expected one
+    # (`_dp_id_value`, `_DP_ID_RE` gained a capture group). A #514 change
+    # (resolving `swd_probe`'s `jlink_device` from SDK metadata ahead of
+    # `flash_plan`'s `_DEFAULT_JLINK_DEVICE` fallback) landed and was
+    # REVERTED in the same round: #514's premise was wrong -- `swd_probe`
+    # only ever flashes the GD32 supervisor MCU on E1M-X V2N/V2N-M1
+    # (`helper_firmware:` in alp-sdk metadata, never a SoC-core slice), so
+    # `GD32G553MEY7TR` is the CORRECT device, not a foreign default, and
+    # substituting the SoC's generic attach profile there would have been a
+    # raw memory write misreported as a successful flash.
+    # 2207, not 2170, as of tan-cli#520: `_flash_entry` gains a `swd_probe`
+    # call site for the read-only DPIDR preflight, placed immediately before
+    # the one spawn (`_execute`) that can write for this entry -- there is no
+    # earlier mutating step to hoist ahead of on this path (unlike Flow D's
+    # SETOOLS auto-sign, #512), so this position already satisfies "before
+    # anything that writes or mutates" without needing a hoist of its own.
+    # `_flow_d_preflight` (the shared runner both backends now call) gained an
+    # optional `method` keyword (default `FLOW_D_METHOD`) threaded into every
+    # one of its refusal messages, replacing the hardcoded MRAM wording with
+    # backend-neutral "write"/"write to" phrasing so a `swd_probe` refusal
+    # does not claim to be aborting an MRAM write it was never going to make.
+    # Net growth is mostly comment explaining the ordering invariant and the
+    # call-site's own no-op-when-unarmed safety argument.
+    # 2217, not 2207, same round: `_flow_d_preflight`/its `flow_d_preflight_
+    # script` call site gained a keyword-only `read_device` passthrough
+    # (`plan.preflight_device`, `swd_probe`'s call site) so the preflight can
+    # use the already-resolved write device instead of a second `flash_args`
+    # key -- see the `flash_plan.py` entry above for why that key was already
+    # taken.
+    # 2290, not 2217, as of the tan-cli#520 REVIEW round: BLOCKER 2 re-gates
+    # the swd_probe preflight call site on `plan.preflight_device is not
+    # None` instead of `method == "swd_probe"` alone, so an openocd/pyocd-arm
+    # entry no longer derives Flow D's PAIRED `require_device_key` shape by
+    # accident (a working manifest used to hard-fail at write time only,
+    # disagreeing with a green `--dry-run`); minor 3 branches `_flow_d_
+    # preflight`'s refusal wording on `method` so Flow D's original "write
+    # MRAM" phrasing survives byte-for-byte instead of silently becoming
+    # backend-neutral prose nothing pins; and the review's own design point
+    # adds a NEW non-fatal `flash.dpidr-preflight-unarmed` warning `Issue`
+    # (`_Entry.preflight_unarmed`, read by `_run`'s own entry loop) for a
+    # confirmed swd_probe J-Link write that ran with no `expect_dpidr` armed,
+    # so that silent gap now has a signal without making the field mandatory.
+    # 2298, not 2290, same round: the duplicated `method == "swd_probe" and
+    # plan.preflight_device is not None` condition (nit: two copies that had
+    # to stay in lockstep) is now one local, `swd_probe_took_jlink_arm`, read
+    # by both the preflight call site and the unarmed-warning signal; the
+    # bare `"swd_probe"` literal there is now the imported `SWD_PROBE_
+    # METHOD` constant.
+    # 2312, not 2298, as of the tan-cli#520 REVIEW round 3, finding 2: the
+    # `flash.dpidr-preflight-unarmed` warning built above was appended to
+    # `issues` only -- `_run`'s caller prints only `text_lines` in the
+    # DEFAULT, non-JSON mode, so a plain `tan flash` gave no signal at all
+    # that the wrong-board guard never armed. The warning message is now
+    # built once and appended to both `text_lines` and `issues`, matching
+    # `flash.entries-skipped`'s own shape a few lines below. Net growth is
+    # the new `text_lines.append` call plus the comment explaining why the
+    # warning was JSON-only and why that mattered on the bench.
+    # 2317, not 2312, as of PR #528 review nits: the BLOCKER 2 preflight
+    # comment's "the plan-time guard just below `plan_swd_probe`'s arm split
+    # only ever checks `expect_dpidr`, never `jlink_device`, on that arm"
+    # claim went stale once `flash_plan.py`'s round-four hoist
+    # (`device_precheck`, `flash_plan.py:1225`) started checking
+    # `jlink_device`'s charset/type ahead of that same split, on both arms --
+    # corrected to say so while keeping the underlying conclusion (no
+    # preflight-only meaning for `jlink_device` on the openocd/pyocd arm)
+    # unchanged. Comment-only; net growth is the correction.
+    # 2371, not 2317, as of tan-cli#522: Flow D's static, plan-time
+    # `ok_message` used to claim `verified and PIN-reset` even when the
+    # transcript showed `Failed to halt CPU` -- an intent, not an observed
+    # outcome (the same class #487 defect 6 already fixed for `swd_probe`'s
+    # asserted address). `_flow_d_reset_qualified_message` reads the ALREADY-
+    # CAPTURED `outcome.stdout`/`.stderr` for the one tail
+    # `plan_alif_mram_jlink` always appends and swaps it for an honest
+    # sentence when the transcript names a halt failure -- a targeted
+    # substring swap, not a general transcript-scraping layer, and (as first
+    # shipped) a no-op in text mode, since nothing was captured there --
+    # corrected below, this was MAJOR 1 of the next review round. Net growth
+    # is the new helper plus its docstring and the one call site in the
+    # ok-outcome branch.
+    # 2486, not 2371, as of the tan-cli#519/#522 review round, MAJOR 1: text
+    # mode -- the DEFAULT, standalone invocation, not only `--format json` --
+    # left `outcome.stdout`/`.stderr` empty in every branch of `_spawn`, so
+    # the qualification above never reached an operator reading the console,
+    # which is exactly the sentence #522 was filed against. The live-console
+    # branch now TEES a written child's combined output (still streamed to
+    # the console live, via the new `_Tee` helper on a background thread,
+    # instead of only streaming it) -- the wrapped-console branch (no
+    # OS-level stderr handle -- a pytest/embedded capture object) now threads
+    # its ALREADY-captured `proc.stdout`/`.stderr` through instead of only
+    # `print()`-replaying and discarding them; and a `Popen.wait`-timeout on
+    # the live-console branch now builds its own `TimeoutExpired` with the
+    # tees' partial output (`Popen.wait`'s own carries none) so
+    # `_timeout_stderr` sees the same shape on all three spawn variants. Net
+    # growth is `_Tee` itself (a `_Drain`-shaped background-thread reader,
+    # teeing instead of only draining) plus the docstring explaining why each
+    # of the three branches needed a different fix.
+    # 2551, not 2486, as of the tan-cli#519/#522 review round 3 (a second
+    # review pass on the same change, not a new issue): the first `_Tee` read
+    # a TEXT-mode stream in fixed 4096-*character* chunks, which is NOT live
+    # -- `TextIOWrapper.read(n)` blocks until `n` characters are decoded or
+    # EOF, so a slowly-dribbling child produced no console output for over a
+    # second at a time (measured), the opposite of the class's own purpose.
+    # `_Tee` now reads the raw BINARY pipe with `read1` (bytes ready, not
+    # characters decoded) and decodes them itself, incrementally. Separately,
+    # `_Tee.join()`'s timeout defaulted to `None` -- unbounded -- so a killed
+    # child's own orphaned grandchild holding the pipe open (a backgrounded
+    # `sleep &`, measured) could hang `tan flash` indefinitely past its own
+    # `_FLASH_TIMEOUT_S`; `join` now bounds on the same `_DRAIN_JOIN_S` the
+    # pipeline's stderr drain already uses. Also a MINOR: the sink-write
+    # `except (OSError, ValueError): pass` silently swallowed
+    # `UnicodeEncodeError` (a `ValueError` subclass) too, discarding a whole
+    # chunk -- including any clean lines it shared -- when the sink's own
+    # encoding could not represent one decoded character; it now retries with
+    # a lossy re-encode instead of dropping the chunk. Net growth is the
+    # rewritten `_Tee` docstring/body (binary read + incremental decode + the
+    # bounded join + the narrower exception handling) plus one `flash_plan.py`
+    # MAJOR-2 companion fix's own `flash_cmd.py`-side commentary.
+    # 2629, not 2551, as of the tan-cli#519/#522 close-out review (three
+    # findings, no new issue): MAJOR 1's `_execute_message`/`_half_lines`
+    # docstrings were corrected -- an ORDINARY text-mode failure no longer
+    # unconditionally leaves `outcome.stdout`/`.stderr` empty now that
+    # `_spawn`'s single-tool branches capture the child's transcript in every
+    # mode, and the old test asserting that as "unaffected" was split into a
+    # narrower still-true case (a genuinely silent child) plus a NEW test
+    # guarding the changed case against a real `_spawn` outcome, not only a
+    # hand-built `_Outcome`; MAJOR 2's `_Tee` docstring dropped its overstated
+    # "nothing is silently withheld" claim and documents the tty-vs-pipe
+    # consequence measured on a real pty (tracked as tan-cli#541); MINOR 1
+    # documents that `_spawn` joins TWO `_Tee`s, so the real overrun past
+    # `_FLASH_TIMEOUT_S` is up to `2 * _DRAIN_JOIN_S`, not one, at both
+    # constants' own definitions; and the NIT on `_flow_d_reset_qualified_
+    # message` names the one residual risk a bounded transcript join leaves:
+    # a truncated transcript falls through to the OPTIMISTIC "verified and
+    # PIN-reset" claim, not a refusal. Net growth is docstring/comment plus
+    # one new decoder test (`test_tee_decodes_a_multibyte_utf8_sequence_
+    # split_across_a_read1_boundary`, MINOR 2) proving the incremental
+    # decoder against a naive per-chunk one.
+    "tan/commands/flash_cmd.py": 2629,
+    # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
+    # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
+    # companion half -- `needs_dcache_off` now checks
+    # `entry.kind in ("raw_shmem", "rpmsg")` instead of `raw_shmem` alone).
+    # This branch carried a stale 1639 from before #485 landed on dev; the
+    # rebase re-derived it on the merged tree rather than keeping either
+    # side's number by ownership.
+    "tan/planner/kconfig.py": 1643,
+
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
     # tuple that would need a fourth positional slot for
@@ -198,7 +632,77 @@ _MODULE_BUDGET: dict[str, int] = {
     # board.yaml) gained a next-step sentence naming `tan doctor`/`tan init`/
     # `tan examples`, each appended as its own wrapped string literal rather
     # than lengthening an existing line.
-    "tan/commands/build_cmd.py": 1612,
+    #
+    # 1695, not 1612, as of tan-cli#483: `_missing_app_dirs` (a new
+    # module-level function, with docstring) checks every zephyr/baremetal
+    # slice's resolved `cores.<id>.app` for existence, and `_dispatch` grew
+    # a second held-back-outcome path beside the existing `${TOOLCHAIN_ROOT}`
+    # demotion one -- same shape, not a new convention -- to fail just the
+    # bad slice rather than the whole plan.
+    #
+    # 1703, not 1695, as of the tan-cli#483 review round: `_missing_app_dirs`
+    # took a `build_root` parameter and now anchors a relative `appDir` on
+    # it (not the tan process's own CWD, which broke the moment `tan build`
+    # ran from anywhere but the project itself) and reports the anchored
+    # absolute path; gained a `command is not None` guard mirroring the
+    # `${TOOLCHAIN_ROOT}` demotion filter beside it (a slice the planner
+    # already refused a command for must not have its unread `app:` reported
+    # as the failure reason instead); and split "does not exist" from "is
+    # not a directory" so an existing file/broken symlink is named honestly.
+    # Its own docstring was trimmed back to keep the function AT the
+    # function-length ratchet's 50-line cap (49 lines) rather than paying
+    # that ratchet too, matching this file's own established precedent
+    # (`doctor_render.py:render_doctor_footer`, above).
+    # 1706, not 1703, as of tan-cli#510: `_missing_tool_issues`'s match
+    # dropped its `endswith("` not found")` half (the message now carries a
+    # `-- searched ...` tail) and gained its own two-line explanation of why.
+    # 1732, not 1706, as of the tan-cli#510 REVIEW round: `_slice_result`
+    # gained the new, always-present `resolvedTool` field plus the docstring
+    # explaining why it is the one exception to "omitted when absent", and
+    # `_text_recap` gained the resolved-tool note it now composes for a
+    # failed/cancelled slice (never folded into `reason` -- see both
+    # functions' own docstrings).
+    "tan/commands/build_cmd.py": 1732,
+    # 1720, not 1703, as of tan-cli#488 defect 8: `build()`'s resolution
+    # prologue (`Path.cwd()` through `Project.resolved(...)`) moved inside a
+    # `try`, with pre-try safe defaults for every name the exception handler
+    # and the final `emit()` read -- mirroring `doctor_cmd.doctor`'s identical
+    # fix for the same defect class -- so a raise anywhere in it produces the
+    # `build.internal-failure` envelope instead of a raw traceback.
+    # 1732, not 1720, as of tan-cli#488 round 5 class sweep: `_dispatch`'s
+    # `_Heartbeat(enabled=...)` read a bare `sys.stderr.isatty()`, the exact
+    # unguarded shape `tan.core.consent.can_prompt` was fixed for -- a
+    # detached-stdio `tan build`/`tan run` raised the same `AttributeError`
+    # arming the heartbeat, before a single slice ever dispatched. Gained a
+    # `sys.stderr is not None` guard plus a docstring paragraph.
+    # 1754, not 1732, as of tan-cli#488 ROUND 6: round 5's `sys.stderr is not
+    # None` guard stopped a detached (`None`) stderr from crashing this line,
+    # but not a stderr that EXISTS and simply has no `.isatty()` -- exactly
+    # what `sys.stderr` is under `--format json` (`tan.cli.main`'s
+    # `_TeeStderr`). Measured against the real binary: `tan run --format
+    # json --sdk-root <sdk>` from a real project crashed with `AttributeError:
+    # '_TeeStderr' object has no attribute 'isatty'` (exit 5,
+    # `run.internal-failure`) before a single slice dispatched, on every run
+    # -- `run_cmd._run` calls `_build` with no `json_mode` of its own, so
+    # `_dispatch` always saw the `json_mode=False` default and never
+    # short-circuited past this line. `enabled=not json_mode and sys.stderr
+    # is not None and sys.stderr.isatty()` is now `enabled=not json_mode and
+    # stderr_is_tty()`, importing the shared probe `tan.env` already built
+    # for this exact class (tan-cli#288) instead of a fourth hand-rolled
+    # copy, which also collapses back onto one line under the 100-column
+    # limit. Also corrects six stale `run_cmd._build_then_run` docstring/
+    # comment references (a name that was never real in `run_cmd.py`, which
+    # has only ever defined `_run`) to the actual name while editing the
+    # same paragraphs, and two `run_cmd.py:258` line citations that pointed
+    # at `_run`'s docstring line rather than its actual `_build(` call site
+    # (`run_cmd.py:267`). Net growth is almost entirely the docstring
+    # recording the round-6 recurrence and the residual `json_mode`-
+    # threading gap this round deliberately still leaves open.
+    # 1783 on the merged tree, MEASURED with `wc -l`: both sides grew this file
+    # -- tan-cli#530's resolver on `dev` and #488's doctor/consent guards here --
+    # and the auto-merge kept only one side's number.
+    "tan/commands/build_cmd.py": 1783,
+
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
@@ -231,13 +735,63 @@ _MODULE_BUDGET: dict[str, int] = {
     # resolved to a literal ... a 'code=' keyword argument is not a
     # resolvable code literal" -- each wrapper's own literal is the only
     # shape the gate can verify against the registry.
-    # 1402 -> 1443: tan-cli#476 added `_project_not_found_failure` and the
-    # guard that reaches it, so a `--project` naming a directory which does
-    # not exist is refused instead of CREATED (the writer calls
-    # `mkdir(parents=True)`). Extracting from this module is tan-cli#408's
-    # job; a defect that silently materialises a project tree should not
-    # wait on it.
-    "tan/commands/debug_config_cmd.py": 1443,
+    # 1402 -> 1535: tan-cli#489 fixed three data-loss/misattribution defects
+    # in one bounded change: (1+2) the launch.json write moved from a
+    # truncating `open(path, "w")` to a temp-sibling + `os.replace` (matching
+    # `bootstrap_cmd.reconcile_west_manifest_path`'s own pattern); (4) split
+    # `sdk-identity-key-absent` off a new `_sdk_identity_core_unresolved_issue`
+    # for the "no core to index the SDK's per-core identity with" case, which
+    # it used to misattribute; (5) `_explicit_core_unknown_failure` closes the
+    # silent `--core`-vs-manifest gap `infer_target_kind`'s own guard cannot
+    # reach once `--target-kind` is given explicitly.
+    # 1535 -> 1643, review round on the same issue: (1) `bool(known_jlink_cores)`
+    # guard plus its own explaining comment, so a SoM with no `jlink_device`
+    # map at all does not steal `sdk-identity-key-absent`'s correct case;
+    # (4/5, symlink+fsync) `_atomic_write_launch_json` replaced the bare
+    # temp-plus-`os.replace` with a symlink-resolving, `fsync`'d,
+    # mode-preserving write plus a stale-temp sweep -- a real function with a
+    # real docstring, not a few extra lines at the call site; (6)
+    # `explicit_omissions` threaded through `create_launch_json_write_plan`
+    # so `--pre-launch-task ''` actually removes an existing key on a write,
+    # not just a fresh draft.
+    # 1643 -> 1656, SECOND review round on the same issue: the stale-temp
+    # sweep from the round above was DELETED outright (it could delete a
+    # concurrent process's own in-flight temp, including one outside the
+    # project through a symlinked `launch.json`) rather than shrinking this
+    # file; the mode-preservation logic grew instead -- reading the existing
+    # file's mode BEFORE the write and applying it AFTER a successful
+    # replace (never to the temp itself, so a failed replace's cleanup
+    # `unlink` is never blocked by a read-only-mirrored temp), plus the
+    # umask-respecting default for a brand first-ever write, plus a guard
+    # against `os.fdopen` leaking `mkstemp`'s own fd.
+    # 1656 -> 1661, THIRD review round: doc-only corrections (the stale
+    # `shutil.copymode` present-tense claim after `shutil` was dropped from
+    # the imports; `.gitignore`'s comment split into a `debug_config_cmd.py`
+    # entry) plus a single-threaded-CLI caveat on the `os.umask` set-restore
+    # -- the list-merge algorithm change that dominates this round's diff
+    # lives in `debug_launch.py` below, not here.
+    # 1661 -> 1542, tan-cli#516 review round: `_atomic_write_launch_json`
+    # (the 119-line function this file grew across the three rounds recorded
+    # immediately above) is GONE, not grown again -- the fsync/symlink/mode
+    # shape it carried moved into the new shared `tan/core/atomic_write.py:
+    # atomic_write_text`, which `bootstrap_cmd.reconcile_west_manifest_path`
+    # now also calls, so the write plan's own docstring comment ("`_atomic_
+    # write_launch_json`'s own docstring covers the rest") stopped being true
+    # the moment #516 gave `reconcile_west_manifest_path` its own unsynchronised
+    # copy of the same durability gap this module had already closed once.
+    # The call site now reads `atomic_write_text(launch_json_path, plan.content)`
+    # directly; nothing here duplicates the durability sequence any more.
+    # 1542 -> 1583: tan-cli#476 added `_project_not_found_failure` and the
+    # guard that reaches it (at the top of `_run`, before anything can
+    # write), so a `--project` naming a directory which does not exist is
+    # refused instead of CREATED (the writer calls `mkdir(parents=True)`).
+    # Extracting from this module is tan-cli#408's job; a defect that
+    # silently materialises a project tree should not wait on it.
+    # 1583 -> 1597, review round: the guard now tells "missing" apart from
+    # "exists but is a file" instead of calling both "does not exist", and
+    # drops the redundant parenthetical resolved-path suffix when
+    # `--project` was already given as an absolute path.
+    "tan/commands/debug_config_cmd.py": 1597,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -290,18 +844,30 @@ _MODULE_BUDGET: dict[str, int] = {
     # "record-shaped" line makes stderr not a tty, which already returns
     # `None` and skips wrapping wholesale.
     "tan/commands/sdk_cmd.py": 1274,
-    "tan/commands/validate_cmd.py": 1093,
+    # 1122, not 1093, as of tan-cli#488 defect 8: `validate()`'s whole body
+    # (from the SDK-root ladder through the final `_emit(...)`) moved inside a
+    # `try`/`except typer.Exit: raise`/`except Exception`, so the identical
+    # unguarded-prologue shape `build_cmd.build` already had (`os.path.abspath`
+    # calling `os.getcwd()` on a deleted cwd) now also produces a
+    # `validate.internal-failure` envelope instead of a raw traceback.
+    "tan/commands/validate_cmd.py": 1122,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
     # resolved, the same cost `project_pin_issue` above already justified.
-    "tan/commands/new_som_cmd.py": 1057,
+    "tan/commands/new_som_cmd.py": 1341,
+
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
     # `sdk.project-pin-unresolved`.
     "tan/commands/clean_cmd.py": 1013,
-    "tan/planner/loader.py": 996,
+    # 1015, not 996, as of tan-cli#485: `_load_yaml`/`_load_json` route
+    # through the new `strict_loaders.strict_yaml_load`/`strict_json_loads`
+    # (alp-sdk #1127, a duplicate-mapping-key refusal), and the IPC-entry
+    # loop gained the alp-sdk #1088 refusal of `cacheable: true` on a
+    # `kind: rpmsg` entry.
+    "tan/planner/loader.py": 1015,
     # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
     # carries `foreign_global_default_for` through into `_Sdk`, and `init`
     # surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk` writes
@@ -332,15 +898,93 @@ _MODULE_BUDGET: dict[str, int] = {
     # matching nothing) carry a bare reason code the caller maps to a new
     # issue code -- and `_core_not_in_manifest_message` grew a `slices`
     # parameter to name the cores the build actually produced.
-    "tan/core/debug_launch.py": 1068,
-    "tan/commands/build/execute.py": 941,
+    # 1109, not 1068, as of tan-cli#489: (3) `_merge_value`'s list branch grew
+    # a no-truncation tail-append plus a recursive dict branch (a per-index
+    # merge used to silently delete a customer's extra `setupCommands`/
+    # `configFiles` entries and their hand-added keys); (5)
+    # `explicit_core_unknown_message` is the `--target-kind`-explicit
+    # counterpart of `_core_not_in_manifest_message` above, kept in `tan.core`
+    # rather than duplicated in the command module per this file's own
+    # pure-logic convention.
+    # 1201, not 1109, review round on the same issue: (2/3) the per-index
+    # list merge was replaced with `_list_item_identity` +
+    # `_merge_list_by_identity` (a reordered `configFiles`/`setupCommands`
+    # was pairing the wrong entries, both destroying one and duplicating
+    # another) -- a real function plus its own docstring recording the
+    # remaining, deliberately-accepted "cannot shrink a list tan itself
+    # wrote" limitation, not a few extra lines; (6) `explicit_omissions`
+    # threaded through `create_launch_json_write_plan` so
+    # `--pre-launch-task ''` removes an existing key on a write, not only a
+    # fresh draft.
+    # 1221, not 1201, SECOND review round on the same issue: the identity-only
+    # merge above was NON-IDEMPOTENT (measured: three consecutive runs
+    # accumulated three revisions of `configFiles` instead of holding only
+    # the latest) and emitted in the DRAFT's own order, not `existing`'s --
+    # both fatal to OpenOCD/gdb sessions that depend on entry order.
+    # `_merge_list_by_identity` now keeps position as a weaker fallback
+    # signal for a draft item matching nothing already present, restoring
+    # idempotence and order, with its own docstring rewritten to describe
+    # the residual limitation this ACTUALLY leaves (not the "cannot shrink"
+    # framing the previous round's docstring used, which described a
+    # symptom of the accumulation bug, not a real property).
+    # 1275, not 1221, THIRD review round on the same issue: the SECOND
+    # round's fallback used the unmatched draft item's own INDEX against
+    # `existing` at that same index -- correct only while nothing earlier in
+    # the draft had also identity-matched, which any customer-prepended
+    # entry ahead of tan's own resolved values immediately breaks (measured:
+    # accumulation persisted for any board with more than one `--config`).
+    # `_merge_list_by_identity` now does ANCHOR-relative placement (a free
+    # `existing` slot bracketed by the nearest identity matches before/after
+    # the unmatched item in the draft, not its own raw index) -- more state
+    # to track per merge (`anchor_of_draft_index`, the two-pass placement
+    # loop) and a docstring long enough to record why the simpler two-pass
+    # ("assign every leftover draft item to every leftover existing slot in
+    # order") was rejected, not just what shipped.
+    "tan/core/debug_launch.py": 1275,
+    # 1003, not 941, as of tan-cli#510: `_command_on_path`/`_tool_is_
+    # available` (a bool-only availability check, and a spawn that repeated
+    # a SEPARATE, unhardened PATH lookup) were replaced by one
+    # `_resolve_tool` returning the resolved absolute path AND what it
+    # searched -- the spawn now runs that path, never the bare identity, and
+    # the missingTool refusal names the search. The per-slice resolved-tool
+    # note appended ahead of `output_artefact` resolution accounts for the
+    # rest.
+    # 1075, not 1003, as of the tan-cli#510 REVIEW round: that per-slice
+    # resolved-tool note (appended to `message`) is GONE -- `resolved_tool`
+    # is now a dedicated `SliceOutcome` field, computed once per slice and
+    # threaded through every outcome constructor -- but the review's other
+    # three findings cost more lines than that removal saved: `_resolve_tool`
+    # takes an `env` parameter and resolves against it (MAJOR 2, moving the
+    # whole env-assembly block earlier in the loop plus its own explanatory
+    # comment), the env-assembly-before-resolution reordering itself carries
+    # a paragraph explaining why (MAJOR 2), `SliceOutcome.resolved_tool` and
+    # a second `execute.py` module-docstring divergence paragraph (mirroring
+    # the existing tan-cli#307 one) are both new, and the absolute-path-miss
+    # message split into two non-circular returns (the review's minor
+    # finding) plus the `os.get_exec_path(env)` POSIX comment (MAJOR 2).
+    # 1119, not 1075, as of the tan-cli#510 REVIEW ROUND 3: the missing-tool
+    # refusal's searched-`PATH` text was reaching the persisted
+    # `system-manifest.yaml` `reason` (a support-ticket-forwarded artefact),
+    # not just the transient message/envelope -- `SliceOutcome` gained a
+    # `manifest_message` field (and its own docstring) plus a short-form
+    # value threaded through the missing-tool call site and
+    # `_write_manifest_after_dispatch`'s `reason=` line; `SliceOutcome.
+    # resolved_tool`'s docstring also grew a paragraph documenting a
+    # deliberate ambiguity the review flagged as a NIT (an already-absolute
+    # `tool` that fails to launch reports `resolvedTool: null`,
+    # indistinguishable from "never resolved" without a separate field this
+    # port does not add).
+    "tan/commands/build/execute.py": 1119,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather
     # than extracted because this file mirrors an upstream generator --
     # splitting it here would make the next port a hand-merge instead of
     # a diff.
-    "tan/planner/zephyr_board.py": 970,
+    # 975, not 970, as of tan-cli#485: `_resolve_variant` grew a
+    # case/whitespace-insensitive `is_tbd`-shaped TBD check (alp-sdk #1048,
+    # matching `som_metadata.py::_resolve_silicon_variant`'s own copy).
+    "tan/planner/zephyr_board.py": 975,
     "tan/commands/support_bundle_cmd.py": 834,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
@@ -428,7 +1072,201 @@ _MIRRORED = ("tan/planner/",)
 # than left to bump this budget a second time. `run_fix` (`doctor_cmd.py`)
 # also grew this pass, but it was already over 50 lines before it, so it
 # never moved the COUNT either way.
-_FUNCTION_COUNT_BUDGET = 203
+#
+# 205, not 203, as of tan-cli#489: two more functions crossed 50 lines --
+# `debug_config_cmd.py:_fill_debug_probe_identity_from_sdk` (52 -> 57), which
+# now also returns the `known_jlink_cores` set item (4)'s
+# `sdk-identity-core-unresolved` message needs, and
+# `debug_launch.py:_merge_value` (44 -> 53), whose list branch gained the
+# no-truncation tail-append plus a recursive dict branch (item (3): a
+# per-index merge used to silently delete a customer's own `setupCommands`/
+# `configFiles` entries). `_run` (`debug_config_cmd.py`) also grew, 320 -> 382,
+# but was already over the cap, so it does not move this count.
+#
+# 206, not 205, review round on the same issue: `_merge_value`'s old 53-line
+# list branch was REPLACED by `_merge_list_by_identity` (52 lines, a wash --
+# still one function over the cap, not two), but `_atomic_write_launch_json`
+# (`debug_config_cmd.py`, findings 4+5: symlink-resolving, `fsync`'d,
+# mode-preserving) is a genuinely NEW one at 81 lines, so the count moves by
+# exactly the net +1 that accounts for.
+#
+# 207, not 206, merging in tan-cli#485's review round (independent of the
+# #489 work above -- both landed on top of the same 203 baseline):
+# `project_loader.py:_hwrev_pad_route_overrides` (trimmed to exactly 50
+# lines, at the cap not over it, in #485's first pass) needed its dropped
+# constraint note back -- "same error TYPE and MESSAGE SHAPE as
+# loader.load_board_yaml's SoM-side refusals" is load-bearing: the function
+# INLINES `loader._status_repr` rather than importing it, and that inlining
+# is invisible without the note telling a future editor the two must be kept
+# in sync by hand. +6 lines (50 -> 56), all docstring, so the function
+# crosses the cap again -- the same choice `render_doctor_footer` made the
+# OTHER way, above, when the growth was prose that added nothing a reader
+# couldn't infer; this growth names a real constraint the code doesn't
+# otherwise state anywhere.
+# 204, not 203, as of tan-cli#485's review round: `project_loader.py:
+# _hwrev_pad_route_overrides` (trimmed to exactly 50 lines, at the cap not
+# over it, in #485's first pass) needed its dropped constraint note back --
+# "same error TYPE and MESSAGE SHAPE as loader.load_board_yaml's SoM-side
+# refusals" is load-bearing: the function INLINES `loader._status_repr`
+# rather than importing it, and that inlining is invisible without the note
+# telling a future editor the two must be kept in sync by hand. +6 lines
+# (50 -> 56), all docstring, this budget raised rather than re-trimmed --
+# the same choice `render_doctor_footer` made the OTHER way, above, when the
+# growth was prose that added nothing a reader couldn't infer; this growth
+# names a real constraint the code doesn't otherwise state anywhere. This
+# step landed on `dev` via tan-cli#521, independently of the two steps below.
+#
+# 205, not 204, as of the tan-cli#487 REVIEW round (finding 1):
+# `flash_cmd.py:_yocto_wic_block_device_refusal` crossed 50 lines (41 -> 66)
+# once its docstring grew to explain the narrowed ENOENT fail-open (the
+# review's own point -- a blanket fail-open was the bug, and the function
+# needs to say precisely which shape still fails open and why, or the next
+# reader re-widens it by "simplifying" the condition). Body growth is small
+# (one `if`/`return` pair); the docstring is the reason. `_FUNCTION_WORST_
+# BUDGET` is untouched -- 66 lines is nowhere near it.
+#
+# 206, not 205, as of tan-cli#511: `flash_plan.py:openocd_program_word`
+# crossed 50 lines (36 -> 74). The body is a single line, unchanged
+# (`return f"{{{text}}}"`, now shorter than before -- the predicate it used
+# to branch on is gone); the docstring is the entire growth, recording why
+# the conditional it replaces never actually preserved the parity fixture
+# it claimed to (the CAPTURE_PLATFORM finding), and the one Tcl brace-
+# counting edge case (an odd trailing backslash count) unconditional
+# bracing deliberately still leaves fail-safe rather than special-cased
+# away. `_FUNCTION_WORST_BUDGET` is untouched -- 74 lines is nowhere near it.
+# These last two steps landed on tan-cli#487/#511's own branch, disjoint from
+# tan-cli#521's `project_loader.py` step above -- merging #521's dev tip into
+# #511 (tan-cli#511's PR merge) lands all three functions in the same tree at
+# once, so the budget here is 203 + 1 (#521) + 2 (#487/#511) = 206, not
+# either side's pre-merge number on its own. Re-measured against the merged
+# tree with the gate's own `ast`-walk, not summed from the two branches'
+# comments on faith.
+#
+# 209, not 206 and not 207, merging tan-cli#489's branch with the `dev` tip
+# that now carries BOTH tan-cli#521 (#485's `project_loader.py` step) and
+# tan-cli#511 (#487's `_yocto_wic_block_device_refusal` and #511's
+# `openocd_program_word`). The two comment histories above each describe a
+# DIFFERENT subset of the same 203 baseline and overlap on #485's single
+# step, so neither side's total survives the merge and neither does the
+# naive union of them: 207 + 206 - 203 = 210, which is WRONG. The real
+# figure is 203 + 1 (#485, counted once) + 3 (#489) + 2 (#487/#511) = 209,
+# and it was re-measured against the merged tree with the gate's own
+# `ast`-walk rather than summed from the two branches' comments on faith --
+# the arithmetic and the measurement disagree by one, and the measurement
+# wins.
+#
+# 206, not 205, as of tan-cli#520: `flash_plan.py:flow_d_preflight_script`
+# crossed 50 lines (44 -> 51) once it gained a `read_device` keyword-only
+# parameter, doubled its docstring to explain the two ways it can now be
+# armed (Flow D's paired `jlink_device` vs `swd_probe`'s caller-supplied
+# device), and picked up one extra local (`paired_device`) to distinguish the
+# two. `_FUNCTION_WORST_BUDGET` is untouched -- 51 lines is nowhere near it.
+#
+# 207, not 206, as of the tan-cli#520 REVIEW round 2 MAJOR fix:
+# `flash_plan.py:_resolve_jlink_device` crossed 50 lines (49 -> 69) once it
+# gained the plan-time `validate_identifier` call plus the docstring
+# explaining why write-time-only validation (round 1's fix) let `--dry-run`
+# and a real run disagree on an identical hostile manifest.
+# `_FUNCTION_WORST_BUDGET` is untouched -- 69 lines is nowhere near it.
+#
+# MEASURED, not summed: the two histories above are disjoint subsets of the
+# same 203 baseline -- the `ours` side counts #485/#489/#487/#511, the
+# `theirs` side counts tan-cli#520's own two crossings -- so neither total
+# survives rebasing #520's work onto the `dev` tip that now carries all of
+# the former. Re-walked with the gate's own `ast` logic (span > 50 over all
+# of `tan/`, planner included) against this exact tree.
+#
+# 214, not 211, as of tan-cli#488: three NEW functions crossed 50 lines --
+# `doctor_cmd.py:zephyr_python_floor` (28 -> 59, the three-way fallback
+# split), `doctor_cmd.py:_load_manifest` (48 -> 80, the `schemaVersion`-first
+# read), and `doctor_cmd.py:west_resolved_check` (50 -> 81, the `ran` arm).
+# `doctor` (269 -> 286) and `_collect` (343 -> 380) both grew too, but were
+# already over the cap, so neither moves this count. `_FUNCTION_WORST_BUDGET`
+# is untouched -- 380 lines is nowhere near 707.
+#
+# 215, not 214, as of tan-cli#488 ROUND 2: `doctor_cmd.py:fix_suppressed_issue`
+# crossed 50 lines with its `sys.stdin is not None` guard and the docstring
+# paragraph explaining it (defect 6). `west_check` (already over the cap)
+# grew further with the `resolved_ran` branch (defect 3) but does not move
+# this count. `_FUNCTION_WORST_BUDGET` is untouched -- nothing here is close
+# to 707.
+#
+# 216, not 215, as of tan-cli#488 ROUND 6: `tan/core/consent.py:can_prompt`
+# crossed 50 lines (45 -> 60) with the docstring paragraph explaining why
+# `is not None` was never the whole guard -- a stream that EXISTS but lacks
+# `.isatty()` (`_TeeStderr` under `--format json`) still crashes it, the
+# same class `build_cmd._dispatch` and `doctor_cmd.fix_suppressed_issue`
+# were fixed for in this same round. `fix_suppressed_issue` (76 -> 88) and
+# `_dispatch` (186 -> 209) both grew too, but were already over the cap, so
+# neither moves this count. `_FUNCTION_WORST_BUDGET` is untouched --
+# measured (AST walk, all of `tan/` including `tan/planner/`) at 701 lines
+# worst (`bootstrap_cmd.py:_run`), under the 707 ceiling.
+# 212, not 211, as of tan-cli#516 (first pass): the new shared `tan/core/
+# atomic_write.py:atomic_write_text` (54 lines, docstring included) was a
+# genuinely NEW function over the cap -- `reconcile_west_manifest_path`'s own
+# body did not cross it either before or after this change, so that was a
+# pure +1, not a replacement.
+#
+# 211, not 212, as of the tan-cli#516 REVIEW round: `debug_config_cmd.py:
+# _atomic_write_launch_json` -- the 81-line function that was ALREADY over
+# the cap before this issue, one of the 199 baseline never enumerated here --
+# is gone outright. `_write` now calls the shared `atomic_write_text`
+# directly instead of keeping a second, hand-synchronised copy of the same
+# durability sequence beside it (the drift #516 itself was filed to close);
+# `atomic_write_text` grew to 95 lines picking up that copy's mode-
+# preservation and its broadened exception handling, but it was already
+# counted once in the 212 above and staying one function does not add a
+# second count. Net: +1 (atomic_write_text, counted in the prior step) - 1
+# (`_atomic_write_launch_json`, deleted) against the pre-#516 211 baseline
+# nets back to 211, not a coincidence -- re-measured with the gate's own
+# `ast` walk against this exact tree, not summed on faith.
+# `_FUNCTION_WORST_BUDGET` is untouched: re-measuring the CURRENT worst
+# (`bootstrap_cmd.py:_run`) with this gate's own `ast` walk finds 701 lines,
+# not 707 -- unrelated to this change (that function is untouched here) and
+# still comfortably under the recorded ceiling, so the ceiling is left as
+# recorded rather than tightened on faith.
+# 212, not 211, as of tan-cli#496's remaining-defects pass:
+# `new_som_cmd.py:_rollback_write_failure` is a genuinely NEW function (61
+# lines) extracted from the write-failure `except OSError:` block so the
+# restore-vs-delete logic (defect 2) and the exists()-gated cleanup
+# reporting (the finding against this file's own earlier fix) are
+# unit-testable on their own; every other function this pass touched
+# (`_interactive`, `_render_preset`, `new_som`, `scaffold_cmd.py:scaffold`)
+# was already over 50 lines before it, so growing them moves nothing here.
+# `_FUNCTION_WORST_BUDGET` is untouched -- `_rollback_write_failure` is 61
+# lines and `new_som` (grown to 506) is still well under `bootstrap_cmd.
+# _run`'s 701, itself under the recorded 707.
+
+# 213, not 211, as of the tan-cli#510 REVIEW round: two functions crossed 50
+# lines, both docstring/parameter growth, not new branching:
+# `build/execute.py:_resolve_tool` (47 -> 71) gained an `env` parameter
+# (MAJOR 2: resolve against the slice's OWN assembled env, not
+# `os.environ`) plus the docstring explaining why, and split its absolute-
+# path miss into its own non-circular message (the review's own minor
+# finding); `build_cmd.py:_text_recap` (48 -> 61) gained the resolved-tool
+# note it prints for a failed/cancelled slice (MAJOR 1: carried in the new
+# `resolvedTool` field, never folded into `reason`, so `_text_recap` is
+# where the note is actually composed for default text). Neither is
+# anywhere near `_FUNCTION_WORST_BUDGET`. Re-walked with the gate's own
+# `ast` logic against this exact tree, not computed from the diff alone.
+#
+# 214 on the merged tree, MEASURED by AST walk -- neither side's number: #496
+# contributed one crossing (212) and tan-cli#530's resolver two (213), and the
+# union is 214, not either. Taking either side here fails the gate.
+# 213 on the merged tree, measured by AST walk: #516 added no long function, and
+# tan-cli#530 (#510's resolver) added two -- so dev's figure carries, not #516's
+# pre-merge 211.
+#
+# 218 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- neither side's figure; #488's doctor/consent work and dev's
+# tan-cli#530 resolver both add crossings.
+# 214 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- #496 contributes one crossing that dev's 213 does not.
+#
+# 219 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- neither #488's 218 nor dev's 214: the two branches' crossings
+# are disjoint and `new_som_cmd.py`'s gate resolution adds none of its own.
+_FUNCTION_COUNT_BUDGET = 219
 _FUNCTION_WORST_BUDGET = 707
 
 

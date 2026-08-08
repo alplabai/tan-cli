@@ -28,6 +28,7 @@ modes themselves against the captured oracle measurements.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -231,6 +232,108 @@ def test_a_two_slice_plan_reports_one_executed_and_one_skipped(project):
     assert slices[1]["status"] == "skipped"
 
 
+def _one_slice_plan(tool: str) -> dict:
+    """A single, real slice naming `tool` by whatever identity the caller
+    gives it (bare or absolute) -- minimal scaffolding for the
+    `resolvedTool` cases below, which need to control the exact `tool`
+    string rather than reuse `two_slice_plan`'s fixed `sys.executable`. The
+    exit code is controlled entirely by the SPAWNED SCRIPT
+    (`_write_dualtool_script`'s own `exit_code`), not by anything here --
+    tan-cli#510 review round 3, NIT: this used to take its own `exit_code`
+    parameter that nothing in the plan ever consumed, reading as if it
+    governed the outcome when it was silently discarded."""
+    return {
+        "schemaVersion": 1,
+        "generatedBy": "tests/commands/test_build_command.py",
+        "boardYaml": "board.yaml",
+        "sku": "E1M-TEST",
+        "buildRoot": "build",
+        "executionPolicy": {"unknownBackend": "fail", "missingTool": "skip", "nullCommand": "skip"},
+        "sharedArtefacts": [],
+        "slices": [
+            {
+                "coreId": "only",
+                "backend": "baremetal",
+                "buildDir": "build/only",
+                "appDir": None,
+                "configArtefacts": [],
+                "toolchain": {"id": "baremetal"},
+                "artifacts": {"elf": None},
+                "debug": {"console": "rtt"},
+                "command": {"tool": tool, "args": [], "cwd": None},
+                "env": {},
+                "envAppendPath": {},
+            }
+        ],
+        "warnings": [],
+    }
+
+
+def _write_dualtool_script(directory: Path, exit_code: int) -> str:
+    """A real, minimal executable named `tan510dualtool[.bat]`, resolvable
+    off `PATH` by that bare identity -- distinct from `sys.executable`
+    (already absolute, so `tool == resolved_tool` and `resolvedTool` would
+    be suppressed by construction) specifically so resolution lands on a
+    DIFFERENT string than the plan named."""
+    if os.name == "nt":
+        path = directory / "tan510dualtool.bat"
+        path.write_text(f"@exit /b {exit_code}\r\n", encoding="utf-8")
+    else:
+        path = directory / "tan510dualtool"
+        path.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
+        os.chmod(path, 0o755)
+    return path.stem if os.name == "nt" else path.name
+
+
+def test_resolved_tool_is_reported_in_json_but_not_in_text_on_success(
+    project, tmp_path, monkeypatch
+):
+    """tan-cli#510 review, MAJOR 1: `data.slices[].resolvedTool` is a NEW,
+    additive field -- always present -- carrying the absolute path a bare
+    identity resolved to; on a SUCCESS it must add nothing to default text
+    (only `data.slices[].reason`/the manifest's `reason:` would be
+    corrupted by that, which is exactly what the review's round-1 finding
+    was)."""
+    tool_dir = tmp_path / "toolbin"
+    tool_dir.mkdir()
+    tool_name = _write_dualtool_script(tool_dir, 0)
+    monkeypatch.setenv("PATH", str(tool_dir))
+
+    plan = write_plan(project, _one_slice_plan(tool_name))
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    slice_ = env["data"]["slices"][0]
+    assert slice_["status"] == "ok"
+    assert "reason" not in slice_
+    assert slice_["resolvedTool"] is not None
+    assert slice_["resolvedTool"] != tool_name
+    assert Path(slice_["resolvedTool"]).is_absolute()
+
+    text_proc = run_tan("build", "--plan-from", str(plan), "--execute", cwd=project)
+    # The precise appended-note shape, not a bare "resolved" substring: the
+    # post-build manifest write's OWN best-effort failure note (no alp-sdk
+    # checkout resolves for this scratch `board.yaml`) legitimately contains
+    # the word "resolved" too, and is not what this test is about.
+    assert "resolved to `" not in text_proc.stderr, text_proc.stderr
+
+
+def test_resolved_tool_note_appears_in_default_text_only_on_failure(project, tmp_path, monkeypatch):
+    """tan-cli#510 review, MAJOR 1's other half: shown in default text for a
+    FAILED slice (never folded into `reason` -- see `_text_recap`'s own
+    docstring), so a customer reading plain stderr output, not just the JSON
+    envelope, can see which binary actually ran."""
+    tool_dir = tmp_path / "toolbin"
+    tool_dir.mkdir()
+    tool_name = _write_dualtool_script(tool_dir, 7)
+    monkeypatch.setenv("PATH", str(tool_dir))
+
+    plan = write_plan(project, _one_slice_plan(tool_name))
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", cwd=project)
+    assert "failed: only" in proc.stderr
+    assert "resolved to `" in proc.stderr, proc.stderr
+
+
 def test_every_artefact_is_on_disk_before_the_first_slice_is_spawned(project):
     # I-20. The probe IS the first slice dispatched; it exits non-zero the
     # moment any artefact -- shared, its own, or the OTHER slice's -- is not
@@ -286,10 +389,19 @@ def test_a_null_command_slice_survives_with_its_warning(project):
     # I-11, on the real plan that has this shape: `m33` carries `command:
     # null` plus a `board-tree-missing` warning naming why. Neither the slice
     # nor the warning may be dropped. `a55_cluster` carries a REAL `bitbake`
-    # command, which also skips under `scrub_path` (tan-cli#283: this fixture
-    # therefore has NOTHING built), so the envelope is a coded refusal now --
-    # see `test_a_wholly_skipped_build_refuses_not_reports_success` for the
-    # dedicated coverage of that half; this test stays about I-11 alone.
+    # command, which also skips under `scrub_path`, so the envelope is a
+    # coded refusal now -- see `test_a_wholly_skipped_build_refuses_not_
+    # reports_success` for the dedicated coverage of that half; this test
+    # stays about I-11 alone.
+    #
+    # tan-cli#483: `m33` ALSO carries an `appDir` that does not exist on
+    # this machine (`/srv/alp-sdk/examples/multicore/rpmsg-imx93/m33`,
+    # captured on the machine that produced this fixture) -- but
+    # `_missing_app_dirs` is guarded on `command is not None` (review round:
+    # nothing was ever going to dispatch for a slice the planner already
+    # refused a command for, so its unread `app:` must not become the
+    # reported reason instead of `board-tree-missing`), and `m33`'s command
+    # IS null -- so this stays exactly the pre-#483 shape, unaffected.
     plan_doc = real_plan("multicore_rpmsg-imx93")
     plan = write_plan(project, plan_doc)
     proc = run_tan(
@@ -305,21 +417,52 @@ def test_a_null_command_slice_survives_with_its_warning(project):
     assert [s["coreId"] for s in slices] == ["a55_cluster", "m33"]
     m33 = next(s for s in slices if s["coreId"] == "m33")
     assert m33["status"] == "skipped"
+    assert not any(i["code"] == "build.app-dir-missing" for i in env["issues"])
 
     warnings = env["data"]["warnings"]
     assert [w["code"] for w in warnings] == ["board-tree-missing"]
     assert warnings[0]["coreId"] == "m33"
 
 
+#: The synthetic three-slice, all-tools-missing shape both tests below need
+#: -- coreIds/backends/tool names mirroring the real `multicore_rpmsg-aen`
+#: fixture these tests used before tan-cli#483, but with `appDir: null`
+#: throughout so neither test's result depends on whether `/srv/alp-sdk`
+#: (the SDK path baked into that fixture's own `appDir`s, see
+#: `tests/parity/oracle/ORACLE-PROVENANCE.txt`) happens to exist on the host
+#: running the suite -- a CI container or maintainer box that mounts the SDK
+#: there would silently flip these slices back to a DIFFERENT status than a
+#: host without it, which is exactly the host-dependence a test must not
+#: have.
+def _three_core_missing_tool_plan() -> dict:
+    return _app_dir_plan(
+        _app_dir_slice(
+            "a32_cluster", "yocto", None,
+            command={"tool": "bitbake", "args": ["alp-image-edge"], "cwd": None},
+        ),
+        _app_dir_slice(
+            "m55_he", "zephyr", None,
+            command={"tool": "west", "args": ["build", "-b", "b1", "app"], "cwd": None},
+        ),
+        _app_dir_slice(
+            "m55_hp", "zephyr", None,
+            command={"tool": "west", "args": ["build", "-b", "b2", "app"], "cwd": None},
+        ),
+    )
+
+
 def test_no_slice_is_filtered_out_however_few_cores_the_customer_named(project):
-    # I-04. The planner fans out over the SoC's cores; this AEN plan carries
-    # three slices, one of them a Yocto slice on the A-cluster the customer's
-    # board.yaml need never have mentioned. The CLI must report all three --
-    # tan-cli#283: this fixture is also the exact all-skipped repro (every
-    # slice's tool absent under `scrub_path`), covered end to end by
-    # `test_a_wholly_skipped_build_refuses_not_reports_success` below; this
-    # test stays about I-04 (all three slices present, none filtered).
-    plan = write_plan(project, real_plan("multicore_rpmsg-aen"))
+    # I-04. The planner fans out over the SoC's cores; this AEN-shaped plan
+    # carries three slices, one of them a Yocto slice on the A-cluster the
+    # customer's board.yaml need never have mentioned. The CLI must report
+    # all three -- this test stays about I-04 (all three slices present,
+    # none filtered), not about what each one's status is (that's
+    # `test_a_wholly_skipped_build_refuses_not_reports_success` below).
+    #
+    # tan-cli#483: synthetic, not `real_plan("multicore_rpmsg-aen")` -- see
+    # `_three_core_missing_tool_plan`'s own docstring for why the captured
+    # fixture can no longer serve this test host-independently.
+    plan = write_plan(project, _three_core_missing_tool_plan())
     proc = run_tan(
         "build", "--plan-from", str(plan), "--execute", "--format", "json",
         cwd=project, scrub_path=True,
@@ -338,13 +481,20 @@ def test_no_slice_is_filtered_out_however_few_cores_the_customer_named(project):
 
 
 def test_a_wholly_skipped_build_refuses_not_reports_success(project):
-    """The exact tan-cli#283 repro: every slice of a real captured plan
-    skipped for a missing tool (`bitbake`/`west` absent from `scrub_path`'s
-    emptied PATH) used to report `ok: true, exitCode: 0, issues: []` -- a
-    JSON consumer could not tell that from a real build. Now a coded refusal:
-    `exitCode` 1, `ok: false`, `build.nothing-built` plus one `build.missing-
-    tool` issue PER skipped slice, each naming its tool."""
-    plan = write_plan(project, real_plan("multicore_rpmsg-aen"))
+    """The exact tan-cli#283 repro: every slice skipped for a missing tool
+    (`bitbake`/`west` absent from `scrub_path`'s emptied PATH) used to
+    report `ok: true, exitCode: 0, issues: []` -- a JSON consumer could not
+    tell that from a real build. Now a coded refusal: `exitCode` 1,
+    `ok: false`, `build.nothing-built` plus one `build.missing-tool` issue
+    PER skipped slice, each naming its tool.
+
+    Shares `_three_core_missing_tool_plan` with the I-04 test above (see its
+    docstring): a SYNTHETIC plan, not `real_plan("multicore_rpmsg-aen")`
+    (this test's plan before tan-cli#483), because the captured fixture's
+    own zephyr slices carry a real `appDir` from the machine that captured
+    them and can no longer be trusted to produce an ALL-skipped result on an
+    arbitrary host."""
+    plan = write_plan(project, _three_core_missing_tool_plan())
     proc = run_tan(
         "build", "--plan-from", str(plan), "--execute", "--format", "json",
         cwd=project, scrub_path=True,
@@ -625,6 +775,85 @@ def test_a_missing_plan_file_is_a_coded_envelope(project):
     assert proc.returncode == 1, env
     assert env["ok"] is False
     assert [i["code"] for i in env["issues"]] == ["build.plan-unavailable"]
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_deleted_working_directory_still_produces_an_envelope(tmp_path, monkeypatch):
+    """tan-cli#488 defect 8: the resolution prologue (`Path.cwd()` through
+    `resolve_sdk_root_ladder`) used to run OUTSIDE the `try`/`except` that
+    turns a raise into the `build.internal-failure` envelope -- reachable
+    whenever the working directory is removed out from under the process (a
+    cleanup script racing a `tan build` run in the same shell). Reproduced
+    exactly as the CLI sees it: chdir into a directory, delete it, then spawn
+    the real subprocess with no explicit `cwd=` so it inherits the deleted
+    one, mirroring `doctor_cmd`'s identical regression test.
+
+    That real-deletion repro is POSIX-only by construction, not a test gap:
+    a directory that is any process's current working directory holds an
+    implicit handle the Windows kernel will not let ANY process -- including
+    the one sitting in it -- remove (`shutil.rmtree` raises `PermissionError:
+    [WinError 32] The process cannot access the file because it is being used
+    by another process`, before a subprocess is ever spawned). POSIX's rmdir
+    has no such restriction, which is the whole premise this test exercises.
+    On Windows the state genuinely cannot be constructed, so this reproduces
+    the SAME guarded code path -- `build_cmd.build`'s `Path.cwd()` resolution
+    prologue turning a raise into `build.internal-failure` -- through a direct
+    in-process invocation with `Path.cwd` mocked to raise instead, matching
+    `doctor_cmd`/`validate_cmd`/`flash_cmd`'s sibling tests for the identical
+    defect. The property under test (the guard's own behaviour) is platform-
+    independent even though the real-deletion construction is not.
+    """
+    if os.name == "nt":
+        import typer
+        from typer.testing import CliRunner
+
+        from tan.commands import build_cmd
+
+        def raise_gone():
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(build_cmd.Path, "cwd", staticmethod(raise_gone))
+        app = typer.Typer()
+        app.command("build")(build_cmd.build)
+        result = CliRunner().invoke(app, ["--format", "json"])
+
+        env_doc = json.loads(result.stdout)
+        assert env_doc["ok"] is False
+        assert result.exit_code == env_doc["exitCode"] == 5, env_doc
+        assert env_doc["project"] == {"root": None, "boardYaml": None}, env_doc
+        assert any(
+            i["code"] == "build.internal-failure" for i in env_doc["issues"]
+        ), env_doc["issues"]
+        return
+
+    gone = tmp_path / "gone_dir_build"
+    gone.mkdir()
+    prev_cwd = os.getcwd()
+    os.chdir(gone)
+    try:
+        shutil.rmtree(gone)
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+            ),
+        }
+        proc = subprocess.run(
+            [sys.executable, "-m", "tan", "build", "--format", "json"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+    finally:
+        os.chdir(prev_cwd)
+
+    env_doc = envelope_of(proc)
+    assert env_doc["ok"] is False
+    assert proc.returncode == env_doc["exitCode"] == 5, env_doc
+    assert env_doc["project"] == {"root": None, "boardYaml": None}, env_doc
+    assert any(i["code"] == "build.internal-failure" for i in env_doc["issues"]), env_doc["issues"]
     assert "Traceback" not in proc.stderr
 
 
@@ -1104,6 +1333,316 @@ def test_a_slice_still_naming_toolchain_root_is_routed_not_spawned(
 
     # The OTHER slice is untouched by one slice's provisioning gap.
     assert env["data"]["slices"][1]["status"] == "skipped"
+
+
+# --- tan-cli#483: cores.<id>.app must resolve to a real directory -----------
+
+
+def _app_dir_slice(core_id, backend, app_dir, command=None):
+    """One slice naming `cores.<id>.app`'s RESOLVED path (`appDir` -- what
+    `tan.core.build_plan.Slice.app_dir` carries) directly, the way a real
+    plan does once the planner has already resolved `./nope` against the
+    project root. `command`, when given, is a real tool a test can prove
+    never ran."""
+    return {
+        "coreId": core_id,
+        "backend": backend,
+        "buildDir": f"build/{core_id}",
+        "appDir": app_dir,
+        "configArtefacts": [],
+        "toolchain": {"id": backend},
+        "artifacts": {"elf": None},
+        "debug": {"console": "rtt"},
+        "command": command,
+        "env": {},
+        "envAppendPath": {},
+    }
+
+
+def _app_dir_plan(*slices):
+    return {
+        "schemaVersion": 1,
+        "generatedBy": "tests/commands/test_build_command.py",
+        "boardYaml": "board.yaml",
+        "sku": "E1M-TEST",
+        "buildRoot": "build",
+        "executionPolicy": {
+            "unknownBackend": "fail",
+            "missingTool": "skip",
+            "nullCommand": "skip",
+        },
+        "sharedArtefacts": [],
+        "warnings": [],
+        "slices": list(slices),
+    }
+
+
+def test_a_missing_app_dir_is_refused_naming_the_core_and_path_not_dispatched(project):
+    """The repro at the heart of tan-cli#483: `cores.m55_hp.app` names a
+    directory that was never created. BEFORE the fix this fell through to
+    `west`/the slice's own command with the PROJECT ROOT silently
+    substituted; the command below would print a sentinel this test can
+    prove escaped to stderr if it ever ran -- it must not.
+
+    PRE-FIX: this fails -- `data.slices[0].status` was `"succeeded"` (or a
+    late CMake-style failure with neither the core id nor the path named),
+    no `build.app-dir-missing` issue existed at all, and the sentinel WAS
+    printed. Verified by running this test against the pre-fix tree (no
+    `_missing_app_dirs` call in `_dispatch`): it failed on the
+    `next(i for i in env["issues"] if i["code"] == "build.app-dir-missing")`
+    lookup with `StopIteration`, and the sentinel assertion below also
+    failed -- the command really did run."""
+    missing_app = project / "nope"
+    assert not missing_app.exists()
+    plan = write_plan(
+        project,
+        _app_dir_plan(
+            _app_dir_slice(
+                "m55_hp",
+                "zephyr",
+                str(missing_app),
+                command={
+                    "tool": sys.executable,
+                    "args": ["-c", "print('THIS SLICE MUST NOT RUN')"],
+                    "cwd": None,
+                },
+            )
+        ),
+    )
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert proc.returncode == 1  # ExitCode.RUNTIME_FAILURE
+    assert env["data"]["slices"][0]["status"] == "failed"
+    assert "THIS SLICE MUST NOT RUN" not in proc.stdout
+    assert "THIS SLICE MUST NOT RUN" not in proc.stderr
+
+    issue = next(i for i in env["issues"] if i["code"] == "build.app-dir-missing")
+    assert issue["severity"] == "error"
+    assert "m55_hp" in issue["message"]
+    assert str(missing_app) in issue["message"]
+
+
+def test_a_bad_app_dir_on_one_core_does_not_block_the_others_build(project):
+    """The multi-core case tan-cli#483 asks about explicitly: one core's
+    `app:` is bad, the sibling's is fine -- the fine one still builds, not
+    just gets reported alongside a whole-plan refusal. Matches the SAME
+    per-slice precedent `test_a_slice_still_naming_toolchain_root_is_routed_
+    not_spawned` above already proves for a `${TOOLCHAIN_ROOT}` demotion,
+    not a third convention.
+
+    A THIRD slice, `zzz_nocmd`, carries no `app:` at all (`appDir: None`,
+    `command: None`) -- the pre-existing null-command shape, unrelated to
+    this bug (tan-cli#483 is explicit these must not be conflated). It stays
+    `"skipped"` with no `build.app-dir-missing` issue either side of this
+    fix: `_missing_app_dirs` is guarded on `app_dir is not None`, so a
+    missing `app:` key never reaches it. Folded into this same case, not a
+    standalone one, because a standalone assertion here is true on BOTH
+    sides of the fix and proves nothing about it by itself -- bundled with
+    the two assertions below that DO flip, it stays a real regression
+    guard on the fix rather than a test that would pass unchanged forever.
+
+    PRE-FIX: `data.slices[1].status` (the good core) and `slices[2].status`
+    (the no-`app:` core) are unaffected either way by this bug -- what
+    PRE-FIX actually gets wrong is `slices[0]`, which this test shares with
+    the single-slice case above. This case exists to prove the FIX does not
+    regress either untouched slice while refusing the bad one -- i.e. it
+    pins the "just that slice" half of the two-way question tan-cli#483
+    poses, which an implementation that refused the WHOLE build (a real
+    alternative reading of "fails fast") would fail: `slices[1].status`
+    would be `"skipped"`/absent rather than `"ok"`. Verified failing
+    pre-fix (no `_missing_app_dirs` call in `_dispatch`): `slices[0].status`
+    was `"succeeded"`->`"ok"` (dispatched, wrongly) and the sentinel WAS on
+    stderr; `slices[1]`/`slices[2]` were already correct either way, exactly
+    as this docstring says."""
+    good_app = project / "src"
+    good_app.mkdir()
+    bad_app = project / "src_hp"
+    assert not bad_app.exists()
+    plan = write_plan(
+        project,
+        _app_dir_plan(
+            _app_dir_slice(
+                "m55_hp",
+                "zephyr",
+                str(bad_app),
+                command={
+                    "tool": sys.executable,
+                    "args": ["-c", "print('THIS SLICE MUST NOT RUN')"],
+                    "cwd": None,
+                },
+            ),
+            _app_dir_slice(
+                "m55_he",
+                "baremetal",
+                str(good_app),
+                command={"tool": sys.executable, "args": ["-c", "print(1)"], "cwd": None},
+            ),
+            _app_dir_slice("zzz_nocmd", "zephyr", None, command=None),
+        ),
+    )
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    slices = {s["coreId"]: s for s in env["data"]["slices"]}
+    assert slices["m55_hp"]["status"] == "failed"
+    assert slices["m55_he"]["status"] == "ok"
+    assert slices["zzz_nocmd"]["status"] == "skipped"
+    assert "THIS SLICE MUST NOT RUN" not in proc.stdout
+    assert "THIS SLICE MUST NOT RUN" not in proc.stderr
+    app_dir_issues = [i for i in env["issues"] if i["code"] == "build.app-dir-missing"]
+    assert len(app_dir_issues) == 1
+    assert "m55_hp" in app_dir_issues[0]["message"]
+
+
+def test_a_bad_app_dir_is_checked_for_baremetal_too(project):
+    """The schema's own scope (`metadata/schemas/board.schema.json`
+    `$defs/core_entry/properties/app`) names `os: baremetal` alongside
+    `os: zephyr` -- this proves the check is not zephyr-only."""
+    missing_app = project / "nope"
+    plan = write_plan(
+        project,
+        _app_dir_plan(
+            _app_dir_slice(
+                "mcu", "baremetal", str(missing_app),
+                command={"tool": sys.executable, "args": ["-c", "print(1)"], "cwd": None},
+            )
+        ),
+    )
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert env["data"]["slices"][0]["status"] == "failed"
+    issue = next(i for i in env["issues"] if i["code"] == "build.app-dir-missing")
+    assert "mcu" in issue["message"]
+    assert str(missing_app) in issue["message"]
+
+
+def test_a_slice_with_no_command_is_not_reported_for_its_unread_app_dir(project):
+    """tan-cli#483 review round: a slice the planner already refused a
+    command for (`command: null` -- `board-tree-missing`,
+    `yocto-recipe-missing`, `no-command`, ...) must not have
+    `build.app-dir-missing` fire over its `app:`, bad or not -- nothing was
+    ever going to dispatch for that slice, so its `app:` is never consumed.
+    Reporting the app-dir reason anyway would mask the planner's own
+    (already-warned) reason and flip an otherwise-`ok` build's exit code
+    over a path nothing was going to read."""
+    good_app = project / "src"
+    good_app.mkdir()
+    plan = write_plan(
+        project,
+        _app_dir_plan(
+            _app_dir_slice(
+                "mcu", "baremetal", str(good_app),
+                command={"tool": sys.executable, "args": ["-c", "print(1)"], "cwd": None},
+            ),
+            _app_dir_slice("m33", "zephyr", str(project / "nope"), command=None),
+        ),
+    )
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert env["ok"] is True, env
+    assert env["exitCode"] == 0
+    statuses = {s["coreId"]: s["status"] for s in env["data"]["slices"]}
+    assert statuses == {"mcu": "ok", "m33": "skipped"}
+    assert not any(i["code"] == "build.app-dir-missing" for i in env["issues"])
+
+
+def test_a_relative_app_dir_is_anchored_on_the_build_root_not_the_process_cwd(project):
+    """tan-cli#483 review round: `appDir` is a plan field like any other
+    relative path in the plan (issue #596's anchoring contract) -- it must
+    resolve against `--build-root`, never the tan PROCESS's own CWD.
+    Reproduced pre-fix: invoking from the project's PARENT with an explicit
+    `--build-root` pointing back at the project reported the slice's `src/`
+    (which genuinely exists, right there under the build root) as missing,
+    having resolved `"src"` against the parent instead."""
+    good_app = project / "src"
+    good_app.mkdir()
+    plan = write_plan(
+        project,
+        _app_dir_plan(
+            _app_dir_slice(
+                "m55_he", "baremetal", "src",
+                command={"tool": sys.executable, "args": ["-c", "print(1)"], "cwd": None},
+            )
+        ),
+    )
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--build-root", str(project),
+        "--format", "json", cwd=project.parent,
+    )
+
+    env = envelope_of(proc)
+    assert env["ok"] is True, env
+    assert env["data"]["slices"][0]["status"] == "ok"
+    assert not any(i["code"] == "build.app-dir-missing" for i in env["issues"])
+
+
+def test_a_missing_relative_app_dir_names_the_build_root_anchored_absolute_path(project):
+    """The negative half of the anchoring case above: a relative `appDir`
+    that really is missing must be refused naming the ANCHORED ABSOLUTE
+    path (`<build_root>/nope`), not the bare relative spelling the plan
+    carries -- a bare `"nope"` is exactly the "the real path is never
+    named" symptom tan-cli#483 exists to end."""
+    plan = write_plan(
+        project,
+        _app_dir_plan(
+            _app_dir_slice(
+                "m55_he", "zephyr", "nope",
+                command={
+                    "tool": sys.executable,
+                    "args": ["-c", "print('THIS SLICE MUST NOT RUN')"],
+                    "cwd": None,
+                },
+            )
+        ),
+    )
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--build-root", str(project),
+        "--format", "json", cwd=project.parent,
+    )
+
+    env = envelope_of(proc)
+    assert env["data"]["slices"][0]["status"] == "failed"
+    assert "THIS SLICE MUST NOT RUN" not in proc.stdout
+    assert "THIS SLICE MUST NOT RUN" not in proc.stderr
+    issue = next(i for i in env["issues"] if i["code"] == "build.app-dir-missing")
+    assert str(project / "nope") in issue["message"]
+    # Not the bare relative spelling on its own -- the whole point of the fix.
+    assert issue["message"] != "core `m55_he`: app directory does not exist: nope"
+
+
+def test_an_app_dir_that_is_a_regular_file_is_named_not_a_directory(project):
+    """tan-cli#483 review round (minor): `Path.is_dir()` is also `False` for
+    an existing regular file -- `_missing_app_dirs` must not call that "does
+    not exist" (a user staring at a path they can `ls` will not trust the
+    tool). Distinguished via `.exists()` first."""
+    app_file = project / "app.c"
+    app_file.write_text("", encoding="utf-8")
+    plan = write_plan(
+        project,
+        _app_dir_plan(
+            _app_dir_slice(
+                "mcu", "baremetal", str(app_file),
+                command={
+                    "tool": sys.executable,
+                    "args": ["-c", "print('THIS SLICE MUST NOT RUN')"],
+                    "cwd": None,
+                },
+            )
+        ),
+    )
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert env["data"]["slices"][0]["status"] == "failed"
+    assert "THIS SLICE MUST NOT RUN" not in proc.stdout
+    assert "THIS SLICE MUST NOT RUN" not in proc.stderr
+    issue = next(i for i in env["issues"] if i["code"] == "build.app-dir-missing")
+    assert "is not a directory" in issue["message"]
+    assert "does not exist" not in issue["message"]
+    assert str(app_file) in issue["message"]
 
 
 # --- the OS is derived, never selectable (I-01/I-02) ------------------------
