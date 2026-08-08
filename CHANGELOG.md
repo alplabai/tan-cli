@@ -120,6 +120,58 @@ All notable changes to `tan` are documented here. Format follows
   list, so the one command whose whole purpose is explaining a broken
   machine stayed silent on exactly the runs where something had already
   gone wrong. (#478)
+- **A lone surrogate anywhere in the payload killed stdout AFTER serialisation
+  had already succeeded.** `emit()` writes the envelope with a bare
+  `print(text)`, and under `ensure_ascii=False` a lone surrogate -- what
+  `os.fsdecode`/`surrogateescape` turns every un-decodable filesystem byte
+  into -- passes straight through `json.dumps` into that string, so the encode
+  failed at the PRINT, one call after `_serialise()`'s own "no payload may ever
+  crash stdout" guard could still do anything about it. `tan inspect --format
+  json` from a directory created as `proj\xffx` exited 1 with ZERO bytes on
+  stdout and a Rich `UnicodeEncodeError` traceback on stderr, and `tan scaffold
+  --format json --name 'bad\xffname'` WROTE all three files and then said
+  nothing at all -- the extension's only channel is that envelope. Every
+  surrogate is now replaced with U+FFFD on the finished document, which is
+  precisely what the frozen v0.4.1 oracle puts on the wire for the same
+  directory (`Path::to_string_lossy`): the two `clean --format json` envelopes
+  are now byte-for-byte identical, measured. Not `ensure_ascii=True` as a
+  fallback re-serialisation -- that escapes every OTHER non-ASCII character in
+  the same document too, so one bad byte in a path would have turned a good
+  `Sensör Ölçüm` elsewhere in `data` into the escaped
+  `Sens\u00f6r \u00d6l\u00e7\u00fcm`. (#491)
+- **A `--format json` that was not tan's own flag flipped the whole run into
+  JSON mode.** `_wants_json` is an adjacent-pair textual scan of argv, and
+  `main()` used its answer as the gate for the ENTIRE run. In Rust that same
+  scan is consulted ONLY inside the `Cli::try_parse()` `Err` arm, so it can
+  never affect a run that parsed; the port promoted it to a process-wide mode
+  switch. So `tan quality -- --format json` -- which forwards the pair to `west
+  alp-quality` and leaves tan's own `--format` at `text` -- answered
+  `{"command":"cli",...,"cli.parse-error"}` on stdout in place of the real
+  coded refusal, and `tan lock -- --format json` reported a west child's
+  non-zero exit as a parse error it never was. Fixed by recording the PARSE
+  OUTCOME (`_DispatchedCommand`) rather than by making the scan cleverer:
+  `_wants_json` is unchanged. Two earlier attempts rewrote the scan and each
+  reopened the defect a different way, and a third textual shape is ruled out
+  by measurement -- the oracle answers `quality -- --format json` in TEXT and
+  `build -- --format json` in JSON, and the only thing separating them is
+  whether the parser accepted the argv. This also settles the same defect's
+  second vector, `tan --format json build --format text`, which now runs in
+  text mode exactly as the oracle does. (#546, #491)
+- **Ctrl-C during a `--format json` run was reported as an invalid command
+  line.** `KeyboardInterrupt` never reaches `tan.cli.main` raw -- Typer
+  re-raises it as `Exit(130)`, which Click turns into `sys.exit(130)` -- so an
+  interrupted run was indistinguishable from any other non-zero exit with no
+  envelope and fell into the `cli.parse-error` fallback: an envelope asserting
+  the COMMAND LINE was invalid for a run that was already spawning, at an
+  `exitCode` of 130, outside the contract's fixed 0-5 set. An interrupted flash
+  lost its whole `data.entries[]` this way, so the slices already programmed
+  went unreported. Now answered by the new `cli.interrupted` at
+  `RuntimeFailure` (1), with the process exiting 1 to match (the wire invariant
+  is `process exit code == envelope.exitCode`). Fixed in `tan/cli.py`, not in
+  any one command: every command lands in that same handler. TEXT mode is
+  untouched and still exits 130 through Click's own machinery. A deliberate
+  divergence from the oracle, which has no SIGINT handler at all and simply
+  dies from the signal with zero bytes on stdout. (#491)
 - **`tan debug-config --project <path>` created the directory tree when
   `<path>` did not exist, and wrote a `native-host` launch.json into it at
   exit 0 with `issues: []`.** `--project` names a project that already
