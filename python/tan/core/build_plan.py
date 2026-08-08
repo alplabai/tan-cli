@@ -6,6 +6,7 @@ optional-but-always-emitted ones default cleanly, and an unsupported
 schemaVersion is REFUSED rather than silently hand-ported around."""
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from tan.core.plan_exec import ExecutionPolicy, PolicyAction
@@ -152,11 +153,81 @@ def _artefacts(raw: Any, context: str) -> list[dict[str, Any]]:
     return raw
 
 
+def _foreign_os_absolute(tool: str) -> str | None:
+    """Return a short name for the OTHER OS's path convention if `tool`
+    looks absolute under it, else `None`.
+
+    `Path(tool).is_absolute()` (below) answers relative to THIS host's own
+    `pathlib` flavour: `/usr/bin/west` is absolute under `PurePosixPath` but
+    NOT under `PureWindowsPath` (no drive), and `C:\\tools\\west.exe` is
+    absolute under `PureWindowsPath` but NOT under `PurePosixPath` (no
+    leading `/`, and `pathlib` never special-cases a drive-letter prefix on
+    POSIX). Used only to name the reason precisely in the refusal message
+    below -- a bare "relative path" reading is misleading for a path that IS
+    absolute, just under the wrong OS's rules."""
+    if tool.startswith("/"):
+        return "POSIX"
+    if len(tool) >= 3 and tool[1] == ":" and tool[2] in "\\/" and tool[0].isalpha():
+        return "Windows"
+    if tool.startswith("\\\\"):
+        return "Windows"
+    return None
+
+
 def _is_legal_env_name(name: str) -> bool:
     """`os.environ`/`subprocess` reject an empty name or one containing `=`
     with `ValueError: illegal environment variable name` -- catch that shape
     here, at parse time, instead of at spawn time deep inside `execute.py`."""
     return name != "" and "=" not in name
+
+
+def _validate_tool_shape(tool: str, context: str) -> None:
+    """Refuse a `command.tool` that is neither a bare identity nor an
+    already-resolved absolute path -- split out of `_command` so that
+    function stays under the repo's long-function budget.
+
+    tan-cli#510 review, MAJOR 4: `command.tool` is an IDENTITY per ADR-0020
+    (a bare name to look up, e.g. `west`) or an ALREADY-RESOLVED absolute
+    path a producer computed -- never a relative path. A relative path
+    carrying a separator (`bin/sh`) is neither: `_resolve_tool`
+    (`build/execute.py`) answers `Path(tool).is_absolute()` False for it, so
+    it falls into the bare-identity PATH search, which checks it against
+    THIS process's cwd -- but the spawn below hands it to
+    `subprocess.Popen(cwd=spawn_cwd)`, resolved against the CHILD's cwd
+    instead. Two different directories deciding what "the tool" even means
+    is the exact defect this issue exists to close; refused here, at parse
+    time, rather than reaching that check/spawn split at all. A bare `west`
+    (no separator) is untouched -- it is exactly the identity shape this
+    refusal is not about.
+
+    tan-cli#530, decision (a): "absolute" is deliberately THIS HOST's own
+    notion (`Path(tool).is_absolute()`) -- an already-absolute
+    `command.tool` is inherently host-specific even though the plan around
+    it is portable (see `_foreign_os_absolute`'s docstring for the full
+    reasoning). No emitting flow produces this shape today (the SDK planner
+    only emits bare `west`/`bitbake`/`cmake`); this guards a hand-authored
+    or foreign-host `--plan-from` file."""
+    if Path(tool).is_absolute() or ("/" not in tool and "\\" not in tool):
+        return
+    foreign = _foreign_os_absolute(tool)
+    if foreign is not None:
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`{context}.tool` (`{tool}`) is a {foreign}-absolute path, not "
+            f"executable on this host -- a build plan is a portable artefact, "
+            f"but an absolute `command.tool` is inherently host-specific: "
+            f"`{tool}` is only absolute under {foreign} path rules, and this "
+            f"host cannot resolve or spawn it. `command.tool` must be either "
+            f"a bare identity to look up on PATH (e.g. `west`) or a path this "
+            f"host itself recognises as absolute.",
+        )
+    raise PlanParseError(
+        "build.plan-invalid",
+        f"`{context}.tool` (`{tool}`) is a relative path, not an identity -- "
+        f"`command.tool` must be either a bare identity to look up on PATH "
+        f"(e.g. `west`) or an already-resolved absolute path; a relative path "
+        f"carrying a separator is neither.",
+    )
 
 
 def _command(raw: Any, context: str) -> SliceCommand | None:
@@ -172,6 +243,7 @@ def _command(raw: Any, context: str) -> SliceCommand | None:
     tool = raw.get("tool")
     if not isinstance(tool, str):
         raise PlanParseError("build.plan-invalid", f"`{context}.tool` must be a string")
+    _validate_tool_shape(tool, context)
     args = raw.get("args", [])
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         raise PlanParseError("build.plan-invalid", f"`{context}.args` must be a list of strings")
