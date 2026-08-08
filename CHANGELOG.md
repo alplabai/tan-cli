@@ -363,6 +363,25 @@ All notable changes to `tan` are documented here. Format follows
   or an unrecognised `encoding=` (`LookupError` from `os.fdopen` itself) both
   left the `*.tan-tmp` sibling on disk, un-unlinked, instead of being
   reported and cleaned up like any other write failure. (#516)
+- **The published `envelope-contract.json` release asset re-packaged five
+  `debug-config-preview-*` goldens that no longer describe the shipping CLI,
+  and `contract/README.md` claimed coverage it did not have.** The five
+  `debug-config-preview-*` fixtures predate `tan-cli#138`'s restored
+  `preLaunchTask` default and `tan-cli#321`'s `debug-config.gdbserver-
+  address-unresolved` issue, so they were marked `xfail(strict=True)` rather
+  than re-recorded (re-recording them would also redden the frozen `crates/`
+  oracle's own copy of the same fixtures). `contract/README.md` is corrected
+  to: name the real, narrower live-parity coverage instead of overstating
+  it (only the bare `zephyr-mcu` invocation and `native-host` get a
+  whole-envelope oracle-parity diff; `zephyr-mcu-sdk-identity`,
+  `baremetal-mcu` and `yocto-userspace` do not); add the missing
+  `data.configuration` row to the "Frozen `data` field names" table; record
+  the `--core m55_hp` the `zephyr-mcu-sdk-identity` fixture actually invokes;
+  and replace an unfiled "filed as a follow-up" claim with the real tracking
+  issue, `tan-cli#529`. `.github/workflows/release.yml`'s "Bundle the
+  envelope contract" step comment is corrected to match: it no longer
+  asserts the re-packaging is "pure" with no possible drift from what ships.
+  (#502)
 
 - **`tan new-som`: a YAML-injection hole, a `--force` rollback that could
   destroy a customer's hand-filled preset, and three smaller correctness
@@ -466,6 +485,7 @@ All notable changes to `tan` are documented here. Format follows
     character check (now a shared `_has_control_char` helper) rejects DEL
     alongside the C0 range, and the self-check's `yaml.safe_load` call is
     now itself guarded as a backstop. (#496)
+
 
 
 ## [0.5.1] — 2026-08-04
