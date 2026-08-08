@@ -42,6 +42,7 @@ child's cwd. The search itself is shared, not duplicated, with
 """
 from __future__ import annotations
 
+import codecs
 import functools
 import os
 import posixpath
@@ -120,6 +121,12 @@ _DATA_SCHEMA_VERSION = "1"
 #: timeout with no output at all. Generous -- a real MRAM/eMMC write is seconds
 #: to minutes, and a wrongly-short timeout would abort a write MID-FLIGHT, which
 #: on a bootloader partition is worse than waiting.
+#:
+#: tan-cli#519/#522 review, MINOR 1: NOT the whole wall-clock bound on a
+#: live-console `_spawn` call. After the kill (or the child's own exit),
+#: `_spawn` still joins its two `_Tee` drain threads -- see `_DRAIN_JOIN_S`'s
+#: own comment -- so the real ceiling on a single flash entry is this value
+#: PLUS up to `2 * _DRAIN_JOIN_S`, not this value alone.
 _FLASH_TIMEOUT_S = 900.0
 
 #: The read-only DPIDR preflight is a connect-and-quit; it must not inherit the
@@ -131,6 +138,18 @@ _PREFLIGHT_TIMEOUT_S = 60.0
 #: decompressor's diagnosis into the outcome (tan-cli#401), but a `tan` that
 #: hangs on a thread rather than reporting a flash result would be the worse
 #: trade -- both children have already exited by every path that joins it.
+#:
+#: `_Tee` (tan-cli#519/#522) reuses this SAME constant for the identical
+#: reason, but `_spawn` joins TWO of them -- `out_tee.text()` and
+#: `err_tee.text()`, one per stream -- so the real overrun past a `_spawn`
+#: caller's own `timeout` is bounded by UP TO `2 * _DRAIN_JOIN_S`, not one
+#: `_DRAIN_JOIN_S`: worst case both tees straggle behind a lingering
+#: grandchild in sequence. Measured: `timeout=3` -> 4.00s; `timeout=2` ->
+#: 6.01s. Still bounded and still the better trade than an unbounded join,
+#: but a reader of `_FLASH_TIMEOUT_S` alone would not learn a `tan flash`
+#: timeout is really `timeout + up to 2 * _DRAIN_JOIN_S` from this constant
+#: on its own -- see `_Tee.join`'s own docstring for where that bound is
+#: actually spent.
 _DRAIN_JOIN_S = 2.0
 
 
@@ -358,14 +377,37 @@ def _spawn(
     workspace: str | None = None,
 ) -> _Outcome:
     """One process. Captured in JSON mode (the output is kept for the failure
-    message and never re-spawned), inherited-to-stderr in text mode so a long
-    write streams live.
+    message and never re-spawned), TEED to stderr in text mode -- streamed live
+    to the console AND collected, so a transcript-dependent qualification
+    (`_flow_d_reset_qualified_message`, tan-cli#522) has the same evidence to
+    read regardless of `--format`.
 
     In text mode the child's stdout is redirected to **stderr**, not inherited:
     stdout is the envelope channel for this process even when this run is not
     using it, and a flash tool that prints to stdout would otherwise put
     non-envelope bytes there. Rust can inherit safely because its text path
     never writes an envelope at all; here the same process object owns both.
+
+    tan-cli#522 review, MAJOR 1: `outcome.stdout`/`.stderr` used to be empty
+    in EVERY text-mode branch of this function -- the wrapped-console branch
+    (`sink is None`) captured the full transcript via `capture_output=True`
+    and then only ever `print()`-replayed it, throwing the strings away
+    before they reached the `_Outcome`; the live-console branch (`sink` real)
+    handed the child's stdout fd straight to `subprocess.run(stdout=sink)`,
+    an OS-level redirect this process never saw a byte of. Both are fixed
+    below: the wrapped-console branch now threads its already-captured
+    `proc.stdout`/`.stderr` through; the live-console branch replaces the OS-
+    level redirect with [`_Tee`] on a `Popen`, which forwards each chunk to
+    the console as it arrives (the same "streams live" guarantee this
+    function always promised) while also accumulating it. (tan-cli#519/#522
+    review round 3: the FIRST version of `_Tee`, shipped in the round this
+    docstring was written, did not actually keep that promise -- it read the
+    child's TEXT-mode stream in fixed 4096-*character* chunks, which blocks
+    until that many characters have been decoded or EOF, so a slowly
+    dribbling child produced no console output for over a second at a time,
+    measured. `_Tee` now reads the raw binary pipe with `read1`, which
+    returns as soon as the OS has ANY bytes ready, and decodes them itself
+    -- see [`_Tee`]'s own docstring.)
 
     `venv_bin` (tan-cli#289/#59), when given, is prepended onto the child's
     PATH -- `env=None` (the default, passed through unchanged) means
@@ -413,9 +455,46 @@ def _spawn(
                 print(proc.stdout, end="", file=sys.stderr)
             if proc.stderr:
                 print(proc.stderr, end="", file=sys.stderr)
-            return _Outcome(success=proc.returncode == 0, returncode=proc.returncode)
-        proc = subprocess.run(list(argv), stdout=sink, timeout=timeout, env=env, cwd=workspace)
-        return _Outcome(success=proc.returncode == 0, returncode=proc.returncode)
+            return _Outcome(
+                success=proc.returncode == 0,
+                stdout=proc.stdout or "",
+                stderr=proc.stderr or "",
+                returncode=proc.returncode,
+            )
+        try:
+            # BINARY, not `text=True` (tan-cli#519/#522 review round 3,
+            # MAJOR 1): `_Tee` reads and decodes the raw pipe itself, in
+            # chunks bounded by BYTES ready, not characters decoded -- see
+            # its docstring for why a `text=True` stream defeated the whole
+            # "live" point of this branch.
+            proc = subprocess.Popen(  # noqa: S603 -- argv comes from the pure planner
+                list(argv),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                cwd=workspace,
+            )
+        except OSError as err:
+            return _Outcome(success=False, stderr=f"could not spawn: {err}", captured=capture)
+        out_tee = _Tee(proc.stdout, sink)
+        err_tee = _Tee(proc.stderr, sink)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            # `Popen.wait`'s own `TimeoutExpired` carries no output (unlike
+            # `subprocess.run(capture_output=True)`'s) -- built by hand here so
+            # the shared handler below sees the same shape either way.
+            raise subprocess.TimeoutExpired(
+                list(argv), timeout, output=out_tee.text(), stderr=err_tee.text()
+            ) from None
+        return _Outcome(
+            success=proc.returncode == 0,
+            stdout=out_tee.text(),
+            stderr=err_tee.text(),
+            returncode=proc.returncode,
+        )
     except subprocess.TimeoutExpired as exc:
         return _Outcome(
             success=False,
@@ -443,11 +522,12 @@ def _timeout_stderr(exc: subprocess.TimeoutExpired, timeout: float) -> str:
     wrapped console (a pytest/embedded capture object with no OS-level
     stderr handle) a multi-GB `.wic` write killed mid-transfer used to report
     only `flash command failed` with no hint a truncated image is now on the
-    card. The third spawn variant (`stdout=sink`, direct-to-console
-    streaming) never sets `capture_output`, so `exc.stdout`/`.stderr` are
-    `None` there and this falls back to the bare sentence, unchanged --
-    nothing was lost that this function could recover, since that variant's
-    own output already reached the console directly.
+    card. The third spawn variant (live console, [`_Tee`]-backed) used to have
+    no output here either -- `Popen.wait`'s own `TimeoutExpired` carries none
+    -- but `_spawn` now builds one BY HAND from what the tees had already
+    collected before the kill (tan-cli#522 review, MAJOR 1), so this handler
+    sees the same shape on all three spawn variants and needs no branch of
+    its own to tell them apart.
 
     `_text`, not a bare `isinstance(chunk, str)` check: measured,
     `subprocess.TimeoutExpired.stdout`/`.stderr` are `bytes` even when the
@@ -532,8 +612,12 @@ def _half_lines(half: _Half, *, captured: bool) -> list[str]:
     processes inherit stdio instead -- so "it exited 9 and said nothing" is
     not a diagnosis there, it is an artifact of never having listened, and a
     body-less header for it produced a dangling `"<program> exited rc=1:"`
-    with nothing following, contradicting `_execute_message`'s own docstring
-    claim that an ordinary text-mode failure leaves `outcome.stderr` empty."""
+    with nothing following. (tan-cli#519/#522 review, MAJOR 1: this pipeline
+    case is the ONE ordinary text-mode failure shape that still, genuinely,
+    leaves `outcome.stderr` empty -- `_spawn`'s single-tool branches no
+    longer do, now that they [`_Tee`]/capture-and-replay the child's
+    transcript in every mode; see `_execute_message`'s own docstring, which
+    used to make that claim unconditionally.)"""
     body = [line for line in half.stderr.splitlines() if line.strip()]
     if not body and (half.returncode == 0 or not captured):
         return []
@@ -576,6 +660,147 @@ def _pipeline_returncode(left_rc: int | None, right_rc: int | None) -> int:
         if rc:
             return rc
     return 0 if left_rc is not None and right_rc is not None else -1
+
+
+class _Tee:
+    """One BINARY `Popen` child stream (stdout or stderr), read to EOF on a
+    background thread -- forwarding every chunk to `sink` AS it arrives (so a
+    live console still sees the child's output as it happens, unchanged from
+    before this class existed) while also accumulating it, so the caller has
+    the same transcript a `--format json` capture would have produced
+    (tan-cli#522 review, MAJOR 1: `_flow_d_reset_qualified_message` needs a
+    transcript to qualify Flow D's reset claim against, and text mode's own
+    `_spawn` branch had none at all).
+
+    `stream.read1(n)` on the raw pipe, not `TextIOWrapper.read(n)` (this
+    class's OWN first version, and not [`_Drain`]'s single blocking `.read()`
+    either): `read1` returns as soon as the OS has ANY bytes ready, up to `n`.
+    A bounded read on a *text*-mode stream does NOT have that property -- it
+    blocks until it has decoded `n` CHARACTERS or hit EOF, silently reading
+    and buffering as many underlying chunks as that takes (tan-cli#519/#522
+    review round 3, MAJOR 1: measured against a child dribbling one line
+    every 20ms, `TextIOWrapper.read(4096)` delivered nothing to the console
+    for over a second at a time -- the exact "capture, then replay after the
+    child exits" shape this class exists to avoid on the live-console path
+    (the `sink is None` branch of `_spawn` already does that replay
+    deliberately; this is the OTHER branch, where a real console is present
+    and can show output as it is produced)). `Popen` is spawned WITHOUT
+    `text=True` for this branch specifically so this class can read the raw
+    bytes and decode them itself, incrementally
+    (`codecs.getincrementaldecoder`), so a multi-byte UTF-8 sequence split
+    across two `read1` calls is never corrupted or double-counted.
+
+    Two independent threads (one per stream, both writing to the same `sink`)
+    means the console's stdout/stderr interleaving is no longer OS-arbitrated
+    the way direct fd inheritance was -- each thread's own chunks stay in
+    order with themselves, but the two streams may interleave differently
+    than before. Both still land on the SAME console, visibly, in real time.
+
+    That is the ONE console-visible change this class was believed to make.
+    There is a SECOND, tan-cli#519/#522 review round 3 found only after
+    measuring on a real pty: `subprocess.PIPE` means the CHILD's own
+    `stdout.isatty()`/`stderr.isatty()` now report `False`, where direct fd
+    inheritance (the pre-`_Tee` behaviour) let them report `True` on a real
+    terminal. Measured: same invocation, real pty --
+    `origin/dev  child sees  stdout_isatty=True   stderr_isatty=True`;
+    `this class  child sees  stdout_isatty=False  stderr_isatty=False`.
+    `pyocd flash` / `west flash` / `openocd` gate their own `\r`-updated
+    progress bar and colour output on `isatty()`, so on a real terminal an
+    operator now loses the live progress indicator for a multi-minute
+    GD32/Alif write -- console output is still complete and still live line-
+    by-line, but the CHILD renders it differently once it can no longer see a
+    tty of its own. Deliberately NOT fixed here (driving this tee through a
+    pty is real machinery, tracked as **tan-cli#541**): the claim this
+    docstring used to make -- "nothing is silently withheld from the
+    operator" -- overstated what changed; the console still sees everything
+    the child prints, but not necessarily in the shape/cadence the child
+    itself would have chosen for a real terminal.
+
+    `join`'s default timeout is `_DRAIN_JOIN_S`, the SAME bound [`_Drain`]
+    uses and for the identical reason (tan-cli#519/#522 review round 3,
+    BLOCKER): a grandchild the killed child leaves behind (a backgrounded
+    `sleep 20 &` inside a shell script `_spawn` ran) still holds this pipe's
+    write end open after `proc.kill()`/`proc.wait()` return -- `kill()` reaps
+    only the direct child -- so the read loop below never sees EOF until that
+    OTHER process exits too. An unbounded `join()` here is what made
+    `_FLASH_TIMEOUT_S` toothless: `proc.wait(timeout=...)` returned on
+    schedule but the subsequent `.text()` call blocked past it, measured
+    hanging past an outer kill entirely on the TimeoutExpired path. A `tan`
+    that hangs on a thread rather than reporting a flash result would be the
+    worse trade -- the exact sentence `_Drain.join`'s own docstring already
+    uses for this same class of problem.
+
+    tan-cli#519/#522 review, MINOR 1: `_DRAIN_JOIN_S` alone documents ONE
+    stream's bound. `_spawn` calls [`text`] on TWO `_Tee`s (stdout's and
+    stderr's), one after the other, so the real overrun past `_spawn`'s own
+    `timeout` is up to `2 * _DRAIN_JOIN_S`, not one -- a straggling
+    grandchild can make BOTH joins spend their full bound in sequence.
+    Measured: `_spawn(..., timeout=3)` -> 4.00s; `timeout=2` -> 6.01s.
+    Bounded and still the right trade, but see `_DRAIN_JOIN_S`'s own comment
+    for why that bound alone understates it by 2x."""
+
+    def __init__(self, stream, sink) -> None:
+        self._chunks: list[str] = []
+        self._stream = stream
+        self._sink = sink
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+
+    def _read(self) -> None:
+        try:
+            for raw in iter(lambda: self._stream.read1(65536), b""):
+                chunk = self._decoder.decode(raw)
+                if chunk:
+                    self._chunks.append(chunk)
+                    self._write(chunk)
+            tail = self._decoder.decode(b"", final=True)
+            if tail:
+                self._chunks.append(tail)
+                self._write(tail)
+        except (OSError, ValueError):
+            pass
+
+    def _write(self, chunk: str) -> None:
+        try:
+            self._sink.write(chunk)
+            self._sink.flush()
+        except UnicodeEncodeError:
+            # The DECODED chunk is a well-formed `str` (the incremental UTF-8
+            # decoder above already replaced anything malformed); this is the
+            # SINK's own narrower encoding rejecting a character it can
+            # represent, not a decode failure. Re-encoded with a lossy
+            # fallback instead of losing the whole chunk (tan-cli#519/#522
+            # review round 3, MINOR): the bare `except (OSError, ValueError):
+            # pass` below used to catch this too -- `UnicodeEncodeError` is a
+            # `ValueError` subclass -- discarding the WHOLE 4KiB chunk from
+            # the console, including whatever clean ASCII lines shared it.
+            try:
+                encoding = getattr(self._sink, "encoding", None) or "utf-8"
+                self._sink.write(chunk.encode(encoding, "backslashreplace").decode(encoding))
+                self._sink.flush()
+            except (OSError, ValueError):
+                pass
+        except (OSError, ValueError):
+            # The console went away mid-write (a closed pipe, a torn-
+            # down pytest capture). Keep reading and accumulating --
+            # the transcript this thread is building still matters
+            # even when nobody can watch it live any more.
+            pass
+
+    def join(self, timeout: float | None = _DRAIN_JOIN_S) -> None:
+        self._thread.join(timeout=timeout)
+
+    def text(self) -> str:
+        """Everything this stream said, joined. Joins first ([`_Drain.text`]'s
+        own reasoning): reading `_chunks` while the thread may still be
+        appending is exactly the read that could observe a partial list.
+        Bounded (see `join`'s own docstring): a straggling grandchild still
+        holding this pipe open means `_chunks` may be incomplete when this
+        returns -- the same tradeoff `_Drain.text` already makes, for the
+        same reason."""
+        self.join()
+        return "".join(self._chunks)
 
 
 class _Drain:
@@ -883,17 +1108,102 @@ def _execute_message(outcome: _Outcome, method: str, entry_id: str) -> str:
     <err>`, `_spawn_pipeline`'s `_timed_out_stderr`, and `_spawn_jlink`'s
     `could not write the J-Link Commander script: <err>` were all composed
     and then discarded, reported as a bare `flash command failed` even though
-    every one of them populates `outcome.stderr` regardless of mode. The
-    ORDINARY text-mode failure (the child streamed straight to the console
-    and then exited non-zero) leaves BOTH `stderr`/`stdout` empty -- there is
-    nothing tan itself has to add there, so that case is unaffected: `outcome.
-    stderr.strip() or outcome.stdout.strip()` is false and this still falls
-    through to the generic sentence, exactly as before."""
+    every one of them populates `outcome.stderr` regardless of mode.
+
+    tan-cli#519/#522 review, MAJOR 1: an ORDINARY text-mode failure -- the
+    child streamed straight to the console and then exited non-zero, with no
+    tan-authored diagnosis at all -- used to leave BOTH `stderr`/`stdout`
+    empty unconditionally, so this always fell through to the bare `flash
+    command failed` sentence. That is no longer true for `_spawn`'s two
+    single-tool branches (the wrapped-console capture-and-replay branch, and
+    the live-console branch now [`_Tee`]s instead of only streaming): both
+    populate `outcome.stdout`/`.stderr` with the child's own transcript in
+    EVERY mode now, so an ordinary text-mode failure whose child printed a
+    diagnosis on stderr/stdout (`Error: could not connect to target`, say)
+    now surfaces that diagnosis here too, in place of the old generic
+    sentence -- a CUSTOMER-VISIBLE change to the exact string
+    `data.entries[].message` (and the text-mode `FAIL:` line) reports for
+    every `_spawn`-backed method (`swd_probe`, `alif_setools`, `west_flash`,
+    ...), declared in this change's own CHANGELOG entry. The bare fallback
+    now survives only for a child that truly prints nothing (both streams
+    genuinely empty) and for `_spawn_pipeline`'s UNCAPTURED text-mode path,
+    which pipes neither half's stderr at all and so still reaches
+    `_Outcome.stderr == ""` unconditionally -- see [`_half_lines`]'s own
+    docstring for that narrower, still-true case."""
     if outcome.captured or outcome.stderr.strip() or outcome.stdout.strip():
         tail = _capture_tail(outcome)
         if tail:
             return f"{method}[{entry_id}]: {tail}"
     return f"{method}[{entry_id}]: flash command failed"
+
+
+#: The two J-Link Commander phrases that mean the post-write PIN-reset
+#: (`RSetType 2` / `r` / `g`, `plan_alif_mram_jlink`'s own script) asked the
+#: core to halt and it refused -- the documented busy-resident case: an image
+#: that never idles keeps the core running, so `VC_CORERESET` cannot halt it
+#: (tan-cli#522). Matched against whatever JLinkExe printed, not derived from
+#: the exit code -- JLinkExe still exits 0 here (`outcome.success` is `True`;
+#: the WRITE and its `verifybin` genuinely succeeded), so the exit code alone
+#: cannot tell this run apart from one whose reset actually landed.
+_FLOW_D_HALT_FAILURE_MARKERS = ("Failed to halt CPU", "CPU is not halted")
+
+#: The exact tail `plan_alif_mram_jlink` always appends to `ok_message` --
+#: see its own `f"...; verified and PIN-reset"` lines. Matched verbatim so the
+#: qualification below is a targeted substring swap, not a re-derivation of
+#: the message shape.
+_FLOW_D_VERIFIED_AND_RESET = "; verified and PIN-reset"
+_FLOW_D_VERIFIED_ONLY = "; verified; reset requested, core was busy and did not halt"
+
+
+def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
+    """Downgrade Flow D's claimed `PIN-reset` to what the transcript actually
+    shows (tan-cli#522).
+
+    `plan_alif_mram_jlink` composes `ok_message` at PLAN time, before the
+    write has run -- it has no transcript to consult, so it reports the
+    INTENDED outcome ("verified and PIN-reset") unconditionally. The write
+    itself is genuinely fine here (`outcome.success` is `True`, `verifybin`
+    passed), but a busy-resident image can keep the core running straight
+    through `VC_CORERESET`, so the reset half did not take even though
+    JLinkExe still exits 0 -- the identical message otherwise reports every
+    run alike, whether the reset landed or the transcript ended in three
+    lines of J-Link errors. `data.entries[].message` is what a `--format
+    json` consumer renders as the outcome of the flash (the same surface
+    tan-cli#402/#487 fixed for the device/address halves of this message),
+    so an operator reading it cannot tell the two apart -- and on this board
+    the reset is what would have started the freshly-written image.
+
+    Scoped to a substring match on the CAPTURED transcript
+    (`outcome.stdout`/`.stderr` -- see `_Outcome`/`_spawn`). tan-cli#522
+    review, MAJOR 1: this used to be populated ONLY under `--format json`'s
+    single-spawn capture, so in text mode -- the default human invocation --
+    this was a silent no-op and the qualification never reached the operator
+    reading the console, even though JLinkExe's own transcript streamed
+    straight past them there too. `_spawn`'s live-console branch now TEES
+    that same transcript (streamed live to the console AND collected, via
+    [`_Tee`]) instead of only streaming it, so `outcome.stdout`/`.stderr` are
+    populated in every mode and this function needs no mode split of its
+    own. Not a general transcript-scraping layer: this reads only the one
+    tail `plan_alif_mram_jlink` always appends, and only for
+    `FLOW_D_METHOD`.
+
+    tan-cli#519/#522 review, NIT (residual risk, not fixed): the transcript
+    this reads is [`_Tee.text`]'s bounded join, which can be INCOMPLETE if a
+    grandchild the killed child leaves behind still holds the pipe open past
+    `_DRAIN_JOIN_S` -- see that method's own docstring. Should that bound
+    ever truncate a real JLinkExe transcript mid-halt-failure, the marker
+    substring search above finds nothing and this function falls through to
+    `return ok_message` UNCHANGED -- the OPTIMISTIC `"; verified and
+    PIN-reset"` claim, the exact wrong claim tan-cli#522 exists to stop. No
+    plausible JLinkExe repro for this was constructible during this review
+    (a 24 MB transcript drains through the tee in ~0.13s, far under the
+    2s/4s bound), so this is documented risk, not a reproduced defect."""
+    if _FLOW_D_VERIFIED_AND_RESET not in ok_message:
+        return ok_message
+    transcript = outcome.stdout + outcome.stderr
+    if not any(marker in transcript for marker in _FLOW_D_HALT_FAILURE_MARKERS):
+        return ok_message
+    return ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY)
 
 
 # ── per-entry dispatch ──────────────────────────────────────────────────────
@@ -1561,6 +1871,8 @@ def _flash_entry(
         # a SUCCESSFUL sign too, not only via `missing_tool_message`/
         # `unresolved_message` on a failure.
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
+        if method == FLOW_D_METHOD:
+            ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
         lines.append(f"  ok: {ok_message}")
         return (
             0,

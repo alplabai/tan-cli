@@ -860,6 +860,122 @@ All notable changes to `tan` are documented here. Format follows
     a new text-only test (no `pwsh` needed, so it runs on every OS this
     suite runs on) asserts the shipped source keeps it there. (Inspected,
     not executed against a real `pwsh`.) (#490)
+- **`tan flash`'s `swd_probe` OpenOCD and pyOCD arms read no probe-selection
+  field at all**, so a multi-probe host had no way to say which one to use --
+  an ABSENT feature, not (#513)'s accept-and-ignore shape (that fix covered
+  only the J-Link arm's `flash_args.jlink_serial`). Two new fields, not one
+  neutral field reused across all three tools: `flash_args.
+  openocd_usb_location` renders as its own `adapter usb location {<path>}` `-c`
+  word (braced, matching the flash artefact's own `-c` word, so whitespace in
+  the value cannot split it into extra Tcl words -- and refused outright, at
+  plan time, when the value is whitespace-ONLY, rather than reaching OpenOCD
+  as `adapter usb location {  }`), ahead of the target config (OpenOCD
+  selects a probe by USB path); `flash_args.pyocd_uid` renders as pyOCD's own
+  `--uid <value>`. `JLinkExe` keeps `jlink_serial` (serial-only; it has no
+  USB-path selector at all) -- the three fields are different identifiers
+  for different tools, not three spellings of one. Each new field is
+  charset-guarded the way #486 already guards `interface`/`target`/
+  `jlink_serial` (`validate_openocd_word` for the Tcl word; `pyocd_uid` gets
+  `validate_pyocd_uid`, `validate_identifier` deliberately widened by exactly
+  one shape to accept pyOCD's own documented `<plugin>:<uid>` form), and each
+  is refused, not silently dropped, when set on an arm that cannot honour it
+  -- mirroring #513's own wrong-arm refusal. The OpenOCD/pyOCD split itself
+  resolves the arm ONCE, by the SAME `if openocd: ... elif pyocd: ...`
+  precedence the argv build uses, rather than by each field's own
+  tool-availability check in isolation -- the original version of this fix
+  used availability alone, which stayed silent on a host with BOTH tools
+  present (OpenOCD always wins the arm there, but a `pyocd_uid`-only refusal
+  keyed off pyOCD merely being *available* never fired, silently dropping the
+  probe selector on exactly the shared-serial, multi-probe host this fix was
+  written for -- caught in review before this reached anyone). This matters
+  most on the alplab-gw bench, where two physically different probes
+  enumerate with the same OEM-cloned serial and only a USB path can tell
+  them apart. `--dry-run` previews these two fields the same way a real run
+  on the same host would, in BOTH directions: the arm resolution that
+  decides `chosen` (and every refusal keyed off it) now consults `which()`
+  for real whenever EITHER field is named, the same scoping the J-Link side
+  of the split already had -- the first version of this fix only scoped the
+  J-Link side, so a manifest naming `openocd_usb_location`/`pyocd_uid` still
+  hit an unconditional "assume J-Link is absent, the other tool is present"
+  bypass on the OTHER side, unchanged by whether that tool was actually on
+  PATH. Measured on a pyocd-only host: a `pyocd_uid` preview used to refuse
+  while a real run on that host succeeded, and an `openocd_usb_location`
+  preview used to print a full `openocd -f ... -c 'adapter usb location ...'`
+  command line -- a tool not installed on that host -- while a real run
+  refused; both now agree, in both directions. The unconditional bypass is
+  kept, unchanged, when NEITHER field is named -- every oracle-pinned `would
+  run JLinkExe` `--dry-run` fixture relies on that path staying
+  replay-host-independent. On a host with NO probe tool at all, a manifest
+  naming `openocd_usb_location`/`pyocd_uid` used to get two different, both
+  misleading, refusals depending on mode -- `--dry-run` said "this run is
+  taking the J-Link path" (its own bare-host preview default), a real run
+  said "this run is not taking the OpenOCD/pyOCD path" (naming the OTHER
+  tool as if it were available) -- neither names the actual cause. Both now
+  refuse with the same `swd_probe: no flash tool found -- install SEGGER
+  J-Link (preferred), or openocd, or pyocd` message the bottom of this
+  function already gives that host shape when neither field is named.
+  (#519)
+- **`tan flash`'s Flow D (`alif_mram_jlink`) reported `verified and
+  PIN-reset` even on a run whose reset chain ended in `Failed to halt CPU`**
+  -- the documented busy-resident case, where an image that never idles keeps
+  the core running so `VC_CORERESET` cannot halt it. JLinkExe still exits 0
+  here and the write itself is genuinely fine (`verifybin` passed), so this
+  was not a missed failure; it was a success message asserting an INTENT
+  (the same class as (#487) defect 6's asserted-but-never-sent address, not
+  a new one). `data.entries[].message` is what a `--format json` consumer
+  renders as the flash outcome, and the identical string used to cover both
+  a landed reset and a failed one. The message now reads the transcript
+  (`; verified and PIN-reset`) and swaps it for `; verified; reset requested,
+  core was busy and did not halt` when the transcript names the halt
+  failure -- a targeted substring swap scoped to Flow D's own message shape,
+  not a general transcript-scraping layer. Text-mode runs -- the default,
+  standalone invocation, not only `--format json` -- get the same qualified
+  message: `tan flash`'s live-console spawn now TEES a written child's
+  combined output onto a background thread instead of only streaming it, so
+  the transcript this qualification reads is populated regardless of
+  `--format`. Two defects found reviewing the first version of that tee, both
+  fixed in this same change: it read the child through a TEXT-mode stream in
+  fixed 4096-*character* chunks, which blocks until that many characters are
+  decoded or EOF -- measured against a slowly-dribbling child, this withheld
+  console output for over a second at a time, the opposite of the "live"
+  streaming the tee exists to provide, so it now reads the raw pipe directly
+  (bytes ready, not characters decoded) and decodes the bytes itself; and its
+  own thread-join had no timeout, so a killed child's own orphaned
+  grandchild holding the pipe open (a backgrounded `sleep &`, say) could hang
+  `tan flash` indefinitely past `_FLASH_TIMEOUT_S` -- now bounded by the same
+  `_DRAIN_JOIN_S` the pipeline's stderr drain already uses, and for the
+  identical reason (`_spawn` joins TWO of these tees, one per stream, so the
+  real ceiling on a single flash entry is `_FLASH_TIMEOUT_S` plus up to
+  `2 * _DRAIN_JOIN_S`, not one -- measured: `timeout=3` overran to 4.00s,
+  `timeout=2` to 6.01s). **A parallel, unfixed risk, noted here rather than fixed
+  in this change (out of scope, #540): `swd_probe`'s own J-Link arm asserts
+  `{device} flashed via J-Link @ {base}` from the exit code alone, and
+  `jlink_commander_script` gives it no `verifybin` at all (`r`/`halt` before
+  the load, `r`/`g` after) -- the same intent-vs-observed gap this fix closes
+  for Flow D, on a backend with no verify step to fall back on if a future
+  review finds the same halt-survives-nonzero-exit shape there.**
+
+  Two more consequences of that same tee, both found reviewing THIS round
+  (#519/#522 round 3): first, `_execute_message`'s own text-mode fallback
+  changed shape along with it -- before, an ORDINARY text-mode failure (the
+  child streamed straight to the console, no tan-authored diagnosis) always
+  left `outcome.stdout`/`.stderr` empty and fell back to the bare `flash
+  command failed` sentence; now that `_spawn`'s single-tool branches capture
+  the child's transcript in every mode, that same failure surfaces whatever
+  the child actually printed instead (e.g. `swd_probe[e1]: Error: could not
+  connect to target`, measured) -- a customer-visible change to
+  `data.entries[].message` and the text-mode `FAIL:` line for every
+  `_spawn`-backed method. Second, `subprocess.PIPE` (required to read the
+  child's own stdout/stderr at all) means the CHILD's `stdout.isatty()`/
+  `stderr.isatty()` now report `False` where direct fd inheritance let them
+  report `True` on a real terminal (measured on a real pty) -- `pyocd
+  flash`/`west flash`/`openocd` gate their own `\r`-updated progress bar and
+  colour output on `isatty()`, so on a terminal an operator now loses that
+  live progress indicator during a multi-minute GD32/Alif write. Console
+  output itself stays complete and live, line by line; only the CHILD's own
+  rendering of it changes. Deliberately not fixed here -- driving the tee
+  through a pty is real machinery and this branch has already had three
+  review rounds -- tracked as #541. (#522)
 
 
 - **`tan faultdecode`'s `addr2line` probe was spoofable via a Windows CWD
