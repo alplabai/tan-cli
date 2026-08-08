@@ -25,6 +25,36 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan generate`'s subprocess engine (`TAN_GENERATE_EXECUTOR=subprocess`,
+  and its `auto` fallback) reported a legitimate zero-byte emit as a failed
+  target.** `zephyr-conf`/`cmake-args` write a genuinely empty file and exit
+  0 on a project touching no core of the mode's OS class (e.g. a
+  Linux-only E1M-V2N101 project asking for `zephyr-conf`) -- `alp-sdk`'s own
+  `alp_project.py` says so on its own stderr. `_missing_emit_output` used to
+  read ANY zero-byte `output` as proof of the tan-cli#397 failure it exists
+  to catch, so this correct emit was reported `generate.emit-failed`, exit
+  3 -- and with an explicit `--output` (the shape `cmake/alp.cmake` drives
+  for every Zephyr example), the false failure then triggered
+  `_discard_probe_file` and UNLINKED the real, empty artefact the SDK had
+  just written. A zero-byte `output` is now accepted only when the SDK's
+  own stderr carries its `_write_or_print` confirmation of that exact
+  write; a zero-byte file with no such confirmation (a partially installed
+  or differently configured checkout, tan-cli#397's own scenario) is still
+  refused exactly as before. (#498)
+- **`tan validate`'s two v2 board.yaml structural checks (`os:` forbidden,
+  `cores:` required) are unreachable on `--offline`, so a v1 board.yaml the
+  real SDK schema rejects with 3 errors reports `outcome: clean`, exit 0
+  through the path `validate.sdk-root-unresolved`'s own message recommends
+  to a user with no SDK checkout.** NOT fixed here: removing the gate flips
+  the FROZEN `contract/envelopes/validate-offline-clean` fixture's own
+  outcome (verified directly against alp-sdk's live validator -- its
+  `board.yaml` is schema-invalid, missing `cores:`) and diverges from the
+  identical gate in the frozen Rust oracle. Documented instead, with the
+  full finding and the two candidate fixes, in `contract/README.md`'s
+  "Known limitation: `validate-offline-clean`'s board.yaml fails the real
+  schema" -- a maintainer decision is needed before either candidate lands.
+  #498 stays open for this part.
+
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
   gaps found reviewing the fix.** All under (#489):

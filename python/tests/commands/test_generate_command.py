@@ -1473,6 +1473,82 @@ def test_an_output_override_the_emitter_never_filled_is_not_reported_written(
     assert destination.parent.is_dir()
 
 
+def _project_with_a_confirmed_empty_write_sdk(tmp_path):
+    """tan-cli#498: a stand-in for `alp_project.py`'s REAL behaviour on an
+    unscoped per-core emit whose mode's OS class matches no core in this
+    project -- it writes a genuine zero-byte file and, via `_write_or_print`,
+    announces exactly that on stderr before exiting 0. Unlike
+    `_project_with_silent_sdk` (tan-cli#397's stand-in, which writes nothing
+    and says nothing), this is the SDK confirming its own empty artefact."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_text('', encoding='utf-8')\n"
+        "print(f'alp_project: wrote {out} (0 bytes)', file=sys.stderr)\n",
+        encoding="utf-8",
+    )
+    return project, sdk
+
+
+def test_an_sdk_confirmed_empty_write_is_not_reported_as_a_failed_emit(
+    tmp_path, monkeypatch, capsys
+):
+    """The false positive tan-cli#498 reports: `zephyr-conf`/`cmake-args` on a
+    project touching no core of the mode's OS class legitimately write a
+    zero-byte file and exit 0 -- that must land in `written[]`, not `failed[]`,
+    when the SDK's own stderr confirms the empty write."""
+    project, sdk = _project_with_a_confirmed_empty_write_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(target="zephyr-conf", sdk_root=str(sdk), output_format="json")
+
+    assert code == int(ExitCode.SUCCESS), capsys.readouterr().out
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["ok"] is True
+    assert env["data"]["failed"] == []
+    assert env["data"]["written"] == ["build/generated/alp.conf"]
+    assert env["issues"] == []
+    written = project / "build" / "generated" / "alp.conf"
+    assert written.is_file()
+    assert written.stat().st_size == 0
+
+
+def test_an_sdk_confirmed_empty_write_with_output_override_is_kept_not_discarded(
+    tmp_path, monkeypatch, capsys
+):
+    """The sharper failure mode tan-cli#498 names: with `--output`,
+    `_ensure_writable`'s own probe already created a zero-byte file, so a false
+    `generate.emit-failed` used to trigger `_discard_probe_file` and UNLINK the
+    real (empty) artefact the SDK had just written. A confirmed empty write
+    must survive on disk."""
+    project, sdk = _project_with_a_confirmed_empty_write_sdk(tmp_path)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target="zephyr-conf",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == int(ExitCode.SUCCESS), capsys.readouterr().out
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["failed"] == []
+    assert env["issues"] == []
+    assert destination.is_file()
+    assert destination.stat().st_size == 0
+
+
 def test_a_tree_target_that_left_no_board_directory_is_a_failed_target(
     tmp_path, monkeypatch, capsys
 ):

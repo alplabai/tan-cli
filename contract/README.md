@@ -252,7 +252,7 @@ just the one that captured it:
 |---|---|---|---|
 | `init-preview-minimal-app` | `init --template minimal-app --preview --format json` | 0 | Deterministic scaffold plan — the envelope shape `init` templates hand the extension (`{schemaVersion,templateId,destination,preview,fileChanges,written,unchanged,sdkPinned}`). |
 | `init-invalid-template` | `init --template bogus-template --format json` | 2 | Validation-failure envelope shape for `init`. |
-| `validate-offline-clean` | `validate --offline --format json` (fixture `board.yaml`) | 0 | The offline structural validator's clean-outcome envelope — no Python/SDK spawn, so it's genuinely deterministic and network-free. |
+| `validate-offline-clean` | `validate --offline --format json` (fixture `board.yaml`) | 0 | The offline structural validator's clean-outcome envelope — no Python/SDK spawn, so it's genuinely deterministic and network-free. **This fixture's own `board.yaml` is schema-invalid against the live SDK validator** — see "Known limitation: `validate-offline-clean`'s board.yaml fails the real schema" below. |
 | `validate-offline-schema-violation` | `validate --offline --format json` (malformed fixture `board.yaml`) | 2 | Same command, non-clean outcome — pins the `issues[]` shape too. |
 | `validate-offline-empty-document` | `validate --offline --format json` (empty fixture `board.yaml`) | 2 | An empty/comment-only document used to report exit 0 "clean" — pins that both the shipping Python CLI and frozen Rust oracle refuse it, message and exit code alike. |
 | `sdk-current-no-sdk` | `sdk current --format json` | 0 | Reports `sourceTier: "none"` in a workspace with no SDK configured — offline, host-independent given the isolated `HOME`. |
@@ -270,6 +270,65 @@ just the one that captured it:
 | version-format tests (no fixture dir) | `--version` | 0 | `python/tests/test_cli_skeleton.py` and the Rust mirror assert the format rather than a literal version that changes every release. |
 | issue-code gates (no fixture dir) | — | — | Python AST gates check the shipping emit sites; `contract.rs` checks Rust-owned registry entries. They prove spelling/registration, while command tests prove reachability. |
 | `doctor_build_data_keys_the_extension_reads` (in `contract.rs`, no fixture dir) | `doctor --build --format json` | — | KEY-SET assertion, not a value diff: doctor's values are host facts (what is on PATH, whether a Zephyr workspace exists), its key names are not. Covers `data.summary.{pass,warn,fail}`, `data.nextSteps`, `data.checks[].{name,status}` and the literal check name `workspace`. |
+
+### Known limitation: `validate-offline-clean`'s board.yaml fails the real schema (tan-cli#498)
+
+`validate_board_text` (`python/tan/commands/validate_cmd.py`) guards its two
+structural checks — top-level `os:` is forbidden, `cores:` is required — on
+`_effective_schema_version(doc) >= 2`, ported from the identical gate in the
+frozen Rust oracle (`crates/tan-core/src/validate.rs:282`). No conforming
+alp-sdk project can ever satisfy that condition: alp-sdk's
+`scripts/alp_migrate/__init__.py` pins `LATEST = 1` with an empty migration
+registry, so board.yaml v2 does not exist, `schemaVersion:` never appears in a
+real project, and `_effective_schema_version` returns 1 for all of them. Two
+checks that read as v2-only design (the `I-02` comment above the gate
+describes v2's per-core-derived OS) in fact restate rules alp-sdk's
+`metadata/schemas/board.schema.json` already enforces at the SCHEMA ROOT, with
+no `schemaVersion` condition anywhere in the file (`"required": ["som",
+"cores"]`, `"not": {"required": ["os"]}`) — verified directly by running the
+live validator (`scripts/validate_board_yaml.py`, alp-sdk `dev`@`99e47476`)
+against this exact fixture's `board.yaml`:
+
+```
+$ python scripts/validate_board_yaml.py --input contract/envelopes/validate-offline-clean/board.yaml
+error[ALP-B001]: required key 'cores' is missing
+  --> .../board.yaml:1:1
+   |
+ 1 | som:
+   | ^
+   = hint: add a 'cores:' entry to this block
+EXIT=1
+```
+
+So `validate --offline` on this exact fixture reports `outcome: clean`, exit
+0, while the real (spawn-path) validator this same repo ships rejects the
+identical file. This is a genuine gap, not a cosmetic one: `--offline` is the
+path `validate.sdk-root-unresolved`'s own message recommends to a user with no
+SDK checkout.
+
+**Not fixed here.** Removing the `>= 2` gate (or otherwise making these two
+checks reachable at v1) flips this exact fixture's outcome from `clean` to
+`schema-violation` — its `board.yaml` (`som:` + `preset:`, no `cores:`) is
+precisely the shape the real schema rejects — which breaks the FROZEN
+`contract/envelopes/validate-offline-clean` golden (also `crates/`'s own copy
+of the same fixture, per the intro above) and diverges from the frozen Rust
+oracle's identical gate. Per this repo's own rule for a frozen fixture that
+looks wrong (tan-cli#502's `docs(contract)` precedent): document the finding
+here rather than re-record the golden, and leave the decision to a
+maintainer. The decision is genuinely open, not a mechanical ungate:
+
+- **Ungate it** (make `--offline` schema-accurate at v1) — the more useful
+  behaviour for the customer this gate's own existence targets, but a
+  breaking wire change to `validate-offline-clean` needing coordinated
+  `contract/` + `crates/` handling, most likely as its own tan-cli#502-style
+  slice.
+- **Keep the gate, correct what it claims** — reword the `I-02` comment and
+  the "board.yaml v2:" message prefixes so they stop describing these two
+  facts as v2-specific (they are not), and document `--offline` as
+  deliberately partial (document-shape only, not schema-equivalent) rather
+  than implying its "clean" outcome means schema-clean. No fixture moves.
+
+tan-cli#498 stays open for this part until a maintainer picks one.
 
 ### Known divergence: `debug-config-preview-*` (tan-cli#502)
 

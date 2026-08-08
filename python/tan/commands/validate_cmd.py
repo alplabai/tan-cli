@@ -492,6 +492,15 @@ def validate_board_text(text: str) -> _Result:
         )
 
     messages: list[str] = []
+    # tan-cli#498: this gate is UNREACHABLE for every real project -- v2 does
+    # not exist yet (alp-sdk `scripts/alp_migrate.LATEST == 1`), and the real
+    # schema already enforces both checks below at v1, unconditionally. Ported
+    # verbatim from the identical gate in the frozen oracle
+    # (`crates/tan-core/src/validate.rs:282`); ungating it would flip this
+    # module's own FROZEN `validate-offline-clean` fixture from clean to
+    # schema-violation, so the fix is deliberately NOT made here -- see
+    # `contract/README.md`'s "Known limitation" section for the full finding
+    # and the open maintainer decision.
     if _effective_schema_version(doc) >= 2:
         # I-02: the OS is derived from each core's Cortex class and is never
         # selectable, so a top-level `os:` is rejected outright.

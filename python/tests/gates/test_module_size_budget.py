@@ -570,7 +570,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command WRITES `build/generated/alp.conf` and the DTS overlays
     # out of whichever checkout resolved.
-    "tan/commands/generate_cmd.py": 1186,
+    # 1203, not 1186, as of tan-cli#498: `_missing_emit_output` no longer
+    # treats every zero-byte `output` as proof of a failed emit -- a present,
+    # zero-byte file is now accepted when `stderr` carries the SDK's own
+    # `_write_or_print` confirmation that it wrote exactly that (the
+    # unscoped `zephyr-conf`/`cmake-args` case, which legitimately writes
+    # nothing when no core matches the mode's OS class). The new
+    # `_SDK_CONFIRMED_EMPTY_WRITE_RE` module constant plus its own
+    # docstring account for the growth; the function itself stayed at 49
+    # lines, under the ratchet's own 50-line function cap.
+    "tan/commands/generate_cmd.py": 1203,
     # 1215, not 1096, as of tan-cli#464 (measured majors, then an independent
     # design review): the `globalDefault` tier gained a `writtenFor`-vs-caller
     # check (`_workspace_under`, `global_default_foreign_project_issue`) and a
@@ -607,7 +616,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # "record-shaped" line makes stderr not a tty, which already returns
     # `None` and skips wrapping wholesale.
     "tan/commands/sdk_cmd.py": 1274,
-    "tan/commands/validate_cmd.py": 1093,
+    # 1102, not 1093, as of tan-cli#498: a nine-line comment above the
+    # unreachable v2-structural-checks gate records WHY it is not ungated
+    # here (it would flip the FROZEN `validate-offline-clean` fixture) and
+    # points at `contract/README.md`'s "Known limitation" section for the
+    # full finding -- no behaviour changed, only the gap is now documented
+    # in-place instead of silent.
+    "tan/commands/validate_cmd.py": 1102,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
