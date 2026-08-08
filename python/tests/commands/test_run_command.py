@@ -432,3 +432,78 @@ def test_find_native_sim_exe_none_when_slice_skipped_even_with_stale_exe_on_disk
 
 def test_find_native_sim_exe_none_when_manifest_absent(tmp_path):
     assert run_cmd._find_native_sim_exe(str(tmp_path), None) is None
+
+
+# --------------------------------------------------------------------------
+# tan-cli#497 defect 4 -- the SDK-resolution warnings reach TEXT mode too
+# --------------------------------------------------------------------------
+
+
+def _broken_pin_project(tmp_path):
+    """A project whose `.alp/sdk-path` names a checkout that does not resolve,
+    beside a sibling `alp-sdk` that discovery DOES find -- so resolution
+    answers with a DIFFERENT checkout than the pin names. `conftest.py`'s
+    autouse fixture has already repointed HOME, so `~/.alp/sdk-default` cannot
+    interfere."""
+    sdk = tmp_path / "alp-sdk" / "scripts"
+    sdk.mkdir(parents=True)
+    (sdk / "alp_project.py").write_text("", encoding="utf-8")
+    project = tmp_path / "proj"
+    (project / ".alp").mkdir(parents=True)
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    (project / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}), encoding="utf-8"
+    )
+    return project
+
+
+def test_the_sdk_pin_warning_reaches_run_text_mode_not_only_json(tmp_path, monkeypatch):
+    """tan-cli#497 defect 4. `run` COMPUTED `sdk.project-pin-unresolved` and
+    prepended it to `issues`, but text mode prints `text_lines` -- a separate
+    list the warning never reached -- so the DEFAULT path discarded it
+    silently. `tan build` in the identical workspace printed the line and `tan
+    run` did not, which is exactly the silence tan-cli#263 exists to remove
+    and which `run_cmd`'s own comment says `run` must not repeat.
+
+    Fails against dev: stderr carries the build refusal and nothing else."""
+    project = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(project)
+    result = CliRunner().invoke(_app(), ["run"])
+    assert result.exit_code != 0
+    lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    assert lines[0].startswith("warning: .alp/sdk-path names")
+    assert "gone-checkout" in lines[0]
+    # The build refusal is still reported after it -- the warning is prepended,
+    # never a replacement.
+    assert len(lines) > 1
+
+
+def test_the_run_text_warnings_are_the_same_ones_json_reports_in_the_same_order(
+    tmp_path, monkeypatch
+):
+    """The two channels are composed from ONE list, so they cannot disagree
+    about which warnings applied. Pinned because the defect was precisely a
+    second, hand-maintained rendering that had drifted to empty."""
+    project = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(project)
+    text = CliRunner().invoke(_app(), ["run"]).stderr
+    doc = json.loads(CliRunner().invoke(_app(), ["run", "--format", "json"]).stdout)
+    warnings = [i for i in doc["issues"] if i["severity"] == "warning"]
+    assert [i["code"] for i in warnings] == ["sdk.project-pin-unresolved"]
+    for issue in warnings:
+        assert f"{issue['severity']}: {issue['message']}" in text
+
+
+def test_a_clean_workspace_prints_no_run_resolution_warning(tmp_path, monkeypatch):
+    """The negative control: with no pin and no foreign global default nothing
+    extra may be printed, or a fix that emitted unconditionally would look
+    identical to the cases above."""
+    sdk = tmp_path / "alp-sdk" / "scripts"
+    sdk.mkdir(parents=True)
+    (sdk / "alp_project.py").write_text("", encoding="utf-8")
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+    result = CliRunner().invoke(_app(), ["run"])
+    assert "warning: .alp/sdk-path names" not in result.stderr

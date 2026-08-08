@@ -57,6 +57,7 @@ from tan.commands.build_output import (
     resolve_project_context,
 )
 from tan.commands.sdk_cmd import sdk_resolution_issues
+from tan.core.flash_plan import slice_should_flash
 from tan.core.global_flags import accept_global_flags
 from tan.core.pending import is_pending_placeholder
 from tan.core.size import (
@@ -375,6 +376,53 @@ def _measure_slice(
     )
     budget = _resolve_slice_budget(sku, core_id, metadata_root)
 
+    # tan-cli#499 defect 2: `size` never consulted the manifest `status`, so a
+    # slice recorded `failed`/`skipped` was still measured from whatever
+    # `zephyr.elf` was left on disk -- RUN 1's artefact -- and emitted as an
+    # ordinary measured row (`source: "size-tool"`, exit 0, `issues: []`).
+    # `overlay_run_results_raw` deliberately PRESERVES the previous
+    # `output_artefact` when a run carries none, and an empty one falls
+    # through to the preserved `build_dir` probe, so the compensation
+    # `build_cmd` applies on the WRITE side does not help. Worse under
+    # `--fail-over-budget`, which then computes its verdict from stale bytes.
+    # This is the same stale-artefact class `flash_plan.slice_should_flash`
+    # and `image_bundle.slice_should_bundle` both guard -- whose own docstring
+    # claims the predicate is "shared on purpose so `flash` and `image` can
+    # never disagree about which artefacts are real"; `size` consulted
+    # neither.
+    #
+    # Only a DECLARED, non-ok status refuses. An ABSENT `status` still
+    # measures, unchanged: a manifest that omits the key says nothing about
+    # whether the slice built, and refusing there would break the oracle
+    # parity every no-status case has today (the whole `test_field_type_
+    # leniency_parity` family, and `test_size_measured_slice_and_the_sdk_
+    # envelope_key`, all write slices with no `status`).
+    #
+    # And only when a measurement was actually SUPPRESSED. When the probe
+    # found nothing anyway the row is already `not-built` for the honest
+    # reason, and saying so in the oracle's own words keeps byte parity on
+    # every frozen case that carries a non-ok status with no artefact behind
+    # it -- so this divergence materialises exactly where the defect does.
+    declared_status = slice_.get("status")
+    stale = (
+        sizes is not None
+        and isinstance(declared_status, str)
+        and not slice_should_flash(declared_status)
+    )
+    if stale:
+        return SliceSize(
+            core_id=core_id,
+            os=os_name,
+            status="not-built",
+            flash_total=budget.flash_total,
+            ram_total=budget.ram_total,
+            note=budget.note,
+            notes=[
+                f"slice did not build (manifest status: {declared_status}); "
+                f"refusing to report a stale measurement from {probed_elf}"
+            ],
+        )
+
     if sizes is None:
         return SliceSize(
             core_id=core_id,
@@ -436,6 +484,14 @@ class _Outcome:
     sdk: SdkInfo | None = None
 
 
+def _sdk_warning_lines(issues: list[Issue]) -> list[str]:
+    """The text-mode rendering of the `sdk_resolution_issues` pair
+    (tan-cli#497 defect 5). `{severity}: {message}` -- the shape `tan build`
+    and `tan run` already print a resolution warning with, so the same
+    workspace reads the same way whichever command a developer runs."""
+    return [f"{issue.severity}: {issue.message}" for issue in issues]
+
+
 def _error_outcome(
     project: Project,
     context: ProjectContext,
@@ -454,17 +510,23 @@ def _error_outcome(
     field so it can compute the same pair `_run` computes on the happy path,
     from the one shared `sdk_resolution_issues` -- no future early return
     through here can drop them again.
+
+    tan-cli#497 defect 5 (the `size` sibling the issue names alongside
+    `image`): that fix reached `issues` and stopped there -- `text` was built
+    without the pair, so the DEFAULT mode dropped both warnings while
+    `--format json` reported them. Composed from the SAME list now.
     """
     issues = sdk_resolution_issues(
         context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
     )
+    text = _sdk_warning_lines(issues)
     issues.append(Issue(code, "error", message))
     return _Outcome(
         ExitCode.RUNTIME_FAILURE,
         build_size_report([]),
         project,
         issues,
-        [f"size: {message}"],
+        [*text, f"size: {message}"],
         context.sdk,
     )
 
@@ -527,6 +589,12 @@ def _run(
     exit_code = ExitCode.SUCCESS
 
     if not json_mode:
+        # tan-cli#497 defect 5, happy-path half: the pair above went into
+        # `issues` and nowhere else, so a measured report solved out of a
+        # FALLBACK checkout printed its table with no mention that the
+        # project pin had been ignored. Ahead of the table so it is not lost
+        # below a long slice list.
+        text.extend(_sdk_warning_lines(issues))
         text.extend(render_table_lines(rows, _use_color(no_color, ci)))
         if size_bin is None:
             text.append(

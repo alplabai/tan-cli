@@ -14,7 +14,7 @@ in between. That is deliberate: comparing in one cwd means the envelopes' absolu
 paths are literally the same strings, so nothing has to be path-normalised and no
 normalisation can hide a divergence.
 
-Four things ARE normalised, each an implementation difference rather than a
+Five things ARE normalised, each an implementation difference rather than a
 contract one, and each named at its call site:
   - the OS-error tail `size` interpolates into `size.manifest-unavailable`
     (Rust's `io::Error` Display vs Python's `OSError`);
@@ -31,6 +31,15 @@ contract one, and each named at its call site:
     fallback (or its resolved candidates) to name in the message. Fixed only on
     the Python side because oracle parity cannot catch an SDK-integration defect
     the frozen oracle itself has.
+  - the `image.slice-skipped` notice Python emits for a slice whose manifest
+    DECLARES a non-`ok` `status` (tan-cli#499 defect 1) -- also a DELIBERATE
+    divergence: the oracle drops such a slice with a bare `continue`
+    (`image.rs`) and reports nothing at all, so a green `tan build` with one
+    executionPolicy-skipped slice produced `ok: true`, `exitCode: 0`,
+    `issues: []` and a `bundle-manifest.json` whose `boot_order` still named a
+    core `slices[]` carried no artefact for. Stripped from both sides rather
+    than reconciled; the pre-existing `(build_dir missing)` and unsafe-name
+    notices, which the oracle DOES emit, stay fully compared.
 
 Two cases are xfail(strict=True) -- the deliberate I-18 divergence. Strict, so
 if the oracle ever grows the same read-side reconciliation this file FAILS and
@@ -168,8 +177,44 @@ def _run(command, argv, cwd: Path, home: Path, extra=None):
     return proc.returncode, payload, proc.stderr
 
 
+#: An `image.slice-skipped` notice the PORT emits for a slice the manifest
+#: declares did not build (tan-cli#499 defect 1). Anchored on the whole
+#: `(status: ...)` tail so the PRE-EXISTING `(build_dir missing)` and
+#: `(core_id/os is not a safe archive name)` notices -- which the oracle DOES
+#: emit and which stay fully compared -- can never match it.
+_SLICE_STATUS_NOTICE = re.compile(r"^image: skipping .* \(status: .*\)$", re.S)
+
+
+def _drop_declared_status_skips(payload: dict) -> dict:
+    """Remove the tan-cli#499 defect 1 divergence from an envelope.
+
+    A DELIBERATE divergence, in the same register as the `(tried ...)` clause
+    above: the frozen oracle drops a non-`ok` slice from the bundle with a
+    bare `continue` and reports nothing (`image.rs`), so `tan image` answered
+    `ok: true`, `exitCode: 0`, `issues: []` while writing a
+    `bundle-manifest.json` whose `boot_order` named a core `slices[]` carried
+    no artefact for. Measured on the binary before diverging, not inferred.
+    Fixed only on the Python side because the oracle is frozen; recorded here
+    rather than by re-capturing `oracle_fixtures/`, which stays byte-frozen.
+
+    Applied to BOTH sides -- a no-op on the rust one, which has no such issue
+    to drop -- so this cannot mask a divergence in the opposite direction.
+    """
+    payload["issues"] = [
+        issue
+        for issue in payload.get("issues") or []
+        if not (
+            issue.get("code") == "image.slice-skipped"
+            and isinstance(issue.get("message"), str)
+            and _SLICE_STATUS_NOTICE.match(issue["message"])
+        )
+    ]
+    return payload
+
+
 def _normalise(payload: dict) -> dict:
     payload = json.loads(json.dumps(payload))
+    payload = _drop_declared_status_skips(payload)
     for issue in payload.get("issues") or []:
         message = issue.get("message")
         if not isinstance(message, str):
@@ -208,9 +253,14 @@ def _normalise(payload: dict) -> dict:
 
 
 def _normalise_text(text: str) -> str:
-    """The `text_mode` twin of `_normalise`'s `(tried ...)` strip: the same
-    notice line reaches stderr in text mode, so it needs the same divergence
-    carved out (alp-sdk#330)."""
+    """The `text_mode` twin of `_normalise`'s carve-outs: the same notice
+    lines reach stderr in text mode, so they need the same divergences carved
+    out -- the `(tried ...)` clause (alp-sdk#330) and the declared-status
+    slice skip (tan-cli#499 defect 1)."""
+    text = "\n".join(
+        line for line in text.splitlines(keepends=True)
+        if not _SLICE_STATUS_NOTICE.match(line.strip())
+    )
     return re.sub(
         r" \(tried .*?\)(?=; refusing to produce an incomplete bundle)",
         "",

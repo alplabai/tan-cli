@@ -744,3 +744,116 @@ def test_an_unexpected_failure_is_a_coded_envelope_not_a_traceback(
     envelope = json.loads(result.stdout)
     assert envelope["issues"][0]["code"] == "kconfig.internal-failure"
     assert "RuntimeError: resolver exploded" in envelope["issues"][0]["message"]
+
+
+# --------------------------------------------------------------------------
+# tan-cli#497 defect 2 -- the SDK-resolution warnings are no longer dropped
+# --------------------------------------------------------------------------
+
+
+def _broken_pin_project(tmp_path: Path) -> Path:
+    """A project whose `.alp/sdk-path` names a checkout that does not resolve,
+    beside a sibling `alp-sdk` that discovery DOES find -- so resolution
+    answers with a DIFFERENT checkout than the pin names, which is the exact
+    shape tan-cli#263/#464/#497 are about (not "resolved to nothing").
+    `conftest.py`'s autouse fixture has already repointed HOME, so
+    `~/.alp/sdk-default` cannot interfere."""
+    sdk = tmp_path / "alp-sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    (proj / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_he:\n    os: zephyr\n", encoding="utf-8"
+    )
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}), encoding="utf-8"
+    )
+    return proj
+
+
+def test_a_broken_project_pin_is_reported_on_a_kconfig_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tan-cli#497 defect 2. `presets_cmd.resolve_sdk` deliberately CARRIES
+    `broken_project_pin`/`foreign_global_default_for` onto the `ActiveSdk` it
+    returns, and this module read neither -- it imported `resolve_sdk` and
+    none of the issue helpers, and `_fail` hardcoded a single-element issue
+    list. So every refusal answered with its own error and nothing about the
+    pin, while `sdk current`, `presets`, `size` and `image` all surfaced it
+    from the identical workspace.
+
+    Fails against dev: there `issues` is `[kconfig.no-workspace]` alone."""
+    proj = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(proj)
+    result = runner.invoke(app, ["--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert [i["code"] for i in envelope["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "kconfig.no-workspace",
+    ]
+    assert envelope["issues"][0]["severity"] == "warning"
+    assert "gone-checkout" in envelope["issues"][0]["message"]
+    # The envelope always DID name the checkout that answered -- what was
+    # missing is the warning that the pin was ignored, not the resolved root.
+    assert envelope["sdk"]["sourceTier"] == "discovery"
+
+
+def test_a_broken_project_pin_reaches_kconfig_text_mode_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The DEFAULT mode: `_fail`'s text branch printed only `kconfig: <msg>`.
+
+    Fails against dev: stderr carries the workspace refusal and nothing
+    else."""
+    proj = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(proj)
+    result = runner.invoke(app, [])
+    assert result.exit_code == 2
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "gone-checkout" in result.stderr
+
+
+def test_the_success_emit_carries_the_pin_warning_not_a_literal_empty_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worst shape of the drop, and the one the issue singles out: a full
+    symbol menu at `ok: true`, `issues: []`, solved out of a checkout the
+    project pin does not name -- and this command is the alp-sdk-vscode
+    `prj.conf` LSP's live symbol feed, so the editor rendered that menu with
+    nothing in the envelope it could have noticed.
+
+    Fails against dev: there `issues` is `[]`."""
+    proj = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(proj)
+    _stub_workspace(monkeypatch)
+    body = _golden_emit_body()
+    monkeypatch.setattr("tan.planner_root.emit", lambda *a, **kw: json.dumps(body))
+
+    result = runner.invoke(app, ["--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    assert envelope["data"] == body
+    assert [i["code"] for i in envelope["issues"]] == ["sdk.project-pin-unresolved"]
+
+
+def test_a_clean_workspace_success_emit_still_reports_no_issues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative control. With no pin and no foreign global default the
+    success emit must stay `issues: []` -- without this, a fix that appended
+    something unconditionally would be indistinguishable from the one
+    above."""
+    sdk = _sdk_root(tmp_path)
+    proj = _project(tmp_path, "cores:\n  m55_he:\n    os: zephyr\n")
+    _stub_workspace(monkeypatch)
+    monkeypatch.setattr(
+        "tan.planner_root.emit", lambda *a, **kw: json.dumps(_golden_emit_body())
+    )
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["issues"] == []
