@@ -548,6 +548,14 @@ def _emit_failure(
         )
     else:
         stream = typer.get_text_stream("stderr")
+        # tan-cli#478 review finding 6: the JSON envelope has carried the
+        # foreign-default pair since the `Envelope` seam landed, but the
+        # DEFAULT text path never read `sdk_context_issues` at all -- a
+        # customer running plain `tan diff` (no `--format json`) saw only
+        # `text_lines` and never learned another project's checkout decided
+        # this. Printed first, matching the JSON list's own ordering.
+        for issue in sdk_context_issues or []:
+            stream.write(f"{issue.message}\n")
         for line in text_lines:
             stream.write(f"{line}\n")
     raise typer.Exit(int(exit_code))
@@ -695,11 +703,19 @@ def diff(
     root, board_path = resolve_project_paths(project, board_yaml)
     sdk = resolve_sdk(sdk_root, root)
     sdk_info = SdkInfo.from_resolution(sdk.path, sdk) if sdk is not None else None
-    # tan-cli#478: no hand-call here. `SdkInfo.from_resolution` above carries
-    # the pair, and `Envelope.__init__` appends it for EVERY command -- which
-    # is what stops the 33rd from forgetting. Removing this call is the proof
-    # the seam works: `diff` still discloses without it.
-    sdk_context_issues: list[Issue] = []
+    # tan-cli#478: `SdkInfo.from_resolution` above carries the pair, and
+    # `Envelope.__init__` appends it to the JSON envelope for every command --
+    # that seam alone is enough for `--format json`, and dedupes by code, so
+    # computing it again here changes nothing there. But `diff`'s text mode
+    # never touches `Envelope` at all (`_emit_failure`'s `else` branch and the
+    # success branch below both write straight to stderr), so without this
+    # the DEFAULT (non-JSON) path stayed silent -- tan-cli#478 review finding
+    # 6. Computed here, once, and threaded into both text branches below.
+    sdk_context_issues: list[Issue] = (
+        sdk_resolution_issues(sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for)
+        if sdk is not None
+        else []
+    )
     board_file = Path(board_path)
 
     if not board_file.exists():
@@ -786,6 +802,11 @@ def diff(
         )
     else:
         stream = typer.get_text_stream("stderr")
+        # tan-cli#478 review finding 6: printed unconditionally, unlike the
+        # `--quiet`-suppressed entries below -- a foreign-checkout warning is
+        # not the "non-essential" output `--quiet` exists to trim.
+        for issue in sdk_context_issues:
+            stream.write(f"{issue.message}\n")
         for line in _render_text(entries, board_path, quiet):
             stream.write(f"{line}\n")
     raise typer.Exit(int(ExitCode.SUCCESS))

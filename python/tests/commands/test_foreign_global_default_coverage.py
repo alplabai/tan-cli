@@ -146,6 +146,31 @@ def test_every_command_discloses_a_foreign_global_default(name, argv, two_projec
     )
 
 
+@pytest.mark.parametrize(
+    "name,argv", FOREIGN_DEFAULT_COMMANDS, ids=[n for n, _ in FOREIGN_DEFAULT_COMMANDS]
+)
+def test_every_command_discloses_it_in_default_text_mode_too(name, argv, two_projects):
+    """tan-cli#478 review finding 6: the JSON envelope carrying the pair is
+    not enough on its own -- a diagnostic the customer cannot see is not a
+    diagnostic, and the DEFAULT invocation (no `--format json`) is what a
+    human actually runs. Same precondition as the parametrized JSON case
+    above; asserts on `proc.stderr` instead of the envelope, with no
+    `--format` flag at all.
+    """
+    sub_a, proj_b, _new_sdk_b, env_extra = two_projects
+
+    proc = run_tan_with_env(*argv, cwd=sub_a, env_extra=env_extra)
+
+    assert "machine-global default SDK" in proc.stderr, (
+        f"DEFECT (tan-cli#478): {name}'s default text output did not disclose "
+        f"the foreign global default:\n{proc.stderr}"
+    )
+    assert str(proj_b).replace("\\", "/") in proc.stderr, (
+        f"{name}'s text output warned, but did not name the project the "
+        f"pointer was written for:\n{proc.stderr}"
+    )
+
+
 def test_the_support_bundle_file_itself_records_it(two_projects):
     """The envelope is not enough for this one, and an earlier revision of this
     test only checked the envelope -- which was false assurance over a real

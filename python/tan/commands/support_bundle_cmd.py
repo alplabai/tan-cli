@@ -837,6 +837,23 @@ def support_bundle(
         )
 
     if not json_mode:
+        # tan-cli#478 review finding 6: the bundle FILE and the JSON envelope
+        # both carry `sdkResolution`/the foreign-default pair now, but
+        # `outcome.text` (every `_Outcome` constructor above) never did --
+        # the default `tan support-bundle` with no `--format` stayed silent.
+        # Read off `outcome.issues` rather than recomputed from `outcome.sdk`:
+        # `resolve_debug_project_context`'s `context.sdk` is a bare
+        # `SdkInfo(sdk_root, sdk_tier)` (the legacy site
+        # `test_sdk_info_is_built_from_a_resolution.py` ledgers for
+        # `inspect_cmd.py`, shared by every caller of that resolver), so it
+        # carries neither `foreign_global_default_for` nor
+        # `broken_project_pin` -- recomputing from it would silently print
+        # nothing. `_run`'s success path already builds `issues` from
+        # `context`'s own (correctly carried) fields; this only ever
+        # re-prints what is already there.
+        for issue in outcome.issues:
+            if issue.code.startswith("sdk."):
+                typer.echo(issue.message, err=True)
         for line in outcome.text:
             typer.echo(line, err=True)
         if verbose and outcome.verbose_hint_eligible:

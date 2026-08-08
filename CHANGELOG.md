@@ -25,6 +25,33 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`sdk.global-default-foreign-project` now reaches every command that
+  resolves an SDK, in DEFAULT text output as well as `--format json`, not
+  only the five `doctor`/`generate`/`build`/`presets`/`examples` that
+  happened to be wired for it (#464).** A customer building against a
+  different SDK than they think got no warning from `inspect`, `trace`,
+  `validate`, `diff`, `support-bundle`, or `migrate`/`lock`/`quality`
+  (`west_forward_cmd.py`) -- `ok: true`, `issues: []`, while `validate`
+  SPAWNED that foreign checkout's own schema validator and
+  `migrate`/`lock`/`quality` spawned `west` itself out of it. `support-bundle`
+  was the sharpest case: the one artefact a user sends to explain a broken
+  machine carried the fact nowhere, not in the envelope and not in the
+  bundle FILE. Fixed at one seam -- every SDK ladder already answers with
+  `foreign_global_default_for`/`broken_project_pin`; `SdkInfo.from_resolution`
+  now carries both through onto the envelope's `sdk` block (off the wire --
+  the wire shape stays `{root, sourceTier}`), and `Envelope.__init__` turns
+  them into the `sdk.global-default-foreign-project`/`sdk.project-pin-unresolved`
+  pair for every command's JSON envelope from there, so a new command cannot
+  forget it (`tests/gates/test_sdk_info_is_built_from_a_resolution.py` is
+  the ratchet that keeps a raw `SdkInfo(...)` construction from reintroducing
+  the drop). Text mode has no `Envelope` to lean on -- `diff`/`inspect`/
+  `trace`/`support-bundle`/`validate` and the three `west`-forwarding verbs
+  all write straight to stderr (or, for `west`-forwarding, hand stdio to the
+  child) -- so each now prints the same warning first. `validate`'s own
+  JSON/SARIF/diagnostic-v1 documents keep the advisory OUT of
+  `data.issueCount` and out of the board-anchored formats, so a CI job
+  uploading SARIF does not annotate line 1 of a customer's board.yaml with a
+  fact about the host. (#478)
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
   gaps found reviewing the fix.** All under (#489):

@@ -816,6 +816,15 @@ def _emit(
             # `--format json`'s `issues[].message`) already names where tan
             # looked and the remedy -- see the guard above.
             stream.write("validate: no board.yaml to validate\n")
+            # tan-cli#478 review finding 6: this branch prints `findings[0]`
+            # alone -- deliberately, per tan-cli#350, to keep the verdict
+            # wording narrow -- but the sdk.* advisories `findings` filters
+            # OUT of `issueCount`/sarif/diagnostic-v1 still belong on the
+            # customer's screen; the other two branches below already print
+            # them because they loop over the unfiltered `issues`.
+            for issue in issues:
+                if issue.code.startswith("sdk."):
+                    stream.write(f"{issue.message}\n")
             stream.write(f"{findings[0].message}\n")
         elif outcome != OUTCOME_CLEAN:
             stream.write("validate: validation failure\n")
