@@ -9,7 +9,41 @@ from an un-revendored SDK change.
 
 ## Source
 
-- **Current vendor point (all templates):** **`v0.15.0-rc1`** (`996937ac`) —
+- **Current vendor point (all templates):** **`f30f4d4b`** (alp-sdk `dev`,
+  the same commit `parity.yml`'s `PINNED_SDK_TAG` now names) — re-vendored by
+  the tan-cli#543/#544/#545 planner re-sync. **Eleven** files moved:
+  - The **seven** `README.md` doc-link files (`diagnostics`, `minimal` and
+    `sensor` for both SKUs, plus `iot`/E1M-AEN801) change only
+    `blob|tree/v0.15.0-rc1/` → `blob|tree/v0.15.0/`. Those bytes are now the
+    EMIT'S OWN: alp-sdk has since cut the real `v0.15.0` tag (`e2928b9f`), so
+    tan-cli#384's seven `DELIBERATE_EDITS` entries in
+    `tests/parity/scaffold_byte_parity.py` are **RETIRED** rather than
+    re-pointed — that module's doctrine makes an `un_edit` with nothing left
+    to undo a hard failure, so a healed divergence must force its entry out.
+    The `un_edit_doc_link_ref` transform is kept for the next pre-release
+    vendor point.
+  - `edge-ai`'s **two** `README.md` files gain the alp-sdk#1266 board-target
+    rewrite, and its **two** `testcase.yaml` files follow their example's
+    current content. `edge-ai/*/testcase.yaml` is RETAINED, not dropped: the
+    catalog record still carries
+    `testcase_yaml: ["examples/ai/cold-chain-monitor/testcase.yaml"]` and the
+    file exists on disk, so `augment_with_example_extras` diffs it like any
+    other file (both `edge-ai` pairs report 8 files, not 6).
+  - `iot`/E1M-AEN801's `CMakeLists.txt` keeps its tan-cli#379 deliberate edit
+    and was NOT rewritten.
+
+  Re-vendored by re-running the live emit through
+  `tests/parity/scaffold_byte_parity.py`'s OWN `discover_vendored_matrix` +
+  `emit_live_scaffold` + `augment_with_example_extras`, writing each changed
+  path with `newline="\n"` and never touching a `DELIBERATE_EDITS` path — the
+  same throwaway-driver shape as the bumps below, run on Linux (Python
+  3.12.3). Verified after: `scaffold_byte_parity.py --sdk <f30f4d4b>` rc 0,
+  **9/9** (template, sku) pairs PASS.
+
+  This bump lands in the SAME commit as the `PINNED_SDK_TAG` move and the
+  `tan/planner/` port it depends on, because either half alone reds a seam.
+
+- **Previous vendor point:** **`v0.15.0-rc1`** (`996937ac`) —
   the release tag, re-vendored to match `parity.yml`'s `PINNED_SDK_TAG` move
   off `v0.14.0`. Same seven `README.md` files as the v0.14.0 bump below and
   NOTHING else: every changed line differs only by the doc-version link
@@ -57,9 +91,21 @@ from an un-revendored SDK change.
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
 - Repo: `alplabai/alp-sdk`
-- Ref: `v0.15.0-rc1` (release tag — `git checkout v0.15.0-rc1` reproduces the
-  exact pinned commit; `dev`'s tip does not)
-- Commit: **v0.15.0-rc1 (`996937ac`)** — the seven READMEs above. History below.
+- Ref: `v0.15.0` — the ref every shipped doc link in this tree pins, and the
+  one `tests/core/test_template_integrity.py` reads off THIS line to check
+  them against. It is now the emit's OWN rendered ref rather than a hand-edit:
+  the emit renders the link ref from the SDK's `VERSION` (dropping any
+  pre-release suffix), and alp-sdk has since cut the real `v0.15.0` tag
+  (`e2928b9f`), so **tan-cli#384's hand-edit is retired and the seven
+  `DELIBERATE_EDITS` entries with it.** Links resolve as emitted.
+- Commit: **`f30f4d4b`** (alp-sdk `dev`) — the checkout the emit was RUN
+  against, and the same commit `parity.yml`'s `PINNED_SDK_TAG` now names.
+  Distinct from `Ref:` above on purpose: `Ref:` is the ref the rendered LINKS
+  name (a browsable tag, `v0.15.0`), `Commit:` is where the BYTES came from.
+  `f30f4d4b` is 6 contract-surface commits past the `v0.15.0` tag, which is
+  why the two are not one line.
+- Previous: `v0.15.0-rc1` (release tag) / **`996937ac`** — the seven READMEs
+  described in the entry below. History below.
 - Previous: **v0.14.0 (`ef79eab0`)** — the release tag, re-vendored for tan
   v0.4.1. Seven `README.md` files moved (`diagnostics`, `minimal` and `sensor`
   for both SKUs, plus `iot`/E1M-AEN801), and NOTHING else: all 40 changed

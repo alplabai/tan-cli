@@ -18,7 +18,7 @@ debugger.
 * **Portable, chip-free.** Only `<alp/*>` headers -- no chip driver,
   no vendor header -- so the *same* `src/main.c` builds and runs on
   every E1M family (a Ring 1 example per
-  [`docs/portability.md`](https://github.com/alplabai/alp-sdk/blob/v0.15.0-rc1/docs/portability.md)).
+  [`docs/portability.md`](https://github.com/alplabai/alp-sdk/blob/v0.15.0/docs/portability.md)).
 * **SKIP is not FAIL.** A check whose backend has no probe returns
   `ALP_ERR_NOSUPPORT`, which the self-test reports as **SKIP** -- "this
   backend can't answer", not "the hardware is broken". Conflating a
@@ -103,7 +103,7 @@ still latches, so the twister console harness passes regardless.
 
 ## Reference
 
-- [`<alp/hw_info.h>`](https://github.com/alplabai/alp-sdk/blob/v0.15.0-rc1/include/alp/hw_info.h) -- SoM/SoC identity surface.
-- [`<alp/power.h>`](https://github.com/alplabai/alp-sdk/blob/v0.15.0-rc1/include/alp/power.h) -- operating-point profile surface.
-- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/v0.15.0-rc1/include/alp/peripheral.h) -- I2C surface.
-- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/v0.15.0-rc1/examples/peripheral-io/i2c-scanner) -- standalone bus-scan companion.
+- [`<alp/hw_info.h>`](https://github.com/alplabai/alp-sdk/blob/v0.15.0/include/alp/hw_info.h) -- SoM/SoC identity surface.
+- [`<alp/power.h>`](https://github.com/alplabai/alp-sdk/blob/v0.15.0/include/alp/power.h) -- operating-point profile surface.
+- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/v0.15.0/include/alp/peripheral.h) -- I2C surface.
+- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/v0.15.0/examples/peripheral-io/i2c-scanner) -- standalone bus-scan companion.
