@@ -759,6 +759,31 @@ All notable changes to `tan` are documented here. Format follows
     suite runs on) asserts the shipped source keeps it there. (Inspected,
     not executed against a real `pwsh`.) (#490)
 
+- **`tan/planner/zephyr_board.py`'s module docstring omitted the
+  hand-maintained per-board `Kconfig` from its "NOT GENERATED" list**,
+  naming only `board.cmake`. A porter following the docstring to copy
+  `tan generate --target zephyr-board`'s `build/boards/<board>/` output
+  into a real `zephyr/boards/` tree would drop `Kconfig` -- the file that
+  sets `CPU_HAS_CUSTOM_FIXED_SOC_MPU_REGIONS default y` and selects the
+  custom E8 MPU region table in place of Zephyr's generic 2-region
+  FLASH_0/SRAM_0 fallback -- with no diagnostic, silently downgrading a
+  production-MRAM-boot (Flow D) board to the unsafe generic MPU map. The
+  docstring now names both hand-maintained files, matching alp-sdk's own
+  `tests/scripts/test_gen_zephyr_board.py`'s `HAND_MAINTAINED =
+  frozenset({"board.cmake", "Kconfig"})`. Comment-only: no emitted board
+  file changed, so this needed no re-pin of `HAND_PORT_HASHES` (which
+  pins alp-sdk's `scripts/gen_zephyr_board.py`, not this file's content)
+  and does not disturb `test_planner_emit_parity.py`. The identical gap
+  exists in alp-sdk's own `scripts/gen_zephyr_board.py` docstring and is
+  tracked for a matching upstream fix, independent of this correction.
+  Split out of tan-cli#493's defect 8; the other 23 numbered defects
+  across #492 (15), #493 (7 remaining), and #517 were found, during this
+  same audit, to be byte-identical logic already present in alp-sdk's
+  current `scripts/alp_orchestrate/**` / `scripts/gen_zephyr_board.py`
+  -- porting a local fix for any of them into `tan/planner/` alone would
+  fork the hash-pinned mirror, so none of those 23 were changed here;
+  each needs the upstream alp-sdk fix first, then a re-vendor.
+
 
 
 ## [0.5.1] — 2026-08-04

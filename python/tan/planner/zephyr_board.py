@@ -30,8 +30,8 @@ Scope (issue #523, first slice):
 
   - Alif Ensemble (the `aen` family, e.g. E1M-AEN801 m55_hp/m55_he) is
     fully generated: every file in the hand-authored board tree except
-    `board.cmake` (see NOT GENERATED below) is produced here,
-    byte-identical to the committed tree -- proven by
+    `board.cmake` and `Kconfig` (see NOT GENERATED below) is produced
+    here, byte-identical to the committed tree -- proven by
     `tests/scripts/test_gen_zephyr_board.py`.
   - Renesas RZ/V2N-family boards (`v2n` / `v2n-m1`, e.g. E1M-V2N101,
     E1M-V2M101 `m33_sm`) generate only the family-agnostic files
@@ -48,15 +48,25 @@ Scope (issue #523, first slice):
     `metadata/pinmux/<family>-internal.yaml` (or similar) source and
     extends this module.
 
-  NOT GENERATED (any family): `board.cmake`.  The hand-authored AEN
-  `board.cmake` pair (HP/HE) intentionally carries asymmetric prose --
-  one board's file hosts the full SETOOLS/J-Link bench-bring-up
-  runbook, the sibling's just points at it -- which is a documentation
-  choice, not a hardware fact, so there is nothing in metadata for it
-  to derive from.  Flasher/debugger `board_runner_args()` wiring stays
-  hand-authored until that asymmetry is either resolved (duplicate the
-  full rationale in both) or the prose itself is promoted into a
-  metadata field.
+  NOT GENERATED (any family): `board.cmake` and `Kconfig`.  The
+  hand-authored AEN `board.cmake` pair (HP/HE) intentionally carries
+  asymmetric prose -- one board's file hosts the full SETOOLS/J-Link
+  bench-bring-up runbook, the sibling's just points at it -- which is a
+  documentation choice, not a hardware fact, so there is nothing in
+  metadata for it to derive from.  Flasher/debugger `board_runner_args()`
+  wiring stays hand-authored until that asymmetry is either resolved
+  (duplicate the full rationale in both) or the prose itself is promoted
+  into a metadata field.  `Kconfig` selects the custom E8 MPU region
+  table (`CPU_HAS_CUSTOM_FIXED_SOC_MPU_REGIONS default y`, which gates
+  `mpu_regions_e8.c` in `zephyr/CMakeLists.txt` in place of Zephyr's
+  generic 2-region FLASH_0/SRAM_0 fallback); Zephyr's own `hwm_v2.cmake`
+  unconditionally osources a bare `Kconfig` in a board directory whether
+  or not it exists, which is what lets this hand-maintained file survive
+  regeneration exactly as `board.cmake` does.  A porter copying the
+  `build/boards/<board>/` output this generator writes into a real
+  `zephyr/boards/` tree must copy `Kconfig` across by hand alongside
+  `board.cmake`, or the build silently falls back to the unsafe generic
+  MPU map on a production-MRAM-boot (Flow D) board.
 """
 
 from __future__ import annotations

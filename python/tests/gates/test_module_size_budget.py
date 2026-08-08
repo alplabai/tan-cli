@@ -788,7 +788,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # 975, not 970, as of tan-cli#485: `_resolve_variant` grew a
     # case/whitespace-insensitive `is_tbd`-shaped TBD check (alp-sdk #1048,
     # matching `som_metadata.py::_resolve_silicon_variant`'s own copy).
-    "tan/planner/zephyr_board.py": 975,
+    # 985, not 975, as of tan-cli#493 (defect 8): the module docstring's
+    # "NOT GENERATED" paragraph omitted the hand-maintained per-board
+    # `Kconfig` (only named `board.cmake`), which is undocumented
+    # anywhere else under `tan/` -- a porter following the docstring
+    # alone would drop `Kconfig` and silently lose the custom E8 MPU
+    # region table. Comment-only: no emitted-file behaviour changed,
+    # so this does not touch HAND_PORT_HASHES (which pins alp-sdk's
+    # `scripts/gen_zephyr_board.py`, not this file) or the emit-parity
+    # gate. The identical gap exists upstream and should be fixed there
+    # too, independently of this docstring correction.
+    "tan/planner/zephyr_board.py": 985,
     "tan/commands/support_bundle_cmd.py": 834,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
