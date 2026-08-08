@@ -418,17 +418,29 @@ phase_diag() {
   envelope "monitor envelope"            -- monitor --port /dev/tan-surface-no-such-port
 
   step "model without a subcommand"    1 -- model --project "$PROJ" --sdk-root "$SDK"
-  # `--out` is pinned to an ABSOLUTE path inside $WORK on purpose: model_cmd.py
-  # resolves a relative `--out` against the *project* root
-  # (model_cmd.py:352-354), not the harness's scratch dir. Against a project
-  # whose board.yaml carries a `models:` block that resolution would land
-  # `build/models` inside "$PROJ" itself -- fine in sandbox mode (the whole
-  # project IS scratch), but a real write into the operator's own project when
-  # this runs un-gated (no can_mutate check, on purpose: it's a no-op read when
-  # there is no `models:` block) against `--project`. An absolute `--out` makes
-  # the write land in $WORK regardless of mode or the board's `models:` block.
-  step "model build (models: optional)" 0 \
-      -- model build --project "$PROJ" --sdk-root "$SDK" --out "$WORK/model-build-out"
+  # `--out` is pinned to an ABSOLUTE path inside $WORK: model_cmd.py resolves a
+  # relative `--out` against the *project* root (model_cmd.py:352-354), not the
+  # harness's scratch dir, so an unpinned `--out` against a project whose
+  # board.yaml carries a `models:` block would land `build/models` inside
+  # "$PROJ" itself. The absolute path makes the write land in $WORK regardless
+  # of mode or the board's `models:` block.
+  #
+  # Gated on can_mutate like every other writing step, even though the pinned
+  # --out keeps the write itself inside $WORK: a real --project's `models:`
+  # block is board-owned content this harness cannot predict -- unlike the
+  # scaffolded sandbox project (which never declares one, so this is always the
+  # `models: []` no-op success path there), a real project's models may name
+  # sources the harness's SDK/toolchain cannot compile, and hard-asserting exit
+  # 0 against that unknown shape is the same "reports a verdict it did not
+  # earn" failure mode the envelope/xstep fixes above closed. Requiring
+  # --allow-mutate here matches the operator's own signal that running real
+  # commands against their project is what they asked for.
+  if can_mutate; then
+    step "model build (models: optional)" 0 \
+        -- model build --project "$PROJ" --sdk-root "$SDK" --out "$WORK/model-build-out"
+  else
+    skip "model build" "real project without --allow-mutate"
+  fi
 
   # support-bundle WRITES $PROJ/.alp-support/*.json (proven right below by
   # reading it back) -- gate it like the project phase's other writing steps.
