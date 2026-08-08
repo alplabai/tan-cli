@@ -67,17 +67,30 @@ def real_plan(name: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def run_tan(*argv, cwd, scrub_path=False):
+def run_tan(*argv, cwd, scrub_path=False, env_overrides=None):
     """Spawn the port. ``scrub_path`` empties ``PATH`` so no plan tool
     (``west``/``bitbake``) can possibly resolve -- a slice must then take the
     ``executionPolicy.missingTool`` branch instead of launching a real
-    multi-minute Zephyr/Yocto build on whichever developer machine runs this."""
+    multi-minute Zephyr/Yocto build on whichever developer machine runs this.
+
+    ``env_overrides`` sets (or, on a ``None`` value, DELETES) variables in the
+    child's environment. Needed from tan-cli#547 on: ``${TOOLCHAIN_ROOT}``
+    resolution reads ``ZEPHYR_SDK_INSTALL_DIR`` and scans ``$HOME``, and a
+    test that wants a specific host shape has to build it in the CHILD --
+    ``monkeypatch.setenv`` in the parent reaches the child only because
+    ``os.environ`` is copied here, which is exactly what this makes explicit
+    rather than incidental."""
     env = {
         **os.environ,
         "PYTHONPATH": os.pathsep.join(
             [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
         ),
     }
+    for key, value in (env_overrides or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
     if scrub_path:
         env["PATH"] = ""
     return subprocess.run(
@@ -1275,6 +1288,34 @@ def test_alp_sdk_root_env_is_not_a_discovery_tier(project, monkeypatch):
 # --- an unresolved ${TOOLCHAIN_ROOT} is never dispatched --------------------
 
 
+def _host_with_installs(tmp_path, *names):
+    """Environment overrides that make the CHILD see a host with exactly
+    ``names`` worth of Zephyr SDK installs (tan-cli#547).
+
+    ``ZEPHYR_SDK_INSTALL_DIR`` is deleted, not merely unset in the parent:
+    it short-circuits every other branch of the resolver, so leaving a
+    developer's own value in place would make these tests measure that
+    machine instead of the host they build. (`tests/conftest.py`'s autouse
+    fixture already scrubs it for the parent; this keeps the intent visible
+    at the one place it decides an outcome.)
+
+    Two or more installs is the ONLY deterministic way to force an
+    unresolved verdict from a child process: `/opt` is a real scan root and
+    a developer box with `/opt/zephyr-sdk-0.16.5` would otherwise resolve
+    where this test needs a demotion. An extra install there only pushes the
+    count further past one, so the ambiguous verdict holds either way.
+    """
+    home = tmp_path / "toolchain-host"
+    for name in names:
+        (home / name).mkdir(parents=True)
+    home.mkdir(exist_ok=True)
+    return {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "ZEPHYR_SDK_INSTALL_DIR": None,
+    }
+
+
 @pytest.mark.parametrize(
     "policy,expected_exit,expected_status,expected_severity",
     # tan-cli#283: BOTH slices of this fixture end up not-succeeded here --
@@ -1286,15 +1327,22 @@ def test_alp_sdk_root_env_is_not_a_discovery_tier(project, monkeypatch):
     ids=["missingTool=skip", "missingTool=fail"],
 )
 def test_a_slice_still_naming_toolchain_root_is_routed_not_spawned(
-    project, policy, expected_exit, expected_status, expected_severity
+    project, tmp_path, policy, expected_exit, expected_status, expected_severity
 ):
-    # This port resolves no toolchain root, so a tokened plan naming
-    # ${TOOLCHAIN_ROOT} in a slice's own fields leaves the literal token
-    # behind. Dispatching that slice would run a command with an
-    # unsubstituted token in its argv -- a silent wrong-path build. It must
-    # instead take `executionPolicy.missingTool`, whose default is skip: a
-    # host-provisioning fact, not a plan bug (and so NOT plan-fatal, which
-    # would take every OTHER slice down with it).
+    # A host with no ONE resolvable toolchain root leaves a tokened plan's
+    # ${TOOLCHAIN_ROOT} literal behind in the slice's own fields. Dispatching
+    # that slice would run a command with an unsubstituted token in its argv
+    # -- a silent wrong-path build. It must instead take
+    # `executionPolicy.missingTool`, whose default is skip: a host-
+    # provisioning fact, not a plan bug (and so NOT plan-fatal, which would
+    # take every OTHER slice down with it).
+    #
+    # tan-cli#547 changed HOW that host is arranged, not what is asserted.
+    # Before the resolver landed, `toolchain_root=None` was hardcoded, so
+    # every host was this host and the test needed no setup at all. Now the
+    # unresolved condition has to be BUILT -- which is the whole point of the
+    # issue: it must no longer be the unconditional default.
+    host = _host_with_installs(tmp_path, "zephyr-sdk-0.16.5", "zephyr-sdk-1.0.1")
     sdk = project / "sdk"
     (sdk / "scripts").mkdir(parents=True)
     (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8", newline="")
@@ -1320,6 +1368,7 @@ def test_a_slice_still_naming_toolchain_root_is_routed_not_spawned(
         "--format",
         "json",
         cwd=project,
+        env_overrides=host,
     )
 
     env = envelope_of(proc)
@@ -1330,9 +1379,77 @@ def test_a_slice_still_naming_toolchain_root_is_routed_not_spawned(
     issue = next(i for i in env["issues"] if i["code"] == "build.toolchain-root-unresolved")
     assert issue["severity"] == expected_severity
     assert "TOOLCHAIN_ROOT" in issue["message"]
+    # tan-cli#547: the reason names the AMBIGUITY, not "no toolchain
+    # install is detectable" -- this host has two, and telling its owner to
+    # install an SDK is the wrong instruction. Pre-fix both hosts got the
+    # identical no-toolchain sentence, because there was only one.
+    assert "several toolchain installs" in issue["message"]
+    assert "zephyr-sdk-0.16.5" in issue["message"]
+    assert "zephyr-sdk-1.0.1" in issue["message"]
 
     # The OTHER slice is untouched by one slice's provisioning gap.
     assert env["data"]["slices"][1]["status"] == "skipped"
+
+
+def test_a_slice_naming_toolchain_root_builds_on_a_host_that_has_one(project, tmp_path):
+    """tan-cli#547's headline, end to end and BOTH ways: the same tokened
+    plan the case above demotes must SUBSTITUTE and dispatch on a host that
+    has a toolchain.
+
+    PRE-FIX this fails. `build_cmd._build` passed `toolchain_root=None`
+    unconditionally (with a comment claiming resolution was lazy and only
+    unresolvable hosts demoted), so this slice demoted here too: measured
+    pre-fix, `data.slices[0].status` was `"skipped"`, a
+    `build.toolchain-root-unresolved` issue was present, and the sentinel
+    below was NOT in the substituted argv because the slice never ran.
+    A test that only checked "demotes when unresolvable" -- which is what the
+    suite had -- passed unchanged against the broken tree, which is why the
+    issue asks for this one by name.
+
+    The host is arranged with `ZEPHYR_SDK_INSTALL_DIR`, not with a scanned
+    install: the env var short-circuits `/opt`, so the outcome does not
+    depend on whether the machine running this suite happens to have an SDK
+    of its own."""
+    sdk = project / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8", newline="")
+    toolchain = tmp_path / "zephyr-sdk-1.0.1"
+    toolchain.mkdir()
+
+    doc = two_slice_plan(ALL_ARTEFACTS)
+    doc["planPathMode"] = "tokened"
+    doc["slices"][0]["command"]["args"] = [
+        "-c",
+        "import sys; print('RESOLVED ' + sys.argv[1])",
+        "${TOOLCHAIN_ROOT}/bin/cmake",
+    ]
+    plan = write_plan(project, doc)
+    proc = run_tan(
+        "build",
+        "--plan-from",
+        str(plan),
+        "--execute",
+        "--board-yaml",
+        "board.yaml",
+        "--sdk-root",
+        str(sdk),
+        "--format",
+        "json",
+        cwd=project,
+        env_overrides={
+            "HOME": str(tmp_path / "empty-home"),
+            "USERPROFILE": str(tmp_path / "empty-home"),
+            "ZEPHYR_SDK_INSTALL_DIR": str(toolchain),
+        },
+    )
+
+    env = envelope_of(proc)
+    assert [i for i in env["issues"] if i["code"] == "build.toolchain-root-unresolved"] == []
+    assert env["data"]["slices"][0]["status"] != "skipped", env
+    # The substituted value reached the argv -- not the literal token, and
+    # not the empty string (which would have made it the HOST root `/bin`).
+    assert f"RESOLVED {toolchain.as_posix()}/bin/cmake" in proc.stderr, proc.stderr
+    assert "${TOOLCHAIN_ROOT}" not in proc.stderr
 
 
 # --- tan-cli#483: cores.<id>.app must resolve to a real directory -----------
@@ -1643,6 +1760,182 @@ def test_an_app_dir_that_is_a_regular_file_is_named_not_a_directory(project):
     assert "is not a directory" in issue["message"]
     assert "does not exist" not in issue["message"]
     assert str(app_file) in issue["message"]
+
+
+# --- tan-cli#517: the app-dir parent fallback is announced, never silent ----
+
+
+def _sources_only_project(project, core_dirs=("src",)):
+    """The shipped convention: ONE `CMakeLists.txt` at the project root doing
+    `target_sources(app PRIVATE src/main.c)`, with `cores.<id>.app` pointing
+    at a sources subdirectory that carries no `CMakeLists.txt` of its own.
+    96 of 105 enabled app-carrying core entries across alp-sdk `dev`'s own
+    examples have exactly this shape."""
+    (project / "CMakeLists.txt").write_text("", encoding="utf-8", newline="")
+    made = []
+    for name in core_dirs:
+        d = project / name
+        d.mkdir()
+        made.append(d)
+    return made
+
+
+_ECHOING_COMMAND = {
+    "tool": sys.executable,
+    "args": ["-c", "print('SLICE RAN')"],
+    "cwd": None,
+}
+
+
+def test_the_app_dir_parent_fallback_is_announced_naming_both_paths(project):
+    """The fix for tan-cli#517. `cores.m55_hp.app` names a real directory
+    with no `CMakeLists.txt`, so the planner points `west build` at its
+    PARENT. That still HAPPENS -- refusing it would break 91% of the SDK's
+    own examples and the issue rules a refusal out in as many words -- but it
+    must be visible in `issues[]`, naming the configured path AND the
+    substituted one.
+
+    PRE-FIX this fails: `build.app-dir-substituted` did not exist, the
+    envelope carried `issues: []`, and the only trace of the substitution was
+    inside the frozen planner. Verified against the pre-fix tree -- the
+    `next(...)` lookup below raised `StopIteration`.
+
+    The slice must still DISPATCH: this is an advisory, not a hold. Proven by
+    the sentinel on stderr rather than by an exit code -- a `zephyr` slice
+    whose stand-in command produces no Zephyr output trips the port's own
+    post-build "this never loaded Zephyr" check (`build.slice-failed`), which
+    is unrelated to this issue and would be asserted away here. `zephyr` is
+    not negotiable for this case: it is the only backend whose app dir the
+    planner substitutes at all."""
+    (src,) = _sources_only_project(project)
+    plan = write_plan(
+        project,
+        _app_dir_plan(_app_dir_slice("m55_hp", "zephyr", str(src), command=_ECHOING_COMMAND)),
+    )
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert "SLICE RAN" in proc.stderr, env
+    assert env["data"]["slices"][0]["status"] != "skipped", env
+    assert [i for i in env["issues"] if i["code"] == "build.app-dir-missing"] == []
+
+    issue = next(i for i in env["issues"] if i["code"] == "build.app-dir-substituted")
+    assert issue["severity"] == "info"
+    assert "m55_hp" in issue["message"]
+    # BOTH paths. Naming only the substituted one would read identically to a
+    # correctly-configured self-contained app dir.
+    assert str(src) in issue["message"]
+    assert str(project) in issue["message"]
+
+
+def test_the_multicore_typo_that_builds_the_other_cores_app_is_named(project):
+    """The harm tan-cli#517 is actually about. Two cores, each with its own
+    self-contained app dir; one core's `app:` is a typo that still names an
+    existing directory (`docs/`). The fallback lands it on the project root
+    -- where the OTHER core's application lives -- and the build succeeds
+    against the wrong tree.
+
+    PRE-FIX: `issues[]` carried nothing at all about the app directory --
+    nothing anywhere said the configured directory was not the one built.
+    The sibling core is untouched either way; what flips is that the typo is
+    now named. Asserted on `issues[]` and not on the exit code for the same
+    reason as the case above."""
+    _sources_only_project(project, core_dirs=("docs",))
+    good = project / "m33_sm"
+    good.mkdir()
+    (good / "CMakeLists.txt").write_text("", encoding="utf-8", newline="")
+    plan = write_plan(
+        project,
+        _app_dir_plan(
+            _app_dir_slice("m55_hp", "zephyr", str(project / "docs"), command=_ECHOING_COMMAND),
+            _app_dir_slice("m33_sm", "zephyr", str(good), command=_ECHOING_COMMAND),
+        ),
+    )
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    announced = [i for i in env["issues"] if i["code"] == "build.app-dir-substituted"]
+    assert len(announced) == 1, env["issues"]
+    assert "m55_hp" in announced[0]["message"]
+    assert str(project / "docs") in announced[0]["message"]
+    # The self-contained sibling is used verbatim, so nothing is announced
+    # for it -- an announcement per core would be noise, not signal.
+    assert "m33_sm" not in announced[0]["message"]
+
+
+def test_a_self_contained_app_dir_is_never_announced(project):
+    """The multicore convention: `app:` points straight at a directory that
+    carries its own `CMakeLists.txt`, so `_zephyr_app_dir` uses it verbatim.
+    Nothing was substituted, so there is nothing to say -- and saying it
+    anyway would make the advisory meaningless."""
+    (project / "CMakeLists.txt").write_text("", encoding="utf-8", newline="")
+    app = project / "m33_sm"
+    app.mkdir()
+    (app / "CMakeLists.txt").write_text("", encoding="utf-8", newline="")
+    plan = write_plan(
+        project,
+        _app_dir_plan(_app_dir_slice("m33_sm", "zephyr", str(app), command=_ECHOING_COMMAND)),
+    )
+    env = envelope_of(
+        run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+    )
+    assert [i for i in env["issues"] if i["code"] == "build.app-dir-substituted"] == []
+
+
+def test_nothing_is_announced_when_the_parent_has_no_cmakelists_either(project):
+    """`_zephyr_app_dir`'s third arm: neither the app dir nor its parent
+    carries a `CMakeLists.txt`, so it returns the configured path UNCHANGED.
+    No substitution happened, so announcing one would be a lie -- the build
+    fails in west/CMake naming the directory the project actually
+    configured."""
+    src = project / "src"
+    src.mkdir()
+    assert not (project / "CMakeLists.txt").exists()
+    plan = write_plan(
+        project,
+        _app_dir_plan(_app_dir_slice("m55_hp", "zephyr", str(src), command=_ECHOING_COMMAND)),
+    )
+    env = envelope_of(
+        run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+    )
+    assert [i for i in env["issues"] if i["code"] == "build.app-dir-substituted"] == []
+
+
+def test_a_baremetal_slice_is_never_announced(project):
+    """`baremetal` has no fallback to announce: the arm beside
+    `_zephyr_app_dir` builds `cmake -S <_resolve_app_path(app)>` with no
+    `CMakeLists.txt` probe at all, so its app dir is never substituted --
+    even in the exact filesystem shape that substitutes for `zephyr`."""
+    (src,) = _sources_only_project(project)
+    plan = write_plan(
+        project,
+        _app_dir_plan(_app_dir_slice("m55_he", "baremetal", str(src), command=_ECHOING_COMMAND)),
+    )
+    env = envelope_of(
+        run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+    )
+    assert [i for i in env["issues"] if i["code"] == "build.app-dir-substituted"] == []
+
+
+def test_a_refused_app_dir_is_not_also_announced(project):
+    """A nonexistent `app:` is tan-cli#483's refusal
+    (`build.app-dir-missing`, error, slice held). It must not ALSO collect an
+    advisory about a substitution that never got the chance to happen --
+    burying the verdict that actually stopped the slice under a note about
+    it is the failure mode both codes exist to avoid."""
+    (project / "CMakeLists.txt").write_text("", encoding="utf-8", newline="")
+    missing = project / "nope"
+    assert not missing.exists()
+    plan = write_plan(
+        project,
+        _app_dir_plan(_app_dir_slice("m55_hp", "zephyr", str(missing), command=_ECHOING_COMMAND)),
+    )
+    env = envelope_of(
+        run_tan("build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project)
+    )
+    codes = [i["code"] for i in env["issues"]]
+    assert "build.app-dir-missing" in codes
+    assert "build.app-dir-substituted" not in codes
 
 
 # --- the OS is derived, never selectable (I-01/I-02) ------------------------
