@@ -40,6 +40,7 @@ from the oracle's own `--format json` output, not retyped by hand.
 
 from __future__ import annotations
 
+import functools as _functools
 import json
 
 import pytest
@@ -326,6 +327,316 @@ def test_format_json_before_subcommand_reads_off_ctx_obj():
     doc = json.loads(result.stdout)
     assert doc["data"]["shell"] == "zsh"
     assert doc["data"]["script"] == ZSH_SCRIPT
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#503: `doctor` must not advertise flags the Python `doctor` rejects
+# ---------------------------------------------------------------------------
+
+
+def _case_arm_lines(script: str, label_line_substr: str) -> list[str]:
+    """Collect a bash/zsh `case` arm IN FULL: the pattern label
+    (e.g. `doctor)`) on its own line, then every following line through the
+    terminating `;;`, inclusive.
+
+    Filtering on the label alone (the pre-existing shape of this test) only
+    ever matches the label line itself -- `doctor)` -- which never contains a
+    flag name; the flags live on the NEXT line
+    (`COMPREPLY=( $(compgen -W "$global_flags --build --fix" -- "$cur") )` in
+    bash, `_arguments '--build[...]' ...` in zsh). A `"target-kind" not in
+    line` assertion over label-only lines is true no matter what the arm body
+    says, so it could not have caught the regression it was written for."""
+    lines = script.splitlines()
+    out: list[str] = []
+    capturing = False
+    for line in lines:
+        if not capturing and label_line_substr in line:
+            capturing = True
+        if capturing:
+            out.append(line)
+            if ";;" in line:
+                capturing = False
+    return out
+
+
+def test_doctor_completion_no_longer_offers_target_kind_or_server():
+    """`doctor_cmd.py` deliberately did not port the debug half
+    (`--target-kind`/`--server`) -- but the captured scripts still offered
+    both, so accepting the completion's own suggestion was a guaranteed exit
+    2 (`cli.parse-error`). `support-bundle`/`debug-config` genuinely still
+    carry both and must be untouched.
+
+    bash/zsh arms span two lines (label, then body) so the whole arm is
+    collected via `_case_arm_lines`; fish's `complete -c tan -n
+    '__fish_seen_subcommand_from doctor' -l ...` is a single line per flag
+    and the substring filter already sees the flags directly."""
+    doctor_lines = _case_arm_lines(BASH_SCRIPT, "doctor)")
+    assert doctor_lines and any("compgen" in line for line in doctor_lines), doctor_lines
+    doctor_lines += _case_arm_lines(ZSH_SCRIPT, "doctor)")
+    assert any("_arguments" in line for line in doctor_lines), doctor_lines
+    doctor_lines += [
+        line
+        for line in FISH_SCRIPT.splitlines()
+        if "__fish_seen_subcommand_from doctor'" in line
+    ]
+    assert any("-l build" in line for line in doctor_lines), doctor_lines
+    for line in doctor_lines:
+        # Bare substrings, not "--target-kind"/"--server": fish spells its
+        # flags `-l target-kind`/`-l server` (no double dash).
+        assert "target-kind" not in line, line
+        assert "server" not in line, line
+
+
+def test_debug_config_and_support_bundle_still_keep_target_kind_and_server():
+    """Control for the above: only `doctor` lost the two flags. bash/zsh spell
+    the flag `--target-kind`; fish's `complete -l target-kind` spells it
+    without the leading dashes."""
+    assert "--target-kind" in BASH_SCRIPT
+    assert "--server" in BASH_SCRIPT
+    assert "--target-kind" in ZSH_SCRIPT
+    assert "--server" in ZSH_SCRIPT
+    assert "-l target-kind" in FISH_SCRIPT
+    assert "-l server" in FISH_SCRIPT
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#503: bash/zsh `--format` completion must find the real subcommand
+# even when a global flag (with a value) precedes it.
+# ---------------------------------------------------------------------------
+
+
+def _bash_complete(argv: list[str]) -> list[str]:
+    """Drive the real emitted `BASH_SCRIPT` in a live bash and return
+    `COMPREPLY` for completing the LAST word of `argv` (typically `""`, an
+    about-to-be-typed value)."""
+    import subprocess as sp
+
+    words = " ".join(f'"{w}"' for w in argv)
+    script = (
+        BASH_SCRIPT
+        + "\nCOMP_WORDS=(" + words + ")\n"
+        + f"COMP_CWORD={len(argv) - 1}\n"
+        + "COMPREPLY=()\n_tan_complete\nprintf '%s\\n' \"${COMPREPLY[@]}\"\n"
+    )
+    proc = sp.run(  # noqa: S603, S607 -- fixed script, no shell metacharacters
+        ["bash", "-c", script], capture_output=True, text=True, timeout=10
+    )
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+@_functools.lru_cache(maxsize=1)
+def _bash_available() -> bool:
+    """`shutil.which("bash") is not None` is not proof bash is on this host --
+    on Windows, `C:\\Windows\\System32\\bash.exe` is the WSL launcher stub,
+    installed whenever the "Windows Subsystem for Linux" optional feature is
+    enabled even with zero distributions registered. It is a real,
+    `PATH`-resolvable, executable `bash.exe` that is NOT bash: run with `-c`,
+    it ignores the command and prints a UTF-16LE "Windows Subsystem for Linux
+    has no installed distributions..." banner instead, which `_bash_complete`
+    would then misread as `COMPREPLY`. Spawn a trivial command and require the
+    literal expected output before treating `bash` as usable, rather than
+    trusting presence on `PATH`."""
+    import shutil as _shutil
+    import subprocess as _sp
+
+    if _shutil.which("bash") is None:
+        return False
+    try:
+        proc = _sp.run(  # noqa: S603, S607 -- fixed args, no shell metacharacters
+            ["bash", "-c", "echo tan-bash-ok"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except OSError:
+        return False
+    return proc.returncode == 0 and "tan-bash-ok" in proc.stdout
+
+
+@pytest.mark.skipif(
+    not _bash_available(), reason="no real bash on this host (WSL launcher stub is not bash)"
+)
+def test_bash_format_completion_finds_the_subcommand_past_a_leading_global_flag():
+    """`tan --sdk-root /x validate --format <TAB>` used to offer only `text
+    json` (`${COMP_WORDS[1]}` was `--sdk-root`, matching no `case` arm), the
+    exact misinformation tan-cli#403 exists to prevent -- and the exact
+    pre-subcommand shape `output_format.py`'s docstring names as the one
+    alp-sdk-vscode's `withSdkRoot` actually uses."""
+    reply = _bash_complete(["tan", "--sdk-root", "/x", "validate", "--format", ""])
+    assert "diagnostic-v1" in reply
+    assert "sarif" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_format_completion_still_works_with_no_leading_flag():
+    """Regression guard: the ordinary, no-global-flag shape must still work
+    after the scan replaces the fixed-index read."""
+    reply = _bash_complete(["tan", "validate", "--format", ""])
+    assert "diagnostic-v1" in reply
+    assert "sarif" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_format_completion_narrow_command_still_gets_the_narrow_list():
+    reply = _bash_complete(["tan", "--sdk-root", "/x", "size", "--format", ""])
+    assert reply == ["text", "json"]
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_format_completion_does_not_leak_its_loop_variable():
+    """The subcommand scan's `for vf in $value_flags` loop variable was
+    missing from the function's `local` declaration, so it leaked into and
+    clobbered a `$vf` already set in the sourcing interactive shell -- a real
+    collision, not a hypothetical one: plenty of shells use short names like
+    `vf` for their own state. `_bash_complete` sources `BASH_SCRIPT` and runs
+    `_tan_complete` in a subshell that starts with `vf` pre-set; if the loop
+    variable is still un-local'd, that subshell's `vf` comes back overwritten
+    with the last/matched entry of `$value_flags` instead of its original
+    value."""
+    import subprocess as sp
+
+    argv = ["tan", "--sdk-root", "/x", "validate", "--format", ""]
+    words = " ".join(f'"{w}"' for w in argv)
+    script = (
+        'vf="untouched"\n'
+        + BASH_SCRIPT
+        + "\nCOMP_WORDS=(" + words + ")\n"
+        + f"COMP_CWORD={len(argv) - 1}\n"
+        + "COMPREPLY=()\n_tan_complete\nprintf 'vf=%s\\n' \"$vf\"\n"
+    )
+    proc = sp.run(  # noqa: S603, S607 -- fixed script, no shell metacharacters
+        ["bash", "-c", script], capture_output=True, text=True, timeout=10
+    )
+    assert "vf=untouched" in proc.stdout.splitlines(), proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#503: the zsh counterpart of the subcommand-scan loop above. Unlike
+# `_bash_complete`, which drives the emitted script in a real `bash -c`, the
+# zsh loop had no live-shell test at all -- every zsh assertion elsewhere in
+# this file is a static string check on `ZSH_SCRIPT`'s text, never an actual
+# `zsh` parsing and running it. This drives the REAL snippet (lines lifted
+# verbatim out of `ZSH_SCRIPT`, not retyped) in a real `zsh`.
+# ---------------------------------------------------------------------------
+
+
+def _zsh_available() -> bool:
+    """Unlike `bash` (see `_bash_available`), a plain `which` IS proof here:
+    Windows has no `zsh.exe` launcher stub anywhere on the default `PATH` --
+    the WSL-installer-provided stub is specifically `%SystemRoot%\\System32\\
+    bash.exe` (and `wsl.exe`/`wslconfig.exe`), never a `zsh.exe`, and
+    `windows-latest`/`macos-latest`/`ubuntu-latest` GitHub runner images carry
+    no other program named `zsh` that could shadow the real one. Verified,
+    not assumed."""
+    import shutil as _shutil
+
+    return _shutil.which("zsh") is not None
+
+
+def _zsh_subcmd_scan_snippet() -> str:
+    """The `subcmd` scan loop plus the `case "$subcmd"` that picks the wide
+    vs narrow `--format` value list, extracted VERBATIM from the emitted
+    `ZSH_SCRIPT` (between `local subcmd="" i=2` and the `_arguments -C` call
+    that follows it) -- so this exercises the committed source, not a
+    hand-written stand-in for it."""
+    lines = ZSH_SCRIPT.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip().startswith('local subcmd='))
+    # `startswith`, not `in`: a comment a few lines ABOVE `start` also mentions
+    # "`_arguments -C`" in prose, and a substring search from index 0 matches
+    # that comment first, well before `start` -- yielding a negative/empty
+    # slice and an always-empty snippet.
+    end = next(
+        i
+        for i, line in enumerate(lines)
+        if i > start and line.strip().startswith("_arguments -C")
+    )
+    return "\n".join(lines[start:end])
+
+
+def _zsh_scan(argv: list[str]) -> tuple[str, bool]:
+    """Run `_zsh_subcmd_scan_snippet()` in a real `zsh -f -c` and return
+    `(subcmd, wide)`: `subcmd` is what the loop resolved `$words[i]` to, and
+    `wide` is whether the `case "$subcmd"` arm it took spliced in the
+    IDE-oriented `--format` values (`diagnostic-v1`/`sarif`)."""
+    import subprocess as sp
+
+    words = " ".join(f'"{w}"' for w in argv)
+    body = _zsh_subcmd_scan_snippet()
+    script = (
+        "myfunc() {\n"
+        f"  local -a words=({words})\n"
+        "  local -a global_args=()\n"
+        f"{body}\n"
+        '  print -r -- "SUBCMD=$subcmd"\n'
+        '  if [[ "${global_args[*]}" == *diagnostic-v1* ]]; then\n'
+        '    print -r -- "WIDE=1"\n'
+        "  else\n"
+        '    print -r -- "WIDE=0"\n'
+        "  fi\n"
+        "}\nmyfunc\n"
+    )
+    proc = sp.run(  # noqa: S603, S607 -- fixed script, no shell metacharacters
+        ["zsh", "-f", "-c", script], capture_output=True, text=True, timeout=10
+    )
+    assert proc.returncode == 0, proc.stderr
+    fields = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+    return fields.get("SUBCMD", ""), fields.get("WIDE") == "1"
+
+
+@pytest.mark.skipif(not _zsh_available(), reason="no zsh on this host")
+def test_zsh_format_completion_finds_the_subcommand_past_a_leading_global_flag():
+    """`tan --sdk-root /x validate --format <TAB>` must still resolve
+    `validate` as the subcommand (not `--sdk-root`, its value, or the empty
+    about-to-be-typed word) and therefore pick the WIDE `--format` list."""
+    subcmd, wide = _zsh_scan(["tan", "--sdk-root", "/x", "validate", "--format", ""])
+    assert subcmd == "validate"
+    assert wide is True
+
+
+@pytest.mark.skipif(not _zsh_available(), reason="no zsh on this host")
+def test_zsh_format_completion_still_works_with_no_leading_flag():
+    """Regression guard: the ordinary, no-global-flag shape must still work
+    after the scan replaces a fixed-index read."""
+    subcmd, wide = _zsh_scan(["tan", "validate", "--format", ""])
+    assert subcmd == "validate"
+    assert wide is True
+
+
+@pytest.mark.skipif(not _zsh_available(), reason="no zsh on this host")
+def test_zsh_format_completion_narrow_command_still_gets_the_narrow_list():
+    """`size` is not one of the IDE-oriented commands, so it must keep the
+    narrow `text json` list even past a leading global flag."""
+    subcmd, wide = _zsh_scan(["tan", "--sdk-root", "/x", "size", "--format", ""])
+    assert subcmd == "size"
+    assert wide is False
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#503: fish `generate --target` must list every real target value.
+# ---------------------------------------------------------------------------
+
+
+def test_fish_target_completion_lists_every_valid_generate_target():
+    from tan.commands.generate_cmd import (
+        ALL_EMIT_MODES,
+        COMPOSED_ROUTE_TABLE,
+        IPC_CONTRACT_H,
+        ZEPHYR_BOARD,
+    )
+
+    line = next(line for line in FISH_SCRIPT.splitlines() if line.startswith(
+        "complete -c tan -l target -d"
+    ))
+    listed = set(line.rsplit("-a '", 1)[1].rstrip("'").split())
+    expected = set(ALL_EMIT_MODES) | {ZEPHYR_BOARD, COMPOSED_ROUTE_TABLE, IPC_CONTRACT_H}
+    assert listed == expected
+    # The three the reviewer's evidence named as missing, by name (a stronger
+    # assertion than the set-equality above, so a future refactor that
+    # accidentally drops one still fails loudly here even if it also drops it
+    # from `expected`'s own source).
+    assert "os-topology" in listed
+    assert "composed-route-table" in listed
+    assert "ipc-contract-h" in listed
 
 
 def test_subcommand_format_overrides_a_leading_root_format():
