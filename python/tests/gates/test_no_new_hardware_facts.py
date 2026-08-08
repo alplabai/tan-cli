@@ -43,6 +43,19 @@ PATTERNS = (
 #: cannot grow silently.
 ALLOWED: dict[str, str] = {
     "explain_cmd.py": "OK: customer-facing prose; naming real parts is the feature",
+    "hw_info.py": (
+        "OK: EMITTED customer-facing prose, not a resolved fact. The `E1M-AEN801` "
+        "mention is inside the comment block `_emit_hw_info_h` WRITES INTO the "
+        "generated `<alp/hw_info.h>`, as the worked example for why "
+        "CONFIG_BOARD/CONFIG_BOARD_TARGET differ per slice while "
+        "ALP_HW_BUILD_PRIMARY_CORE may not (\"the HE slice's CONFIG_BOARD is "
+        "\\\"alp_e1m_aen801_m55_he\\\"\"). It steers nothing: no branch reads it, and "
+        "every value the header actually emits is resolved from the bound SDK's "
+        "metadata. Ported byte-for-byte from alp-sdk#1279 -- this file mirrors "
+        "`scripts/alp_project_emit/hw_info.py`, so paraphrasing the example to "
+        "dodge this gate would make the next port a hand-merge AND would break "
+        "the emit-parity byte comparison, since the text is output."
+    ),
     "bootstrap.py": "OK: guidance prose naming the bridge a customer may build",
     "scaffold.py": (
         "DEBT (largest): DEFAULT_SOM_SKU, IOT_STARTER_SUPPORTED_SKU, _FAMILY_TREES "

@@ -126,22 +126,18 @@ def un_edit_iot_extra_conf_order(text: str) -> str:
 #: `un_edit` that finds nothing to undo is a FAILURE. A healed divergence --
 #: the tree re-vendored, or alp-sdk fixing its emit -- has to force the entry
 #: out, otherwise the next real drift in that file inherits a dead excuse.
+# tan-cli#384's seven README entries were RETIRED here (the tan-cli#543/#545
+# re-vendor). They pinned every scaffold README's doc links at the vendor ref
+# `v0.15.0-rc1` because the emit's own `v0.15.0` was a tag "alp-sdk has never
+# cut" -- a link a customer could not open. MEASURED: alp-sdk HAS since tagged
+# `v0.15.0` (`e2928b9f`, `git tag -l v0.15*`), so the emit's own bytes are
+# browsable and the divergence is healed. This module's own doctrine directly
+# above says a healed divergence must force its entry OUT rather than linger as
+# a dead excuse, and an `un_edit` with nothing to undo is a hard failure -- so
+# the entries are gone and the tree carries the emit's own `v0.15.0` links.
+# `un_edit_doc_link_ref` is kept: it is the only record of the transform, and
+# the next pre-release vendor point will need it again.
 DELIBERATE_EDITS: dict[tuple[str, str, str], tuple[str, Callable[[str], str]]] = {
-    (template, sku, "README.md"): (
-        "tan-cli#384: doc links pinned at the vendor ref v0.15.0-rc1, not the "
-        "emit's own v0.15.0, which alp-sdk has never tagged",
-        un_edit_doc_link_ref,
-    )
-    for template, sku in (
-        ("diagnostics", "E1M-AEN801"),
-        ("diagnostics", "E1M-V2N101"),
-        ("iot", "E1M-AEN801"),
-        ("minimal", "E1M-AEN801"),
-        ("minimal", "E1M-V2N101"),
-        ("sensor", "E1M-AEN801"),
-        ("sensor", "E1M-V2N101"),
-    )
-} | {
     ("iot", "E1M-AEN801", "CMakeLists.txt"): (
         "tan-cli#379: list(PREPEND EXTRA_CONF_FILE ...) so a caller's own "
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",

@@ -615,7 +615,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # This branch carried a stale 1639 from before #485 landed on dev; the
     # rebase re-derived it on the merged tree rather than keeping either
     # side's number by ownership.
-    "tan/planner/kconfig.py": 1643,
+    # 1679, not 1643, as of tan-cli#543: the alp-sdk#1241 port adds
+    # `_chip_has_driver` and the `som_chips` filter that stopped tan emitting
+    # `CONFIG_ALP_SDK_CHIP_DP83825=y`, a symbol declared nowhere -- the live
+    # red on eight consecutive `parity` dispatch runs (+41, upstream's own
+    # delta), less the 7 lines alp-sdk#1267 MOVED out of this file when
+    # `_BLOCK_SLUGS` relocated to `slugs.py`, plus the 2-line docstring
+    # correction from alp-sdk#1228. Raised rather than extracted: this file
+    # mirrors an upstream module line for line, so a split here would make the
+    # next port a hand-merge instead of a diff. Measured, not computed.
+    "tan/planner/kconfig.py": 1679,
 
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
@@ -800,7 +809,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # `infer_target_kind`'s own guard -- +20 lines of comment, 0 of code.
     # Measured after both, not computed from the deltas above.
     "tan/commands/debug_config_cmd.py": 1689,
-    "tan/planner/template.py": 1199,
+    # 1329, not 1199, as of tan-cli#544's hand-port audit: three alp-sdk
+    # commits land here at once -- `_safe_join` + `PathEscapeError`
+    # (alp-sdk#1126's resolve-then-contain path-traversal guard, applied at
+    # both `_rendered_bytes` read sites and `render_to_envelope`'s
+    # `example_dir`), `_cmake_core_map` (alp-sdk#1287: each Zephyr core's own
+    # `--core` rename against its own CMakeLists.txt), and `_scaffold_readme`'s
+    # qualified-then-short board-target rewrite plus the `_m33_sm`
+    # `west flash --host <board-ip>` rule (alp-sdk#1266). Same mirrored-module
+    # reasoning as `kconfig.py` above: raised, not extracted.
+    "tan/planner/template.py": 1329,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
@@ -875,7 +893,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # (alp-sdk #1127, a duplicate-mapping-key refusal), and the IPC-entry
     # loop gained the alp-sdk #1088 refusal of `cacheable: true` on a
     # `kind: rpmsg` entry.
-    "tan/planner/loader.py": 1015,
+    # 1016, not 1015, as of tan-cli#543: alp-sdk#1223 DROPS the legacy
+    # `raw: true` -> `fs: raw` normalisation (the schema now rejects the key
+    # outright) and replaces it with the five-line comment recording that
+    # measurement -- a net +1. Despite the `docs(accuracy)` subject line, this
+    # is a behavioural change, which is why it was ported rather than skipped.
+    "tan/planner/loader.py": 1016,
     # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
     # carries `foreign_global_default_for` through into `_Sdk`, and `init`
     # surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk` writes
@@ -992,7 +1015,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # 975, not 970, as of tan-cli#485: `_resolve_variant` grew a
     # case/whitespace-insensitive `is_tbd`-shaped TBD check (alp-sdk #1048,
     # matching `som_metadata.py::_resolve_silicon_variant`'s own copy).
-    "tan/planner/zephyr_board.py": 975,
+    # 1027, not 975, as of tan-cli#544: the alp-sdk#1289 port reserves the App
+    # MRAM top for the SE-owned ATOC -- `_AEN_ATOC_KIB = 32` with its measured
+    # sizing evidence, an `atoc` region appended after `storage` in BOTH
+    # `_aen_flash_partitions` branches, and the four label/nodelabel maps.
+    # The evidence comment is kept VERBATIM from alp-sdk rather than
+    # summarised: it carries the bench-observed addresses (ATOC magic `ckBS`
+    # / `0x53426B63` at `0x8057EA50`, window top `0x80580000`) that say why
+    # 32 KiB and not less, and a paraphrase of those is worth nothing on a
+    # bench. Raised, not extracted -- same mirrored-generator reasoning as the
+    # tan-cli#432 entry above.
+    "tan/planner/zephyr_board.py": 1027,
     "tan/commands/support_bundle_cmd.py": 834,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
@@ -1274,7 +1307,23 @@ _MIRRORED = ("tan/planner/",)
 # 219 on the merged tree, MEASURED by AST walk over all of `tan/` including
 # `tan/planner/` -- neither #488's 218 nor dev's 214: the two branches' crossings
 # are disjoint and `new_som_cmd.py`'s gate resolution adds none of its own.
-_FUNCTION_COUNT_BUDGET = 219
+#
+# 220 as of tan-cli#543/#544/#545, MEASURED by AST walk over all of `tan/`
+# INCLUDING `tan/planner/` (49 of the 220 crossings live there), never
+# computed from the diff. Exactly ONE function crosses: `tan/planner/
+# partition.py:_reserved_spans` at 70 lines, new with the alp-sdk#1331 port.
+# It is a line-for-line port of alp-sdk's own function at the same size, and
+# it is one indivisible decision -- derive the device origin, VERIFY it
+# (`origin + capacity == highest region top`), or refuse and say why. Splitting
+# the verify away from the derive is precisely how it would come back guessing
+# a base. The other five functions this change introduces stay under the cap
+# (`_chip_has_driver` 23, `_first_free` 21, `_safe_join` 17,
+# `_curated_library_names` 26, `_cmake_core_map` 36), and every function it
+# GROWS -- `_emit_chips`, `_aen_flash_partitions`, `_scaffold_readme`,
+# `render_to_envelope`, `_emit_hw_info_h` -- was already over 50 before it.
+# `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
+# `bootstrap_cmd.py:_run` at 701, which this change does not go near.
+_FUNCTION_COUNT_BUDGET = 220
 _FUNCTION_WORST_BUDGET = 707
 
 

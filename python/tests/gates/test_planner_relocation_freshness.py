@@ -107,12 +107,61 @@ from tests.conftest import sdk_root
 #: "rpmsg")`) into `tan/planner/`. Also carries alp-sdk #1069's `carveout:
 #: false` memory_map exclusion (`carveout.py`, already ported ahead of this
 #: bump) and doc-only wording drift in `buildplan.py`/`orchestrator.py`
-#: (alp-sdk #1214, no behavioural delta). Deliberately NOT bumped to
-#: alp-sdk `origin/dev` tip: this exact commit is the last one before
-#: `validate.py`'s curated-library-registry derivation (alp-sdk #1197,
-#: `f7c69cea`) starts drifting that file too, which is unrelated to
-#: tan-cli#485 and stays for its own audited bump.
-PINNED_SDK_COMMIT = "53557a6030c4f90a5525d29c142190e7e91f2bbb"  # alp-sdk origin/dev
+#: (alp-sdk #1214, no behavioural delta).
+#:
+#: `53557a60` -> `f30f4d4b` (tan-cli#543/#531, the audited bump #485 deferred
+#: -- "`validate.py` ... stays for its own audited bump"; this is it). SIX
+#: upstream commits, each classified by reading its diff rather than its
+#: subject line, and every behavioural one ported into `tan/planner/`:
+#:
+#:   - `bc73b66c` (#1241) BEHAVIOURAL, and the live red: `_chip_has_driver`
+#:     + the `som_chips = {s for s in som_chips if _chip_has_driver(s)}`
+#:     filter in `kconfig.py`. `ethernet_phy: dp83825` made an undriven chip
+#:     reachable from `on_module:` for the first time, so tan emitted
+#:     `CONFIG_ALP_SDK_CHIP_DP83825=y` -- a symbol declared nowhere, since
+#:     every `zephyr/kconfigs/chips.kconfig` entry reads "Compile
+#:     chips/<part>/<part>.c" and there is no `chips/dp83825/`. This is what
+#:     reddened `parity` on eight consecutive dispatch runs. Driver presence
+#:     is checked ON DISK against the BOUND SDK root (`paths.REPO`), not read
+#:     off `driver_status:`, exactly as upstream.
+#:   - `66275c08` (#1331) BEHAVIOURAL: `partition.py`'s storage-region bounds
+#:     check -- `_reserved_spans` + `_first_free`, the SoM's own `memory_map:`
+#:     regions seeded into the overlap set, the bump allocator advancing PAST
+#:     them, and a WARNING when the device origin cannot be derived+verified.
+#:     Fixes a silent-corruption default (a littlefs mount resolving onto
+#:     MCUboot at offset 0 of `mram_main`, `status` clean). tan-cli#545.
+#:   - `5146f70d` (#1278) BEHAVIOURAL: `_slice_config_artefact` no longer
+#:     returns `("cmake-args.txt", ...)` for a baremetal slice. The artefact
+#:     was materialised and consumed by nothing; alp-sdk's own commit message
+#:     names THIS repo as the half that still wrote it (tan-cli#492), so the
+#:     removal had to land here or `--emit build-plan` parity stays red on
+#:     every baremetal slice. `_slice_cmake_args` itself is untouched and
+#:     still serves `tan generate --target cmake-args`.
+#:   - `3e32ba1e` (#1228) DOC-ONLY *within this surface*: the whole
+#:     `alp_orchestrate` delta is six lines inside `_emit_inference`'s
+#:     DOCSTRING, naming `ETHOS_U_VARIANT_{U55,U65,U85}` /
+#:     `TFLM_KERNEL_{NEON,HELIUM,REF}`. Verified rather than inherited: the
+#:     emitting code already wrote those spellings (`kconfig.py:1083`,
+#:     `:1038-1049`), so no emitted byte moves. Ported anyway to keep the
+#:     mirror diffable.
+#:   - `89b8112f` (#1267) NO BEHAVIOURAL DELTA, but NOT doc-only despite the
+#:     `docs(accuracy)` subject -- it MOVES `_BLOCK_SLUGS` from `kconfig.py`
+#:     to `slugs.py` (same frozenset, same single consumer). The move is
+#:     ported so the two files stay diffable against upstream.
+#:   - `f7c69cea` (#1223) BEHAVIOURAL ON BOTH FILES, again despite a
+#:     `docs(accuracy)` subject -- `docs(...)` in a subject is not proof, and
+#:     this is the commit that proves it. `loader.py` DROPS the legacy
+#:     `raw: true` -> `fs: raw` normalisation (measured: the current
+#:     `board.schema.json` declares no `raw` property and sets
+#:     `additionalProperties: false` on storage items, so such a board is now
+#:     rejected at validation instead). `validate.py` replaces the
+#:     hand-listed `_CURATED_LIBRARIES` frozenset with
+#:     `_curated_library_names(METADATA_ROOT)`, derived from
+#:     `metadata/libraries/*.yaml` + `library-aliases-v1.json` -- the same
+#:     reachability rule alp-sdk's `check_library_registry.py` cross-checks,
+#:     so the two can no longer drift (9 curated libraries were silently
+#:     missing from the old list).
+PINNED_SDK_COMMIT = "f30f4d4ba76c235cbb2b2cc713666cb858677e03"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -122,25 +171,25 @@ PINNED_SDK_COMMIT = "53557a6030c4f90a5525d29c142190e7e91f2bbb"  # alp-sdk origin
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "739a0288487997d6f1be7dc1f47fcf05b34a16386c0c81e8fe4eaadcfb84e3f0",
-    "buildplan.py": "50f740465b23bd2aebfdd1f8dc210126b0da6e8d0600f944beb17889d16cbd65",
+    "buildplan.py": "65542fca35c7fa960192fe8245539d9ea47192072d5c00747db7517b9d1bc66f",
     "carveout.py": "cdc9d78544441ae6b05dbdb12c5790d2bf4d5cb97fed481df14b57f215265d18",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "d80ab84bec3bc1aefe8640a6d5d1b43334447cb4ea87d4c25cee927ebfc2bf17",
+    "kconfig.py": "af09c3315cd6f862b799f1244f2b1dccea13a3dceb3399a8ceaeaea1cfe4fa75",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "47b823e0fc06cc657a3c3068598b953e342720cf359443651a9996b93be7aaa5",
-    "loader.py": "bd5177c0a9fcb8973fe7f899ef5ec91a2b386ea51a58bd1dc263b2e0c8efb183",
+    "loader.py": "bd051f509d04e1920263c13670e2b6b0a30c0bdf0d1d93f11ee620c026b9d7d0",
     "manifest.py": "930aa9c453fd86b487f66ec84be8f074a53f22a6077b0310390e176fee7918ba",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
     "models.py": "6d33258874d6f732d66668d30c22fd644e02de2fb9f35e7b497ddd2d81164109",
     "orchestrator.py": "01c7d90fc50bf85974fdbd228fac8319d687a121f45bc64c9528dd1fed3debff",
-    "partition.py": "97e7646ab7f8692919d1cd529d42be453d7fc3240416f98e202a5920cb6cb029",
+    "partition.py": "03368920536ebc82a64f5220cb6c7defbc393c68b9f0815357c4f345eb681d03",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "ae8e5244877d3e9ad35f89e6b7782861f810825321052ed9f5770b9762c0281a",
     "secure.py": "a6a5762fbac2f99fc4356f01b3ffedd15d366af6d2ddde0042223b3da749cbe6",
-    "slugs.py": "5c0481e2375bfc0ece96960e6a3c5f51d1fcd1e629ea7a2a50e6581765f6657d",
+    "slugs.py": "339bffdb8e5fef41eefc0cd2eb05705c2b3e53580c7cfd775e1dd1c65127d5cb",
     "topology.py": "12f5f62d3adeb9e935594934fd2fc2b1fbeaec6f466d6dd89c329c54e844f3b1",
-    "validate.py": "2dbe9dcb36ff0ebe4c968ef120983342aa00f02f32b9166f9c1608d1578495e7",
+    "validate.py": "ca7b7f8339595cddc7ab3df1807bd1020b3e3e70d900ead3793b68afcca98c85",
 }
 
 #: alp-sdk commit the SDK-SIDE SOURCE FILES in HAND_PORT_HASHES were last
@@ -158,7 +207,65 @@ PINNED_HASHES: dict[str, str] = {
 #: invisible to it by construction -- a real, standing gap in this gate's
 #: coverage that a future audit pass should account for, not a claim that it
 #: doesn't exist.
-HAND_PORT_PINNED_SDK_COMMIT = "996937ac4b452260628cf2c6adad4be31483a3d4"  # alp-sdk v0.15.0-rc1
+#:
+#: `996937ac` -> `f30f4d4b` (tan-cli#544, and the standing gap above CLOSED for
+#: this round): TEN upstream commits touch these four files, and the gap is
+#: exactly why each was checked against the CURRENT `tan/planner/` file rather
+#: than assumed missing. Four were ALREADY PRESENT, forward-ported without
+#: moving this pin, and re-confirmed here by measurement, not memory:
+#:
+#:   - `1ad76193` (#1069, disjoint per-core slot0 windows) -- present in
+#:     `zephyr_board.py`'s `_aen_role_slot0_map` / disjoint branch.
+#:   - `93ab1a54` (#1048, one `is_tbd()` helper) -- present as the inlined
+#:     case/whitespace-insensitive match at `zephyr_board.py:108` and
+#:     `som_metadata.py:143` (tan-cli#485).
+#:   - `1a91a232` (#1025, the status gate on the second resolution path) --
+#:     present at `project_loader.py:205` (`sdk_compat.revision_buildable`,
+#:     raising `SdkRevisionNotBuildable`). Re-measured downstream: this is
+#:     what makes `seam1_field_diff.py` report `PASS multicore_rpmsg-imx93
+#:     (alp-sdk and tan both refuse this board)`, so tan-cli#425's recorded
+#:     divergence no longer reproduces.
+#:   - `8b1a460a` (#1004) + `f4d87a1f` (#1096) -- NOT APPLICABLE. Both
+#:     consolidate alp-sdk's five/four hand-rolled `silicon:` splits onto
+#:     `resolve_soc_path()`/`split_silicon_ref()`. `tan/planner` already keeps
+#:     ONE soft-fail copy (`som_metadata.resolve_soc_path`, same falsy /
+#:     not-exactly-3-parts -> `None` contract) plus the raising variant in
+#:     `loader._silicon_to_soc_path`; the remaining upstream delta is
+#:     docstring prose about call sites that do not exist here.
+#:
+#: FOUR carried real deltas and are ported in this change:
+#:
+#:   - `d639e777` (#1289) BEHAVIOURAL, and the reason this bump exists:
+#:     `zephyr_board.py`'s `_aen_flash_partitions` reserves the App MRAM top
+#:     for the SE-owned ATOC. `_AEN_STORAGE_KIB` 128 -> 96, new
+#:     `_AEN_ATOC_KIB = 32`, an `atoc` region appended after `storage` in BOTH
+#:     branches, `_AEN_ATOC_KIB` added to the `reserved` sum, and the four
+#:     label/nodelabel maps extended. `96 + 32 == 128`, so `image_kib` is
+#:     unchanged and no committed AEN board's slot geometry moves. SETOOLS
+#:     top-anchors the ATOC package at the App MRAM window end (`0x80580000`
+#:     on the E8) and grows it DOWNWARD at PROVISIONING time; bench-observed
+#:     on E1M-AEN801 2026-08-08, ATOC magic `ckBS` (`0x53426B63`) intact at
+#:     `0x8057EA50` while a Zephyr app erased `0x80560000` inside the SAME
+#:     `storage` partition. Either direction leaves an unbootable part, and it
+#:     is silent until the next boot. tan-cli#544/#515.
+#:   - `77abfd7c` (#1279) BEHAVIOURAL: `project_emit/hw_info.py`'s per-core
+#:     macro guidance. This is EMITTED TEXT inside the generated
+#:     `<alp/hw_info.h>`, not a source comment, so the old wording was a live
+#:     byte divergence from the SDK oracle.
+#:   - `cb7f64ae` (#1125, #1126) BEHAVIOURAL (security): `_safe_join` +
+#:     `PathEscapeError` in `template.py`, applied at both `_rendered_bytes`
+#:     read sites and at `render_to_envelope`'s `example_dir`. Resolve-then-
+#:     contain, so it fails closed on traversal, an absolute `rel`, and a
+#:     symlink escape alike. The `#1125` half (`build_model`'s name pattern)
+#:     is alp-sdk-only -- that function did not relocate.
+#:   - `b24770fa` (#1287) + `560b256e` (#1266) BEHAVIOURAL: `_cmake_core_map`
+#:     (each Zephyr core's OWN `--core` rename applied to its OWN
+#:     `CMakeLists.txt`, via `orchestrator._zephyr_app_dir`) and
+#:     `_scaffold_readme`'s qualified-then-short board-target rewrite plus the
+#:     `_m33_sm` `west flash --host <board-ip>` rule. Both change
+#:     `--emit scaffold` bytes, which is why `python/tan/templates/vendored/`
+#:     is re-vendored in this same change.
+HAND_PORT_PINNED_SDK_COMMIT = "f30f4d4ba76c235cbb2b2cc713666cb858677e03"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -167,13 +274,13 @@ HAND_PORT_PINNED_SDK_COMMIT = "996937ac4b452260628cf2c6adad4be31483a3d4"  # alp-
 #: `scripts/alp_project_loader.py`, so a filename-keyed table (like
 #: PINNED_HASHES above, where the relocation is 1:1) cannot hold this.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "2fb2a991431494c41e0d9eac5541100d6159663ad525ac492819defbffa05467",
-    "scripts/alp_project_loader.py": "7ae0c9aa135d1f39b6a2904f1b5b5ae12febdc13795b8bbe9a7580c5edd34ff7",
-    "scripts/alp_template.py": "45efe843937faf44d31e6e6e382d4b793b76da3b6cc01d5a5c8edb45084aadc0",
+    "scripts/gen_zephyr_board.py": "351d20dee0499605b9015f982edc7793f3a321109886ac762578ab79e3ad1af3",
+    "scripts/alp_project_loader.py": "5defcec1248f1246403f414119b342ad8caaf26e7db2fb1ab56bbecceecab79a",
+    "scripts/alp_template.py": "6e62ac385154cef4decb8bb54eb9fae27e45f9797faffe8159cedca770f1f352",
     "scripts/alp_project_emit/__init__.py": "62c4742bc373e7fafcd8aa864ad7692d3c05b610c6d7457023aeb82c98847d88",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
-    "scripts/alp_project_emit/hw_info.py": "e1ff1f64e16a275758bec27550d1811b3cc8d3ac73d32325e63f9402ec83715c",
+    "scripts/alp_project_emit/hw_info.py": "25673bb45305ce3f54280560beea8577bdf04bfdada44a133ff7ca48fbe05167",
     "scripts/alp_project_emit/native_sim.py": "24943e7099d745b254b853135ff0b4ae8415be7946d93170d479b637105f18c0",
     "scripts/alp_project_emit/west_libs.py": "0bfad8fb6c22b955d0554f8fffca8c1c9bf9f73d3c64778b9ba2de76eb6a972d",
 }
