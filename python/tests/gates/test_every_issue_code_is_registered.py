@@ -787,7 +787,11 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # SEVENTH call, reusing the ALREADY-registered `core-unknown` literal
         # (not a new code) for the `--target-kind`-explicit path
         # `infer_target_kind`'s own guard never reaches.
-        expected_calls=7,
+        # 8 as of tan-cli#476: `_project_not_found_failure` refuses a `--project`
+        # that names a directory which does not exist, instead of creating it
+        # and writing a launch.json into it at exit 0. Code registered before
+        # this bump.
+        expected_calls=8,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(

@@ -1809,6 +1809,71 @@ def test_an_omitted_target_kind_infers_zephyr_mcu_from_the_built_manifest(tmp_pa
     ), env["data"]["notes"]
 
 
+def test_a_project_that_does_not_exist_is_refused_not_created(tmp_path):
+    """tan-cli#476: `--project` names a project that EXISTS.
+
+    A typo'd path used to be MATERIALISED -- the writer calls
+    `mkdir(parents=True)`, so `debug-config --project <ghost>` created the
+    directory, wrote a `native_sim` launch.json into it, and reported exit 0
+    with `issues: []`. Nothing downstream could tell that apart from writing
+    into a real project.
+
+    A deliberate divergence from the Rust oracle, which does the same thing
+    (measured: `target/release/tan debug-config --project <ghost>` exits 0 and
+    leaves `<ghost>/.vscode/launch.json`). No parity CASE pins it -- every
+    frozen `debug-config` argv runs in an existing work_dir -- so no frozen
+    comparison changes.
+    """
+    ghost = tmp_path / "no-such-project"
+
+    env = envelope(
+        run_cli(tmp_path, "--project", str(ghost), "--preview", "--format", "json")
+    )
+
+    assert env["exitCode"] == 2, env
+    assert env["ok"] is False, env
+    assert "debug-config.project-not-found" in [i["code"] for i in env["issues"]]
+    assert not ghost.exists(), "refused, but the directory was created anyway"
+
+
+def test_a_refused_project_is_not_created_even_on_the_writing_path(tmp_path):
+    """The guard runs BEFORE anything can write, so it holds without
+    `--preview` too -- which is the invocation that actually creates files.
+
+    Review round: the writing path used to pin only the exit code, so a
+    future change routing it to a DIFFERENT exit-2 code would still pass.
+    Pin the issue code here too, same as the `--preview` sibling above."""
+    ghost = tmp_path / "no-such-project-write"
+
+    env = envelope(run_cli(tmp_path, "--project", str(ghost), "--format", "json"))
+
+    assert env["exitCode"] == 2, env
+    assert env["ok"] is False, env
+    assert "debug-config.project-not-found" in [i["code"] for i in env["issues"]]
+    assert not ghost.exists(), "refused, but the directory was created anyway"
+
+
+def test_a_project_arg_that_is_an_existing_file_is_refused_as_not_a_directory(tmp_path):
+    """Review round: `os.path.isdir` alone cannot distinguish "missing" from
+    "exists but is a file" -- a `--project` pointing at, say, `board.yaml`
+    genuinely exists, so telling the caller it "does not exist" is false.
+    Same code and exit as the missing-path case; the message names the real
+    reason."""
+    a_file = tmp_path / "board.yaml"
+    a_file.write_text("som:\n  sku: E1M-AEN801\n")
+
+    env = envelope(
+        run_cli(tmp_path, "--project", str(a_file), "--preview", "--format", "json")
+    )
+
+    assert env["exitCode"] == 2, env
+    assert env["ok"] is False, env
+    assert "debug-config.project-not-found" in [i["code"] for i in env["issues"]]
+    message = env["issues"][0]["message"]
+    assert "is not a directory" in message, message
+    assert "does not exist" not in message, message
+
+
 def test_an_omitted_target_kind_still_defaults_to_native_host_with_no_project_signal(tmp_path):
     """The regression-safety pairing: an empty scratch directory (no
     board.yaml, no build) carries no evidence at all, so the historical
