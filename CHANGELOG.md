@@ -202,111 +202,33 @@ All notable changes to `tan` are documented here. Format follows
   `--format json` and tan's default text output, so that silent gap has a
   signal without making the field mandatory. (#520)
 - **`tan faultdecode` dropped a piped/pasted dump whenever any register flag
-  was also given, hung on an open stdin pipe in two different ways, and
-  could crash instead of refusing cleanly on a closed one.** Several
-  defects, closed together:
+  was also given, its `addr2line` probe was spoofable via a Windows CWD
+  decoy, and the emitted shell completions advertised `tan doctor` flags the
+  Python command rejects.** Three independent defects, closed together:
   - A piped/pasted dump's `CFSR`/`BFAR`/etc was silently discarded whenever
     ANY of `--cfsr`/`--hfsr`/.../`--ufsr` was also given, even though the
     command's own help promises "Explicit flags win over a parsed dump" --
     which is only true if the dump is still read when flags are present
     too. The implicit stdin read is now attempted unconditionally; an
-    explicit flag still wins register-by-register via the existing merge.
-  - The implicit-stdin auto-consume used a `select.select` readiness probe
-    bounded to a quarter second, then handed off to a plain, UNBOUNDED
-    `sys.stdin.read()`. `select` reports a pipe readable the instant its
-    first byte lands, whether or not the writer ever closes it -- so a
-    producer that writes something and then stalls (stays connected, never
-    closes) still hung the read indefinitely past the bounded probe,
-    reproducing the exact class of hang the probe was added to fix. The
-    read itself is now done on a background daemon thread and joined with
-    the same timeout, bounding both "is anything coming" and "what did it
-    send" on every platform, including Windows (where `select` accepts
-    sockets only) and a `fileno`-less in-memory stdin.
-  - That daemon-thread fix had its own follow-on regression: the thread
-    collected the read with a single `got.append(sys.stdin.read())`, which
-    only appends once `read()` RETURNS at EOF -- so a producer that writes a
-    complete, flushed dump and then holds the pipe open (never sends EOF)
-    still lost the ENTIRE payload the instant the bounded `join()` timed
-    out, reporting "no fault registers supplied" even though the CFSR the
-    engineer piped in had, in fact, fully arrived. The thread now reads
-    line-by-line and appends each line as it lands, so whatever was
-    delivered inside the bounded window survives the timeout that abandons
-    the thread.
-  - That per-line fix still bounded the WHOLE read with a single
-    `reader.join(_STDIN_READY_TIMEOUT_S)` -- a TOTAL budget for the entire
-    operation, not a stall detector, so a slow-but-steady producer (a serial
-    capture, a script draining a device one line at a time) whose first line
-    landed inside the window but whose dump kept arriving after it had
-    everything past the cutoff silently discarded, at exit 0, with no signal
-    the dump was truncated -- the exact bench case this issue exists to fix,
-    one layer in. The reader thread now hands each line to the main thread
-    over a `Queue` the instant it arrives, and the main thread loops on
-    `queue.get(timeout=_STDIN_READY_TIMEOUT_S)` -- a fresh window starting
-    from the LAST line, not from when the read began. A producer that keeps
-    writing faster than the idle window elapses is read to EOF however long
-    that takes in total; only a producer that goes idle for a whole window,
-    or never writes at all, is cut off.
-  - This bullet's own text above, for the first shape, said "only an
-    unfinished, newline-less line still in flight when the timeout fires is
-    lost, not everything that came before it"; `_read_implicit_stdin`'s
-    docstring said the same thing for the queue-based follow-on shape ("a
-    final, newline-less partial line still in flight at the timeout is the
-    one exception"). Both were false: `_drain`'s `except (OSError,
-    ValueError)` also caught `UnicodeDecodeError` (a `ValueError` subclass)
-    `readline()` raises decoding a WHOLE buffered `TextIOWrapper` chunk (up
-    to ~8 KB) at once, so ONE stray non-UTF-8 byte anywhere in that chunk
-    discarded every complete line already sitting in it, undelivered, plus
-    everything after it -- not merely a trailing partial line -- confidently
-    misdiagnosing at exit 0. `--file` was never affected: it already reads
-    with `encoding="utf-8", errors="ignore"` (`Path.read_text`). The implicit
-    read now matches it (`_stdin_errors_ignore`,
-    `sys.stdin.reconfigure(encoding="utf-8", errors="ignore")` -- both
-    operands pinned, not just the error policy, since `errors="ignore"`
-    alone leaves the ENCODING at whatever `sys.stdin` was already open with
-    and two non-UTF-8 encodings can each decode the same byte without error
-    into different text; guarded by `hasattr` for a stream that cannot
-    reconfigure -- the same guard `cli._reconfigure_stdio` uses for
-    stdout/stderr, and itself wrapped in `try`/`except (OSError, ValueError)`
-    since `reconfigure()` raises `io.UnsupportedOperation` -- a subclass of
-    both -- once any read has already happened on the stream), applied to
-    both the implicit auto-consume AND the explicit `--file -` read, which
-    had the identical unguarded `sys.stdin.read()` and was exposed to the
-    same defect one call site over. The except clause is unchanged (still
-    `OSError, ValueError`, still broad) -- a narrower except would only be
-    another shape of the same mistake, catching this ValueError subclass by
-    accident of scope rather than by design.
-  - `_read_dump`/`resolve_symbol`/`can_prompt` dereferenced `sys.stdin`/
-    `sys.stderr` bare; with fd 0/2 closed (a daemon/service parent, some CI
-    runners, a Windows `pythonw`/frozen no-console launch) both are `None`,
-    not merely non-a-tty, and `.isatty()` on `None` raised `AttributeError`
-    instead of the coded refusal the caller should have gotten. `can_prompt`
-    is the ONE shared gate `doctor --fix` and `scaffold` both call through,
-    so both callers get the guard from this one fix -- but it is not the
-    only bare `sys.stdin`/`sys.stderr` dereference issue #503's own defect 3
-    named: `doctor_cmd.fix_suppressed_issue`'s own direct
-    `sys.stdin.isatty() and sys.stderr.isatty()` and
-    `new_som_cmd.new_som`'s own direct `sys.stdin.isatty()` are separate call
-    sites that do not go through `can_prompt`, and both are still unguarded
-    as of this change -- the class is closed for `can_prompt`'s two callers'
-    *shared* gate, not for `doctor`/`new-som` outright.
+    explicit flag still wins register-by-register via the existing
+    `pick()` merge. Reading unconditionally makes a closed fd 0 (a
+    daemon/service parent, some CI runners, a Windows `pythonw`/frozen
+    no-console launch -- `sys.stdin is None`) reachable on invocations that
+    used to short-circuit past it once a flag was given, so `_read_dump`
+    now guards `sys.stdin is None` explicitly on both the `--file -` and
+    the implicit path, and wraps `.isatty()` in the same
+    `try`/`except (AttributeError, ValueError)` `_use_color` already uses
+    for `sys.stdout.isatty()` -- both now end in the coded
+    `faultdecode.no-registers` refusal instead of a bare `AttributeError`
+    and a traceback.
   - `resolve_symbol`'s `addr2line`-class tool probe used `shutil.which`,
     which inserts the current directory ahead of `$PATH` on Windows, so a
     decoy `addr2line.exe`/`llvm-addr2line.exe`/`arm-zephyr-eabi-addr2line.exe`
     sitting at a checked-out project's root was reported "available" and
     then spawned by bare name (reopening the same hole a second way). Now
-    uses `doctor_cmd.on_path` and spawns the resolved absolute path.
-  - `_parse_hexint` accepted a negative/out-of-range hex value (`int(text,
-    16)` happily parses a leading `-`), corrupting the downstream bit scan
-    and the JSON report's `0x{v:08x}` formatting; now rejected at parse
-    time with a coded refusal. `tan.core.faultdecode.parse_dump`'s own
-    `0x[0-9A-Fa-f]+` regex alternative had the identical unbounded-width
-    gap on the OTHER entry point a register value can arrive by (a pasted
-    dump, not a flag) and needed the same bound; an over-wide match there
-    is now skipped rather than reaching `decode()`.
-  - `BFSR.LSPERR`/`MMFSR.MLSPERR` had no `root_cause` branch, so an
-    escalated lazy-FP-stacking fault fell through to the generic `FORCED`
-    message and reported "its own status bits are clear" while they were
-    the very bits set.
+    uses `doctor_cmd.on_path` and spawns the resolved absolute path, the
+    same pattern `size_cmd`/`flash_cmd`/`build/execute.py` already use for
+    every other tool probe in this package.
   - The emitted bash/zsh/fish completion scripts advertised `tan doctor
     --target-kind`/`--server`, which `doctor_cmd.py` deliberately never
     ported; removed from `doctor`'s arm on all three shells (unchanged for
@@ -318,107 +240,34 @@ All notable changes to `tan` are documented here. Format follows
     hand-typed and missing 3 of the 12 real values (`os-topology` -- a
     member of the default/`--all` set -- `composed-route-table`,
     `ipc-contract-h`); now spliced from `generate_cmd`'s own tables.
-  - `_stdin_errors_ignore()` (added by the fix above this bullet) pinned
-    `errors="ignore"` but not `encoding`, so a piped dump still decoded
-    with whatever encoding `sys.stdin` was already open with -- the host's
-    `PYTHONIOENCODING`, or a legacy code page on a real Windows console --
-    while `--file` always reads with `encoding="utf-8"` explicitly. Two
-    non-UTF-8 encodings can each decode the same byte without error into
-    DIFFERENT text; measured, `PYTHONIOENCODING=cp1252` decoded a lone
-    `0xE9` byte inside a `BFAR: 0x...` line as a literal character instead
-    of dropping it, shifting the regex match enough to lose the faulting
-    address entirely, while the identical bytes via `--file` (pinned
-    UTF-8) decoded it correctly -- two different diagnoses from one dump,
-    at exit 0 on both, with no exception on either path to flag the
-    divergence. `_stdin_errors_ignore()` now pins `encoding="utf-8"`
-    alongside `errors="ignore"`, matching `--file`'s call exactly, so the
-    two routes decode identically by construction rather than by
-    coincidence of the host's default encoding.
-  - The implicit-stdin auto-consume's `sys.stdin.isatty()` check was
-    unguarded; `_read_dump`'s own `sys.stdin is None` guard, a few lines
-    above it, covers only a closed fd 0, not a replaced/wrapped stdin that
-    exists but lacks `.isatty()` -- the identical shape `cli.main` already
-    creates for `sys.stderr` (`_TeeStderr`, no `.isatty()` at all) under
-    `--format json`. Wrapped in the same `try/except (AttributeError,
-    ValueError)` `_use_color` already uses for `sys.stdout.isatty()`, so a
-    future stdin wrapper fails the same way stderr's already does, not
-    with a bare traceback.
-  - Round 3's idle-only fix reopened tan-cli#388 for the OPPOSITE producer
-    shape: one that never goes idle, writing faster than
-    `_STDIN_READY_TIMEOUT_S` apart forever (`yes | tan faultdecode`, or a
-    device whose diagnostic UART never stops talking). That producer never
-    trips the idle check, so the read was, again, unbounded -- zero bytes on
-    stdout AND stderr, the exact unclassifiable hang tan-cli#388 was filed
-    against. `_read_implicit_stdin` now enforces BOTH bounds: the idle
-    window (reset on every line, so a slow-but-steady producer is still read
-    to completion) AND a total wall-clock cap, `_STDIN_TOTAL_TIMEOUT_S`
-    (5s, 20x the idle window), that ends the read regardless of how recently
-    the last line arrived. When the total cap is what ends the read (never
-    the idle timeout or a clean EOF, which stay silent as before), the
-    decode is NOT presented as complete: text mode gets a stderr note,
-    `--json` gets a stderr warning line (stdout stays the unwrapped SDK
-    report contract, untouched), and `--format json` gets a new
-    `faultdecode.stdin-truncated` warning issue alongside the report --
-    "decode what arrived and say so" rather than a silent truncation or a
-    hang.
-  - `_parse_hexint`'s 32-bit range check (added two bullets above) had been
-    applied to `--pc`/`--lr` as well as the eight status/address registers,
-    which was scope creep past what the defect actually named: the
-    reproduction was `--cfsr`-only, `--pc`/`--lr` feed only best-effort
-    `addr2line` symbolication (never the CFSR bit-scan the defect was
-    about), and the oracle itself applies no such bound to them (measured:
-    `tan faultdecode --cfsr 0x8200 --pc 0x100000000` on the shipped v0.4.1
-    binary exits 0, unchanged). `enforce_range` is now a keyword the two
-    symbolication flags opt out of; the eight status/address registers are
-    unaffected.
-  - `BFSR.LSPERR`/`MMFSR.MLSPERR` escalated to `FORCED` is a DELIBERATE,
-    tested divergence from the oracle, not a silent one: measured against
-    the real SDK (`scripts/alp_cli/faultdecode.py`),
-    `decode(cfsr=0x2000, hfsr=0x40000000).root_cause` still returns the
-    self-contradictory "its own status bits are clear" message even though
-    LSPERR is the very bit set in the same report's flags. The port's
-    corrected message is intentionally kept, not reverted -- see
-    `tests/core/test_faultdecode.py::
-    test_lsperr_plus_forced_diverges_from_the_oracle_by_design`, which pins
-    the oracle's own text so a future "restore parity" cannot silently
-    reintroduce the contradiction, and the live random-sweep parity test now
-    excludes this one known combination instead of passing on it by luck of
-    the fixed seed.
-  - `consent.can_prompt`'s `sys.stdin`/`sys.stderr` guard used `is not None`
-    before `.isatty()` -- which stops a `None` stream (fd 0/2 closed) but
-    does nothing for a stream that EXISTS yet still lacks `.isatty()`, the
-    `_TeeStderr` shape named two bullets above. `json_mode` is meant to
-    short-circuit `can_prompt` before it reaches such an object on the path
-    that threads `json_mode` through correctly, but a caller that forgets to
-    (the exact bug tan-cli#488 found in `build_cmd._dispatch`) reaches the
-    bare `.isatty()` regardless, and `is not None` would not have caught it.
-    Rewritten as `try`/`except (AttributeError, ValueError)` -- the same
-    exception a bare `None.isatty()` already raises, so one guard now covers
-    both shapes without depending on every future caller getting
-    `json_mode` right.
-  - `_stdin_errors_ignore`'s `sys.stdin.reconfigure(...)` call was itself
-    unguarded past the `hasattr` check: `TextIOWrapper.reconfigure()` raises
-    `io.UnsupportedOperation` (a subclass of both `OSError` and `ValueError`,
-    so no new import was needed to catch it) once ANY read has already
-    happened on the stream -- measured, even reconfiguring to the identical
-    encoding it already has still raises post-read. `hasattr` only proves
-    the method exists, not that calling it will succeed on this stream's
-    current state; now wrapped in `try`/`except (OSError, ValueError)`,
-    falling back to whatever encoding the stream already had rather than
-    crashing.
-  - Defect 3's class (bare `sys.stdin`/`sys.stderr` dereferences) is
-    STILL only partially closed. `doctor_cmd.fix_suppressed_issue`'s
-    `sys.stdin.isatty() and sys.stderr.isatty()` (`doctor_cmd.py:2585`,
-    reproduced live: `tan doctor --fix` with fd 0 closed raises
-    `AttributeError: 'NoneType' object has no attribute 'isatty'`, exit 5)
-    and `new_som_cmd.new_som`'s own `sys.stdin.isatty()`
-    (`new_som_cmd.py:784`, reproduced the same way against a resolved SDK
-    root) remain unguarded -- both files are mid-review on separate open
-    PRs (#536, #534) and are out of scope here. The one-line fix for each is
-    the same shape this round gave `consent.can_prompt`: wrap the
-    `.isatty()` call in `try`/`except (AttributeError, ValueError)` (or
-    route through a shared `tan.env` helper, if one lands first).
-    (#503)
+
+  Three things this issue also raised are DEFERRED, not closed here:
+  - The implicit-stdin reader itself (`_stdin_offers_input`,
+    `_stdin_offers_input_by_reading`) is UNCHANGED from `dev` -- several
+    rounds of bounding it more tightly (an idle+total dual timeout, a
+    background queue drain, `sys.stdin.reconfigure(encoding="utf-8",
+    errors="ignore")` for a stray non-UTF-8 byte) each closed one shape of
+    hang or data loss and introduced a different one, so the reader reverts
+    to the known quantity `dev` already has rather than shipping another
+    unproven variant. This reinstates `dev`'s own defect -- a producer that
+    writes a dump and then holds the pipe open without closing it can still
+    lose that dump to the broad `except (OSError, ValueError)` in
+    `_stdin_offers_input_by_reading`/`_read_dump`, or hang past the
+    readiness probe on an unbounded `sys.stdin.read()` -- knowingly, not by
+    oversight. Tracked as tan-cli#537.
+  - `_parse_hexint` still accepts a negative/out-of-range hex value
+    (`int(text, 16)` parses a leading `-`), matching the v0.4.1 oracle
+    exactly: measured, `tan faultdecode --cfsr 0x100000000` and `--cfsr
+    -8200` both exit 0 on the shipped binary. A 32-bit range check was
+    tried and reverted -- it was an undeclared divergence from the oracle,
+    not an authorised one.
+  - `BFSR.LSPERR`/`MMFSR.MLSPERR` escalated to `FORCED` still falls through
+    to the generic "its own status bits are clear" `root_cause`, matching
+    the oracle's own (self-contradictory, but unaltered) text. A corrected
+    message was tried and reverted; whether to diverge from the oracle here
+    deliberately is an open question for a separate issue, not decided in
+    this change.
+  (Refs #503, #537)
 
 ## [0.5.1] — 2026-08-04
 

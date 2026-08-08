@@ -159,31 +159,10 @@ def test_bit_tables_match_the_sdk_original_exactly():
     )
 
 
-def _is_authorised_lsperr_forced_divergence(cfsr: int, hfsr: int) -> bool:
-    """`True` for exactly the one input shape this module's `decode()` is
-    KNOWN, and MEANT, to disagree with the SDK oracle on -- tan-cli#503
-    defect 4, an AUTHORISED divergence, not an accidental one (see
-    `test_lsperr_plus_forced_names_lazy_fp_stacking_diverges_from_the_oracle_
-    by_design` below, which pins the measured oracle text; and the FORCED
-    branch's own comment in `tan/core/faultdecode.py`).
-
-    Whether this actually reaches the divergent branch inside `decode()`
-    depends on no HIGHER-priority CFSR bit also being set (those branches
-    are checked first and would shadow it), so this is a necessary, not a
-    sufficient, condition for a mismatch -- deliberately permissive: a false
-    positive here only means one fewer case gets diffed, never a real defect
-    hidden behind it, and the dedicated test below diffs the exact case
-    directly regardless of what this sweep does or does not land on.
-    """
-    return bool(hfsr & (1 << 30)) and bool(cfsr & ((1 << 13) | (1 << 5)))
-
-
 def test_decode_matches_the_sdk_original_over_many_fault_words():
     """`decode()` + `render_human()` + `report_to_json()`, swept over every
     single-bit case and a batch of random combinations, diffed against the
-    SDK original's own functions -- excluding the one AUTHORISED divergence
-    (`_is_authorised_lsperr_forced_divergence`), which has its own dedicated
-    proof test instead of being (mis)counted as a regression here."""
+    SDK original's own functions."""
     original = _load_original()
     import random
 
@@ -200,8 +179,6 @@ def test_decode_matches_the_sdk_original_over_many_fault_words():
 
     mismatches = []
     for cfsr, hfsr, dfsr in cases:
-        if _is_authorised_lsperr_forced_divergence(cfsr, hfsr):
-            continue
         for bfar, mmfar in ((None, None), (0x20000000, None), (None, 0x20000004)):
             ours = port.decode(cfsr=cfsr, hfsr=hfsr, dfsr=dfsr, bfar=bfar, mmfar=mmfar)
             theirs = original.decode(
@@ -214,27 +191,6 @@ def test_decode_matches_the_sdk_original_over_many_fault_words():
             ):
                 mismatches.append((hex(cfsr), hex(hfsr), hex(dfsr), bfar, mmfar))
     assert not mismatches, f"{len(mismatches)} decode mismatches: {mismatches[:5]}"
-
-
-def test_lsperr_plus_forced_diverges_from_the_oracle_by_design():
-    """tan-cli#503 defect 4 is an AUTHORISED divergence, not a silent one --
-    see the repo's `firmware_path: TBD` precedent in
-    `tests/parity/test_flash_oracle_parity.py` for the shape this follows.
-
-    Measured against a real SDK oracle checkout (`ALP_SDK_ROOT`) @ commit
-    `99e47476`: `decode(cfsr=0x2000, hfsr=0x40000000).root_cause` is
-    `"Forced HardFault -- a configurable fault escalated but its own status
-    bits are clear; ..."` -- self-contradictory, since BFSR.LSPERR (the very
-    bit that made bit 13 of CFSR set) is listed in the SAME report's flags.
-    The port names the real cause instead ("Fault during lazy floating-point
-    state preservation ..."). This is a deliberate correction, not a defect
-    to "fix back" -- do not restore parity with the oracle here."""
-    original = _load_original()
-    ours = port.decode(cfsr=0x2000, hfsr=0x40000000)
-    theirs = original.decode(cfsr=0x2000, hfsr=0x40000000)
-    assert "its own status bits are clear" in theirs.root_cause
-    assert "lazy floating-point" in ours.root_cause
-    assert ours.root_cause != theirs.root_cause
 
 
 def test_parse_dump_matches_the_sdk_original():
@@ -293,74 +249,3 @@ def test_mmfsr_bfsr_ufsr_sub_registers_compose_into_cfsr():
 def test_last_occurrence_of_a_token_wins():
     found = port.parse_dump("cfsr: 0x1\ncfsr: 0x2\n")
     assert found["cfsr"] == 0x2
-
-
-# --------------------------------------------------------------------------
-# tan-cli#503, defect 4: LSPERR/MLSPERR must not fall through to the generic
-# FORCED message when both are set -- LSPERR/MLSPERR name the real cause.
-# --------------------------------------------------------------------------
-
-
-def test_lsperr_plus_forced_names_lazy_fp_stacking_not_the_generic_forced_message():
-    """BFSR.LSPERR (bit 13) escalated to HardFault (HFSR.FORCED, bit 30) used
-    to report 'its own status bits are clear' while LSPERR was the very bit
-    set -- self-contradictory against the flag list in the same report."""
-    report = port.decode(cfsr=1 << 13, hfsr=1 << 30)
-    assert report.has("LSPERR")
-    assert report.has("FORCED")
-    assert "lazy floating-point" in report.root_cause
-    assert "its own status bits are clear" not in report.root_cause
-
-
-def test_mlsperr_plus_forced_names_lazy_fp_stacking_not_the_generic_forced_message():
-    """MMFSR.MLSPERR (bit 5) is the MemManage-side twin of the same defect."""
-    report = port.decode(cfsr=1 << 5, hfsr=1 << 30)
-    assert report.has("MLSPERR")
-    assert "lazy floating-point" in report.root_cause
-
-
-def test_lsperr_alone_without_forced_is_unaffected():
-    """The fix must be scoped to the FORCED combination only: LSPERR alone
-    (no escalation) must keep decoding exactly as before -- via the generic
-    `first = report.flags[0]` fallback -- matching the frozen golden fixture
-    and the SDK oracle for every case that is not this exact combination."""
-    report = port.decode(cfsr=1 << 13)
-    assert report.has("LSPERR")
-    assert report.has("FORCED") is False
-    assert report.root_cause == (
-        "LSPERR set (BFSR): Bus fault during lazy floating-point state preservation."
-    )
-
-
-# --------------------------------------------------------------------------
-# tan-cli#503 follow-up: `parse_dump`'s `0x[0-9A-Fa-f]+` alternative has no
-# width cap -- `faultdecode_cmd._parse_hexint` bounds a value entering via a
-# flag, but this is the SECOND, independent entry point a value can arrive
-# by, and it must reject an over-wide match the same way.
-# --------------------------------------------------------------------------
-
-
-def test_parse_dump_skips_a_value_wider_than_32_bits():
-    """An over-wide hex run (more than 8 hex digits, i.e. > 0xFFFFFFFF) is
-    dropped, not clamped or wrapped -- the same "refuse, don't corrupt"
-    contract `_parse_hexint` applies on the flag path, so a value that
-    reaches `decode()` from either entry point is always a well-formed
-    32-bit word."""
-    found = port.parse_dump("cfsr: 0x1FFFFFFFFF\n")
-    assert "cfsr" not in found
-
-
-def test_parse_dump_accepts_the_maximum_32_bit_value():
-    """The boundary itself, 0xFFFFFFFF, must still parse -- the guard is
-    `value > 0xFFFFFFFF`, not `>=`, so this is not an off-by-one rejection of
-    a legitimate all-ones register word."""
-    found = port.parse_dump("cfsr: 0xFFFFFFFF\n")
-    assert found["cfsr"] == 0xFFFFFFFF
-
-
-def test_parse_dump_over_wide_value_does_not_suppress_a_later_valid_token():
-    """One bad match must not poison the whole parse: an over-wide CFSR is
-    skipped, but a well-formed HFSR later in the same text is still found."""
-    found = port.parse_dump("cfsr: 0x1FFFFFFFFF\nhfsr: 0x40000000\n")
-    assert "cfsr" not in found
-    assert found["hfsr"] == 0x40000000

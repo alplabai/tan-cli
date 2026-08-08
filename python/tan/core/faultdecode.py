@@ -260,29 +260,6 @@ def _root_cause(report: FaultReport) -> str:
         return ("Debug event with no debugger attached -- a stray BKPT or a watchpoint firing in a "
                 "free-running build.")
     if report.has("FORCED"):
-        # LSPERR/MLSPERR (tan-cli#503) have no dedicated branch of their own
-        # above -- unlike every other CFSR cause bit -- so an escalated lazy
-        # -FP-stacking fault used to fall all the way through to here and
-        # report "its own status bits are clear" while BFSR.LSPERR/MMFSR.
-        # MLSPERR were the very bits set. Handled ONLY inside this FORCED
-        # branch, not as a standalone check above it: LSPERR/MLSPERR alone
-        # (no escalation) still falls through to the generic `first =
-        # report.flags[0]` fallback below, unchanged, matching the SDK
-        # original and the frozen golden fixture for every case that is not
-        # this exact combination.
-        if report.has("LSPERR") or report.has("MLSPERR"):
-            # AUTHORISED divergence from the SDK oracle (tan-cli#503 defect
-            # 4), not an accidental one -- measured against the real oracle,
-            # `decode(cfsr=0x2000, hfsr=0x40000000).root_cause` still returns
-            # the self-contradictory "its own status bits are clear" message
-            # below; this branch deliberately names the real cause instead.
-            # See `tests/core/test_faultdecode.py::
-            # test_lsperr_plus_forced_diverges_from_the_oracle_by_design` for
-            # the pinned proof and provenance -- do not "restore parity" here.
-            return ("Fault during lazy floating-point state preservation -- the deferred FPU "
-                    "context push/pop (lazy stacking) hit a bad or unmapped stack address. Check "
-                    "the active stack's FP context region and CONTROL.FPCA, and consider disabling "
-                    "lazy stacking (FPCCR.LSPEN) if the crash is hard to reproduce.")
         return ("Forced HardFault -- a configurable fault escalated but its own status bits are clear; "
                 "the escalation usually means faults are disabled (SHCSR) or it faulted at priority -1.")
 
@@ -335,21 +312,9 @@ def parse_dump(text: str) -> dict[str, int]:
         key = canon[m.group(1).lower()]
         raw = m.group(2)
         try:
-            value = int(raw, 16)
+            found[key] = int(raw, 16)
         except ValueError:  # pragma: no cover - regex already constrains this
             continue
-        if value > 0xFFFFFFFF:
-            # `0x[0-9A-Fa-f]+` has no width cap (tan-cli#503 follow-up): an
-            # over-wide hex run in a pasted dump would otherwise reach
-            # `decode()` unbounded, the same corruption `faultdecode_cmd
-            # ._parse_hexint`'s range check exists to refuse on the flag
-            # path. There is no caller to hand a coded refusal to from here
-            # (this is a pure grep over free text, not a CLI option), so an
-            # out-of-range match is treated like unrecognised text and
-            # skipped, keeping `decode()` a function of well-formed 32-bit
-            # words regardless of which of the two entry points supplied it.
-            continue
-        found[key] = value
 
     # Compose CFSR from sub-registers if a combined CFSR was not given outright.
     if "cfsr" not in found:
