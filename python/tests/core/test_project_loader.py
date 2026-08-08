@@ -107,3 +107,41 @@ def test_the_unknown_revision_refusal_is_an_orchestrator_error_subclass():
     from tan.planner import OrchestratorError, SdkRevisionUnknown
 
     assert issubclass(SdkRevisionUnknown, OrchestratorError)
+
+
+@pytest.mark.parametrize("mode", ["carrier-netlist", "composed-route-table"])
+def test_a_reserved_hw_rev_refuses_through_the_route_table_emit(tmp_path, mode):
+    """tan-cli#485 (#320 recurred): alp-sdk `1a91a232` (#1025's STATUS half,
+    landed in the same function this module ports) added a second gate --
+    `SdkRevisionNotBuildable` -- alongside the existence gate above, for an
+    `hw_rev` that EXISTS in the table but is `status: reserved` / `status:
+    tbd` / status-less. `_hwrev_pad_route_overrides` only ever carried the
+    existence half (`SdkRevisionUnknown`), so `tan generate --target
+    carrier-netlist` / `--target composed-route-table` happily emitted a
+    full net-by-net routing table for `E1M-AEN801` `hw_rev: r3` (real
+    fixture data: r3 is `status: reserved` in
+    metadata/e1m_modules/aen/hw-revisions.yaml) with no defined routing --
+    while `tan build` (which DOES run `load_board_yaml`, and DOES carry
+    this gate -- see `tests/core/test_sdk_revision_gate.py`) refused the
+    identical input.  This is the exact contradiction the issue names:
+    `tan validate`/`tan build` refuse what the generators hand out.
+
+    Fails against unfixed `project_loader.py` (verified before the fix
+    landed: `_hwrev_pad_route_overrides` returned r3's pad_route_overrides
+    with no exception, so this `pytest.raises` block never entered and the
+    test failed with `Failed: DID NOT RAISE`)."""
+    if SDK is None:
+        pytest.skip(reason=_SKIP_REASON)
+    from tan.planner_root import bind_sdk_root
+    bind_sdk_root(SDK)
+    from tan import planner_emit
+    from tan.planner import SdkRevisionNotBuildable
+
+    board = _fixture_board_yaml(tmp_path, "r3")
+    with pytest.raises(SdkRevisionNotBuildable) as excinfo:
+        planner_emit.render(mode, sdk_root=SDK, board_yaml=board)
+
+    message = str(excinfo.value)
+    assert "r3" in message            # the not-buildable revision
+    assert "E1M-AEN801" in message    # which SoM
+    assert "reserved" in message      # names the actual status, not just refuses

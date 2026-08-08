@@ -172,6 +172,85 @@ def test_heartbeat_line_never_wraps_on_a_narrow_terminal(monkeypatch):
     assert all(len(row) <= width for row in term.rows), term.rows
 
 
+def test_dispatch_does_not_crash_arming_the_heartbeat_when_stderr_is_none(monkeypatch):
+    """tan-cli#488 round 5 class sweep: `_dispatch` computes `_Heartbeat`'s
+    `enabled=` with a bare `sys.stderr.isatty()` (tan-cli#287), the exact
+    unguarded shape `tan.core.consent.can_prompt` was fixed for -- `sys.stderr`
+    can be `None` (a process launched with its standard handles detached: a
+    GUI launcher, a `pythonw`-style spawn, or a shell that closed fd 2 before
+    exec), and a bare `.isatty()` on it raises `AttributeError: 'NoneType'
+    object has no attribute 'isatty'` before a single slice ever dispatches --
+    caught only by `build()`'s outer `except Exception` and reported as a
+    fabricated `build.internal-failure` for a detached-stdio `tan build` that
+    should simply run with the heartbeat disabled.
+
+    An empty-slices plan is enough to reach the `with _Heartbeat(...)` line
+    without needing a real toolchain or Zephyr tree -- `execute_slices` on a
+    zero-slice plan returns immediately, so this stays a real call into
+    `_dispatch`, not a stand-in for it."""
+    from tan.core.build_plan import BuildPlan
+
+    plan = BuildPlan(
+        schema_version=1,
+        generated_by="test",
+        board_yaml="board.yaml",
+        sku="sku",
+        build_root="build",
+        slices=[],
+        shared_artefacts=[],
+        warnings=[],
+    )
+    monkeypatch.setattr(sys, "stderr", None)
+
+    outcomes, issues = build_cmd._dispatch(plan, [], build_cmd.Path("/tmp"), None, None, json_mode=False)
+
+    assert outcomes == []
+    assert issues == []
+
+
+def test_dispatch_does_not_crash_arming_the_heartbeat_when_stderr_has_no_isatty(monkeypatch):
+    """tan-cli#488 round 6: the round-5 guard above (the test immediately
+    above this one) only stopped a `None` `sys.stderr` from crashing this
+    line -- it never covered a `sys.stderr` that EXISTS and simply has no
+    `.isatty()` method, which is exactly what `tan.cli.main` installs under
+    `--format json` (`_TeeStderr`: `write`/`flush`/`getvalue` only). Every
+    `tan run --format json` against a real project crashed here with
+    `AttributeError: '_TeeStderr' object has no attribute 'isatty'` --
+    `run_cmd._run` calls `_build` with no `json_mode` of its own, so
+    `_dispatch` always saw the `json_mode=False` default and reached the
+    bare `.isatty()` unconditionally (measured against the real binary,
+    exit 5, `run.internal-failure`, before a single slice dispatched). This
+    is the one shape `test_dispatch_does_not_crash_arming_the_heartbeat_when_
+    stderr_is_none` above cannot catch: monkeypatching `sys.stderr` to
+    `None` never exercises a stderr that has attributes but not this one."""
+
+    class _NoIsatty:
+        def write(self, _text: str) -> int:  # pragma: no cover - never called
+            return 0
+
+        def flush(self) -> None:  # pragma: no cover - never called
+            pass
+
+    from tan.core.build_plan import BuildPlan
+
+    plan = BuildPlan(
+        schema_version=1,
+        generated_by="test",
+        board_yaml="board.yaml",
+        sku="sku",
+        build_root="build",
+        slices=[],
+        shared_artefacts=[],
+        warnings=[],
+    )
+    monkeypatch.setattr(sys, "stderr", _NoIsatty())
+
+    outcomes, issues = build_cmd._dispatch(plan, [], build_cmd.Path("/tmp"), None, None, json_mode=False)
+
+    assert outcomes == []
+    assert issues == []
+
+
 # --- CLI, subprocess: the JSON path is untouched -------------------------
 
 

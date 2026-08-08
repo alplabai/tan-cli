@@ -479,12 +479,13 @@ def test_the_real_collect_produces_the_oracle_shaped_check_list(tmp_path, monkey
         sdk / "metadata" / "bootstrap.json",
         json.dumps(
             {
+                "schemaVersion": 1,
                 "prerequisites": {
                     "posix": [],
                     "windows": [],
                     "pythonMinVersion": "3.10",
                     "install": {},
-                }
+                },
             }
         ),
     )

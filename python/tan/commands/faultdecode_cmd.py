@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import json as _json
 import select
-import shutil
 import subprocess
 import sys
 import threading
@@ -55,6 +54,7 @@ from pathlib import Path
 
 import typer
 
+from tan.commands.doctor_cmd import on_path
 from tan.core.faultdecode import (
     Symbol,
     decode,
@@ -76,8 +76,22 @@ def resolve_symbol(addr: int, elf: Path) -> Symbol | None:
     Tries ``arm-zephyr-eabi-addr2line`` then ``llvm-addr2line`` then plain
     ``addr2line``. Returns ``None`` (caller skips gracefully) if no tool is on
     PATH or the lookup fails -- symbolication is a convenience, never required.
+
+    Uses `doctor_cmd.on_path`, NOT `shutil.which` (tan-cli#503): on Windows,
+    `shutil.which` inserts `os.curdir` ahead of `$PATH`, so an
+    `addr2line.exe`/`llvm-addr2line.exe`/`arm-zephyr-eabi-addr2line.exe`
+    sitting at the root of a checked-out project is reported as "available".
+    Spawning it by bare NAME afterwards (rather than the resolved absolute
+    path) would reopen the same hole a second way -- `CreateProcess`'s own
+    current-directory-first search -- even past a hardened probe, so the
+    resolved absolute path from `on_path` is what gets spawned below, the same
+    `doctor_cmd.on_path` call `flash_cmd` already makes for its own tool
+    probes. `size_cmd`/`build/execute.py` hand-roll their OWN hardened PATH
+    walk instead (`_find_on_path`/`_command_on_path`, both return a bare
+    `bool`, not a resolved path) -- a different, not-yet-unified pattern, not
+    this one.
     """
-    tool = next((t for t in _ADDR2LINE_TOOLS if shutil.which(t)), None)
+    tool = next((p for t in _ADDR2LINE_TOOLS if (p := on_path(t))), None)
     if tool is None or not elf.is_file():
         return None
     try:
@@ -227,13 +241,33 @@ def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
     IMPLICIT read, and the caller passes `False` once any fault register was
     supplied as a flag -- there is nothing left for a dump to contribute, so
     there is no reason to wait on a pipe for one (tan-cli#388).
+
+    tan-cli#488 round 5 class sweep: `sys.stdin` itself, not just the result
+    of calling `.isatty()` on it, can be `None` -- a process launched with
+    its standard handles detached (a GUI launcher, a `pythonw`-style spawn,
+    or a shell that closed fd 0 before exec). `--file -` names stdin
+    explicitly, so a detached stdin there is refused with a clear message
+    rather than a raw `AttributeError`; the IMPLICIT auto-consume path below
+    treats a detached stdin the same as one that offers nothing (`""`) -- it
+    was already never blocking on a stdin that has no answer to give.
     """
     if file_ == "-":
+        if sys.stdin is None:
+            raise typer.BadParameter(
+                "stdin is detached (no standard input handle for this process), "
+                "so `--file -` cannot read a dump from it",
+                param_hint="--file",
+            )
         return sys.stdin.read()
     if file_ is not None:
         return Path(file_).read_text(encoding="utf-8", errors="ignore")
     # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works.
-    if not auto_consume_stdin or sys.stdin.isatty() or not _stdin_offers_input():
+    if (
+        not auto_consume_stdin
+        or sys.stdin is None
+        or sys.stdin.isatty()
+        or not _stdin_offers_input()
+    ):
         return ""
     if _PREREAD_STDIN:
         # The readiness check had to consume stdin to answer (Windows, or a
