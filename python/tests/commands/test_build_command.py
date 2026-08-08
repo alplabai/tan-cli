@@ -1448,7 +1448,13 @@ def test_a_slice_naming_toolchain_root_builds_on_a_host_that_has_one(project, tm
     assert env["data"]["slices"][0]["status"] != "skipped", env
     # The substituted value reached the argv -- not the literal token, and
     # not the empty string (which would have made it the HOST root `/bin`).
-    assert f"RESOLVED {toolchain.as_posix()}/bin/cmake" in proc.stderr, proc.stderr
+    #
+    # `str(toolchain)`, NOT `as_posix()`: `ZEPHYR_SDK_INSTALL_DIR` is returned
+    # VERBATIM (measured against the oracle -- a trailing slash survives), so
+    # on Windows the substituted value carries the backslashes this test set,
+    # and asserting the posix spelling would fail there for a reason that has
+    # nothing to do with the code under test.
+    assert f"RESOLVED {toolchain}/bin/cmake" in proc.stderr, proc.stderr
     assert "${TOOLCHAIN_ROOT}" not in proc.stderr
 
 
