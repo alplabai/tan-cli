@@ -36,12 +36,14 @@ SOM=E1M-AEN801
 CORE=m55_hp
 EXPECT_MARKER="[i2c-master]"
 WORK=""
+WORK_CREATED=0
 PHASES=all
 ALLOW_MUTATE=0
 ALLOW_BOOTSTRAP=0
 KEEP=0
 LEDGER=""
 BOOTSTRAPPED=0
+STRICT=0
 
 usage() {
   cat <<'TXT'
@@ -64,7 +66,14 @@ Options
   --allow-bootstrap    permit `tan bootstrap` (copies the SDK; slow, GBs of disk)
   --keep               keep the sandbox after the run
   --json FILE          append a machine-readable result ledger
+  --strict             also fail the run if anything was SKIPped (workspace,
+                        renode, ... not detected) -- "green" then means "the
+                        whole surface ran", not just "nothing that ran failed"
   -h, --help           this text
+
+`--work` is deleted at exit ONLY when this run created it (the mktemp -d
+default, or a --work path that did not already exist). An EXISTING directory
+passed to --work is never touched, no matter what --keep says.
 
 `tan flash` is never run and there is no flag to enable it.
 
@@ -89,6 +98,7 @@ while [ $# -gt 0 ]; do
     --allow-bootstrap) ALLOW_BOOTSTRAP=1; shift ;;
     --keep)            KEEP=1; shift ;;
     --json)            LEDGER=$2; shift 2 ;;
+    --strict)          STRICT=1; shift ;;
     -h|--help)         usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -98,16 +108,42 @@ command -v "$TAN" >/dev/null 2>&1 || [ -x "$TAN" ] || {
   echo "ABORT: no tan binary at '$TAN' (--tan PATH, or put tan on PATH)" >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || {
   echo "ABORT: python3 is required for the envelope and ledger checks" >&2; exit 2; }
+
+# Presence on PATH is not proof `$TAN` IS tan -- on Windows especially, a
+# same-named shim, a stale shell function, or a launcher stub for an entirely
+# different tool can sit on PATH and still pass `command -v`. Prove it by
+# asking, before running ~90 steps against something that answers to the name
+# but is not the tool. (The concrete trap this generalises from: on Windows,
+# `bash.exe` on PATH is often the WSL launcher stub, not bash -- a real,
+# executable, PATH-resolvable binary that answers `-c` with a UTF-16LE "no
+# distributions installed" banner instead of running anything. If you are
+# invoking THIS script as `bash scripts/tan-surface/run.sh` on a Windows host,
+# confirm your `bash` is real -- `bash -c 'echo ok'` -- before trusting
+# anything this script goes on to report.)
+TAN_VERSION_LINE=$("$TAN" --version 2>/dev/null | head -1)
+case "$TAN_VERSION_LINE" in
+  tan\ *) ;;
+  *) echo "ABORT: '$TAN --version' did not print 'tan <version>' (got: '${TAN_VERSION_LINE:-<empty output>}') -- '$TAN' is not the tan binary" >&2
+     exit 2 ;;
+esac
+
 [ -n "$SDK" ] || { echo "ABORT: --sdk-root is required" >&2; usage >&2; exit 2; }
 [ -f "$SDK/scripts/alp_project.py" ] || {
   echo "ABORT: '$SDK' does not look like an alp-sdk checkout (no scripts/alp_project.py)" >&2; exit 2; }
 SDK=$(CDPATH= cd -- "$SDK" && pwd)
 
+# WORK_CREATED gates the cleanup trap below: only a directory THIS run made
+# is ever deleted. Passing an existing directory to --work is a request to
+# use it, not permission to destroy it at exit.
 if [ -z "$WORK" ]; then
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/tan-surface.XXXXXX") || exit 2
+  WORK_CREATED=1
+elif [ -d "$WORK" ]; then
+  WORK=$(CDPATH= cd -- "$WORK" && pwd)
 else
   mkdir -p "$WORK" || exit 2
   WORK=$(CDPATH= cd -- "$WORK" && pwd)
+  WORK_CREATED=1
 fi
 
 if [ "$MODE" = inplace ]; then
@@ -123,13 +159,13 @@ fi
 . "$HERE/cases.sh"
 
 printf '\033[1mtan surface walk\033[0m\n'
-printf '  tan       %s (%s)\n' "$TAN" "$("$TAN" --version 2>/dev/null | head -1)"
+printf '  tan       %s (%s)\n' "$TAN" "$TAN_VERSION_LINE"
 printf '  sdk-root  %s\n' "$SDK"
 printf '  project   %s (%s)\n' "$PROJ" "$MODE"
 printf '  work      %s\n' "$WORK"
 printf '  phases    %s\n' "$PHASES"
 if [ "$MODE" = inplace ] && [ "$ALLOW_MUTATE" != 1 ]; then
-  warn "read-only against a real project; pass --allow-mutate to include the writing steps"
+  warn "read-only against a real project; pass --allow-mutate to include the writing steps (build, run, lock, support-bundle, generate, clean)"
 fi
 
 # An ALREADY-bootstrapped checkout is the normal state on a working machine, and
@@ -169,7 +205,13 @@ restore_global() {
     cp "$GLOBAL_SAVED" "$GLOBAL_DEFAULT"
     printf '        restored your previous ~/.alp/sdk-default\n'
   fi
-  if [ "$KEEP" != 1 ] && [ -n "${WORK:-}" ] && [ "$MODE" = sandbox ]; then
+  # Only ever delete a $WORK this run itself created (see the option parsing
+  # above) -- an operator-supplied EXISTING directory is never touched here,
+  # in EITHER --project or sandbox mode. Un-gating this from `MODE = sandbox`
+  # also closes the leak the old condition had in --project mode: a
+  # --project run's own mktemp'd scratch dir (used for the invalid-board
+  # fixture, a bootstrap SDK copy, ...) used to survive every run untouched.
+  if [ "$KEEP" != 1 ] && [ "$WORK_CREATED" = 1 ] && [ -n "${WORK:-}" ]; then
     chmod -R +w "$WORK" 2>/dev/null || true
     rm -rf "$WORK" 2>/dev/null || true
   fi
