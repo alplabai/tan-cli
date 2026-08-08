@@ -748,11 +748,30 @@ def _emit(
     command_line: str = "",
     sdk: SdkInfo | None = None,
 ) -> None:
+    # tan-cli#478 review: `issues` may now carry the SDK-resolution pair
+    # (`sdk.project-pin-unresolved`, `sdk.global-default-foreign-project`)
+    # alongside this command's own findings. Those belong in the ENVELOPE and
+    # nowhere else here:
+    #
+    #   * `data.issueCount` reads as "how many findings does this board have";
+    #     counting a host fact made a CLEAN board report `outcome: "clean"`,
+    #     `exitCode: 0`, `issueCount: 1`.
+    #   * `--format diagnostic-v1` / `--format sarif` are ported alp-sdk
+    #     documents whose every entry is anchored at `board.yaml` 1:1. A CI job
+    #     uploading the SARIF would annotate line 1 of the customer's
+    #     board.yaml with "the machine-global default SDK was last set by ..."
+    #     -- a fact about the host, presented as a finding about the file.
+    #   * the tan-cli#350 text verdict keyed off `len(issues) == 1`, so a
+    #     prepended warning silently restored the "validate: validation
+    #     failure" wording that issue removed for the nothing-was-checked case.
+    #
+    # Split once, here, rather than at each of the four readers below.
+    findings = [issue for issue in issues if not issue.code.startswith("sdk.")]
     if output_format == ValidateOutputFormat.JSON:
         data = {
             "schemaVersion": DATA_SCHEMA_VERSION,
             "outcome": outcome,
-            "issueCount": len(issues),
+            "issueCount": len(findings),
             # The validator command line that actually ran, or `""` -- which
             # every guard and the whole offline path keep, and which the two
             # committed conformance fixtures pin.
@@ -782,13 +801,13 @@ def _emit(
         # `json.dumps(to_machine_json(collector), indent=2)` -- these two
         # formats are ported documents, not the envelope (which is
         # deliberately compact; see `tan.envelope.emit`'s `separators`).
-        typer.echo(json.dumps(_diagnostic_v1_document(issues, board_path), indent=2))
+        typer.echo(json.dumps(_diagnostic_v1_document(findings, board_path), indent=2))
     elif output_format == ValidateOutputFormat.SARIF:
         # indent=2, matching scripts/alp_cli/validate.py:36.
-        typer.echo(json.dumps(_sarif_document(issues, board_path), indent=2))
+        typer.echo(json.dumps(_sarif_document(findings, board_path), indent=2))
     else:
         stream = typer.get_text_stream("stderr")
-        if len(issues) == 1 and issues[0].code == "validate.board-yaml-missing":
+        if len(findings) == 1 and findings[0].code == "validate.board-yaml-missing":
             # tan-cli#350: this is not a VALIDATION failure -- there is no
             # board.yaml to validate, so nothing was checked and found
             # wrong. Every other non-clean outcome below still says
@@ -797,7 +816,7 @@ def _emit(
             # `--format json`'s `issues[].message`) already names where tan
             # looked and the remedy -- see the guard above.
             stream.write("validate: no board.yaml to validate\n")
-            stream.write(f"{issues[0].message}\n")
+            stream.write(f"{findings[0].message}\n")
         elif outcome != OUTCOME_CLEAN:
             stream.write("validate: validation failure\n")
             for issue in issues:

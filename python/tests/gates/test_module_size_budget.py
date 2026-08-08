@@ -290,7 +290,11 @@ _MODULE_BUDGET: dict[str, int] = {
     # comments that explain why: extracting from a 1100-line module is
     # tan-cli#408's job, and holding a defect fix hostage to it would
     # leave the silence in place for the sake of a number.
-    "tan/commands/validate_cmd.py": 1108,
+    # 1108 -> 1127, tan-cli#478 review round: `_emit` now splits this
+    # command's own findings from the SDK-resolution advisories, so
+    # `data.issueCount`, `--format sarif`, `--format diagnostic-v1` and the
+    # tan-cli#350 text verdict stop treating a HOST fact as a board finding.
+    "tan/commands/validate_cmd.py": 1127,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
@@ -300,7 +304,10 @@ _MODULE_BUDGET: dict[str, int] = {
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
     # `sdk.project-pin-unresolved`.
-    "tan/commands/clean_cmd.py": 1013,
+    # 1013 -> 1015, tan-cli#478: `SdkInfo.from_resolution` wrapped over two
+    # lines. Found by the new constructor gate, which caught this site on
+    # its first run -- it was not in the hand-written enumeration.
+    "tan/commands/clean_cmd.py": 1015,
     "tan/planner/loader.py": 996,
     # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
     # carries `foreign_global_default_for` through into `_Sdk`, and `init`

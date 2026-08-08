@@ -184,3 +184,58 @@ def test_the_support_bundle_file_itself_records_it(two_projects):
     # And the raw-string form of #478's own repro, so a future refactor that
     # renames the key without dropping the fact still has to keep it findable.
     assert "global-default-foreign-project" in bundle_path.read_text(encoding="utf-8")
+
+
+def test_the_sdk_advisory_never_leaks_into_validates_board_documents(two_projects):
+    """tan-cli#478 review: the pair belongs in the ENVELOPE only.
+
+    `--format diagnostic-v1` and `--format sarif` are ported alp-sdk documents
+    in which every entry is anchored at `board.yaml`, region 1:1. A CI job
+    uploading the SARIF to code scanning would annotate line 1 of the
+    customer's board.yaml with a fact about the HOST -- "the machine-global
+    default SDK was last set by a bootstrap relocation in <other project>".
+
+    `data.issueCount` is the same confusion in the JSON: it reads as "how many
+    findings does this board have", and counting a host fact made a CLEAN
+    board report `outcome: "clean"`, `exitCode: 0`, `issueCount: 1`.
+    """
+    sub_a, _proj_b, _new_sdk_b, env_extra = two_projects
+    (sub_a / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n", encoding="utf-8"
+    )
+
+    env = _envelope(run_tan_with_env("validate", "--format", "json", cwd=sub_a, env_extra=env_extra))
+    assert "sdk.global-default-foreign-project" in codes(env), (
+        "precondition unmet: this run must resolve the foreign pointer"
+    )
+    assert env["data"]["issueCount"] == sum(
+        1 for i in env["issues"] if not i["code"].startswith("sdk.")
+    ), "issueCount counted a host advisory as a board finding"
+
+    for fmt in ("sarif", "diagnostic-v1"):
+        proc = run_tan_with_env("validate", "--format", fmt, cwd=sub_a, env_extra=env_extra)
+        assert "global-default-foreign-project" not in proc.stdout, (
+            f"--format {fmt} anchored a host fact at the customer's board.yaml"
+        )
+
+
+def test_a_missing_board_yaml_keeps_its_own_verdict_wording(two_projects):
+    """tan-cli#350's wording, which the first revision of this PR regressed.
+
+    That branch keyed off `len(issues) == 1`, so prepending the SDK advisory
+    pushed it to 2 and control fell through to the generic line. The result:
+    `validate: validation failure` -- "a VERDICT that implies something was
+    checked and found wrong. Nothing was validated." -- printed for an empty
+    directory, exactly what #350 removed.
+    """
+    sub_a, _proj_b, _new_sdk_b, env_extra = two_projects
+    empty = sub_a.parent / "no-board-here"
+    empty.mkdir(exist_ok=True)
+
+    proc = run_tan_with_env("validate", cwd=empty, env_extra=env_extra)
+
+    assert "no board.yaml to validate" in proc.stderr, proc.stderr
+    assert "validation failure" not in proc.stderr, (
+        "tan-cli#350's wording regressed: nothing was checked, so nothing was "
+        "found wrong"
+    )
