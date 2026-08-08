@@ -9,11 +9,15 @@ pure module).
 `board_yaml_path`, `sdk_root`, `python` and `toolchain_root` are each
 resolved exactly ONCE by the caller and handed in -- never re-resolved here
 per-slice or on retry, the same "one resolution for the whole plan" contract
-`tan_core::plan_tokens::TokenValues` documents."""
+`tan_core::plan_tokens::TokenValues` documents. `toolchain_advice` travels
+WITH `toolchain_root` for that reason: it is the second half of one
+resolution (`toolchain.ToolchainResolution`), not an independent knob, and
+re-deriving it here would let the reason drift from the value it explains."""
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.commands.build.toolchain import NO_TOOLCHAIN_ADVICE
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.build_plan import BuildPlan
 from tan.core.plan_tokens import (
@@ -47,12 +51,6 @@ class SliceDemotion:
     slice_index: int
     core_id: str
     reason: str
-
-
-_NO_TOOLCHAIN_ADVICE = (
-    "no toolchain install is detectable on this host -- install the Zephyr SDK "
-    "(`west sdk install`) or set `ZEPHYR_SDK_INSTALL_DIR` to an existing install"
-)
 
 
 def _is_own_git_checkout(sdk_root: Path) -> bool:
@@ -129,11 +127,22 @@ def apply_plan_token_substitution(
     sdk_root: str | None,
     python: str,
     toolchain_root: str | None,
+    toolchain_advice: str = NO_TOOLCHAIN_ADVICE,
 ) -> tuple[BuildPlan, list[SliceDemotion]]:
     """Apply the build-plan token-substitution pass to `plan` before
     materialise writes anything or a slice command runs. A no-op unless
     `plan.plan_path_mode` is present; a present-but-unrecognised mode is a
-    hard error, never a half-applied guess."""
+    hard error, never a half-applied guess.
+
+    `toolchain_advice` is the reason an unresolved `${TOOLCHAIN_ROOT}` gets,
+    both in the plan-fatal refusal and in each demoted slice's `reason`.
+    It defaults to the no-toolchain wording this pass always used, so a
+    caller that has not resolved a toolchain at all -- and every existing
+    test -- keeps its exact previous message. `build_cmd` passes the
+    resolver's own reason instead, which distinguishes "this host has none"
+    from "this host has SEVERAL and nothing picking between them"
+    (tan-cli#547): two different fixes, and only the second one names the
+    installs the caller can choose from."""
     if plan.plan_path_mode is None:
         return plan, []
     if plan.plan_path_mode != PLAN_PATH_MODE_TOKENED:
@@ -215,7 +224,7 @@ def apply_plan_token_substitution(
     except UnresolvedToolchainRoot as e:
         raise TokenSubstitutionError(
             "build.toolchain-root-unresolved",
-            f"plan field `{e.field}` names ${{TOOLCHAIN_ROOT}}, but {_NO_TOOLCHAIN_ADVICE}. "
+            f"plan field `{e.field}` names ${{TOOLCHAIN_ROOT}}, but {toolchain_advice}. "
             f"tan refuses rather than substituting an empty path, which would silently build "
             f"against the host root.",
         ) from e
@@ -226,7 +235,7 @@ def apply_plan_token_substitution(
         SliceDemotion(
             slice_index=d.slice_index,
             core_id=d.core_id,
-            reason=f"plan field `{d.field}` names ${{TOOLCHAIN_ROOT}}, but {_NO_TOOLCHAIN_ADVICE}",
+            reason=f"plan field `{d.field}` names ${{TOOLCHAIN_ROOT}}, but {toolchain_advice}",
         )
         for d in demoted
     ]

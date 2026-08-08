@@ -105,6 +105,14 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     # which is what `tests/core/test_timestamp.py` exists to document. The
     # tests that WANT one set it themselves.
     monkeypatch.delenv("SOURCE_DATE_EPOCH", raising=False)
+    # Same class as `ZEPHYR_BASE` above, and load-bearing from tan-cli#547 on:
+    # `${TOOLCHAIN_ROOT}` now has a real resolver, and
+    # `ZEPHYR_SDK_INSTALL_DIR` short-circuits every branch of it. Left
+    # unscrubbed, a developer or CI shell that exports it makes every
+    # toolchain-root test observe THAT path instead of the one the test
+    # built -- including the demotion tests, which would resolve instead of
+    # demoting and go red for a reason that is nothing to do with the code.
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
