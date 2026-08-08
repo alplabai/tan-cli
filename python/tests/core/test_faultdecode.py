@@ -159,10 +159,31 @@ def test_bit_tables_match_the_sdk_original_exactly():
     )
 
 
+def _is_authorised_lsperr_forced_divergence(cfsr: int, hfsr: int) -> bool:
+    """`True` for exactly the one input shape this module's `decode()` is
+    KNOWN, and MEANT, to disagree with the SDK oracle on -- tan-cli#503
+    defect 4, an AUTHORISED divergence, not an accidental one (see
+    `test_lsperr_plus_forced_names_lazy_fp_stacking_diverges_from_the_oracle_
+    by_design` below, which pins the measured oracle text; and the FORCED
+    branch's own comment in `tan/core/faultdecode.py`).
+
+    Whether this actually reaches the divergent branch inside `decode()`
+    depends on no HIGHER-priority CFSR bit also being set (those branches
+    are checked first and would shadow it), so this is a necessary, not a
+    sufficient, condition for a mismatch -- deliberately permissive: a false
+    positive here only means one fewer case gets diffed, never a real defect
+    hidden behind it, and the dedicated test below diffs the exact case
+    directly regardless of what this sweep does or does not land on.
+    """
+    return bool(hfsr & (1 << 30)) and bool(cfsr & ((1 << 13) | (1 << 5)))
+
+
 def test_decode_matches_the_sdk_original_over_many_fault_words():
     """`decode()` + `render_human()` + `report_to_json()`, swept over every
     single-bit case and a batch of random combinations, diffed against the
-    SDK original's own functions."""
+    SDK original's own functions -- excluding the one AUTHORISED divergence
+    (`_is_authorised_lsperr_forced_divergence`), which has its own dedicated
+    proof test instead of being (mis)counted as a regression here."""
     original = _load_original()
     import random
 
@@ -179,6 +200,8 @@ def test_decode_matches_the_sdk_original_over_many_fault_words():
 
     mismatches = []
     for cfsr, hfsr, dfsr in cases:
+        if _is_authorised_lsperr_forced_divergence(cfsr, hfsr):
+            continue
         for bfar, mmfar in ((None, None), (0x20000000, None), (None, 0x20000004)):
             ours = port.decode(cfsr=cfsr, hfsr=hfsr, dfsr=dfsr, bfar=bfar, mmfar=mmfar)
             theirs = original.decode(
@@ -191,6 +214,27 @@ def test_decode_matches_the_sdk_original_over_many_fault_words():
             ):
                 mismatches.append((hex(cfsr), hex(hfsr), hex(dfsr), bfar, mmfar))
     assert not mismatches, f"{len(mismatches)} decode mismatches: {mismatches[:5]}"
+
+
+def test_lsperr_plus_forced_diverges_from_the_oracle_by_design():
+    """tan-cli#503 defect 4 is an AUTHORISED divergence, not a silent one --
+    see the repo's `firmware_path: TBD` precedent in
+    `tests/parity/test_flash_oracle_parity.py` for the shape this follows.
+
+    Measured against a real SDK oracle checkout (`ALP_SDK_ROOT`) @ commit
+    `99e47476`: `decode(cfsr=0x2000, hfsr=0x40000000).root_cause` is
+    `"Forced HardFault -- a configurable fault escalated but its own status
+    bits are clear; ..."` -- self-contradictory, since BFSR.LSPERR (the very
+    bit that made bit 13 of CFSR set) is listed in the SAME report's flags.
+    The port names the real cause instead ("Fault during lazy floating-point
+    state preservation ..."). This is a deliberate correction, not a defect
+    to "fix back" -- do not restore parity with the oracle here."""
+    original = _load_original()
+    ours = port.decode(cfsr=0x2000, hfsr=0x40000000)
+    theirs = original.decode(cfsr=0x2000, hfsr=0x40000000)
+    assert "its own status bits are clear" in theirs.root_cause
+    assert "lazy floating-point" in ours.root_cause
+    assert ours.root_cause != theirs.root_cause
 
 
 def test_parse_dump_matches_the_sdk_original():

@@ -258,13 +258,20 @@ All notable changes to `tan` are documented here. Format follows
     discarded every complete line already sitting in it, undelivered, plus
     everything after it -- not merely a trailing partial line -- confidently
     misdiagnosing at exit 0. `--file` was never affected: it already reads
-    with `errors="ignore"` (`Path.read_text`). The implicit read now matches
-    it (`_stdin_errors_ignore`, `sys.stdin.reconfigure(errors="ignore")`,
-    guarded by `hasattr` for a stream that cannot reconfigure -- the same
-    guard `cli._reconfigure_stdio` uses for stdout/stderr), applied to both
-    the implicit auto-consume AND the explicit `--file -` read, which had
-    the identical unguarded `sys.stdin.read()` and was exposed to the same
-    defect one call site over. The except clause is unchanged (still
+    with `encoding="utf-8", errors="ignore"` (`Path.read_text`). The implicit
+    read now matches it (`_stdin_errors_ignore`,
+    `sys.stdin.reconfigure(encoding="utf-8", errors="ignore")` -- both
+    operands pinned, not just the error policy, since `errors="ignore"`
+    alone leaves the ENCODING at whatever `sys.stdin` was already open with
+    and two non-UTF-8 encodings can each decode the same byte without error
+    into different text; guarded by `hasattr` for a stream that cannot
+    reconfigure -- the same guard `cli._reconfigure_stdio` uses for
+    stdout/stderr, and itself wrapped in `try`/`except (OSError, ValueError)`
+    since `reconfigure()` raises `io.UnsupportedOperation` -- a subclass of
+    both -- once any read has already happened on the stream), applied to
+    both the implicit auto-consume AND the explicit `--file -` read, which
+    had the identical unguarded `sys.stdin.read()` and was exposed to the
+    same defect one call site over. The except clause is unchanged (still
     `OSError, ValueError`, still broad) -- a narrower except would only be
     another shape of the same mistake, catching this ValueError subclass by
     accident of scope rather than by design.
@@ -336,6 +343,81 @@ All notable changes to `tan` are documented here. Format follows
     ValueError)` `_use_color` already uses for `sys.stdout.isatty()`, so a
     future stdin wrapper fails the same way stderr's already does, not
     with a bare traceback.
+  - Round 3's idle-only fix reopened tan-cli#388 for the OPPOSITE producer
+    shape: one that never goes idle, writing faster than
+    `_STDIN_READY_TIMEOUT_S` apart forever (`yes | tan faultdecode`, or a
+    device whose diagnostic UART never stops talking). That producer never
+    trips the idle check, so the read was, again, unbounded -- zero bytes on
+    stdout AND stderr, the exact unclassifiable hang tan-cli#388 was filed
+    against. `_read_implicit_stdin` now enforces BOTH bounds: the idle
+    window (reset on every line, so a slow-but-steady producer is still read
+    to completion) AND a total wall-clock cap, `_STDIN_TOTAL_TIMEOUT_S`
+    (5s, 20x the idle window), that ends the read regardless of how recently
+    the last line arrived. When the total cap is what ends the read (never
+    the idle timeout or a clean EOF, which stay silent as before), the
+    decode is NOT presented as complete: text mode gets a stderr note,
+    `--json` gets a stderr warning line (stdout stays the unwrapped SDK
+    report contract, untouched), and `--format json` gets a new
+    `faultdecode.stdin-truncated` warning issue alongside the report --
+    "decode what arrived and say so" rather than a silent truncation or a
+    hang.
+  - `_parse_hexint`'s 32-bit range check (added two bullets above) had been
+    applied to `--pc`/`--lr` as well as the eight status/address registers,
+    which was scope creep past what the defect actually named: the
+    reproduction was `--cfsr`-only, `--pc`/`--lr` feed only best-effort
+    `addr2line` symbolication (never the CFSR bit-scan the defect was
+    about), and the oracle itself applies no such bound to them (measured:
+    `tan faultdecode --cfsr 0x8200 --pc 0x100000000` on the shipped v0.4.1
+    binary exits 0, unchanged). `enforce_range` is now a keyword the two
+    symbolication flags opt out of; the eight status/address registers are
+    unaffected.
+  - `BFSR.LSPERR`/`MMFSR.MLSPERR` escalated to `FORCED` is a DELIBERATE,
+    tested divergence from the oracle, not a silent one: measured against
+    the real SDK (`scripts/alp_cli/faultdecode.py`),
+    `decode(cfsr=0x2000, hfsr=0x40000000).root_cause` still returns the
+    self-contradictory "its own status bits are clear" message even though
+    LSPERR is the very bit set in the same report's flags. The port's
+    corrected message is intentionally kept, not reverted -- see
+    `tests/core/test_faultdecode.py::
+    test_lsperr_plus_forced_diverges_from_the_oracle_by_design`, which pins
+    the oracle's own text so a future "restore parity" cannot silently
+    reintroduce the contradiction, and the live random-sweep parity test now
+    excludes this one known combination instead of passing on it by luck of
+    the fixed seed.
+  - `consent.can_prompt`'s `sys.stdin`/`sys.stderr` guard used `is not None`
+    before `.isatty()` -- which stops a `None` stream (fd 0/2 closed) but
+    does nothing for a stream that EXISTS yet still lacks `.isatty()`, the
+    `_TeeStderr` shape named two bullets above. `json_mode` is meant to
+    short-circuit `can_prompt` before it reaches such an object on the path
+    that threads `json_mode` through correctly, but a caller that forgets to
+    (the exact bug tan-cli#488 found in `build_cmd._dispatch`) reaches the
+    bare `.isatty()` regardless, and `is not None` would not have caught it.
+    Rewritten as `try`/`except (AttributeError, ValueError)` -- the same
+    exception a bare `None.isatty()` already raises, so one guard now covers
+    both shapes without depending on every future caller getting
+    `json_mode` right.
+  - `_stdin_errors_ignore`'s `sys.stdin.reconfigure(...)` call was itself
+    unguarded past the `hasattr` check: `TextIOWrapper.reconfigure()` raises
+    `io.UnsupportedOperation` (a subclass of both `OSError` and `ValueError`,
+    so no new import was needed to catch it) once ANY read has already
+    happened on the stream -- measured, even reconfiguring to the identical
+    encoding it already has still raises post-read. `hasattr` only proves
+    the method exists, not that calling it will succeed on this stream's
+    current state; now wrapped in `try`/`except (OSError, ValueError)`,
+    falling back to whatever encoding the stream already had rather than
+    crashing.
+  - Defect 3's class (bare `sys.stdin`/`sys.stderr` dereferences) is
+    STILL only partially closed. `doctor_cmd.fix_suppressed_issue`'s
+    `sys.stdin.isatty() and sys.stderr.isatty()` (`doctor_cmd.py:2585`,
+    reproduced live: `tan doctor --fix` with fd 0 closed raises
+    `AttributeError: 'NoneType' object has no attribute 'isatty'`, exit 5)
+    and `new_som_cmd.new_som`'s own `sys.stdin.isatty()`
+    (`new_som_cmd.py:784`, reproduced the same way against a resolved SDK
+    root) remain unguarded -- both files are mid-review on separate open
+    PRs (#536, #534) and are out of scope here. The one-line fix for each is
+    the same shape this round gave `consent.can_prompt`: wrap the
+    `.isatty()` call in `try`/`except (AttributeError, ValueError)` (or
+    route through a shared `tan.env` helper, if one lands first).
     (#503)
 
 ## [0.5.1] — 2026-08-04

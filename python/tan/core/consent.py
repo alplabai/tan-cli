@@ -54,20 +54,31 @@ def can_prompt(*, non_interactive: bool, ci: bool, json_mode: bool) -> bool:
     A command with a documented default takes it when this returns `False`; one
     without a default fails instead of asking.
 
-    `sys.stdin`/`sys.stderr` are guarded with an `is not None` check before
-    `.isatty()` (tan-cli#503): both are `None`, not merely non-a-tty, with fd
-    0/2 closed -- a daemon/service parent, some CI runners, and a Windows
-    `pythonw`/frozen no-console launch all give exactly this shape for BOTH
-    streams at once -- and a bare `.isatty()` there raises `AttributeError`
-    instead of this function doing what it is for: answering "no" and letting
-    the caller refuse the prompt cleanly.
+    `sys.stdin`/`sys.stderr` are probed inside `try`/`except (AttributeError,
+    ValueError)` (tan-cli#503), not an `is not None` check ahead of
+    `.isatty()`: an EARLIER round of this fix used `is not None`, which
+    stops `None.isatty()` (fd 0/2 closed -- a daemon/service parent, some CI
+    runners, a Windows `pythonw`/frozen no-console launch) but does nothing
+    for a stream that EXISTS yet still lacks `.isatty()` -- exactly the shape
+    `cli.main` already creates for `sys.stderr` under `--format json`
+    (`_TeeStderr`: `write`/`flush`/`getvalue` only). `json_mode` short-
+    circuits this function before it would reach that object on the path
+    that passes it correctly, but a caller that forgets to thread `json_mode`
+    through (the exact bug `build_cmd._dispatch` had) reaches the bare
+    `.isatty()` anyway, and `is not None` would not have caught it -- a
+    `None.isatty()` and a `_TeeStderr().isatty()` raise the identical
+    `AttributeError`, so one `except` clause handles both shapes without
+    needing to name either one, and does not depend on every future caller
+    getting `json_mode` right.
     """
-    return (
-        not non_interactive
-        and not ci
-        and not json_mode
-        and sys.stdin is not None
-        and sys.stdin.isatty()
-        and sys.stderr is not None
-        and sys.stderr.isatty()
-    )
+    if non_interactive or ci or json_mode:
+        return False
+    try:
+        if not sys.stdin.isatty():
+            return False
+    except (AttributeError, ValueError):
+        return False
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False

@@ -106,3 +106,36 @@ def test_stdout_tty_ness_is_deliberately_not_consulted(monkeypatch, ttys):
     assert can_prompt(non_interactive=False, ci=False, json_mode=False) is True
     monkeypatch.setattr(sys, "stdout", _FakeStream(True))
     assert can_prompt(non_interactive=False, ci=False, json_mode=False) is True
+
+
+class _NoIsattyStream:
+    """Shaped like `cli._TeeStderr` under `--format json`: a real object with
+    `write`/`flush`/`getvalue`, but no `.isatty()` at all -- EXISTS, so an
+    `is not None` guard does not catch it, unlike `sys.stdin`/`sys.stderr`
+    being `None` outright (fd 0/2 closed)."""
+
+
+def test_a_tee_stderr_shaped_stream_withholds_consent_instead_of_crashing(monkeypatch):
+    """tan-cli#503 round 4: an EARLIER version of this fix guarded
+    `sys.stdin`/`sys.stderr` with `is not None` before `.isatty()` -- which
+    stops a `None` stream (fd closed) but does nothing for a stream that
+    EXISTS yet still lacks `.isatty()`, exactly `cli._TeeStderr`'s own shape
+    under `--format json`. `json_mode` is expected to short-circuit this
+    function before it reaches such an object on the path that passes it
+    correctly -- but a caller that forgets to thread `json_mode` through
+    (the exact bug `build_cmd._dispatch` had, tan-cli#488) reaches the bare
+    `.isatty()` anyway. `json_mode=False` here stands in for exactly that
+    caller bug: `can_prompt` must still answer `False`, not raise
+    `AttributeError: '_NoIsattyStream' object has no attribute 'isatty'`."""
+    monkeypatch.setattr(sys, "stdin", _FakeStream(True))
+    monkeypatch.setattr(sys, "stderr", _NoIsattyStream())
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False
+
+
+def test_a_tee_stderr_shaped_stdin_withholds_consent_instead_of_crashing(monkeypatch):
+    """The stdin-side twin of the test above -- `.isatty()` missing on
+    `sys.stdin` itself, not just `sys.stderr`, must be caught by the same
+    guard rather than only the stderr one."""
+    monkeypatch.setattr(sys, "stdin", _NoIsattyStream())
+    monkeypatch.setattr(sys, "stderr", _FakeStream(True))
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False

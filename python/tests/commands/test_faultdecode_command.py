@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import io
 import json
 import os
 import subprocess
@@ -1013,6 +1014,143 @@ def test_a_mid_stream_stray_byte_decodes_identically_regardless_of_stdins_defaul
     assert "0x00008200" in stdin_stdout
     assert "0xdeadbeef" in stdin_stdout
     assert "Precise data bus fault at 0xdeadbeef" in stdin_stdout
+
+
+def test_reconfigure_raising_unsupported_operation_does_not_crash(monkeypatch):
+    """tan-cli#503 round 4: `TextIOWrapper.reconfigure()` raises
+    `io.UnsupportedOperation` (measured: a `BytesIO`-backed `TextIOWrapper`
+    that has already had one `readline()` called on it raises this even when
+    RECONFIGURED TO THE SAME ENCODING it already has -- not only on an actual
+    encoding change) once any read has happened on the stream. `hasattr`
+    alone only proves the method exists, not that calling it will succeed on
+    this stream's current state; `_stdin_errors_ignore` must swallow that,
+    the same way it already swallows a missing `.reconfigure()` outright."""
+    from tan.commands.faultdecode_cmd import _stdin_errors_ignore
+
+    class _RaisesOnReconfigure:
+        def reconfigure(self, **_kwargs):
+            raise io.UnsupportedOperation("Cannot change encoding after first read")
+
+    monkeypatch.setattr(sys, "stdin", _RaisesOnReconfigure())
+    _stdin_errors_ignore()  # must not raise
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503 round 4: the implicit-stdin read is now bounded by BOTH an
+# idle window AND a total wall-clock cap, so a continuously writing producer
+# that never goes idle still terminates -- the exact unclassifiable hang
+# tan-cli#388 was filed against, one layer past the round-3 idle-only fix.
+# --------------------------------------------------------------------------
+
+
+def _run_with_stdin_streamed_continuously(
+    args: list[str], line: str, gap_s: float, wall_clock_s: float
+) -> tuple[int, str, str]:
+    """Write `line` into stdin every `gap_s` seconds -- well inside the idle
+    window, so this producer never goes idle on its own -- for
+    `wall_clock_s`, then close stdin. A regressed (idle-only) reader would
+    never stop reading until this function's own close, making this
+    indistinguishable from an ordinary bounded producer; the total-cap fix
+    is what makes the child exit BEFORE that close, which is what the caller
+    asserts on (elapsed time, not just the exit code)."""
+    proc = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+        [sys.executable, "-m", "tan", "faultdecode", *args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    start = time.monotonic()
+    try:
+        while time.monotonic() - start < wall_clock_s:
+            try:
+                proc.stdin.write(line)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                break  # the child already exited (the total cap fired)
+            time.sleep(gap_s)
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        rc = proc.wait(timeout=_OPEN_STDIN_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail(
+            f"tan faultdecode {' '.join(args)} did not terminate against a "
+            "continuously writing producer (tan-cli#503 round 4 -- the "
+            "total-cap fix is what is supposed to end this read)"
+        )
+    elapsed = time.monotonic() - start
+    out = proc.stdout.read()
+    err = proc.stderr.read()
+    proc.stdout.close()
+    proc.stderr.close()
+    return rc, out, err, elapsed
+
+
+def test_a_continuously_writing_producer_terminates_with_a_truncation_notice():
+    """The BLOCKER this round closes: idle-only bounding reopens tan-cli#388
+    for a producer that never goes idle (`yes | tan faultdecode`, or a device
+    whose diagnostic UART never stops talking) -- writes faster than the idle
+    window elapses, forever. Must still terminate, decode whatever arrived
+    (a real register was in every line, so this is a successful decode, not
+    a refusal), and DISCLOSE the truncation rather than presenting a partial
+    dump as the whole one."""
+    from tan.commands.faultdecode_cmd import _STDIN_TOTAL_TIMEOUT_S
+
+    rc, out, err, elapsed = _run_with_stdin_streamed_continuously(
+        ["--format", "json"],
+        "CFSR: 0x00008200\n",
+        gap_s=0.05,
+        wall_clock_s=_STDIN_TOTAL_TIMEOUT_S + 3.0,
+    )
+    assert rc == 0, (rc, out, err)
+    # Terminated at roughly the total cap, not at the producer's own
+    # wall-clock budget -- proving the CHILD ended the read, not the parent
+    # merely closing the pipe out from under it.
+    assert elapsed < _STDIN_TOTAL_TIMEOUT_S + 2.0, (elapsed, out, err)
+    payload = json.loads(out)
+    assert payload["command"] == "faultdecode"
+    assert payload["data"]["fault_detected"] is True
+    assert payload["data"]["inputs"]["cfsr"] == "0x00008200"
+    codes = [i["code"] for i in payload["issues"]]
+    assert "faultdecode.stdin-truncated" in codes
+
+
+def test_a_continuously_writing_producer_with_no_usable_registers_still_terminates():
+    """Same shape, but the continuous stream never contains a register --
+    proving termination does not depend on a decode succeeding. Falls
+    through to the ordinary `faultdecode.no-registers` refusal, now with the
+    truncation folded into its own message (still zero-signal-lost, not a
+    second silent failure mode stacked on the first)."""
+    from tan.commands.faultdecode_cmd import _STDIN_TOTAL_TIMEOUT_S
+
+    rc, out, err, elapsed = _run_with_stdin_streamed_continuously(
+        ["--format", "json"],
+        "just some unrelated noise, no register here\n",
+        gap_s=0.05,
+        wall_clock_s=_STDIN_TOTAL_TIMEOUT_S + 3.0,
+    )
+    assert rc == 2, (rc, out, err)
+    assert elapsed < _STDIN_TOTAL_TIMEOUT_S + 2.0, (elapsed, out, err)
+    payload = json.loads(out)
+    assert payload["issues"][0]["code"] == "faultdecode.no-registers"
+    assert "continuously writing producer" in payload["issues"][0]["message"]
+
+
+def test_a_slow_but_steady_producer_within_the_total_cap_is_not_flagged_truncated():
+    """The companion proof to the two tests above: a producer that finishes
+    (closes stdin) well inside `_STDIN_TOTAL_TIMEOUT_S` must decode in full
+    with NO truncation notice -- the total cap is a backstop for a producer
+    that never stops, not a budget that taxes an ordinary bounded one."""
+    chunks = ["CFSR: 0x00008200\n", "BFAR: 0xdeadbeef\n", "HFSR: 0x40000000\n"]
+    rc, out, err = _run_with_stdin_streamed_slowly(["--format", "json"], chunks, 0.1)
+    assert rc == 0, (rc, out, err)
+    payload = json.loads(out)
+    assert payload["issues"] == []
+    assert payload["data"]["inputs"]["cfsr"] == "0x00008200"
 
 
 # --------------------------------------------------------------------------

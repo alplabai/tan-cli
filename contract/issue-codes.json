@@ -2515,6 +2515,15 @@
       "consumerEffect": "Distinguishes 'nothing to analyse' from a tan crash on the one refusal `faultdecode` has. Reachable only under `--format json`: the command's own `--json` is the unwrapped SDK report surface (see faultdecode_cmd.py's module docstring) and keeps writing the human error line to stderr, envelope-free, exactly as the forwarded child did.",
       "emittedBy": "python/tan/commands/faultdecode_cmd.py",
       "note": "Exit 2 (ValidationFailure), matching the `click.UsageError` the alp_cli original raised for the same input. Added by tan-cli#399, which made `--format json` emit tan's envelope with the decode report as `data`; without this the refusal path went out as `command: \"cli\"` / `cli.parse-error` while the success path emitted `command: \"faultdecode\"`. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "faultdecode.stdin-truncated",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none -- no consumer matches this code with `===` yet; registered so a fault-decode panel has a stable spelling to bind to",
+      "consumerEffect": "Tells a `--format json` consumer the decode it just received may be incomplete: the implicit-stdin read hit `_STDIN_TOTAL_TIMEOUT_S` (a continuously writing producer that never went idle) rather than an idle timeout or EOF, and was cut off there. `data` still carries the report the SAME as an untruncated run -- this is additive, not a refusal -- so a consumer that ignores unknown issue codes still gets a usable decode, just without the disclosure.",
+      "emittedBy": "python/tan/commands/faultdecode_cmd.py",
+      "note": "tan-cli#503 round 4: the implicit-stdin read is bounded by BOTH an idle window (`_STDIN_READY_TIMEOUT_S`) and a total wall-clock cap (`_STDIN_TOTAL_TIMEOUT_S`); only the TOTAL cap firing sets this, never the idle timeout or a clean EOF, which are the read's ordinary, undisclosed endings. `--json` (the unwrapped SDK-report surface, envelope-free) and text mode carry the identical notice as a stderr line instead, since neither has an `issues[]` array to put it in; exit code is unaffected (still 0 when a decode was possible) so a script gating only on exit code sees no behavioural change, and one reading the disclosure sees it either way. Pre-consumer -- promote to `frozen` the moment a consumer binds to it."
     }
   ]
 }

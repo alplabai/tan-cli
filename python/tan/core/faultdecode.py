@@ -271,6 +271,14 @@ def _root_cause(report: FaultReport) -> str:
         # original and the frozen golden fixture for every case that is not
         # this exact combination.
         if report.has("LSPERR") or report.has("MLSPERR"):
+            # AUTHORISED divergence from the SDK oracle (tan-cli#503 defect
+            # 4), not an accidental one -- measured against the real oracle,
+            # `decode(cfsr=0x2000, hfsr=0x40000000).root_cause` still returns
+            # the self-contradictory "its own status bits are clear" message
+            # below; this branch deliberately names the real cause instead.
+            # See `tests/core/test_faultdecode.py::
+            # test_lsperr_plus_forced_diverges_from_the_oracle_by_design` for
+            # the pinned proof and provenance -- do not "restore parity" here.
             return ("Fault during lazy floating-point state preservation -- the deferred FPU "
                     "context push/pop (lazy stacking) hit a bad or unmapped stack address. Check "
                     "the active stack's FP context region and CONTROL.FPCA, and consider disabling "
