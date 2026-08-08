@@ -371,7 +371,16 @@
       "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
       "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config` refusing a `--project` that names a directory which does not exist -- exits `ValidationFailure` (2).",
       "emittedBy": "python/tan/commands/debug_config_cmd.py",
-      "note": "tan-cli#476: the command used to CREATE the directory and write a `launch.json` into it at exit 0 with `issues: []`, because the writer calls `mkdir(parents=True)`. A deliberate divergence from the Rust oracle, which does the same thing (measured); no parity CASE pins it, since all four frozen `debug-config` argvs run in an existing work_dir."
+      "note": "tan-cli#476: the command used to CREATE the directory and write a `launch.json` into it at exit 0 with `issues: []`, because the writer calls `mkdir(parents=True)`. A deliberate divergence from the Rust oracle, which does the same thing (measured); no parity CASE pins it, since all four frozen `debug-config` argvs run in an existing work_dir. Granularity note (tan-cli#508 review): this earns its OWN code rather than folding into `debug-config.invalid-argument` below, because a missing/non-directory `--project` is checked before target/server are even parsed -- it is a precondition on the WORKSPACE, the same class as `build-manifest-missing` above, not a flag-value shape check."
+    },
+    {
+      "code": "debug-config.invalid-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config` refusing a flag VALUE outside the accepted set -- `--target-kind`, `--server`, an unsupported target+server pairing, `--svd`, `--gdbserver-address` -- at `ValidationFailure` (2).",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#477: these five all reported `debug-config.internal-failure` at exit 5, which tells the user tan crashed and tells CI a typo is a tool defect. tan-cli#462 made that argument for the four PRECONDITIONS and reclassified them; the argument-validation half was not in that change, so `--core bogus` -- quoted in #462's own body -- still exited 5 in v0.5.1. A deliberate divergence from the Rust oracle (measured: exit 5); the frozen parity CASE is retired in the same commit with the reason recorded. Exit 5 stays for the `except Exception` backstop and a malformed EXISTING launch.json."
     },
     {
       "code": "debug-config.core-unknown",

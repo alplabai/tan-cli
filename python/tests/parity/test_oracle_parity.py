@@ -79,13 +79,31 @@ CASES = [
     ([], ENVELOPE, None),
     (["validate", "--format", "json"], ENVELOPE, "validate lands in a later sub-project"),
     # `debug-config`'s refusal envelope, which no conformance golden reaches:
-    # all four are exit-0 previews. Pins exit 5, the `zephyr-mcu`/`none`
+    # all four are exit-0 previews. USED TO pin exit 5, the `zephyr-mcu`/`none`
     # placeholder payload, `configuration: null`, the null project AND the
     # message string, across both implementations.
+    #
+    # tan-cli#477 DELIBERATELY DIVERGES on the exit code alone. A flag value
+    # outside the accepted set is the caller's own input, so it exits
+    # `ValidationFailure` (2) here where the oracle exits 5 -- measured on the
+    # oracle, not inferred (`target/release/tan debug-config --target-kind
+    # bogus` -> 5). Reporting a typo as `internal failure` tells the user tan
+    # crashed and tells CI to treat it as a tool defect; tan-cli#462 already
+    # made that argument for the four PRECONDITIONS and reclassified them,
+    # and #462's own body quoted `--core bogus` at exit 5 as part of the same
+    # report. This is the half that was left behind.
+    #
+    # The case is retired rather than loosened: what remains comparable is the
+    # message and the placeholder payload, and both are pinned by
+    # `test_debug_config_command.py`'s own assertions, which do not need the
+    # oracle to run. Comparing a SHAPE that deliberately excludes the exit
+    # code would keep the case alive while quietly not checking the one field
+    # this divergence changes.
     (
         ["--format", "json", "debug-config", "--target-kind", "bogus"],
         ENVELOPE,
-        None,
+        "tan-cli#477: the port exits 2 (caller's own bad flag value) where the "
+        "oracle exits 5 -- a deliberate divergence, see the comment above",
     ),
     # The first case that compares a whole SUCCESS envelope from a ported
     # command, not a usage error: `presets` with nothing resolvable exits 0 and

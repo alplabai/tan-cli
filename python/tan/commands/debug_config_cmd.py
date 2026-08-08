@@ -869,7 +869,12 @@ def _project_not_found_failure(
     pins it (all four frozen `debug-config` argvs run in an existing
     `work_dir`), so this changes no frozen comparison. `--project` names a
     project that EXISTS; a path that does not is the caller's own input error,
-    hence `ValidationFailure` (2), the same class as tan-cli#462's four."""
+    hence `ValidationFailure` (2), the same class as tan-cli#462's four.
+
+    A separate code from `_invalid_argument_failure` below, on purpose
+    (tan-cli#508 review): this fires before target/server are even parsed --
+    a precondition on the WORKSPACE, the same class as
+    `_build_manifest_missing_failure` above, not a flag-value shape check."""
     return _failure(
         generated_at=generated_at,
         target=ZEPHYR_MCU,
@@ -877,6 +882,51 @@ def _project_not_found_failure(
         launch_json_path=launch_json_path,
         exit_code=ExitCode.VALIDATION_FAILURE,
         code="project-not-found",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
+def _invalid_argument_failure(
+    generated_at: str,
+    message: str,
+    launch_json_path: str,
+    target: str = ZEPHYR_MCU,
+    server: str = SERVER_NONE,
+) -> _Outcome:
+    """tan-cli#477: a flag VALUE outside the set this command accepts.
+
+    Covers `--target-kind`, `--server`, an unsupported target+server pairing,
+    `--svd` and `--gdbserver-address` -- every `DebugConfigError` raised while
+    turning the caller's own arguments into a draft. All five already produced
+    a complete, actionable message; only the verdict was wrong:
+
+        Unsupported --target-kind 'bogus'. Allowed values: zephyr-mcu,
+        baremetal-mcu, yocto-userspace, native-host.
+
+    Reporting that as `internal failure` / exit 5 tells the user tan crashed
+    and tells CI to treat a typo as a tool defect. tan-cli#462 made exactly
+    this argument for the four PRECONDITIONS and reclassified them; the
+    argument-validation half was not part of that change, so `--core bogus` --
+    quoted verbatim in #462's own body -- still exited 5 in v0.5.1.
+
+    Exit 5 stays reserved for what `_build_manifest_missing_failure`'s
+    docstring already names: the `except Exception` backstop, and an
+    unreadable or malformed EXISTING launch.json. Neither is reachable from a
+    flag value.
+
+    A DELIBERATE DIVERGENCE from the Rust oracle, which exits 5 here --
+    measured (`target/release/tan debug-config --target-kind bogus` -> 5), and
+    pinned by `test_oracle_parity.py`'s own comment ("Pins exit 5 ... across
+    both implementations"). That CASE is updated in the same commit with the
+    divergence recorded, rather than left to fail."""
+    return _failure(
+        generated_at=generated_at,
+        target=target,
+        server=server,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="invalid-argument",
         message=message,
         text_lines=["debug-config: validation failure"],
     )
@@ -1140,9 +1190,22 @@ def _run(
     try:
         target = parse_target_kind(effective_target_kind)
         server = parse_server_kind(effective_server_arg)
+    except DebugConfigError as err:
+        # Neither local is bound yet -- the zephyr-mcu/none placeholder is the
+        # honest answer here (matches the TS catch block).
+        return _invalid_argument_failure(generated_at, str(err), cwd_launch_path)
+
+    try:
         draft = create_launch_draft(target, server, pre_launch_task)
     except DebugConfigError as err:
-        return _internal_failure(generated_at, str(err), cwd_launch_path)
+        # #508 review, Major 4 follow-up: `target`/`server` ARE already bound
+        # by this point (both parsed above) -- an unsupported PAIRING of two
+        # individually-valid values must report the pairing it actually
+        # refused, not the placeholder. Same reasoning as the `--svd` /
+        # `--gdbserver-address` sites below, which already do this.
+        return _invalid_argument_failure(
+            generated_at, str(err), cwd_launch_path, target, server
+        )
 
     # tan-cli#489 (5): an EXPLICIT --target-kind bypasses `infer_target_kind`
     # entirely, so its own --core-vs-manifest guard (the `core-unknown` refusal
@@ -1155,6 +1218,26 @@ def _run(
     # project has nothing to validate --core against yet, and staying silent
     # there is the existing, correct "not built yet" behaviour every other
     # placeholder-carrying draft already has.
+    #
+    # tan-cli#477 review, Major 2: this leaves one gap OPEN, deliberately, not
+    # closed by mistake -- with NO manifest at all, an unknown --core on a
+    # real hardware project (`som.sku` set) still is not refused here, even
+    # though the OMITTED-`--target-kind` sibling of this same precondition
+    # (`infer_target_kind`'s own `build-manifest-missing` guard,
+    # `_pre_build_hardware_message`) does refuse that case. Closing it is NOT
+    # a matter of just mirroring that guard: `--core` pre-build has a SECOND,
+    # legitimate job this guard cannot see from here -- selecting which
+    # core's SDK-published debug-probe identity to resolve (alp-sdk#1026,
+    # `identity_core = core or build_core_id` below) -- and several tests
+    # (`test_a_valid_core_with_no_published_jlink_device_map_keeps_the_key_
+    # absent_code`, `test_write_discloses_when_sdk_identity_overwrites_a_
+    # hand_filled_device`) exercise EXACTLY this: `--core m55_hp` with no
+    # build manifest at all, resolving fine off the SDK identity map alone.
+    # A guard keyed only on "does a manifest exist" cannot tell that
+    # legitimate case apart from a genuine typo without also consulting the
+    # SDK's own published core list, which this call site does not have
+    # (that lookup happens later, in `_fill_debug_probe_identity_from_sdk`).
+    # tan-cli#477 stays open for this half; see CHANGELOG.
     if target_kind is not None and core is not None:
         build_manifest = _load_yaml(Path(workspace_root, "build", "system-manifest.yaml"))
         all_slices = manifest_slices(build_manifest)
@@ -1210,7 +1293,13 @@ def _run(
         try:
             resolution.svd = _resolve_user_svd(workspace_root, svd)
         except DebugConfigError as err:
-            return _internal_failure(generated_at, str(err), launch_json_path)
+            # tan-cli#477 review: `target`/`server` ARE known here, unlike at
+            # the parse site above -- reporting the zephyr-mcu/none
+            # placeholder would misdescribe what the caller asked for, and a
+            # validation verdict the extension may render must not.
+            return _invalid_argument_failure(
+                generated_at, str(err), launch_json_path, target, server
+            )
 
     # `--gdbserver-address` is the ONLY producer of `resolution.gdbserver_address`
     # (tan-cli#321): a runtime property of the deployed board, so nothing else
@@ -1219,7 +1308,10 @@ def _run(
         try:
             resolution.gdbserver_address = _resolve_gdbserver_address(gdbserver_address)
         except DebugConfigError as err:
-            return _internal_failure(generated_at, str(err), launch_json_path)
+            # Same as `--svd` above: both are known by this point.
+            return _invalid_argument_failure(
+                generated_at, str(err), launch_json_path, target, server
+            )
 
     apply_launch_resolution(draft, resolution)
 
