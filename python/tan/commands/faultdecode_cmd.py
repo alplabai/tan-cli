@@ -84,9 +84,12 @@ def resolve_symbol(addr: int, elf: Path) -> Symbol | None:
     Spawning it by bare NAME afterwards (rather than the resolved absolute
     path) would reopen the same hole a second way -- `CreateProcess`'s own
     current-directory-first search -- even past a hardened probe, so the
-    resolved absolute path from `on_path` is what gets spawned below, exactly
-    like `size_cmd`/`doctor_cmd`/`flash_cmd`/`build/execute.py` already do for
-    every other tool probe in this package.
+    resolved absolute path from `on_path` is what gets spawned below, the same
+    `doctor_cmd.on_path` call `flash_cmd` already makes for its own tool
+    probes. `size_cmd`/`build/execute.py` hand-roll their OWN hardened PATH
+    walk instead (`_find_on_path`/`_command_on_path`, both return a bare
+    `bool`, not a resolved path) -- a different, not-yet-unified pattern, not
+    this one.
     """
     tool = next((p for t in _ADDR2LINE_TOOLS if (p := on_path(t))), None)
     if tool is None or not elf.is_file():
@@ -229,43 +232,22 @@ def _stdin_offers_input_by_reading() -> bool:
     return bool(got[0])
 
 
-def _read_dump(file_: str | None) -> str:
+def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
     """Read a pasted dump from --file, '-' (stdin), or piped stdin.
 
     `--file -` is the EXPLICIT opt-in and always reads stdin to EOF, whatever
     else is on the command line: the caller asked for that read by name, and a
-    dump has no terminator other than EOF.
-
-    The IMPLICIT read (no `--file` at all) is attempted UNCONDITIONALLY, flags
-    or no flags (tan-cli#503): the command's own help promises "Explicit flags
-    win over a parsed dump", true only if the dump is still read when flags
-    are present too -- `faultdecode()`'s `pick()` merge relies on it. Safe
-    against the tan-cli#388 hang either way: `_stdin_offers_input()` bounds
-    the readiness probe to `_STDIN_READY_TIMEOUT_S` regardless of flags.
-
-    `sys.stdin is None` (defect 3) happens with fd 0 closed -- a daemon/
-    service parent, some CI runners, a frozen no-console launch -- and is
-    guarded explicitly below, in both branches: a bare `.read()`/`.isatty()`
-    on `None` used to raise `AttributeError` instead of the coded
-    `faultdecode.no-registers` refusal. `.isatty()` is also wrapped in the
-    same `try`/`except (AttributeError, ValueError)` `_use_color` already
-    uses, for a stream that EXISTS yet still lacks `.isatty()`.
+    dump has no terminator other than EOF. `auto_consume_stdin` gates only the
+    IMPLICIT read, and the caller passes `False` once any fault register was
+    supplied as a flag -- there is nothing left for a dump to contribute, so
+    there is no reason to wait on a pipe for one (tan-cli#388).
     """
     if file_ == "-":
-        if sys.stdin is None:  # fd 0 closed (tan-cli#503): nothing to read.
-            return ""
         return sys.stdin.read()
     if file_ is not None:
         return Path(file_).read_text(encoding="utf-8", errors="ignore")
-    # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works,
-    # flags or no flags.
-    if sys.stdin is None:
-        return ""
-    try:
-        is_tty = sys.stdin.isatty()
-    except (AttributeError, ValueError):
-        return ""
-    if is_tty or not _stdin_offers_input():
+    # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works.
+    if not auto_consume_stdin or sys.stdin.isatty() or not _stdin_offers_input():
         return ""
     if _PREREAD_STDIN:
         # The readiness check had to consume stdin to answer (Windows, or a
@@ -401,11 +383,14 @@ def faultdecode(
     pc_i = _parse_hexint("pc", pc)
     lr_i = _parse_hexint("lr", lr)
 
-    # A piped/pasted dump is always read (tan-cli#503), whether or not fault
-    # registers were also supplied as flags -- see `_read_dump`'s docstring.
-    # Explicit flags still win: `pick()` below prefers the flag value and only
-    # falls back to a value the dump provided.
-    dump_text = _read_dump(file_value)
+    # `--pc`/`--lr` are addresses to symbolicate, not status registers, and
+    # neither satisfies the "something to analyse" check below -- so neither
+    # counts as a reason to skip the dump.
+    registers_given = any(
+        value is not None
+        for value in (cfsr_i, hfsr_i, dfsr_i, bfar_i, mmfar_i, mmfsr_i, bfsr_i, ufsr_i)
+    )
+    dump_text = _read_dump(file_value, auto_consume_stdin=not registers_given)
     parsed: dict[str, int] = parse_dump(dump_text) if dump_text else {}
 
     def pick(name: str, flag_val: int | None) -> int | None:

@@ -22,7 +22,6 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -355,95 +354,19 @@ def test_explicit_flag_wins_over_a_parsed_dump():
 
 
 # --------------------------------------------------------------------------
-# tan-cli#503, defect 1: a piped dump must still be READ and MERGED when a
-# register flag is also given -- `pick()` prefers the flag, per register, but
-# a register the flags never mentioned must still come from the dump.
+# tan-cli#503, defect 1 (a piped dump must still be READ and MERGED when a
+# register flag is also given) and defect 3 (fd 0 closed must be a coded
+# refusal, never a traceback) are DEFERRED to tan-cli#537, not fixed here:
+# both require reworking `_stdin_offers_input`/`_stdin_offers_input_by_reading`
+# (the implicit-stdin reader itself), and every rework of that reader tried so
+# far closed one shape of hang/data-loss while opening another. This file
+# reverted to `dev`'s own `_read_dump(file_, *, auto_consume_stdin=...)` gate,
+# so a register flag suppresses the implicit stdin read exactly as it does on
+# `dev` -- `test_explicit_flag_wins_over_a_parsed_dump` above and
+# `test_stdin_dump_is_auto_consumed_when_piped` below still cover that
+# register-free path; the closed-fd-0 and flag-plus-dump-merge cases are
+# tan-cli#537's to add tests for, alongside the reader fix.
 # --------------------------------------------------------------------------
-
-
-def test_a_piped_dump_still_contributes_registers_the_flags_did_not_give():
-    """`--hfsr` alone used to suppress the implicit stdin read entirely, so a
-    piped CFSR/BFAR was silently dropped and the wrong root cause reported
-    (tan-cli#503). `--hfsr` here is deliberately a flag that does NOT
-    contradict the dump (dump has no HFSR line), isolating the "does a piped
-    dump get read/merged at all when any flag is present" question from the
-    per-register precedence `test_explicit_flag_wins_over_a_parsed_dump`
-    already pins."""
-    dump = "CFSR: 0x00008200\nBFAR: 0xdeadbeef\n"
-    result = runner.invoke(app, ["--hfsr", "0x40000000", "--json"], input=dump)
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    # CFSR/BFAR came from the piped dump; HFSR came from the flag.
-    assert payload["inputs"]["cfsr"] == "0x00008200"
-    assert payload["addresses"]["bfar"] == "0xdeadbeef"
-    assert payload["addresses"]["bfar_valid"] is True
-    assert any(f["name"] == "PRECISERR" for f in payload["flags"])
-    assert "Precise data bus fault" in payload["root_cause"]
-
-
-def test_bfar_only_flag_does_not_suppress_a_piped_cfsr():
-    """`--bfar`/`--mmfar` count toward "a register was supplied" but do not
-    satisfy the "something to analyse" gate (cfsr/hfsr/dfsr only) -- so
-    suppressing the dump on their account used to refuse with
-    `faultdecode.no-registers` even though a perfectly good CFSR was sitting
-    on stdin (tan-cli#503)."""
-    result = runner.invoke(
-        app, ["--bfar", "0x20001000", "--json"], input="CFSR: 0x00008200\n"
-    )
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["inputs"]["cfsr"] == "0x00008200"
-    # The explicit --bfar flag still wins over the dump (dump has no BFAR).
-    assert payload["addresses"]["bfar"] == "0x20001000"
-
-
-# --------------------------------------------------------------------------
-# tan-cli#503, defect 3: fd 0 closed must be a coded refusal, never a
-# traceback -- `sys.stdin` is `None` in that shape, and both `_read_dump`
-# call sites used to dereference it bare. Kept alongside defect 1's
-# unconditional implicit read (above): removing the flags-suppress-the-read
-# gate means a closed fd 0 is now reachable even when a register WAS given
-# as a flag, not only on the register-free path dev's own gate used to
-# short-circuit first.
-# --------------------------------------------------------------------------
-
-
-def test_closed_stdin_is_a_coded_refusal_not_a_traceback():
-    proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
-        [sys.executable, "-m", "tan", "faultdecode", "--format", "json"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        close_fds=True,
-        timeout=20,
-        # Close fd 0 in the child rather than redirecting it, to reproduce
-        # `sys.stdin is None` exactly (a redirected /dev/null still leaves
-        # `sys.stdin` a real, readable file object).
-        preexec_fn=lambda: os.close(0),
-    )
-    assert proc.returncode == 2, proc.stderr
-    assert "Traceback" not in proc.stderr
-    payload = json.loads(proc.stdout)
-    assert payload["command"] == "faultdecode"
-    assert payload["ok"] is False
-    assert [i["code"] for i in payload["issues"]] == ["faultdecode.no-registers"]
-
-
-def test_closed_stdin_with_explicit_file_dash_is_also_a_coded_refusal():
-    proc = subprocess.run(  # noqa: S603
-        [sys.executable, "-m", "tan", "faultdecode", "--file", "-", "--format", "json"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        close_fds=True,
-        timeout=20,
-        preexec_fn=lambda: os.close(0),
-    )
-    assert proc.returncode == 2, proc.stderr
-    assert "Traceback" not in proc.stderr
-    payload = json.loads(proc.stdout)
-    assert payload["command"] == "faultdecode"
-    assert [i["code"] for i in payload["issues"]] == ["faultdecode.no-registers"]
 
 
 # --------------------------------------------------------------------------

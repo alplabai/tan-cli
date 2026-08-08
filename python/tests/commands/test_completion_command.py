@@ -456,6 +456,34 @@ def test_bash_format_completion_narrow_command_still_gets_the_narrow_list():
     assert reply == ["text", "json"]
 
 
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_format_completion_does_not_leak_its_loop_variable():
+    """The subcommand scan's `for vf in $value_flags` loop variable was
+    missing from the function's `local` declaration, so it leaked into and
+    clobbered a `$vf` already set in the sourcing interactive shell -- a real
+    collision, not a hypothetical one: plenty of shells use short names like
+    `vf` for their own state. `_bash_complete` sources `BASH_SCRIPT` and runs
+    `_tan_complete` in a subshell that starts with `vf` pre-set; if the loop
+    variable is still un-local'd, that subshell's `vf` comes back overwritten
+    with the last/matched entry of `$value_flags` instead of its original
+    value."""
+    import subprocess as sp
+
+    argv = ["tan", "--sdk-root", "/x", "validate", "--format", ""]
+    words = " ".join(f'"{w}"' for w in argv)
+    script = (
+        'vf="untouched"\n'
+        + BASH_SCRIPT
+        + "\nCOMP_WORDS=(" + words + ")\n"
+        + f"COMP_CWORD={len(argv) - 1}\n"
+        + "COMPREPLY=()\n_tan_complete\nprintf 'vf=%s\\n' \"$vf\"\n"
+    )
+    proc = sp.run(  # noqa: S603, S607 -- fixed script, no shell metacharacters
+        ["bash", "-c", script], capture_output=True, text=True, timeout=10
+    )
+    assert "vf=untouched" in proc.stdout.splitlines(), proc.stdout
+
+
 # ---------------------------------------------------------------------------
 # tan-cli#503: the zsh counterpart of the subcommand-scan loop above. Unlike
 # `_bash_complete`, which drives the emitted script in a real `bash -c`, the

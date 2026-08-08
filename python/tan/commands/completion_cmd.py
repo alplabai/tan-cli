@@ -181,7 +181,7 @@ _tan_complete() {
   # is the subcommand (or "" if none was typed yet).
   if [[ "$prev" == "--format" ]]; then
     local value_flags="--project --board-yaml --sdk-root --target --format"
-    local subcmd="" i=1 w skip
+    local subcmd="" i=1 w skip vf
     while [[ $i -lt $cword ]]; do
       w="${COMP_WORDS[$i]}"
       if [[ "$w" == --* ]]; then

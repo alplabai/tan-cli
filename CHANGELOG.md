@@ -201,34 +201,18 @@ All notable changes to `tan` are documented here. Format follows
   surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
   `--format json` and tan's default text output, so that silent gap has a
   signal without making the field mandatory. (#520)
-- **`tan faultdecode` dropped a piped/pasted dump whenever any register flag
-  was also given, its `addr2line` probe was spoofable via a Windows CWD
-  decoy, and the emitted shell completions advertised `tan doctor` flags the
-  Python command rejects.** Three independent defects, closed together:
-  - A piped/pasted dump's `CFSR`/`BFAR`/etc was silently discarded whenever
-    ANY of `--cfsr`/`--hfsr`/.../`--ufsr` was also given, even though the
-    command's own help promises "Explicit flags win over a parsed dump" --
-    which is only true if the dump is still read when flags are present
-    too. The implicit stdin read is now attempted unconditionally; an
-    explicit flag still wins register-by-register via the existing
-    `pick()` merge. Reading unconditionally makes a closed fd 0 (a
-    daemon/service parent, some CI runners, a Windows `pythonw`/frozen
-    no-console launch -- `sys.stdin is None`) reachable on invocations that
-    used to short-circuit past it once a flag was given, so `_read_dump`
-    now guards `sys.stdin is None` explicitly on both the `--file -` and
-    the implicit path, and wraps `.isatty()` in the same
-    `try`/`except (AttributeError, ValueError)` `_use_color` already uses
-    for `sys.stdout.isatty()` -- both now end in the coded
-    `faultdecode.no-registers` refusal instead of a bare `AttributeError`
-    and a traceback.
+- **`tan faultdecode`'s `addr2line` probe was spoofable via a Windows CWD
+  decoy, and the emitted shell completions advertised stale/wrong flags and
+  values.** Two independent defects, closed together:
   - `resolve_symbol`'s `addr2line`-class tool probe used `shutil.which`,
     which inserts the current directory ahead of `$PATH` on Windows, so a
     decoy `addr2line.exe`/`llvm-addr2line.exe`/`arm-zephyr-eabi-addr2line.exe`
     sitting at a checked-out project's root was reported "available" and
     then spawned by bare name (reopening the same hole a second way). Now
     uses `doctor_cmd.on_path` and spawns the resolved absolute path, the
-    same pattern `size_cmd`/`flash_cmd`/`build/execute.py` already use for
-    every other tool probe in this package.
+    same `on_path` call `flash_cmd` already makes for its own tool probes
+    (`size_cmd`/`build/execute.py` harden their own probes independently,
+    with a different hand-rolled bool-returning walk -- not this pattern).
   - The emitted bash/zsh/fish completion scripts advertised `tan doctor
     --target-kind`/`--server`, which `doctor_cmd.py` deliberately never
     ported; removed from `doctor`'s arm on all three shells (unchanged for
@@ -236,25 +220,44 @@ All notable changes to `tan` are documented here. Format follows
     bash/zsh's `--format` value-list selection assumed the subcommand
     always sat at a fixed word index, silently offering the narrow list
     whenever a global flag (e.g. `--sdk-root`) preceded it; both now scan
-    for the real subcommand. fish's `generate --target` value list was
-    hand-typed and missing 3 of the 12 real values (`os-topology` -- a
-    member of the default/`--all` set -- `composed-route-table`,
-    `ipc-contract-h`); now spliced from `generate_cmd`'s own tables.
+    for the real subcommand. The bash scan's own loop variable (`vf`,
+    iterating `$value_flags`) was missing from its `local` declaration, so
+    it leaked into and clobbered a `$vf` already set in the sourcing
+    interactive shell -- confirmed by sourcing the completion script with
+    `vf` pre-set and completing `tan --sdk-root /x validate --format <TAB>`:
+    `$vf` came back overwritten as `--sdk-root` before the fix, unchanged
+    after it. fish's `generate --target` value list was hand-typed and
+    missing 3 of the 12 real values (`os-topology` -- a member of the
+    default/`--all` set -- `composed-route-table`, `ipc-contract-h`); now
+    spliced from `generate_cmd`'s own tables.
 
-  Three things this issue also raised are DEFERRED, not closed here:
-  - The implicit-stdin reader itself (`_stdin_offers_input`,
-    `_stdin_offers_input_by_reading`) is UNCHANGED from `dev` -- several
-    rounds of bounding it more tightly (an idle+total dual timeout, a
-    background queue drain, `sys.stdin.reconfigure(encoding="utf-8",
-    errors="ignore")` for a stray non-UTF-8 byte) each closed one shape of
-    hang or data loss and introduced a different one, so the reader reverts
-    to the known quantity `dev` already has rather than shipping another
-    unproven variant. This reinstates `dev`'s own defect -- a producer that
-    writes a dump and then holds the pipe open without closing it can still
-    lose that dump to the broad `except (OSError, ValueError)` in
-    `_stdin_offers_input_by_reading`/`_read_dump`, or hang past the
-    readiness probe on an unbounded `sys.stdin.read()` -- knowingly, not by
-    oversight. Tracked as tan-cli#537.
+  A piped/pasted dump being silently discarded whenever a register flag was
+  also given -- despite the command's own help promising "Explicit flags win
+  over a parsed dump", true only if the dump is still read when flags are
+  present too -- is NOT fixed here. It was, briefly, on this branch: the
+  implicit stdin read was made unconditional, with `sys.stdin is None`
+  (fd 0 closed -- a daemon/service parent, some CI runners, a frozen
+  no-console launch) guarded explicitly on both the `--file -` and implicit
+  paths so the change wouldn't trade one crash for another. But making the
+  implicit read unconditional makes EVERY flag-bearing invocation newly
+  dependent on `_stdin_offers_input`/`_stdin_offers_input_by_reading` (the
+  bounded-readiness reader that closed the original tan-cli#388 hang) --
+  including the primary documented invocation, `tan faultdecode --cfsr
+  0x8200`, which used to return with no stdin interaction at all. Several
+  rounds of bounding that reader more tightly (an idle+total dual timeout, a
+  background queue drain, `sys.stdin.reconfigure(encoding="utf-8",
+  errors="ignore")` for a stray non-UTF-8 byte) each closed one shape of hang
+  or data loss and opened a different one, so this change reverts `_read_dump`
+  to `dev`'s own `auto_consume_stdin=not registers_given` gate byte-for-byte
+  -- a flag-bearing invocation behaves exactly as it does on `dev`, including
+  `dev`'s own known defect (a producer that writes a dump and then holds the
+  pipe open without closing it can still lose that dump, or hang past the
+  readiness probe) -- rather than reopen tan-cli#388 for the flag-bearing case
+  to fix it. Both the flags-plus-dump merge and the `sys.stdin is None` guard
+  now move to tan-cli#537 together with the reader itself: neither can be
+  fixed correctly without touching it.
+
+  Two smaller things this issue also raised are DEFERRED, not closed here:
   - `_parse_hexint` still accepts a negative/out-of-range hex value
     (`int(text, 16)` parses a leading `-`), matching the v0.4.1 oracle
     exactly: measured, `tan faultdecode --cfsr 0x100000000` and `--cfsr
