@@ -92,8 +92,24 @@ def slice_archive_name(core_id: str, os_name: str) -> str | None:
     site, because [`slice_artefact_rel`] needs the identical check for the
     manifest's `artefact` string -- a per-call-site guard is how this class of
     bug keeps recurring.
+
+    tan-cli#499: `is_plain_relative` alone is not enough here -- it is a PATH
+    guard, so it legitimately accepts a nested relative like `a/b` (a real
+    `image.slice-unsafe-name` sibling reachable through `helper_firmware_
+    candidates` needs exactly that leniency). This function folds its result
+    into a single FILENAME, not a path: a separator-bearing `core_id`/`os`
+    that passes `is_plain_relative` still produces `slices/a/b-zephyr.tar.gz`,
+    whose parent directory does not exist, so the caller's tar/write aborts
+    the entire `tan image` run (`image.bundle-write-failed`) instead of
+    taking the dedicated warning-skip this guard exists to route unsafe
+    shapes through. Rejecting any separator here, on top of the path guard,
+    keeps `is_plain_relative("a/./b") is True` valid (it is still a correct
+    PATH predicate) while stopping THIS caller from ever handing a multi-
+    component result to a single-component join.
     """
     if not is_plain_relative(core_id) or not is_plain_relative(os_name):
+        return None
+    if _SEPARATORS.search(core_id) or _SEPARATORS.search(os_name):
         return None
     return f"{core_id}-{os_name}.tar.gz"
 

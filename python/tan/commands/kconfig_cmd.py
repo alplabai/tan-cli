@@ -71,7 +71,7 @@ import typer
 import yaml
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -252,19 +252,31 @@ def _fail(
     core: str | None,
     json_mode: bool,
     sdk: SdkInfo | None = None,
+    extra_issues: list[Issue] | None = None,
 ) -> None:
+    """`extra_issues` (tan-cli#497) are the `sdk.project-pin-unresolved` /
+    `sdk.global-default-foreign-project` pair `_run_kconfig` computes once
+    `sdk` resolves -- every `_fail` call reached AFTER that point must still
+    disclose them, or a broken project pin is silently dropped on every
+    failure path this command has (it used to be dropped on all of them,
+    success included). Ordered ahead of the command's own error issue and
+    printed ahead of it in text mode too, matching `run_cmd`'s established
+    shape."""
+    issues = [*(extra_issues or []), Issue(code, "error", message)]
     if json_mode:
         emit(
             Envelope(
                 "kconfig",
                 Project.resolved(root, board_path),
                 _empty_data(core),
-                [Issue(code, "error", message)],
+                issues,
                 exit_code,
                 sdk=sdk,
             )
         )
     else:
+        for extra in extra_issues or []:
+            print(f"kconfig: {extra.message}", file=sys.stderr)
         print(f"kconfig: {message}", file=sys.stderr)
     raise typer.Exit(int(exit_code))
 
@@ -410,6 +422,15 @@ def _run_kconfig(
         )
         return
     sdk_info = SdkInfo(sdk.path, sdk.tier)
+    # tan-cli#497: computed once, threaded into every remaining `_fail` call
+    # and the success emit below -- `sdk` carries `broken_project_pin` /
+    # `foreign_global_default_for` whenever `resolve_sdk` fell through a
+    # rejected tier to answer, and this command (the vscode `prj.conf` LSP's
+    # live feed) used to solve a full symbol menu out of that fallback
+    # checkout with `issues: []`, silently.
+    resolution_issues = sdk_resolution_issues(
+        sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for
+    )
 
     try:
         resolved_core = _resolve_core(core, board_path)
@@ -423,6 +444,7 @@ def _run_kconfig(
             core=None,
             json_mode=json_mode,
             sdk=sdk_info,
+            extra_issues=resolution_issues,
         )
         return
 
@@ -440,6 +462,7 @@ def _run_kconfig(
             core=resolved_core,
             json_mode=json_mode,
             sdk=sdk_info,
+            extra_issues=resolution_issues,
         )
         return
 
@@ -468,6 +491,7 @@ def _run_kconfig(
                 core=resolved_core,
                 json_mode=json_mode,
                 sdk=sdk_info,
+                extra_issues=resolution_issues,
             )
             return
         except Exception as err:  # noqa: BLE001 -- every planner failure is an
@@ -483,6 +507,7 @@ def _run_kconfig(
                 core=resolved_core,
                 json_mode=json_mode,
                 sdk=sdk_info,
+                extra_issues=resolution_issues,
             )
             return
     finally:
@@ -503,6 +528,7 @@ def _run_kconfig(
             core=resolved_core,
             json_mode=json_mode,
             sdk=sdk_info,
+            extra_issues=resolution_issues,
         )
         return
     if not isinstance(data, dict) or data.get("schemaVersion") != KCONFIG_SCHEMA_VERSION:
@@ -518,6 +544,7 @@ def _run_kconfig(
             core=resolved_core,
             json_mode=json_mode,
             sdk=sdk_info,
+            extra_issues=resolution_issues,
         )
         return
 
@@ -533,6 +560,7 @@ def _run_kconfig(
             core=resolved_core,
             json_mode=json_mode,
             sdk=sdk_info,
+            extra_issues=resolution_issues,
         )
         return
 
@@ -542,12 +570,19 @@ def _run_kconfig(
                 "kconfig",
                 Project.resolved(root, board_path),
                 data,
-                [],
+                resolution_issues,
                 ExitCode.SUCCESS,
                 sdk=sdk_info,
             )
         )
     else:
+        # tan-cli#497: the success path used to emit a literal `[]`, so a
+        # broken project pin (or a foreign global-default) that still landed
+        # on a usable checkout was reported nowhere -- this is the vscode
+        # `prj.conf` LSP's live feed, so that solved menu came from a
+        # checkout the workspace's own pin did not name, silently.
+        for issue in resolution_issues:
+            print(f"kconfig: {issue.message}", file=sys.stderr)
         for line in _text_lines(data, verbose):
             print(line, file=sys.stderr)
     raise typer.Exit(int(ExitCode.SUCCESS))

@@ -17,6 +17,7 @@ file (I-26).
 from __future__ import annotations
 
 import json
+import math
 import re
 import struct
 from dataclasses import dataclass, field
@@ -231,6 +232,35 @@ def budget_note_only(note: str) -> MemoryBudget:
     return MemoryBudget(None, None, note)
 
 
+def _saturating_int(value: float) -> int:
+    """`int(value)`, saturating `+inf` to [`_U64_MAX`] instead of raising.
+
+    tan-cli#499 (DECLARED DIVERGENCE, not silent): `int(value)` is total for
+    every FINITE float -- Python's `int` is arbitrary-precision, so unlike a
+    real `as u64` cast there is no width for a large finite value to
+    overflow. The one input this module's own callers can still hand it that
+    is not finite is `+inf` (NaN and non-positive values are already filtered
+    by both callers before this is reached): a SoC JSON's `mram_mb`/
+    `soc_flash_mb`/`tcm_kb`/`sram_banks_kb` entry spelled `Infinity` --
+    `json.loads` resolves it to `float("inf")`, where the Rust oracle's
+    `serde_json` REJECTS the literal outright at parse time (a hard error,
+    not a saturating cast) and reports the slice `budget_note: "unreadable
+    SoM preset for <SKU>"` instead of measuring it at all. This function
+    picks the OTHER total answer -- saturate to `u64::MAX`, matching the
+    "Rust's `as u64` cast semantics" both `_mb_to_bytes`/`_kib_to_bytes`
+    already claim for every other input -- over `size.internal-failure`
+    (`OverflowError` escaping uncaught, exit 5, EVERY slice's measurement
+    discarded) as the least-bad total behaviour for a value class the oracle
+    never actually reaches this code with. This is NOT proven oracle-
+    identical (the oracle never gets far enough to disagree with a number);
+    it is a deliberate choice to keep `tan size` measuring every slice it
+    still can rather than fail with `OverflowError`.
+    """
+    if math.isinf(value):
+        return _U64_MAX
+    return min(int(value), _U64_MAX)
+
+
 def _mb_to_bytes(mb: float) -> int:
     """Megabytes -> bytes with Rust's `as u64` cast semantics: truncate toward
     zero, and saturate a negative or NaN input to 0. A `Some(0)` total counts as
@@ -242,7 +272,7 @@ def _mb_to_bytes(mb: float) -> int:
         return 0
     if value != value or value <= 0:  # NaN or non-positive
         return 0
-    return min(int(value), _U64_MAX)
+    return _saturating_int(value)
 
 
 def _kib_to_bytes(kib: float) -> int:
@@ -252,7 +282,7 @@ def _kib_to_bytes(kib: float) -> int:
         return 0
     if value != value or value <= 0:
         return 0
-    return min(int(value), _U64_MAX)
+    return _saturating_int(value)
 
 
 def sram_banks(variant: dict) -> list[tuple[str, float]]:
@@ -266,7 +296,17 @@ def sram_banks(variant: dict) -> list[tuple[str, float]]:
     for name, value in raw.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
-        out.append((str(name), float(value)))
+        try:
+            out.append((str(name), float(value)))
+        except OverflowError:
+            # tan-cli#499 (declared divergence, same class as
+            # `_saturating_int` above): a JSON integer past ~1.8e308 --
+            # `123456789012345678901234567890` and its like -- raises
+            # `OverflowError: int too large to convert to float` rather than
+            # returning `inf`; every OTHER non-numeric bank entry is
+            # SKIPPED, not fatal, so this joins that same treatment instead
+            # of taking down the whole measurement run.
+            continue
     return out
 
 

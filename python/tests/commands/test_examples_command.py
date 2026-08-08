@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from tan.cli import app
 from tan.commands.examples_cmd import (
+    SDK_UNRESOLVED_MESSAGE,
     Example,
     discover_examples,
     example_description_from_readme,
@@ -275,6 +276,23 @@ def test_an_unresolvable_sdk_root_warns_on_the_wire_instead_of_looking_healthy(t
     assert doc["issues"][0]["severity"] == "warning"
     # The remediation, matching what `presets.sdk-root-unresolved` ships.
     assert "--sdk-root" in doc["issues"][0]["message"]
+    # tan-cli#497: the typed value itself must be IN the message -- the old
+    # text was self-defeating ("pass --sdk-root <path>" to someone who had
+    # just done exactly that), and neither the JSON nor the stderr text named
+    # the path that actually failed.
+    assert str(tmp_path / "no-such-sdk") in doc["issues"][0]["message"]
+
+
+def test_the_unresolved_message_stays_generic_when_no_sdk_root_was_passed(tmp_path, monkeypatch):
+    # tan-cli#497: the naming fix must not fire when `--sdk-root` was never
+    # given at all -- there is no rejected value to name, and the message
+    # must stay the original, remediation-only text.
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["examples", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["issues"][0]["code"] == "examples.sdk-root-unresolved"
+    assert doc["issues"][0]["message"] == SDK_UNRESOLVED_MESSAGE
 
 
 def test_the_unresolved_warning_survives_a_filter_that_used_to_take_the_blame(tmp_path):

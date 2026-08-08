@@ -75,6 +75,41 @@ def footprint_project(root: Path, sku: str, rom: int, ram: int, soc: str) -> Non
 SOC_5M5 = '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "tcm_kb": 1280}]}'
 
 
+def test_an_infinite_mram_mb_does_not_collapse_the_whole_run(tmp_path):
+    # tan-cli#499 end to end: a SoC JSON with `"mram_mb": Infinity` (a real
+    # shape `json.loads` accepts and resolves to `float("inf")`) used to
+    # raise `OverflowError` OUTSIDE `_mb_to_bytes`'s own try block, so `tan
+    # size` exited 5 with `size.internal-failure` and `data.slices` EMPTY --
+    # every OTHER slice's measurement discarded too. Must now saturate and
+    # keep measuring.
+    soc = (
+        '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "tcm_kb": 1280}], "variants":'
+        ' [{"order_code": "OC1", "alp_module_skus": ["E1M-TEST"], "mram_mb": Infinity,'
+        ' "sram_banks_kb": {"SRAM_M55_HP_ITCM": 256, "SRAM_M55_HP_DTCM": 1024}}]}'
+    )
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, soc)
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    assert result.returncode == 0, result.stdout
+    doc = envelope(result)
+    assert doc["ok"] is True
+    assert doc["data"]["slices"] != []
+    row = doc["data"]["slices"][0]
+    assert row["status"] == "ok"
+    assert row["flash"]["total"] == 2**64 - 1
+
+
+def test_as_f64_returns_none_for_an_oversized_json_integer_instead_of_raising():
+    # tan-cli#499 (declared divergence, same class as `tan.core.size.
+    # _saturating_int`): a bare `float(value)` on a JSON integer past
+    # ~1.8e308 raises `OverflowError: int too large to convert to float`,
+    # which used to escape uncaught and collapse the whole `tan size` run.
+    from tan.commands.size_cmd import _as_f64
+
+    assert _as_f64(10**400) is None
+    assert _as_f64(4.5) == 4.5
+    assert _as_f64("nope") is None
+
+
 # --------------------------------------------------------------- happy paths
 
 
@@ -262,6 +297,49 @@ def test_the_un_nested_path_still_wins_when_both_exist(tmp_path):
     write(plain / "build" / "ram.json", '{"symbols":{"size":44}}')
     doc = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "br"))
     assert doc["data"]["slices"][0]["flash"]["used"] == 11
+
+
+def test_a_failed_slice_with_no_output_artefact_does_not_pick_up_a_stale_nested_elf(
+    tmp_path,
+):
+    # tan-cli#499: run 1 succeeded and left a real ELF at the NESTED I-18 path;
+    # run 2 explicitly recorded `status: failed` with no `output_artefact` --
+    # the nested probe must not resurrect run 1's leftover as a current
+    # measurement (the oracle, with no such probe at all, reports
+    # `not-built` here; this port must at least stop reporting `ok`/a
+    # measured row from a manifest that says the run did not succeed).
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices:\n"
+        "- core_id: m55_hp\n  os: zephyr\n  build_dir: m55_hp-zephyr\n  status: failed\n",
+    )
+    nested = tmp_path / "br" / "m55_hp-zephyr" / "build"
+    write(nested / "rom.json", '{"symbols":{"size":4096}}')
+    write(nested / "ram.json", '{"symbols":{"size":2048}}')
+    doc = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "br"))
+    row = doc["data"]["slices"][0]
+    assert row["status"] == "not-built"
+    assert row["flash"]["used"] is None
+    assert row["source"] is None
+
+
+def test_an_absent_status_still_gets_the_nested_probe(tmp_path):
+    # The counterpart to the failed-slice case above: a slice with NO
+    # `status` at all (a plan-time manifest, before any build ran) must keep
+    # the I-18 nested widening -- this is the exact case
+    # `test_i18_nested_west_output_is_measured_not_reported_not_built` pins,
+    # re-asserted here with an explicit `build_dir` too.
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices:\n"
+        "- core_id: m55_hp\n  os: zephyr\n  build_dir: m55_hp-zephyr\n",
+    )
+    nested = tmp_path / "br" / "m55_hp-zephyr" / "build"
+    write(nested / "rom.json", '{"symbols":{"size":4096}}')
+    write(nested / "ram.json", '{"symbols":{"size":2048}}')
+    doc = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "br"))
+    row = doc["data"]["slices"][0]
+    assert row["flash"]["used"] == 4096
 
 
 # ------------------------------------------------------------- hostile inputs

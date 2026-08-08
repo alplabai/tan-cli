@@ -170,6 +170,18 @@ def _run(command, argv, cwd: Path, home: Path, extra=None):
 
 def _normalise(payload: dict) -> dict:
     payload = json.loads(json.dumps(payload))
+    # tan-cli#499: a DELIBERATE divergence, not a bug to reconcile -- the
+    # frozen oracle's `_assemble_bundle` (`crates/tan-cli/src/commands/
+    # image.rs`) `continue`s on a non-`ok` slice with no notice at all; the
+    # port now emits `image.slice-not-built` (warning) there instead, so a
+    # partial `tan build` cannot produce a "complete"-looking bundle whose
+    # `boot_order` names a core `slices[]` carries no artefact for. Stripped
+    # here rather than reconciled, the same treatment the `(tried ...)`
+    # helper-missing clause already gets a few lines down -- this file
+    # compares against a binary that cannot grow the fix.
+    issues = payload.get("issues")
+    if isinstance(issues, list):
+        payload["issues"] = [i for i in issues if i.get("code") != "image.slice-not-built"]
     for issue in payload.get("issues") or []:
         message = issue.get("message")
         if not isinstance(message, str):

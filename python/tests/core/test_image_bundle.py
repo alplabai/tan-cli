@@ -39,6 +39,18 @@ def test_archive_name_rejects_every_shape_that_escapes_a_joined_base(core_id):
     assert slice_artefact_rel(core_id, "zephyr") is None
 
 
+def test_archive_name_rejects_a_nested_but_path_legal_core_id():
+    # tan-cli#499: "a/b" passes `is_plain_relative` (it is a legitimate nested
+    # relative PATH) but folding it into a single filename component would
+    # produce "slices/a/b-zephyr.tar.gz", whose parent dir does not exist --
+    # this guard is stricter than the general path predicate specifically
+    # because its result is a FILENAME, not a path.
+    assert is_plain_relative("a/b")
+    assert slice_archive_name("a/b", "zephyr") is None
+    assert slice_artefact_rel("a/b", "zephyr") is None
+    assert slice_archive_name("m55_hp", "a/b") is None
+
+
 def test_archive_name_rejects_an_unsafe_os_field_too():
     assert slice_archive_name("m55_hp", "../escape") is None
     assert slice_archive_name("m55_hp", "") is None

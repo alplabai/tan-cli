@@ -42,6 +42,37 @@ from __future__ import annotations
 import sys
 
 
+def _stream_is_tty(stream: object) -> bool:
+    """A GUARDED `stream.isatty()` probe -- tan-cli#499.
+
+    `sys.stdin`/`sys.stderr` are `None` (not a closed file object) when a
+    wrapper starts tan with the matching fd closed at exec (a systemd unit, a
+    build server, a VS Code task, `exec tan ... 0<&-`) -- CPython's own doc
+    for `sys.stdin` says so explicitly. `None.isatty()` then raises
+    `AttributeError`; a stream some other layer already closed raises
+    `ValueError` on the same call. Either used to escape `can_prompt`
+    unguarded, as a raw traceback out of whichever command called it first
+    (`tan scaffold` outside its own `try`; `tan doctor --fix` fabricating an
+    `AttributeError` "tan crashed" verdict that discarded a diagnosis which
+    had already fully streamed). Both cases mean exactly the same thing this
+    function exists to answer: there is no real terminal here, so consent
+    cannot be asked for -- `False`, not a crash.
+
+    The repo already owns this exact guard as `tan.env._stderr_is_tty`; not
+    imported from here to avoid a cross-module dependency on that function's
+    module-private name for a three-line try/except, but the shape (and the
+    two exceptions caught) must stay identical to it -- see that function's
+    own docstring, and keep the two in lockstep if either ever changes.
+    """
+    isatty = getattr(stream, "isatty", None)
+    if isatty is None:
+        return False
+    try:
+        return isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def can_prompt(*, non_interactive: bool, ci: bool, json_mode: bool) -> bool:
     """Whether this invocation may prompt the user, or take any other action
     that needs a human's live consent (installing a toolchain, overwriting a
@@ -58,6 +89,6 @@ def can_prompt(*, non_interactive: bool, ci: bool, json_mode: bool) -> bool:
         not non_interactive
         and not ci
         and not json_mode
-        and sys.stdin.isatty()
-        and sys.stderr.isatty()
+        and _stream_is_tty(sys.stdin)
+        and _stream_is_tty(sys.stderr)
     )

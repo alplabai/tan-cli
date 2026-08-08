@@ -94,6 +94,31 @@ SDK_UNRESOLVED_MESSAGE = (
 )
 
 
+def _sdk_unresolved_message(sdk_root: str | None) -> str:
+    """tan-cli#497: `_resolve_sdk`'s terminal `--sdk-root` branch used to
+    return a bare `None` on ANY failure, so the caller had no way to tell
+    "the flag was never passed" from "the flag was passed and wrong" --
+    every unresolved-SDK report used the same [`SDK_UNRESOLVED_MESSAGE`],
+    which tells a reader who just typed `--sdk-root` to "pass --sdk-root
+    <path>", with the value they actually typed nowhere in the JSON envelope
+    or the stderr text. `examples()` already holds the raw CLI value in
+    scope, so this names it directly rather than threading a new field
+    through `_ResolvedSdk` for a `None` result that carries no other facts.
+    Falls back to the original, remediation-only text -- unchanged --
+    when `--sdk-root` was never passed at all (`sdk_root` empty/`None`),
+    matching `presets_cmd.py`'s twin, which has the identical gap and is out
+    of scope for this file.
+    """
+    if not sdk_root:
+        return SDK_UNRESOLVED_MESSAGE
+    return (
+        f'alp-sdk root is unresolved: --sdk-root "{sdk_root}" does not resolve to '
+        "an alp-sdk checkout (scripts/alp_project.py not found there). Returning "
+        "an empty example catalogue; pass a different --sdk-root <path>, or drop "
+        "the flag to use discovery."
+    )
+
+
 @dataclass(frozen=True)
 class Example:
     """One catalogue entry. Field order is the emitted JSON order, matching
@@ -473,7 +498,9 @@ def examples(
             # discriminator between the two empty answers -- a checkout that
             # resolves and ships no `examples/` tree emits no issue at all,
             # because that is not a misconfiguration to warn anybody about.
-            issues.append(Issue(SDK_UNRESOLVED_CODE, "warning", SDK_UNRESOLVED_MESSAGE))
+            issues.append(
+                Issue(SDK_UNRESOLVED_CODE, "warning", _sdk_unresolved_message(sdk_root))
+            )
         if filter_ is not None:
             found = [e for e in found if example_matches_filter(e, filter_)]
         if category is not None:

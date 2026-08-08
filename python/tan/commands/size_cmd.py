@@ -260,7 +260,19 @@ def _as_f64(value: Any) -> float | None:
     """serde_json's `as_f64`: a JSON number, never a bool and never a string."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        return float(value)
+    except OverflowError:
+        # tan-cli#499 (declared divergence, same class as
+        # `tan.core.size._saturating_int`): a JSON integer outside a `float`'s
+        # representable range (`123456789012345678901234567890` and its
+        # like) raises here instead of the `inf` a plain out-of-range FLOAT
+        # literal would produce. Treated as "not a usable number" -- `None`,
+        # the same answer every other non-numeric shape this function
+        # already returns -- rather than letting an uncaught `OverflowError`
+        # take down the whole `tan size` run over one hostile/malformed SoC
+        # JSON field.
+        return None
 
 
 def _read_soc(path: str) -> tuple[list[dict], float | None, list[tuple[str, float | None]]]:

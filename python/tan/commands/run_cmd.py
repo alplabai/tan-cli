@@ -437,6 +437,17 @@ def run(
     foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
     if foreign_issue is not None:
         issues = [foreign_issue, *issues]
+    # tan-cli#497: `pin_issue`/`foreign_issue` used to be prepended only onto
+    # `issues` (the `--format json` envelope) -- `run`'s default TEXT mode
+    # prints `text_lines`, a separate list `_run` built and returned earlier,
+    # so a workspace whose `.alp/sdk-path` names an unreachable checkout built
+    # and ran against the fallback SDK with no signal on the path most
+    # customers actually use. Prepended here in the same `severity: message`
+    # shape `build_cmd.build`'s text branch already prints every issue in.
+    if pin_issue is not None:
+        text_lines = [f"{pin_issue.severity}: {pin_issue.message}", *text_lines]
+    if foreign_issue is not None:
+        text_lines = [f"{foreign_issue.severity}: {foreign_issue.message}", *text_lines]
 
     if json_mode:
         emit(Envelope("run", project_obj, data, issues, exit_code, sdk=sdk))

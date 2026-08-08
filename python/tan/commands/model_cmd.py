@@ -56,7 +56,7 @@ import typer
 from tan.commands.build_cmd import _planner_python
 from tan.commands.build_output import resolve_metadata_sdk_root, resolve_project_context
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -111,13 +111,25 @@ print(json.dumps({"results": results}))
 
 
 class ModelError(Exception):
-    """A refusal whose issue code and exit code are already decided."""
+    """A refusal whose issue code and exit code are already decided.
+
+    `project`/`sdk`/`resolution_issues` (tan-cli#497) are `None`/`None`/`[]`
+    at construction and filled in by `_run_build`'s own catch-and-reraise the
+    instant `context` is known (every raise site in this module runs AFTER
+    that resolution) -- so the command-level handler in `model()` can report
+    the checkout this run actually resolved, and the `sdk.project-pin-
+    unresolved` / `sdk.global-default-foreign-project` pair, instead of
+    hardcoding `Project(root=None, board_yaml=None)` / `sdk=None` /
+    `issues=[the one refusal]` the way every ModelError used to."""
 
     def __init__(self, code: str, message: str, exit_code: ExitCode) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.exit_code = exit_code
+        self.project: Project | None = None
+        self.sdk: SdkInfo | None = None
+        self.resolution_issues: list[Issue] = []
 
 
 def _resolve_compile(block: dict | None, base: Path) -> dict | None:
@@ -307,6 +319,25 @@ def _run_build(
     board_path = Path(context.board_yaml)
     reported_project = context.project()
     sdk_info = context.sdk
+    # tan-cli#497: computed once, right here -- every `ModelError` raised
+    # below runs after this point (directly via `_err`, or through
+    # `_load_board`/`_run_driver`, both re-raised with the same three fields
+    # attached a few lines down), and both success returns prepend it to
+    # `issues` instead of the bare `[]` this used to return on every path.
+    # Before this, a broken `.alp/sdk-path` project pin (or a foreign
+    # `~/.alp/sdk-default`) that still resolved to a USABLE checkout was
+    # silently ignored by `tan model build` while `tan size`/`tan image`,
+    # calling the identical `resolve_project_context`, both surfaced it.
+    resolution_issues = sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
+    )
+
+    def _err(code: str, message: str, exit_code: ExitCode) -> ModelError:
+        err = ModelError(code, message, exit_code)
+        err.project = reported_project
+        err.sdk = sdk_info
+        err.resolution_issues = resolution_issues
+        return err
 
     # The metadata-reading resolution is DELIBERATELY separate and wider
     # (`build_output.resolve_metadata_sdk_root`'s own doc): a child/sibling
@@ -316,7 +347,7 @@ def _run_build(
     # resolution already allows.
     resolved_sdk = resolve_metadata_sdk_root(sdk_root, context.workspace_root)
     if resolved_sdk is None:
-        raise ModelError(
+        raise _err(
             "model.sdk-root-unresolved",
             # `tan sdk switch` refuses in this build (tan-cli#305) -- kept the
             # two mechanisms that actually work here (`--sdk-root`, placing
@@ -327,18 +358,24 @@ def _run_build(
             ExitCode.VALIDATION_FAILURE,
         )
 
-    board_doc = _load_board(board_path)
+    try:
+        board_doc = _load_board(board_path)
+    except ModelError as err:
+        err.project = reported_project
+        err.sdk = sdk_info
+        err.resolution_issues = resolution_issues
+        raise
     som = board_doc.get("som")
     sku = som.get("sku") if isinstance(som, dict) else None
     if not isinstance(sku, str) or not sku:
-        raise ModelError(
+        raise _err(
             "model.board-yaml-invalid",
             f"{board_path}: som.sku is missing.",
             ExitCode.VALIDATION_FAILURE,
         )
     models = board_doc.get("models") or []
     if not isinstance(models, list):
-        raise ModelError(
+        raise _err(
             "model.board-yaml-invalid",
             f"{board_path}: `models:` must be a list.",
             ExitCode.VALIDATION_FAILURE,
@@ -346,7 +383,7 @@ def _run_build(
 
     data: dict[str, Any] = {"schemaVersion": DATA_SCHEMA_VERSION, "sku": sku, "built": []}
     if not models:
-        return reported_project, sdk_info, data, [], ExitCode.SUCCESS
+        return reported_project, sdk_info, data, resolution_issues, ExitCode.SUCCESS
 
     base = board_path.parent
     out_dir = Path(out)
@@ -361,7 +398,7 @@ def _run_build(
     driver_models = []
     for m in models:
         if not isinstance(m, dict) or "name" not in m or "source" not in m:
-            raise ModelError(
+            raise _err(
                 "model.board-yaml-invalid",
                 f"{board_path}: every `models:` entry needs `name` and `source`.",
                 ExitCode.VALIDATION_FAILURE,
@@ -377,7 +414,7 @@ def _run_build(
     floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
     too_old = _python_too_old(python, floor)
     if too_old is not None:
-        raise ModelError("model.python-too-old", too_old, ExitCode.RUNTIME_FAILURE)
+        raise _err("model.python-too-old", too_old, ExitCode.RUNTIME_FAILURE)
 
     payload = {
         "sku": sku,
@@ -385,10 +422,16 @@ def _run_build(
         "metadataRoot": str(metadata_dir),
         "models": driver_models,
     }
-    result = _run_driver(python, resolved_sdk / "scripts", payload)
+    try:
+        result = _run_driver(python, resolved_sdk / "scripts", payload)
+    except ModelError as err:
+        err.project = reported_project
+        err.sdk = sdk_info
+        err.resolution_issues = resolution_issues
+        raise
 
     if "importError" in result:
-        raise ModelError(
+        raise _err(
             "model.internal-failure",
             f"could not import alp_model from {resolved_sdk / 'scripts'}: "
             f"{result['importError']}",
@@ -403,20 +446,24 @@ def _run_build(
         # legitimate no-models no-op (both would report `ok: true`).
         reported = {r.get("name") for r in driver_results if isinstance(r, dict)}
         missing = [m["name"] for m in driver_models if m["name"] not in reported]
-        raise ModelError(
+        raise _err(
             "model.internal-failure",
             f"model build driver reported {len(driver_results)} of "
             f"{len(driver_models)} model(s); missing: {', '.join(missing)}.",
             ExitCode.INTERNAL_FAILURE,
         )
 
-    issues: list[Issue] = []
+    # A `model.build-failed` issue -- an ERROR -- decides the exit code;
+    # `resolution_issues` are WARNINGS and must not flip a run that built
+    # every model into `WRITE_FAILURE` just because the project pin also
+    # went stale.
+    build_issues: list[Issue] = []
     built: list[str] = []
     for r in driver_results:
         if r.get("ok"):
             built.append(r["path"])
         else:
-            issues.append(
+            build_issues.append(
                 Issue(
                     "model.build-failed",
                     "error",
@@ -424,8 +471,8 @@ def _run_build(
                 )
             )
     data["built"] = built
-    exit_code = ExitCode.SUCCESS if not issues else ExitCode.WRITE_FAILURE
-    return reported_project, sdk_info, data, issues, exit_code
+    exit_code = ExitCode.SUCCESS if not build_issues else ExitCode.WRITE_FAILURE
+    return reported_project, sdk_info, data, [*resolution_issues, *build_issues], exit_code
 
 
 def model(
@@ -509,11 +556,17 @@ def model(
             sdk_root=sdk_root,
         )
     except ModelError as err:
+        # tan-cli#497: `err.project`/`err.sdk`/`err.resolution_issues` are
+        # `None`/`None`/`[]` only for a `ModelError` raised before `_run_build`
+        # resolves `context` -- none exist today, since `resolve_project_
+        # context` is the first thing that function does, but the fallback
+        # keeps this handler correct even if a future raise site is added
+        # ahead of it, rather than silently reporting the wrong checkout.
         finish(
-            Project(root=None, board_yaml=None),
-            None,
+            err.project or Project(root=None, board_yaml=None),
+            err.sdk,
             {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []},
-            [Issue(err.code, "error", err.message)],
+            [*err.resolution_issues, Issue(err.code, "error", err.message)],
             err.exit_code,
         )
         return

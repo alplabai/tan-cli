@@ -182,13 +182,33 @@ def is_unsafe_removal_target(project_root: str, target: str) -> bool:
     project root itself or any ancestor of it. Deliberately does NOT require
     containment under the project root: an out-of-tree slice build dir is a
     supported clean target (see the module docstring).
+
+    tan-cli#499: the LEXICAL test (`_normalize` = `os.path.normpath`, never
+    resolving a symlink) is exact oracle parity, but on its own it is
+    defeated when `target` reaches the project root -- or an ancestor of it
+    -- through a SYMLINKED PARENT component (a `current ->` release link, a
+    WSL/`/mnt` alias, any checkout reached through a linked parent
+    directory): the two strings compare unequal even though they name the
+    same directory, the candidate is judged safe, and `shutil.rmtree`
+    recursively deletes the user's sources. The `os.path.realpath` arm below
+    is ADDITIVE, never a replacement -- it can only ever refuse MORE targets
+    than the lexical test alone, never remove more, and it changes nothing
+    about what a caller REPORTS: `data.buildRoot` and every rejection message
+    still carry the lexical spelling the user typed
+    (`test_normalize_is_lexical_and_never_resolves_a_symlink` pins that; this
+    function's own return value is a bare bool, so there is nothing here for
+    a resolved path to leak into). A target that IS a symlink itself (not
+    reached THROUGH one) stays safe to remove, matching the module's own
+    documented rule that a link is unlinked, never followed.
     """
     target_n = _normalize(target)
     if not _has_normal_component(target_n):
         return True
     # True when the target IS the project root or an ancestor of it -- both
     # would delete the user's sources.
-    return _is_under(target_n, project_root)
+    if _is_under(target_n, project_root):
+        return True
+    return _is_under(os.path.realpath(target), os.path.realpath(project_root))
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +599,24 @@ def os_error_text(err: BaseException) -> str:
     return f"{err.strerror} (os error {code})"
 
 
+#: `func` values this hook can safely retry as a bare `func(path)` call --
+#: tan-cli#499. `shutil.rmtree`'s POSIX walk (`_rmtree_safe_fd`) calls this
+#: hook with several OTHER raw stdlib functions on the fd-based path --
+#: `os.open` (needs a required `flags` argument shutil's own call supplies
+#: but a bare `func(path)` retry does not), `os.close` (needs a file
+#: descriptor, not a path string -- and CPython's own `shutil.py` source
+#: carries the comment "close() should not be retried after an error"),
+#: `os.scandir` and `os.lstat` (retrying either on the SAME path answers a
+#: different question than the one that failed: `os.scandir(topfd)`'s
+#: retry-by-path is not the same call), and `os.path.islink` (not a real
+#: failure at all -- a `raise OSError(...)` this module manufactures for "a
+#: directory turned into a symlink mid-walk", which no chmod can fix). A
+#: read-only bit on a directory or file is exactly what `os.unlink`/
+#: `os.rmdir` hit, which is the ONLY case this hook exists to retry (see the
+#: docstring below) -- every other `func` re-raises instead.
+_RETRYABLE_RMTREE_FUNCS = (os.unlink, os.rmdir)
+
+
 def _retry_after_clearing_readonly(func, path, _exc=None) -> None:
     """`shutil.rmtree` error hook: clear the read-only bit and retry once.
 
@@ -594,9 +632,37 @@ def _retry_after_clearing_readonly(func, path, _exc=None) -> None:
     replace the whole mode with `0o200` and strip the owner's read/execute bits
     from a directory mid-walk. A failure here propagates out of `rmtree` and is
     reported by the caller as `clean.remove-failed`.
+
+    tan-cli#499: a bare `func(path)` retry used to be unconditional. On
+    POSIX, `shutil.rmtree` runs the fd-based `_rmtree_safe_fd` walk, which
+    hands this hook `os.open`/`os.close` for a NESTED directory it could not
+    open/close -- neither is callable with one positional argument, and
+    `os.open(path)` raising `TypeError: open() missing required argument
+    'flags'` is neither `OSError` nor `ValueError`, so it sailed past this
+    module's own `except (OSError, ValueError)` guard, escaped the whole
+    target loop, and hit `clean`'s outer catch-all (`clean.internal-failure`,
+    exit 5) -- abandoning every OTHER target still queued (the state file,
+    any out-of-tree slice dir) with no attempt made. The real trigger is not
+    a root-owned tree (`os.chmod` fails there first with `EPERM`, an
+    `OSError`, handled correctly) but a directory the invoking user OWNS and
+    cannot OPEN -- no r/x bits, or any non-permission `os.open` failure such
+    as fd exhaustion.
+
+    Only [`_RETRYABLE_RMTREE_FUNCS`] are retried; every other `func` clears
+    the read-only bit (harmless even when it cannot help) and then RE-RAISES
+    the original exception via a bare `raise` -- re-raising the exception
+    this hook is being called synchronously from inside the handling of,
+    exactly like the retried arm already relies on `func(path)` raising to
+    propagate a retry failure. Re-raising, not silently returning, matters:
+    `shutil.rmtree` treats an `onexc` hook that returns without raising as
+    "handled, keep going", which here would report `removed` for a subtree
+    this process never actually removed.
     """
     os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
-    func(path)
+    if func in _RETRYABLE_RMTREE_FUNCS:
+        func(path)
+        return
+    raise
 
 
 #: `shutil.rmtree`'s error-hook keyword. `onerror` is deprecated from 3.12 and

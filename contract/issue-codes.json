@@ -589,6 +589,14 @@
       "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "image.slice-not-built",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/image_cmd.py",
+      "note": "Registered for tan-cli#499: `_assemble_bundle` used to `continue` with NO notice at all for a manifest slice whose `status` was not `ok` -- the only exclusion in that function that reported nothing, while `build_dir`-missing, an unsafe archive name, and a `TBD` helper all already emit a warning notice. Reachable with a GREEN `tan build` (a PARTIAL build, e.g. a slice skipped under `executionPolicy` for a missing tool, is still `ok: true`/exit 0), so `tan image` used to answer `ok: true`, `issues: []` and write a `bundle-manifest.json` whose `boot_order` still named a core `slices[]` carried no artefact for. Python-only: the frozen oracle (`crates/tan-cli/src/commands/image.rs`) does the same bare `continue`, no Notice -- this is a deliberate port-side improvement, not oracle parity, so `emittedBy` names the Python file rather than a Rust one. Registered by the Python-side emit-site gate (`python/tests/gates/test_every_issue_code_is_registered.py`); pre-consumer, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "image.slice-skipped",
       "status": "reserved",
       "severity": "warning",

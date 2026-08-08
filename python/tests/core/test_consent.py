@@ -96,6 +96,40 @@ def test_fully_captured_pipes_withhold_consent_even_with_no_flags(ttys):
     assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#499: a closed fd 0 or fd 2 means `sys.stdin`/`sys.stderr` is `None`
+# -- an unguarded `.isatty()` call raises `AttributeError`, which the `ttys`
+# fixture above can never exercise (it always monkeypatches a real
+# `_FakeStream` object in, never `None`).
+# ---------------------------------------------------------------------------
+
+
+class _ClosedStream:
+    """A stream some layer already closed -- `.isatty()` raises `ValueError`,
+    not `AttributeError` (matches a real closed `io` object)."""
+
+    def isatty(self) -> bool:
+        raise ValueError("I/O operation on closed file")
+
+
+def test_a_closed_stdin_withholds_consent_instead_of_raising(monkeypatch):
+    monkeypatch.setattr(sys, "stdin", None)
+    monkeypatch.setattr(sys, "stderr", _FakeStream(True))
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False
+
+
+def test_a_closed_stderr_withholds_consent_instead_of_raising(monkeypatch):
+    monkeypatch.setattr(sys, "stdin", _FakeStream(True))
+    monkeypatch.setattr(sys, "stderr", None)
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False
+
+
+def test_a_stream_that_raises_value_error_on_isatty_withholds_consent(monkeypatch):
+    monkeypatch.setattr(sys, "stdin", _ClosedStream())
+    monkeypatch.setattr(sys, "stderr", _FakeStream(True))
+    assert can_prompt(non_interactive=False, ci=False, json_mode=False) is False
+
+
 def test_stdout_tty_ness_is_deliberately_not_consulted(monkeypatch, ttys):
     """`tan doctor --fix | tee log` from a real terminal is a normal,
     fully-interactive invocation. Consulting `stdout` would refuse consent

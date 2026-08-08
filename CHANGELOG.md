@@ -25,6 +25,131 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **SDK-resolution warnings were computed and then dropped by several
+  commands, so a customer could build, run, or solve Kconfig against a
+  different alp-sdk checkout than the one their `.alp/sdk-path` project pin
+  named, with no signal anywhere.** All under (#497), following the
+  disclosure shape (#464) established:
+  - `tan sdk current` resolved through the narrow `resolve_sdk_tiered`
+    alone, which has no candidate for a CHILD `<ws>/alp-sdk` (the README
+    Quickstart layout) -- it now resolves through the same
+    `build_cmd.resolve_sdk_root_ladder` every other narrow command
+    (`doctor`/`build`/`validate`/...) already uses.
+  - `tan kconfig` computed neither `sdk.project-pin-unresolved` nor
+    `sdk.global-default-foreign-project` on ANY path, success included --
+    the alp-sdk-vscode `prj.conf` LSP's live feed could silently solve a
+    symbol menu out of a checkout the project pin did not name.
+  - `tan model build` silently dropped both warnings too, and lost them
+    entirely (along with `project`/`sdk`) on a `ModelError` refusal, which
+    used to hardcode `Project(root=None, board_yaml=None)`/`sdk=None`.
+  - `tan run` prepended the pair to the JSON `issues[]` but never to the
+    `text_lines` its default (non-JSON) output actually prints.
+  - `tan image` computed the pair into `issues` but never into `text`, on
+    both the manifest-error path and the happy path -- so the bundle a
+    customer just flashed could have pulled a helper firmware out of a
+    fallback checkout with nothing in the printed text saying so.
+  - `image.helper-missing`'s message claimed "no --sdk-root" even when
+    `--sdk-root` WAS given but failed the loader-marker check, sending the
+    reader looking for a missing flag instead of the typo they actually
+    made; the message now names the rejected `--sdk-root` value.
+  - `tan examples --sdk-root <bad-path>` discarded the typed value on the
+    terminal `--sdk-root` branch, so `examples.sdk-root-unresolved` told the
+    reader to "pass --sdk-root <path>" -- the flag they had just passed --
+    with the failing value nowhere in the JSON envelope or the stderr text;
+    the message now names it.
+- **`tan image` discarded every manifest slice whose `status` was not `ok`
+  with no notice at all** -- the only exclusion in `_assemble_bundle` that
+  reported nothing, while a missing `build_dir`, an unsafe archive name, and
+  a `TBD` helper all already emit a warning. Reachable with a green `tan
+  build` (a partial build, e.g. a slice skipped for a missing tool, is still
+  `ok: true`/exit 0): `tan image` answered `ok: true`, `issues: []` and
+  wrote a `bundle-manifest.json` whose `boot_order` still named a core
+  `slices[]` carried no artefact for. Now emits `image.slice-not-built`
+  (warning) and keeps assembling. (#499)
+- **`tan size` could report a stale, previous-run artefact as the current
+  measurement for a slice a later run explicitly recorded as `failed`.**
+  The I-18 nested `/build` fallback probe (added so a real `west build`
+  tree with no `output_artefact` recorded yet is still measured, not
+  reported `not-built`) is now gated on the slice's own `status`: still
+  probed for an ABSENT status (a plan-time manifest, before any build ran)
+  or `"ok"`, but not for any other explicit status -- so a `failed`/
+  `skipped` slice with no recorded `output_artefact` can no longer pick a
+  leftover artefact back up from one directory deeper than the one it
+  actually built into. (#499)
+- **`tan clean` could crash with an uncaught `TypeError` instead of
+  reporting `clean.remove-failed`, abandoning every other queued removal
+  target (including the orchestrator state file).** `shutil.rmtree`'s
+  POSIX fd-based walk hands its error hook raw functions other than
+  `os.unlink`/`os.rmdir` (`os.open`, `os.close`, ...) that are not safely
+  retryable as a bare `func(path)` call -- `os.open(path)` raised `TypeError:
+  open() missing required argument 'flags'`, which is neither `OSError` nor
+  `ValueError` and escaped the module's own retry-failure guard straight to
+  `clean`'s outer catch-all (`clean.internal-failure`, exit 5). The retry
+  hook now only retries `os.unlink`/`os.rmdir`; every other function
+  re-raises the original exception instead, which the caller already turns
+  into a `clean.remove-failed` warning and keeps going. (#499)
+- **`tan clean`'s unsafe-removal-target screen could be defeated by a
+  symlinked PARENT path component**, accepting a target that both IS the
+  project root and is an ANCESTOR of it, reached through a symlinked
+  directory earlier in the path (a `current ->` release link, a WSL/`/mnt`
+  alias, any checkout reached through a linked parent) -- `is_unsafe_
+  removal_target`'s lexical `normpath` comparison never resolves a symlink,
+  so the two path strings compared unequal even though they named the same
+  directory, and `shutil.rmtree` recursively deleted the project's sources.
+  A second, resolved-path check is now OR'd into the existing lexical one
+  (additive only -- it can only ever refuse MORE, never remove more), and
+  the reported `data.buildRoot` stays the lexical spelling the customer
+  typed. (#499)
+- **`tan support-bundle`'s HOME redaction used an unanchored `str.replace`**,
+  so any path for which the resolved HOME happened to be a plain STRING
+  PREFIX (or a substring immediately preceded by another path component)
+  was corrupted mid-name into a wrong path, silently, at `ok: true` -- and a
+  `HOME` of a bare separator root (`/`, what a uid with no `/etc/passwd`
+  entry gets under Docker/OpenShift) turned every path separator in the
+  written bundle into the placeholder. The match is now anchored to a path
+  boundary on both sides, and a bare-separator-root HOME is dropped from
+  the redaction variants outright. (#499)
+- **`tan inspect`'s text mode printed a non-ASCII path as a `\uXXXX`
+  escape** (`json.dumps`'s default `ensure_ascii=True`) instead of the raw
+  UTF-8 the oracle prints, making the printed path no longer copy-pasteable
+  back onto the real path on disk. Matches `diff_cmd._format_value`'s
+  already-fixed case. (#499)
+- **`tan.core.consent.can_prompt` raised `AttributeError` instead of
+  withholding consent when fd 0 or fd 2 was closed at exec** (a systemd
+  unit, a build server, a VS Code task, `exec tan ... 0<&-`) -- CPython
+  sets `sys.stdin`/`sys.stderr` to `None`, not a closed file object, and
+  the unguarded `.isatty()` call crashed straight out of whichever command
+  called it first, discarding work already done (e.g. `tan doctor --fix`
+  fabricated an internal-failure verdict after its diagnosis had already
+  fully streamed). Both streams are now probed through a guarded helper
+  that treats a missing/closed stream as "no terminal", matching the
+  existing `tan.env._stderr_is_tty` guard's shape. (#499)
+- **A non-finite or oversized number in a SoC JSON (`mram_mb: Infinity`, or
+  an integer past `float`'s representable range) crashed `tan size` with
+  an uncaught `OverflowError`**, discarding every slice's measurement --
+  `_mb_to_bytes`/`_kib_to_bytes`'s final `int(value)` cast, and a bare
+  `float(value)` in `sram_banks`/`size_cmd._as_f64`, all sat outside the
+  functions' own guard. `+inf` now saturates to `u64::MAX` (matching the
+  "Rust's `as u64` cast semantics" these functions already claim for every
+  other input) and an unrepresentable integer is treated as "not a usable
+  number" (`None`/skipped), the same answer every other non-numeric shape
+  already gets. **Declared divergence, not proven oracle-identical**: the
+  Rust oracle's `serde_json` rejects a non-finite/oversized JSON literal
+  outright at parse time and never reaches this code with one at all, so
+  this is a deliberate choice to keep measuring every slice `tan size`
+  still can, not a verified match for a case the oracle cannot be driven
+  into. (#499)
+- **`tan image`'s `slice_archive_name` accepted a `core_id`/`os` shaped like
+  a nested-but-otherwise-legal relative path (`a/b`)**, which `is_plain_
+  relative` correctly allows as a PATH but which this function then folds
+  into a single FILENAME component (`slices/a/b-zephyr.tar.gz`, whose
+  parent directory does not exist) -- the whole `tan image` run aborted
+  (`image.bundle-write-failed`, exit 3, no `bundle-manifest.json` written,
+  any already-tarred slices left orphaned) instead of taking the dedicated
+  `image.slice-unsafe-name` warning-skip the equally-invalid `../x` shape
+  already takes. A separator anywhere in `core_id`/`os` is now rejected the
+  same way. (#499)
+
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
   gaps found reviewing the fix.** All under (#489):

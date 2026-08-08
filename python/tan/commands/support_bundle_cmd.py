@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -120,11 +121,58 @@ def _home_variants() -> tuple[str, ...]:
     `--destination`-normalised paths, posix in `workspaceRoot`/`sdkRoot`/
     `boardYamlPath`), so redaction has to look for both. Empty when the host
     has neither `USERPROFILE` nor `HOME` set -- redacts nothing rather than
-    guessing."""
+    guessing.
+
+    tan-cli#499: a variant that is itself a bare separator root (`HOME=/`,
+    what Docker/OpenShift hand a process running as a uid with no
+    `/etc/passwd` entry, or a degenerate `C:\\`/`\\` on Windows) is dropped
+    outright. `_redact`'s boundary-anchored match still stops it turning
+    every `/` in the bundle into `<home>` the way the old unanchored
+    `str.replace` did, but a variant with no real path component left to
+    redact is not a HOME to scrub for -- it is every path in the file.
+    """
     home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
     if not home:
         return ()
-    return tuple({home, home.replace("\\", "/")})
+    variants = {home, home.replace("\\", "/")}
+    return tuple(v for v in variants if v.rstrip("/\\") != "")
+
+
+#: Characters that CONTINUE a path component name -- tan-cli#499. Deliberately
+#: narrower than "not a separator": a redacted string is free prose too (a
+#: doctor detail sentence, a `Would run: ...` command line), where a path sits
+#: next to a space/colon/quote/`=` far more often than at true string start,
+#: and neither of those punctuation marks ever appears INSIDE an ordinary
+#: directory or file name this bundle reports. Restricting the boundary check
+#: to this identifier-ish class is what lets `"prefix C:\\Users\\alice\\proj"`
+#: still redact (space is not a continuation char) while still refusing a
+#: SHORT resolved HOME that is merely the STRING PREFIX of a longer, unrelated
+#: sibling directory name one level down (`/home/de` must not touch
+#: `/home/dev/proj` -- the trailing `v` continues the same component).
+_PATH_WORD_CHAR = r"[A-Za-z0-9_.\-]"
+
+
+def _redact_one(text: str, variant: str) -> str:
+    """Replace `variant` in `text` with `<home>`, anchored to a PATH
+    BOUNDARY on both sides -- tan-cli#499. An unanchored `str.replace`
+    rewrites any string for which `variant` is merely a substring, not just
+    an occurrence of the directory it actually names: a short resolved HOME
+    that happens to be the exact STRING PREFIX of a longer, unrelated
+    sibling directory used to have that unrelated directory corrupted too
+    (`<home>` spliced into the middle of its name), silently, at `ok: true`
+    -- and the same failure mode in reverse, when the resolved HOME is a
+    SUFFIX-adjacent substring of an unrelated ancestor chain. A match counts
+    only when neither the character immediately before nor immediately
+    after it continues the SAME path-component name ([`_PATH_WORD_CHAR`]) --
+    start-of-string and end-of-string both count as a boundary, same as a
+    `/`/`\\` separator or ordinary punctuation does.
+    """
+    if not variant:
+        return text
+    pattern = re.compile(
+        rf"(?<!{_PATH_WORD_CHAR}){re.escape(variant)}(?!{_PATH_WORD_CHAR})"
+    )
+    return pattern.sub("<home>", text)
 
 
 def _redact(value: Any, home_variants: tuple[str, ...]) -> Any:
@@ -134,7 +182,7 @@ def _redact(value: Any, home_variants: tuple[str, ...]) -> Any:
     unchanged."""
     if isinstance(value, str):
         for variant in home_variants:
-            value = value.replace(variant, "<home>")
+            value = _redact_one(value, variant)
         return value
     if isinstance(value, dict):
         return {k: _redact(v, home_variants) for k, v in value.items()}

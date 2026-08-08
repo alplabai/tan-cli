@@ -23,6 +23,7 @@ from typer.testing import CliRunner
 from tan.commands import sdk_cmd
 from tan.commands.inspect_cmd import (
     ResolvedDebugContext,
+    _format_value_text,
     collect_resolved_values,
     filter_resolved_values,
     inspect,
@@ -284,3 +285,24 @@ def test_a_bad_format_is_a_usage_error_not_a_traceback():
     result = runner.invoke(app, ["inspect", "--format", "yaml"])
     assert result.exit_code == 2
     assert "Traceback" not in result.output
+
+
+def test_format_value_text_prints_non_ascii_raw_not_as_a_u_escape():
+    # tan-cli#499: `json.dumps`'s default (`ensure_ascii=True`) mangles any
+    # non-ASCII path into `\uXXXX` escapes -- no longer copy-pasteable back
+    # onto the real path on disk, and no longer equal to it byte-for-byte.
+    # `serde_json::to_string` (what the oracle text-renders with) never does
+    # this; matches `diff_cmd._format_value`'s identical, already-fixed case.
+    rendered = _format_value_text("/scratch/josé-proj")
+    assert rendered == '"/scratch/josé-proj"'
+    assert "\\u" not in rendered
+
+
+def test_text_mode_prints_a_non_ascii_workspace_root_unescaped(tmp_path, monkeypatch):
+    proj = tmp_path / "josé-proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    result = runner.invoke(app, ["inspect"])
+    assert result.exit_code == 0
+    assert "josé-proj" in result.stderr
+    assert "\\u" not in result.stderr

@@ -606,7 +606,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # width only when stderr IS a tty, and any pipe/grep that could read a
     # "record-shaped" line makes stderr not a tty, which already returns
     # `None` and skips wrapping wholesale.
-    "tan/commands/sdk_cmd.py": 1274,
+    # 1294, not 1274, as of tan-cli#497: `_run_current` now resolves through
+    # `build_cmd.resolve_sdk_root_ladder` (function-level import, matching
+    # `sdk_ladder_divergence_issue`'s own import a few lines below) instead
+    # of the narrow `resolve_sdk_tiered` alone, so `sdk current` answers the
+    # same checkout `doctor`/`build`/`validate` would in the README
+    # Quickstart's child-`<ws>/alp-sdk` layout instead of `sdkPath: null`.
+    "tan/commands/sdk_cmd.py": 1294,
     "tan/commands/validate_cmd.py": 1093,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
@@ -665,7 +671,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
     # `sdk.project-pin-unresolved`.
-    "tan/commands/clean_cmd.py": 1013,
+    # 1079, not 1013, as of tan-cli#499: `is_unsafe_removal_target` gained a
+    # second, resolved-path OR-arm to catch a project root reached through a
+    # symlinked parent component, and `_retry_after_clearing_readonly` now
+    # only retries `os.unlink`/`os.rmdir` as a bare `func(path)` call --
+    # everything else `shutil.rmtree`'s POSIX fd-based walk can hand the hook
+    # (`os.open`, `os.close`, ...) re-raises the original exception instead
+    # of crashing with an uncaught `TypeError` that used to abort the whole
+    # target loop. Net growth is mostly the two docstrings explaining why a
+    # naive retry is unsafe for most of `onexc`'s possible `func` values.
+    "tan/commands/clean_cmd.py": 1079,
     # 1015, not 996, as of tan-cli#485: `_load_yaml`/`_load_json` route
     # through the new `strict_loaders.strict_yaml_load`/`strict_json_loads`
     # (alp-sdk #1127, a duplicate-mapping-key refusal), and the IPC-entry
@@ -745,6 +760,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # ("assign every leftover draft item to every leftover existing slot in
     # order") was rejected, not just what shipped.
     "tan/core/debug_launch.py": 1275,
+    # 818, not under the 800 cap, as of tan-cli#499: `slice_elf_candidates`/
+    # `slice_footprint_dirs`' I-18 nested `/build` probe is now gated by a
+    # new `_nested_probe_ok` helper -- `True` for an absent `status` (a
+    # plan-time manifest) or `"ok"`, `False` for any OTHER explicit status,
+    # so a `failed`/`skipped` slice with no recorded `output_artefact`
+    # cannot pick a stale artefact back up from a directory one level
+    # deeper than the one it actually built into. Net growth is mostly the
+    # new helper's docstring explaining why the gate is absent-or-ok, not
+    # just ok.
+    "tan/core/system_manifest.py": 818,
     # 1003, not 941, as of tan-cli#510: `_command_on_path`/`_tool_is_
     # available` (a bool-only availability check, and a spawn that repeated
     # a SEPARATE, unhardened PATH lookup) were replaced by one
@@ -789,7 +814,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # case/whitespace-insensitive `is_tbd`-shaped TBD check (alp-sdk #1048,
     # matching `som_metadata.py::_resolve_silicon_variant`'s own copy).
     "tan/planner/zephyr_board.py": 975,
-    "tan/commands/support_bundle_cmd.py": 834,
+    # 882, not 834, as of tan-cli#499: `_redact` now anchors its match to a
+    # path boundary (`_redact_one`, a new regex-based helper) instead of a
+    # bare `str.replace`, which used to rewrite any string for which the
+    # resolved HOME was merely a substring prefix into a silently WRONG one
+    # -- and `_home_variants` now drops a bare-separator-root HOME (`/`,
+    # what a uid with no `/etc/passwd` entry gets under Docker/OpenShift)
+    # outright. Net growth is mostly the two docstrings explaining why.
+    "tan/commands/support_bundle_cmd.py": 882,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring

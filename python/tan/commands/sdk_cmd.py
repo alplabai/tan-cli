@@ -969,8 +969,28 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
 
     Always exit 0. "Nothing is configured" is a successful answer to the
     question asked, and the `sdk-current-no-sdk` golden pins it.
+
+    tan-cli#497: resolves through `build_cmd.resolve_sdk_root_ladder`, not
+    the narrow `resolve_sdk_tiered` alone -- that ladder's own docstring
+    names `sdk current` as one of its thirteen callers precisely so this
+    answers the same checkout `doctor`/`build`/`validate` would. Bare
+    `resolve_sdk_tiered` has no candidate for a CHILD `<ws>/alp-sdk` (the
+    README Quickstart layout): it would report `sdkPath: null` here while
+    every other narrow command finds the checkout via the ladder's
+    `discover_sdk_root` tail. Function-level import: `build_cmd` imports
+    this module at load time, so importing it back at module scope would
+    be circular (mirrors `sdk_ladder_divergence_issue`'s import a few lines
+    below).
     """
-    active = resolve_sdk_tiered(sdk_root, workspace_root)
+    from tan.commands.build_cmd import resolve_sdk_root_ladder
+
+    resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    active = ActiveSdk(
+        str(resolution.path) if resolution.path is not None else None,
+        resolution.tier,
+        resolution.broken_project_pin,
+        resolution.foreign_global_default_for,
+    )
     readiness = check_sdk_readiness(active.path) if active.path is not None else None
     text = (
         format_readiness_block("Active SDK", readiness)

@@ -736,7 +736,7 @@ def slice_build_dir_or_default(slice_: dict, build_root: str) -> str:
     return os.path.join(build_root, f"{slice_.get('core_id')}-{slice_.get('os')}")
 
 
-def _nested_variants(base: str) -> list[str]:
+def _nested_variants(base: str, *, include_nested: bool = True) -> list[str]:
     """`base`, then `base/build` -- the I-18 pair. `west build` is emitted with
     NO `-d`, so its tree lands at `<slice-cwd>/build/` while the plan's
     `artifacts` block still names `<slice-cwd>/...`; the consumer reconciles
@@ -751,8 +751,38 @@ def _nested_variants(base: str) -> list[str]:
     port's `tan build` does not yet write that manifest, so the reconciliation
     has to happen on the read side or every slice of a real nested build reports
     `not-built`.
+
+    `include_nested=False` (tan-cli#499) drops the `/build` candidate entirely
+    -- reserved for a slice whose recorded `status` is NOT `"ok"` and carries
+    no `output_artefact`: with no output_artefact, the only reason a file
+    would sit at the NESTED path is a build this manifest itself says did not
+    (or no longer) succeed. Widening the search there converts an oracle
+    `not-built` into a stale measurement reported as current -- the un-nested
+    candidate stays in either way, since the oracle's own base-path lookup is
+    unaffected by this gate and this is strictly a narrowing, never a new
+    match the oracle would refuse.
     """
+    if not include_nested:
+        return [base]
     return [base, os.path.join(base, WEST_NESTED_DIR)]
+
+
+def _nested_probe_ok(slice_: dict) -> bool:
+    """tan-cli#499: whether the I-18 nested `/build` probe should run for
+    `slice_` at all, when no `output_artefact` is recorded.
+
+    `True` for an ABSENT `status` (a plan-time manifest, before any build
+    ran -- the case [`_nested_variants`]'s own docstring exists for: a real
+    `west build` tree sitting on disk with nothing yet written back) AND for
+    `"ok"` (the ordinary just-built case). `False` for any OTHER explicit
+    status (`failed`/`skipped`/`pending`/anything else a future SDK adds):
+    a manifest that names the outcome of a real run and says it was not `ok`
+    is exactly the case that must not have its own leftover artefact from a
+    DIFFERENT, earlier run picked back up one directory deeper and reported
+    as current.
+    """
+    status = slice_.get("status")
+    return status is None or status == "ok"
 
 
 def slice_elf_candidates(slice_: dict, build_root: str) -> list[str]:
@@ -761,6 +791,12 @@ def slice_elf_candidates(slice_: dict, build_root: str) -> list[str]:
     A recorded `output_artefact` is authoritative and used ALONE -- `tan build`
     only ever writes it already-resolved, so second-guessing it would ignore a
     deliberate `-d`/`--build-dir` override.
+
+    tan-cli#499: with no recorded `output_artefact`, the I-18 nested `/build`
+    probe is gated by [`_nested_probe_ok`]. A slice with an explicit non-`ok`
+    status can still be measured off the UN-nested path (unchanged,
+    oracle-matching); it just cannot pick up a leftover artefact that only
+    exists one directory deeper.
     """
     artefact = slice_.get("output_artefact")
     if isinstance(artefact, str) and artefact != "":
@@ -768,11 +804,15 @@ def slice_elf_candidates(slice_: dict, build_root: str) -> list[str]:
     build_dir = slice_build_dir_or_default(slice_, build_root)
     return [
         os.path.join(base, "zephyr", "zephyr.elf")
-        for base in _nested_variants(build_dir)
+        for base in _nested_variants(build_dir, include_nested=_nested_probe_ok(slice_))
     ]
 
 
 def slice_footprint_dirs(slice_: dict, build_root: str) -> list[str]:
     """Where this slice's `rom.json` + `ram.json` may be, best first (same I-18
-    pair as [`slice_elf_candidates`])."""
-    return _nested_variants(slice_build_dir_or_default(slice_, build_root))
+    pair as [`slice_elf_candidates`], including the same [`_nested_probe_ok`]
+    gate, tan-cli#499)."""
+    return _nested_variants(
+        slice_build_dir_or_default(slice_, build_root),
+        include_nested=_nested_probe_ok(slice_),
+    )

@@ -215,6 +215,7 @@ def _bundle_helper(
     sdk_root: str | None,
     helpers_dir: str,
     used_names: set[str],
+    sdk_root_arg: str | None,
 ) -> dict[str, Any] | _Notice | None:
     """Copy one helper's firmware, or a notice, or `None` for an absent one.
 
@@ -243,7 +244,20 @@ def _bundle_helper(
     if firmware is None:
         tried = "; ".join(f"{label} {path}" for label, path in candidates)
         if sdk_root is None and not os.path.isabs(raw):
-            tried += "; sdk root not resolved (no --sdk-root and no discoverable checkout)"
+            # tan-cli#497: this used to claim "no --sdk-root" unconditionally
+            # whenever nothing resolved, including when `--sdk-root` WAS
+            # given but failed the loader-marker check -- sending the reader
+            # looking for a missing flag instead of at the typo in the path
+            # they actually typed. `sdk_root_arg` is the raw CLI value,
+            # `sdk_root` the resolved (and validated) one; the two can
+            # legitimately differ.
+            if sdk_root_arg:
+                tried += (
+                    f"; sdk root not resolved (--sdk-root {sdk_root_arg!r} does not "
+                    "resolve to an alp-sdk checkout)"
+                )
+            else:
+                tried += "; sdk root not resolved (no --sdk-root and no discoverable checkout)"
         return _Notice(
             "image.helper-missing",
             "error",
@@ -305,7 +319,11 @@ def _is_file(path: str) -> bool:
 
 
 def _assemble_bundle(
-    build_root: str, sdk_root: str | None, manifest: SystemManifest, yaml_text: str
+    build_root: str,
+    sdk_root: str | None,
+    manifest: SystemManifest,
+    yaml_text: str,
+    sdk_root_arg: str | None = None,
 ) -> tuple[list[_Notice], dict[str, Any], str]:
     """Do the filesystem work: mkdir the bundle tree, tar each ok slice, copy each
     present helper firmware, write `bundle-manifest.json`."""
@@ -321,7 +339,37 @@ def _assemble_bundle(
     notices: list[_Notice] = []
     slice_entries: list[dict[str, Any]] = []
     for slice_ in manifest.slices:
-        if not slice_should_bundle(slice_.get("status")):
+        status = slice_.get("status")
+        if not slice_should_bundle(status):
+            if status is not None:
+                # tan-cli#499: the only exclusion in this function that used
+                # to report NOTHING -- `build_dir`-missing, an unsafe archive
+                # name, and a `TBD` helper all emit a warning notice a few
+                # lines below; a slice `tan build` skipped under
+                # `executionPolicy` (missing `west`/`bitbake`) or that
+                # outright failed reaches a GREEN `tan build` too (a
+                # PARTIAL build is still `ok: true`/exit 0), so `tan image`
+                # used to answer `ok: true`, `issues: []` and write a
+                # `bundle-manifest.json` whose `boot_order` still names a
+                # core `slices[]` carries no artefact for. Warning
+                # severity, not an exit-code flip: a `failed` status
+                # already exits 1 at `tan build`, and this notice's own job
+                # is disclosure, matching the module's established shape
+                # for every other excluded item.
+                #
+                # Gated on `status is not None`, mirroring `tan.core.
+                # system_manifest._nested_probe_ok`'s identical absent-vs-
+                # explicit distinction: an ABSENT status is a plan-time
+                # manifest (before any build ran) -- oracle-measured, pinned
+                # by `test_nonfinite_floats.py`, at `issues: []` -- not a
+                # run that recorded an outcome and said it was not `ok`.
+                notices.append(
+                    _Notice(
+                        "image.slice-not-built",
+                        "warning",
+                        f"image: skipping {slice_.get('core_id')} (status: {status})",
+                    )
+                )
             continue
         result = _bundle_slice(slice_, build_root, slices_dir)
         if isinstance(result, _Notice):
@@ -332,7 +380,9 @@ def _assemble_bundle(
     helper_entries: list[dict[str, Any]] = []
     used_names: set[str] = set()
     for helper in manifest.helper_mcus:
-        result = _bundle_helper(helper, build_root, sdk_root, helpers_dir, used_names)
+        result = _bundle_helper(
+            helper, build_root, sdk_root, helpers_dir, used_names, sdk_root_arg
+        )
         if result is None:
             continue
         if isinstance(result, _Notice):
@@ -399,12 +449,18 @@ def _error_outcome(
         context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
     )
     issues.append(Issue(code, "error", message))
+    # tan-cli#497: `issues` carried this pair into `--format json` while the
+    # DEFAULT text path (`outcome.text`, printed to stderr by `image()`)
+    # never did -- so a broken `.alp/sdk-path` project pin, or a foreign
+    # `~/.alp/sdk-default`, was invisible on the mode almost every customer
+    # actually runs.
+    text = [f"image: {issue.message}" for issue in issues[:-1]] + [f"image: {message}"]
     return _Outcome(
         exit_code,
         _empty_bundle(),
         project,
         issues,
-        [f"image: {message}"],
+        text,
         context.sdk,
     )
 
@@ -448,7 +504,9 @@ def _run(
 
     sdk_root = context.sdk.root if context.sdk is not None else None
     try:
-        notices, bundle, bundle_dir = _assemble_bundle(build_root, sdk_root, manifest, yaml_text)
+        notices, bundle, bundle_dir = _assemble_bundle(
+            build_root, sdk_root, manifest, yaml_text, sdk_root_arg
+        )
     except BundleWriteError as err:
         return _error_outcome(
             project,
@@ -470,17 +528,26 @@ def _run(
     issues = [Issue(n.code, n.severity, n.message) for n in notices]
     # The same pair `_error_outcome` above computes for a manifest/bundle-write
     # refusal, from the same shared `sdk_resolution_issues`.
-    issues.extend(
-        sdk_resolution_issues(
-            context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
-        )
+    resolution_issues = sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
+    )
+    issues.extend(resolution_issues)
+    # tan-cli#497: `resolution_issues` used to reach ONLY `issues` (the
+    # `--format json` envelope) on this path too -- so the helper firmware a
+    # bundle physically packaged could have been resolved out of a fallback
+    # checkout the workspace's own `.alp/sdk-path` pin did not name, and
+    # default TEXT mode (`image: bundle ready at ...`) said nothing about it.
+    text = (
+        [n.message for n in notices]
+        + [f"image: {issue.message}" for issue in resolution_issues]
+        + [f"image: bundle ready at {bundle_dir}"]
     )
     return _Outcome(
         exit_code,
         bundle,
         project,
         issues,
-        [n.message for n in notices] + [f"image: bundle ready at {bundle_dir}"],
+        text,
         context.sdk,
     )
 

@@ -134,6 +134,34 @@ def test_home_variants_empty_when_unset(monkeypatch):
     assert _home_variants() == ()
 
 
+def test_home_variants_refuses_a_bare_separator_root(monkeypatch):
+    # tan-cli#499: `HOME=/` (what Docker/OpenShift hand a uid with no
+    # /etc/passwd entry) must not become a redaction variant -- an unanchored
+    # `str.replace("/", "<home>")` would turn every path separator in the
+    # whole bundle into the placeholder.
+    monkeypatch.setenv("HOME", "/")
+    assert _home_variants() == ()
+
+
+def test_redact_does_not_corrupt_a_path_for_which_home_is_only_a_prefix():
+    # tan-cli#499: the whole defect. An unanchored `str.replace` rewrote an
+    # unrelated, longer sibling directory name into a corrupted string --
+    # silently, at `ok: true` -- any time the resolved HOME happened to be
+    # its exact STRING PREFIX. Neither `a` (HOME as a prefix) nor `b` (the
+    # same collision, with an unrelated ancestor directory directly before
+    # it too) may be touched at all; `c` is the real home dir and must still
+    # redact.
+    payload = {
+        "a": "/home/dev/proj",
+        "b": "/srv/home/dev/proj",
+        "c": "/home/de/proj",
+    }
+    redacted = _redact(payload, ("/home/de",))
+    assert redacted["a"] == "/home/dev/proj"
+    assert redacted["b"] == "/srv/home/dev/proj"
+    assert redacted["c"] == "<home>/proj"
+
+
 def test_written_bundle_never_contains_the_raw_home_directory(tmp_path, monkeypatch):
     """The end-to-end property: a project living UNDER the resolved home
     directory must not leak that home path anywhere in the WRITTEN file --

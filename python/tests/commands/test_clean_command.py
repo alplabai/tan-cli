@@ -151,6 +151,30 @@ def test_filesystem_and_drive_roots_are_unsafe():
         assert not is_unsafe_removal_target(project, r"\\server\share\x")
 
 
+@pytest.mark.skipif(WINDOWS, reason="symlinks need elevated privilege on Windows")
+def test_a_symlinked_parent_component_cannot_disguise_the_project_root_as_safe(tmp_path):
+    """tan-cli#499: `_normalize` never resolves a symlink, so BOTH arms of the
+    lexical test -- target IS the project root, and target is an ANCESTOR of
+    it -- are defeated when the target reaches that directory through a
+    symlinked PARENT component. The resolved-path OR-arm must still refuse."""
+    work = tmp_path / "work"
+    (work / "proj" / "src").mkdir(parents=True)
+    (work / "proj" / "src" / "main.c").write_text("int main(void){return 0;}")
+    link = tmp_path / "wlink"
+    link.symlink_to(work)
+
+    project = str(work / "proj")
+    # CASE 1: target IS the project root, reached through the symlinked parent.
+    assert is_unsafe_removal_target(project, str(link / "proj"))
+    # CASE 2: target is an ANCESTOR of the project root, same symlinked parent.
+    assert is_unsafe_removal_target(project, str(link))
+    # A target that is a symlink ITSELF (not reached THROUGH one) stays safe --
+    # unlinking it is the documented behaviour, not a tree deletion.
+    sibling_link = tmp_path / "just_a_link"
+    sibling_link.symlink_to(work / "proj" / "src")
+    assert not is_unsafe_removal_target(project, str(sibling_link))
+
+
 def test_real_build_trees_and_out_of_tree_dirs_stay_removable():
     """The rule is "not catastrophic", NOT "not outside" (`path_guard.rs:100-103`).
     An out-of-tree Yocto tmp dir is a supported clean target -- which is why this
@@ -695,6 +719,36 @@ def test_a_read_only_artefact_inside_the_build_tree_is_still_removed(tmp_path, m
     assert doc["issues"] == []
     assert doc["data"]["removed"] == 2
     assert not (proj / "build").exists()
+    assert_canary_intact(tmp_path)
+
+
+@pytest.mark.skipif(WINDOWS, reason="POSIX permission-bit repro; not the Windows failure mode")
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses every permission bit")
+def test_an_unopenable_build_dir_is_a_warning_not_an_internal_failure(tmp_path, monkeypatch):
+    """tan-cli#499: a build root this process OWNS but cannot OPEN (no r/x
+    bits) used to reach `shutil.rmtree`'s fd-based POSIX walk, whose error
+    hook got handed `os.open` -- not retryable as a bare `func(path)` call
+    (`TypeError: open() missing required argument 'flags'`), which is
+    neither `OSError` nor `ValueError` and escaped straight to `clean`'s
+    outer catch-all (`clean.internal-failure`, exit 5), abandoning every
+    OTHER queued target including the state-file unlink. The oracle exits 0
+    with `clean.remove-failed` as a WARNING and still removes the state
+    file; this asserts the port now does too."""
+    proj = make_project(tmp_path)
+    isolate(monkeypatch, tmp_path, proj)
+    os.chmod(proj / "build", 0o000)
+    try:
+        result = runner.invoke(app, ["clean", "--format", "json"])
+    finally:
+        os.chmod(proj / "build", 0o700)  # restore so the fixture can clean up
+    assert result.exit_code == 0, result.stdout
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert [i["code"] for i in doc["issues"]] == ["clean.remove-failed"]
+    assert doc["issues"][0]["severity"] == "warning"
+    # The state file removal must still have gone ahead -- the whole point of
+    # not letting the TypeError abort the target loop.
+    assert not (proj / ".alp-build-state.json").exists()
     assert_canary_intact(tmp_path)
 
 

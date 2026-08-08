@@ -271,6 +271,34 @@ def test_sram_banks_keeps_order_and_drops_non_numeric_entries():
     assert sram_banks({}) == []
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#499: a non-finite/oversized SoC-JSON number must saturate, not raise
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_budget_saturates_an_infinite_mram_to_u64_max_not_a_crash():
+    # `json.loads` resolves a SoC JSON's `"mram_mb": Infinity` to
+    # `float("inf")`; `_mb_to_bytes` used to let `int(value)` raise
+    # `OverflowError` OUTSIDE its own try block for exactly this input,
+    # collapsing the whole `tan size` run into `size.internal-failure` with
+    # every slice's measurement discarded.
+    budget = resolve_budget("c", float("inf"), None, [], [])
+    assert budget.flash_total == 2**64 - 1
+    # -inf is already the pre-existing "saturate to 0" (non-positive) arm --
+    # asserted here so the two infinities are not confused with each other.
+    assert resolve_budget("c", float("-inf"), None, [], []).flash_total == 0
+
+
+def test_sram_banks_drops_an_oversized_bank_value_instead_of_raising():
+    # A JSON integer with hundreds of digits raises `OverflowError: int too
+    # large to convert to float` on a bare `float(value)` -- treated the same
+    # as any other non-numeric bank entry (skipped), not fatal to the whole
+    # read.
+    huge = 10**400
+    variant = {"sram_banks_kb": {"A": 1, "HUGE": huge, "B": 2.5}}
+    assert sram_banks(variant) == [("A", 1.0), ("B", 2.5)]
+
+
 def test_resolve_variant_forward_then_reverse_then_nothing():
     variants = [
         {"order_code": "AAA", "alp_module_skus": ["E1M-X"]},

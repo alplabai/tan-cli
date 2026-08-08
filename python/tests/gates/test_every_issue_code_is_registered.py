@@ -433,6 +433,9 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
         ("tan/commands/monitor_cmd.py", "err.code"),  # <- MonitorError
         ("tan/commands/init_cmd.py", "err.code"),  # <- InitError
         ("tan/commands/model_cmd.py", "err.code"),  # <- ModelError
+        ("tan/commands/model_cmd.py", "code"),  # `ModelError(code, ...)` inside `_run_build`'s own
+        # `_err(code, message, exit_code)` helper (tan-cli#497), forwarding ITS
+        # OWN `code` parameter -- every `_err(...)` call site carries a literal.
         ("tan/commands/explain_cmd.py", "err.code"),  # <- ExplainError
         ("tan/commands/run_cmd.py", "err.code"),  # <- BuildError (run retags build's own refusal)
         ("tan/commands/generate_cmd.py", "err.code"),  # <- GenerateError

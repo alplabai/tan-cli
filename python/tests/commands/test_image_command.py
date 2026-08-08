@@ -381,10 +381,16 @@ def test_a_pending_slice_and_a_tbd_helper_yield_an_empty_bundle_at_rc_zero(tmp_p
     doc = envelope(result)
     assert doc["data"]["slices"] == []
     assert doc["data"]["helper_mcus"] == []
+    # tan-cli#499: a `pending` slice now gets its OWN notice too -- the
+    # exclusion that used to report nothing at all. Slice notices are
+    # appended before helper notices in `_assemble_bundle`, so it is first.
+    assert doc["issues"][0]["code"] == "image.slice-not-built"
+    assert doc["issues"][0]["severity"] == "warning"
+    assert "m55_hp" in doc["issues"][0]["message"]
     # The `TBD` sentinel is the LEGITIMATE not-yet-built state: a warning, never
     # the error a genuinely missing concrete path gets.
-    assert doc["issues"][0]["code"] == "image.helper-skipped"
-    assert doc["issues"][0]["severity"] == "warning"
+    assert doc["issues"][1]["code"] == "image.helper-skipped"
+    assert doc["issues"][1]["severity"] == "warning"
     assert (tmp_path / "br" / "image-bundle" / "bundle-manifest.json").is_file()
 
 

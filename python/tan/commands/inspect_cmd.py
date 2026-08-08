@@ -226,8 +226,15 @@ def _format_value_text(value: Any) -> str:
     """Strings JSON-quoted, everything else its compact JSON form -- mirrors
     Rust's `format_value` (`Value::String` -> `serde_json::to_string`, else
     `Value::to_string()`); `json.dumps` gives the identical rendering for a
-    scalar (`true`/`false`/`null`/a bare number) in either language."""
-    return json.dumps(value)
+    scalar (`true`/`false`/`null`/a bare number) in either language.
+
+    `ensure_ascii=False` (tan-cli#499): `serde_json::to_string` emits raw
+    UTF-8, never a `\\uXXXX` escape, for a non-ASCII path -- `json.dumps`'s
+    default (`ensure_ascii=True`) does not, so a project path holding any
+    non-ASCII character (an accented name, a CJK folder) printed mangled and
+    no longer copy-pasteable back onto the real path on disk. Matches
+    `diff_cmd._format_value`'s identical fix, with the identical rationale."""
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _inspect_text_lines(
@@ -242,7 +249,12 @@ def _inspect_text_lines(
             if show_origin:
                 lines.append(
                     f"{v['key']}={rendered} source={v['source']} "
-                    f"detail={json.dumps(v['detail'])}"
+                    # tan-cli#499: same `ensure_ascii=False` fix as `rendered`
+                    # above -- every `detail` string happens to be ASCII
+                    # today, but nothing guarantees that stays true, and a
+                    # SEPARATE `json.dumps` call here would silently regress
+                    # the moment one carries a non-ASCII path.
+                    f"detail={json.dumps(v['detail'], ensure_ascii=False)}"
                 )
             else:
                 lines.append(f"{v['key']}={rendered}")
