@@ -588,6 +588,350 @@ All notable changes to `tan` are documented here. Format follows
     alongside the C0 range, and the self-check's `yaml.safe_load` call is
     now itself guarded as a backstop. (#496)
 
+- **`install.ps1`'s Path update permanently destroyed every `%VAR%` reference
+  in the User (or, under `-System`, the MACHINE) Path -- silently.**
+  `[Environment]::GetEnvironmentVariable("Path", $scope)` EXPANDS a
+  `REG_EXPAND_SZ` Path value before returning it, and
+  `[Environment]::SetEnvironmentVariable` always writes the result back as
+  `REG_SZ` -- so a Path like `%JAVA_HOME%\bin;%LOCALAPPDATA%\...` lost every
+  indirection the moment `install.ps1` appended its own directory, breaking
+  every one of those entries the next time the referenced profile moved
+  (domain join, roaming profile, a drive-letter change). `install.ps1` now
+  opens the registry directly -- reading UNEXPANDED
+  (`DoNotExpandEnvironmentNames`) and writing back with the SAME
+  `RegistryValueKind` the key already had, the way rustup/scoop/chocolatey
+  do -- and re-broadcasts `WM_SETTINGCHANGE` itself, since a direct registry
+  write does not get that side effect for free the way
+  `SetEnvironmentVariable` did. (#490)
+- **`install.sh`'s tan-cli#434 health check ran the freshly downloaded
+  binary out of `$TMPDIR`, which 404s the whole install on a host with
+  `$TMPDIR` mounted `noexec`** (common on CIS/STIG-hardened images --
+  exactly where customers install `tan` from via `curl | sh`) -- and
+  misattributed the failure to a glibc floor. `install.sh` and `install.ps1`
+  now recognise the noexec/AppLocker signature and retry the health check
+  staged inside `$INSTALL_DIR`/`$Dir` (which already has to be exec-able for
+  `tan` to ever run) before falling back to a message that names the mount
+  option explicitly, with the `TMPDIR`/`--dir` workaround spelled out.
+  Six further defects found reviewing that fix, all closed together:
+  - `install.sh` reported a retry that never got staged as one that ran and
+    failed -- `retried=1` was set before the retry was attempted, and the
+    `mktemp`/`mv` error was discarded rather than surfaced. It is now set
+    only after the retry's own health check actually runs, and a staging
+    failure's real error text is reported instead.
+  - `install.sh`'s noexec signature keyed on the untranslated English
+    "Permission denied", but neither it nor the health check forced
+    `LC_ALL=C` -- on a localized host (the same hardened-image class this
+    fix targets) glibc's translated `strerror(EACCES)` never matched, and
+    the noexec retry silently never fired.
+  - `install.ps1`'s AppLocker signature matched on the "Access is denied"
+    message text alone; `install.sh`'s equivalent already requires exit code
+    126 AND the text. `install.ps1` now reads the actual Win32 status off the
+    underlying `Win32Exception` and matches it against all three codes
+    `CreateProcess` can return for this class of refusal:
+    `ERROR_ACCESS_DENIED` (5, an NTFS deny-execute ACE),
+    `ERROR_ACCESS_DISABLED_BY_POLICY` (1260, the stock AppLocker/Software
+    Restriction Policy "block executables from %TEMP%" rule), and
+    `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (786, `0x312`, the same
+    SAFER/SRP policy class configured with no user-facing notification --
+    confirmed against
+    `learn.microsoft.com/windows/win32/debug/system-error-codes--500-999-`
+    and MS-ERREF, `openspecs/windows_protocols/ms-erref`, `0x00000312`).
+  - The retry gate's speculative `mkdir -p "$INSTALL_DIR"` ran even when the
+    install was then refused, leaving an empty directory where pre-fix
+    nothing existed; it is now removed on that path -- including any
+    intermediate PARENT directories that same `mkdir -p` also created (a
+    round-9 fix: the first version of this only `rmdir`'d the leaf, which
+    left a multi-level `--dir` like `<dir>/orph/deep/bin` orphaning
+    `<dir>/orph` and `<dir>/orph/deep` behind on refusal).
+  - `restore_previous`'s `as_root rm -rf "$dest" "$LIB_DIR"` was unguarded,
+    so under `set -eu` a failure there aborted the script mid-rollback,
+    skipping both the backup restore and the warning that names it.
+  - The first `download` call's own fatal `need curl or wget on PATH`
+    message was redirected to `/dev/null`, so a host with neither tool
+    exited 1 with zero diagnostic output.
+  Three more defects from the same report, also closed: a relative
+  `--dir`/`-Dir` was baked verbatim into the archive layout's generated
+  launcher and the PATH-modifying line, working only from the one CWD
+  install ran in -- both scripts now normalise it to an absolute path
+  first; a `--system`/root-owned install left the whole tree owned by the
+  invoking unprivileged user (`mktemp` stages unprivileged and `mv`
+  preserves ownership even across filesystems as root) -- `install.sh` now
+  `chown`s the installed files to root after a sudo-elevated commit
+  (non-fatal if the chown itself cannot succeed); and fish/tcsh/csh fell
+  through to `~/.profile` with a POSIX `export` line neither shell reads or
+  parses -- each now gets its own rc file (`~/.config/fish/config.fish`,
+  `~/.tcshrc`, `~/.cshrc`) and its own syntax (`set -gx` / `setenv`). (#490)
+- **Three more defects found reviewing the (#490) fixes above, all in
+  `install.ps1`:**
+  - A relative `-Dir` resolved against `[Environment]::CurrentDirectory`,
+    which NEITHER Windows PowerShell 5.1 nor PowerShell 7+ updates on
+    `Set-Location`/`cd` -- only `$PWD` does, on both. `-Dir .\bin` after `cd
+    .\tools` could silently install somewhere the user never asked for
+    (often wherever the PowerShell process itself started), on either
+    version. Now anchored against `$PWD.Path`, which both 5.1 and 7 keep
+    accurate, via `[System.IO.Path]::Combine` (an already-absolute `-Dir`
+    passes through unchanged).
+  - The registry-kind-preserving Path write this same issue's
+    highest-priority fix added was never actually exercised by any test:
+    every `install.ps1` test in the suite passes `-NoModifyPath` so it never
+    rewrites the real User/Machine Path on the machine running the suite --
+    which also means none of them ever reached the write.
+    `Get-PathRegistryKey` now has a test-only seam
+    (`TAN_INSTALL_TEST_PATH_REGISTRY_KEY`) that points the read/write at a
+    disposable scratch `HKCU` subkey instead of the real key, and a new test
+    exercises it end-to-end: seeds a `REG_EXPAND_SZ` Path containing a
+    `%VAR%` reference, runs the real write path, and asserts the value kind
+    and the literal `%VAR%` both survive.
+  - `Move-Item` carries the SOURCE item's ACL into `$LibDir`/`$dest` rather
+    than picking up the destination's -- `$stage`/`$tmp` are staged
+    unprivileged in the invoking user's own `%TEMP%`, so under `-System` a
+    machine-wide install under `%ProgramFiles%` was left writable by that
+    unprivileged user, a local-privilege-escalation shape (install.sh's
+    equivalent, a post-commit `chown` to root, already existed; this was the
+    missing Windows half). The commit now runs `icacls /reset` on whatever
+    was actually moved into place -- not a manual
+    `Get-Acl`/`SetAccessRuleProtection`/`Set-Acl`, since a moved item's ACEs
+    keep whatever "inherited" flag they had from the OLD parent and
+    re-enabling inheritance alone would add the new parent's ACEs alongside
+    the stale ones rather than replacing them -- so the item ends up with
+    only what its new parent grants, exactly as if created there fresh.
+    Non-fatal, like the `install.sh` `chown`. (#490)
+- **The relative-`-Dir` fix directly above shipped with zero test coverage,
+  justified by a comment claiming PowerShell 7 keeps
+  `[Environment]::CurrentDirectory` and `$PWD` in sync so only Windows
+  PowerShell 5.1 needed it.** That claim does not hold: measured directly
+  (PowerShell 7.4.6, `Set-Location` into a subdirectory, then compare
+  `$PWD.Path` against `[Environment]::CurrentDirectory`), the two diverge on
+  7 exactly as they do on 5.1 -- the comment was the only thing standing
+  between the missing test and a reader believing the gap was intentional.
+  `install.ps1`'s module comment is corrected, and a new regression test
+  (`test_ps1_relative_dir_is_resolved_against_pwd_not_process_startup_dir`)
+  starts `pwsh` in one directory, `Set-Location`s into a subdirectory
+  mid-script (mirroring `cd .\tools; irm ... | iex -Dir .\bin`), and asserts
+  the install lands under the subdirectory rather than wherever the `pwsh`
+  PROCESS itself started -- `windows_only` like the rest of this file's ps1
+  coverage. (#490)
+- **Two more defects found reviewing the (#490) fixes above, all shipping
+  the exact misattribution the fix exists to prevent:**
+  - `install.sh`'s noexec health check forced `LC_ALL=C` as a COMMAND-PREFIX
+    assignment (`LC_ALL=C "$1" --version`), which sets the variable only in
+    the environment handed to the child about to be exec'd. When `exec(2)`
+    itself fails -- the noexec case this whole check exists for -- no child
+    ever replaces the running shell's image, so the "Permission denied"
+    diagnostic is printed by the shell in whatever locale IT was already
+    running in, not the temporarily-prefixed one; on a bash-as-`/bin/sh` host
+    (RHEL/Rocky/Alma/Fedora/SLES) with a localized ambient locale, glibc's
+    translated `strerror(EACCES)` never matched the English substring the
+    noexec signature keys on, and the retry silently never fired. Confirmed
+    for real on a Fedora 40 host with `glibc-langpack-de` installed: under a
+    `de_DE.UTF-8` ambient locale, the old command-prefix form printed "Keine
+    Berechtigung" (missing the signature); wrapping the same assignment in
+    `export` inside the `$(...)` subshell -- which does reach that
+    subshell's own `setlocale()`, and a shell's locale state persists across
+    the rest of that same process -- prints "Permission denied" instead.
+  - `install.sh`'s `latest` redirect resolution (the DEFAULT invocation --
+    no `--version`, exactly the documented `curl | sh` one-liner) has its
+    own inline curl/wget branching that does not go through `download()` and
+    always runs first, so a host with neither tool fell through both
+    branches unguarded and printed "could not resolve which release
+    'latest' points at ... pass an explicit --version" instead of "need curl
+    or wget on PATH" -- the correct diagnostic, and the one the prior
+    round's fix only reached when `--version` was passed explicitly, skipping
+    this block entirely. Now checked up front, before `latest` resolution or
+    any other download, the same idiom the sha256-tool check further down
+    already uses. (#490)
+- **Four more defects found reviewing the (#490) fixes above, closing the
+  last release-blocker on this issue:**
+  - `install.sh`'s own tcsh arm silently disabled a user's existing shell
+    config. tcsh(1), STARTUP AND SHUTDOWN, reads FIRST `~/.tcshrc` or, only
+    if that file is not found, `~/.cshrc` -- never both -- so creating a bare
+    `~/.tcshrc` on a host whose config lived entirely in `~/.cshrc` stopped
+    that config from loading at all, from the next shell on, with no warning
+    and no recovery (the idempotency guard makes a re-run a no-op). The tcsh
+    arm now appends to an existing `~/.cshrc` instead of creating
+    `~/.tcshrc` when the latter does not already exist.
+  - `install.ps1` could report a successful install as a failure. The
+    `WM_SETTINGCHANGE` broadcast added to keep already-running apps in sync
+    with a direct registry Path write compiles a small C# helper via
+    `Add-Type ... -ErrorAction SilentlyContinue` -- which an AppLocker DLL
+    rule or a Software Restriction Policy over `%TEMP%` (the exact host
+    class the health-check retry above exists for) can block, leaving the
+    type undefined -- and referencing that unresolved type at the broadcast
+    call site is then a TERMINATING error under this script's
+    `$ErrorActionPreference = "Stop"`, reached only AFTER the commit and the
+    registry Path write had already succeeded. The broadcast is now gated on
+    the type actually existing and wrapped in its own try/catch, matching
+    `Reset-InheritedAcl`'s already-established "an install that already
+    succeeded must not be turned into a failure over a best-effort side
+    effect" rule just above it.
+  - `install.ps1`'s noexec/AppLocker retry discarded the real error from a
+    failed `New-Item`/`Copy-Item` in an empty `catch` block and substituted
+    a hardcoded, never-measured guess ("$Dir could not be used for a retry
+    without elevation") in the failure message -- the real cause could
+    equally be disk-full, an AV quarantine, a locked file, or MAX_PATH.
+    Mirrors `install.sh`'s own fix for the identical class on the POSIX side
+    (`retry_stage_err`): the catch block now captures
+    `$_.Exception.Message` into `$retryStageErr` and the failure message
+    reports it instead of guessing.
+  - This CHANGELOG's own entry for `Test-AccessDeniedSignature` was spread
+    across three separate bullets from three review rounds, each describing
+    a different intermediate state (5 alone; then "+1260"; then a
+    correction of a wrong 1261 to 786) with no single bullet describing what
+    actually ships. Collapsed into one: `install.ps1` matches all three
+    Win32 codes `CreateProcess` can return for this refusal class --
+    `ERROR_ACCESS_DENIED` (5), `ERROR_ACCESS_DISABLED_BY_POLICY` (1260), and
+    `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (786, `0x312`) -- verified
+    against `install.ps1`'s shipped `Test-AccessDeniedSignature`. (#490)
+  Also closed, a MINOR from the same review: `install.sh`'s relative-`--dir`
+  normalisation ran a speculative `mkdir -p` on the not-yet-existing parent
+  of a relative `--dir` during ARGUMENT PARSING, before any network call or
+  health check -- so `--dir new/deep/bin` against a subsequently refused
+  install (e.g. an unresolvable `--version`) still left `./new/deep` behind
+  in the caller's CWD. Normalisation now walks up to the nearest EXISTING
+  ancestor to resolve the absolute path without creating anything. (The real
+  `mkdir -p "$INSTALL_DIR"` still runs later, during the noexec-retry health
+  check -- itself a path a refused install can still reach; see the
+  intermediate-parent fix for that gate above.)
+- **Four more defects found reviewing the (#490) fixes above, closing the
+  issue:**
+  - `install.sh`'s round-8 tcsh fix left the plain `csh)` arm unchanged,
+    still writing `~/.cshrc` unconditionally. On macOS, FreeBSD, and
+    Debian/Ubuntu-via-alternatives `/bin/csh` IS tcsh (a compat symlink/
+    build, not a distinct binary), so `SHELL=/bin/csh` on a host that also
+    has `~/.tcshrc` hit the exact tcsh(1) STARTUP-AND-SHUTDOWN shadowing bug
+    round 8 fixed for the `tcsh` name, just under a different `$SHELL`
+    value: `~/.tcshrc` is read first and `~/.cshrc` never is, so the PATH
+    line written there is inert. MEASURED against real tcsh 6.24.10 (both
+    `~/.tcshrc` and `~/.cshrc` seeded, `SHELL=/bin/csh`): the installer
+    reported `added .../binF to PATH in .../homeF/.cshrc`, then
+    `tcsh -c 'echo $PATH' | grep -c binF` -> `0`. `csh` now shares the exact
+    same shadowing-aware logic as `tcsh` (one case arm, `tcsh | csh)`),
+    covered in all four rc-file shapes: neither exists, `~/.cshrc` only,
+    `~/.tcshrc` only, and both.
+  - `install.sh`'s noexec-retry gate's speculative `mkdir -p "$INSTALL_DIR"`
+    creates every missing INTERMEDIATE parent too, and the round-8 fix for
+    this gate's orphan directory only `rmdir`'d the LEAF on refusal -- the
+    same class of orphan round 8 already fixed once in the relative-`--dir`
+    argument-parsing path, surviving here. MEASURED: `--dir <dir>/orph/deep/
+    bin` refused left `<dir>/orph` and `<dir>/orph/deep` on disk. The gate
+    now walks up from `$INSTALL_DIR` to the first ancestor that does not
+    exist yet, `rmdir`-ing each one NON-recursively, on refusal -- the same
+    "first new ancestor" trick as the argument-parsing fix, without ever
+    recursively deleting anything: an initial version of this fix used
+    `rm -rf` on the first-new-ancestor, which with the default
+    `$INSTALL_DIR` (`$HOME/.local/bin`) is `$HOME/.local` itself -- a shared
+    XDG root other tools keep state under -- and destroyed any write another
+    process made under it during the retry window (MEASURED: a write
+    injected via the retry gate's own `mktemp` call survived pre-`rm -rf`
+    and was destroyed by it). `rmdir` fails harmlessly the instant a
+    directory holds anything this run did not create, which is exactly the
+    wanted semantics.
+  - `install.ps1` had the identical intermediate-parent orphan as the
+    `install.sh` finding above, one level higher: `New-Item -ItemType
+    Directory -Force -Path $Dir`, unconditional and run before the health
+    check even starts, is the `mkdir -p` equivalent and creates every
+    missing parent of `$Dir`, with nothing removing them on a subsequent
+    health-check refusal. `$Dir`'s first not-yet-existing ancestor is now
+    recorded before that `New-Item` call and, on a subsequent health-check
+    refusal, each directory from `$Dir` up to that ancestor is removed with
+    a NON-recursive `[System.IO.Directory]::Delete($p, $false)` -- the same
+    `rm -rf`-on-a-shared-ancestor data-loss risk as the `install.sh` finding
+    above, here on the default `$Dir` (`%LOCALAPPDATA%\Programs\tan`),
+    whose first-new-ancestor is `%LOCALAPPDATA%\Programs` -- a root other
+    per-user installers populate -- and with a wider window (the whole
+    checksums fetch/download/sha256/extract sequence). Verified end-to-end
+    against real `pwsh 7.4.6`: a write injected while `$Dir` exists but
+    before the health check completes survives the refusal cleanup.
+  - `install.ps1`'s round-8 `Add-Type` fix gated and try/catch-wrapped the
+    `SendMessageTimeout` P/Invoke *call*, but left the `Add-Type` statement
+    that COMPILES the helper class itself sitting at column 0: unconditional,
+    outside `if (-not $alreadyPresent)`, and outside any try/catch of its
+    own. `-ErrorAction SilentlyContinue` on `Add-Type` only suppresses a
+    NON-terminating error; a compile/assembly-load failure from `Add-Type`
+    itself is a TERMINATING one under this script's own
+    `$ErrorActionPreference = "Stop"` -- precisely what an AppLocker DLL rule
+    or a Software Restriction Policy over `%TEMP%` (the exact host class the
+    health-check retry earlier in this same script exists for) produces --
+    so it could abort the whole script even on a run that never touched the
+    Path at all (a fresh `-NoModifyPath` run, or one where `$Dir` was
+    already on the Path), turning an install that would otherwise have
+    succeeded into a reported failure. `Add-Type` now lives inside the same
+    write branch as the registry Path update and inside its own try/catch;
+    a new text-only test (no `pwsh` needed, so it runs on every OS this
+    suite runs on) asserts the shipped source keeps it there. (Inspected,
+    not executed against a real `pwsh`.) (#490)
+
+
+- **`tan faultdecode`'s `addr2line` probe was spoofable via a Windows CWD
+  decoy, and the emitted shell completions advertised stale/wrong flags and
+  values.** Two independent defects, closed together:
+  - `resolve_symbol`'s `addr2line`-class tool probe used `shutil.which`,
+    which inserts the current directory ahead of `$PATH` on Windows, so a
+    decoy `addr2line.exe`/`llvm-addr2line.exe`/`arm-zephyr-eabi-addr2line.exe`
+    sitting at a checked-out project's root was reported "available" and
+    then spawned by bare name (reopening the same hole a second way). Now
+    uses `doctor_cmd.on_path` and spawns the resolved absolute path, the
+    same `on_path` call `flash_cmd` already makes for its own tool probes
+    (`size_cmd`/`build/execute.py` harden their own probes independently,
+    with a different hand-rolled bool-returning walk -- not this pattern).
+  - The emitted bash/zsh/fish completion scripts advertised `tan doctor
+    --target-kind`/`--server`, which `doctor_cmd.py` deliberately never
+    ported; removed from `doctor`'s arm on all three shells (unchanged for
+    `support-bundle`/`debug-config`, which genuinely still take both).
+    bash/zsh's `--format` value-list selection assumed the subcommand
+    always sat at a fixed word index, silently offering the narrow list
+    whenever a global flag (e.g. `--sdk-root`) preceded it; both now scan
+    for the real subcommand. The bash scan's own loop variable (`vf`,
+    iterating `$value_flags`) was missing from its `local` declaration, so
+    it leaked into and clobbered a `$vf` already set in the sourcing
+    interactive shell -- confirmed by sourcing the completion script with
+    `vf` pre-set and completing `tan --sdk-root /x validate --format <TAB>`:
+    `$vf` came back overwritten as `--sdk-root` before the fix, unchanged
+    after it. fish's `generate --target` value list was hand-typed and
+    missing 3 of the 12 real values (`os-topology` -- a member of the
+    default/`--all` set -- `composed-route-table`, `ipc-contract-h`); now
+    spliced from `generate_cmd`'s own tables.
+
+  A piped/pasted dump being silently discarded whenever a register flag was
+  also given -- despite the command's own help promising "Explicit flags win
+  over a parsed dump", true only if the dump is still read when flags are
+  present too -- is NOT fixed here. It was, briefly, on this branch: the
+  implicit stdin read was made unconditional, with `sys.stdin is None`
+  (fd 0 closed -- a daemon/service parent, some CI runners, a frozen
+  no-console launch) guarded explicitly on both the `--file -` and implicit
+  paths so the change wouldn't trade one crash for another. But making the
+  implicit read unconditional makes EVERY flag-bearing invocation newly
+  dependent on `_stdin_offers_input`/`_stdin_offers_input_by_reading` (the
+  bounded-readiness reader that closed the original tan-cli#388 hang) --
+  including the primary documented invocation, `tan faultdecode --cfsr
+  0x8200`, which used to return with no stdin interaction at all. Several
+  rounds of bounding that reader more tightly (an idle+total dual timeout, a
+  background queue drain, `sys.stdin.reconfigure(encoding="utf-8",
+  errors="ignore")` for a stray non-UTF-8 byte) each closed one shape of hang
+  or data loss and opened a different one, so this change reverts `_read_dump`
+  to `dev`'s own `auto_consume_stdin=not registers_given` gate byte-for-byte
+  -- a flag-bearing invocation behaves exactly as it does on `dev`, including
+  `dev`'s own known defect (a producer that writes a dump and then holds the
+  pipe open without closing it can still lose that dump, or hang past the
+  readiness probe) -- rather than reopen tan-cli#388 for the flag-bearing case
+  to fix it. Both the flags-plus-dump merge and the `sys.stdin is None` guard
+  now move to tan-cli#537 together with the reader itself: neither can be
+  fixed correctly without touching it.
+
+  Two smaller things this issue also raised are DEFERRED, not closed here:
+  - `_parse_hexint` still accepts a negative/out-of-range hex value
+    (`int(text, 16)` parses a leading `-`), matching the v0.4.1 oracle
+    exactly: measured, `tan faultdecode --cfsr 0x100000000` and `--cfsr
+    -8200` both exit 0 on the shipped binary. A 32-bit range check was
+    tried and reverted -- it was an undeclared divergence from the oracle,
+    not an authorised one.
+  - `BFSR.LSPERR`/`MMFSR.MLSPERR` escalated to `FORCED` still falls through
+    to the generic "its own status bits are clear" `root_cause`, matching
+    the oracle's own (self-contradictory, but unaltered) text. A corrected
+    message was tried and reverted; whether to diverge from the oracle here
+    deliberately is an open question for a separate issue, not decided in
+    this change.
+  (Refs #503, #537)
 
 
 

@@ -354,6 +354,75 @@ def test_explicit_flag_wins_over_a_parsed_dump():
 
 
 # --------------------------------------------------------------------------
+# tan-cli#503, defect 1 (a piped dump must still be READ and MERGED when a
+# register flag is also given) and defect 3 (fd 0 closed must be a coded
+# refusal, never a traceback) are DEFERRED to tan-cli#537, not fixed here:
+# both require reworking `_stdin_offers_input`/`_stdin_offers_input_by_reading`
+# (the implicit-stdin reader itself), and every rework of that reader tried so
+# far closed one shape of hang/data-loss while opening another. This file
+# reverted to `dev`'s own `_read_dump(file_, *, auto_consume_stdin=...)` gate,
+# so a register flag suppresses the implicit stdin read exactly as it does on
+# `dev` -- `test_explicit_flag_wins_over_a_parsed_dump` above and
+# `test_stdin_dump_is_auto_consumed_when_piped` below still cover that
+# register-free path; the closed-fd-0 and flag-plus-dump-merge cases are
+# tan-cli#537's to add tests for, alongside the reader fix.
+# --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503, defect 2: addr2line must be resolved via `on_path` (PATH-only),
+# never `shutil.which` (which inserts CWD ahead of PATH on Windows), and
+# spawned by its resolved absolute path, never a bare name.
+# --------------------------------------------------------------------------
+
+
+def test_resolve_symbol_resolves_the_tool_through_on_path_not_shutil_which(
+    monkeypatch, tmp_path
+):
+    from tan.commands import faultdecode_cmd
+
+    elf = tmp_path / "zephyr.elf"
+    elf.write_bytes(b"\x7fELF")
+
+    calls: list[list[str]] = []
+
+    def fake_on_path(command: str) -> str | None:
+        if command == "arm-zephyr-eabi-addr2line":
+            return None
+        if command == "llvm-addr2line":
+            return None
+        if command == "addr2line":
+            return "/usr/bin/addr2line"  # a resolved ABSOLUTE path
+        raise AssertionError(f"unexpected tool probe: {command}")
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+
+        class _Result:
+            stdout = "my_func\nfile.c:42\n"
+
+        return _Result()
+
+    monkeypatch.setattr(faultdecode_cmd, "on_path", fake_on_path)
+    monkeypatch.setattr(faultdecode_cmd.subprocess, "run", fake_run)
+
+    sym = faultdecode_cmd.resolve_symbol(0x08001000, elf)
+    assert sym is not None
+    assert sym.func == "my_func"
+    # The RESOLVED ABSOLUTE PATH was spawned, not the bare name "addr2line"
+    # (tan-cli#503): a bare name would let a project-local decoy on CWD
+    # (Windows CreateProcess search order) get executed a second way even
+    # past a hardened probe.
+    assert calls[0][0] == "/usr/bin/addr2line"
+
+
+def test_resolve_symbol_skips_gracefully_when_no_tool_resolves(monkeypatch, tmp_path):
+    from tan.commands import faultdecode_cmd
+
+    elf = tmp_path / "zephyr.elf"
+    elf.write_bytes(b"\x7fELF")
+    monkeypatch.setattr(faultdecode_cmd, "on_path", lambda _tool: None)
+    assert faultdecode_cmd.resolve_symbol(0x08001000, elf) is None
 # `sys.stdin` itself, not just its `.isatty()`, can be `None` (tan-cli#488
 # round 5 class sweep): a process launched with its standard handles
 # detached -- a GUI launcher, a `pythonw`-style spawn, or a shell that closed
@@ -384,6 +453,7 @@ def test_read_dump_file_dash_refuses_cleanly_when_stdin_is_none(monkeypatch):
     monkeypatch.setattr(sys, "stdin", None)
     with pytest.raises(typer.BadParameter, match="stdin is detached"):
         _read_dump("-", auto_consume_stdin=True)
+
 
 
 def test_symbolication_is_skipped_gracefully_for_a_non_elf_file():
