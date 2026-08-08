@@ -940,6 +940,81 @@ def test_a_stray_byte_mid_dump_decodes_the_same_via_stdin_and_via_file(tmp_path)
     assert "Precise data bus fault" in stdin_stdout
 
 
+def test_a_mid_stream_stray_byte_decodes_identically_regardless_of_stdins_default_encoding(
+    tmp_path,
+):
+    """`--file` always reads a pasted dump with `Path.read_text(encoding=
+    "utf-8", errors="ignore")` -- BOTH operands pinned, independent of the
+    host's own default text encoding. Before this fix, `_stdin_errors_
+    ignore()` pinned only `errors="ignore"` and left `sys.stdin`'s ENCODING
+    at whatever the process was already open with (`PYTHONIOENCODING`, or a
+    legacy code page on a real Windows console) -- `errors="ignore"` alone
+    hides a decode CRASH, but does nothing about two encodings each decoding
+    the SAME byte without error into two DIFFERENT characters.
+
+    Measured against the pre-fix code: `PYTHONIOENCODING=cp1252` decodes a
+    lone `0xE9` byte as `chr(0xE9)` ("e"-acute, no error), while UTF-8's
+    `errors="ignore"` drops it outright (also no error) -- so the piped path
+    kept one extra character `--file` never saw. That shifted the following
+    `BFAR: 0x...` regex match just enough to lose the address entirely: the
+    piped decode reported the generic "Precise data bus fault" with no
+    address, while `--file` (pinned UTF-8) correctly reported "... at
+    0xdeadbeef (BFAR)" -- two different diagnoses from byte-identical input,
+    both at exit 0, with no exception on either path to flag the divergence.
+
+    The stray byte sits MID-STREAM, inside the `BFAR` line itself, with a
+    further pad line still to follow it -- not merely trailing -- so a fix
+    that only special-cases a byte at EOF would still pass this test for the
+    wrong reason; and it sits where it actually perturbs a regex match (right
+    before the hex run `_DUMP_RE` looks for), not in inert padding, so a fix
+    that only avoids a crash without also avoiding a *different* successful
+    decode would still fail it, for the right reason.
+    """
+    data = (
+        b"# lead-in pad line before the stray byte\n"
+        b"CFSR: 0x00008200\n"
+        b"BFAR: \xe9deadbeef\n"  # cp1252 keeps the byte, shifting past "0x";
+        # utf-8/ignore drops it, leaving "BFAR: 0xdeadbeef" intact.
+        b"# trailing pad line so the stray byte is not the final byte in the stream\n"
+    )
+
+    dump_file = tmp_path / "mid_stream_dump.bin"
+    dump_file.write_bytes(data)
+
+    # `PYTHONIOENCODING=cp1252` changes only stdin's *default* text encoding
+    # for a process that never overrides it -- `--file`'s `Path.read_text`
+    # pins its own encoding unconditionally and ignores it, so this env var
+    # exercises exactly the seam this fix closes and nothing else.
+    env = dict(REAL_ENVIRON)
+    env["PYTHONIOENCODING"] = "cp1252"
+
+    try:
+        file_proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            [sys.executable, "-m", "tan", "faultdecode", "--no-color", "--file", str(dump_file)],
+            capture_output=True,
+            text=True,
+            timeout=_OPEN_STDIN_TIMEOUT_S,
+            env=env,
+        )
+        stdin_proc = subprocess.run(  # noqa: S603
+            [sys.executable, "-m", "tan", "faultdecode", "--no-color"],
+            input=data,
+            capture_output=True,
+            timeout=_OPEN_STDIN_TIMEOUT_S,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"tan faultdecode did not exit within {_OPEN_STDIN_TIMEOUT_S}s")
+
+    assert file_proc.returncode == 0, file_proc.stderr
+    assert stdin_proc.returncode == 0, stdin_proc.stderr
+    stdin_stdout = stdin_proc.stdout.decode("utf-8")
+    assert stdin_stdout == file_proc.stdout
+    assert "0x00008200" in stdin_stdout
+    assert "0xdeadbeef" in stdin_stdout
+    assert "Precise data bus fault at 0xdeadbeef" in stdin_stdout
+
+
 # --------------------------------------------------------------------------
 # Every `--format json` command must have an envelope to emit (tan-cli#399)
 # --------------------------------------------------------------------------

@@ -192,14 +192,30 @@ _STDIN_READY_TIMEOUT_S = 0.25
 
 
 def _stdin_errors_ignore() -> None:
-    """Make `sys.stdin` skip a malformed byte instead of raising mid-decode
-    (tan-cli#503): matches `--file`'s own `Path.read_text(..., errors=
-    "ignore")` in `_read_dump` below. `hasattr` skips a stream that cannot
+    """Make `sys.stdin` decode exactly like `--file` does (tan-cli#503):
+    `_read_dump` below reads a pasted file with `Path.read_text(encoding=
+    "utf-8", errors="ignore")` -- BOTH operands pinned, not just the error
+    policy. Pinning only `errors="ignore"` here (an earlier round of this
+    fix) closed the crash but left `encoding` at whatever `sys.stdin` was
+    already open with -- the platform/locale default (`PYTHONIOENCODING`,
+    or a legacy code page on Windows), which is not necessarily UTF-8. Two
+    non-UTF-8 encodings can each decode the SAME byte without error (so
+    `errors="ignore"` never fires on either side) yet produce DIFFERENT
+    text: measured, piping a dump containing a lone `0xE9` byte through
+    `PYTHONIOENCODING=cp1252` decoded it as `chr(0xE9)` ("e"-acute) and
+    shifted the `BFAR: 0x...` regex match just enough to lose the address
+    entirely, while the identical bytes read via `--file` (pinned UTF-8)
+    dropped the byte and matched `BFAR` correctly -- two different
+    diagnoses from one dump, with no exception on either path to signal
+    the divergence. Pinning `encoding="utf-8"` alongside `errors="ignore"`
+    makes the two routes decode identically BY CONSTRUCTION, the same way
+    `--file`'s own call already does, rather than merely by coincidence of
+    the host's default encoding. `hasattr` skips a stream that cannot
     reconfigure (e.g. a test harness's in-memory stdin) -- the same guard
     `cli._reconfigure_stdio` uses for stdout/stderr.
     """
     if hasattr(sys.stdin, "reconfigure"):
-        sys.stdin.reconfigure(errors="ignore")
+        sys.stdin.reconfigure(encoding="utf-8", errors="ignore")
 
 
 def _read_implicit_stdin() -> str:
@@ -286,7 +302,20 @@ def _read_dump(file_: str | None) -> str:
         return Path(file_).read_text(encoding="utf-8", errors="ignore")
     # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works,
     # flags or no flags.
-    if sys.stdin is None or sys.stdin.isatty():
+    if sys.stdin is None:
+        return ""
+    try:
+        # A replaced/wrapped stdin (not currently done anywhere in this repo,
+        # but `cli.main` already does exactly this to `sys.stderr` via
+        # `_TeeStderr` under `--format json`) may exist yet lack `.isatty()`
+        # entirely, raising `AttributeError` rather than answering False --
+        # the same shape `doctor_cmd.fix_suppressed_issue` had to route
+        # around for `_TeeStderr` on stderr. Mirrors `_use_color`'s identical
+        # guard on `sys.stdout.isatty()` above.
+        is_tty = sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return ""
+    if is_tty:
         return ""
     return _read_implicit_stdin()
 

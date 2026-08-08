@@ -311,6 +311,31 @@ All notable changes to `tan` are documented here. Format follows
     hand-typed and missing 3 of the 12 real values (`os-topology` -- a
     member of the default/`--all` set -- `composed-route-table`,
     `ipc-contract-h`); now spliced from `generate_cmd`'s own tables.
+  - `_stdin_errors_ignore()` (added by the fix above this bullet) pinned
+    `errors="ignore"` but not `encoding`, so a piped dump still decoded
+    with whatever encoding `sys.stdin` was already open with -- the host's
+    `PYTHONIOENCODING`, or a legacy code page on a real Windows console --
+    while `--file` always reads with `encoding="utf-8"` explicitly. Two
+    non-UTF-8 encodings can each decode the same byte without error into
+    DIFFERENT text; measured, `PYTHONIOENCODING=cp1252` decoded a lone
+    `0xE9` byte inside a `BFAR: 0x...` line as a literal character instead
+    of dropping it, shifting the regex match enough to lose the faulting
+    address entirely, while the identical bytes via `--file` (pinned
+    UTF-8) decoded it correctly -- two different diagnoses from one dump,
+    at exit 0 on both, with no exception on either path to flag the
+    divergence. `_stdin_errors_ignore()` now pins `encoding="utf-8"`
+    alongside `errors="ignore"`, matching `--file`'s call exactly, so the
+    two routes decode identically by construction rather than by
+    coincidence of the host's default encoding.
+  - The implicit-stdin auto-consume's `sys.stdin.isatty()` check was
+    unguarded; `_read_dump`'s own `sys.stdin is None` guard, a few lines
+    above it, covers only a closed fd 0, not a replaced/wrapped stdin that
+    exists but lacks `.isatty()` -- the identical shape `cli.main` already
+    creates for `sys.stderr` (`_TeeStderr`, no `.isatty()` at all) under
+    `--format json`. Wrapped in the same `try/except (AttributeError,
+    ValueError)` `_use_color` already uses for `sys.stdout.isatty()`, so a
+    future stdin wrapper fails the same way stderr's already does, not
+    with a bare traceback.
     (#503)
 
 ## [0.5.1] — 2026-08-04
