@@ -362,19 +362,18 @@ try {
 	# (`icacls /deny`), which genuinely does yield 5, so nothing exercised
 	# this path against the mechanism the issue actually names.
 	#
-	# tan-cli#490 review, round 6: a round-5 comment here also claimed a
-	# second code, "ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY (1261)", for
-	# the same policy configured with no user-facing notification. Checked
-	# against Microsoft's published system-error-codes table
-	# (learn.microsoft.com/windows/win32/debug/system-error-codes--1000-1299-):
-	# 1261 is ERROR_REG_NAT_CONSUMPTION, an Itanium invalid-register-value
-	# fault, wholly unrelated to policy or SAFER, and no
-	# "...NO_SAFER_UI_BY_POLICY" symbol appears anywhere in that table --
-	# it does not exist. That table lists exactly one ERROR_ACCESS_DISABLED_*
-	# code in this range (ERROR_ACCESS_DISABLED_BY_POLICY, 1260); the other
-	# two named there, ERROR_ACCESS_DISABLED_WEBBLADE and
-	# _WEBBLADE_TAMPER, are unrelated Windows Web Blade features. Only 1260
-	# is matched below. Both matched codes are the same class of refusal
+	# tan-cli#490 review, round 5 also paired a second, real symbol,
+	# ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY -- the same SAFER/SRP policy
+	# class configured with NO user-facing notification -- with the wrong
+	# number, 1261. 1261 is ERROR_REG_NAT_CONSUMPTION, an unrelated Itanium
+	# invalid-register-value fault; round 6 caught that mismatch but, having
+	# only checked the 1000-1299 and 1300-1699 system-error-codes pages,
+	# concluded no such symbol exists at all and deleted it. It exists: it is
+	# 786 (0x312), on the 500-999 page, confirmed against two Microsoft
+	# sources -- learn.microsoft.com/windows/win32/debug/system-error-codes--500-999-
+	# ("Access to %1 has been restricted by your Administrator by policy rule
+	# %2.") and MS-ERREF (openspecs/windows_protocols/ms-erref, 0x00000312).
+	# Both matched codes below (1260 and 786) are the same class of refusal
 	# (CreateProcess never started the process at all) and get the same
 	# "security policy" wording further down.
 	# -------------------------------------------------------------------------
@@ -389,7 +388,8 @@ try {
 	function Test-AccessDeniedSignature($win32ErrorCode) {
 		if ($null -eq $win32ErrorCode) { return $false }
 		return ($win32ErrorCode -eq 5) -or       # ERROR_ACCESS_DENIED
-			($win32ErrorCode -eq 1260)           # ERROR_ACCESS_DISABLED_BY_POLICY
+			($win32ErrorCode -eq 1260) -or       # ERROR_ACCESS_DISABLED_BY_POLICY
+			($win32ErrorCode -eq 786)            # ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY
 	}
 	function Invoke-HealthCheck([string]$exePath) {
 		try {

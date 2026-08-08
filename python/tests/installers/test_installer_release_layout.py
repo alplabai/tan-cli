@@ -741,7 +741,7 @@ def test_ps1_temp_execute_denied_distinguishes_from_a_broken_binary(release_serv
 
 
 @pwsh_only
-def test_ps1_access_denied_signature_accepts_the_applocker_policy_code(tmp_path):
+def test_ps1_access_denied_signature_accepts_the_applocker_policy_codes(tmp_path):
     """tan-cli#490 review, MAJOR 2: the two icacls-based tests above only
     reproduce an NTFS deny-execute ACE, which fails CreateProcess with
     ERROR_ACCESS_DENIED (5) -- they cannot exercise the scenario the issue
@@ -750,21 +750,25 @@ def test_ps1_access_denied_signature_accepts_the_applocker_policy_code(tmp_path)
     enforcement (the Application Identity service, or a Safer/SRP registry
     policy) that is not something a hosted CI runner should be made to carry
     for one assertion. That policy class fails CreateProcess with
-    ERROR_ACCESS_DISABLED_BY_POLICY (1260) -- and pre-fix,
-    Test-AccessDeniedSignature only ever matched 5, so neither the retry nor
-    the "security policy" wording would ever fire against the issue's own
-    named case.
+    ERROR_ACCESS_DISABLED_BY_POLICY (1260) or, when configured with no
+    user-facing notification, ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY
+    (786) -- and pre-fix, Test-AccessDeniedSignature only ever matched 5, so
+    neither the retry nor the "security policy" wording would ever fire
+    against the issue's own named case.
 
-    tan-cli#490 review, round 6: an earlier version of this docstring and
-    the probe below also claimed a second code, "1261 =
-    ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY", for the same policy
-    configured with no user-facing notification. Checked against
-    Microsoft's published system-error-codes table
-    (learn.microsoft.com/windows/win32/debug/system-error-codes--1000-1299-):
-    1261 is ERROR_REG_NAT_CONSUMPTION (an Itanium invalid-register-value
-    fault, unrelated to policy), and no "...NO_SAFER_UI_BY_POLICY" symbol
-    exists in that table at all. Only 1260 is a verified, real code for this
-    scenario, so only 1260 is probed below.
+    tan-cli#490 review, round 5 also paired a second, real symbol,
+    ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY -- the same policy configured
+    with no user-facing notification -- with the wrong number, 1261. Round 6
+    checked Microsoft's system-error-codes table, found 1261 is
+    ERROR_REG_NAT_CONSUMPTION (an unrelated Itanium invalid-register-value
+    fault), and -- having only checked the 1000-1299 and 1300-1699 pages --
+    concluded the symbol does not exist and dropped it entirely. It exists:
+    it is 786 (0x312), on the 500-999 page
+    (learn.microsoft.com/windows/win32/debug/system-error-codes--500-999-,
+    "Access to %1 has been restricted by your Administrator by policy rule
+    %2."), confirmed also against MS-ERREF
+    (openspecs/windows_protocols/ms-erref, 0x00000312). Both 1260 and 786 are
+    verified, real codes for this scenario and are probed below.
 
     This exercises the REAL discriminator function extracted verbatim out of
     install.ps1 (not a reimplementation that could silently drift from it),
@@ -793,6 +797,7 @@ def test_ps1_access_denied_signature_accepts_the_applocker_policy_code(tmp_path)
         '}\n'
         'Write-Output ("5=" + (Probe 5))\n'
         'Write-Output ("1260=" + (Probe 1260))  # ERROR_ACCESS_DISABLED_BY_POLICY -- the AppLocker/SRP case #490 names\n'
+        'Write-Output ("786=" + (Probe 786))    # ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY -- same policy, no user-facing notification\n'
         'Write-Output ("2="    + (Probe 2))     # ERROR_FILE_NOT_FOUND -- must NOT match\n'
         'Write-Output ("none=" + (Probe $null))\n'
     )
@@ -805,6 +810,7 @@ def test_ps1_access_denied_signature_accepts_the_applocker_policy_code(tmp_path)
     lines = result.stdout.split()
     assert "5=True" in lines
     assert "1260=True" in lines
+    assert "786=True" in lines
     assert "2=False" in lines
     assert "none=False" in lines
 

@@ -348,19 +348,25 @@ All notable changes to `tan` are documented here. Format follows
     this block entirely. Now checked up front, before `latest` resolution or
     any other download, the same idiom the sha256-tool check further down
     already uses. (#490)
-- **This CHANGELOG's own round-5 entry for the fix above named a second,
-  fabricated Win32 constant.** It credited
+- **This CHANGELOG's own round-5 entry for the fix above named a real Win32
+  symbol with the wrong number, and round 6 then dropped the symbol entirely
+  instead of correcting it.** Round 5 credited
   `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (1261) alongside the real
-  `ERROR_ACCESS_DISABLED_BY_POLICY` (1260) as a second AppLocker/SRP
-  "silent policy block" code; `install.ps1` and its test both matched and
-  probed 1261 on that basis. Checked against Microsoft's published
-  system-error-codes table
-  (learn.microsoft.com/windows/win32/debug/system-error-codes--1000-1299-):
-  1261 is `ERROR_REG_NAT_CONSUMPTION`, an Itanium-specific invalid-register
-  fault with nothing to do with policy, and no symbol matching
-  `*NO_SAFER_UI*` exists anywhere in that table. `install.ps1` now matches
-  only the verified 1260, and the test that probed 1261 as `True` was
-  narrowed to 1260 only. (#490)
+  `ERROR_ACCESS_DISABLED_BY_POLICY` (1260) as a second AppLocker/SRP "silent
+  policy block" code; `install.ps1` and its test both matched and probed
+  1261 on that basis. 1261 is in fact `ERROR_REG_NAT_CONSUMPTION`, an
+  Itanium-specific invalid-register fault unrelated to policy -- round 6
+  caught that -- but round 6 then searched only the 1000-1299 and 1300-1699
+  system-error-codes pages, found no `*NO_SAFER_UI*` symbol on either, and
+  concluded the symbol does not exist at all, deleting it from both
+  `install.ps1` and its test. The symbol was never fabricated: it is real,
+  it lives on the 500-999 page, and its value is **786** (`0x312`),
+  "Access to %1 has been restricted by your Administrator by policy rule
+  %2." -- confirmed against
+  `learn.microsoft.com/windows/win32/debug/system-error-codes--500-999-`
+  and MS-ERREF (`openspecs/windows_protocols/ms-erref`, `0x00000312`).
+  `install.ps1`'s `Test-AccessDeniedSignature` now matches 1260 and 786
+  alongside `ERROR_ACCESS_DENIED` (5), and the test probes all three. (#490)
 
 ## [0.5.1] — 2026-08-04
 
