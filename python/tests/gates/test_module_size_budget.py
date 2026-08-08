@@ -612,7 +612,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # of the narrow `resolve_sdk_tiered` alone, so `sdk current` answers the
     # same checkout `doctor`/`build`/`validate` would in the README
     # Quickstart's child-`<ws>/alp-sdk` layout instead of `sdkPath: null`.
-    "tan/commands/sdk_cmd.py": 1294,
+    # 1313, not 1294, as of the #497.1 review's MAJOR 3: `_run_current` used
+    # to echo `str(resolution.path)` for the `sdkRootFlag` tier, which
+    # silently normalises a trailing separator/`./`/double-slash out of what
+    # the customer actually typed for `--sdk-root` before it reaches the
+    # envelope -- an undeclared rewrite a customer diffing their own flag
+    # against `sdkPath`/`sdk.root` cannot tell from their own typo. Now
+    # echoes the raw flag (whitespace-stripped only) for that one tier, +19
+    # net for the branch and its explaining comment.
+    "tan/commands/sdk_cmd.py": 1313,
     "tan/commands/validate_cmd.py": 1093,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
@@ -828,7 +836,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # -- and `_home_variants` now drops a bare-separator-root HOME (`/`,
     # what a uid with no `/etc/passwd` entry gets under Docker/OpenShift)
     # outright. Net growth is mostly the two docstrings explaining why.
-    "tan/commands/support_bundle_cmd.py": 882,
+    # 899, not 882, as of the #497.1 review's MAJOR 1: the boundary anchor
+    # above required a non-word char on BOTH sides of a match, which a
+    # variant left with its trailing separator intact could never satisfy
+    # against any real sub-path -- `HOME=/home/dev/` silently disabled
+    # redaction for the whole bundle. `_home_variants` now strips a trailing
+    # separator before anchoring (and drops a degenerate Windows drive root,
+    # `C:\`/`\`, the same way it already dropped a bare `/`); +17 net for
+    # `_DEGENERATE_HOME` and the docstring explaining the trap.
+    "tan/commands/support_bundle_cmd.py": 899,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring

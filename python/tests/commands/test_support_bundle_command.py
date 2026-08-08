@@ -143,6 +143,44 @@ def test_home_variants_refuses_a_bare_separator_root(monkeypatch):
     assert _home_variants() == ()
 
 
+def test_home_variants_refuses_a_degenerate_windows_drive_root(monkeypatch):
+    # tan-cli#499: the Windows analogue of a bare `/` -- `HOME=C:\` or
+    # `HOME=\` -- must be dropped the same way, not kept as a variant whose
+    # trailing separator then silently disables redaction (MAJOR 1).
+    monkeypatch.setenv("HOME", "C:\\")
+    assert _home_variants() == ()
+    monkeypatch.setenv("HOME", "\\")
+    assert _home_variants() == ()
+
+
+def test_home_variants_strips_a_trailing_separator(monkeypatch):
+    # tan-cli#497/#499 MAJOR 1: a `HOME` that ends in a path separator
+    # (`/home/dev/`, what some containers/CI runners hand a process) must
+    # normalise to the same variant as the non-trailing-separator shape --
+    # `_redact_one`'s boundary anchoring requires a non-word char on BOTH
+    # sides of a match, and an un-normalised trailing separator meant the
+    # character immediately after the match was always a word char (the
+    # first letter of the next path component), so the "after" boundary
+    # check failed for every real sub-path and redaction was silently
+    # disabled for the whole bundle.
+    monkeypatch.setenv("HOME", "/home/dev/")
+    assert _home_variants() == ("/home/dev",)
+
+
+def test_redact_with_a_trailing_separator_home_matches_the_no_separator_shape(monkeypatch):
+    # The behavioural half of the above: both HOME shapes must redact
+    # identically, not just normalise to the same variant tuple.
+    payload = {"a": "/home/dev/proj/file.txt"}
+
+    monkeypatch.setenv("HOME", "/home/dev/")
+    with_trailing_sep = _redact(payload, _home_variants())
+
+    monkeypatch.setenv("HOME", "/home/dev")
+    without_trailing_sep = _redact(payload, _home_variants())
+
+    assert with_trailing_sep == without_trailing_sep == {"a": "<home>/proj/file.txt"}
+
+
 def test_redact_does_not_corrupt_a_path_for_which_home_is_only_a_prefix():
     # tan-cli#499: the whole defect. An unanchored `str.replace` rewrote an
     # unrelated, longer sibling directory name into a corrupted string --

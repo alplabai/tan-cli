@@ -386,6 +386,18 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/commands/build_cmd.py", "_refuse"): 0,
     ("tan/commands/build/materialise.py", "MaterialiseError"): 0,
     ("tan/commands/model_cmd.py", "ModelError"): 0,
+    # tan-cli#497: `_run_build`'s own `_err(code, message, exit_code)` helper
+    # -- registered so every ONE of its 7 call sites is itself scanned for a
+    # literal, not just excused via `_KNOWN_CODE_FORWARDS`. Two of those
+    # codes (`model.sdk-root-unresolved`, `model.python-too-old`) have NO
+    # OTHER emit site anywhere in the tree; before this entry existed, the
+    # blanket `("tan/commands/model_cmd.py", "code")` forward silenced the
+    # one `ModelError(code, ...)` call this scan could see (inside `_err`'s
+    # own body) without ever visiting `_err`'s call sites themselves -- so
+    # neither of those two codes was checked against the registry by
+    # anything, the gate having been loosened to fit the shape rather than
+    # widened to cover it.
+    ("tan/commands/model_cmd.py", "_err"): 0,
     ("tan/commands/kconfig_cmd.py", "_CoreResolutionError"): 0,
     ("tan/commands/init_cmd.py", "InitError"): 0,
     ("tan/commands/renode_cmd.py", "_issue"): 0,
@@ -435,7 +447,10 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
         ("tan/commands/model_cmd.py", "err.code"),  # <- ModelError
         ("tan/commands/model_cmd.py", "code"),  # `ModelError(code, ...)` inside `_run_build`'s own
         # `_err(code, message, exit_code)` helper (tan-cli#497), forwarding ITS
-        # OWN `code` parameter -- every `_err(...)` call site carries a literal.
+        # OWN `code` parameter -- `_err` is now ITSELF registered in
+        # `_FULL_CODE_CALLABLES` above, so its call sites carry the literal
+        # this scan actually checks (same shape as `build_cmd.py`'s `_refuse`/
+        # `code` pair below).
         ("tan/commands/explain_cmd.py", "err.code"),  # <- ExplainError
         ("tan/commands/run_cmd.py", "err.code"),  # <- BuildError (run retags build's own refusal)
         ("tan/commands/generate_cmd.py", "err.code"),  # <- GenerateError
@@ -1573,6 +1588,33 @@ def test_gate_rejects_a_deliberately_unregistered_code():
     # not unconditionally red.
     offenders_clean = _missing(real_emitted, registered)
     assert fabricated not in offenders_clean
+
+
+def test_model_cmd_err_helper_call_sites_are_actually_scanned():
+    """MAJOR finding, tan-cli#497/#499 review: `_run_build`'s own `_err(code,
+    message, exit_code)` helper used to be invisible to this gate entirely --
+    only registered as a blanket `_KNOWN_CODE_FORWARDS` excuse for the ONE
+    `ModelError(code, ...)` call inside `_err`'s own body, with `_err`'s 7
+    call sites (the actual literals) never scanned by anything. Two of those
+    codes -- `model.sdk-root-unresolved` and `model.python-too-old` -- have
+    NO OTHER emit site anywhere in `tan/`, so before `_err` was registered in
+    `_FULL_CODE_CALLABLES` neither code was checked against the registry by
+    any mechanism this file provides (proven directly above by mutating each
+    to an unregistered spelling and watching `test_every_emitted_issue_code_
+    is_registered` stay green on the pre-fix table).
+
+    This test pins the fix: `_err`'s call sites resolve as literals (zero
+    unresolved), and both single-source codes are among the ones found.
+    """
+    model_cmd = TAN / "commands" / "model_cmd.py"
+    found, unresolved = _literal_codes_in_file(model_cmd)
+    assert not unresolved, (
+        f"model_cmd.py has unresolved code-position argument(s): {unresolved}"
+    )
+    assert {"model.sdk-root-unresolved", "model.python-too-old"} <= found, (
+        "the two codes emitted ONLY through `_err(...)` are missing from the "
+        f"scanned literal set -- `_err` is no longer being scanned: {found}"
+    )
 
 
 def test_check_site_counts_flags_a_declared_vs_actual_mismatch():

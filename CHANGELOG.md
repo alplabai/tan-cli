@@ -161,6 +161,47 @@ All notable changes to `tan` are documented here. Format follows
   exactly, including what must STILL stay a string: an uppercase prefix
   (`0B11`, `0XA5`) or underscore-grouping (`0x1_F`, `1_000`), neither of
   which the oracle's grammar accepts. (#499)
+- **Three defects found reviewing the (#497)/(#499) fixes above, one of them
+  a privacy regression in the fix itself:**
+  - **The HOME-redaction boundary anchor above disabled redaction entirely
+    whenever `HOME`/`USERPROFILE` ended in a path separator** (e.g.
+    `HOME=/home/dev/`, what some containers/CI runners hand a process) --
+    `_redact_one`'s boundary check requires a non-word character on BOTH
+    sides of a match, and a variant left with its trailing separator intact
+    always has a word character immediately after it in any real sub-path
+    (`/home/dev/` followed by `project...`), so the "after" check failed for
+    every occurrence except the bare HOME string on its own. A support
+    bundle is the artefact a customer sends US; leaking their home path
+    (which carries their username, and often their employer's directory
+    layout) with the bundle still reporting `ok: true` is a privacy
+    regression. `_home_variants` now strips a trailing separator before
+    anchoring (and still drops a degenerate root -- a bare `/`, or a
+    Windows drive root `C:\`/`\` -- outright, unchanged).
+  - **The `test_every_issue_code_is_registered.py` emit-site gate was
+    weakened, not satisfied, to accommodate `model_cmd.py`'s new `_err`
+    helper.** The `_KNOWN_CODE_FORWARDS` entry added for it excused the one
+    `ModelError(code, ...)` call the scan could see inside `_err`'s own
+    body, without registering `_err` itself as a scanned call site -- so
+    none of `_err`'s 7 call sites were ever checked against the registry by
+    anything. Two codes (`model.sdk-root-unresolved`, `model.python-too-
+    old`) have no OTHER emit site anywhere in the tree, so neither was
+    verified by any mechanism this gate provides (both happened to already
+    be registered correctly; the gate just could not have caught it if they
+    were not). `_err` is now itself registered in `_FULL_CODE_CALLABLES`,
+    restoring the coverage the blanket forward had quietly dropped.
+  - **`tan sdk current` silently rewrote a `--sdk-root` value that ended in
+    a separator, contained `./`, or a doubled slash before echoing it back**
+    in `data.sdkPath` and `sdk.root` -- `resolve_sdk_root_ladder`'s
+    `sdkRootFlag` tier wraps the raw flag in `Path(...)` for its own
+    filesystem-facing use, and `Path` normalises such spellings away on
+    construction. A customer checking whether `tan` understood their
+    `--sdk-root` then saw a value that was not what they typed, with no
+    declared reason why, and could not tell the difference from their own
+    typo. `sdk current` now echoes the raw flag verbatim (whitespace-
+    stripped only) whenever the `sdkRootFlag` tier wins; every other tier
+    (a project pin, the global default, discovery) was never literal CLI
+    input in the first place, so it keeps the existing resolved-path
+    rendering. (#497)
 
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge

@@ -115,6 +115,12 @@ DATA_SCHEMA_VERSION = "1"
 # ---------------------------------------------------------------------------
 
 
+#: A variant that, once its trailing separators are stripped, is nothing
+#: more than a drive letter (`C:`) or empty -- the Windows analogue of a bare
+#: `/` root. Matched against the STRIPPED form (see [`_home_variants`]).
+_DEGENERATE_HOME = re.compile(r"^[A-Za-z]:$")
+
+
 def _home_variants() -> tuple[str, ...]:
     """The resolved home directory, in both its native and posix-slash
     spelling -- the bundle mixes both (native in doctor detail strings and
@@ -123,19 +129,30 @@ def _home_variants() -> tuple[str, ...]:
     has neither `USERPROFILE` nor `HOME` set -- redacts nothing rather than
     guessing.
 
-    tan-cli#499: a variant that is itself a bare separator root (`HOME=/`,
-    what Docker/OpenShift hand a process running as a uid with no
-    `/etc/passwd` entry, or a degenerate `C:\\`/`\\` on Windows) is dropped
-    outright. `_redact`'s boundary-anchored match still stops it turning
-    every `/` in the bundle into `<home>` the way the old unanchored
-    `str.replace` did, but a variant with no real path component left to
-    redact is not a HOME to scrub for -- it is every path in the file.
+    tan-cli#499 (MAJOR 1 follow-up): a trailing separator is stripped from
+    each variant before it becomes an anchor. `_redact_one`'s boundary check
+    requires a non-word character (or start/end of string) on BOTH sides of
+    a match; a variant left with its trailing `/`/`\\` intact always has a
+    word character immediately after it in any real sub-path (`/home/dev/`
+    followed by `project...`), so the "after" boundary check failed for
+    every occurrence except the bare HOME string on its own -- silently
+    turning redaction off for the entire bundle whenever `HOME`/`USERPROFILE`
+    happened to end in a separator. Measured: `HOME=/home/dev/` left
+    `/home/dev/proj/file.txt` completely unredacted.
+
+    A variant that is itself a bare separator root (`HOME=/`, what
+    Docker/OpenShift hand a process running as a uid with no `/etc/passwd`
+    entry) or a degenerate drive root (`HOME=C:\\`/`HOME=\\`) is still
+    dropped outright, same as before -- a variant with no real path
+    component left after stripping is not a HOME to scrub for, it is every
+    path in the file.
     """
     home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
     if not home:
         return ()
     variants = {home, home.replace("\\", "/")}
-    return tuple(v for v in variants if v.rstrip("/\\") != "")
+    stripped = {v.rstrip("/\\") for v in variants}
+    return tuple(v for v in stripped if v and not _DEGENERATE_HOME.match(v))
 
 
 #: Characters that CONTINUE a path component name -- tan-cli#499. Deliberately

@@ -539,6 +539,38 @@ def test_current_reports_a_resolved_sdk_with_the_optional_sdk_key(tmp_path, isol
     assert env["project"] == {"root": None, "boardYaml": None}
 
 
+def test_current_echoes_a_trailing_separator_sdk_root_verbatim(tmp_path, isolated_home):
+    """MAJOR 3, tan-cli#497.1 review: `resolve_sdk_root_ladder`'s `sdkRootFlag`
+    tier wraps the raw `--sdk-root` string in `Path(...)` for its own
+    filesystem-facing use, and `Path` normalises on construction -- a
+    trailing separator silently disappears before `sdk current` echoes the
+    value back. A customer checking whether tan understood their `--sdk-root`
+    must see exactly what they typed, not a silently rewritten path they
+    cannot distinguish from their own typo. `data.sdkPath` and `sdk.root`
+    must both carry the raw flag, separator and all -- only the `sdk.root`
+    field's declared backslash->forward-slash normalisation (`SdkInfo.as_dict`)
+    may still apply on top."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    root = make_sdk_root(tmp_path / "the-sdk", version="0.14.0")
+    raw_flag = str(root) + os.sep
+
+    proc = run_tan(
+        "sdk", "current", "--sdk-root", raw_flag, "--format", "json", cwd=workspace
+    )
+    assert proc.returncode == 0
+    env = envelope(proc)
+    assert env["ok"] is True
+    assert env["data"]["sourceTier"] == "sdkRootFlag"
+    assert env["data"]["readiness"]["state"] == "ready"
+    # The whole point: the trailing separator survives, unlike `str(Path(...))`.
+    assert env["data"]["sdkPath"] == raw_flag
+    assert env["sdk"] == {
+        "root": raw_flag.replace("\\", "/"),
+        "sourceTier": "sdkRootFlag",
+    }
+
+
 def test_current_with_no_sdk_omits_the_sdk_key(tmp_path, isolated_home):
     workspace = tmp_path / "ws"
     workspace.mkdir()

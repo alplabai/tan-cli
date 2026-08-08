@@ -985,8 +985,27 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
     from tan.commands.build_cmd import resolve_sdk_root_ladder
 
     resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    # tan-cli#497.1 review, MAJOR 3: `resolve_sdk_root_ladder`'s `sdkRootFlag`
+    # tier wraps the raw `--sdk-root` string in `Path(...)` for its own
+    # filesystem-facing callers (readiness checks, board resolution, ...),
+    # and `Path` normalises on construction -- drops a trailing separator,
+    # collapses `a//b`, strips a leading `./` -- silently rewriting what the
+    # customer actually typed before it ever reaches this envelope. A
+    # customer checking whether tan understood their `--sdk-root` then sees a
+    # value that is NOT theirs with no declared reason why. Only the
+    # `sdkRootFlag` tier can diverge this way (the other three tiers -- a
+    # project pin file, the global default, discovery -- were never literal
+    # CLI input in the first place, so normalising THEM carries no such
+    # promise to keep); echo the flag exactly as given (stripped of
+    # surrounding whitespace only, matching the ladder's own truthiness
+    # check) whenever that tier won.
+    reported_path: str | None
+    if resolution.tier == "sdkRootFlag" and sdk_root is not None and sdk_root.strip():
+        reported_path = sdk_root.strip()
+    else:
+        reported_path = str(resolution.path) if resolution.path is not None else None
     active = ActiveSdk(
-        str(resolution.path) if resolution.path is not None else None,
+        reported_path,
         resolution.tier,
         resolution.broken_project_pin,
         resolution.foreign_global_default_for,
