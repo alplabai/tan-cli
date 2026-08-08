@@ -846,6 +846,121 @@ def test_spawn_text_mode_timeout_still_folds_in_the_teed_output_before_the_kill(
     assert "timed out after 1s and was killed" in outcome.stderr
 
 
+# ── _Tee round 3 (tan-cli#519/#522 review round 3): bounded join + live read ─
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="`sh -c '... &'` is a POSIX shell shape")
+def test_spawn_returns_promptly_when_the_child_leaves_an_orphaned_pipe_holder():
+    """BLOCKER: `_Tee.text()` used to `.join()` its background reader thread
+    with NO timeout, so anything still holding the child's stdout/stderr
+    pipe open after the DIRECT child exits -- a backgrounded grandchild, say
+    `sleep 20 &` inside a shell script -- blocked the join, and therefore
+    `_spawn`, indefinitely: `proc.wait()` returns on schedule (the direct
+    child is gone) but `out_tee.text()`/`err_tee.text()` afterwards do not,
+    because the read loop on the pipe never sees EOF until the ORPHAN also
+    exits. Measured against the pre-round-3 source: `sh -c 'sleep 20 & echo
+    done; exit 0'` under `_spawn(..., timeout=3)` took 20.00s to return, not
+    ~0s the way `origin/dev`'s OS-level fd redirect did. Bounded here well
+    under that -- `join`'s default timeout is now `_DRAIN_JOIN_S` (2s)."""
+    import time
+
+    from tan.commands.flash_cmd import _spawn
+
+    started = time.monotonic()
+    outcome = _spawn(["sh", "-c", "sleep 20 & echo done; exit 0"], capture=False, timeout=3.0)
+    elapsed = time.monotonic() - started
+    assert outcome.success is True
+    assert elapsed < 10.0, elapsed
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="`sh -c '... &'` is a POSIX shell shape")
+def test_spawn_timeout_path_returns_promptly_despite_an_orphaned_pipe_holder():
+    """The TIMEOUT-path sibling of the test above: `proc.kill()` reaps only
+    the DIRECT child, so a grandchild it left running (`sleep 20 &`) still
+    holds the pipe open after the kill too -- the exact shape that made the
+    `except subprocess.TimeoutExpired` handler's `out_tee.text()`/
+    `err_tee.text()` calls hang past `_spawn`'s own timeout entirely on the
+    pre-round-3 source (measured: `sh -c 'sleep 20 & sleep 30'` under
+    `_spawn(..., timeout=2)` NEVER RETURNED, killed only by an outer test
+    harness timeout). Bounded here the same way."""
+    import time
+
+    from tan.commands.flash_cmd import _spawn
+
+    started = time.monotonic()
+    outcome = _spawn(["sh", "-c", "sleep 20 & sleep 30"], capture=False, timeout=2.0)
+    elapsed = time.monotonic() - started
+    assert outcome.success is False
+    assert "timed out" in outcome.stderr
+    assert elapsed < 10.0, elapsed
+
+
+def test_tee_forwards_each_read1_chunk_immediately_not_buffered_to_a_char_count():
+    """MAJOR 1: the first `_Tee` read a TEXT-mode stream via `.read(4096)`,
+    which blocks until 4096 CHARACTERS are decoded or EOF -- not live.
+    `_Tee` now reads a BINARY stream via `.read1(n)`, which returns whatever
+    the OS has ready, however small, and forwards each `read1()` result to
+    the sink as ITS OWN chunk -- proven here with a fake stream that never
+    returns anywhere close to a full chunk: three separate `read1()` results
+    must arrive as three separate accumulated chunks, not one chunk that
+    only appears after all three were buffered up together first. Fails
+    against the pre-round-3 source (a `TextIOWrapper`-shaped `.read(4096)`
+    loop has no `read1` counterpart to call at all -- this test exercises
+    the class's actual read primitive, not merely its net output)."""
+    import io
+
+    from tan.commands.flash_cmd import _Tee
+
+    class _FakeBinaryStream:
+        def __init__(self, chunks):
+            self._chunks = [*chunks, b""]
+
+        def read1(self, _n):
+            return self._chunks.pop(0)
+
+    stream = _FakeBinaryStream([b"a", b"b", b"c"])
+    sink = io.StringIO()
+    tee = _Tee(stream, sink)
+    assert tee.text() == "abc"
+    assert tee._chunks == ["a", "b", "c"]
+
+
+def test_tee_sink_write_failure_only_drops_console_display_not_the_transcript():
+    """MINOR: `except (OSError, ValueError): pass` around the sink write also
+    caught `UnicodeEncodeError` (a `ValueError` subclass) -- raised when the
+    sink's own narrower encoding cannot represent a character the decoder
+    correctly produced -- and silently discarded the WHOLE chunk, including
+    any clean lines it shared. The transcript (`.text()`) must still collect
+    everything regardless of what the console sink can display."""
+    import io
+
+    from tan.commands.flash_cmd import _Tee
+
+    class _FakeBinaryStream:
+        def __init__(self, chunks):
+            self._chunks = [*chunks, b""]
+
+        def read1(self, _n):
+            return self._chunks.pop(0)
+
+    class _AsciiOnlySink:
+        encoding = "ascii"
+
+        def __init__(self):
+            self.written = []
+
+        def write(self, text: str) -> None:
+            self.written.append(text.encode(self.encoding))  # raises on non-ASCII
+
+        def flush(self) -> None:
+            pass
+
+    stream = _FakeBinaryStream(["clean line\n".encode(), "café\n".encode()])
+    sink = _AsciiOnlySink()
+    tee = _Tee(stream, sink)
+    assert tee.text() == "clean line\ncafé\n"
+
+
 # ── `_execute_message` text-mode gate + the TimeoutExpired partial output ──
 # (tan-cli#487, defect 4)
 
@@ -1792,6 +1907,70 @@ def test_swd_probe_dry_run_and_real_run_agree_when_only_openocd_is_on_path_pyocd
         flash_plan.plan_swd_probe(real, which_openocd_only)
     assert "pyocd_uid" in str(dry_raised.value)
     assert str(dry_raised.value) == str(real_raised.value)
+
+
+def test_swd_probe_dry_run_and_real_run_agree_when_only_pyocd_is_on_path_pyocd_uid_side():
+    """tan-cli#519/#522 review round 3, MINOR: the sibling test above
+    (`..._openocd_is_on_path_pyocd_uid_side`) uses `which_openocd_only` --
+    the one host shape where the pre-round-3 and fixed code already agreed
+    BY ACCIDENT (OpenOCD always wins the arm-split precedence, so a
+    `pyocd_uid` manifest is refused on that host either way) -- so it never
+    actually exercised the pyocd-only host this round's MAJOR 2 fix is
+    about. Here, on a PYOCD-only host, `pyocd_uid` is the field that arm CAN
+    honour: `--dry-run` and a real run must both plan the SAME `pyocd`
+    command line, not merely both refuse or both agree by luck. Fails
+    against the pre-round-3 source (measured: the `--dry-run` bypass forced
+    `openocd = True` unconditionally, so `chosen` was always `"openocd"` and
+    the dry-run call raised `FlashPlanError` naming 'this run is not taking
+    the pyOCD path', while the real-run call -- correctly seeing no openocd
+    on PATH -- returned a `pyocd` plan)."""
+    which_pyocd_only = lambda n: n == "pyocd"  # noqa: E731
+    args = {"interface": "cmsis-dap", "target": "stm32h7x", "pyocd_uid": "abc123"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+
+    dry_plan = flash_plan.plan_swd_probe(dry, which_pyocd_only)
+    real_plan = flash_plan.plan_swd_probe(real, which_pyocd_only)
+
+    assert dry_plan.argv[0] == "pyocd"
+    assert dry_plan.argv == real_plan.argv
+
+
+def test_swd_probe_dry_run_and_real_run_agree_when_only_pyocd_is_on_path_openocd_usb_location_side():
+    """The refusal-shape mirror, same host: `openocd_usb_location` needs the
+    OpenOCD arm, which this pyocd-only host does not take on EITHER side, so
+    both must refuse, identically. Fails against the pre-round-3 source
+    (measured: the `--dry-run` bypass forced `openocd = True` unconditionally
+    and planned a full `openocd -f ... -c 'adapter usb location 3-4.4.3' ...`
+    command line for a tool not installed on this host, while the real-run
+    call correctly refused)."""
+    which_pyocd_only = lambda n: n == "pyocd"  # noqa: E731
+    args = {"interface": "cmsis-dap", "target": "gd32g553", "openocd_usb_location": "3-4.4.3"}
+    dry = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=True)
+    real = FlashInputs(artefact="/build/zephyr.bin", flash_args=args, core_id="cm7", sku="S", dry_run=False)
+
+    with pytest.raises(FlashPlanError) as dry_raised:
+        flash_plan.plan_swd_probe(dry, which_pyocd_only)
+    with pytest.raises(FlashPlanError) as real_raised:
+        flash_plan.plan_swd_probe(real, which_pyocd_only)
+    assert "openocd_usb_location" in str(dry_raised.value)
+    assert str(dry_raised.value) == str(real_raised.value)
+
+
+def test_swd_probe_openocd_usb_location_whitespace_only_is_refused_at_plan_time():
+    """tan-cli#519/#522 review round 3, MINOR: `validate_openocd_word`
+    guards the Jim Tcl/control-character charset only -- whitespace is
+    deliberately left alone there (a real artefact path needs it) -- so a
+    WHITESPACE-ONLY `openocd_usb_location` passed straight through and would
+    have reached OpenOCD as `adapter usb location {  }`, an empty selector.
+    Refused here instead, at plan time, before anything is spawned. Fails
+    against the pre-round-3 source (measured: no error, and `"  "` appeared
+    verbatim in `argv`)."""
+    inp = _swd_inputs(interface="cmsis-dap", target="gd32g553", openocd_usb_location="  ")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert "openocd_usb_location" in str(raised.value)
+    assert "whitespace" in str(raised.value)
 
 
 def test_swd_probe_dry_run_still_defaults_to_jlink_when_neither_new_field_is_set():

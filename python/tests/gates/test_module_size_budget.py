@@ -343,7 +343,24 @@ _MODULE_BUDGET: dict[str, int] = {
     # over-rejected. Net growth is almost entirely docstring/comment
     # explaining each of the four fixes and why the narrower (not the
     # broadest possible) version of each was chosen.
-    "tan/core/flash_plan.py": 2662,
+    # 2699, not 2662, as of the tan-cli#519/#522 review round 3 (a second
+    # review pass on the round above, not a new issue): the round-above
+    # MAJOR-2 fix only scoped the J-Link side of the arm split's `--dry-run`
+    # bypass -- the openocd/pyocd side kept `(inp.dry_run or which(...))`
+    # unconditionally, so a manifest naming `openocd_usb_location`/
+    # `pyocd_uid` still hit an unscoped "assume the tool is present" bypass
+    # on THAT side, and `--dry-run` disagreed with a real run in both
+    # directions on a single-tool host (measured: a pyocd-only host preview
+    # planned a full `openocd` command line for a tool not installed there;
+    # the same host refused a `pyocd_uid` preview a real run would accept).
+    # Scoped the same way the J-Link side already was: the unconditional
+    # bypass survives only when NEITHER new field is named. Also a MINOR:
+    # `openocd_usb_location: "  "` (whitespace-only) passed the Tcl-metachar
+    # charset guard untouched and reached OpenOCD as `adapter usb location
+    # {  }`, an empty selector the tool would only reject at runtime; now
+    # refused at plan time. Net growth is the re-scoped bypass's own
+    # docstring plus the whitespace-only guard and its explanation.
+    "tan/core/flash_plan.py": 2699,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
@@ -474,18 +491,38 @@ _MODULE_BUDGET: dict[str, int] = {
     # which is exactly the sentence #522 was filed against. The live-console
     # branch now TEES a written child's combined output (still streamed to
     # the console live, via the new `_Tee` helper on a background thread,
-    # exactly as before -- just also collected) instead of only streaming it;
-    # the wrapped-console branch (no OS-level stderr handle -- a pytest/
-    # embedded capture object) now threads its ALREADY-captured
-    # `proc.stdout`/`.stderr` through instead of only `print()`-replaying and
-    # discarding them; and a `Popen.wait`-timeout on the live-console branch
-    # now builds its own `TimeoutExpired` with the tees' partial output
-    # (`Popen.wait`'s own carries none) so `_timeout_stderr` sees the same
-    # shape on all three spawn variants. Net growth is `_Tee` itself (a
-    # `_Drain`-shaped background-thread reader, teeing instead of only
-    # draining) plus the docstring explaining why each of the three branches
-    # needed a different fix.
-    "tan/commands/flash_cmd.py": 2486,
+    # instead of only streaming it) -- the wrapped-console branch (no
+    # OS-level stderr handle -- a pytest/embedded capture object) now threads
+    # its ALREADY-captured `proc.stdout`/`.stderr` through instead of only
+    # `print()`-replaying and discarding them; and a `Popen.wait`-timeout on
+    # the live-console branch now builds its own `TimeoutExpired` with the
+    # tees' partial output (`Popen.wait`'s own carries none) so
+    # `_timeout_stderr` sees the same shape on all three spawn variants. Net
+    # growth is `_Tee` itself (a `_Drain`-shaped background-thread reader,
+    # teeing instead of only draining) plus the docstring explaining why each
+    # of the three branches needed a different fix.
+    # 2551, not 2486, as of the tan-cli#519/#522 review round 3 (a second
+    # review pass on the same change, not a new issue): the first `_Tee` read
+    # a TEXT-mode stream in fixed 4096-*character* chunks, which is NOT live
+    # -- `TextIOWrapper.read(n)` blocks until `n` characters are decoded or
+    # EOF, so a slowly-dribbling child produced no console output for over a
+    # second at a time (measured), the opposite of the class's own purpose.
+    # `_Tee` now reads the raw BINARY pipe with `read1` (bytes ready, not
+    # characters decoded) and decodes them itself, incrementally. Separately,
+    # `_Tee.join()`'s timeout defaulted to `None` -- unbounded -- so a killed
+    # child's own orphaned grandchild holding the pipe open (a backgrounded
+    # `sleep &`, measured) could hang `tan flash` indefinitely past its own
+    # `_FLASH_TIMEOUT_S`; `join` now bounds on the same `_DRAIN_JOIN_S` the
+    # pipeline's stderr drain already uses. Also a MINOR: the sink-write
+    # `except (OSError, ValueError): pass` silently swallowed
+    # `UnicodeEncodeError` (a `ValueError` subclass) too, discarding a whole
+    # chunk -- including any clean lines it shared -- when the sink's own
+    # encoding could not represent one decoded character; it now retries with
+    # a lossy re-encode instead of dropping the chunk. Net growth is the
+    # rewritten `_Tee` docstring/body (binary read + incremental decode + the
+    # bounded join + the narrower exception handling) plus one `flash_plan.py`
+    # MAJOR-2 companion fix's own `flash_cmd.py`-side commentary.
+    "tan/commands/flash_cmd.py": 2551,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks

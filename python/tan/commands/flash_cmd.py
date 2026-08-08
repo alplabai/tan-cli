@@ -42,6 +42,7 @@ child's cwd. The search itself is shared, not duplicated, with
 """
 from __future__ import annotations
 
+import codecs
 import functools
 import os
 import posixpath
@@ -380,7 +381,15 @@ def _spawn(
     `proc.stdout`/`.stderr` through; the live-console branch replaces the OS-
     level redirect with [`_Tee`] on a `Popen`, which forwards each chunk to
     the console as it arrives (the same "streams live" guarantee this
-    function always promised) while also accumulating it.
+    function always promised) while also accumulating it. (tan-cli#519/#522
+    review round 3: the FIRST version of `_Tee`, shipped in the round this
+    docstring was written, did not actually keep that promise -- it read the
+    child's TEXT-mode stream in fixed 4096-*character* chunks, which blocks
+    until that many characters have been decoded or EOF, so a slowly
+    dribbling child produced no console output for over a second at a time,
+    measured. `_Tee` now reads the raw binary pipe with `read1`, which
+    returns as soon as the OS has ANY bytes ready, and decodes them itself
+    -- see [`_Tee`]'s own docstring.)
 
     `venv_bin` (tan-cli#289/#59), when given, is prepended onto the child's
     PATH -- `env=None` (the default, passed through unchanged) means
@@ -435,13 +444,15 @@ def _spawn(
                 returncode=proc.returncode,
             )
         try:
+            # BINARY, not `text=True` (tan-cli#519/#522 review round 3,
+            # MAJOR 1): `_Tee` reads and decodes the raw pipe itself, in
+            # chunks bounded by BYTES ready, not characters decoded -- see
+            # its docstring for why a `text=True` stream defeated the whole
+            # "live" point of this branch.
             proc = subprocess.Popen(  # noqa: S603 -- argv comes from the pure planner
                 list(argv),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 env=env,
                 cwd=workspace,
             )
@@ -630,7 +641,7 @@ def _pipeline_returncode(left_rc: int | None, right_rc: int | None) -> int:
 
 
 class _Tee:
-    """One text-mode `Popen` child stream (stdout or stderr), read to EOF on a
+    """One BINARY `Popen` child stream (stdout or stderr), read to EOF on a
     background thread -- forwarding every chunk to `sink` AS it arrives (so a
     live console still sees the child's output as it happens, unchanged from
     before this class existed) while also accumulating it, so the caller has
@@ -639,51 +650,105 @@ class _Tee:
     transcript to qualify Flow D's reset claim against, and text mode's own
     `_spawn` branch had none at all).
 
-    `stream.read(n)` in a loop, not one blocking `.read()` ([`_Drain`]'s own
-    choice below): a bounded chunk read is what makes the forwarding live --
-    a single `.read()` blocks until EOF, which is exactly the "capture, then
-    replay after the child exits" shape this class exists to avoid on the
-    live-console path (the `sink is None` branch of `_spawn` already does
-    that replay deliberately; this is the OTHER branch, where a real console
-    is present and can show output as it is produced).
+    `stream.read1(n)` on the raw pipe, not `TextIOWrapper.read(n)` (this
+    class's OWN first version, and not [`_Drain`]'s single blocking `.read()`
+    either): `read1` returns as soon as the OS has ANY bytes ready, up to `n`.
+    A bounded read on a *text*-mode stream does NOT have that property -- it
+    blocks until it has decoded `n` CHARACTERS or hit EOF, silently reading
+    and buffering as many underlying chunks as that takes (tan-cli#519/#522
+    review round 3, MAJOR 1: measured against a child dribbling one line
+    every 20ms, `TextIOWrapper.read(4096)` delivered nothing to the console
+    for over a second at a time -- the exact "capture, then replay after the
+    child exits" shape this class exists to avoid on the live-console path
+    (the `sink is None` branch of `_spawn` already does that replay
+    deliberately; this is the OTHER branch, where a real console is present
+    and can show output as it is produced)). `Popen` is spawned WITHOUT
+    `text=True` for this branch specifically so this class can read the raw
+    bytes and decode them itself, incrementally
+    (`codecs.getincrementaldecoder`), so a multi-byte UTF-8 sequence split
+    across two `read1` calls is never corrupted or double-counted.
 
     Two independent threads (one per stream, both writing to the same `sink`)
     means the console's stdout/stderr interleaving is no longer OS-arbitrated
     the way direct fd inheritance was -- each thread's own chunks stay in
     order with themselves, but the two streams may interleave differently
     than before. Both still land on the SAME console, visibly, in real time;
-    nothing is silently withheld from the operator."""
+    nothing is silently withheld from the operator.
+
+    `join`'s default timeout is `_DRAIN_JOIN_S`, the SAME bound [`_Drain`]
+    uses and for the identical reason (tan-cli#519/#522 review round 3,
+    BLOCKER): a grandchild the killed child leaves behind (a backgrounded
+    `sleep 20 &` inside a shell script `_spawn` ran) still holds this pipe's
+    write end open after `proc.kill()`/`proc.wait()` return -- `kill()` reaps
+    only the direct child -- so the read loop below never sees EOF until that
+    OTHER process exits too. An unbounded `join()` here is what made
+    `_FLASH_TIMEOUT_S` toothless: `proc.wait(timeout=...)` returned on
+    schedule but the subsequent `.text()` call blocked past it, measured
+    hanging past an outer kill entirely on the TimeoutExpired path. A `tan`
+    that hangs on a thread rather than reporting a flash result would be the
+    worse trade -- the exact sentence `_Drain.join`'s own docstring already
+    uses for this same class of problem."""
 
     def __init__(self, stream, sink) -> None:
         self._chunks: list[str] = []
         self._stream = stream
         self._sink = sink
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._thread = threading.Thread(target=self._read, daemon=True)
         self._thread.start()
 
     def _read(self) -> None:
         try:
-            for chunk in iter(lambda: self._stream.read(4096), ""):
-                self._chunks.append(chunk)
-                try:
-                    self._sink.write(chunk)
-                    self._sink.flush()
-                except (OSError, ValueError):
-                    # The console went away mid-write (a closed pipe, a torn-
-                    # down pytest capture). Keep reading and accumulating --
-                    # the transcript this thread is building still matters
-                    # even when nobody can watch it live any more.
-                    pass
+            for raw in iter(lambda: self._stream.read1(65536), b""):
+                chunk = self._decoder.decode(raw)
+                if chunk:
+                    self._chunks.append(chunk)
+                    self._write(chunk)
+            tail = self._decoder.decode(b"", final=True)
+            if tail:
+                self._chunks.append(tail)
+                self._write(tail)
         except (OSError, ValueError):
             pass
 
-    def join(self, timeout: float | None = None) -> None:
+    def _write(self, chunk: str) -> None:
+        try:
+            self._sink.write(chunk)
+            self._sink.flush()
+        except UnicodeEncodeError:
+            # The DECODED chunk is a well-formed `str` (the incremental UTF-8
+            # decoder above already replaced anything malformed); this is the
+            # SINK's own narrower encoding rejecting a character it can
+            # represent, not a decode failure. Re-encoded with a lossy
+            # fallback instead of losing the whole chunk (tan-cli#519/#522
+            # review round 3, MINOR): the bare `except (OSError, ValueError):
+            # pass` below used to catch this too -- `UnicodeEncodeError` is a
+            # `ValueError` subclass -- discarding the WHOLE 4KiB chunk from
+            # the console, including whatever clean ASCII lines shared it.
+            try:
+                encoding = getattr(self._sink, "encoding", None) or "utf-8"
+                self._sink.write(chunk.encode(encoding, "backslashreplace").decode(encoding))
+                self._sink.flush()
+            except (OSError, ValueError):
+                pass
+        except (OSError, ValueError):
+            # The console went away mid-write (a closed pipe, a torn-
+            # down pytest capture). Keep reading and accumulating --
+            # the transcript this thread is building still matters
+            # even when nobody can watch it live any more.
+            pass
+
+    def join(self, timeout: float | None = _DRAIN_JOIN_S) -> None:
         self._thread.join(timeout=timeout)
 
     def text(self) -> str:
         """Everything this stream said, joined. Joins first ([`_Drain.text`]'s
         own reasoning): reading `_chunks` while the thread may still be
-        appending is exactly the read that could observe a partial list."""
+        appending is exactly the read that could observe a partial list.
+        Bounded (see `join`'s own docstring): a straggling grandchild still
+        holding this pipe open means `_chunks` may be incomplete when this
+        returns -- the same tradeoff `_Drain.text` already makes, for the
+        same reason."""
         self.join()
         return "".join(self._chunks)
 

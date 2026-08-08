@@ -1267,6 +1267,20 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
         validate_openocd_word(
             openocd_usb_location, "flash_args.openocd_usb_location"
         )
+        # tan-cli#519/#522 review round 3, MINOR: `validate_openocd_word`
+        # guards the Jim Tcl/control-character charset only -- whitespace is
+        # deliberately left alone there (a real artefact path needs it, see
+        # that function's own docstring), so a WHITESPACE-ONLY value passed
+        # straight through and reached OpenOCD as `adapter usb location {  }`,
+        # an empty selector the tool would only reject at runtime, on the
+        # bench. Refused at plan time instead, the same as an absent value
+        # would be refused later by OpenOCD -- but before anything is spawned.
+        if not openocd_usb_location.strip():
+            raise FlashPlanError(
+                f"flash_args.openocd_usb_location = {_quoted(openocd_usb_location)} "
+                "is whitespace-only -- refusing to interpolate an empty USB-location "
+                "selector into OpenOCD's `adapter usb location` command."
+            )
     # `pyocd_uid` only ever reaches argv (`pyocd flash --uid <value> ...`,
     # below) -- no shell, no Tcl script -- but it is still an identifier-shaped
     # value from an untrusted manifest, so it gets the same `validate_identifier`
@@ -1507,8 +1521,31 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     # the diagnosis is about the field this run cannot honour rather than a
     # field it happens to be missing -- and reused, unchanged, by the argv
     # build below instead of being computed a second time.
-    openocd = not force_pyocd and (inp.dry_run or which("openocd"))
-    pyocd = not force_openocd and (inp.dry_run or which("pyocd"))
+    #
+    # tan-cli#519/#522 review round 3, MAJOR 2: `(inp.dry_run or which(...))`
+    # treated EVERY `--dry-run` as "assume the tool is on PATH", unconditionally
+    # -- the SAME unscoped bypass the J-Link resolution above had until this
+    # round (`new_probe_selector_named`, defined there), just never scoped
+    # here. Measured on a host with pyocd alone on PATH: a manifest naming
+    # `openocd_usb_location` previewed a full `openocd -f ... -c 'adapter usb
+    # location ...'` command line (`--dry-run` always saw `openocd = True`,
+    # bypassed, so `chosen` was always `"openocd"`), while a REAL run on that
+    # same host refuses (`which("openocd")` is `None` there, so `chosen` is
+    # `"pyocd"`, and the wrong-arm refusal below fires) -- the preview an
+    # operator runs BEFORE touching a board printed a command for a tool not
+    # installed on that host. Scoped exactly like the J-Link resolution: keep
+    # the unconditional bypass ONLY when neither new field is named (every
+    # `would run JLinkExe` oracle-pinned dry-run fixture relies on reaching
+    # THAT bypass first and never falls through to here at all); otherwise
+    # consult `which()` for real, so `openocd`/`pyocd` -- and therefore
+    # `chosen` and every refusal keyed off it -- agree between `--dry-run` and
+    # a real run on the SAME host.
+    if inp.dry_run and not new_probe_selector_named:
+        openocd = not force_pyocd
+        pyocd = not force_openocd
+    else:
+        openocd = not force_pyocd and bool(which("openocd"))
+        pyocd = not force_openocd and bool(which("pyocd"))
     # BLOCKER fix: `openocd`/`pyocd` above test tool AVAILABILITY only. The arm
     # actually taken below is `if openocd: ... elif pyocd: ...` -- OpenOCD wins
     # whenever BOTH are on PATH, but a refusal keyed off availability alone
