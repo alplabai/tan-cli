@@ -840,7 +840,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command WRITES `build/generated/alp.conf` and the DTS overlays
     # out of whichever checkout resolved.
-    # 1295, not 1186, as of tan-cli#498 defects 4 and 5. Defect 4:
+    # 1303, not 1186, as of tan-cli#498 defects 4 and 5. Defect 4:
     # `_missing_emit_output` treated a zero-byte artefact as proof of failure,
     # which is wrong -- `alp_project.py`'s unscoped per-core emits legitimately
     # write 0 bytes and exit 0 when no core matches the mode's OS class, so the
@@ -854,7 +854,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # closes the silent target discard AND the `--core` hole it opened. Most of
     # the growth is the measured rationale each carries, per this file's own
     # "needs a reason in the diff" rule.
-    "tan/commands/generate_cmd.py": 1295,
+    "tan/commands/generate_cmd.py": 1303,
     # 1215, not 1096, as of tan-cli#464 (measured majors, then an independent
     # design review): the `globalDefault` tier gained a `writtenFor`-vs-caller
     # check (`_workspace_under`, `global_default_foreign_project_issue`) and a

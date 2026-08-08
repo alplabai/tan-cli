@@ -631,6 +631,14 @@ def _output_stamp(output: Path) -> tuple[int, int, int] | None:
     rather than one: a rewrite that lands on the same size and the same
     coarse timestamp still moves the inode on any emitter that writes through
     a temp file + rename, and a same-inode rewrite moves `st_mtime_ns`.
+
+    Known limit, and the direction it errs in ON PURPOSE: on a filesystem with
+    coarse timestamps (FAT's 2s, HFS+'s 1s -- not ext4/APFS/NTFS, where this
+    runs), an in-place rewrite of byte-identical content inside one tick is
+    indistinguishable from no write at all, and would be reported as a failed
+    emit. That is the safe side of the trade: a false FAILURE is loud, costs a
+    re-run and destroys nothing, while the false SUCCESS it replaces put a
+    previous board's `alp.conf` into the next `tan build` silently.
     """
     try:
         stat = output.stat()
