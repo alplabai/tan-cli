@@ -717,7 +717,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # 1783 on the merged tree, MEASURED with `wc -l`: both sides grew this file
     # -- tan-cli#530's resolver on `dev` and #488's doctor/consent guards here --
     # and the auto-merge kept only one side's number.
-    # 1909, not 1783, MEASURED on this tree, from the two issues in this PR.
+    # 1908, not 1783, MEASURED on this tree, from the two issues in this PR.
     # tan-cli#547 adds `_toolchain_for_plan` (the LAZY call site: the host
     # toolchain scan runs only for a plan that actually names
     # `${TOOLCHAIN_ROOT}`, which is the property the issue asks the port to
@@ -734,7 +734,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # entries take it), why the severity is `info` and not `warning`, and why
     # the probe mirrors `_zephyr_app_dir`'s condition instead of reading the
     # substituted path back out of `command.args`.
-    "tan/commands/build_cmd.py": 1909,
+    "tan/commands/build_cmd.py": 1908,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`

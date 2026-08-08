@@ -1136,7 +1136,6 @@ def _missing_app_dirs(plan: BuildPlan, build_root: Path) -> dict[int, str]:
     return missing
 
 
-
 #: The one backend whose app dir the planner may SILENTLY substitute. Only
 #: `_zephyr_app_dir` carries the parent fallback (`tan/planner/
 #: orchestrator.py:397-401`); the `baremetal` arm beside it builds
