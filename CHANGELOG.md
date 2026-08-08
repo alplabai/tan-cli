@@ -760,6 +760,77 @@ All notable changes to `tan` are documented here. Format follows
     not executed against a real `pwsh`.) (#490)
 
 
+- **`tan faultdecode`'s `addr2line` probe was spoofable via a Windows CWD
+  decoy, and the emitted shell completions advertised stale/wrong flags and
+  values.** Two independent defects, closed together:
+  - `resolve_symbol`'s `addr2line`-class tool probe used `shutil.which`,
+    which inserts the current directory ahead of `$PATH` on Windows, so a
+    decoy `addr2line.exe`/`llvm-addr2line.exe`/`arm-zephyr-eabi-addr2line.exe`
+    sitting at a checked-out project's root was reported "available" and
+    then spawned by bare name (reopening the same hole a second way). Now
+    uses `doctor_cmd.on_path` and spawns the resolved absolute path, the
+    same `on_path` call `flash_cmd` already makes for its own tool probes
+    (`size_cmd`/`build/execute.py` harden their own probes independently,
+    with a different hand-rolled bool-returning walk -- not this pattern).
+  - The emitted bash/zsh/fish completion scripts advertised `tan doctor
+    --target-kind`/`--server`, which `doctor_cmd.py` deliberately never
+    ported; removed from `doctor`'s arm on all three shells (unchanged for
+    `support-bundle`/`debug-config`, which genuinely still take both).
+    bash/zsh's `--format` value-list selection assumed the subcommand
+    always sat at a fixed word index, silently offering the narrow list
+    whenever a global flag (e.g. `--sdk-root`) preceded it; both now scan
+    for the real subcommand. The bash scan's own loop variable (`vf`,
+    iterating `$value_flags`) was missing from its `local` declaration, so
+    it leaked into and clobbered a `$vf` already set in the sourcing
+    interactive shell -- confirmed by sourcing the completion script with
+    `vf` pre-set and completing `tan --sdk-root /x validate --format <TAB>`:
+    `$vf` came back overwritten as `--sdk-root` before the fix, unchanged
+    after it. fish's `generate --target` value list was hand-typed and
+    missing 3 of the 12 real values (`os-topology` -- a member of the
+    default/`--all` set -- `composed-route-table`, `ipc-contract-h`); now
+    spliced from `generate_cmd`'s own tables.
+
+  A piped/pasted dump being silently discarded whenever a register flag was
+  also given -- despite the command's own help promising "Explicit flags win
+  over a parsed dump", true only if the dump is still read when flags are
+  present too -- is NOT fixed here. It was, briefly, on this branch: the
+  implicit stdin read was made unconditional, with `sys.stdin is None`
+  (fd 0 closed -- a daemon/service parent, some CI runners, a frozen
+  no-console launch) guarded explicitly on both the `--file -` and implicit
+  paths so the change wouldn't trade one crash for another. But making the
+  implicit read unconditional makes EVERY flag-bearing invocation newly
+  dependent on `_stdin_offers_input`/`_stdin_offers_input_by_reading` (the
+  bounded-readiness reader that closed the original tan-cli#388 hang) --
+  including the primary documented invocation, `tan faultdecode --cfsr
+  0x8200`, which used to return with no stdin interaction at all. Several
+  rounds of bounding that reader more tightly (an idle+total dual timeout, a
+  background queue drain, `sys.stdin.reconfigure(encoding="utf-8",
+  errors="ignore")` for a stray non-UTF-8 byte) each closed one shape of hang
+  or data loss and opened a different one, so this change reverts `_read_dump`
+  to `dev`'s own `auto_consume_stdin=not registers_given` gate byte-for-byte
+  -- a flag-bearing invocation behaves exactly as it does on `dev`, including
+  `dev`'s own known defect (a producer that writes a dump and then holds the
+  pipe open without closing it can still lose that dump, or hang past the
+  readiness probe) -- rather than reopen tan-cli#388 for the flag-bearing case
+  to fix it. Both the flags-plus-dump merge and the `sys.stdin is None` guard
+  now move to tan-cli#537 together with the reader itself: neither can be
+  fixed correctly without touching it.
+
+  Two smaller things this issue also raised are DEFERRED, not closed here:
+  - `_parse_hexint` still accepts a negative/out-of-range hex value
+    (`int(text, 16)` parses a leading `-`), matching the v0.4.1 oracle
+    exactly: measured, `tan faultdecode --cfsr 0x100000000` and `--cfsr
+    -8200` both exit 0 on the shipped binary. A 32-bit range check was
+    tried and reverted -- it was an undeclared divergence from the oracle,
+    not an authorised one.
+  - `BFSR.LSPERR`/`MMFSR.MLSPERR` escalated to `FORCED` still falls through
+    to the generic "its own status bits are clear" `root_cause`, matching
+    the oracle's own (self-contradictory, but unaltered) text. A corrected
+    message was tried and reverted; whether to diverge from the oracle here
+    deliberately is an open question for a separate issue, not decided in
+    this change.
+  (Refs #503, #537)
+
 
 ## [0.5.1] — 2026-08-04
 
