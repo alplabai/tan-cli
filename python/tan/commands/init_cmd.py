@@ -100,6 +100,7 @@ from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
+    IOT_STARTER_SUPPORTED_SKU,
     TEMPLATE_IDS,
     CoresError,
     ExampleReadError,
@@ -117,10 +118,8 @@ from tan.core.scaffold import (
     scaffold_tree_preview,
     sdk_pointer_json,
     splice_companion_cores,
-    supported_skus_for,
     vendored_app_core_key,
     vendored_core_ids,
-    vendored_tree_core_ids,
     write_files,
 )
 from tan.envelope import Envelope, Issue, Project, emit
@@ -465,74 +464,19 @@ def _is_sdk_checkout(root: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _sdk_confirms_sku_topology(
-    template_id: str, sku: str, resolved_sdk: _Sdk | None
-) -> bool:
-    """Whether a RESOLVED alp-sdk checkout's own SoM catalogue proves `sku`
-    genuinely carries every core `template_id`'s vendored tree declares,
-    overriding a `supported_skus_for` refusal -- tan-cli#494 defect 2
-    follow-up.
-
-    `supported_skus_for`'s allow-list is the deliberately narrow, SDK-FREE
-    fallback `tan.core.scaffold`'s own I-32 invariant requires (`tan init`
-    must plan without a checkout at all); it is guaranteed to lag the SDK's
-    own SoM catalogue as new SKUs ship, which is exactly the "worse than the
-    defect it fixes" shape a SoM vendor cannot ship (a customer with a
-    legitimate, just-added SKU told their hardware is unsupported). When a
-    checkout DOES resolve, its live `metadata/e1m_modules/<sku>.yaml`
-    topology is the ground truth -- reading it here gives the SAME verdict
-    `tan validate` would reach one command later, without making the
-    customer wait for that round-trip to find out.
-
-    Never overrides `iot-starter`: its one-SKU gate is a silicon-validation
-    fact (its CC3501E Wi-Fi transport), not a core-topology one, and no SoM
-    topology field could ever prove a NEW SKU's Wi-Fi bridge has been bench
-    validated. `False` (defer to the static table) whenever there is nothing
-    to check against: no SDK resolved, the template needs no extra core at
-    all, or the checkout's own catalogue has never heard of `sku` (too new
-    even for THIS checkout, or a genuine typo `tan validate` would refuse
-    too)."""
-    if resolved_sdk is None or template_id in ("iot-starter", "minimal-app"):
-        return False
-    needed = vendored_tree_core_ids(template_id, sku)
-    if not needed:
-        return False
-    from tan.commands.presets_cmd import read_soms  # noqa: PLC0415 -- command-layer read, no cycle
-
-    for som in read_soms(str(resolved_sdk.path)):
-        if som.sku == sku:
-            return needed <= {core.id for core in som.cores}
-    return False
-
-
 def _plan_from_template(
-    template: str | None, som: str | None, cores_raw: str | None, resolved_sdk: _Sdk | None
+    template: str | None, som: str | None, cores_raw: str | None
 ) -> tuple[str, list[PlannedFile]]:
     template_id = _resolve_template(template)
     sku = som or DEFAULT_SOM_SKU
-    # Checked BEFORE anything is planned. `iot-starter` vendors exactly one SoM
-    # family (its Wi-Fi transport is silicon-validated on that SKU alone); every
-    # OTHER family-split template vendors a `cores:`/`pins:`/`chips:` block that
-    # is only correct for the SKUs its tree was captured against
-    # (`supported_skus_for`) -- tan-cli#494 defect 2. Both refuse the same way,
-    # rather than quietly rendering hardware content the requested SKU does not
-    # have (a customer's very next command, `tan validate`, is where the
-    # mismatch used to actually surface) -- UNLESS a resolved checkout's own
-    # metadata proves the static refusal wrong (`_sdk_confirms_sku_topology`,
-    # tan-cli#494 defect 2 follow-up).
-    supported = supported_skus_for(template_id, sku)
-    if (
-        supported is not None
-        and sku not in supported
-        and not _sdk_confirms_sku_topology(template_id, sku, resolved_sdk)
-    ):
+    # Checked BEFORE anything is planned: `iot-starter` vendors exactly one SoM
+    # family (its Wi-Fi transport is silicon-validated on that SKU alone), so
+    # any other `--som` must be refused, never quietly rendered against it.
+    if template_id == "iot-starter" and sku != IOT_STARTER_SUPPORTED_SKU:
         raise InitError(
             "init.invalid-som",
-            f"Template '{template_id}' has no vendored scaffold for SoM SKU "
-            f"'{sku}' -- its cores:/pins:/chips: content is only valid for: "
-            f"{', '.join(supported)}. Use one of those, or --template "
-            "minimal-app, which derives its single core from any SKU instead "
-            "of vendoring a fixed hardware block.",
+            f"Template 'iot-starter' supports only SoM SKU "
+            f"'{IOT_STARTER_SUPPORTED_SKU}'; got '{sku}'.",
             ExitCode.VALIDATION_FAILURE,
         )
     try:
@@ -1019,7 +963,7 @@ def init(
             # template id -- `template_id` here is `"example:<src>"`.
             subject_label = f"example '{template_id[len('example:') :]}'"
         else:
-            template_id, files = _plan_from_template(template, som, cores, resolved_sdk)
+            template_id, files = _plan_from_template(template, som, cores)
             subject_label = f"template '{template_id}'"
 
         files = _apply_board_yaml_override(

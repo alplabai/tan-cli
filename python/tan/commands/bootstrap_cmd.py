@@ -53,7 +53,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -1264,41 +1263,6 @@ def _list_entries(parent: Path) -> list[str] | None:
         return None
 
 
-def _target_west_config_names_checkout(target: Path, checkout_name: str) -> bool:
-    """Whether `target`'s OWN `.west/config` (if any) verifiably names THIS
-    checkout as its manifest repo -- the guard that makes the "resumable
-    half-built workspace" exemption below safe.
-
-    `west init -l <checkout>` forces the topdir to be the checkout's own
-    PARENT and writes `[manifest] path = <checkout's own directory name>` --
-    a single path COMPONENT, since the checkout sits directly under the
-    topdir. That is true whether `target` IS the checkout's current parent
-    (the ordinary case) or `target` is a relocation destination the checkout
-    has not been moved into yet: either way, the manifest names the checkout
-    by NAME, not by a path resolved against the checkout's current, possibly
-    already-rolled-back, location. Comparing `target / rel` against the
-    checkout's CURRENT absolute path (`_manifest_points_at`, used everywhere
-    else in this module) is therefore the WRONG check here -- on the exact
-    retry-after-rollback case this exemption exists for, the checkout has
-    already been moved back to its original parent by the time this runs, so
-    `target / rel` would never equal it even for tan's own leftover `.west`.
-    Comparing by NAME instead matches regardless of which side of a
-    relocation the checkout currently sits on, and still refuses an
-    UNRELATED west workspace previously initialised at `target` (a different
-    SDK, a different customer project) the moment its manifest names a
-    different checkout, which is the realistic shape a foreign `.west` here
-    takes.
-    """
-    config = _read_text(target / ".west" / "config")
-    if config is None:
-        return False
-    rel = get_manifest_path(config)
-    if rel is None:
-        return False
-    name = re.split(r"[\\/]", rel.strip())[-1] if rel.strip() else ""
-    return name == checkout_name
-
-
 def _relocation_target_occupied(target: Path, checkout_name: str, venv_dir_name: str) -> bool:
     """Whether `target` -- the directory an auto- or explicit relocation is
     about to move the checkout INTO -- already holds content that should
@@ -1316,34 +1280,27 @@ def _relocation_target_occupied(target: Path, checkout_name: str, venv_dir_name:
     second, narrower one: `checkout_name`/`venv_dir_name` are exactly the two
     entries a COMPLETED relocation leaves under `target`, so the same
     exemption that already lets the checkout's own parent hold "nothing but
-    the checkout [and] bootstrap's OWN venv" applies here, one level down --
-    plus, unlike that call site, a `target` that already holds its OWN
-    `.west` (a half-built west workspace from an interrupted `west init -l`
-    at THIS location) is exempt too: `west_phase`'s "already initialised"
-    branch exists precisely to resume that, not to be refused before it ever
-    gets the chance.
+    the checkout [and] bootstrap's OWN venv" applies here, one level down.
 
-    That `.west` exemption must not fire on JUST any `.west/config` at
-    `target`, though -- an UNRELATED west workspace previously initialised
-    there (a different SDK, a different customer project that happened to
-    reuse this same default `alp-workspace` name) is exactly the "content of
-    its own" the guard exists to protect, and moving THIS checkout's git
-    directory into it is irreversible from the customer's point of view. The
-    first cut of this fix fed a bare `_is_file(target / ".west" / "config")`
-    into `parent_needs_workspace_guard`, which only asks "does a config file
-    exist", not "whose workspace is it" -- so it exempted every foreign
-    workspace along with tan's own half-built one. `target`'s `.west/config`
-    is now also required to verifiably name `checkout_name`
-    ([`_target_west_config_names_checkout`]) before it counts as "resumable,
-    not foreign".
+    NO `.west` exemption here, deliberately -- a target that already holds its
+    OWN `.west/config` is always treated as occupied, even when it is tan's
+    own interrupted `west init -l` from a prior failed retry at this exact
+    location. Two cuts were tried and both proved too weak to trust with a
+    customer's git checkout: the first waved through ANY `.west/config`
+    regardless of whose workspace it named; the second required the manifest
+    to name `checkout_name`, but `west init -l <alp-sdk>` writes exactly that
+    literal directory name for essentially every customer, so it "proved"
+    ownership no more reliably than the first cut did whenever two unrelated
+    checkouts share the default clone name. A real identity check (matching
+    by git remote, resolved path, or similar) is real scope, not a quick
+    tightening -- until one lands, refusing and asking the customer to clear
+    `target`'s leftover `.west` by hand is the safe failure mode; silently
+    relocating their checkout into someone else's workspace is not.
     """
     entries = _list_entries(target)
     if entries is None:
         return False
-    dot_west_is_workspace = _target_west_config_names_checkout(target, checkout_name)
-    return parent_needs_workspace_guard(
-        entries, checkout_name, venv_dir_name, dot_west_is_workspace
-    )
+    return parent_needs_workspace_guard(entries, checkout_name, venv_dir_name, False)
 
 
 def default_relocation_target(
@@ -2666,24 +2623,28 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             # `old_root`, so every reported path must say so, whether or not
             # the pointer restore below it also succeeded.
             if undo.detail is None:
-                # tan-cli#495 defect 3's own aggravating fact: `moved_to` is the
-                # checkout's OWN vacated location, gone the instant the move-back
-                # above succeeds -- "delete `moved_to`" told the customer to
-                # remove a path that no longer exists. What `step` actually left
-                # behind (the comment above already says so: "beside the
-                # checkout, not inside it") is `moved_to`'s PARENT -- the
-                # relocation target directory itself, still holding the
-                # partial venv/west checkout tan-cli#495 defect 3's own primary
-                # fix (`_relocation_target_occupied`, above) now knows how to
-                # look past on the very next retry.
-                leftover = moved_to.parent
+                # tan-cli#495 defect 3 tried naming `moved_to`'s PARENT here
+                # instead (the relocation target directory itself) so the
+                # advice would point at a real, still-existing path. That
+                # broke worse than what it replaced: under an explicit
+                # `--workspace <dir>`, that parent IS the customer's own
+                # pre-existing directory, not anything tan created -- this
+                # message told them to "delete" it by hand. Reverted to
+                # naming `moved_to` (the checkout's own vacated location,
+                # gone the instant the move-back above succeeds): a
+                # nonexistent path is useless advice, but it is never a
+                # customer's own directory, so it is harmless. Distinguishing
+                # "tan's own auto-relocation target" from "the customer's own
+                # --workspace dir" reliably enough to name the leftover
+                # accurately is left for a follow-up (see tan-cli#494/#495
+                # triage notes).
                 log.warn(
                     "workspace-relocation-rolled-back",
                     f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
                     f"moved it back to {_native(relocation_undo.old_root)} and restored "
                     f"the previous default SDK. Anything {step} already created under "
-                    f"{_native(leftover)} (a partial venv/west checkout) was left on "
-                    f"disk -- delete {_native(leftover)} by hand if you do not want it.",
+                    f"{_native(moved_to)} (a partial venv/west checkout) was left on "
+                    f"disk -- delete {_native(moved_to)} by hand if you do not want it.",
                 )
             else:
                 # The checkout moved back; only the pointer restore that

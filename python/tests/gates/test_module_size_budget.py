@@ -196,17 +196,23 @@ _MODULE_BUDGET: dict[str, int] = {
     # trusts) instead of the HOST-keyed `facts.venv_bin_dir(is_windows)`,
     # which used to disagree with the same run's `Next steps:` block for a
     # `.venv` whose layout does not match the reading host.
-    # 3118, not 3068, as of the fix/494-495-init-and-bootstrap blocker-1
-    # follow-up: `_relocation_target_occupied`'s `.west` exemption used to
-    # feed a bare `_is_file(target / ".west" / "config")` into
-    # `parent_needs_workspace_guard`, waving through ANY west workspace
-    # sitting at the auto-relocation target regardless of whose it was --
-    # moving a customer's checkout into a workspace it has nothing to do
-    # with. The new `_target_west_config_names_checkout` helper (+ its
-    # docstring explaining why a NAME comparison is correct here and
-    # `_manifest_points_at`'s path-based one is not, post-rollback) is the
-    # fix; `import re` is the only new import.
-    "tan/commands/bootstrap_cmd.py": 3118,
+    # 3079, not 3068, as of the fix/494-495-init-and-bootstrap scope-down
+    # pass. Two things changed here, both reverting a #495 defect-3 attempt
+    # rather than growing it a third time: (1) the rollback message's
+    # `leftover = moved_to.parent` (naming the RELOCATION TARGET as
+    # deletable) is reverted to naming `moved_to` itself -- under an explicit
+    # `--workspace <dir>` the parent is the customer's OWN pre-existing
+    # directory, not anything tan created, so advising its deletion was
+    # unacceptable even though the alternative (a vacated, nonexistent path)
+    # is merely useless; (2) `_relocation_target_occupied`'s `.west`
+    # exemption (and the `_target_west_config_names_checkout` helper it
+    # relied on, plus its `import re`) is removed outright -- proving
+    # ownership by the manifest's last path component alone passes for any
+    # unrelated workspace whose checkout also happens to be named `alp-sdk`,
+    # which is most of them. A target already holding its own `.west/config`
+    # is now always treated as occupied, same as any other foreign content;
+    # a real identity check is future work, not shipped half-working.
+    "tan/commands/bootstrap_cmd.py": 3079,
     # 1963, not 1890, as of tan-cli#495 defect 6: `manual_install_posix`
     # (the `manualInstallHints.posix.note` field `manual_install_windows`
     # already had a twin for) is parsed (optionally -- an SDK predating
@@ -628,26 +634,28 @@ _MODULE_BUDGET: dict[str, int] = {
     # different targets used to collapse silently onto whichever resolved
     # last.
     "tan/planner/template.py": 1259,
-    # 1185, not 1106, as of tan-cli#494 defects 1/2/4: `_is_build_output_dir`
+    # 1141, not 1106, as of tan-cli#494 defects 1/4: `_is_build_output_dir`
     # (a `.gitignore`-shaped exclusion so `--from-example` on a built example
     # tree no longer walks into `build/`) plus `read_example_tree`'s
     # per-file try/except (naming the actual unreadable path, defect 4,
-    # instead of a bare codec error) account for most of it; the rest is
-    # `family_supported_skus`/`supported_skus_for` (defect 2), gating every
-    # family-split template's `--som` the same way `iot-starter` already
-    # gated its own, so a SKU outside the vendored tree's topology is refused
-    # up front instead of silently inheriting the wrong `cores:`/`pins:`/
-    # `chips:` block.
-    # 1232, not 1185, as of the fix/494-495-init-and-bootstrap blocker-2
-    # follow-up: `family_supported_skus`'s blanket per-family allow-list
-    # over-refused 15 previously-valid template/SKU combinations (every
-    # family-split template besides `edge-ai-starter` declares nothing but
-    # the family's own baseline core, so it is correct for the WHOLE family,
-    # not just the one representative SKU). `_tree_extra_core_ids`/
-    # `vendored_tree_core_ids` now derive the restriction PER template from
-    # what its own vendored tree actually declares, restricting only when a
-    # tree needs a core beyond that baseline.
-    "tan/core/scaffold.py": 1232,
+    # instead of a bare codec error) account for it.
+    #
+    # tan-cli#494 defect 2 (`family_supported_skus`/`supported_skus_for`, a
+    # static per-family `--som` allow-list) is NOT in this tree, on purpose --
+    # reverted whole in the fix/494-495-init-and-bootstrap scope-down pass,
+    # not iterated a third time. Its first cut refused 15 previously-valid
+    # template/SKU combinations (every family-split template besides
+    # `edge-ai-starter` needs nothing but the family's own baseline core, so
+    # it is correct for the WHOLE family); its second cut fixed that but left
+    # `_family_bucket` falling an unrecognised family (E1M-NX9101, a Renesas
+    # SKU) back to the ALIF tree, which the allow-list then rubber-stamped at
+    # `ok:true` -- the default template rendering `a55_cluster`/Alif-only
+    # pins and chips against a SKU whose real topology is nothing like it.
+    # `_family_bucket`'s SKU-prefix bucketing genuinely cannot distinguish
+    # vendors from a fixed two-tree table; a gate built on top of it inherits
+    # that gap instead of closing it. Reported as a design problem to file
+    # separately, not fixed here.
+    "tan/core/scaffold.py": 1141,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one
@@ -774,19 +782,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # filter, and the returned `--preview`/`--force` message), +14 lines,
     # single cause -- the `init.would-overwrite` call site itself stayed the
     # same length, swapping a literal string for a call.
-    # 1044, not 1023, as of tan-cli#494: `_cwd_or_dot` (defect 10 -- a removed
+    # 1035, not 1023, as of tan-cli#494 defect 10: `_cwd_or_dot` (a removed
     # cwd used to escape `init` as `init.internal-failure` where every sibling
-    # command's identical `Path.cwd()` call already falls back to `"."`) plus
-    # `_plan_from_template`'s `supported_skus_for` gate (defect 2, described
-    # beside `tan/core/scaffold.py`'s own entry above).
-    # 1091, not 1044, as of the fix/494-495-init-and-bootstrap blocker-2
-    # follow-up: `_sdk_confirms_sku_topology` (+ its docstring explaining why
-    # `iot-starter` is excluded) lets a RESOLVED alp-sdk checkout's own SoM
-    # catalogue override `supported_skus_for`'s SDK-free refusal with real
-    # topology, so a legitimate, just-added SKU is not told its hardware is
-    # unsupported just because tan's own static table has not heard of it
-    # yet -- `_plan_from_template` threads `resolved_sdk` through to reach it.
-    "tan/commands/init_cmd.py": 1091,
+    # command's identical `Path.cwd()` call already falls back to `"."`).
+    #
+    # tan-cli#494 defect 2's `_plan_from_template` gate (and its
+    # `_sdk_confirms_sku_topology` override) is NOT in this tree -- reverted
+    # whole alongside `tan/core/scaffold.py`'s `family_supported_skus`, see
+    # that entry's comment above for why. `_plan_from_template` is back to
+    # its `origin/dev` shape: only `iot-starter`'s single-SKU gate.
+    "tan/commands/init_cmd.py": 1035,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
@@ -1155,14 +1160,20 @@ _MIRRORED = ("tan/planner/",)
 # renames` crossed 50 lines (44 -> 54) picking up the same ambiguity-
 # collision guard its two siblings already have.
 _FUNCTION_COUNT_BUDGET = 217
-# 717, not 707, as of tan-cli#495: `_run` picked up defects 2/3/4's own
-# call-site changes (`resolve_python_floor`'s new keyword argument,
-# `_relocation_target_occupied`'s call plus its comment, the `--print-env`
-# dispatch's exit-code gate lives in the top-level `bootstrap()` wrapper, not
-# `_run`, so that one is NOT what moved this number) -- still the one linear
-# refusal ladder tan-cli#408's own `# noqa: PLR0911, PLR0912, PLR0915` stands
-# in front of.
-_FUNCTION_WORST_BUDGET = 717
+# 721, not 707, as of tan-cli#495 and the fix/494-495-init-and-bootstrap
+# scope-down pass that followed it. `_run` picked up defect 2/4/5's own
+# call-site changes (`resolve_python_floor`'s new keyword argument, the
+# `--print-env` dispatch's exit-code gate lives in the top-level
+# `bootstrap()` wrapper, not `_run`, so that one is NOT what moved this
+# number) plus, net, the nested `rollback_relocation_after`'s own comment
+# explaining why its rollback message reverts to naming the vacated
+# checkout path rather than the relocation target's parent (a customer's
+# own pre-existing `--workspace` directory under an explicit relocation,
+# never something tan created -- see `bootstrap_cmd.py`'s entry above) and
+# why `_relocation_target_occupied` no longer exempts a `.west/config` at
+# the target at all. Still the one linear refusal ladder tan-cli#408's own
+# `# noqa: PLR0911, PLR0912, PLR0915` stands in front of.
+_FUNCTION_WORST_BUDGET = 721
 
 
 def _modules() -> list[Path]:

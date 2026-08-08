@@ -1005,18 +1005,14 @@ def test_the_auto_relocation_target_retries_past_its_own_leftover_venv(tmp_path)
 
 
 def test_the_auto_relocation_target_refuses_an_unrelated_west_workspace_already_there(tmp_path):
-    """The `.west` exemption `test_the_auto_relocation_target_retries_past_its_
-    own_leftover_venv` exercises for tan's OWN leftover venv must not also wave
-    through a west workspace `target` already holds that has nothing to do
-    with THIS checkout -- e.g. an unrelated SDK/project a prior, wholly
-    separate `tan bootstrap` run auto-relocated into this same default
-    `alp-workspace` name. The first cut of the tan-cli#495 defect 3 fix
-    exempted `target` from the occupied check the moment ANY `.west/config`
-    existed there, with no check on WHOSE workspace it was -- feeding
-    `dot_west_is_workspace=True` into `parent_needs_workspace_guard`
-    regardless of what the manifest actually named. That moved a customer's
-    git checkout into a west workspace it has nothing to do with instead of
-    refusing. `target`'s `.west/config` here names a checkout called
+    """`target` already holding a west workspace that has nothing to do with
+    THIS checkout -- e.g. an unrelated SDK/project a prior, wholly separate
+    `tan bootstrap` run auto-relocated into this same default `alp-workspace`
+    name -- must refuse, never silently move a customer's git checkout into
+    it. (See the sibling test below for why `target`'s `.west/config`
+    genuinely naming THIS checkout, not just an unrelated one, refuses the
+    exact same way now -- no exemption survived tan-cli#495 defect 3's two
+    attempts at one.) `target`'s `.west/config` here names a checkout called
     `other-project`, never `sdk.name` (`alp-sdk`) -- the shape a genuinely
     foreign workspace takes -- so the checkout must stay exactly where it
     started."""
@@ -1043,14 +1039,21 @@ def test_the_auto_relocation_target_refuses_an_unrelated_west_workspace_already_
     )
 
 
-def test_the_auto_relocation_target_retries_past_its_own_half_built_west(tmp_path):
-    """Contrast with the sibling test above: `target`'s `.west/config` here
-    names THIS checkout (`sdk.name`) -- the shape a genuinely interrupted
-    `west init -l` at `target` leaves behind, per `rollback_relocation_
-    after`'s own docstring (the checkout itself moves back to its original
-    location on rollback, but a `.west`/`.venv` a later step already created
-    under the vacated target survives). That must still resume, not refuse,
-    on the very next retry."""
+def test_the_auto_relocation_target_still_refuses_its_own_half_built_west(tmp_path):
+    """tan-cli#495 defect 3 follow-up, REVERTED. Two cuts of a ".west/config
+    at `target` names THIS checkout, so resume rather than refuse" exemption
+    were tried: the first waved through ANY `.west/config` regardless of whose
+    workspace it named; the second required the manifest to name
+    `checkout_name`, but `west init -l <alp-sdk>` writes exactly that literal
+    directory name for essentially every customer, so it proved ownership no
+    more reliably than the first cut whenever two unrelated checkouts share
+    the default clone name (a realistic collision, not a hypothetical one).
+    Both were reverted rather than iterated a third time -- `target` holding
+    its own `.west/config` (here, one that DOES name `sdk.name`, the shape a
+    genuinely interrupted `west init -l` at `target` would leave behind) is
+    now always treated as occupied, the same as any other foreign content.
+    The customer has to clear it by hand on a retry; a real identity check is
+    tracked as a follow-up, not shipped half-working."""
     sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
     (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
     target = sdk.parent / "alp-workspace"
@@ -1064,9 +1067,10 @@ def test_the_auto_relocation_target_retries_past_its_own_half_built_west(tmp_pat
         "--sdk-root", str(sdk), cwd=sdk.parent,
     )
     env = envelope(proc)
-    assert proc.returncode == 0, env
-    assert "bootstrap.workspace-guard" not in codes(env)
-    assert (target / sdk.name).exists()
+    assert proc.returncode == 2
+    assert codes(env) == ["bootstrap.workspace-guard"]
+    assert sdk.exists()
+    assert not (target / sdk.name).exists()
 
 
 def test_print_env_agrees_with_dry_run_on_a_dirty_parent(tmp_path):

@@ -25,11 +25,10 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
-- **`tan init`/`tan scaffold` put wrong content into a new project, in six
-  separate ways** (#494; four further defects from the same review --
-  `_vendored_files`'s all-or-nothing completeness check, `module_template.py`'s
-  missing build-wiring guidance, and two shapes of the vendored README's
-  board-target rewrite -- remain open, see "Still open" below):
+- **`tan init`/`tan scaffold` put wrong content into a new project, in five
+  separate ways** (Refs #494 -- not Closes; a sixth defect from the same
+  review was attempted and reverted, and five further defects remain open,
+  see below):
   - `--from-example` on an SDK example that carries an in-place `build/`
     (a real, gitignored artifact of building that example) hard-failed on
     the first non-UTF-8 build artifact `read_example_tree` walked into, or --
@@ -44,25 +43,6 @@ All notable changes to `tan` are documented here. Format follows
     0xff in position 88: invalid start byte`, with nothing telling the
     customer which of hundreds of files was the culprit) -- it now names the
     file.
-  - `tan init --template <edge-ai-starter|sensor-starter|board-diagnostics|
-    zephyr-app> --som <sku>` accepted any SoM SKU and rendered the vendored
-    tree's `cores:`/`pins:`/`chips:` block verbatim regardless of whether
-    that SKU's real topology matches it -- `--som E1M-AEN301` (no Cortex-A32)
-    got E1M-AEN801's `a32_cluster` core, reported `ok:true`, and the very
-    next `tan validate` hard-errored. A family-split template now refuses
-    up front (`init.invalid-som`) only for the ONE `--som` shape its own
-    vendored tree actually mismatches: `edge-ai-starter`'s heterogeneous
-    scaffold pre-declares a companion application-cluster core
-    (`a32_cluster` on the Alif tree, present on E1M-AEN801 alone; `a55_cluster`
-    on the Renesas tree, present on every E1M-V2N/E1M-V2M SKU, since the four
-    share one PCB and one silicon variant) and stays restricted to the SKUs
-    that genuinely carry it; `board-diagnostics`/`sensor-starter`/
-    `zephyr-app` declare nothing but each family's own guaranteed baseline
-    core and are therefore correct for -- and now accept -- any SKU in the
-    family. An initial version of this fix applied ONE family-wide
-    restriction to every family-split template uniformly and shipped refusing
-    15 previously-valid combinations before landing here; caught and
-    corrected before release, not after.
   - A removed working directory turned a plain `tan init --preview` (no
     `--project`) into `init.internal-failure` at exit 5 with no preview at
     all, where the two sibling commands making the identical `Path.cwd()`
@@ -90,8 +70,35 @@ All notable changes to `tan` are documented here. Format follows
     every catalog `board.yaml` today (no two pins share a `doc:`); now raises
     the same ambiguity error the sibling functions already do.
 
-  **Still open, Refs #494 (not Closes):** four defects from the same review
-  are not fixed here. `_vendored_files`'s completeness guard
+  **Attempted and reverted, not shipped:** `tan init --template
+  <edge-ai-starter|sensor-starter|board-diagnostics|zephyr-app> --som <sku>`
+  accepting any SoM SKU and rendering the vendored tree's `cores:`/`pins:`/
+  `chips:` block verbatim regardless of whether that SKU's real topology
+  matches it. Two cuts of a static per-template SKU allow-list were tried;
+  both shipped a defect of equal severity to the one they fixed. The first
+  applied ONE family-wide allow-list to every family-split template
+  uniformly, refusing 15 previously-valid template/SKU combinations. The
+  second derived the restriction per template from what its own vendored
+  tree actually declares, which fixed the over-refusal -- but the allow-list
+  sits on top of `_family_bucket`, which maps an UNRECOGNISED SKU family
+  (`E1M-NX9101`, a Renesas SKU with no vendored NXP tree at all) to the ALIF
+  tree rather than refusing, on purpose, as a deliberate scaffolding
+  fallback (`tan/core/scaffold.py`'s own module docstring: "Do not grow
+  this: no SKU list, no addresses, no pin names"). The allow-list then
+  rubber-stamped that fallback as `ok:true` for every non-`edge-ai-starter`
+  template: `zephyr-app --som E1M-NX9101` (the DEFAULT template with no
+  `--template` given at all) rendered `cores: m55_hp`/Alif-only pins and
+  chips against a topology that is actually `a55_cluster`/`m33`, confidently
+  and with `issues: []`. Reverted whole -- both the static table and the
+  `init_cmd._sdk_confirms_sku_topology` resolved-checkout override built on
+  top of it -- rather than attempting a third fix. The design problem is
+  real and needs its own fix: a family bucket keyed on SKU PREFIX cannot
+  distinguish vendors, so any allow-list built on it inherits that gap
+  instead of closing it; tracked as a follow-up, not fixed here.
+
+  **Still open, Refs #494 (not Closes):** five defects from the same review
+  are not fixed here (four from the original review, plus the SKU-topology
+  gate above). `_vendored_files`'s completeness guard
   (`tan/core/scaffold.py`) only checks the vendored tree directory is
   non-empty, not that it holds every file a template's own `CMakeLists.txt`
   expects, so a partially-corrupted install (a mode-000 `src/`, a
@@ -112,7 +119,8 @@ All notable changes to `tan` are documented here. Format follows
   the defect; a tan-only fix would break `test_planner_emit_parity.py`
   until the upstream script is fixed in lockstep.
 - **`tan bootstrap` could resolve, sign, and print against the wrong
-  workspace, in eight separate ways** (#495):
+  workspace, in eight separate ways** (Refs #495 -- not Closes; part of one
+  sub-defect's own fix was tried twice and reverted, see below):
   - `find_workspace_venv`'s upward `.venv` search accepted any west-capable
     venv with no manifest check, while its sibling `west_workspace_dir`
     already guarded the identical upward walk against a foreign `.west`
@@ -139,23 +147,38 @@ All notable changes to `tan` are documented here. Format follows
     behind after a failed retry made the identical next run refuse
     (`bootstrap.workspace-guard`) instead of resuming -- the documented
     quickstart's own first command was not retryable after its most likely
-    transient failure (a dropped network mid-`pip install west`). The
-    rollback message also used to tell the customer to delete a path
-    (the checkout's own vacated location) that no longer exists the instant
-    the move-back succeeds; it now names the directory that genuinely still
-    holds the leftover. A target that already holds its OWN `.west` (a
-    half-built west workspace from an interrupted `west init -l` at THIS
-    location) is exempt from the occupied check too, so that exact retry
-    resumes instead of refusing -- but only when that `.west/config`
-    verifiably names THIS checkout (`_target_west_config_names_checkout`,
-    matched by directory NAME rather than by resolving the manifest path
-    against the checkout's current location, which the post-rollback retry
-    this exists for would never match even for tan's own leftover). An
-    earlier version of this exemption accepted ANY `.west/config` present at
-    the target with no ownership check at all, which would have moved a
-    customer's checkout into an unrelated west workspace that happened to
-    already sit at that path (a different SDK, a different project) instead
-    of refusing; caught and corrected before release, not after.
+    transient failure (a dropped network mid-`pip install west`).
+    `_relocation_target_occupied` now reuses `parent_needs_workspace_guard`'s
+    own exemption for the checkout's own name and bootstrap's own venv
+    directory name, so that retry resumes.
+
+    A `.west`-config exemption for the SAME target -- so a half-built west
+    workspace from an interrupted `west init -l` there would resume too --
+    was attempted twice and reverted rather than shipped a third time. The
+    first cut waved through ANY `.west/config` present, with no check on
+    whose workspace it was, which would have moved a customer's checkout
+    into an unrelated one instead of refusing. The second required the
+    manifest to name the checkout by directory NAME -- but `west init -l
+    <alp-sdk>` writes that exact literal name for essentially every
+    customer, so it proved ownership no more reliably than the first cut
+    whenever two unrelated checkouts share the default clone name, which is
+    the realistic case, not an edge one. A target already holding its own
+    `.west/config` is now always treated as occupied, same as any other
+    foreign content; a real identity check is a follow-up, not shipped here.
+  - The rollback message printed when a later bootstrap step fails after a
+    relocation used to name the checkout's own now-vacated (and therefore
+    nonexistent) location as what a customer should "delete ... by hand" --
+    useless advice, but harmless. An attempted fix renamed it to the
+    relocation TARGET's parent instead, on the theory that is what the
+    failed step's own leftover venv/west checkout actually sits under; that
+    is true for the tan-cli#302 auto-relocation case, where that parent is a
+    directory tan itself creates, but under an EXPLICIT `--workspace <dir>`
+    the same parent is the customer's own pre-existing directory -- telling
+    them to delete their own workspace is worse than the useless-but-harmless
+    message it replaced. Reverted to naming the vacated checkout location,
+    matching pre-fix behaviour; reliably distinguishing "tan's own
+    auto-relocation target" from "the customer's own `--workspace` dir" is
+    left for a follow-up.
   - `--print-env` in text mode routed every refusal computed ahead of its
     short-circuit (`sdk-root-unresolved`, `workspace-guard`, the
     `--workspace`/`--print-env` conflict, and others) to STDOUT instead of
@@ -171,15 +194,18 @@ All notable changes to `tan` are documented here. Format follows
     `_VALUE_n` override the caller's own environment already carried -- a
     corporate host's proxy or mirror `insteadOf` override, most realistically.
     It is now appended at the next free index instead of claiming index 0.
-  - `manualInstallHints.posix.note` (the Zephyr SDK / Arm toolchain
-    "NOT auto-installed" section alp-sdk added at v0.14.0) was parsed for
-    round-trip fidelity but rendered by nothing -- a Linux/macOS customer
-    never saw it at all, only the Windows twin. `optional_libs_block` now
-    renders it for `Linux`/`MacOs`, after the optional-native-libs section,
-    matching the frozen Rust oracle's placement; the no-manifest fallback
-    facts gained the equivalent text, minus one clause naming `tan sdk
-    switch` -- not yet ported in this build, so recommending it would be the
-    same dead end (#305/#381) closed everywhere else in this port.
+  - `manualInstallHints.posix.note` -- the Zephyr SDK / Arm toolchain
+    "NOT auto-installed" section's POSIX twin to `manualInstallHints.
+    windows.note`, which this port already parsed and rendered -- was
+    parsed and rendered nowhere at all: a Linux/macOS customer never saw the
+    section, only a Windows customer did. Both the parsing
+    (`BootstrapFacts.manual_install_posix`) and the rendering
+    (`optional_libs_block`, for `Linux`/`MacOs`, after the optional-native-
+    libs section, matching the frozen Rust oracle's placement) are new
+    here; the no-manifest fallback facts gained the equivalent text, minus
+    one clause naming `tan sdk switch` -- not yet ported in this build, so
+    recommending it would be the same dead end (#305/#381) closed
+    everywhere else in this port.
   - `--print-env`'s venv-activation hint resolved its bin-dir name from the
     HOST (`facts.venv_bin_dir(is_windows)`) instead of the layout that
     actually exists on disk, disagreeing with the same run's `Next steps:`
