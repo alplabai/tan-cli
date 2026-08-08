@@ -341,6 +341,108 @@ All notable changes to `tan` are documented here. Format follows
     (`tan/planner/orchestrator.py::_slice_command`) only ever emits the
     bare identities `west`/`bitbake`/`cmake`, never an absolute path.
     (#510, #530)
+- **`tan doctor` could return the wrong verdict outright -- a pass on a host
+  that cannot build, and a refusal on one that can.** Eight defects, fixed in
+  two passes:
+  - `westResolved` treated a `west` launcher that resolves but cannot be
+    EXECUTED (a relocated/renamed workspace, a deleted `.venv/bin/python`) the
+    same as one that ran and printed something unparseable, and reported
+    `pass` -- `tan build` then died with `FileNotFoundError`/
+    `ModuleNotFoundError` on the very first slice. `probe_status` now tells
+    "could not be spawned" apart from "ran fine", and the sibling `west`
+    check (bare-PATH-only) no longer reports `pass` for that same
+    unspawnable binary either -- both checks now agree.
+  - `hostPrerequisites` keyed macOS off a `windows`/posix bool with no
+    `macos` arm, so a stock Mac (no `wget`, no standalone `xz`) failed
+    `tan doctor` over tools alp-sdk's manifest never asks macOS for, while
+    `tan bootstrap` on the identical manifest succeeded. Now host-keyed,
+    matching `tan bootstrap`'s own reader.
+  - `_load_manifest` never read `schemaVersion`, so an SDK whose manifest
+    `tan bootstrap` refuses outright still reported `hostPrerequisites: pass`
+    with zero tools probed and no warning.
+  - `sdkProvenance` and a build's `${SDK_ROOT}` token substitution both
+    misattributed an ENCLOSING git repository's commit to a vendored SDK with
+    no `.git` of its own (an extracted release archive inside a customer's
+    own app repo, a supported setup) -- printing a foreign commit as the
+    SDK's own, and, in the build path, able to fire a false
+    `sdkCommit` mismatch or miss a real one. Both sites now compare the
+    resolved `git rev-parse --show-toplevel` against the SDK root itself and
+    treat a mismatch as no signal.
+  - The `west` check re-probed a bare `"west"` instead of the already
+    PATH-resolved binary, reopening the cwd-injection gap `on_path` exists to
+    close.
+  - The `fdt` check asked tan's OWN interpreter instead of the workspace
+    venv's -- a permanent false red on the shipped PyInstaller freeze (`fdt`
+    is not a bundled dependency there) and a possible false green under
+    `python -m tan` (a stray local `fdt.py` on the cwd).
+  - `zephyr_python_floor` blamed an unset `$ZEPHYR_BASE` for a floor read
+    failure even when a workspace HAD resolved and `$ZEPHYR_BASE` was never
+    consulted at all -- now names the real cause.
+  - A working directory deleted out from under the process escaped `doctor`'s
+    (and `build`'s and `validate`'s) resolution prologue as a raw traceback
+    with empty stdout instead of the coded internal-failure envelope every
+    other failure gets.
+  - Two smaller finish-up fixes found reviewing the above: the
+    `schemaVersion`-mismatch message's trailing period doubled up with the
+    warning that wraps it ("...outright.. Falling back to"), and a bare
+    `sys.stdin.isatty()` in the `--fix` consent-suppression message crashed
+    on a host whose `stdin` handle is `None` (a GUI-launched process).
+  - The `None`-`stdin` guard above closed only the symptom's SECOND call
+    site. `doctor()` calls the shared `can_prompt` gate
+    (`tan.core.consent`) to decide `fix_allowed` BEFORE it ever reaches the
+    consent-suppression message, and that shared gate still called the bare
+    `sys.stdin.isatty()` -- so a detached-stdio host (`tan doctor --fix`
+    with fd 0 closed before exec, `0<&-`) still crashed, one call earlier,
+    caught only by `doctor()`'s outer handler as a fabricated
+    `doctor.internal-failure` (exit 5) that discarded the whole diagnosis
+    instead of the correct `doctor.fix-suppressed` warning (exit 4). The
+    `is not None` guard now lives in `can_prompt` itself -- the one place
+    every caller (`doctor`, `scaffold`) reaches it -- rather than duplicated
+    per call site.
+  - The `is not None` guard above landed on `sys.stdin` only, leaving
+    `sys.stderr` -- the NEXT operand of the identical `and` chain, in the
+    same `can_prompt` function and in `fix_suppressed_issue`'s own duplicate
+    -- still a bare `.isatty()`. A host with a live, non-tty stdin and a
+    detached stderr (each handle can be detached independently by whatever
+    spawned the process) still crashed with the identical `AttributeError`,
+    one operand later; verified against the real binary with a `pty.fork()`
+    child (a genuine tty on stdin, stderr closed before `exec`), not a
+    monkeypatched mock. Both call sites now guard `sys.stderr is not None`
+    too. Sweeping the rest of `tan/` for the same unguarded-`isatty()`
+    shape found three further, independent sites and closed two of them:
+    `faultdecode_cmd._read_dump`'s implicit stdin auto-consume (now treats a
+    detached stdin the same as one offering nothing, `""`) and its explicit
+    `--file -` read (now refused with a clear `--file` message instead of a
+    raw crash); and `new_som_cmd.new_som`'s non-interactive-stdin refusal
+    (now reaches its own named "stdin is not a terminal" message instead of
+    crashing first). The third, `build_cmd._dispatch`'s `_Heartbeat` arming,
+    only had its `None` case guarded by this same sweep -- `sys.stderr is
+    not None and sys.stderr.isatty()` still crashed on a stderr that EXISTS
+    but has no `.isatty()` at all, which is exactly what `--format json`
+    installs (`_TeeStderr`); that site was not actually closed until round
+    6, below. (#488)
+- **Round 6: the round-5 sweep's own `is not None` guards left the actual
+  crash open on the one site that mattered most.** `sys.stderr is not None
+  and sys.stderr.isatty()` (`build_cmd._dispatch`) and the equivalent
+  `sys.stdin`/`sys.stderr` pair in `tan.core.consent.can_prompt` and
+  `doctor_cmd.fix_suppressed_issue` all stop a *detached* (`None`) handle
+  from crashing `.isatty()`, but not a handle that EXISTS and simply lacks
+  the method -- exactly what `sys.stderr` becomes under `--format json`
+  (`tan.cli.main` tees it through `_TeeStderr`, which implements only
+  `write`/`flush`/`getvalue`). Measured against the real binary: every `tan
+  run --format json` against a real project crashed with `AttributeError:
+  '_TeeStderr' object has no attribute 'isatty'` (exit 5,
+  `run.internal-failure`) before a single slice dispatched, because
+  `run_cmd._run` calls `_build` with no `json_mode` of its own, so
+  `_dispatch` always saw the `json_mode=False` default and reached the bare
+  `.isatty()` unconditionally. All three sites now route through
+  `tan.env.stdin_is_tty`/`stderr_is_tty` -- promoted from the module-private
+  `_stderr_is_tty` tan-cli#288 already built for this exact
+  try/except-guarded probe, plus a new `stdin_is_tty` alongside it -- instead
+  of each hand-rolling a fourth (and fifth) copy of a guard three of the
+  previous five rounds already got wrong once. (#488)
+
+
 - **`tan bootstrap`'s `reconcile_west_manifest_path` never `fsync`'d the
   temp sibling it writes `.west/config` through, so `os.replace`'s atomicity
   guarantee (the RENAME only) was covering nothing about the CONTENT
@@ -946,6 +1048,7 @@ All notable changes to `tan` are documented here. Format follows
     deliberately is an open question for a separate issue, not decided in
     this change.
   (Refs #503, #537)
+
 
 
 ## [0.5.1] — 2026-08-04

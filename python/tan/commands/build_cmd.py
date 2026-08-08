@@ -108,6 +108,7 @@ from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
 from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
+from tan.env import stderr_is_tty
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -254,7 +255,7 @@ class _Heartbeat:
     with the stream it was standing in for.
 
     Armed by [`_dispatch`] itself, not handed down by its caller: `_build`'s
-    two callers -- `build_cmd.build` and `run_cmd._build_then_run` -- both
+    two callers -- `build_cmd.build` and `run_cmd._run` -- both
     bottleneck through `_dispatch` before any slice runs, so constructing
     the heartbeat there covers `tan run`'s identical silent-CMake window
     too, not just a direct `tan build` (tan-cli#287 follow-up).
@@ -875,25 +876,58 @@ def _dispatch(
     EAGER call that can run for minutes -- the loop after it only walks
     results `execute_slices` already computed -- and this function is the
     one seam every route into the build engine shares. `_build`'s two
-    callers, `build_cmd.build` (`tan build`) and `run_cmd._build_then_run`
+    callers, `build_cmd.build` (`tan build`) and `run_cmd._run`
     (`tan run`), both bottleneck through here before any slice runs, so
     arming the heartbeat at THIS level, not one up, is what covers `tan
     run`'s identical silent-CMake window too -- the gap the previous
     revision (a `_Heartbeat` built in `build()` and threaded down as
-    `on_output`) left, since `run_cmd.py:258` calls `_build` with no
+    `on_output`) left, since `run_cmd.py:267` calls `_build` with no
     `on_output` of its own.
 
     `json_mode` is the one thing this function cannot discover for itself
     (`sys.stderr.isatty()` it checks directly, same as `build()` used to).
-    `build()` passes its real value straight through. `run_cmd.
-    _build_then_run` has its own `--format json` support but does not yet
-    thread it here (out of this file's scope to add -- see `run_cmd.py:258`),
-    so its call keeps the default `False`.
+    `build()` passes its real value straight through. `run_cmd._run` takes
+    its own `json_mode` parameter but does not yet thread it into this call
+    (out of this file's scope to add -- see `run_cmd.py:267`), so its call
+    keeps the default `False`.
+
+    tan-cli#488 round 5 class sweep: `sys.stderr` can be `None` -- a process
+    launched with its standard handles detached (a GUI launcher, a
+    `pythonw`-style spawn, or a shell that closed fd 2 before exec) -- the
+    same condition `tan.core.consent.can_prompt` guards against. A bare
+    `sys.stderr.isatty()` here raised the identical `AttributeError:
+    'NoneType' object has no attribute 'isatty'` for a detached-stdio
+    `tan build`/`tan run`, caught only by `build()`'s own outer `except
+    Exception` and reported as a fabricated `build.internal-failure` instead
+    of simply running with the heartbeat disabled.
+
+    tan-cli#488 round 6: the round-5 fix only added `sys.stderr is not
+    None` in front of the same bare `.isatty()` call -- which stops a
+    `None` stderr from crashing this line, but not a stderr that EXISTS and
+    simply has no `.isatty()` method at all. `tan.cli.main` installs exactly
+    that shape under `--format json`: `sys.stderr` becomes `_TeeStderr`
+    (`cli.py`'s tee, `write`/`flush`/`getvalue` only, no `isatty`), which is
+    not `None`, so round 5's guard let the call through and
+    `run_cmd._run` -> `_build` -> here crashed with `AttributeError:
+    '_TeeStderr' object has no attribute 'isatty'` on every `tan run
+    --format json` -- exit 5, `run.internal-failure`, before a single slice
+    ever dispatched (measured against the real binary). This is the exact
+    condition `tan.env.stderr_is_tty` already exists to guard (tan-cli#288)
+    and `use_color`/`wrap_width` already share -- a `None` check does not
+    cover a stream that exists but lacks the method, which is the whole
+    class this line, `tan.core.consent.can_prompt` and `doctor_cmd.
+    fix_suppressed_issue` all shared the same wrong shape for. Now routed
+    through the one shared probe instead of a fourth hand-rolled copy.
     # ponytail: the one live gap this leaves -- `tan run --format json` with
     # a REAL terminal still attached to stderr would arm the heartbeat where
-    # it should stay silent. stdout (the envelope channel) is untouched
-    # either way; thread `json_mode` through `run_cmd._build_then_run` if
-    # that combination is ever hit for real.
+    # it should stay silent (`run_cmd._run` does not thread its own
+    # `json_mode` into `_build`, so `_dispatch` always sees the default
+    # `False` on that path -- see `run_cmd.py:267`). stdout (the envelope
+    # channel) is untouched either way, and the crash this round fixes is
+    # closed regardless of `json_mode`'s value, since `stderr_is_tty()` is
+    # false for a `_TeeStderr` on its own merits; threading `json_mode`
+    # through `run_cmd._run` is a separate, narrower polish left for its own
+    # change, out of this file's scope to add.
 
     A demoted slice still names a literal `${TOOLCHAIN_ROOT}` in its own
     fields because this host resolved no toolchain. `execute_slices` does not
@@ -980,7 +1014,7 @@ def _dispatch(
     # that also inherited the terminal's stderr). `__enter__`/`__exit__` run
     # regardless of what happens inside, so a dispatch that raises still
     # stops the thread and blanks any line it had printed.
-    with _Heartbeat(enabled=not json_mode and sys.stderr.isatty()) as heartbeat:
+    with _Heartbeat(enabled=not json_mode and stderr_is_tty()) as heartbeat:
         dispatched = iter(
             execute_slices(
                 replace(plan, slices=runnable),
@@ -1150,7 +1184,7 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
 def _build(
     *,
     # Defaulted so `mode` stays optional for the OTHER caller of this engine:
-    # `run_cmd._build_then_run` builds unconditionally (there is no `tan run
+    # `run_cmd._run` builds unconditionally (there is no `tan run
     # --plan`/`--materialise`) and has no mode to pass.
     mode: str = _MODE_NATIVE,
     plan_from: str | None,
@@ -1158,7 +1192,7 @@ def _build(
     sdk_root: str | None,
     sdk_root_for_stamp: str | None,
     board_yaml: str | None,
-    # Defaulted for the same reason as `mode`: `run_cmd._build_then_run`
+    # Defaulted for the same reason as `mode`: `run_cmd._run`
     # calls this with no format preference of its own today. Threaded
     # straight through to `_dispatch`, which is where the heartbeat this
     # gates is actually armed -- see that function's own docstring.
@@ -1497,122 +1531,139 @@ def build(
     # below. `project is None` (the overwhelming common case, no flag given)
     # makes `workspace_root == cwd`, byte-for-byte the prior behaviour -- this
     # only changes anything when `--project` is actually given.
-    cwd = Path.cwd()
-    workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
-
-    # Anchor an EXPLICIT `--board-yaml` on `workspace_root`, not the real cwd,
-    # before anything derives from it (the default build root below included).
-    # `_abs_posix` is purely lexical (`os.path.abspath`, which anchors on
-    # `os.getcwd()`), so a relative `--board-yaml` left untouched re-anchors on
-    # the real cwd instead -- matching Rust's `resolve_board_yaml_path`
-    # (`crates/tan-core/src/project.rs:198-208`, which joins a relative
-    # configured path onto `workspace_root`). Verified against the oracle in a
-    # scratch tree (`tmp/app/board.yaml`, cwd=`tmp`): `tan --project app build
-    # --board-yaml board.yaml --format json` must report `project.root` /
-    # `project.boardYaml` under `tmp/app`, not `tmp` -- with a board.yaml also
-    # sitting in the real cwd, the pre-fix anchor planned and built the WRONG
-    # project without a word, exactly the failure class this port exists to
-    # remove.
-    if board_yaml is not None and not os.path.isabs(board_yaml):
-        board_yaml = os.path.join(str(workspace_root), board_yaml)
-
-    # Resolution, in one place, before anything can fail -- and to ABSOLUTE,
-    # BOTH sides, from the same anchor.
     #
-    # The divergence guard in `apply_plan_token_substitution` compares these
-    # two lexically (as the Rust oracle does), so they must move together: this
-    # resolves both or neither, never one. But they must also both be absolute,
-    # because `${PROJECT_ROOT}` is substituted from `board_yaml` and then
-    # CONSUMED from a different directory -- each slice runs its command in its
-    # own `command.cwd` (`<root>/build/<slice>`), and Zephyr resolves
-    # `-DEXTRA_CONF_FILE` against the APPLICATION source dir, which for the
-    # stock-shim slice is inside the SDK checkout entirely. Left relative, the
-    # default `cd <project> && tan build` resolves `${PROJECT_ROOT}` to `"."`
-    # and every zephyr slice dies -- `<sdk>/firmware/alp-stock-shim/./build/
-    # <slice>/alp.conf: File not found`, and `ERROR: . doesn't contain a
-    # CMakeLists.txt` -- which is the whole documented happy path. Rust never
-    # hits this because it anchors first: `resolve_cli_project_context_inner`
-    # builds `workspace_root = normalize_path(cwd.join(--project))` and derives
-    # `board_yaml_path` by joining onto THAT, so both are absolute before the
-    # guard ever runs (`crates/tan-cli/src/util.rs`, `crates/tan-core/src/
-    # project.rs::resolve_board_yaml_path`).
-    if board_yaml is None and (workspace_root / "board.yaml").is_file():
-        # Already absolute (anchored on `workspace_root`, not a bare
-        # relative "board.yaml") so `_abs_posix` below is a no-op
-        # normalisation rather than a re-anchor onto the real cwd -- the
-        # divergence that would reappear the moment `--project` differs
-        # from cwd.
-        board_yaml = str(workspace_root / "board.yaml")
-    if build_root is None:
-        build_root = str(Path(board_yaml).parent) if board_yaml else str(workspace_root)
-    build_root = _abs_posix(build_root)
-    if board_yaml is not None:
-        board_yaml = _abs_posix(board_yaml)
-
-    # `--sdk-root` > the project's own `.alp/sdk-path` pin > the machine-global
-    # default > the positional walk (`resolve_sdk_root_ladder`, above) --
-    # previously this skipped straight from `--sdk-root` to the positional
-    # walk, so `tan init`'s own pointer went unread the moment `tan build` ran
-    # in the same directory.
-    sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
-    resolved_sdk_root = sdk_resolution.path
-    sdk_tier = sdk_resolution.tier
-    sdk_broken_pin = sdk_resolution.broken_project_pin
-    sdk_foreign_default = sdk_resolution.foreign_global_default_for
-    # tan-cli#407: computed HERE, while `sdk_root` still holds the raw
-    # `--sdk-root` flag -- it is reassigned to the RESOLVED root a few lines
-    # below, and a bogus flag is blanked to `None` in between, which would
-    # make this warn about a discovery collision the user never reached
-    # because they named a root explicitly.
-    sdk_divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=False)
-    # tan-cli#257/#258: `resolve_sdk_root_ladder` returns an explicit
-    # `--sdk-root` UNVALIDATED (I-31 terminal-for-REPORTING, matching the
-    # oracle's `resolve_sdk_tiered`) -- fine for a caller that only reports
-    # the tier, but `build` also ACTS on `resolved_sdk_root`, so a bogus flag
-    # used to sail through as `sdk.sourceTier: "sdkRootFlag"`, reach
-    # `_emit_plan` as a non-None `sdk_root`, and get refused for the NEXT
-    # missing thing (`no board.yaml found`) instead -- telling the customer
-    # their project is broken when the `--sdk-root` they just typed is what's
-    # wrong, and reporting an `sdk` key the oracle never emits on this path.
-    # Validated here, at the flag's own entry point, rather than in the
-    # shared ladder (which every other caller also relies on staying
-    # unvalidated) -- same shape as `clean_cmd.sdk_root_resolves` and
-    # `flash_cmd._resolve_sdk`, the two callers that already guard their own
-    # explicit `--sdk-root`. An unresolvable explicit root is treated as no
-    # root at all: `_emit_plan` then gives its own "no alp-sdk checkout
-    # found" refusal, and no `sdk` key is reported, matching the oracle.
-    if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk_root):
-        resolved_sdk_root = None
-    sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
-    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
-    # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the
-    # sdk-switch-pristine guard actually compares (tan-cli#163), kept
-    # SEPARATE from `sdk_root` itself: an explicit `--sdk-root` is a
-    # documented, supported relative form, and `sdk_root` unchanged still
-    # feeds `${SDK_ROOT}` token substitution and the `sdk.root` envelope
-    # field verbatim, matching the Rust oracle's own split between
-    # `normalized_sdk_root_str` (stamp-only) and the raw `resolve_sdk_root`
-    # result used everywhere else.
-    sdk_root_for_stamp = (
-        str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
-    )
-    # tan-cli#236: `boardYaml` reported only when the file really exists --
-    # `board_yaml` itself stays unfiltered for `_build` below, which needs the
-    # unconditional path.
-    project = Project.resolved(build_root, board_yaml)
-
-    # tan-cli#287: the heartbeat that covers a silent slice (a first-build
-    # CMake configure, measured at 234.2s with nothing printed) is armed
-    # inside `_dispatch`, not here -- `_build`'s OTHER caller,
-    # `run_cmd._build_then_run`, bottlenecks through the identical
-    # `_dispatch` call and needs the same cover for a silent `tan run`. See
-    # `_dispatch`'s own docstring for the TTY/`json_mode` gating (unchanged:
-    # still never armed for `--format json`, stdout is untouched either way)
-    # and for the mode-gating this also fixes for free -- `_MODE_PLAN`/
-    # `_MODE_MATERIALISE` return from `_build` before `_dispatch` is ever
-    # reached, so neither ticks a heartbeat for a slow in-process planner
-    # that never runs CMake at all.
+    # tan-cli#488 defect 8: safe defaults for every name the exception handler
+    # below and the final `emit()` read, so a raise from ANYWHERE in this
+    # resolution prologue -- not only inside `_build` -- still produces the
+    # `build.internal-failure` envelope the guard below promises, instead of a
+    # raw traceback with empty stdout. `Path.cwd()` immediately below is the
+    # concrete case: a working directory deleted out from under the process
+    # throws `FileNotFoundError` -- previously from OUTSIDE the `try`/`except`,
+    # before `project`/`sdk`/`sdk_tier` had a real value, so it unwound through
+    # typer's own traceback renderer instead of this command's error contract.
+    # Mirrors `doctor_cmd.doctor`'s identical fix for the same defect class.
+    project_envelope = Project(root=None, board_yaml=None)
+    sdk: SdkInfo | None = None
+    sdk_tier = "none"
+    sdk_broken_pin: str | None = None
+    sdk_foreign_default: str | None = None
+    sdk_divergence: Issue | None = None
     try:
+        cwd = Path.cwd()
+        workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
+
+        # Anchor an EXPLICIT `--board-yaml` on `workspace_root`, not the real cwd,
+        # before anything derives from it (the default build root below included).
+        # `_abs_posix` is purely lexical (`os.path.abspath`, which anchors on
+        # `os.getcwd()`), so a relative `--board-yaml` left untouched re-anchors on
+        # the real cwd instead -- matching Rust's `resolve_board_yaml_path`
+        # (`crates/tan-core/src/project.rs:198-208`, which joins a relative
+        # configured path onto `workspace_root`). Verified against the oracle in a
+        # scratch tree (`tmp/app/board.yaml`, cwd=`tmp`): `tan --project app build
+        # --board-yaml board.yaml --format json` must report `project.root` /
+        # `project.boardYaml` under `tmp/app`, not `tmp` -- with a board.yaml also
+        # sitting in the real cwd, the pre-fix anchor planned and built the WRONG
+        # project without a word, exactly the failure class this port exists to
+        # remove.
+        if board_yaml is not None and not os.path.isabs(board_yaml):
+            board_yaml = os.path.join(str(workspace_root), board_yaml)
+
+        # Resolution, in one place, before anything can fail -- and to ABSOLUTE,
+        # BOTH sides, from the same anchor.
+        #
+        # The divergence guard in `apply_plan_token_substitution` compares these
+        # two lexically (as the Rust oracle does), so they must move together: this
+        # resolves both or neither, never one. But they must also both be absolute,
+        # because `${PROJECT_ROOT}` is substituted from `board_yaml` and then
+        # CONSUMED from a different directory -- each slice runs its command in its
+        # own `command.cwd` (`<root>/build/<slice>`), and Zephyr resolves
+        # `-DEXTRA_CONF_FILE` against the APPLICATION source dir, which for the
+        # stock-shim slice is inside the SDK checkout entirely. Left relative, the
+        # default `cd <project> && tan build` resolves `${PROJECT_ROOT}` to `"."`
+        # and every zephyr slice dies -- `<sdk>/firmware/alp-stock-shim/./build/
+        # <slice>/alp.conf: File not found`, and `ERROR: . doesn't contain a
+        # CMakeLists.txt` -- which is the whole documented happy path. Rust never
+        # hits this because it anchors first: `resolve_cli_project_context_inner`
+        # builds `workspace_root = normalize_path(cwd.join(--project))` and derives
+        # `board_yaml_path` by joining onto THAT, so both are absolute before the
+        # guard ever runs (`crates/tan-cli/src/util.rs`, `crates/tan-core/src/
+        # project.rs::resolve_board_yaml_path`).
+        if board_yaml is None and (workspace_root / "board.yaml").is_file():
+            # Already absolute (anchored on `workspace_root`, not a bare
+            # relative "board.yaml") so `_abs_posix` below is a no-op
+            # normalisation rather than a re-anchor onto the real cwd -- the
+            # divergence that would reappear the moment `--project` differs
+            # from cwd.
+            board_yaml = str(workspace_root / "board.yaml")
+        if build_root is None:
+            build_root = str(Path(board_yaml).parent) if board_yaml else str(workspace_root)
+        build_root = _abs_posix(build_root)
+        if board_yaml is not None:
+            board_yaml = _abs_posix(board_yaml)
+
+        # `--sdk-root` > the project's own `.alp/sdk-path` pin > the machine-global
+        # default > the positional walk (`resolve_sdk_root_ladder`, above) --
+        # previously this skipped straight from `--sdk-root` to the positional
+        # walk, so `tan init`'s own pointer went unread the moment `tan build` ran
+        # in the same directory.
+        sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+        resolved_sdk_root = sdk_resolution.path
+        sdk_tier = sdk_resolution.tier
+        sdk_broken_pin = sdk_resolution.broken_project_pin
+        sdk_foreign_default = sdk_resolution.foreign_global_default_for
+        # tan-cli#407: computed HERE, while `sdk_root` still holds the raw
+        # `--sdk-root` flag -- it is reassigned to the RESOLVED root a few lines
+        # below, and a bogus flag is blanked to `None` in between, which would
+        # make this warn about a discovery collision the user never reached
+        # because they named a root explicitly.
+        sdk_divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=False)
+        # tan-cli#257/#258: `resolve_sdk_root_ladder` returns an explicit
+        # `--sdk-root` UNVALIDATED (I-31 terminal-for-REPORTING, matching the
+        # oracle's `resolve_sdk_tiered`) -- fine for a caller that only reports
+        # the tier, but `build` also ACTS on `resolved_sdk_root`, so a bogus flag
+        # used to sail through as `sdk.sourceTier: "sdkRootFlag"`, reach
+        # `_emit_plan` as a non-None `sdk_root`, and get refused for the NEXT
+        # missing thing (`no board.yaml found`) instead -- telling the customer
+        # their project is broken when the `--sdk-root` they just typed is what's
+        # wrong, and reporting an `sdk` key the oracle never emits on this path.
+        # Validated here, at the flag's own entry point, rather than in the
+        # shared ladder (which every other caller also relies on staying
+        # unvalidated) -- same shape as `clean_cmd.sdk_root_resolves` and
+        # `flash_cmd._resolve_sdk`, the two callers that already guard their own
+        # explicit `--sdk-root`. An unresolvable explicit root is treated as no
+        # root at all: `_emit_plan` then gives its own "no alp-sdk checkout
+        # found" refusal, and no `sdk` key is reported, matching the oracle.
+        if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk_root):
+            resolved_sdk_root = None
+        sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
+        sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
+        # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the
+        # sdk-switch-pristine guard actually compares (tan-cli#163), kept
+        # SEPARATE from `sdk_root` itself: an explicit `--sdk-root` is a
+        # documented, supported relative form, and `sdk_root` unchanged still
+        # feeds `${SDK_ROOT}` token substitution and the `sdk.root` envelope
+        # field verbatim, matching the Rust oracle's own split between
+        # `normalized_sdk_root_str` (stamp-only) and the raw `resolve_sdk_root`
+        # result used everywhere else.
+        sdk_root_for_stamp = (
+            str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
+        )
+        # tan-cli#236: `boardYaml` reported only when the file really exists --
+        # `board_yaml` itself stays unfiltered for `_build` below, which needs the
+        # unconditional path.
+        project_envelope = Project.resolved(build_root, board_yaml)
+
+        # tan-cli#287: the heartbeat that covers a silent slice (a first-build
+        # CMake configure, measured at 234.2s with nothing printed) is armed
+        # inside `_dispatch`, not here -- `_build`'s OTHER caller,
+        # `run_cmd._run`, bottlenecks through the identical
+        # `_dispatch` call and needs the same cover for a silent `tan run`. See
+        # `_dispatch`'s own docstring for the TTY/`json_mode` gating (unchanged:
+        # still never armed for `--format json`, stdout is untouched either way)
+        # and for the mode-gating this also fixes for free -- `_MODE_PLAN`/
+        # `_MODE_MATERIALISE` return from `_build` before `_dispatch` is ever
+        # reached, so neither ticks a heartbeat for a slow in-process planner
+        # that never runs CMake at all.
         exit_code, data, issues = _build(
             mode=mode,
             plan_from=plan_from,
@@ -1661,7 +1712,7 @@ def build(
         issues = [*resolution_issues, *issues]
 
     if json_mode:
-        emit(Envelope("build", project, data, issues, exit_code, sdk=sdk))
+        emit(Envelope("build", project_envelope, data, issues, exit_code, sdk=sdk))
     else:
         for issue in issues:
             print(f"{issue.severity}: {issue.message}", file=sys.stderr)

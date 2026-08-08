@@ -1537,6 +1537,49 @@ def test_format_json_refuses_to_prompt_even_on_a_terminal(tmp_path, monkeypatch)
     assert "--soc-ref, --family" in payload["issues"][0]["message"]
 
 
+def test_non_interactive_stdin_reports_the_missing_flags_when_stdin_is_none(tmp_path, monkeypatch):
+    """tan-cli#488 round 5 class sweep: `sys.stdin` itself, not just the
+    result of calling `.isatty()` on it, can be `None` -- a process launched
+    with its standard handles detached (a GUI launcher, a `pythonw`-style
+    spawn, or a shell that closed fd 0 before exec). A bare
+    `sys.stdin.isatty()` in the "pipe / CI, fail fast" branch raised
+    `AttributeError: 'NoneType' object has no attribute 'isatty'` there
+    instead of reaching the clean, named refusal
+    `test_non_interactive_stdin_reports_the_missing_flags` (above) already
+    covers for a merely non-tty stdin. Uses `_marker_sdk`, not
+    `@needs_oracle_sdk`: this is the argument-gathering branch, reached
+    before anything schema-real is needed.
+
+    `sys.stdin` is set to `None` as a side effect of `resolve_sdk_tiered`
+    (monkeypatched to a thin wrapper around the real function), not before
+    `runner.invoke()`: `CliRunner.invoke`'s own `isolation()` context manager
+    swaps `sys.stdin` for its own captured stream at the START of every
+    invocation, so a monkeypatch applied before `invoke()` is silently
+    overwritten before `new_som()` ever runs, and this test would pass
+    whether or not the bug is fixed (measured) -- the same trap
+    `test_doctor_fix_with_stdin_none_does_not_crash_before_reaching_fix_suppressed_issue`
+    documents in `test_doctor_command.py`. `resolve_sdk_tiered` is the last
+    thing `new_som()` calls before the vulnerable branch, so patching it is
+    the earliest hook inside the real call that still lands before the bug."""
+    import tan.commands.new_som_cmd as new_som_cmd_module
+
+    real_resolve_sdk_tiered = new_som_cmd_module.resolve_sdk_tiered
+
+    def _resolve_sdk_tiered_then_detach_stdin(*a, **k):
+        result = real_resolve_sdk_tiered(*a, **k)
+        new_som_cmd_module.sys.stdin = None
+        return result
+
+    monkeypatch.setattr(
+        new_som_cmd_module, "resolve_sdk_tiered", _resolve_sdk_tiered_then_detach_stdin
+    )
+    sdk = _marker_sdk(tmp_path / "sdk")
+    out = tmp_path / "out"
+    result = runner.invoke(app, ["--dry-run", "--sdk-root", str(sdk), "--output-root", str(out)])
+    assert result.exit_code == 1
+    assert "--sku" in result.output and "--soc-ref" in result.output and "--family" in result.output
+
+
 def test_bad_format_value_is_a_usage_error(tmp_path):
     """`--format` is validated at the boundary, matching every sibling
     (`faultdecode`, `size`, `sdk`): an unknown value is a Click usage error

@@ -28,6 +28,7 @@ modes themselves against the captured oracle measurements.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -774,6 +775,85 @@ def test_a_missing_plan_file_is_a_coded_envelope(project):
     assert proc.returncode == 1, env
     assert env["ok"] is False
     assert [i["code"] for i in env["issues"]] == ["build.plan-unavailable"]
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_deleted_working_directory_still_produces_an_envelope(tmp_path, monkeypatch):
+    """tan-cli#488 defect 8: the resolution prologue (`Path.cwd()` through
+    `resolve_sdk_root_ladder`) used to run OUTSIDE the `try`/`except` that
+    turns a raise into the `build.internal-failure` envelope -- reachable
+    whenever the working directory is removed out from under the process (a
+    cleanup script racing a `tan build` run in the same shell). Reproduced
+    exactly as the CLI sees it: chdir into a directory, delete it, then spawn
+    the real subprocess with no explicit `cwd=` so it inherits the deleted
+    one, mirroring `doctor_cmd`'s identical regression test.
+
+    That real-deletion repro is POSIX-only by construction, not a test gap:
+    a directory that is any process's current working directory holds an
+    implicit handle the Windows kernel will not let ANY process -- including
+    the one sitting in it -- remove (`shutil.rmtree` raises `PermissionError:
+    [WinError 32] The process cannot access the file because it is being used
+    by another process`, before a subprocess is ever spawned). POSIX's rmdir
+    has no such restriction, which is the whole premise this test exercises.
+    On Windows the state genuinely cannot be constructed, so this reproduces
+    the SAME guarded code path -- `build_cmd.build`'s `Path.cwd()` resolution
+    prologue turning a raise into `build.internal-failure` -- through a direct
+    in-process invocation with `Path.cwd` mocked to raise instead, matching
+    `doctor_cmd`/`validate_cmd`/`flash_cmd`'s sibling tests for the identical
+    defect. The property under test (the guard's own behaviour) is platform-
+    independent even though the real-deletion construction is not.
+    """
+    if os.name == "nt":
+        import typer
+        from typer.testing import CliRunner
+
+        from tan.commands import build_cmd
+
+        def raise_gone():
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(build_cmd.Path, "cwd", staticmethod(raise_gone))
+        app = typer.Typer()
+        app.command("build")(build_cmd.build)
+        result = CliRunner().invoke(app, ["--format", "json"])
+
+        env_doc = json.loads(result.stdout)
+        assert env_doc["ok"] is False
+        assert result.exit_code == env_doc["exitCode"] == 5, env_doc
+        assert env_doc["project"] == {"root": None, "boardYaml": None}, env_doc
+        assert any(
+            i["code"] == "build.internal-failure" for i in env_doc["issues"]
+        ), env_doc["issues"]
+        return
+
+    gone = tmp_path / "gone_dir_build"
+    gone.mkdir()
+    prev_cwd = os.getcwd()
+    os.chdir(gone)
+    try:
+        shutil.rmtree(gone)
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+            ),
+        }
+        proc = subprocess.run(
+            [sys.executable, "-m", "tan", "build", "--format", "json"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+    finally:
+        os.chdir(prev_cwd)
+
+    env_doc = envelope_of(proc)
+    assert env_doc["ok"] is False
+    assert proc.returncode == env_doc["exitCode"] == 5, env_doc
+    assert env_doc["project"] == {"root": None, "boardYaml": None}, env_doc
+    assert any(i["code"] == "build.internal-failure" for i in env_doc["issues"]), env_doc["issues"]
     assert "Traceback" not in proc.stderr
 
 
