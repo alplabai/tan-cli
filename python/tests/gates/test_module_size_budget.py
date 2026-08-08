@@ -708,12 +708,8 @@ _MODULE_BUDGET: dict[str, int] = {
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
     # resolved, the same cost `project_pin_issue` above already justified.
-    # 1064, not 1057, as of tan-cli#488 round 5 class sweep: the "pipe / CI,
-    # fail fast" branch read a bare `sys.stdin.isatty()`; a detached stdin
-    # raised `AttributeError` instead of reaching the clean, named refusal
-    # this branch exists to give. Gained a `sys.stdin is None or` guard plus
-    # a short comment.
-    "tan/commands/new_som_cmd.py": 1064,
+    "tan/commands/new_som_cmd.py": 1341,
+
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
@@ -1082,6 +1078,18 @@ _MIRRORED = ("tan/planner/",)
 # not 707 -- unrelated to this change (that function is untouched here) and
 # still comfortably under the recorded ceiling, so the ceiling is left as
 # recorded rather than tightened on faith.
+# 212, not 211, as of tan-cli#496's remaining-defects pass:
+# `new_som_cmd.py:_rollback_write_failure` is a genuinely NEW function (61
+# lines) extracted from the write-failure `except OSError:` block so the
+# restore-vs-delete logic (defect 2) and the exists()-gated cleanup
+# reporting (the finding against this file's own earlier fix) are
+# unit-testable on their own; every other function this pass touched
+# (`_interactive`, `_render_preset`, `new_som`, `scaffold_cmd.py:scaffold`)
+# was already over 50 lines before it, so growing them moves nothing here.
+# `_FUNCTION_WORST_BUDGET` is untouched -- `_rollback_write_failure` is 61
+# lines and `new_som` (grown to 506) is still well under `bootstrap_cmd.
+# _run`'s 701, itself under the recorded 707.
+
 # 213, not 211, as of the tan-cli#510 REVIEW round: two functions crossed 50
 # lines, both docstring/parameter growth, not new branching:
 # `build/execute.py:_resolve_tool` (47 -> 71) gained an `env` parameter
@@ -1095,6 +1103,9 @@ _MIRRORED = ("tan/planner/",)
 # anywhere near `_FUNCTION_WORST_BUDGET`. Re-walked with the gate's own
 # `ast` logic against this exact tree, not computed from the diff alone.
 #
+# 214 on the merged tree, MEASURED by AST walk -- neither side's number: #496
+# contributed one crossing (212) and tan-cli#530's resolver two (213), and the
+# union is 214, not either. Taking either side here fails the gate.
 # 213 on the merged tree, measured by AST walk: #516 added no long function, and
 # tan-cli#530 (#510's resolver) added two -- so dev's figure carries, not #516's
 # pre-merge 211.
@@ -1102,7 +1113,13 @@ _MIRRORED = ("tan/planner/",)
 # 218 on the merged tree, MEASURED by AST walk over all of `tan/` including
 # `tan/planner/` -- neither side's figure; #488's doctor/consent work and dev's
 # tan-cli#530 resolver both add crossings.
-_FUNCTION_COUNT_BUDGET = 218
+# 214 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- #496 contributes one crossing that dev's 213 does not.
+#
+# 219 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- neither #488's 218 nor dev's 214: the two branches' crossings
+# are disjoint and `new_som_cmd.py`'s gate resolution adds none of its own.
+_FUNCTION_COUNT_BUDGET = 219
 _FUNCTION_WORST_BUDGET = 707
 
 

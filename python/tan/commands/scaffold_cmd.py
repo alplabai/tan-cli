@@ -147,7 +147,12 @@ def _resolve_module_name(name: str | None, interactive: bool) -> str:
     if not interactive:
         raise _need_name()
     try:
-        raw = click.prompt("Module name")
+        # `err=True`: `click.prompt`'s own default (`err=False`) writes the
+        # question to stdout, which corrupts whatever this run is piping or
+        # redirecting there and leaves a real terminal on stderr showing
+        # nothing to answer (tan-cli#496 defect 6, measured against the
+        # frozen oracle: `inquire::Text` renders to stderr).
+        raw = click.prompt("Module name", err=True)
     except click.exceptions.Abort as err:
         raise _cancelled() from err
     stripped = raw.strip()
@@ -168,7 +173,10 @@ def _resolve_template(template: str | None, interactive: bool) -> str:
     if not interactive:
         return DEFAULT_MODULE_TEMPLATE_ID
     try:
-        return click.prompt("Select a module template", type=click.Choice(MODULE_TEMPLATE_IDS))
+        # See `_resolve_module_name`'s `err=True` note -- same defect.
+        return click.prompt(
+            "Select a module template", type=click.Choice(MODULE_TEMPLATE_IDS), err=True
+        )
     except click.exceptions.Abort as err:
         raise _cancelled() from err
 
