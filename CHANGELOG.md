@@ -758,6 +758,42 @@ All notable changes to `tan` are documented here. Format follows
     a new text-only test (no `pwsh` needed, so it runs on every OS this
     suite runs on) asserts the shipped source keeps it there. (Inspected,
     not executed against a real `pwsh`.) (#490)
+- **`tan flash`'s `swd_probe` OpenOCD and pyOCD arms read no probe-selection
+  field at all**, so a multi-probe host had no way to say which one to use --
+  an ABSENT feature, not (#513)'s accept-and-ignore shape (that fix covered
+  only the J-Link arm's `flash_args.jlink_serial`). Two new fields, not one
+  neutral field reused across all three tools: `flash_args.
+  openocd_usb_location` renders as its own `adapter usb location <path>` `-c`
+  word, ahead of the target config (OpenOCD selects a probe by USB path);
+  `flash_args.pyocd_uid` renders as pyOCD's own `--uid <value>`. `JLinkExe`
+  keeps `jlink_serial` (serial-only; it has no USB-path selector at all) --
+  the three fields are different identifiers for different tools, not three
+  spellings of one. Each new field is charset-guarded the way #486 already
+  guards `interface`/`target`/`jlink_serial` (`validate_openocd_word` for the
+  Tcl word, `validate_identifier` for the argv-only `pyocd_uid`), and each is
+  now REFUSED, not silently dropped, when set on an arm that cannot honour it
+  -- mirroring #513's own wrong-arm refusal, in both directions between all
+  three arms. This matters most on the alplab-gw bench, where two physically
+  different probes enumerate with the same OEM-cloned serial and only a USB
+  path can tell them apart. (#519)
+- **`tan flash`'s Flow D (`alif_mram_jlink`) reported `verified and
+  PIN-reset` even on a run whose reset chain ended in `Failed to halt CPU`**
+  -- the documented busy-resident case, where an image that never idles keeps
+  the core running so `VC_CORERESET` cannot halt it. JLinkExe still exits 0
+  here and the write itself is genuinely fine (`verifybin` passed), so this
+  was not a missed failure; it was a success message asserting an INTENT
+  (the same class as (#487) defect 6's asserted-but-never-sent address, not
+  a new one). `data.entries[].message` is what a `--format json` consumer
+  renders as the flash outcome, and the identical string used to cover both
+  a landed reset and a failed one. The message now reads the transcript
+  `--format json` already captures for this one tail (`; verified and
+  PIN-reset`) and swaps it for `; verified; reset requested, core was busy
+  and did not halt` when the transcript names the halt failure -- a
+  targeted substring swap scoped to Flow D's own message shape, not a
+  general transcript-scraping layer. Text-mode runs are unaffected (nothing
+  is captured there to read), and every other backend's `ok_message` is
+  unaffected (none of them assert a distinct post-write step -- a reset --
+  that can diverge from the exit code the way Flow D's did). (#522)
 
 
 

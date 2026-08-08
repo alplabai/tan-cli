@@ -1205,6 +1205,45 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     if serial is not None:
         validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
 
+    # tan-cli#519: the OpenOCD and pyOCD arms had NO probe-selection field at
+    # all -- an ABSENT feature, not #513's accept-and-ignore shape (`serial`,
+    # just above, is the ONLY selector this function used to read anywhere).
+    # Deliberately TWO new fields, not one neutral one reused across all three
+    # tools: `JLinkExe` selects by SERIAL only (`SelectEmuBySN`, above); OpenOCD
+    # selects by USB PATH (`adapter usb location 3-4.4.3`); pyOCD has its own
+    # `--uid`. A serial and a USB path are different identifiers, not two
+    # spellings of one -- collapsing them would force this planner to guess
+    # which shape a given manifest string names. Not hypothetical: on the
+    # alplab-gw bench, two DIFFERENT attached probes (distinct USB paths,
+    # distinct SW-DP IDs -- tan-cli#519) enumerate with the SAME OEM-cloned
+    # serial `603000869` -- a serial cannot disambiguate them; a USB path can.
+    #
+    # Both charset-guarded HERE, unconditionally, ahead of the arm split --
+    # mirroring `serial`'s own hoist just above, for the identical reason:
+    # `--dry-run` always takes the J-Link arm (the `inp.dry_run` bypass a few
+    # lines down), so a hostile value must be refused the same way under
+    # `--dry-run` and on a real run, whichever arm the real run happens to take.
+    #
+    # `openocd_usb_location` is interpolated into an OpenOCD `-c` Tcl command
+    # word (`adapter usb location <value>`, built below) -- `validate_identifier`
+    # would reject the dots a real USB topology path uses (`3-4.4.3`), so this
+    # is `validate_openocd_word`, the Jim-Tcl-metacharacter/control-character
+    # guard #486 already gives OpenOCD's other `-c` words.
+    openocd_usb_location = fa_str_checked(fa, "openocd_usb_location", False)
+    if openocd_usb_location is not None:
+        validate_openocd_word(
+            openocd_usb_location, "flash_args.openocd_usb_location"
+        )
+    # `pyocd_uid` only ever reaches argv (`pyocd flash --uid <value> ...`,
+    # below) -- no shell, no Tcl script -- but it is still an identifier-shaped
+    # value from an untrusted manifest, so it gets the same `validate_identifier`
+    # charset guard `jlink_serial` gets, not a bespoke pass-through.
+    pyocd_uid = fa_str_checked(fa, "pyocd_uid", False)
+    if pyocd_uid is not None:
+        validate_identifier(
+            pyocd_uid, "pyocd_uid", destination="a spawned pyocd command line argument"
+        )
+
     # tan-cli#520 REVIEW round 3, finding 1: `flash_args.jlink_device`'s
     # charset guard used to live ONLY inside `_resolve_jlink_device`, which
     # is called from the J-Link branch alone -- the openocd/pyocd branch
@@ -1272,6 +1311,30 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
         else:
             jlink = next((n for n in _JLINK_BINARIES if which(n)), None)
     if jlink is not None:
+        # tan-cli#519: the SAME wrong-arm refusal #513 gave `jlink_serial` on
+        # the OTHER side of this split (below), mirrored here -- a manifest
+        # naming an OpenOCD/pyOCD-only selector that then lands on the J-Link
+        # arm must refuse, not silently drop it. `JLinkExe` has no USB-path or
+        # `--uid` selector of its own; `jlink_serial` is its ONLY one.
+        if openocd_usb_location is not None:
+            raise FlashPlanError(
+                "swd_probe: flash_args.openocd_usb_location is set, but this run is "
+                "taking the J-Link path, which has no USB-location selector of its "
+                "own -- OpenOCD's `adapter usb location` is an OpenOCD-only primitive "
+                "(J-Link selects a probe by serial: flash_args.jlink_serial). Remove "
+                "flash_args.openocd_usb_location, or ensure no SEGGER J-Link is on "
+                "PATH and flash_args.use_openocd is set, so the manifest takes the "
+                "path flash_args.openocd_usb_location belongs to."
+            )
+        if pyocd_uid is not None:
+            raise FlashPlanError(
+                "swd_probe: flash_args.pyocd_uid is set, but this run is taking the "
+                "J-Link path, which has no --uid selector of its own -- pyOCD's "
+                "--uid is a pyOCD-only primitive (J-Link selects a probe by serial: "
+                "flash_args.jlink_serial). Remove flash_args.pyocd_uid, or ensure no "
+                "SEGGER J-Link is on PATH and flash_args.use_pyocd is set, so the "
+                "manifest takes the path flash_args.pyocd_uid belongs to."
+            )
         device = _resolve_jlink_device(fa)
         speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
         return FlashPlan(
@@ -1371,6 +1434,38 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
             "flash_args.expect_dpidr belongs to."
         )
 
+    # tan-cli#519: mirrors the two wrong-arm refusals just above -- neither
+    # OpenOCD's `adapter usb location` nor pyOCD's `--uid` is the OTHER tool's
+    # primitive, so a manifest naming one and then landing on the other must
+    # refuse rather than silently drop the selector (the same accept-and-ignore
+    # shape #513 closed for `jlink_serial`, now closed on this side too).
+    # `openocd`/`pyocd` are resolved HERE, ahead of the `interface`/`target`
+    # requirement below (mirroring `serial`'s/`expect_dpidr`'s own hoist), so
+    # the diagnosis is about the field this run cannot honour rather than a
+    # field it happens to be missing -- and reused, unchanged, by the argv
+    # build below instead of being computed a second time.
+    openocd = not force_pyocd and (inp.dry_run or which("openocd"))
+    pyocd = not force_openocd and (inp.dry_run or which("pyocd"))
+    if openocd_usb_location is not None and not openocd:
+        raise FlashPlanError(
+            "swd_probe: flash_args.openocd_usb_location is set, but this run is not "
+            "taking the OpenOCD path -- `adapter usb location` is an OpenOCD-only "
+            "primitive (pyOCD selects a probe by flash_args.pyocd_uid, J-Link by "
+            "flash_args.jlink_serial). Remove flash_args.openocd_usb_location, or "
+            "ensure OpenOCD is on PATH and flash_args.use_pyocd is not forcing the "
+            "pyOCD path, so the manifest takes the path "
+            "flash_args.openocd_usb_location belongs to."
+        )
+    if pyocd_uid is not None and not pyocd:
+        raise FlashPlanError(
+            "swd_probe: flash_args.pyocd_uid is set, but this run is not taking the "
+            "pyOCD path -- `--uid` is a pyOCD-only primitive (OpenOCD selects a probe "
+            "by flash_args.openocd_usb_location, J-Link by flash_args.jlink_serial). "
+            "Remove flash_args.pyocd_uid, or ensure pyOCD is on PATH and "
+            "flash_args.use_openocd is not forcing the OpenOCD path, so the manifest "
+            "takes the path flash_args.pyocd_uid belongs to."
+        )
+
     interface = _default(fa_str_checked(fa, "interface", False), "")
     target = _default(fa_str_checked(fa, "target", False), "")
     if not interface or not target:
@@ -1381,8 +1476,6 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
         )
     validate_identifier(interface, "interface")
     validate_identifier(target, "target")
-    openocd = not force_pyocd and (inp.dry_run or which("openocd"))
-    pyocd = not force_openocd and (inp.dry_run or which("pyocd"))
     if openocd:
         validate_openocd_word(inp.artefact, "the flash artefact path")
         # `openocd_program_word` braces the artefact UNCONDITIONALLY -- see
@@ -1400,11 +1493,28 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
         tool = "openocd"
         argv = (
             "openocd", "-f", f"interface/{interface}.cfg",
+            # tan-cli#519: the USB-path probe selector, emitted as its own `-c`
+            # command BEFORE the target config/program -- OpenOCD processes
+            # `-f`/`-c` in argv order, and `adapter usb location` must be set
+            # before anything triggers a connect (the target config or the
+            # `program` command below can). Absent entirely when the manifest
+            # names no `openocd_usb_location`, matching every other optional
+            # selector in this module (`jlink_serial`'s own `-SelectEmuBySN`).
+            *(
+                ("-c", f"adapter usb location {openocd_usb_location}")
+                if openocd_usb_location is not None
+                else ()
+            ),
             "-f", f"target/{target}.cfg", "-c", program,
         )
     elif pyocd:
         tool = "pyocd"
         parts = ["pyocd", "flash", "--target", target]
+        # tan-cli#519: pyOCD's own probe-UID selector -- an argv pair, not a
+        # Tcl word, so it needs no bracing/quoting the way the OpenOCD line
+        # above does.
+        if pyocd_uid is not None:
+            parts += ["--uid", pyocd_uid]
         # pyOCD's --base-address is documented binary-only; passing it for an
         # ELF/HEX is meaningless at best and a wrong-address write at worst.
         if is_bin:

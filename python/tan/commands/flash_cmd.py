@@ -896,6 +896,58 @@ def _execute_message(outcome: _Outcome, method: str, entry_id: str) -> str:
     return f"{method}[{entry_id}]: flash command failed"
 
 
+#: The two J-Link Commander phrases that mean the post-write PIN-reset
+#: (`RSetType 2` / `r` / `g`, `plan_alif_mram_jlink`'s own script) asked the
+#: core to halt and it refused -- the documented busy-resident case: an image
+#: that never idles keeps the core running, so `VC_CORERESET` cannot halt it
+#: (tan-cli#522). Matched against whatever JLinkExe printed, not derived from
+#: the exit code -- JLinkExe still exits 0 here (`outcome.success` is `True`;
+#: the WRITE and its `verifybin` genuinely succeeded), so the exit code alone
+#: cannot tell this run apart from one whose reset actually landed.
+_FLOW_D_HALT_FAILURE_MARKERS = ("Failed to halt CPU", "CPU is not halted")
+
+#: The exact tail `plan_alif_mram_jlink` always appends to `ok_message` --
+#: see its own `f"...; verified and PIN-reset"` lines. Matched verbatim so the
+#: qualification below is a targeted substring swap, not a re-derivation of
+#: the message shape.
+_FLOW_D_VERIFIED_AND_RESET = "; verified and PIN-reset"
+_FLOW_D_VERIFIED_ONLY = "; verified; reset requested, core was busy and did not halt"
+
+
+def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
+    """Downgrade Flow D's claimed `PIN-reset` to what the transcript actually
+    shows (tan-cli#522).
+
+    `plan_alif_mram_jlink` composes `ok_message` at PLAN time, before the
+    write has run -- it has no transcript to consult, so it reports the
+    INTENDED outcome ("verified and PIN-reset") unconditionally. The write
+    itself is genuinely fine here (`outcome.success` is `True`, `verifybin`
+    passed), but a busy-resident image can keep the core running straight
+    through `VC_CORERESET`, so the reset half did not take even though
+    JLinkExe still exits 0 -- the identical message otherwise reports every
+    run alike, whether the reset landed or the transcript ended in three
+    lines of J-Link errors. `data.entries[].message` is what a `--format
+    json` consumer renders as the outcome of the flash (the same surface
+    tan-cli#402/#487 fixed for the device/address halves of this message),
+    so an operator reading it cannot tell the two apart -- and on this board
+    the reset is what would have started the freshly-written image.
+
+    Scoped to a substring match on the CAPTURED transcript only
+    (`outcome.stdout`/`.stderr`, populated only under `--format json`'s
+    single-spawn capture -- see `_Outcome`/`_spawn`): a text-mode run streams
+    JLinkExe's own output straight to the operator's console already (that
+    console IS the diagnosis there), so `outcome.stdout`/`.stderr` are empty
+    and this is a no-op, same as `_execute_message`'s own capture-mode split.
+    Not a general transcript-scraping layer: this reads only the one tail
+    `plan_alif_mram_jlink` always appends, and only for `FLOW_D_METHOD`."""
+    if _FLOW_D_VERIFIED_AND_RESET not in ok_message:
+        return ok_message
+    transcript = outcome.stdout + outcome.stderr
+    if not any(marker in transcript for marker in _FLOW_D_HALT_FAILURE_MARKERS):
+        return ok_message
+    return ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY)
+
+
 # ── per-entry dispatch ──────────────────────────────────────────────────────
 
 
@@ -1561,6 +1613,8 @@ def _flash_entry(
         # a SUCCESSFUL sign too, not only via `missing_tool_message`/
         # `unresolved_message` on a failure.
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
+        if method == FLOW_D_METHOD:
+            ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
         lines.append(f"  ok: {ok_message}")
         return (
             0,

@@ -309,7 +309,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # unified across both arms; a separate stale-drift correction to a
     # related comment in `flash_cmd.py` is its own entry below. Comment-only;
     # net growth is the corrected explanation.
-    "tan/core/flash_plan.py": 2458,
+    # 2568, not 2458, as of tan-cli#519: `plan_swd_probe` gained the two new
+    # probe-selection fields the OpenOCD/pyOCD arms never had at all --
+    # `flash_args.openocd_usb_location` (an `adapter usb location` `-c` word,
+    # charset-guarded by `validate_openocd_word`) and `flash_args.pyocd_uid`
+    # (a `--uid` argv pair, guarded by `validate_identifier`) -- plus FOUR new
+    # wrong-arm refusals mirroring `jlink_serial`'s own #513 shape (each field
+    # refused on the OTHER two arms, not just accepted-and-ignored), all
+    # hoisted ahead of the `interface`/`target` requirement the same way
+    # `jlink_serial`/`expect_dpidr` already are. Net growth is mostly the
+    # per-field docstring/comment explaining why the shape is two distinct
+    # fields rather than one neutral one (the tools genuinely select probes
+    # differently) plus the four refusal messages themselves.
+    "tan/core/flash_plan.py": 2568,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
@@ -420,7 +432,20 @@ _MODULE_BUDGET: dict[str, int] = {
     # corrected to say so while keeping the underlying conclusion (no
     # preflight-only meaning for `jlink_device` on the openocd/pyocd arm)
     # unchanged. Comment-only; net growth is the correction.
-    "tan/commands/flash_cmd.py": 2317,
+    # 2371, not 2317, as of tan-cli#522: Flow D's static, plan-time
+    # `ok_message` used to claim `verified and PIN-reset` even when the
+    # transcript showed `Failed to halt CPU` -- an intent, not an observed
+    # outcome (the same class #487 defect 6 already fixed for `swd_probe`'s
+    # asserted address). `_flow_d_reset_qualified_message` reads the ALREADY-
+    # CAPTURED `outcome.stdout`/`.stderr` for the one tail
+    # `plan_alif_mram_jlink` always appends and swaps it for an honest
+    # sentence when the transcript names a halt failure -- a targeted
+    # substring swap, not a general transcript-scraping layer, and a no-op in
+    # text mode (nothing is captured there) or for any other backend's
+    # message (neither carries the tail this matches). Net growth is the new
+    # helper plus its docstring and the one call site in the ok-outcome
+    # branch.
+    "tan/commands/flash_cmd.py": 2371,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
