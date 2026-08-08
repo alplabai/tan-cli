@@ -614,7 +614,39 @@ _MODULE_BUDGET: dict[str, int] = {
     # wraps. `doctor_cmd.py`/`clean_cmd.py`/`inspect_cmd.py` took the same
     # conversion at 97/92/93 chars and kept their one-liners, which is why
     # only this one moves a number.
-    "tan/commands/flash_cmd.py": 2631,
+    #
+    # RE-MEASURED BELOW after rebasing onto that 2631. NOT 2951, and NOT
+    # 2951 + 2 either: this branch measured 2951 against a 2629 base, while
+    # dev reached 2631 from the same 2629 by the two-line `from_resolution`
+    # wrap -- and that wrap lands INSIDE a region this branch also rewrites,
+    # so the two do not simply stack. `wc -l` on the rebased tree is the only
+    # number that means anything here.
+    #
+    # As of tan-cli#540 + tan-cli#541 -- the two remaining
+    # intent-vs-observed defects on the write path, both of which live in
+    # this file. #540: `swd_probe`'s J-Link arm asserted `{device} flashed via
+    # J-Link @ {base}` on JLinkExe's exit code ALONE, on the one backend whose
+    # Commander script has no `verifybin` to fall back on -- #522 measured on
+    # real silicon that a halt failure does not move that exit code, so a load
+    # into a core that never halted reported a clean flash. Two pure helpers
+    # (`_swd_probe_halt_markers` reads the transcript, `_swd_probe_unconfirmed
+    # _message` swaps the claim and quotes what J-Link actually said), one
+    # `_Entry` field and one `_run` warning (`flash.swd-probe-write-
+    # unconfirmed`) mirroring `preflight_unarmed`'s existing shape exactly.
+    # #541: the `_Tee` that #522 needs handed the child `subprocess.PIPE` for
+    # both streams, so the child stopped seeing a tty and `pyocd`/`west`/
+    # `openocd` dropped the progress bar an operator watches through a
+    # multi-minute write. `_spawn`'s live-console branch now tees through a
+    # pty when the console is a real terminal (`_open_console_pty`,
+    # `_shape_console_pty`, `_close_console_pty`, `_tee_text`), keeping the
+    # pipes on Windows, on a non-terminal sink and on a host that cannot
+    # allocate one. Growth is overwhelmingly docstring: every one of the four
+    # new helpers is a handful of lines of body under a docstring recording
+    # WHY a pipe was not enough, which platform gets which path, and which
+    # `None` arm exists for which failure -- the same density the rest of this
+    # module's spawn machinery already carries, and the reason a reader can
+    # tell a deliberate platform difference from a silent one.
+    "tan/commands/flash_cmd.py": 2953,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -1408,6 +1440,19 @@ _MIRRORED = ("tan/planner/",)
 # 221 crossings live there) after the merge, exactly as the paragraph above
 # says to: taking either side's figure by ownership is the arithmetic mistake,
 # and here it would have shipped a budget the tree already exceeds.
+#
+# RE-MEASURED BELOW on the tree rebased onto that 220. Both sides read 220 and
+# both were right about their own tree -- each reached it from the same 219 by
+# a DIFFERENT crossing (dev: `diff_cmd._emit_failure`; this branch:
+# `flash_cmd._open_console_pty`) -- so "they agree, keep 220" is exactly the
+# arithmetic trap the paragraph above warns about. The crossings are disjoint.
+# This branch's one is `flash_cmd._open_console_pty` at 54
+# lines, of which 12 are body -- the rest is the docstring recording why the
+# pipe tee cost a flash tool its `isatty()` (with the measured before/after),
+# and the three cases that deliberately keep the pipe (Windows, a non-terminal
+# sink, a host that cannot allocate a pty). Extracting from it would only move
+# that prose somewhere a reader of the function would not find it; the three
+# siblings it was split into already sit under the cap.
 _FUNCTION_COUNT_BUDGET = 221
 _FUNCTION_WORST_BUDGET = 707
 

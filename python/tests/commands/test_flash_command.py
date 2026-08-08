@@ -28,6 +28,10 @@ import pytest
 
 from tan.commands import flash_cmd
 from tan.core import flash_plan
+#: The REAL process environment, captured at COLLECTION time -- see
+#: `tests/conftest.py`'s own note, and `_driver_env` below, which is this
+#: module's one consumer (tan-cli#541).
+from tests.conftest import REAL_ENVIRON
 from tan.core.bootstrap import venv_layout
 from tan.core.flash_plan import (
     FlashInputs,
@@ -5562,3 +5566,472 @@ def test_a_hex_artefact_is_refused_even_with_a_sibling_bin(tmp_path):
     # Proves this is the "wrong shape" refusal, not the "ELF with no sibling"
     # one -- a sibling .bin DOES exist here, and it must still not be used.
     assert "Only a plausibly-ELF artefact's" in message
+
+# ── tan-cli#540: swd_probe's J-Link arm must not claim a flash it never saw ──
+
+
+def _swd_probe_run(tmp_path, monkeypatch, *, stdout: str = "", stderr: str = ""):
+    """A confirmed, real `swd_probe` J-Link write whose spawn reports success
+    and whatever transcript the caller wants -- the shape tan-cli#540 is
+    about. Same manifest/PATH scaffolding the `expect_dpidr` unarmed pair
+    above uses; only `_spawn`'s stdout/stderr differ."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe, flash_args: {base: "0x08000000"}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flash_cmd,
+        "_spawn",
+        lambda *_a, **_k: flash_cmd._Outcome(success=True, stdout=stdout, stderr=stderr),
+    )
+    return flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+
+#: The tail of a real bench J-Link session whose reset chain could not halt the
+#: core, verbatim from tan-cli#522's own measurement on E1M-AEN801 silicon.
+#: JLinkExe still exits 0 through all of it, with `-ExitOnError 1` on the argv.
+_HALT_FAILURE_TRANSCRIPT = (
+    "RSetType 2\n"
+    "r\n"
+    "VC_CORERESET did not halt CPU\n"
+    "WARNING: CPU could not be halted\n"
+    "****** Error: Failed to halt CPU\n"
+    "g\n"
+    "CPU is not halted\n"
+)
+
+
+def test_swd_probe_write_into_a_core_that_never_halted_is_not_claimed_as_flashed(
+    tmp_path, monkeypatch
+):
+    """tan-cli#540's headline. `plan_swd_probe` composes `{device} flashed via
+    J-Link @ {base}` at PLAN time and `_flash_entry` asserted it on JLinkExe's
+    exit code alone -- and `jlink_commander_script` gives this arm no
+    `verifybin` at all, so nothing else could have checked. #522 measured on
+    real silicon that a halt failure leaves the exit code at 0 even with
+    `-ExitOnError 1` (which this arm carries), so the transcript is the only
+    evidence there is.
+
+    Fails against current `dev` (measured: the message is exactly
+    `swd_probe[gd32_bridge]: GD32G553MEY7TR flashed via J-Link @ 0x08000000`,
+    identical to a run whose core halted cleanly)."""
+    exit_code, data, _issues, _lines, _sdk = _swd_probe_run(
+        tmp_path, monkeypatch, stdout=_HALT_FAILURE_TRANSCRIPT
+    )
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    # The bare claim is gone -- and the message says what was observed.
+    assert "flashed via J-Link" not in entry["message"], entry
+    assert "write attempted via J-Link" in entry["message"], entry
+    assert "Failed to halt CPU" in entry["message"], entry
+    assert "no verifybin" in entry["message"], entry
+    # The resolved device and the address survive the swap: #402 and #487
+    # fixed those two halves of this same string and neither may regress.
+    assert "GD32G553MEY7TR" in entry["message"], entry
+    assert "0x08000000" in entry["message"], entry
+
+
+def test_swd_probe_unconfirmed_write_warns_in_json_and_in_default_text(tmp_path, monkeypatch):
+    """The machine-readable and operator-readable halves of tan-cli#540's
+    acceptance: an `ok` entry whose prose carries a caveat is not something a
+    `--format json` consumer can key off, and a bench operator does not pass
+    `--format json` at all -- `_run`'s caller prints only `text_lines` in the
+    DEFAULT mode.
+
+    Fails against current `dev` (measured: no such code exists there, and no
+    line of `text_lines` mentions the write being unconfirmed)."""
+    _exit_code, _data, issues, lines, _sdk = _swd_probe_run(
+        tmp_path, monkeypatch, stderr=_HALT_FAILURE_TRANSCRIPT
+    )
+
+    warnings = [i for i in issues if i.code == "flash.swd-probe-write-unconfirmed"]
+    assert len(warnings) == 1, issues
+    assert warnings[0].severity == "warning"
+    # Not an error: the write may well have landed, and there is no bench
+    # evidence that a GD32 halt failure means a failed write.
+    assert not any(i.code == "flash.entry-failed" for i in issues)
+    assert any("UNCONFIRMED" in line for line in lines), lines
+
+
+def test_swd_probe_clean_write_is_untouched_by_the_qualification(tmp_path, monkeypatch):
+    """The negative control. A `swd_probe` J-Link write whose transcript names
+    no halt failure keeps the byte-for-byte original claim and raises no
+    warning -- the qualification is a targeted substring swap driven by an
+    observed marker, not a blanket downgrade of every swd_probe success."""
+    _exit_code, data, issues, lines, _sdk = _swd_probe_run(
+        tmp_path, monkeypatch, stdout="Downloading file [zephyr.bin]...\nO.K.\n"
+    )
+
+    entry = data["entries"][0]
+    assert entry["message"] == (
+        "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed via J-Link @ 0x08000000"
+    )
+    assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues)
+    assert not any("UNCONFIRMED" in line for line in lines), lines
+
+
+def test_the_halt_qualification_does_not_reach_the_openocd_arm(tmp_path, monkeypatch):
+    """`swd_probe`'s OTHER arm neither emits JLinkExe's halt phrases nor makes
+    the `flashed via J-Link` claim, so the qualification is gated on the
+    J-Link arm having actually been taken -- the same
+    `swd_probe_took_jlink_arm` local tan-cli#520's review hoisted for the
+    DPIDR preflight, reused rather than duplicated. Guards against a future
+    edit widening the gate to `method == "swd_probe"`, which would fire on an
+    openocd transcript that merely happened to carry the phrase."""
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices: []
+helper_mcus:
+- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+   flash_method: swd_probe,
+   flash_args: {base: "0x08000000", use_openocd: true, interface: cmsis-dap,
+                target: gd32g5x}}
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    openocd_path = fake_tools / ("openocd.exe" if os.name == "nt" else "openocd")
+    openocd_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(openocd_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flash_cmd,
+        "_spawn",
+        lambda *_a, **_k: flash_cmd._Outcome(success=True, stdout=_HALT_FAILURE_TRANSCRIPT),
+    )
+
+    _exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    entry = data["entries"][0]
+    assert "flashed via openocd" in entry["message"], entry
+    assert "write attempted via J-Link" not in entry["message"], entry
+    assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues)
+
+
+def test_flow_d_keeps_its_own_wording_and_never_takes_the_swd_probe_swap():
+    """Flow D DOES have a `verifybin`, so its own halt-failure sentence
+    (tan-cli#522) says `verified; reset requested, core was busy and did not
+    halt` -- a materially different claim from `swd_probe`'s, which cannot say
+    `verified` at all. The two qualifications match different tails and must
+    not bleed into each other."""
+    from tan.commands.flash_cmd import (
+        _Outcome,
+        _flow_d_reset_qualified_message,
+        _swd_probe_halt_markers,
+        _swd_probe_unconfirmed_message,
+    )
+
+    outcome = _Outcome(success=True, stdout=_HALT_FAILURE_TRANSCRIPT, captured=True)
+    flow_d = "alif_mram_jlink[m55-he]: AE822 MRAM written; verified and PIN-reset"
+    qualified = _flow_d_reset_qualified_message(flow_d, outcome)
+    assert qualified.endswith("; verified; reset requested, core was busy and did not halt")
+    # swd_probe's swap finds nothing to replace in Flow D's message, and Flow
+    # D's finds nothing in swd_probe's.
+    markers = _swd_probe_halt_markers(outcome)
+    assert markers == ["Failed to halt CPU", "CPU is not halted"]
+    assert _swd_probe_unconfirmed_message(flow_d, markers).startswith(flow_d)
+    assert (
+        _flow_d_reset_qualified_message("swd_probe[b]: X flashed via J-Link @ 0x0", outcome)
+        == "swd_probe[b]: X flashed via J-Link @ 0x0"
+    )
+
+
+# ── tan-cli#541: the tee must not cost a flash tool its tty ─────────────────
+
+
+#: Asks the CHILD what it sees. `_spawn` is what stands between it and the
+#: console, so this one line is the entire measurement tan-cli#541 is about.
+_ISATTY_PROBE = (
+    "import sys; "
+    "print('stdout_isatty=%s stderr_isatty=%s' % "
+    "(sys.stdout.isatty(), sys.stderr.isatty()))"
+)
+
+
+def _driver_env(tan_module) -> dict[str, str]:
+    """The environment for a subprocess that must import `tan` for real.
+
+    Built from `REAL_ENVIRON` (captured at collection time in
+    `tests/conftest.py`), NOT from `os.environ` inside a test body:
+    `_scrub_sdk_discovery_env` has by then repointed `HOME` at a pytest tmp
+    dir, and on a user-site install (`~/.local/lib/pythonX.Y/site-packages`)
+    that alone is enough to make the child fail on `import typer` before it
+    reaches a single line of `_spawn`. `PYTHONPATH` is then pinned at THIS
+    tree's `python/` for the same reason `tan_under_test` pins it -- the child
+    must measure this checkout's `flash_cmd`, never an installed one.
+
+    `REAL_ENVIRON` is imported at this MODULE's top level, not here: importing
+    `tests.conftest` creates a second module object whose own
+    `REAL_ENVIRON = dict(os.environ)` runs at ITS import time, so an import
+    inside a test body captures the environment `_scrub_sdk_discovery_env`
+    has already rewritten -- the exact trap this helper exists to dodge,
+    reintroduced one line lower. Measured: with the import here, the child
+    still died on `import typer`."""
+    env = dict(REAL_ENVIRON)
+    repo_python = str(Path(tan_module.__file__).resolve().parents[1])
+    existing = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_python, *(p for p in existing if p != repo_python)]
+    )
+    return env
+
+
+def _spawn_under_a_pty(tmp_path, child_code: str, timeout: float = 30.0):
+    """Drive `_spawn` from a process whose OWN stderr is a real pty, and hand
+    back `(console_text, transcript)`.
+
+    There is no way to fake this: `_spawn` decides on `sink.isatty()`, and
+    pytest's `fd` capture makes `sys.stderr` a temp file, so a pty has to be
+    created for tan itself. That is exactly the rig tan-cli#541's own
+    measurement used (`origin/dev  child sees  stdout_isatty=True`)."""
+    import pty as _pty
+
+    import tan as _tan
+
+    report = tmp_path / "transcript.txt"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys\n"
+        "from tan.commands.flash_cmd import _spawn\n"
+        f"out = _spawn([sys.executable, '-c', {child_code!r}], capture=False,"
+        f" timeout={timeout})\n"
+        "open(sys.argv[1], 'w', encoding='utf-8').write(out.stdout + out.stderr)\n",
+        encoding="utf-8",
+    )
+    master_fd, slave_fd = _pty.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), str(report)],
+        stdout=subprocess.DEVNULL,
+        stderr=slave_fd,
+        env=_driver_env(_tan),
+    )
+    os.close(slave_fd)
+    console = b""
+    try:
+        while True:
+            try:
+                chunk = os.read(master_fd, 65536)
+            except OSError:
+                break  # the pty master's EOF, on Linux
+            if not chunk:
+                break
+            console += chunk
+    finally:
+        os.close(master_fd)
+    proc.wait(timeout=timeout)
+    text = console.decode("utf-8", "replace")
+    # The driver's own traceback would otherwise be swallowed by a bare
+    # FileNotFoundError on the report, hiding the real reason (an import that
+    # did not resolve, a `_spawn` that raised) behind a missing file.
+    assert report.exists(), f"the pty driver wrote no transcript. Console said:\n{text}"
+    return text, report.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty is POSIX-only -- see _open_console_pty")
+def test_a_flash_tool_sees_a_tty_again_when_tan_is_on_one(tmp_path):
+    """tan-cli#541's headline, measured the way the issue measured it. Since
+    `_Tee` landed, `_spawn` passed `subprocess.PIPE` for both of the child's
+    streams, so the child no longer saw a tty and `pyocd`/`west`/`openocd`
+    dropped the `\\r`-redrawn progress bar an operator watches through a
+    multi-minute write. The live-console branch now tees through a pty.
+
+    Fails against current `dev` (measured: `stdout_isatty=False
+    stderr_isatty=False` on both the console and the transcript)."""
+    console, transcript = _spawn_under_a_pty(tmp_path, _ISATTY_PROBE)
+
+    assert "stdout_isatty=True stderr_isatty=True" in console, console
+    # tan-cli#541 acceptance 2: the transcript tan-cli#522 needs is STILL
+    # captured -- the pty buys the tty back without giving the evidence up.
+    assert "stdout_isatty=True stderr_isatty=True" in transcript, transcript
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty is POSIX-only -- see _open_console_pty")
+def test_the_pty_transcript_still_feeds_the_flow_d_qualification(tmp_path):
+    """tan-cli#541 acceptance 2, on the exact string that made the tee
+    load-bearing: #522's qualification reads the transcript for `Failed to
+    halt CPU`, and it has to keep finding it once the transcript arrives over
+    a pty rather than over two pipes. `ONLCR` is cleared on the slave so the
+    captured bytes carry plain `\\n`, not the `\\r\\n` a raw pty would insert
+    -- a transcript that differs from the pipe path's for no reason a caller
+    can see is its own defect.
+
+    A GUARD, not a both-ways test: it passes against `dev` too, because there
+    the same assertions describe the PIPE path. That equality IS the
+    acceptance -- the transcript must come out the same whichever transport
+    carried it -- and it is what would go red if the pty ever started
+    reshaping what #522 reads."""
+    console, transcript = _spawn_under_a_pty(
+        tmp_path,
+        "import sys\n"
+        "print('****** Error: Failed to halt CPU')\n"
+        "print('CPU is not halted', file=sys.stderr)\n",
+    )
+
+    assert "Failed to halt CPU" in transcript, transcript
+    # Both streams land in `_Outcome.stdout` on a pty run (one device, one
+    # tee) -- the merge `_tee_text` documents.
+    assert "CPU is not halted" in transcript, transcript
+    assert "\r\n" not in transcript, repr(transcript)
+    assert "Failed to halt CPU" in console, console
+
+    from tan.commands.flash_cmd import _Outcome, _flow_d_reset_qualified_message
+
+    qualified = _flow_d_reset_qualified_message(
+        "alif_mram_jlink[m55-he]: written; verified and PIN-reset",
+        _Outcome(success=True, stdout=transcript),
+    )
+    assert qualified.endswith("core was busy and did not halt"), qualified
+
+
+def test_a_non_terminal_sink_keeps_the_pipe_behaviour_unchanged():
+    """tan-cli#541 acceptance 3. tan piped to a file, or running under CI, is
+    where the pipe path is already RIGHT: there is no terminal to redraw on,
+    the tool's non-interactive rendering is what belongs in the log, and a pty
+    would only inject escape runs into a file nobody watches. This runs under
+    pytest's own `fd` capture, where `sys.stderr` is a temp file -- so it
+    asserts the untouched case directly.
+
+    A GUARD, not a both-ways test: it passes identically before and after,
+    which is the whole point (the issue asks for this behaviour to be
+    unchanged, and nothing else here proves it stayed that way)."""
+    from tan.commands.flash_cmd import _open_console_pty, _spawn
+
+    assert _open_console_pty(sys.stderr) is None
+    outcome = _spawn(_stub(_ISATTY_PROBE), capture=False, timeout=30.0)
+    assert outcome.success is True
+    assert "stdout_isatty=False stderr_isatty=False" in outcome.stdout, outcome
+    # Two tees, two fields -- the pipe path does NOT merge the streams.
+    assert outcome.stderr == "", outcome
+
+
+def test_open_console_pty_declines_rather_than_raising_when_it_cannot_have_one():
+    """Every `None` arm of `_open_console_pty`, since each one is a place a
+    flash could have become a traceback instead of a write: a sink with no
+    `isatty` at all (an embedded capture object), a sink that answers `False`,
+    and the host refusing to allocate (`pty.openpty` raising)."""
+    from tan.commands import flash_cmd as fc
+
+    class _NoIsatty:
+        pass
+
+    class _NotATty:
+        def isatty(self):
+            return False
+
+    class _Tty:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return sys.stderr.fileno()
+
+    assert fc._open_console_pty(_NoIsatty()) is None
+    assert fc._open_console_pty(_NotATty()) is None
+    if fc.pty is not None:
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(fc.pty, "openpty", _raise_no_ptmx)
+            assert fc._open_console_pty(_Tty()) is None
+        finally:
+            monkey.undo()
+
+
+def _raise_no_ptmx():
+    raise OSError("no /dev/ptmx")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty is POSIX-only -- see _open_console_pty")
+def test_a_pty_run_still_returns_promptly_when_a_grandchild_holds_the_device(tmp_path):
+    """The pty sibling of the `_Tee` bounded-join BLOCKER. A pty master raises
+    `OSError(EIO)` at EOF where a pipe returns `b""`, and a backgrounded
+    grandchild still holding the slave open means neither happens on time --
+    `_Tee.join`'s `_DRAIN_JOIN_S` bound is what keeps `_spawn` returning
+    either way. One tee, not two, so the overrun here is bounded by ONE
+    `_DRAIN_JOIN_S`, not the pipe path's two.
+
+    A GUARD, not a both-ways test: against `dev` it measures the pipe path's
+    already-bounded join and passes. It exists because the pty introduces a
+    NEW way for that bound to matter (EIO instead of `b""`), and an unbounded
+    join here is the tan-cli#519 BLOCKER coming back through a different
+    door."""
+    import pty as _pty
+    import time as _time
+
+    import tan as _tan
+
+    driver = tmp_path / "driver.py"
+    report = tmp_path / "report.txt"
+    driver.write_text(
+        "import sys, time\n"
+        "from tan.commands.flash_cmd import _spawn\n"
+        "start = time.monotonic()\n"
+        "out = _spawn(['sh', '-c', 'sleep 20 & echo done; exit 0'],"
+        " capture=False, timeout=3.0)\n"
+        "open(sys.argv[1], 'w', encoding='utf-8').write("
+        "'%.2f\\n%s' % (time.monotonic() - start, out.stdout))\n",
+        encoding="utf-8",
+    )
+    master_fd, slave_fd = _pty.openpty()
+    started = _time.monotonic()
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), str(report)],
+        stdout=subprocess.DEVNULL,
+        stderr=slave_fd,
+        env=_driver_env(_tan),
+    )
+    os.close(slave_fd)
+    try:
+        while True:
+            try:
+                if not os.read(master_fd, 65536):
+                    break
+            except OSError:
+                break
+    finally:
+        os.close(master_fd)
+    proc.wait(timeout=60)
+    elapsed = _time.monotonic() - started
+    assert elapsed < 15.0, f"{elapsed:.2f}s -- the pty EOF never came and the join ran unbounded"
+    inner, _, transcript = report.read_text(encoding="utf-8").partition("\n")
+    assert float(inner) < 8.0, inner
+    assert "done" in transcript, transcript

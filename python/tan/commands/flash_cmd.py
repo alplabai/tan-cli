@@ -57,6 +57,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+#: POSIX-only, and the ONE reason this file has a conditional import
+#: (tan-cli#541). `pty`/`termios`/`fcntl` do not exist on Windows at all --
+#: `import pty` there raises `ModuleNotFoundError: termios` -- and CPython
+#: ships no equivalent: the Windows console-pty primitive is ConPTY
+#: (`CreatePseudoConsole`), which the standard library does not expose. So the
+#: live-console tee runs a real pty on POSIX (the child keeps its `isatty()`
+#: and therefore its progress bar) and falls back to the plain pipes on
+#: Windows. That fallback is a STATED difference, not a silent one -- see
+#: [`_open_console_pty`] and `_spawn`'s docstring, and tan-cli#541's own
+#: acceptance list, which asks for exactly that.
+try:  # pragma: no cover -- the except arm is Windows-only
+    import fcntl
+    import pty
+    import struct
+    import termios
+except ImportError:  # pragma: no cover -- Windows has none of the four
+    fcntl = pty = struct = termios = None  # type: ignore[assignment]
+
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_ladder
@@ -171,6 +189,16 @@ class _Entry:
     #: `ok` one. NOT part of the envelope contract -- `as_dict()` never emits
     #: it, only `_run`'s own `issues` list reads it.
     preflight_unarmed: bool = False
+    #: tan-cli#540: set on a CONFIRMED, real, `swd_probe` J-Link write whose
+    #: own transcript said the core never halted -- so the load went into a
+    #: running core, this backend runs no `verifybin`, and nothing observed
+    #: the bytes land. `_run` reads this to append its own
+    #: `flash.swd-probe-write-unconfirmed` warning `Issue` (and the matching
+    #: text line) alongside this entry's `ok` one; the entry's own `message`
+    #: is already qualified by `_swd_probe_unconfirmed_message`. NOT part of
+    #: the envelope contract -- `as_dict()` never emits it, exactly like
+    #: `preflight_unarmed` above.
+    write_unconfirmed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -369,6 +397,128 @@ def _tool_available(tool: str, venv_bin: Path | None = None) -> bool:
 # ── spawning ────────────────────────────────────────────────────────────────
 
 
+def _open_console_pty(sink):
+    """A pty for the live-console tee, as `(master_reader, slave_fd)` -- or
+    `None` to keep the plain `subprocess.PIPE` pair (tan-cli#541).
+
+    **Why a pty at all.** `_Tee` gave the child `subprocess.PIPE` for both
+    streams so the transcript could be read (tan-cli#522 needs it in DEFAULT
+    text mode). A pipe is not a terminal, so the CHILD's own
+    `stdout.isatty()`/`stderr.isatty()` flipped `True` -> `False`. Measured on
+    a real pty, same invocation: `origin/dev  child sees stdout_isatty=True
+    stderr_isatty=True`; with the pipe tee, `stdout_isatty=False
+    stderr_isatty=False`. `pyocd flash`, `west flash` and `openocd` all gate
+    their `\\r`-redrawn progress bar and their colour on `isatty()`, so a
+    bench operator watching a multi-minute GD32G553 or Alif MRAM write lost
+    the live progress indicator the previous release showed -- and a write
+    that shows no progress reads as hung, which is the operator-perception
+    problem tan-cli#388/#522 are about, arriving from a third direction. A
+    pty is a terminal AND readable, so it buys the transcript back without
+    costing the child its tty.
+
+    `None` -- i.e. keep today's pipes -- in three cases, each deliberate:
+
+    * `sink` is not a terminal. tan piped to a file, or under CI, is the case
+      where the pipe path is already RIGHT: the operator has no terminal to
+      redraw on, the tool's non-interactive rendering is what should land in
+      the log, and handing the child a pty there would inject escape codes
+      and `\\r` runs into a file nobody watches. tan-cli#541's own acceptance
+      asks for this explicitly ("behaviour when tan is not attached to a
+      terminal is unchanged from today").
+    * Windows, where `pty`/`termios`/`fcntl` do not exist -- see the guarded
+      import at the top of this module for why there is no equivalent to
+      reach for, and note that this is a STATED platform difference: a
+      Windows operator keeps the pipe behaviour, progress bar included in
+      whatever form the tool picks for a pipe.
+    * `pty.openpty()` itself failing (a container with no `/dev/ptmx`, the
+      host out of pty slaves). A flash must still run there; falling back to
+      the pipes costs the progress bar, not the write.
+
+    The caller owns both fds: it must `os.close(slave_fd)` once the child has
+    inherited it (otherwise the parent's own copy holds the write end open and
+    the reader never sees EOF), and the reader is closed by [`_Tee`] reaching
+    EOF plus process teardown, exactly as for a pipe."""
+    if pty is None:
+        return None
+    try:
+        if not sink.isatty():
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    try:
+        master_fd, slave_fd = pty.openpty()
+    except OSError:
+        return None
+    _shape_console_pty(master_fd, slave_fd, sink)
+    return os.fdopen(master_fd, "rb"), slave_fd
+
+
+def _shape_console_pty(master_fd: int, slave_fd: int, sink) -> None:
+    """Make the new pty behave like the terminal it is standing in for: no
+    `\\n` -> `\\r\\n` translation on the way out, no echo, and tan's OWN
+    window size (tan-cli#541).
+
+    `ONLCR` off because this pty's output is not going to a terminal directly
+    -- it is read by [`_Tee`] and written through `sys.stderr` to the REAL
+    terminal, whose own line discipline supplies the carriage return. Left on,
+    every `\\n` the child wrote would reach the captured transcript as
+    `\\r\\n`, and `str.splitlines()` (`_capture_tail`, and every consumer of
+    `outcome.stdout`) would then be reading a transcript that differs from the
+    pipe path's for no reason a caller can see.
+
+    `TIOCSWINSZ` because a tool that renders a progress bar asks the terminal
+    how wide it is; a fresh pty answers 0x0, and a bar sized to zero columns
+    is worse than no bar. Copied from `sink`'s own size so the child draws to
+    the width the operator is actually looking at.
+
+    Every step is best-effort: none of them is worth failing a flash over, and
+    a pty that could not be shaped still delivers the `isatty()` this function
+    exists for."""
+    try:
+        attrs = termios.tcgetattr(slave_fd)
+        attrs[1] &= ~termios.ONLCR  # oflag
+        attrs[3] &= ~termios.ECHO  # lflag
+        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+    except (OSError, ValueError, termios.error):
+        pass
+    try:
+        size = os.get_terminal_size(sink.fileno())
+        fcntl.ioctl(
+            master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", size.lines, size.columns, 0, 0)
+        )
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _close_console_pty(reader, slave_fd: int | None) -> None:
+    """Drop both ends of a pty the spawn never got to use (the `Popen` raised).
+    Best-effort on both, so a failure closing one still closes the other."""
+    if reader is not None:
+        try:
+            reader.close()
+        except (OSError, ValueError):
+            pass
+    if slave_fd is not None:
+        try:
+            os.close(slave_fd)
+        except OSError:
+            pass
+
+
+def _tee_text(tee) -> str:
+    """A tee's transcript, or `""` for the stream a pty run does not have.
+
+    A pty is ONE device: the child's stdout and stderr are the same fd, so the
+    live-console branch builds a single [`_Tee`] there and leaves the stderr
+    one `None` (tan-cli#541). Everything the child said lands in
+    `_Outcome.stdout`; `.stderr` stays empty. Both downstream consumers
+    already read it that way -- `_capture_tail` falls back to `stdout` when
+    `stderr` is blank, and `_flow_d_reset_qualified_message` concatenates the
+    two before searching -- which is why the merge needs no consumer change,
+    only this note saying which field a pty run fills."""
+    return tee.text() if tee is not None else ""
+
+
 def _spawn(
     argv,
     capture: bool,
@@ -409,9 +559,28 @@ def _spawn(
     returns as soon as the OS has ANY bytes ready, and decodes them itself
     -- see [`_Tee`]'s own docstring.)
 
+    tan-cli#541: on POSIX, when `sink` is a REAL terminal, that live-console
+    branch now tees through a **pty** rather than a pipe. The pipe tee cost
+    the child its own `isatty()`, and `pyocd`/`west`/`openocd` all gate their
+    `\\r`-redrawn progress bar on exactly that -- so a bench operator watching
+    a multi-minute write lost the progress indicator the previous release
+    showed. Three consequences a caller should know: the child's stdout and
+    stderr are the SAME device there, so the whole transcript lands in
+    `_Outcome.stdout` and `.stderr` stays `""` (see [`_tee_text`] -- both
+    downstream consumers already read it that way); the transcript now
+    contains whatever `\\r` and ANSI the tool chose to draw for a terminal
+    (harmless -- `--format json` never reaches this branch, since
+    `capture=json_mode`); and on Windows, on a non-terminal `sink` (tan
+    piped to a file, or CI), or on a host that cannot allocate a pty, the
+    pipes are kept UNCHANGED. See [`_open_console_pty`] for each case.
+
     `venv_bin` (tan-cli#289/#59), when given, is prepended onto the child's
     PATH -- `env=None` (the default, passed through unchanged) means
     "inherit this process's own environment", exactly the pre-#59 behaviour.
+    That inheritance is also what carries `TERM` (and `COLUMNS`/`LINES`, when
+    the operator exports them) to a child now spawned onto a pty -- tan never
+    synthesises a `TERM`, so a child sees the operator's own or none at all,
+    the same value it saw under fd inheritance before the tee existed.
     `workspace` (tan-cli#289/#61), when given, becomes the child's cwd, so
     `west flash` can see alp-sdk's out-of-tree runners.
     """
@@ -461,23 +630,46 @@ def _spawn(
                 stderr=proc.stderr or "",
                 returncode=proc.returncode,
             )
+        # tan-cli#541: a PTY when `sink` is a real terminal, so the child
+        # keeps its own `isatty()` (and therefore its progress bar and its
+        # colour) while this process still reads the transcript tan-cli#522
+        # needs. `None` -- Windows, a non-terminal `sink` (piped/CI), or a
+        # host that could not allocate one -- keeps the pipes below exactly
+        # as they are today. See `_open_console_pty` for each case.
+        console_pty = _open_console_pty(sink)
+        reader, slave_fd = console_pty if console_pty is not None else (None, None)
         try:
             # BINARY, not `text=True` (tan-cli#519/#522 review round 3,
             # MAJOR 1): `_Tee` reads and decodes the raw pipe itself, in
             # chunks bounded by BYTES ready, not characters decoded -- see
             # its docstring for why a `text=True` stream defeated the whole
-            # "live" point of this branch.
+            # "live" point of this branch. Unchanged by the pty: `slave_fd`
+            # is a raw fd, which is binary by construction.
+            #
+            # stdin is NOT redirected either way. The child inherits tan's
+            # own, exactly as before this branch existed -- a pty for stdin
+            # would be a second behaviour change (a tool prompting on it
+            # would read EOF from a pty nobody writes to) and tan-cli#541
+            # asks only about the OUTPUT streams.
             proc = subprocess.Popen(  # noqa: S603 -- argv comes from the pure planner
                 list(argv),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=slave_fd if slave_fd is not None else subprocess.PIPE,
+                stderr=slave_fd if slave_fd is not None else subprocess.PIPE,
                 env=env,
                 cwd=workspace,
             )
         except OSError as err:
+            _close_console_pty(reader, slave_fd)
             return _Outcome(success=False, stderr=f"could not spawn: {err}", captured=capture)
-        out_tee = _Tee(proc.stdout, sink)
-        err_tee = _Tee(proc.stderr, sink)
+        if slave_fd is not None:
+            # The child has its own dup now. This copy MUST go, or the pty's
+            # write end never closes, the reader never sees EOF, and the tee
+            # spends its full `_DRAIN_JOIN_S` on every single spawn.
+            os.close(slave_fd)
+        out_tee = _Tee(reader if reader is not None else proc.stdout, sink)
+        # One device, one tee (see `_tee_text`): a pty conflates the child's
+        # two streams, so there is no second stream to read here.
+        err_tee = None if reader is not None else _Tee(proc.stderr, sink)
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -487,12 +679,12 @@ def _spawn(
             # `subprocess.run(capture_output=True)`'s) -- built by hand here so
             # the shared handler below sees the same shape either way.
             raise subprocess.TimeoutExpired(
-                list(argv), timeout, output=out_tee.text(), stderr=err_tee.text()
+                list(argv), timeout, output=_tee_text(out_tee), stderr=_tee_text(err_tee)
             ) from None
         return _Outcome(
             success=proc.returncode == 0,
-            stdout=out_tee.text(),
-            stderr=err_tee.text(),
+            stdout=_tee_text(out_tee),
+            stderr=_tee_text(err_tee),
             returncode=proc.returncode,
         )
     except subprocess.TimeoutExpired as exc:
@@ -697,24 +889,30 @@ class _Tee:
     than before. Both still land on the SAME console, visibly, in real time.
 
     That is the ONE console-visible change this class was believed to make.
-    There is a SECOND, tan-cli#519/#522 review round 3 found only after
+    There was a SECOND, tan-cli#519/#522 review round 3 found only after
     measuring on a real pty: `subprocess.PIPE` means the CHILD's own
-    `stdout.isatty()`/`stderr.isatty()` now report `False`, where direct fd
+    `stdout.isatty()`/`stderr.isatty()` reported `False`, where direct fd
     inheritance (the pre-`_Tee` behaviour) let them report `True` on a real
     terminal. Measured: same invocation, real pty --
     `origin/dev  child sees  stdout_isatty=True   stderr_isatty=True`;
-    `this class  child sees  stdout_isatty=False  stderr_isatty=False`.
+    `pipe tee   child sees  stdout_isatty=False  stderr_isatty=False`.
     `pyocd flash` / `west flash` / `openocd` gate their own `\r`-updated
     progress bar and colour output on `isatty()`, so on a real terminal an
-    operator now loses the live progress indicator for a multi-minute
-    GD32/Alif write -- console output is still complete and still live line-
-    by-line, but the CHILD renders it differently once it can no longer see a
-    tty of its own. Deliberately NOT fixed here (driving this tee through a
-    pty is real machinery, tracked as **tan-cli#541**): the claim this
-    docstring used to make -- "nothing is silently withheld from the
-    operator" -- overstated what changed; the console still sees everything
-    the child prints, but not necessarily in the shape/cadence the child
-    itself would have chosen for a real terminal.
+    operator lost the live progress indicator for a multi-minute GD32/Alif
+    write -- console output was still complete and still live line-by-line,
+    but the CHILD renders it differently once it can no longer see a tty of
+    its own, and a write that shows no progress reads as hung.
+
+    **FIXED, tan-cli#541.** This class is unchanged -- it still reads one
+    binary stream -- but `_spawn` no longer always hands it a pipe: on POSIX,
+    when the console `sink` is a real terminal, it hands it the MASTER end of
+    a `pty.openpty()` pair whose SLAVE is the child's stdout and stderr, so
+    the child sees a tty again and keeps its own rendering. See
+    [`_open_console_pty`] for the three cases that still get a pipe (Windows,
+    a non-terminal `sink`, a host that cannot allocate a pty) and [`_tee_text`]
+    for the one shape change that follows: a pty is one device, so a pty run
+    builds ONE tee, not two, and the whole transcript lands in
+    `_Outcome.stdout`.
 
     `join`'s default timeout is `_DRAIN_JOIN_S`, the SAME bound [`_Drain`]
     uses and for the identical reason (tan-cli#519/#522 review round 3,
@@ -754,12 +952,20 @@ class _Tee:
                 if chunk:
                     self._chunks.append(chunk)
                     self._write(chunk)
+        except (OSError, ValueError):
+            # A PIPE signals EOF with `b""` and never lands here; a PTY
+            # MASTER raises `OSError(EIO)` instead, once the last holder of
+            # the slave side closes it (tan-cli#541). That is this loop's
+            # normal, expected end on the pty path, not an error -- which is
+            # why the final decoder flush moved into the `finally` below: left
+            # inside the `try`, an EIO would have skipped it and silently
+            # dropped a multi-byte character straddling the very last read.
+            pass
+        finally:
             tail = self._decoder.decode(b"", final=True)
             if tail:
                 self._chunks.append(tail)
                 self._write(tail)
-        except (OSError, ValueError):
-            pass
 
     def _write(self, chunk: str) -> None:
         try:
@@ -1206,6 +1412,85 @@ def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
     return ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY)
 
 
+#: The exact claim `plan_swd_probe`'s J-Link arm composes at PLAN time, in
+#: BOTH of its two `ok_message` shapes (`f"...{device} flashed via J-Link @
+#: {base}"` for a raw `.bin`, `f"...{device} flashed via J-Link"` for an
+#: ELF/HEX). Matched verbatim so the qualification below is a targeted
+#: substring swap of the one asserted word, not a re-derivation of the
+#: message shape -- the same discipline `_FLOW_D_VERIFIED_AND_RESET` applies
+#: one backend over.
+_SWD_PROBE_FLASHED_CLAIM = "flashed via J-Link"
+_SWD_PROBE_ATTEMPTED_CLAIM = "write attempted via J-Link"
+
+
+def _swd_probe_halt_markers(outcome: _Outcome) -> list[str]:
+    """Which of the J-Link halt-failure phrases this `swd_probe` write's own
+    transcript actually contains (tan-cli#540). Empty when none did.
+
+    Same two phrases Flow D matches (`_FLOW_D_HALT_FAILURE_MARKERS`) and for
+    the same measured reason: #522 established on real E1M-AEN801 silicon
+    that a halt failure does NOT make JLinkExe exit non-zero even with
+    `-ExitOnError 1` on the argv -- this arm carries that flag too, and the
+    bench still saw exit 0 alongside `VC_CORERESET did not halt CPU` /
+    `WARNING: CPU could not be halted` / `****** Error: Failed to halt CPU` /
+    `CPU is not halted`. So the exit code cannot tell a load into a halted
+    core apart from a load into one that kept running.
+
+    Returned as a LIST rather than a bool so the message below can quote what
+    the tool actually said instead of paraphrasing it -- the difference
+    between "tan thinks the core did not halt" and "J-Link said `Failed to
+    halt CPU`" is the whole point of tan-cli#540. Pure."""
+    transcript = outcome.stdout + outcome.stderr
+    return [marker for marker in _FLOW_D_HALT_FAILURE_MARKERS if marker in transcript]
+
+
+def _swd_probe_unconfirmed_message(ok_message: str, markers: list[str]) -> str:
+    """Downgrade `swd_probe`'s claimed flash to what the transcript shows
+    (tan-cli#540).
+
+    `plan_swd_probe` composes `{device} flashed via J-Link @ {base}` at PLAN
+    time, before anything has run, and `_flash_entry` asserts it on the exit
+    code ALONE. `jlink_commander_script` gives this arm `r`/`halt`, the load,
+    optionally `r`/`g`, and `qc` -- and, unlike Flow D, **no `verifybin` at
+    all**. So on a core that never halted this backend has neither of the two
+    things that could make "flashed" an observation: the exit code does not
+    reflect the halt (see [`_swd_probe_halt_markers`]), and nothing reads the
+    bytes back. The word `flashed` there is an intent, which is the same
+    class tan-cli#402/#487-defect-6/#522 already fixed elsewhere in this
+    message.
+
+    Blast radius, for a reader wondering whether this matters: `swd_probe` is
+    declared in alp-sdk metadata solely under `helper_firmware:` (`name:
+    gd32_bridge`, `chip: gd32g553`) on `E1M-V2N101`, `E1M-V2M101` and
+    `E1M-V2M102`, so the failure this qualifies is "tan says the GD32 bridge
+    firmware is flashed when it may not be", which then presents downstream as
+    the bridge not answering with the flash step apparently clean.
+
+    Status stays `ok` and rc stays 0 (`_flash_entry`), deliberately. The write
+    may well have landed -- a busy-resident core is the documented benign
+    shape on the Flow D side -- and there is no bench evidence that a GD32
+    halt failure means a failed write. Turning a possibly-fine flash into a
+    hard failure without that evidence would be trading an overstatement for a
+    false negative, which is worse on a command that writes hardware. What
+    changes is the CLAIM, plus the `flash.swd-probe-write-unconfirmed` warning
+    `_run` raises off `_Entry.write_unconfirmed`, so an operator and a
+    `--format json` consumer both learn the write is unverified.
+
+    **This is tan-cli#540's option 1, not option 2.** The stronger fix -- give
+    the arm a real `verifybin` after the load, which is what Flow D already
+    does and what would make the success claim TRUE rather than inferred --
+    belongs in `tan.core.flash_plan.jlink_commander_script`, which composes
+    this backend's Commander script. Pure."""
+    quoted = " / ".join(f'"{marker}"' for marker in markers)
+    return (
+        ok_message.replace(_SWD_PROBE_FLASHED_CLAIM, _SWD_PROBE_ATTEMPTED_CLAIM)
+        + f"; the core did not halt (J-Link reported {quoted}) and this backend "
+        "runs no verifybin, so nothing confirms the bytes landed -- re-run the "
+        "write with the target held in reset and confirm the firmware answers "
+        "before trusting it."
+    )
+
+
 # ── per-entry dispatch ──────────────────────────────────────────────────────
 
 
@@ -1483,10 +1768,11 @@ def _flash_entry(
         message: str,
         *,
         preflight_unarmed: bool = False,
+        write_unconfirmed: bool = False,
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
-            preflight_unarmed=preflight_unarmed,
+            preflight_unarmed=preflight_unarmed, write_unconfirmed=write_unconfirmed,
         )
 
     # No flash_method -> silent skip. A helper carrying `update_channel` instead
@@ -1873,10 +2159,26 @@ def _flash_entry(
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         if method == FLOW_D_METHOD:
             ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
+        # tan-cli#540: the same intent-vs-observed shape #522 closed for Flow
+        # D, on the one backend that has no `verifybin` to fall back on.
+        # Gated on `swd_probe_took_jlink_arm` (already computed above for the
+        # DPIDR preflight, so the two can never drift): the halt phrases are
+        # JLinkExe's, and the openocd/pyocd arm neither emits them nor makes
+        # the `flashed via J-Link` claim this qualifies.
+        halt_markers = _swd_probe_halt_markers(outcome) if swd_probe_took_jlink_arm else []
+        if halt_markers:
+            ok_message = _swd_probe_unconfirmed_message(ok_message, halt_markers)
         lines.append(f"  ok: {ok_message}")
         return (
             0,
-            entry(method, "ok", 0, ok_message, preflight_unarmed=swd_probe_preflight_unarmed),
+            entry(
+                method,
+                "ok",
+                0,
+                ok_message,
+                preflight_unarmed=swd_probe_preflight_unarmed,
+                write_unconfirmed=bool(halt_markers),
+            ),
             lines,
         )
     msg = _execute_message(outcome, method, entry_id)
@@ -2397,6 +2699,26 @@ def _run(
             )
             text_lines.append(message)
             issues.append(Issue("flash.dpidr-preflight-unarmed", "warning", message))
+        if entry.write_unconfirmed:
+            # tan-cli#540. The entry's own `message` is already qualified
+            # (`_swd_probe_unconfirmed_message`), and that message reaches
+            # DEFAULT text output via its `ok:` line -- so this is not about
+            # visibility, it is about MACHINE-detectability: an `ok` entry
+            # whose prose happens to contain a caveat is not something a
+            # `--format json` consumer can key off, and `issues` is the
+            # channel alp-sdk-vscode renders warnings from. Appended to
+            # `text_lines` too, for the same reason `flash.dpidr-preflight-
+            # unarmed` is just above: a bench operator does not pass
+            # `--format json`, and this is the one line that says what to do
+            # about it rather than only what happened.
+            message = (
+                f"{entry.id}: swd_probe's J-Link write is UNCONFIRMED -- the core did "
+                "not halt and this backend runs no verifybin, so JLinkExe's exit code "
+                "0 does not mean the firmware landed. Re-run with the target held in "
+                "reset, then confirm the flashed firmware answers."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.swd-probe-write-unconfirmed", "warning", message))
         entries.append(entry.as_dict())
         if rc < 0:
             continue  # silently skipped -- not counted, does not set flashed_anything
