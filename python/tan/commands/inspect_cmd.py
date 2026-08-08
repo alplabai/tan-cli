@@ -350,6 +350,15 @@ def inspect(
     }
 
     if not json_mode:
+        # tan-cli#478 review finding 6: `issues` has carried the
+        # foreign-default/broken-pin pair since the top of this function, but
+        # only the JSON branch below ever read it -- the DEFAULT text path
+        # stayed silent on the exact fact this command exists to disclose
+        # ("which SDK a build would use"). Printed first and unconditionally
+        # (unlike the `--quiet`-suppressed resolved-value lines).
+        for issue in issues:
+            if issue.code.startswith("sdk."):
+                typer.echo(issue.message, err=True)
         for line in _inspect_text_lines(values, focus, show_origin, quiet):
             typer.echo(line, err=True)
 

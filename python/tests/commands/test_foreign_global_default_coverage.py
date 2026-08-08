@@ -146,6 +146,31 @@ def test_every_command_discloses_a_foreign_global_default(name, argv, two_projec
     )
 
 
+@pytest.mark.parametrize(
+    "name,argv", FOREIGN_DEFAULT_COMMANDS, ids=[n for n, _ in FOREIGN_DEFAULT_COMMANDS]
+)
+def test_every_command_discloses_it_in_default_text_mode_too(name, argv, two_projects):
+    """tan-cli#478 review finding 6: the JSON envelope carrying the pair is
+    not enough on its own -- a diagnostic the customer cannot see is not a
+    diagnostic, and the DEFAULT invocation (no `--format json`) is what a
+    human actually runs. Same precondition as the parametrized JSON case
+    above; asserts on `proc.stderr` instead of the envelope, with no
+    `--format` flag at all.
+    """
+    sub_a, proj_b, _new_sdk_b, env_extra = two_projects
+
+    proc = run_tan_with_env(*argv, cwd=sub_a, env_extra=env_extra)
+
+    assert "machine-global default SDK" in proc.stderr, (
+        f"DEFECT (tan-cli#478): {name}'s default text output did not disclose "
+        f"the foreign global default:\n{proc.stderr}"
+    )
+    assert str(proj_b).replace("\\", "/") in proc.stderr, (
+        f"{name}'s text output warned, but did not name the project the "
+        f"pointer was written for:\n{proc.stderr}"
+    )
+
+
 def test_the_support_bundle_file_itself_records_it(two_projects):
     """The envelope is not enough for this one, and an earlier revision of this
     test only checked the envelope -- which was false assurance over a real
@@ -217,6 +242,50 @@ def test_the_sdk_advisory_never_leaks_into_validates_board_documents(two_project
         assert "global-default-foreign-project" not in proc.stdout, (
             f"--format {fmt} anchored a host fact at the customer's board.yaml"
         )
+
+
+def test_support_bundles_early_return_paths_still_disclose_it(two_projects):
+    """PR #504 review MAJOR 1: `support-bundle`'s early-return failure paths
+    (`_internal_failure`/`_server_incompatible`) built their `_Outcome` from a
+    bare `issues=[Issue(...)]` list, dropping the SDK-resolution pair on
+    exactly the runs a customer hits when something has already gone wrong --
+    a `--target-kind`/`--server` parse refusal or an unsupported target/server
+    pairing. Drives both shapes from inside the same foreign-global-default
+    state the parametrized case above proves for the success path.
+    """
+    sub_a, proj_b, _new_sdk_b, env_extra = two_projects
+
+    parse_failure = _envelope(
+        run_tan_with_env(
+            "support-bundle", "--target-kind", "bogus", "--format", "json",
+            cwd=sub_a, env_extra=env_extra,
+        )
+    )
+    assert parse_failure["exitCode"] == 5
+    assert "support-bundle.internal-failure" in codes(parse_failure)
+    assert "sdk.global-default-foreign-project" in codes(parse_failure), (
+        "DEFECT: the --target-kind parse-refusal path dropped the SDK-"
+        "resolution pair"
+    )
+
+    server_incompatible = _envelope(
+        run_tan_with_env(
+            "support-bundle", "--target-kind", "yocto-userspace", "--server", "jlink",
+            "--format", "json", cwd=sub_a, env_extra=env_extra,
+        )
+    )
+    assert server_incompatible["exitCode"] == 4
+    assert "support-bundle.server-compatibility" in codes(server_incompatible)
+    assert "sdk.global-default-foreign-project" in codes(server_incompatible), (
+        "DEFECT: the server-incompatibility refusal path dropped the SDK-"
+        "resolution pair"
+    )
+    for env in (parse_failure, server_incompatible):
+        message = next(
+            i["message"] for i in env["issues"]
+            if i["code"] == "sdk.global-default-foreign-project"
+        )
+        assert str(proj_b).replace("\\", "/") in message
 
 
 def test_a_missing_board_yaml_keeps_its_own_verdict_wording(two_projects):

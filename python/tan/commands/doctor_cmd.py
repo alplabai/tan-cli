@@ -130,6 +130,7 @@ from tan.commands.sdk_cmd import (
     project_pin_issue,
 )
 from tan.core.bootstrap import (
+    BOOTSTRAP_MANIFEST_SCHEMA_VERSION,
     MissingPrerequisite,
     PrereqFailure,
     WorkspaceSdkRecord,
@@ -143,8 +144,8 @@ from tan.core.consent import can_prompt
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
-from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
-from tan.env import TEXT_WRAP_MIN_WIDTH, use_color
+from tan.core.venv import find_workspace_venv, venv_python, west_program, west_workspace_dir
+from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -274,20 +275,27 @@ class Check:
 # ---------------------------------------------------------------------------
 
 
-def probe(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> str | None:
-    """Run `argv` and return its stdout, or `None` for every way that can fail.
+def probe_status(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> tuple[bool, str | None]:
+    """Run `argv` and return `(ran, stdout)`.
 
-    `None` means "no answer", never "the answer is bad" -- callers must not read
-    it as a verdict. The failure modes this swallows are all real on a fresh
-    host: the binary is absent (`FileNotFoundError`), it is a directory or not
-    executable (`OSError`/`PermissionError`), it waits forever on a probe that is
-    not plugged in (`TimeoutExpired`), or it exits non-zero.
+    `ran` is `True` exactly when the process was actually spawned AND exited
+    zero -- the one predicate that answers "could a build slice run this
+    binary at all". `stdout` is the captured text only when `ran` is `True`,
+    else always `None`. `probe()` below collapses both into a single `None`,
+    which is right for most callers (an unparseable version banner and a
+    binary that could not be spawned are both just "no answer") but wrong for
+    a caller that needs to tell "spawned fine, printed garbage" apart from
+    "never ran at all" -- `west_resolved_check` is exactly that caller
+    (tan-cli#488 defect 1): a `west` launcher whose file survives but whose
+    interpreter does not (a relocated workspace, a deleted `.venv/bin/python`)
+    is `is_file()`-true and therefore reaches this probe, but every real
+    invocation of it fails with `OSError`/a non-zero exit -- `probe()` alone
+    cannot distinguish that from a `west` that ran and printed something this
+    command's regex could not parse, and reporting the former as `pass` is
+    the false green this function exists to close.
 
-    `stdin` is closed, not inherited: a tool that decides to prompt then reads
-    EOF and dies instead of blocking until the timeout. `errors="replace"` is
-    the same reason `tests/conformance` uses it -- a tool answering in the
-    platform code page must not turn into a `UnicodeDecodeError` crash that
-    masquerades as a host problem.
+    See `probe()` for why each failure mode below is swallowed rather than
+    raised.
     """
     try:
         out = subprocess.run(
@@ -304,8 +312,30 @@ def probe(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> str | None:
         # SubprocessError covers TimeoutExpired (the child is already killed by
         # `run`); ValueError catches an empty/garbage argv rather than letting
         # it escape as a traceback.
-        return None
-    return out.stdout if out.returncode == 0 else None
+        return False, None
+    return (out.returncode == 0), (out.stdout if out.returncode == 0 else None)
+
+
+def probe(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> str | None:
+    """Run `argv` and return its stdout, or `None` for every way that can fail.
+
+    `None` means "no answer", never "the answer is bad" -- callers must not read
+    it as a verdict. The failure modes this swallows are all real on a fresh
+    host: the binary is absent (`FileNotFoundError`), it is a directory or not
+    executable (`OSError`/`PermissionError`), it waits forever on a probe that is
+    not plugged in (`TimeoutExpired`), or it exits non-zero.
+
+    `stdin` is closed, not inherited: a tool that decides to prompt then reads
+    EOF and dies instead of blocking until the timeout. `errors="replace"` is
+    the same reason `tests/conformance` uses it -- a tool answering in the
+    platform code page must not turn into a `UnicodeDecodeError` crash that
+    masquerades as a host problem.
+
+    A thin wrapper over `probe_status` (above) for every caller that only ever
+    wanted "the answer, or nothing" and has no use for the ran/did-not-run
+    split.
+    """
+    return probe_status(argv, timeout)[1]
 
 
 def on_path(command: str) -> str | None:
@@ -383,6 +413,20 @@ def zephyr_python_floor(zephyr_base: str | None) -> tuple[tuple[int, int], str]:
     OTHER caller, `tan.commands.bootstrap_cmd.resolve_python_floor`, still
     passes a literal `$ZEPHYR_BASE` read directly -- `tan bootstrap` runs before
     any workspace can have resolved, so there is nothing else for it to prefer.
+
+    **The fallback names WHICH of three causes fired (tan-cli#488 defect 7).**
+    It used to be one hardcoded string -- "no $ZEPHYR_BASE workspace on this
+    host to read `cmake/modules/python.cmake` from" -- for every way the read
+    could fail, but only ONE of the three causes below makes that true. A
+    `.west` workspace mid-`west update` (`zephyr_workspace_check`'s own
+    "legitimate, working-in-progress host state") resolves a real
+    `zephyr_base` whose `cmake/modules/python.cmake` simply is not there yet
+    -- reported by `_collect` as `workspace`/`zephyrWorkspace` BOTH passing,
+    in the same envelope that then blamed a `$ZEPHYR_BASE` env var never
+    consulted for this call (`_collect` feeds this function the RESOLVED
+    workspace's own `zephyr/` subtree, never `$ZEPHYR_BASE` itself, once a
+    workspace resolves -- see above). `jlink_flash_device` fixed the identical
+    shape for its own three-cause fallback in tan-cli#310; this mirrors it.
     """
     if zephyr_base:
         path = Path(zephyr_base) / "cmake" / "modules" / "python.cmake"
@@ -391,6 +435,17 @@ def zephyr_python_floor(zephyr_base: str | None) -> tuple[tuple[int, int], str]:
             match = re.search(r"PYTHON_MINIMUM_REQUIRED\s+(\d+)\.(\d+)", text)
             if match is not None:
                 return (int(match.group(1)), int(match.group(2))), str(path)
+            return ZEPHYR_PYTHON_FLOOR, (
+                f"Zephyr's PYTHON_MINIMUM_REQUIRED, from tan's built-in pin "
+                f"{ZEPHYR_PYTHON_FLOOR[0]}.{ZEPHYR_PYTHON_FLOOR[1]} -- {path} was "
+                f"read but did not declare a parseable PYTHON_MINIMUM_REQUIRED"
+            )
+        return ZEPHYR_PYTHON_FLOOR, (
+            f"Zephyr's PYTHON_MINIMUM_REQUIRED, from tan's built-in pin "
+            f"{ZEPHYR_PYTHON_FLOOR[0]}.{ZEPHYR_PYTHON_FLOOR[1]} -- {path} could not "
+            f"be read (a `.west` workspace mid-`west update` is a legitimate, "
+            f"working-in-progress host state, not a broken one)"
+        )
     return ZEPHYR_PYTHON_FLOOR, (
         f"Zephyr's PYTHON_MINIMUM_REQUIRED, from tan's built-in pin "
         f"{ZEPHYR_PYTHON_FLOOR[0]}.{ZEPHYR_PYTHON_FLOOR[1]} -- no $ZEPHYR_BASE "
@@ -731,6 +786,7 @@ def west_check(
     version: tuple[int, int] | None,
     floor: tuple[int, int] | None,
     resolved: str | None = None,
+    resolved_ran: bool = True,
 ) -> Check:
     """`west` -- present on BARE PATH, or resolvable through the SAME
     resolver `westResolved` uses (`tan.core.venv.west_program`).
@@ -780,9 +836,22 @@ def west_check(
     compatible in practice and refusing a host on a version string we could
     not parse is a worse failure than letting the real invocation report its
     own.
+
+    **`resolved_ran` -- a resolved-but-unspawnable west is not a `pass`
+    (tan-cli#488 defect 3).** `resolved` only proves `westResolved` found a
+    file at that path; it says nothing about whether that file can actually
+    run. Before this parameter existed, `found is None and resolved is not
+    None` returned `pass` unconditionally -- including for a `west` whose
+    launcher survives a relocated workspace but whose interpreter does not,
+    the exact host `westResolved` (tan-cli#488 defect 1) now reports `fail`
+    for. That paired one check correctly failing an unbuildable host with its
+    sibling still calling it a `pass`, the headline "pass on an unrunnable
+    west" symptom surviving in this one branch. Defaults to `True` so every
+    existing 4-argument call site (this file's own unit tests, modelling the
+    ordinary "ran fine" case) keeps its prior meaning unchanged.
     """
     if found is None:
-        if resolved is not None:
+        if resolved is not None and resolved_ran:
             return Check(
                 "west",
                 "pass",
@@ -794,6 +863,16 @@ def west_check(
                 f"`bin`/`Scripts` directory holds the `west` launcher) would "
                 f"additionally put it on bare PATH, for tools that spawn it "
                 f"directly rather than through tan.",
+            )
+        if resolved is not None:
+            return Check(
+                "west",
+                "warn",
+                f"`west` is not on bare PATH. It resolves to {resolved} through the "
+                f"workspace venv, but `westResolved` above found that binary could "
+                f"not be executed there -- no build slice can run it. `westResolved` "
+                f"is the check that owns this failure; see it for the remedy.",
+                "Run `tan bootstrap` to recreate the workspace venv.",
             )
         return Check(
             "west",
@@ -832,7 +911,9 @@ def west_check(
     return Check("west", "pass", f"west {_fmt(version)} ({found}).")
 
 
-def west_resolved_check(found: str | None, version: tuple[int, int] | None) -> Check:
+def west_resolved_check(
+    found: str | None, version: tuple[int, int] | None, ran: bool = True
+) -> Check:
     """`westResolved` -- is `west` resolved through the WORKSPACE VENV
     (`tan.core.venv.west_program`), not bare PATH (tan-cli#123/#290)?
 
@@ -868,6 +949,25 @@ def west_resolved_check(found: str | None, version: tuple[int, int] | None) -> C
     `westResolved` answers "can a build slice run at all" and is fatal when the
     answer is no. Exactly one of them owns the exit code, which is tan-cli#123's
     one-version-per-check contract applied to severity.
+
+    **`ran` -- spawn failure is ALSO fatal, not a `pass` (tan-cli#488 defect
+    1).** `found` only proves `tool_in_venv`'s `is_file()` check passed; it
+    says nothing about whether the file can actually be EXECUTED. Before
+    `ran` existed, this function took `version` alone and treated
+    `version is None` as `pass` unconditionally -- but `probe()` collapses
+    THREE outcomes into that same `None`: could not be spawned at all
+    (`OSError` -- a `west` launcher whose shebang names a now-absent
+    interpreter, e.g. a relocated/renamed workspace, or a deleted
+    `.venv/bin/python`), spawned and exited non-zero, and spawned, exited
+    zero, and printed something this file's regex could not parse. `pass` is
+    only right for the third. `ran` (from `probe_status`, passed by
+    `_collect`) is `True` for exactly that third case and `False` for the
+    first two, so a resolved-but-unrunnable `west` now reports the SAME
+    `fail` as a `west` that resolved nowhere at all -- both mean "no build
+    slice can be executed" and both send the customer to the same remedy,
+    `tan bootstrap`. Defaults to `True` so every existing 2-argument call
+    site (this file's own unit tests, modelling the ordinary "ran fine"
+    cases) keeps its prior meaning unchanged.
     """
     if found is None:
         return Check(
@@ -875,6 +975,18 @@ def west_resolved_check(found: str | None, version: tuple[int, int] | None) -> C
             "fail",
             "west resolved neither through the workspace venv nor PATH -- no build "
             "slice can be executed. Run `tan bootstrap` to create the workspace venv.",
+            "tan bootstrap",
+        )
+    if not ran:
+        return Check(
+            "westResolved",
+            "fail",
+            f"west resolved to {found}, but it could not be executed there ("
+            f"`{found} --version` did not run to a successful exit) -- no build "
+            f"slice can be executed. A relocated/renamed workspace, or a "
+            f"workspace venv whose own Python was removed, both leave the `west` "
+            f"launcher file in place while breaking it. Run `tan bootstrap` to "
+            f"recreate the workspace venv.",
             "tan bootstrap",
         )
     if version is None:
@@ -1763,9 +1875,39 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     return Check("sdkProvenance", "pass", detail)
 
 
+def _is_own_git_checkout(root: str) -> bool:
+    """Whether `root` is itself the TOP of a git checkout, not merely nested
+    somewhere inside an unrelated ENCLOSING one (tan-cli#488 defect 4).
+
+    `git -C <root> ...` discovery walks UPWARD looking for a `.git`, so an SDK
+    with no `.git` of its own -- an extracted release archive, vendored under
+    a customer's own application repository, which this port explicitly
+    supports (`sdk_cmd.check_sdk_readiness`'s own docstring names exactly this
+    shape) -- answers every git query with the ENCLOSING repo's state instead
+    of "not a checkout". `_git_short_commit`/`_git_behind_upstream` below both
+    call this FIRST and refuse (`None`) rather than misattribute a foreign
+    repository's commit or upstream-skew as the SDK's own.
+
+    Compares the RESOLVED `--show-toplevel` against the RESOLVED `root`:
+    lexical string comparison alone would false-negative on a symlinked or
+    differently-cased path to the same directory.
+    """
+    top = probe(["git", "-C", root, "rev-parse", "--show-toplevel"])
+    if top is None:
+        return False
+    try:
+        return Path(top.strip()).resolve() == Path(root).resolve()
+    except OSError:
+        return False
+
+
 def _git_short_commit(root: str) -> str | None:
     """`git -C <root> rev-parse --short HEAD`, or `None` when `root` is not a
-    git checkout (e.g. an extracted SDK release archive)."""
+    git checkout of its own (e.g. an extracted SDK release archive -- including
+    one vendored inside a customer's own git repository, see
+    `_is_own_git_checkout`)."""
+    if not _is_own_git_checkout(root):
+        return None
     out = probe(["git", "-C", root, "rev-parse", "--short", "HEAD"])
     if out is None:
         return None
@@ -1775,8 +1917,10 @@ def _git_short_commit(root: str) -> str | None:
 
 def _git_behind_upstream(root: str) -> int | None:
     """Commit count `HEAD` is behind its upstream tracking ref, without
-    fetching. `None` when there is no upstream or `root` is not a git
-    checkout."""
+    fetching. `None` when there is no upstream, or `root` is not a git
+    checkout of its own (see `_is_own_git_checkout`)."""
+    if not _is_own_git_checkout(root):
+        return None
     out = probe(["git", "-C", root, "rev-list", "--count", "HEAD..@{upstream}"])
     if out is None:
         return None
@@ -2217,6 +2361,42 @@ def _load_manifest(sdk_root: str | None) -> ManifestLoad:
         return ManifestLoad(
             fallback, "tan's built-in fallback list", f"{path} is not valid JSON: {err}", is_real=False
         )
+    if not isinstance(facts, dict):
+        return ManifestLoad(
+            fallback, "tan's built-in fallback list", f"{path} is not a JSON object", is_real=False
+        )
+    # tan-cli#488 defect 3: `schemaVersion` read on its own FIRST, mirroring
+    # `tan.core.bootstrap.parse_bootstrap_manifest` -- the ONE other reader of
+    # this same file -- so the two commands agree about what a future,
+    # reshaped manifest means. Before this, `_load_manifest` accepted ANY
+    # `prerequisites` object regardless of `schemaVersion`, so an SDK whose
+    # manifest `tan bootstrap` refuses outright (a schema this build does not
+    # understand) still yielded `hostPrerequisites: pass`, zero tools probed,
+    # and no `bootstrapManifest` warning -- a clean bill of health for a
+    # manifest that was never actually read. `bool` excluded explicitly, same
+    # reason `parse_bootstrap_manifest` excludes it: `True == 1` in Python.
+    schema_version = facts.get("schemaVersion")
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+        return ManifestLoad(
+            fallback,
+            "tan's built-in fallback list",
+            f"{path} could not be read: missing `schemaVersion`",
+            is_real=False,
+        )
+    if schema_version != BOOTSTRAP_MANIFEST_SCHEMA_VERSION:
+        return ManifestLoad(
+            fallback,
+            "tan's built-in fallback list",
+            # tan-cli#488 defect 2: no trailing period -- this string is
+            # always read back through `f"... rejected: {loaded.error}. Falling
+            # back to ..."` (below), which supplies its own; a period here
+            # rendered "...outright.. Falling back to" (double stop).
+            f"{path} declares schemaVersion {schema_version}, but this `tan` "
+            f"supports only {BOOTSTRAP_MANIFEST_SCHEMA_VERSION}. Update `tan`, or "
+            f"pin an SDK whose metadata/bootstrap.json this version understands; "
+            f"`tan bootstrap` already refuses this manifest outright",
+            is_real=False,
+        )
     prerequisites = facts.get("prerequisites")
     if not isinstance(prerequisites, dict):
         return ManifestLoad(
@@ -2574,6 +2754,52 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
     against a real `tan doctor --fix --format json --ci` run). `json_mode`
     is already a complete, accurate reason on its own; there is nothing the
     tty state could add under it.
+
+    tan-cli#488 defect 6: `sys.stdin` is guarded with `is not None` before
+    `.isatty()` -- `sys.stdin` itself, not just `sys.stderr`, can be `None`
+    (a GUI-launched/`pythonw`-style process, or any host that runs tan with
+    its standard handles detached), and a bare `sys.stdin.isatty()` there
+    raises `AttributeError: 'NoneType' object has no attribute 'isatty'` for
+    the same reason the `_TeeStderr` case above already gets its own guard.
+
+    tan-cli#488 round 3: this was, for one round, the ONLY place that guard
+    existed -- `can_prompt` itself (`tan.core.consent`) still called the bare
+    `sys.stdin.isatty()`. Since `doctor()` calls `can_prompt` BEFORE it ever
+    calls this function (`fix_allowed = fix and can_prompt(...)`, evaluated
+    ahead of the `fix_suppressed_issue(...)` call site below it), a `None`
+    `sys.stdin` crashed there first, and this function's own guard never ran
+    at all -- caught only by `doctor()`'s outer `except Exception`, which
+    discarded the whole diagnosis. `can_prompt` now carries the identical
+    guard (the fix belongs there, once, not duplicated per caller -- see its
+    own docstring); the copy here stays only because this function explains
+    each tripped condition individually, not merely whether the aggregate
+    gate passed.
+
+    tan-cli#488 round 5: `sys.stderr`, the NEXT operand of this same `and`
+    chain, was left unguarded through rounds 3 and 4 -- `sys.stderr` can be
+    `None` independently of `sys.stdin` (each handle is detached on its own
+    by whatever spawned the process), so a host with a live, non-tty stdin
+    and a detached stderr still crashed here with the identical
+    `AttributeError`, one operand later. `can_prompt` now guards both; this
+    copy must match it exactly or the two diverge on the very host this
+    function exists to explain.
+
+    tan-cli#488 round 6: `is not None` still was not the whole guard -- it
+    stops a detached (`None`) handle from crashing `.isatty()`, but not a
+    handle that EXISTS and simply has no `.isatty()` method, exactly the
+    shape `sys.stderr` takes under `--format json` (`tan.cli.main`'s
+    `_TeeStderr`, which implements `write`/`flush`/`getvalue` only). The
+    `not json_mode` guard in front of this whole condition means this
+    particular copy was never observed to reach that shape in practice --
+    but `tan.commands.build_cmd._dispatch` hand-rolled the identical
+    `is not None and .isatty()` pair with no `json_mode` operand ahead of
+    it, and that one DID crash on a real `tan run --format json`
+    (`AttributeError: '_TeeStderr' object has no attribute 'isatty'`,
+    measured), one caller away from the same fate here. Both operands now
+    route through `tan.env.stdin_is_tty`/`stderr_is_tty` -- the one shared
+    probe (tan-cli#288) already used by `use_color`/`wrap_width` above and
+    now by `can_prompt` too -- instead of a fourth hand-rolled copy of a
+    guard three of the previous four rounds already got wrong once.
     """
     reasons = []
     if json_mode:
@@ -2582,7 +2808,7 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
         reasons.append("`--ci`")
     if non_interactive:
         reasons.append("`--non-interactive`")
-    if not json_mode and not (sys.stdin.isatty() and sys.stderr.isatty()):
+    if not json_mode and not (stdin_is_tty() and stderr_is_tty()):
         reasons.append("no interactive terminal (stdin/stderr not a tty -- piped, redirected, or CI)")
     return Issue(
         "doctor.fix-suppressed",
@@ -2755,12 +2981,20 @@ def _collect(
     west_resolved_exe = (
         resolved_west if os.path.isabs(resolved_west) else on_path(resolved_west)
     )
-    west_resolved_version = (
-        _parse_two(probe([west_resolved_exe, "--version"]) or "")
+    # tan-cli#488 defect 1: `probe_status`, not `probe` -- `west_resolved_ran`
+    # tells `west_resolved_check` whether `--version` actually ran to a
+    # successful exit, separately from whether its output parsed. `probe()`
+    # alone collapses "could not be spawned" (a `west` launcher whose file
+    # survives a relocated/renamed workspace but whose interpreter does not)
+    # and "spawned, exited zero, printed something unparseable" into the same
+    # `None` -- `pass` is only correct for the second.
+    west_resolved_ran, west_resolved_stdout = (
+        probe_status([west_resolved_exe, "--version"])
         if west_resolved_exe is not None
-        else None
+        else (False, None)
     )
-    _add(west_resolved_check(west_resolved_exe, west_resolved_version))
+    west_resolved_version = _parse_two(west_resolved_stdout or "")
+    _add(west_resolved_check(west_resolved_exe, west_resolved_version, west_resolved_ran))
 
     # tan-cli#292: `venvProvenance`, right beside `westResolved` -- it is a
     # verdict on the SAME resolved venv (`find_workspace_venv`, the search
@@ -2857,7 +3091,21 @@ def _collect(
     if skew is not None:
         _add(skew)
 
-    required = facts.get("windows" if os.name == "nt" else "posix")
+    # tan-cli#488 defect 2: keyed on the HOST, not a `windows`/`posix` bool.
+    # `facts.get(...)` used to read straight off `"windows" if os.name == "nt"
+    # else "posix"`, which has no `macos` arm at all -- so a stock Mac (no
+    # `wget`, no standalone `xz`, both of which joined `prerequisites.posix`
+    # at alp-sdk v0.14.0) got handed the POSIX list wholesale and reported
+    # `hostPrerequisites: fail` on a host `tan bootstrap` accepts. Mirrors
+    # `tan.core.bootstrap.BootstrapFacts.prerequisites`'s own host-keyed read
+    # exactly, including its fallback: an EMPTY/absent `prerequisites.macos`
+    # means the manifest declared none (every SDK before v0.14.0), and macOS
+    # then reads `posix` exactly as it always did -- not a guess, the actual
+    # pre-v0.14.0 behaviour.
+    is_macos = sys.platform == "darwin"
+    required = facts.get("windows" if os.name == "nt" else ("macos" if is_macos else "posix"))
+    if is_macos and not (isinstance(required, list) and required):
+        required = facts.get("posix")
     if not isinstance(required, list):
         required = []
     required = [t for t in required if isinstance(t, str)]
@@ -2885,7 +3133,19 @@ def _collect(
     )
 
     west_exe = on_path("west")
-    west_version = _parse_two(probe(["west", "--version"]) or "") if west_exe else None
+    # tan-cli#488 defect 5: probe `west_exe` -- the PATH-RESOLVED absolute
+    # path `on_path` just returned -- never a second, bare-name spawn.
+    # `on_path` deliberately excludes the cwd for exactly this reason (its own
+    # docstring: a project checked out with its own `west.exe` at its root
+    # must not be reported as this host's tooling); a bare `probe(["west",
+    # ...])` re-opens that gap outright -- CreateProcess searches the cwd
+    # before PATH on Windows, and an empty PATH element (a leading/trailing
+    # `:`, common in a hand-edited profile) does the same on POSIX -- so the
+    # reported version could come from a DIFFERENT binary than the one this
+    # check names. Every other probe in `_collect` already spawns the
+    # resolved path (`west_resolved_exe` above, `jlink_exe` below); this is
+    # the one that did not.
+    west_version = _parse_two(probe([west_exe, "--version"]) or "") if west_exe else None
     # tan-cli#299 second half: feed `west_check` the SAME resolved venv path
     # `westResolved` above already computed (`resolved_west`) -- never a
     # second, independent probe -- so "absent from bare PATH, present in the
@@ -2893,12 +3153,19 @@ def _collect(
     # instead of a permanent warn. Only passed when it is a real venv
     # binary (an absolute path); `west_program`'s bare-`"west"` fallback
     # carries no information `west_exe` above does not already have.
+    #
+    # tan-cli#488 defect 3: `west_resolved_ran` (computed above, the same
+    # `probe_status` result `westResolved` itself was fixed to consult for
+    # defect 1) also passed through -- so a resolved-but-unspawnable west
+    # cannot report `pass` here while `westResolved` reports `fail` for the
+    # identical binary.
     _add(
         west_check(
             west_exe,
             west_version,
             _parse_two(str(facts.get("_pipSpec") or "")),
             resolved_west if os.path.isabs(resolved_west) else None,
+            west_resolved_ran,
         )
     )
 
@@ -2915,7 +3182,10 @@ def _collect(
         setools_check(
             os.environ.get("SETOOLS_DIR"),
             os.environ.get("SE_UART"),
-            _has_module("fdt"),
+            # tan-cli#488 defect 6: the WORKSPACE VENV's interpreter -- the one
+            # `west flash` actually runs `app-gen-toc` under -- never tan's
+            # own. See `_module_importable`'s docstring.
+            _module_importable(venv_python(workspace_root, sdk_root), "fdt"),
             sys.platform.startswith("linux"),
         )
     )
@@ -2939,13 +3209,49 @@ def _collect(
 
 
 def _has_module(name: str) -> bool:
-    """Importability without importing. `find_spec` raises on a half-installed
-    package (`ValueError`) or a broken meta-path finder, which must read as
-    'absent', not as a doctor crash."""
+    """Importability without importing, in TAN'S OWN interpreter. `find_spec`
+    raises on a half-installed package (`ValueError`) or a broken meta-path
+    finder, which must read as 'absent', not as a doctor crash.
+
+    Only the right question when there is no other interpreter to ask --
+    see `_module_importable`, which is what `setools_check`'s `fdt` clause
+    actually wants (tan-cli#488 defect 6)."""
     try:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError, AttributeError):
         return False
+
+
+def _module_importable(python_exe: str | None, name: str) -> bool:
+    """Whether `name` imports cleanly under `python_exe` -- the interpreter
+    that will ACTUALLY run it, not tan's own (tan-cli#488 defect 6).
+
+    `setools_check`'s `fdt` clause names what `west flash` -> `alif_flash.py`
+    imports at flash time, and that import happens inside the WORKSPACE VENV
+    (`tan flash` prepends its `bin`/`Scripts` directory to PATH before
+    spawning `west`), never inside tan's own interpreter. Probing tan's own
+    interpreter instead is wrong in two directions at once: a FALSE GREEN
+    when something merely NAMED `fdt` is reachable from tan's own `sys.path`
+    (under `python -m tan`, that includes the cwd) while the workspace venv
+    still lacks it -- the customer then meets the bare `RuntimeError`
+    `alif_flash.py` raises at the bench, the exact failure this check exists
+    to pre-empt -- and a PERMANENT FALSE RED for the released binary: a
+    PyInstaller freeze's `sys.path` is bundle-only, `fdt` is not among its
+    declared runtime deps, so `find_spec` can never succeed there, yet the
+    check's own remedy ("`pip install fdt` into the workspace venv") can
+    never clear it. alp-sdk's own runner does this correctly
+    (`scripts/west_commands/runners/alif_flash.py` runs the identical
+    `find_spec('fdt')` inside the process that actually invokes
+    `app-gen-toc`); this asks the same interpreter that process will be.
+
+    `python_exe is None` (no workspace venv resolved yet, e.g. before `tan
+    bootstrap` has run) falls back to `_has_module`, against tan's own
+    interpreter -- the best available signal before there is anything else
+    to ask.
+    """
+    if python_exe is None:
+        return _has_module(name)
+    return probe([python_exe, "-c", f"import {name}"]) is not None
 
 
 def _generated_at() -> str:
@@ -3057,89 +3363,106 @@ def doctor(
     # (tan-cli#294 finding 2 / #101) needs the string, not the envelope block.
     project_scope = project
 
-    # `util::cli_workspace_root`: `--project` joined onto the cwd, and
-    # everything below (board.yaml discovery, SDK discovery, the reported
-    # `project.root`) anchors on THAT -- see `build_cmd.build` for the same
-    # pattern and why an unanchored `--project` builds the wrong project.
-    cwd = Path.cwd()
-    workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
+    # tan-cli#488 defect 8: safe defaults for every name the exception
+    # handler below and the final `emit()` read, so a raise from ANYWHERE
+    # in this prologue -- not only inside `_collect` -- still produces the
+    # `doctor.internal-failure` envelope the guard below promises, instead
+    # of a raw traceback with empty stdout. `Path.cwd()` a few lines below
+    # is the concrete case: a working directory deleted out from under the
+    # process (a cleanup script racing a `tan doctor` run in the same
+    # shell) throws `FileNotFoundError` -- previously from OUTSIDE the
+    # `try`/`except`, before `project`/`sdk`/`sdk_tier` had a real value,
+    # so it unwound through typer's own traceback renderer instead of this
+    # command's error contract. Every value here is overwritten the moment
+    # the try body below reaches its own assignment.
+    project_envelope: Project = Project(root=None, board_yaml=None)
+    sdk: SdkInfo | None = None
+    sdk_tier = "none"
+    sdk_broken_pin: str | None = None
+    sdk_foreign_default: str | None = None
+    try:
+        # `util::cli_workspace_root`: `--project` joined onto the cwd, and
+        # everything below (board.yaml discovery, SDK discovery, the reported
+        # `project.root`) anchors on THAT -- see `build_cmd.build` for the same
+        # pattern and why an unanchored `--project` builds the wrong project.
+        cwd = Path.cwd()
+        workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
 
-    # Anchor an EXPLICIT `--board-yaml` on `workspace_root`, not the real cwd,
-    # BEFORE the discovery branch below -- same pattern as `build_cmd.build`
-    # and `crates/tan-core/src/project.rs:198-208`'s `resolve_board_yaml_path`.
-    # Left unanchored, a relative `--board-yaml` under `--project app` reports
-    # (and would build/flash) the board.yaml sitting in the real cwd instead
-    # of the one inside `app`.
-    if board_yaml is not None and not os.path.isabs(board_yaml):
-        board_yaml = os.path.join(str(workspace_root), board_yaml)
-    if board_yaml is None and (workspace_root / "board.yaml").is_file():
-        board_yaml = str(workspace_root / "board.yaml")
-    # `--sdk-root` > `.alp/sdk-path` project pin > machine-global default >
-    # the positional walk (`resolve_sdk_root_ladder`) -- no `ALP_SDK_ROOT`
-    # tier (tried and reverted -- see `resolve_sdk_root_ladder`'s own
-    # docstring). Previously this skipped straight from `--sdk-root` to the
-    # positional walk, silently ignoring `tan init`'s own pointer in the same
-    # directory.
-    sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
-    resolved_sdk_root = sdk_resolution.path
-    sdk_tier = sdk_resolution.tier
-    sdk_broken_pin = sdk_resolution.broken_project_pin
-    sdk_foreign_default = sdk_resolution.foreign_global_default_for
-    sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
-    sdk = (
+        # Anchor an EXPLICIT `--board-yaml` on `workspace_root`, not the real cwd,
+        # BEFORE the discovery branch below -- same pattern as `build_cmd.build`
+        # and `crates/tan-core/src/project.rs:198-208`'s `resolve_board_yaml_path`.
+        # Left unanchored, a relative `--board-yaml` under `--project app` reports
+        # (and would build/flash) the board.yaml sitting in the real cwd instead
+        # of the one inside `app`.
+        if board_yaml is not None and not os.path.isabs(board_yaml):
+            board_yaml = os.path.join(str(workspace_root), board_yaml)
+        if board_yaml is None and (workspace_root / "board.yaml").is_file():
+            board_yaml = str(workspace_root / "board.yaml")
+        # `--sdk-root` > `.alp/sdk-path` project pin > machine-global default >
+        # the positional walk (`resolve_sdk_root_ladder`) -- no `ALP_SDK_ROOT`
+        # tier (tried and reverted -- see `resolve_sdk_root_ladder`'s own
+        # docstring). Previously this skipped straight from `--sdk-root` to the
+        # positional walk, silently ignoring `tan init`'s own pointer in the same
+        # directory.
+        sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+        resolved_sdk_root = sdk_resolution.path
+        sdk_tier = sdk_resolution.tier
+        sdk_broken_pin = sdk_resolution.broken_project_pin
+        sdk_foreign_default = sdk_resolution.foreign_global_default_for
+        sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
+        sdk = (
         SdkInfo.from_resolution(sdk_root, sdk_resolution) if sdk_root is not None else None
     )
-    # tan-cli#344: a dangling `~/.alp/sdk-default` is a distinct fact from
-    # "nothing configured" -- computed unconditionally (one small file read)
-    # so `sdk_check` can name it in the one branch (`sdk_root is None`) where
-    # the two used to print the identical sentence.
-    broken_global_default = _broken_global_default()
-    # Forward slashes -- the established envelope contract on this seam
-    # (`build_cmd.build`, `flash_cmd._resolve_project`), not the native
-    # separators `str(Path(...))` would emit on Windows.
-    #
-    # tan-cli#236: `boardYaml` reported only when the file really exists. An
-    # explicit `--board-yaml` skips the `is_file()` discovery guard above, so
-    # without this it could still name a path nothing sits at.
-    project = Project.resolved(
-        _abs_posix(str(workspace_root)),
-        _abs_posix(board_yaml) if board_yaml is not None else None,
-    )
+        # tan-cli#344: a dangling `~/.alp/sdk-default` is a distinct fact from
+        # "nothing configured" -- computed unconditionally (one small file read)
+        # so `sdk_check` can name it in the one branch (`sdk_root is None`) where
+        # the two used to print the identical sentence.
+        broken_global_default = _broken_global_default()
+        # Forward slashes -- the established envelope contract on this seam
+        # (`build_cmd.build`, `flash_cmd._resolve_project`), not the native
+        # separators `str(Path(...))` would emit on Windows.
+        #
+        # tan-cli#236: `boardYaml` reported only when the file really exists. An
+        # explicit `--board-yaml` skips the `is_file()` discovery guard above, so
+        # without this it could still name a path nothing sits at.
+        project_envelope = Project.resolved(
+            _abs_posix(str(workspace_root)),
+            _abs_posix(board_yaml) if board_yaml is not None else None,
+        )
 
-    # Text mode streams each check the MOMENT it completes (tan-cli doctor
-    # v2, change 3): `_collect` runs up to 15 subprocess probes at
-    # `PROBE_TIMEOUT_S` each, and the old code printed nothing until every
-    # one of them had answered -- on a host where one wedges, a blank
-    # terminal names nothing. Width floored at `TEXT_WRAP_MIN_WIDTH` -- a
-    # 20-column terminal must not fall to one word per line -- and the
-    # fallback (piped/redirected stdout) matches `build_cmd`'s own
-    # `shutil.get_terminal_size` convention. `width`/`color` are resolved
-    # unconditionally, even under `--format json` where neither is ever
-    # read: both calls are cheap and emit nothing, so gating them behind
-    # `if stream` bought nothing but a second, held-together-by-an-11-line-
-    # comment invariant (`_print_check` closes over both) for no benefit.
-    #
-    # UNCONDITIONAL on stderr being a terminal at all (unlike
-    # `tan.env.wrap_width`, which `explain`/`sdk current` use instead): a
-    # piped `tan doctor` still wraps to this `get_terminal_size` fallback
-    # today. That is a real inconsistency with the new seam, left exactly as
-    # it shipped in PR #480 rather than silently fixed here -- see that PR
-    # for the call to change it.
-    stream = not json_mode
-    width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, TEXT_WRAP_MIN_WIDTH)
-    color = use_color(no_color, ci)
+        # Text mode streams each check the MOMENT it completes (tan-cli doctor
+        # v2, change 3): `_collect` runs up to 15 subprocess probes at
+        # `PROBE_TIMEOUT_S` each, and the old code printed nothing until every
+        # one of them had answered -- on a host where one wedges, a blank
+        # terminal names nothing. Width floored at `TEXT_WRAP_MIN_WIDTH` -- a
+        # 20-column terminal must not fall to one word per line -- and the
+        # fallback (piped/redirected stdout) matches `build_cmd`'s own
+        # `shutil.get_terminal_size` convention. `width`/`color` are resolved
+        # unconditionally, even under `--format json` where neither is ever
+        # read: both calls are cheap and emit nothing, so gating them behind
+        # `if stream` bought nothing but a second, held-together-by-an-11-line-
+        # comment invariant (`_print_check` closes over both) for no benefit.
+        #
+        # UNCONDITIONAL on stderr being a terminal at all (unlike
+        # `tan.env.wrap_width`, which `explain`/`sdk current` use instead): a
+        # piped `tan doctor` still wraps to this `get_terminal_size` fallback
+        # today. That is a real inconsistency with the new seam, left exactly as
+        # it shipped in PR #480 rather than silently fixed here -- see that PR
+        # for the call to change it.
+        stream = not json_mode
+        width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, TEXT_WRAP_MIN_WIDTH)
+        color = use_color(no_color, ci)
 
-    def _print_check(check: Check) -> None:
-        """`on_check`'s real, streaming callback: render one check's block
-        and print it through `_print_stream_lines` -- the FOURTH way
-        `_collect` reaches the outside world (see its docstring), and the
-        only one of the four that can raise. See `_print_stream_lines`'s own
-        docstring for the guard and why it is shaped the way it is; not
-        restated here.
-        """
-        _print_stream_lines(render_check_lines(check.as_dict(), width, color), check.name)
+        def _print_check(check: Check) -> None:
+            """`on_check`'s real, streaming callback: render one check's block
+            and print it through `_print_stream_lines` -- the FOURTH way
+            `_collect` reaches the outside world (see its docstring), and the
+            only one of the four that can raise. See `_print_stream_lines`'s own
+            docstring for the guard and why it is shaped the way it is; not
+            restated here.
+            """
+            _print_stream_lines(render_check_lines(check.as_dict(), width, color), check.name)
 
-    try:
         checks = _collect(
             sdk_root,
             build=build,
@@ -3241,7 +3564,7 @@ def doctor(
         issues = [foreign_issue, *issues]
 
     if json_mode:
-        emit(Envelope("doctor", project, data, issues, exit_code, sdk=sdk))
+        emit(Envelope("doctor", project_envelope, data, issues, exit_code, sdk=sdk))
     elif data is None:
         for issue in issues:
             print(f"{issue.severity}: {issue.message}", file=sys.stderr)

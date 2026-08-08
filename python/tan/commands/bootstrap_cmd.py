@@ -78,6 +78,7 @@ from tan.commands.sdk_cmd import (
     global_default_pointer_fix_hint,
     project_pin_issue,
 )
+from tan.core.atomic_write import atomic_write_text
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_REL_PATH,
     DEFAULT_WORKSPACE_DIR_NAME,
@@ -1091,21 +1092,22 @@ def reconcile_west_manifest_path(sdk_root: str) -> tuple[str, str | None, str | 
     rewritten = set_manifest_path(contents, new_rel)
     if rewritten is None:
         return "failed", current, "no [manifest] path line to rewrite"
-    # Atomic replace: write a sibling temp in the same `.west/`, then rename
-    # over `config`. That file is the topdir's ONLY manifest pointer, shared by
-    # every SDK version under it -- a crash mid-write must not leave it
-    # truncated, which would break `west` for all of them.
-    tmp_path = config_path.with_name(f"config.{os.getpid()}.tan-tmp")
+    # Atomic AND durable replace (`atomic_write_text`, tan-cli#516): write a
+    # sibling temp in the same `.west/`, `fsync` it, then rename over `config`.
+    # That file is the topdir's ONLY manifest pointer, shared by every SDK
+    # version under it -- a crash mid-write, or a crash between a successful
+    # rename and the temp's data actually reaching stable storage, must not
+    # leave it truncated or empty, which would break `west` for all of them.
+    # This used to be a bare `Path.write_text` + `os.replace` with no `fsync`
+    # of either the content or the rename -- atomic with respect to the NAME
+    # only, so a power loss in the window could leave a successfully-renamed
+    # empty or partial file; ext4's `auto_da_alloc` heuristic masked this on
+    # the common Linux case, but not on XFS/btrfs/APFS/NTFS/network mounts.
     try:
-        tmp_path.write_text(rewritten, encoding="utf-8", newline="")
-        os.replace(tmp_path, config_path)
+        atomic_write_text(str(config_path), rewritten)
     except OSError as err:
         # Worth naming on Windows: a `config` open in another process, or marked
         # read-only, fails the replace even though writing the temp succeeded.
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return "failed", current, str(err)
     return "rewrote", current, new_rel
 

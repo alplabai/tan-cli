@@ -103,20 +103,30 @@ NOT_PORTED = {
 #: (Measured: regenerating these five reddened ``test (ubuntu-latest)``,
 #: ``test (macos-latest)`` and ``test (windows-latest)`` on the PR.)
 #:
-#: All five are tan-cli#138. ``create_launch_draft`` restores the v0.3.1
-#: ``preLaunchTask`` default for the three build target kinds, which the frozen
-#: oracle had made opt-in in tan-cli#85. alp-sdk-vscode contributes task
-#: providers for exactly those labels and never passes ``--pre-launch-task``,
-#: so without the default its contribution is dead and build-then-debug
-#: silently stops happening. ``yocto-userspace`` is here only because its
-#: fixture asserts the whole envelope as one document; that target deliberately
-#: gains NO default -- see ``tan.core.debug_launch.DEFAULT_PRE_LAUNCH_TASK``
-#: for why naming its task would put an error dialog in front of every F5.
+#: Four of the five are tan-cli#138. ``create_launch_draft`` restores the
+#: v0.3.1 ``preLaunchTask`` default for the three build target kinds, which
+#: the frozen oracle had made opt-in in tan-cli#85. alp-sdk-vscode contributes
+#: task providers for exactly those labels and never passes
+#: ``--pre-launch-task``, so without the default its contribution is dead and
+#: build-then-debug silently stops happening.
+#:
+#: ``yocto-userspace`` is the fifth and its cause is DIFFERENT, not a sibling
+#: of the other four's: this target deliberately gains NO default preLaunchTask
+#: (see ``tan.core.debug_launch.DEFAULT_PRE_LAUNCH_TASK`` for why naming its
+#: task would put an error dialog in front of every F5), so its
+#: ``data.configuration`` matches the golden byte-for-byte. Its sole diff is a
+#: brand-new entry in ``issues[]`` -- tan-cli#321's
+#: ``debug-config.gdbserver-address-unresolved`` info notice, which the frozen
+#: oracle predates and never emits. It is declared here (rather than simply
+#: regenerated) for the same reason as the other four: the fixture asserts the
+#: whole envelope as one document, so any divergence anywhere in it needs the
+#: same declare-don't-silently-fix treatment.
 #:
 #: ``strict=True`` for the same reason as above, and it carries more weight
 #: here: an XPASS means the divergence VANISHED -- someone reverted the #138
-#: restoration -- which is a regression that must fail loudly rather than
-#: quietly re-green the suite.
+#: restoration (four cases) or the #321 issue stopped firing (the fifth) --
+#: which is a regression that must fail loudly rather than quietly re-green
+#: the suite.
 DELIBERATE_DIVERGENCE = {
     "debug-config-preview-zephyr-mcu": "tan-cli#138: restores the v0.3.1 preLaunchTask default",
     "debug-config-preview-zephyr-mcu-sdk-identity": (
@@ -127,8 +137,12 @@ DELIBERATE_DIVERGENCE = {
     ),
     "debug-config-preview-native-host": "tan-cli#138: restores the v0.3.1 preLaunchTask default",
     "debug-config-preview-yocto-userspace": (
-        "tan-cli#138: sibling of the four above -- this target gains NO default, but its "
-        "fixture asserts the whole envelope and the harness compares it as one document"
+        "tan-cli#321: adds the debug-config.gdbserver-address-unresolved info issue "
+        "(this target's default gdbserver <host>:<port> is unresolved) that the frozen "
+        "oracle never emits -- data.configuration itself matches the golden (this target "
+        "gets no tan-cli#138 preLaunchTask default), the sole diff is one extra entry in "
+        "issues[]; declared here because the fixture compares the whole envelope as one "
+        "document"
     ),
 }
 

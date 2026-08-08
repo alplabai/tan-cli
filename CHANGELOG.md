@@ -7,7 +7,132 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [0.5.2] — Unreleased
 
+### Changed
+
+- **`tan debug-config --core <id>` now refuses a `--core` matching no build
+  slice even when `--target-kind` is given explicitly**, not only when it is
+  omitted. Previously an explicit `--core` was only checked against
+  `build/system-manifest.yaml` when `tan` had to infer the target class
+  itself; naming `--target-kind` bypassed that check entirely, so a
+  mistyped or stale `--core` on an otherwise-built project silently produced
+  a launch configuration pointing at a generic pre-build path that does not
+  exist (`${workspaceFolder}/build/app/zephyr/zephyr.elf`) instead of the
+  real per-core artefact. A customer preparing a launch config for a core
+  named in `board.yaml` but not yet built by THIS project is now refused
+  (`debug-config.core-unknown`, exit 2) rather than getting a placeholder
+  config back at exit 0 -- run `tan build` for that core first, or drop
+  `--target-kind` to let it infer. (#489)
+
 ### Fixed
+
+- **`sdk.global-default-foreign-project` now reaches DEFAULT text output
+  too, not only `--format json`, for `inspect`/`trace`/`validate`/`diff`/
+  `support-bundle` and the three west-forwarding verbs `migrate`/`lock`/
+  `quality` -- on top of the five (`doctor`/`generate`/`build`/`presets`/
+  `examples`) already wired for it since #464.** A customer building against a
+  different SDK than they think got no warning from `inspect`, `trace`,
+  `validate`, `diff`, `support-bundle`, or `migrate`/`lock`/`quality`
+  (`west_forward_cmd.py`) -- `ok: true`, `issues: []`, while `validate`
+  SPAWNED that foreign checkout's own schema validator and
+  `migrate`/`lock`/`quality` spawned `west` itself out of it. `support-bundle`
+  was the sharpest case: the one artefact a user sends to explain a broken
+  machine carried the fact nowhere, not in the envelope and not in the
+  bundle FILE. Fixed at one seam -- every SDK ladder already answers with
+  `foreign_global_default_for`/`broken_project_pin`; `SdkInfo.from_resolution`
+  now carries both through onto the envelope's `sdk` block (off the wire --
+  the wire shape stays `{root, sourceTier}`), and `Envelope.__init__` turns
+  them into the `sdk.global-default-foreign-project`/`sdk.project-pin-unresolved`
+  pair for every command's JSON envelope from there, so a new command cannot
+  forget it (`tests/gates/test_sdk_info_is_built_from_a_resolution.py` is
+  the ratchet that keeps a raw `SdkInfo(...)` construction from reintroducing
+  the drop). Text mode has no `Envelope` to lean on -- `diff`/`inspect`/
+  `trace`/`support-bundle`/`validate` and the three `west`-forwarding verbs
+  all write straight to stderr (or, for `west`-forwarding, hand stdio to the
+  child) -- so each now prints the same warning first. `validate`'s own
+  JSON/SARIF/diagnostic-v1 documents keep the advisory OUT of
+  `data.issueCount` and out of the board-anchored formats, so a CI job
+  uploading SARIF does not annotate line 1 of a customer's board.yaml with a
+  fact about the host. `support-bundle`'s three early-return failure paths
+  (a `--target-kind`/`--server` parse refusal, an unsupported target/server
+  pairing, and a bundle-write `OSError`) now carry the same pair too --
+  previously they built their `_Outcome` from a bare `issues=[Issue(...)]`
+  list, so the one command whose whole purpose is explaining a broken
+  machine stayed silent on exactly the runs where something had already
+  gone wrong. (#478)
+- **`tan debug-config` could destroy a customer's hand-authored
+  `.vscode/launch.json`, in three separate ways, plus two smaller merge
+  gaps found reviewing the fix.** All under (#489):
+  - The write used a truncating `open(path, "w")`: any failure between the
+    truncate and the flush (a full disk, a quota/`RLIMIT_FSIZE` hit, an I/O
+    error, or the process dying) destroyed the file, and the next run then
+    refused *permanently* at the malformed-JSON guard. Rewritten as a
+    temp-sibling write, `fsync`'d before an `os.replace` onto the REAL
+    (symlink-resolved) target, with a POSIX directory `fsync` after --
+    matching, and closing gaps in, `bootstrap_cmd.reconcile_west_manifest_path`'s
+    own pattern. A symlinked `launch.json` (dotfile-managed, or shared
+    across worktrees) now keeps the link and updates the real file, instead
+    of the link being replaced by a plain file holding stale content. A
+    launch.json `tan` creates now lands at the umask-filtered default a
+    plain `open(path, "w")` would have produced, not `mkstemp`'s own
+    hardcoded `0600`; a rewrite carries the existing file's own mode across
+    the swap.
+  - Merging a fresh draft into an existing `configFiles`/`setupCommands`
+    list matched entries by POSITION, so a shorter or differently-ordered
+    resolved list silently deleted the customer's own extra entries (a
+    hand-added second OpenOCD `.cfg`, extra `setupCommands` for a remote
+    gdb session) and could pair unrelated entries, both destroying one and
+    duplicating another. Matching is now by IDENTITY (a dict's own `text`
+    field, or a scalar's own value), wherever the matching entry sits, with
+    position kept as a fallback for a draft item that matches nothing
+    already in the file -- placed at the first free slot ANCHORED between
+    the nearest identity matches before and after it in the draft, not at
+    its own raw index. The anchor-relative placement matters as soon as any
+    entry in the list identity-matches: an index-relative fallback (a draft
+    item's own position against the SAME position in the existing list)
+    stays correct only while nothing before it in the draft has also
+    matched something -- once it has, the two index spaces drift apart, and
+    a value that keeps replacing a PRIOR run's own single resolved value
+    (e.g. a rebuilt `runners.yaml` naming a different `--config`, alongside
+    an unrelated `interface/...cfg` entry every run resolves identically)
+    fell through to "append", so `configFiles` accumulated every revision a
+    project had ever been built with instead of holding only the current
+    one, on any board with more than one `--config` argument or a
+    non-empty `openocd_search`.
+  - `debug-config.sdk-identity-key-absent` misattributed "no core id was
+    resolved to look up the SDK's per-core `jlink_device` map with" as "the
+    SDK publishes no `device` value for this SoM at all" -- telling a
+    customer on a never-built project to file a metadata bug when the
+    working remedy was `--core <id>`. Split into
+    `debug-config.sdk-identity-core-unresolved` for that case (and the
+    sibling case of an unrecognised `--core`, which now names the cores the
+    SDK does publish); `sdk-identity-key-absent` still fires, correctly,
+    when the SDK's identity block genuinely carries no `jlink_device` map at
+    all.
+  - `--pre-launch-task ''` (documented as "omit the key entirely") was a
+    silent no-op against an EXISTING `launch.json` already carrying one from
+    a prior run -- the merge only visits keys the fresh draft carries, and
+    the opt-out's own implementation removes the key from the draft rather
+    than marking it for removal. `create_launch_json_write_plan` now takes
+    an explicit set of keys to omit from the merged result. **This is the
+    one place in this whole fix where `tan` deliberately REMOVES
+    hand-authored content**: if a customer had themselves typed a
+    `preLaunchTask` value into the entry `tan` merges into, `--pre-launch-task
+    ''` now deletes it -- correct, and the flag's own documented meaning, but
+    worth stating plainly rather than only as "a key from a prior run".
+
+  Known, accepted limitation: position is still a heuristic, not real
+  provenance. A customer's hand-added `configFiles`/`setupCommands` entry
+  that matches nothing in the fresh draft AND sits in the SAME
+  anchor-bracketed window an unmatched draft item is placed into can still
+  be overwritten -- e.g. `["mine.cfg"] + ["board/x.cfg"] -> ["board/x.cfg"]`,
+  with no identity match anywhere on either side to anchor `mine.cfg`
+  against, exactly the way the pre-#489 code always overwrote whatever sat
+  at that lone position. `sdk-identity-overwrite` discloses the one case a
+  caller can identify (an SDK-filled, not build-resolved, single value)
+  rather than hiding it behind `ok: true`. Closing this further needs a
+  real provenance record ("did `tan` write THIS value, in a prior run"),
+  which nothing here or on disk keeps today; tracked as a follow-up (#518),
+  not built in this change.
 
 - **Two release gates went red on every open PR the moment `v0.5.1` was
   tagged.** `version-identity` refused a tree still claiming `0.5.1` once
@@ -16,6 +141,949 @@ All notable changes to `tan` are documented here. Format follows
   tests failed because `latest` began resolving to a tag its hardcoded
   `RELEASES` snapshot did not carry. Both are the checks working as
   designed; both needed the post-release follow-up they describe.
+- **Three `tan flash` interpolations onto the real write path had no
+  control-character/metacharacter guard, while every sibling field on the
+  same lines already did.** `jlink_serial` was read with the tolerant
+  `fa_str` and interpolated verbatim into `SelectEmuBySN {serial}` in both
+  the MRAM-write script and the read-only DPIDR preflight -- a newline there
+  both injects arbitrary J-Link Commander lines and prefixes them onto the
+  preflight ahead of its wrong-board abort. The artefact/ATOC paths reached
+  `loadbin`/`loadfile`/`verifybin` lines quoted by `commander_path`, but
+  quoting only stops whitespace token-splitting, not a literal newline
+  ending the Commander line early. `jlink_serial` now goes through
+  `fa_str_checked` + `validate_identifier` (which also fixes a bare numeric
+  serial, the canonical SEGGER spelling, being silently dropped), and the
+  artefact/ATOC paths are rejected outright if they contain a `"` or a
+  control character. (#486)
+- **`tan flash`'s write path could send a write somewhere the operator did
+  not intend, or claim `ok:true`/exit 0 over one that never happened.** Six
+  defects, closed together: (1) `yocto_wic`'s `/dev/` target guard was a
+  bare `startswith`, so `/dev/../home/<user>/important.img` passed and `dd`
+  overwrote the file -- the target is now lexically normalized, plus a
+  second, write-time-only `stat.S_ISBLK` gate catches a real file that
+  merely lives lexically under a genuine `/dev/` subtree; (2) an
+  out-of-vocabulary `flash_args.compress`, or a `.wic.zst`/`.wic.bz2`/
+  `.wic.lzo` artefact with no `compress` key at all, silently fell through
+  to a raw `dd` of the still-compressed stream -- both now refuse instead,
+  without touching the genuinely-uncompressed `.wic` path; (3) a relative
+  `--sdk-root` made `tan validate` an artefact against one base and the
+  spawned flasher read it from another -- `sdk_root` is now absolutised the
+  same way `build_root` already is; (4) text mode discarded every
+  tan-authored failure diagnosis (timeout, spawn failure, J-Link
+  script-write failure), and dropped a killed child's output captured
+  before the kill; (5) Flow D's SETOOLS auto-sign ran for real on any
+  non-dry-run invocation even with the confirm gate unarmed, writing into
+  the customer's SETOOLS install on a run that goes on to refuse the MRAM
+  write it was signing for; (6) `swd_probe`'s success message asserted
+  `"@ <base>"` unconditionally, even for an ELF/HEX write where no tool ever
+  received a base address. A seventh, separately-tracked shape --
+  `flash.nothing-matched` misdiagnosing a run where every matched target
+  was legitimately skipped before dispatch (an unresolved `TBD` flash_arg,
+  no flash_method, or a missing tool under `--skip-missing-tools`) -- now
+  reports the new warning code `flash.entries-skipped` instead; `ok`/exit
+  code are unchanged (still success) for that shape.
+  - **Three of these turn a previously-succeeding `tan flash` into a
+    refusal (exit 1).** Most likely to surprise someone: a `.wic.zst`
+    artefact that used to flash successfully on a `dd`-only host (no
+    `bmaptool`) now refuses -- it was silently writing a compressed image
+    straight to the block device. The other two: an explicit
+    `flash_args.compress` value outside `"gz" | "xz"`, and a `/dev/`-rooted
+    target that does not exist and whose parent is not `/dev` itself (a
+    typo, a dangling symlink, or a traversal that would have resolved
+    outside `/dev/`). (#487)
+- **Flow D's read-only DPIDR preflight ran AFTER the SETOOLS auto-sign, so a
+  wrong-board refusal had already mutated the customer's SETOOLS install** --
+  `app-gen-toc` rewrites `app-package-map.txt` rather than appending, so a
+  refusal on the intended abort still destroyed prior sign records first. The
+  preflight is now hoisted ahead of the sign, gated on the identical confirm
+  condition; the mismatch refusal also now names the ACTUAL SW-DP ID the
+  probe reported, not only the expected one -- the useful datum on a bench
+  where a cloned USB serial answers from two physical probes. (#512)
+- **`swd_probe` accepted `flash_args.jlink_serial` and silently ignored it on
+  every arm, so it could not select a probe on a host with more than one
+  J-Link.** `JLinkExe` selects a probe only by serial -- it has no USB-port
+  equivalent -- and an OEM-cloned serial shared by two different physical
+  probes is a measured bench condition, not a hypothetical one. The J-Link
+  arm now emits `SelectEmuBySN {serial}` in both the Commander script (ahead
+  of every other line) and as a `-SelectEmuBySN` argv word (the script line
+  alone does not provably precede this arm's own `-AutoConnect`), through the
+  same `fa_str_checked` + `validate_identifier` guard `jlink_serial` already
+  gets on Flow D. The openocd/pyocd arm has no probe-serial selector of its
+  own, so a manifest naming `jlink_serial` now refuses explicitly on that arm
+  instead of silently dropping the field. (#513)
+- **`swd_probe` had no wrong-board guard at all, on the one backend most
+  likely to run on a multi-probe host.** #513 made the J-Link arm honour
+  `jlink_serial`, but `JLinkExe` selects a probe only by serial, and an
+  OEM-cloned serial shared by two physical probes cannot be disambiguated by
+  serial alone even when pinned. The J-Link arm now gets the identical
+  read-only DPIDR preflight #512 gave Flow D's MRAM write, reusing (not
+  copying) `validate_flow_d_preflight_args`/`flow_d_preflight_script`:
+  `flash_args.expect_dpidr` arms it, and a mismatch refuses before any write.
+  Armed by `expect_dpidr` alone on this backend, not paired with
+  `jlink_device` the way Flow D's is -- `swd_probe`'s `jlink_device` already
+  names the write's own `-device` profile, a different field with a
+  different job (and is now itself validated at PLAN time, ahead of the
+  J-Link-vs-openocd/pyocd arm split rather than only inside the arm that
+  reads it, so a hostile value gets the same verdict under `--dry-run` and
+  for real regardless of which arm a given host takes, and can no longer
+  forge lines in `data.entries[].message`). The openocd/pyocd arm gets the
+  same accept-and-ignore refusal `jlink_serial` already has there:
+  `expect_dpidr` is a JLinkExe-only concept, so a manifest naming it that
+  lands on that arm now refuses explicitly instead of silently dropping the
+  guard. `expect_dpidr` stays optional -- no shipped preset carries a SW-DP
+  ID for tan to require -- but a confirmed J-Link write with none set now
+  surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
+  `--format json` and tan's default text output, so that silent gap has a
+  signal without making the field mandatory. (#520)
+- **`tan build` spawned a slice's `command.tool` by its bare identity, never
+  the absolute path it had just resolved -- ADR-0020 says the executor
+  resolves by explicit path, never PATH, and the check/spawn split let the
+  platform's own resolver disagree with the check that ran one line
+  earlier.** Windows' `CreateProcess` implicit search (no
+  `lpApplicationName`) includes a current-directory step the check was
+  written specifically to exclude, so a project checked out with its own
+  `west.exe` at its root could get spawned in place of the real tool. Fixed
+  by having ONE resolver (`_resolve_tool`) answer both "is it available" and
+  "what absolute path is it", and spawning that path, never the bare
+  identity. A review round on the first attempt found four further defects,
+  all fixed here too:
+  - The resolved-tool note originally appended to every dispatched outcome's
+    `message`, corrupting two contracts at once: `message` is the source of
+    BOTH `data.slices[].reason` (the JSON envelope) and the persisted
+    `build/system-manifest.yaml` `slices[].reason`, whose alp-sdk-owned
+    schema defines the field as "why a slice was skipped/failed" -- every
+    green build began writing a `reason` onto `status: ok` slices, a silent
+    envelope/on-disk contract change with a consumer already modelling it
+    (`alp-sdk-vscode`'s `ManifestSlice.reason`). The resolved path now lives
+    in its own additive field, `data.slices[].resolvedTool` (always
+    present, `null` when identical to the plan's own `tool` -- the dominant
+    Zephyr shape, since `west_program` already rewrites `tool` to the
+    workspace venv's own absolute `west`), never in `reason`. Default text
+    shows it only on a failed or cancelled slice; a success prints nothing
+    extra.
+  - `_resolve_tool` read `os.environ["PATH"]` directly, 46 lines before the
+    slice's own `env` was assembled -- an identical plan with a
+    `command.env` `PATH` and a different same-named tool on the PARENT's
+    PATH resolved (and, pre-fix, would have spawned) the parent's copy
+    instead of the plan's own. Tool resolution now runs against the SAME
+    fully-assembled slice `env` the spawn itself uses, matching pre-fix
+    POSIX `Popen`'s own `os.get_exec_path(env)` selection.
+  - The Windows-only shadow-tool regression test planted its shadow binary
+    in the SLICE's own spawn `cwd`, but `CreateProcess`'s documented
+    implicit search consults the current directory of the CALLING
+    (parent) process, not `lpCurrentDirectory` -- so that test was green
+    before and after the fix and proved nothing. A sibling test now plants
+    the shadow in the test process's own cwd via `monkeypatch.chdir`,
+    leaving the original slice-cwd case in place alongside it.
+  - A non-absolute `command.tool` containing a path separator (e.g.
+    `bin/sh`) used to reach `_resolve_tool`, which checked it against TAN's
+    own cwd, while the spawn then re-resolved the same string against the
+    CHILD's cwd -- two different directories deciding what "the tool" means,
+    the exact class of defect this fix exists to close. Refused at PLAN
+    PARSE time instead (`build.plan-invalid`): `command.tool` is an identity
+    (a bare name to look up) or an already-resolved absolute path, and a
+    relative path with a separator is neither.
+
+  A third review round found two further issues:
+  - **The Windows cwd-shadow regression tests were vacuous.** Both shadowed
+    a `.bat` under the extension-less identity `command.tool` resolves --
+    but `CreateProcess` with `lpApplicationName=NULL` appends only `.exe` to
+    a bare name in its own implicit search; it never consults `PATHEXT`.
+    Reverting to a bare-identity spawn (defeating `_resolve_tool` on
+    purpose, to check the test could fail) still never finds
+    `tan510shadowtool.exe` anywhere, so both tests went red on
+    `status == "succeeded"`, never on the shadow marker -- a green run
+    proved only that `_resolve_tool`'s own PATHEXT walk finds a `.bat`, not
+    the cwd-shadowing property tan-cli#510 exists to close. Both shadows are
+    now real, valid `.exe` files -- a copy of the running interpreter plus
+    its own co-located DLLs, discriminated at runtime by `sys.executable`
+    (which reports the actual loaded image path, not the invocation
+    string) -- so the defeated-resolver case now genuinely fails to find
+    the tool at all, and the fixed case genuinely proves the real, PATH-
+    resolved copy ran. Still Windows-only (`windows-latest`'s
+    `python-tests` matrix in `parity.yml` is the only host that can execute
+    either); unrunnable in this sandbox (Linux), where both remain
+    unconditionally skipped regardless of resolver state.
+  - **The missing-tool refusal's `-- searched PATH: <every entry>` text was
+    reaching `build/system-manifest.yaml`'s persisted `slices[].reason`,
+    not just the terminal/envelope.** That text is what makes the terminal
+    message actionable for the customer running the build, but the
+    manifest is a build ARTEFACT that outlives the run and gets forwarded
+    -- often pasted into a support ticket -- so persisting the full search
+    list leaked the customer's machine layout (private directory names,
+    sometimes credentials embedded in a path) to whoever the ticket
+    reaches. The persisted `reason` is now the short form,
+    `` tool `<name>` not found `` -- byte-identical to what this port
+    always wrote for this case before the searched-PATH detail was added
+    -- while `SliceOutcome.message`/`data.slices[].reason` (the JSON
+    envelope, this run's own screen) keep the full detail unchanged. The
+    "manifest write is byte-identical to `dev`'s" verification this whole
+    fix relies on held for an all-green build throughout, but did NOT hold
+    for a build with a missing-tool slice between the first and this
+    round; it now holds for both. (#510)
+
+  **A separate, undeclared CLI-envelope classification change** ships as a
+  side effect of the env-scoped resolution fix above (the second sub-bullet
+  of round two): a slice whose `command.env` pins a `PATH` that does not
+  contain the tool used to reach the spawn at all (bare `Command::new(&tool)`
+  under the parent's own resolvable PATH, `failed`/exit 1) and now instead
+  resolves against that pinned `PATH`, finds nothing, and reports
+  `skipped`/exit 0 with the new "searched PATH" message. The new
+  classification is correct -- a plan that pins its own `PATH` and gets
+  nothing on it is exactly the missing-tool case, not a spawn failure -- but
+  it is an envelope shape change of the same class the maintainer's own
+  correction on this issue was about, so it is called out explicitly rather
+  than folded silently into the fix above. Unreachable through an SDK-
+  emitted plan (`tan/planner/buildplan.py:465`, inside `emit_build_plan`,
+  emits only `env: {"ALP_SDK_ROOT": "${SDK_ROOT}"}`, never a `PATH`
+  override); reachable only through a hand-authored or materialised plan
+  passed via `--plan-from`. (#510)
+
+  A fourth review round -- the first real `windows-latest` CI run of this
+  whole fix, everything before it having only ever run against a sandbox
+  that unconditionally skips both `skipif(os.name != "nt")` regression
+  tests -- found:
+  - Both Windows-only regression tests' own assertions were case-sensitive
+    against a path Windows resolves with its own case: `CreateProcess`
+    reported the correct real-tool path back, but with a `.EXE` extension
+    where the assertion expected `.exe`, so both went red on the case bytes,
+    never on the property under test. THE INVARIANT ITSELF HELD -- the
+    `real_on_path` copy ran, never the slice/parent shadow. Both assertions
+    now `os.path.normcase()` both sides before comparing (a no-op on POSIX,
+    case-folding on Windows) while still comparing the FULL resolved path,
+    never a basename or substring, so they keep the ability to tell "real
+    tool ran" apart from "shadow tool ran" -- the entire point of either
+    test.
+  - The MAJOR-4 parse-time refusal (previous round) used
+    `Path(tool).is_absolute()`, which answers relative to the host RUNNING
+    THE CHECK, not the host that emitted the plan: `/usr/bin/west` is
+    absolute under POSIX `pathlib` but not under Windows' (no drive), so a
+    plan built on Linux and parsed on Windows was refused at parse time as
+    "a relative path" even though it genuinely is absolute, just under the
+    wrong OS's convention. Decided explicitly rather than left as an
+    accident: kept as a refusal -- an already-absolute `command.tool` is
+    inherently host-specific (nothing can re-root a POSIX-absolute path
+    onto Windows, or the reverse), so refusing it at parse time, naming
+    which OS's convention it belongs to, beats accepting it and failing
+    later at spawn with an unexplained `FileNotFoundError`. The message now
+    says so explicitly (``"...is a {POSIX,Windows}-absolute path, not
+    executable on this host..."``); the accepts-an-absolute-tool test is
+    now built from the RUNNING host's own path convention instead of a
+    hardcoded POSIX string, so it exercises the real invariant on both
+    platforms in CI rather than only ever the POSIX branch. No known
+    real-plan casualty: the SDK planner
+    (`tan/planner/orchestrator.py::_slice_command`) only ever emits the
+    bare identities `west`/`bitbake`/`cmake`, never an absolute path.
+    (#510, #530)
+- **`tan doctor` could return the wrong verdict outright -- a pass on a host
+  that cannot build, and a refusal on one that can.** Eight defects, fixed in
+  two passes:
+  - `westResolved` treated a `west` launcher that resolves but cannot be
+    EXECUTED (a relocated/renamed workspace, a deleted `.venv/bin/python`) the
+    same as one that ran and printed something unparseable, and reported
+    `pass` -- `tan build` then died with `FileNotFoundError`/
+    `ModuleNotFoundError` on the very first slice. `probe_status` now tells
+    "could not be spawned" apart from "ran fine", and the sibling `west`
+    check (bare-PATH-only) no longer reports `pass` for that same
+    unspawnable binary either -- both checks now agree.
+  - `hostPrerequisites` keyed macOS off a `windows`/posix bool with no
+    `macos` arm, so a stock Mac (no `wget`, no standalone `xz`) failed
+    `tan doctor` over tools alp-sdk's manifest never asks macOS for, while
+    `tan bootstrap` on the identical manifest succeeded. Now host-keyed,
+    matching `tan bootstrap`'s own reader.
+  - `_load_manifest` never read `schemaVersion`, so an SDK whose manifest
+    `tan bootstrap` refuses outright still reported `hostPrerequisites: pass`
+    with zero tools probed and no warning.
+  - `sdkProvenance` and a build's `${SDK_ROOT}` token substitution both
+    misattributed an ENCLOSING git repository's commit to a vendored SDK with
+    no `.git` of its own (an extracted release archive inside a customer's
+    own app repo, a supported setup) -- printing a foreign commit as the
+    SDK's own, and, in the build path, able to fire a false
+    `sdkCommit` mismatch or miss a real one. Both sites now compare the
+    resolved `git rev-parse --show-toplevel` against the SDK root itself and
+    treat a mismatch as no signal.
+  - The `west` check re-probed a bare `"west"` instead of the already
+    PATH-resolved binary, reopening the cwd-injection gap `on_path` exists to
+    close.
+  - The `fdt` check asked tan's OWN interpreter instead of the workspace
+    venv's -- a permanent false red on the shipped PyInstaller freeze (`fdt`
+    is not a bundled dependency there) and a possible false green under
+    `python -m tan` (a stray local `fdt.py` on the cwd).
+  - `zephyr_python_floor` blamed an unset `$ZEPHYR_BASE` for a floor read
+    failure even when a workspace HAD resolved and `$ZEPHYR_BASE` was never
+    consulted at all -- now names the real cause.
+  - A working directory deleted out from under the process escaped `doctor`'s
+    (and `build`'s and `validate`'s) resolution prologue as a raw traceback
+    with empty stdout instead of the coded internal-failure envelope every
+    other failure gets.
+  - Two smaller finish-up fixes found reviewing the above: the
+    `schemaVersion`-mismatch message's trailing period doubled up with the
+    warning that wraps it ("...outright.. Falling back to"), and a bare
+    `sys.stdin.isatty()` in the `--fix` consent-suppression message crashed
+    on a host whose `stdin` handle is `None` (a GUI-launched process).
+  - The `None`-`stdin` guard above closed only the symptom's SECOND call
+    site. `doctor()` calls the shared `can_prompt` gate
+    (`tan.core.consent`) to decide `fix_allowed` BEFORE it ever reaches the
+    consent-suppression message, and that shared gate still called the bare
+    `sys.stdin.isatty()` -- so a detached-stdio host (`tan doctor --fix`
+    with fd 0 closed before exec, `0<&-`) still crashed, one call earlier,
+    caught only by `doctor()`'s outer handler as a fabricated
+    `doctor.internal-failure` (exit 5) that discarded the whole diagnosis
+    instead of the correct `doctor.fix-suppressed` warning (exit 4). The
+    `is not None` guard now lives in `can_prompt` itself -- the one place
+    every caller (`doctor`, `scaffold`) reaches it -- rather than duplicated
+    per call site.
+  - The `is not None` guard above landed on `sys.stdin` only, leaving
+    `sys.stderr` -- the NEXT operand of the identical `and` chain, in the
+    same `can_prompt` function and in `fix_suppressed_issue`'s own duplicate
+    -- still a bare `.isatty()`. A host with a live, non-tty stdin and a
+    detached stderr (each handle can be detached independently by whatever
+    spawned the process) still crashed with the identical `AttributeError`,
+    one operand later; verified against the real binary with a `pty.fork()`
+    child (a genuine tty on stdin, stderr closed before `exec`), not a
+    monkeypatched mock. Both call sites now guard `sys.stderr is not None`
+    too. Sweeping the rest of `tan/` for the same unguarded-`isatty()`
+    shape found three further, independent sites and closed two of them:
+    `faultdecode_cmd._read_dump`'s implicit stdin auto-consume (now treats a
+    detached stdin the same as one offering nothing, `""`) and its explicit
+    `--file -` read (now refused with a clear `--file` message instead of a
+    raw crash); and `new_som_cmd.new_som`'s non-interactive-stdin refusal
+    (now reaches its own named "stdin is not a terminal" message instead of
+    crashing first). The third, `build_cmd._dispatch`'s `_Heartbeat` arming,
+    only had its `None` case guarded by this same sweep -- `sys.stderr is
+    not None and sys.stderr.isatty()` still crashed on a stderr that EXISTS
+    but has no `.isatty()` at all, which is exactly what `--format json`
+    installs (`_TeeStderr`); that site was not actually closed until round
+    6, below. (#488)
+- **Round 6: the round-5 sweep's own `is not None` guards left the actual
+  crash open on the one site that mattered most.** `sys.stderr is not None
+  and sys.stderr.isatty()` (`build_cmd._dispatch`) and the equivalent
+  `sys.stdin`/`sys.stderr` pair in `tan.core.consent.can_prompt` and
+  `doctor_cmd.fix_suppressed_issue` all stop a *detached* (`None`) handle
+  from crashing `.isatty()`, but not a handle that EXISTS and simply lacks
+  the method -- exactly what `sys.stderr` becomes under `--format json`
+  (`tan.cli.main` tees it through `_TeeStderr`, which implements only
+  `write`/`flush`/`getvalue`). Measured against the real binary: every `tan
+  run --format json` against a real project crashed with `AttributeError:
+  '_TeeStderr' object has no attribute 'isatty'` (exit 5,
+  `run.internal-failure`) before a single slice dispatched, because
+  `run_cmd._run` calls `_build` with no `json_mode` of its own, so
+  `_dispatch` always saw the `json_mode=False` default and reached the bare
+  `.isatty()` unconditionally. All three sites now route through
+  `tan.env.stdin_is_tty`/`stderr_is_tty` -- promoted from the module-private
+  `_stderr_is_tty` tan-cli#288 already built for this exact
+  try/except-guarded probe, plus a new `stdin_is_tty` alongside it -- instead
+  of each hand-rolling a fourth (and fifth) copy of a guard three of the
+  previous five rounds already got wrong once. (#488)
+
+
+- **`tan bootstrap`'s `reconcile_west_manifest_path` never `fsync`'d the
+  temp sibling it writes `.west/config` through, so `os.replace`'s atomicity
+  guarantee (the RENAME only) was covering nothing about the CONTENT
+  reaching stable storage** -- a power loss between the rename landing and
+  the temp's data blocks flushing could leave the topdir's only manifest
+  pointer, shared by every SDK version under it, renamed to its real name
+  with truncated or missing content. This is the identical gap #489 closed
+  in `tan debug-config`'s `launch.json` write, from which this shape was
+  originally copied; the fix had landed on one call site and not the other.
+  Both now share one helper, `tan/core/atomic_write.py:atomic_write_text`
+  (`fsync`'d before the rename, a POSIX directory `fsync` after, symlink-safe,
+  mode-preserving across the inode swap), rather than two independently
+  hand-synchronised copies of the same durability sequence -- the drift that
+  let this one gap outlive the other's fix. Two further gaps closed in the
+  same round: the extraction had initially reproduced `mkstemp`'s hardcoded
+  `0600` with nothing to restore a rewritten file's original mode after the
+  swap, which would have unconditionally narrowed `.west/config`'s
+  permissions on every rewrite; and the helper's failure cleanup only caught
+  `OSError`, so an unencodable `content` (`UnicodeEncodeError`, a `ValueError`)
+  or an unrecognised `encoding=` (`LookupError` from `os.fdopen` itself) both
+  left the `*.tan-tmp` sibling on disk, un-unlinked, instead of being
+  reported and cleaned up like any other write failure. (#516)
+- **The published `envelope-contract.json` release asset re-packaged five
+  `debug-config-preview-*` goldens that no longer describe the shipping CLI,
+  and `contract/README.md` claimed coverage it did not have.** The five
+  `debug-config-preview-*` fixtures predate `tan-cli#138`'s restored
+  `preLaunchTask` default and `tan-cli#321`'s `debug-config.gdbserver-
+  address-unresolved` issue, so they were marked `xfail(strict=True)` rather
+  than re-recorded (re-recording them would also redden the frozen `crates/`
+  oracle's own copy of the same fixtures). `contract/README.md` is corrected
+  to: name the real, narrower live-parity coverage instead of overstating
+  it (only the bare `zephyr-mcu` invocation and `native-host` get a
+  whole-envelope oracle-parity diff; `zephyr-mcu-sdk-identity`,
+  `baremetal-mcu` and `yocto-userspace` do not); add the missing
+  `data.configuration` row to the "Frozen `data` field names" table; record
+  the `--core m55_hp` the `zephyr-mcu-sdk-identity` fixture actually invokes;
+  and replace an unfiled "filed as a follow-up" claim with the real tracking
+  issue, `tan-cli#529`. `.github/workflows/release.yml`'s "Bundle the
+  envelope contract" step comment is corrected to match: it no longer
+  asserts the re-packaging is "pure" with no possible drift from what ships.
+  (#502)
+
+- **`tan new-som`: a YAML-injection hole, a `--force` rollback that could
+  destroy a customer's hand-filled preset, and three smaller correctness
+  gaps in the porting-kit scaffolder.** Five defects beyond the
+  write-failure rollback fixed earlier this cycle:
+  - **YAML injection into a generated preset.** `--default-hw-rev` and
+    `--default-board` were the only two user-supplied strings still spliced
+    RAW into the hand-built preset YAML. A multi-line `--default-hw-rev`
+    turned its embedded newline into a SIBLING mapping key the instant it
+    was written -- `--default-hw-rev $'r1\ncapabilities: {secure_element:
+    true}'` exited 0, reported success, and planted a fabricated hardware
+    capability flag in the generated `metadata/e1m_modules/<SKU>.yaml`, the
+    exact thing the module's own docstring says never happens ("values are
+    NEVER invented"). A colon-bearing value (`'r1: x'`) instead reached
+    `yaml.safe_load` unguarded and crashed with a raw `ScannerError` -- exit
+    1, zero bytes on stdout under `--format json`. Both fields now render
+    through PyYAML's own emitter (a new `_yaml_scalar` helper), never
+    f-string splicing, and `--default-hw-rev` is additionally checked
+    against its full schema pattern (`^[a-z0-9_-]+$`) before anything is
+    rendered -- a value that cannot be represented as a safe one-line YAML
+    scalar is refused outright.
+  - **`--force` could destroy a pre-existing, hand-filled preset.** The
+    write-failure rollback unlinked `preset_path` unconditionally, so a
+    `--force` re-scaffold whose SoC-spec write failed AFTER the preset
+    write succeeded deleted the customer's original preset and left
+    nothing in its place -- turning "clobbered" into "deleted" with no copy
+    taken and none restored. The rollback now captures the pre-existing
+    preset's bytes before overwriting it and RESTORES them on failure; a
+    genuinely new preset (nothing to restore) is still removed.
+  - **A repeated `--cores` id produced a duplicate YAML/JSON key, reported
+    as success.** `--cores m33_a,m33_a` exited 0 and wrote `topology:` with
+    `m33_a: {}` twice in the preset and two identical `cores[]` rows in the
+    SoC spec -- invalid YAML (a strict loader rejects a duplicate key) that
+    both schema self-checks let through, since neither schema forbids a
+    repeated id within its own document. `tan init`'s sibling `--cores`
+    parser already refused this; `new-som` now does too, before anything is
+    written.
+  - **An out-of-pattern `--default-hw-rev` misreported as an internal tan
+    bug.** `--default-hw-rev R1` (uppercase -- the literal spelling
+    alp-sdk's own hw-revisions files use for an Altium board rev) on a
+    brand-new family (where the family cross-check has nothing to check
+    against yet) reached the post-render schema self-check unvalidated by
+    the command itself, and came back as `new-som.internal-failure` with
+    `data: null` -- a code whose own contract entry says "never bad user
+    input". Pre-validated against the pattern now, so this is
+    `new-som.failed` like every other bad flag.
+  - **Every `click.prompt` in the interactive fallback wrote its question to
+    stdout, not stderr.** `click.prompt`'s own default is `err=False`;
+    `tan new-som`'s ten prompts and `tan scaffold`'s two both used it
+    unset, so `tan new-som > log.txt` (or a pipe) with a real terminal on
+    stdin/stderr wrote the question into the redirect instead of the
+    terminal and blocked on a question the human never saw -- a
+    behavioural divergence from the frozen oracle, whose `inquire`-based
+    prompts render to stderr. Every prompt in both commands now passes
+    `err=True`.
+  - Also: a bare `sys.stdin.isatty()` in `new-som`'s missing-flags gate
+    crashed with an `AttributeError` under a console-less launcher (`sys.
+    stdin` is `None` there, not merely non-interactive); it now checks
+    `sys.stdin is None` first. And the write-failure rollback's own report
+    no longer claims a path "may be half-written" when that path was never
+    physically created (a regular file below `--output-root` fails
+    `mkdir()` structurally, before anything reaches disk for it) --
+    cleanup is now reported only for a path the rollback finds actually
+    exists. (#496)
+- **`tan new-som`: the previous round's own YAML-injection fix reintroduced
+  the same class of defect it was closing, plus a rollback gap and a
+  narrower prompt/control-character check.** Found on review of (#496):
+  - **`--default-board`/`--default-hw-rev` could still be silently
+    truncated into the generated preset, reported as success.**
+    `_yaml_scalar`'s new PyYAML-emitter rendering still called
+    `yaml.safe_dump(value)` at PyYAML's default 80-column fold width and
+    kept only the first line -- fine under 80 columns, but anything longer
+    was cut, and the cut half was simply dropped from the SoM preset with
+    no error. At greater length the cut could land INSIDE an emitted
+    quoted scalar, corrupting `preset_text` into invalid YAML and crashing
+    the self-check's `yaml.safe_load` with a raw `ScannerError` -- exit 1,
+    zero bytes on stdout under `--format json`. `_yaml_scalar` now renders
+    with `width=float("inf")`, so the emitter never folds and the full
+    value always survives on one line.
+  - **A write that failed PARTWAY through could leave a half-written
+    preset on disk, unrolled-back.** The write-failure rollback gated the
+    entire preset branch on membership in a `written` list the caller only
+    appended to AFTER `Path.write_text` returned successfully -- an
+    `OSError` from mid-write (`ENOSPC`/`EDQUOT`/`EFBIG`/`EIO`) left a
+    physically created, partially-written file on disk but raised before
+    that append ran, so the rollback treated the file as never touched.
+    The caller now sets a `preset_write_attempted` flag the instant the
+    write is about to start, and the rollback gates on that instead.
+  - **The "no real terminal" gate checked only `stdin`, never `stderr`.**
+    Every interactive prompt rides stderr (the earlier fix in this same
+    round), so a real stdin terminal with a redirected stderr had no way
+    to show the human the question and blocked on it silently. The gate
+    now refuses unless both `stdin` and `stderr` are real terminals,
+    mirroring `tan.core.consent.can_prompt`'s own rule.
+  - **A raw DEL byte (0x7F) in `--display-name` reached the unguarded
+    preset self-check and crashed it.** The control-character refusal only
+    checked `ord(ch) < 0x20`; DEL is a control character too, just outside
+    that range, and an unescaped DEL inside a rendered double-quoted YAML
+    scalar made `yaml.safe_load(preset_text)` raise a raw `ReaderError` --
+    exit 1, zero bytes on stdout under `--format json`. The control-
+    character check (now a shared `_has_control_char` helper) rejects DEL
+    alongside the C0 range, and the self-check's `yaml.safe_load` call is
+    now itself guarded as a backstop. (#496)
+
+- **`install.ps1`'s Path update permanently destroyed every `%VAR%` reference
+  in the User (or, under `-System`, the MACHINE) Path -- silently.**
+  `[Environment]::GetEnvironmentVariable("Path", $scope)` EXPANDS a
+  `REG_EXPAND_SZ` Path value before returning it, and
+  `[Environment]::SetEnvironmentVariable` always writes the result back as
+  `REG_SZ` -- so a Path like `%JAVA_HOME%\bin;%LOCALAPPDATA%\...` lost every
+  indirection the moment `install.ps1` appended its own directory, breaking
+  every one of those entries the next time the referenced profile moved
+  (domain join, roaming profile, a drive-letter change). `install.ps1` now
+  opens the registry directly -- reading UNEXPANDED
+  (`DoNotExpandEnvironmentNames`) and writing back with the SAME
+  `RegistryValueKind` the key already had, the way rustup/scoop/chocolatey
+  do -- and re-broadcasts `WM_SETTINGCHANGE` itself, since a direct registry
+  write does not get that side effect for free the way
+  `SetEnvironmentVariable` did. (#490)
+- **`install.sh`'s tan-cli#434 health check ran the freshly downloaded
+  binary out of `$TMPDIR`, which 404s the whole install on a host with
+  `$TMPDIR` mounted `noexec`** (common on CIS/STIG-hardened images --
+  exactly where customers install `tan` from via `curl | sh`) -- and
+  misattributed the failure to a glibc floor. `install.sh` and `install.ps1`
+  now recognise the noexec/AppLocker signature and retry the health check
+  staged inside `$INSTALL_DIR`/`$Dir` (which already has to be exec-able for
+  `tan` to ever run) before falling back to a message that names the mount
+  option explicitly, with the `TMPDIR`/`--dir` workaround spelled out.
+  Six further defects found reviewing that fix, all closed together:
+  - `install.sh` reported a retry that never got staged as one that ran and
+    failed -- `retried=1` was set before the retry was attempted, and the
+    `mktemp`/`mv` error was discarded rather than surfaced. It is now set
+    only after the retry's own health check actually runs, and a staging
+    failure's real error text is reported instead.
+  - `install.sh`'s noexec signature keyed on the untranslated English
+    "Permission denied", but neither it nor the health check forced
+    `LC_ALL=C` -- on a localized host (the same hardened-image class this
+    fix targets) glibc's translated `strerror(EACCES)` never matched, and
+    the noexec retry silently never fired.
+  - `install.ps1`'s AppLocker signature matched on the "Access is denied"
+    message text alone; `install.sh`'s equivalent already requires exit code
+    126 AND the text. `install.ps1` now reads the actual Win32 status off the
+    underlying `Win32Exception` and matches it against all three codes
+    `CreateProcess` can return for this class of refusal:
+    `ERROR_ACCESS_DENIED` (5, an NTFS deny-execute ACE),
+    `ERROR_ACCESS_DISABLED_BY_POLICY` (1260, the stock AppLocker/Software
+    Restriction Policy "block executables from %TEMP%" rule), and
+    `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (786, `0x312`, the same
+    SAFER/SRP policy class configured with no user-facing notification --
+    confirmed against
+    `learn.microsoft.com/windows/win32/debug/system-error-codes--500-999-`
+    and MS-ERREF, `openspecs/windows_protocols/ms-erref`, `0x00000312`).
+  - The retry gate's speculative `mkdir -p "$INSTALL_DIR"` ran even when the
+    install was then refused, leaving an empty directory where pre-fix
+    nothing existed; it is now removed on that path -- including any
+    intermediate PARENT directories that same `mkdir -p` also created (a
+    round-9 fix: the first version of this only `rmdir`'d the leaf, which
+    left a multi-level `--dir` like `<dir>/orph/deep/bin` orphaning
+    `<dir>/orph` and `<dir>/orph/deep` behind on refusal).
+  - `restore_previous`'s `as_root rm -rf "$dest" "$LIB_DIR"` was unguarded,
+    so under `set -eu` a failure there aborted the script mid-rollback,
+    skipping both the backup restore and the warning that names it.
+  - The first `download` call's own fatal `need curl or wget on PATH`
+    message was redirected to `/dev/null`, so a host with neither tool
+    exited 1 with zero diagnostic output.
+  Three more defects from the same report, also closed: a relative
+  `--dir`/`-Dir` was baked verbatim into the archive layout's generated
+  launcher and the PATH-modifying line, working only from the one CWD
+  install ran in -- both scripts now normalise it to an absolute path
+  first; a `--system`/root-owned install left the whole tree owned by the
+  invoking unprivileged user (`mktemp` stages unprivileged and `mv`
+  preserves ownership even across filesystems as root) -- `install.sh` now
+  `chown`s the installed files to root after a sudo-elevated commit
+  (non-fatal if the chown itself cannot succeed); and fish/tcsh/csh fell
+  through to `~/.profile` with a POSIX `export` line neither shell reads or
+  parses -- each now gets its own rc file (`~/.config/fish/config.fish`,
+  `~/.tcshrc`, `~/.cshrc`) and its own syntax (`set -gx` / `setenv`). (#490)
+- **Three more defects found reviewing the (#490) fixes above, all in
+  `install.ps1`:**
+  - A relative `-Dir` resolved against `[Environment]::CurrentDirectory`,
+    which NEITHER Windows PowerShell 5.1 nor PowerShell 7+ updates on
+    `Set-Location`/`cd` -- only `$PWD` does, on both. `-Dir .\bin` after `cd
+    .\tools` could silently install somewhere the user never asked for
+    (often wherever the PowerShell process itself started), on either
+    version. Now anchored against `$PWD.Path`, which both 5.1 and 7 keep
+    accurate, via `[System.IO.Path]::Combine` (an already-absolute `-Dir`
+    passes through unchanged).
+  - The registry-kind-preserving Path write this same issue's
+    highest-priority fix added was never actually exercised by any test:
+    every `install.ps1` test in the suite passes `-NoModifyPath` so it never
+    rewrites the real User/Machine Path on the machine running the suite --
+    which also means none of them ever reached the write.
+    `Get-PathRegistryKey` now has a test-only seam
+    (`TAN_INSTALL_TEST_PATH_REGISTRY_KEY`) that points the read/write at a
+    disposable scratch `HKCU` subkey instead of the real key, and a new test
+    exercises it end-to-end: seeds a `REG_EXPAND_SZ` Path containing a
+    `%VAR%` reference, runs the real write path, and asserts the value kind
+    and the literal `%VAR%` both survive.
+  - `Move-Item` carries the SOURCE item's ACL into `$LibDir`/`$dest` rather
+    than picking up the destination's -- `$stage`/`$tmp` are staged
+    unprivileged in the invoking user's own `%TEMP%`, so under `-System` a
+    machine-wide install under `%ProgramFiles%` was left writable by that
+    unprivileged user, a local-privilege-escalation shape (install.sh's
+    equivalent, a post-commit `chown` to root, already existed; this was the
+    missing Windows half). The commit now runs `icacls /reset` on whatever
+    was actually moved into place -- not a manual
+    `Get-Acl`/`SetAccessRuleProtection`/`Set-Acl`, since a moved item's ACEs
+    keep whatever "inherited" flag they had from the OLD parent and
+    re-enabling inheritance alone would add the new parent's ACEs alongside
+    the stale ones rather than replacing them -- so the item ends up with
+    only what its new parent grants, exactly as if created there fresh.
+    Non-fatal, like the `install.sh` `chown`. (#490)
+- **The relative-`-Dir` fix directly above shipped with zero test coverage,
+  justified by a comment claiming PowerShell 7 keeps
+  `[Environment]::CurrentDirectory` and `$PWD` in sync so only Windows
+  PowerShell 5.1 needed it.** That claim does not hold: measured directly
+  (PowerShell 7.4.6, `Set-Location` into a subdirectory, then compare
+  `$PWD.Path` against `[Environment]::CurrentDirectory`), the two diverge on
+  7 exactly as they do on 5.1 -- the comment was the only thing standing
+  between the missing test and a reader believing the gap was intentional.
+  `install.ps1`'s module comment is corrected, and a new regression test
+  (`test_ps1_relative_dir_is_resolved_against_pwd_not_process_startup_dir`)
+  starts `pwsh` in one directory, `Set-Location`s into a subdirectory
+  mid-script (mirroring `cd .\tools; irm ... | iex -Dir .\bin`), and asserts
+  the install lands under the subdirectory rather than wherever the `pwsh`
+  PROCESS itself started -- `windows_only` like the rest of this file's ps1
+  coverage. (#490)
+- **Two more defects found reviewing the (#490) fixes above, all shipping
+  the exact misattribution the fix exists to prevent:**
+  - `install.sh`'s noexec health check forced `LC_ALL=C` as a COMMAND-PREFIX
+    assignment (`LC_ALL=C "$1" --version`), which sets the variable only in
+    the environment handed to the child about to be exec'd. When `exec(2)`
+    itself fails -- the noexec case this whole check exists for -- no child
+    ever replaces the running shell's image, so the "Permission denied"
+    diagnostic is printed by the shell in whatever locale IT was already
+    running in, not the temporarily-prefixed one; on a bash-as-`/bin/sh` host
+    (RHEL/Rocky/Alma/Fedora/SLES) with a localized ambient locale, glibc's
+    translated `strerror(EACCES)` never matched the English substring the
+    noexec signature keys on, and the retry silently never fired. Confirmed
+    for real on a Fedora 40 host with `glibc-langpack-de` installed: under a
+    `de_DE.UTF-8` ambient locale, the old command-prefix form printed "Keine
+    Berechtigung" (missing the signature); wrapping the same assignment in
+    `export` inside the `$(...)` subshell -- which does reach that
+    subshell's own `setlocale()`, and a shell's locale state persists across
+    the rest of that same process -- prints "Permission denied" instead.
+  - `install.sh`'s `latest` redirect resolution (the DEFAULT invocation --
+    no `--version`, exactly the documented `curl | sh` one-liner) has its
+    own inline curl/wget branching that does not go through `download()` and
+    always runs first, so a host with neither tool fell through both
+    branches unguarded and printed "could not resolve which release
+    'latest' points at ... pass an explicit --version" instead of "need curl
+    or wget on PATH" -- the correct diagnostic, and the one the prior
+    round's fix only reached when `--version` was passed explicitly, skipping
+    this block entirely. Now checked up front, before `latest` resolution or
+    any other download, the same idiom the sha256-tool check further down
+    already uses. (#490)
+- **Four more defects found reviewing the (#490) fixes above, closing the
+  last release-blocker on this issue:**
+  - `install.sh`'s own tcsh arm silently disabled a user's existing shell
+    config. tcsh(1), STARTUP AND SHUTDOWN, reads FIRST `~/.tcshrc` or, only
+    if that file is not found, `~/.cshrc` -- never both -- so creating a bare
+    `~/.tcshrc` on a host whose config lived entirely in `~/.cshrc` stopped
+    that config from loading at all, from the next shell on, with no warning
+    and no recovery (the idempotency guard makes a re-run a no-op). The tcsh
+    arm now appends to an existing `~/.cshrc` instead of creating
+    `~/.tcshrc` when the latter does not already exist.
+  - `install.ps1` could report a successful install as a failure. The
+    `WM_SETTINGCHANGE` broadcast added to keep already-running apps in sync
+    with a direct registry Path write compiles a small C# helper via
+    `Add-Type ... -ErrorAction SilentlyContinue` -- which an AppLocker DLL
+    rule or a Software Restriction Policy over `%TEMP%` (the exact host
+    class the health-check retry above exists for) can block, leaving the
+    type undefined -- and referencing that unresolved type at the broadcast
+    call site is then a TERMINATING error under this script's
+    `$ErrorActionPreference = "Stop"`, reached only AFTER the commit and the
+    registry Path write had already succeeded. The broadcast is now gated on
+    the type actually existing and wrapped in its own try/catch, matching
+    `Reset-InheritedAcl`'s already-established "an install that already
+    succeeded must not be turned into a failure over a best-effort side
+    effect" rule just above it.
+  - `install.ps1`'s noexec/AppLocker retry discarded the real error from a
+    failed `New-Item`/`Copy-Item` in an empty `catch` block and substituted
+    a hardcoded, never-measured guess ("$Dir could not be used for a retry
+    without elevation") in the failure message -- the real cause could
+    equally be disk-full, an AV quarantine, a locked file, or MAX_PATH.
+    Mirrors `install.sh`'s own fix for the identical class on the POSIX side
+    (`retry_stage_err`): the catch block now captures
+    `$_.Exception.Message` into `$retryStageErr` and the failure message
+    reports it instead of guessing.
+  - This CHANGELOG's own entry for `Test-AccessDeniedSignature` was spread
+    across three separate bullets from three review rounds, each describing
+    a different intermediate state (5 alone; then "+1260"; then a
+    correction of a wrong 1261 to 786) with no single bullet describing what
+    actually ships. Collapsed into one: `install.ps1` matches all three
+    Win32 codes `CreateProcess` can return for this refusal class --
+    `ERROR_ACCESS_DENIED` (5), `ERROR_ACCESS_DISABLED_BY_POLICY` (1260), and
+    `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (786, `0x312`) -- verified
+    against `install.ps1`'s shipped `Test-AccessDeniedSignature`. (#490)
+  Also closed, a MINOR from the same review: `install.sh`'s relative-`--dir`
+  normalisation ran a speculative `mkdir -p` on the not-yet-existing parent
+  of a relative `--dir` during ARGUMENT PARSING, before any network call or
+  health check -- so `--dir new/deep/bin` against a subsequently refused
+  install (e.g. an unresolvable `--version`) still left `./new/deep` behind
+  in the caller's CWD. Normalisation now walks up to the nearest EXISTING
+  ancestor to resolve the absolute path without creating anything. (The real
+  `mkdir -p "$INSTALL_DIR"` still runs later, during the noexec-retry health
+  check -- itself a path a refused install can still reach; see the
+  intermediate-parent fix for that gate above.)
+- **Four more defects found reviewing the (#490) fixes above, closing the
+  issue:**
+  - `install.sh`'s round-8 tcsh fix left the plain `csh)` arm unchanged,
+    still writing `~/.cshrc` unconditionally. On macOS, FreeBSD, and
+    Debian/Ubuntu-via-alternatives `/bin/csh` IS tcsh (a compat symlink/
+    build, not a distinct binary), so `SHELL=/bin/csh` on a host that also
+    has `~/.tcshrc` hit the exact tcsh(1) STARTUP-AND-SHUTDOWN shadowing bug
+    round 8 fixed for the `tcsh` name, just under a different `$SHELL`
+    value: `~/.tcshrc` is read first and `~/.cshrc` never is, so the PATH
+    line written there is inert. MEASURED against real tcsh 6.24.10 (both
+    `~/.tcshrc` and `~/.cshrc` seeded, `SHELL=/bin/csh`): the installer
+    reported `added .../binF to PATH in .../homeF/.cshrc`, then
+    `tcsh -c 'echo $PATH' | grep -c binF` -> `0`. `csh` now shares the exact
+    same shadowing-aware logic as `tcsh` (one case arm, `tcsh | csh)`),
+    covered in all four rc-file shapes: neither exists, `~/.cshrc` only,
+    `~/.tcshrc` only, and both.
+  - `install.sh`'s noexec-retry gate's speculative `mkdir -p "$INSTALL_DIR"`
+    creates every missing INTERMEDIATE parent too, and the round-8 fix for
+    this gate's orphan directory only `rmdir`'d the LEAF on refusal -- the
+    same class of orphan round 8 already fixed once in the relative-`--dir`
+    argument-parsing path, surviving here. MEASURED: `--dir <dir>/orph/deep/
+    bin` refused left `<dir>/orph` and `<dir>/orph/deep` on disk. The gate
+    now walks up from `$INSTALL_DIR` to the first ancestor that does not
+    exist yet, `rmdir`-ing each one NON-recursively, on refusal -- the same
+    "first new ancestor" trick as the argument-parsing fix, without ever
+    recursively deleting anything: an initial version of this fix used
+    `rm -rf` on the first-new-ancestor, which with the default
+    `$INSTALL_DIR` (`$HOME/.local/bin`) is `$HOME/.local` itself -- a shared
+    XDG root other tools keep state under -- and destroyed any write another
+    process made under it during the retry window (MEASURED: a write
+    injected via the retry gate's own `mktemp` call survived pre-`rm -rf`
+    and was destroyed by it). `rmdir` fails harmlessly the instant a
+    directory holds anything this run did not create, which is exactly the
+    wanted semantics.
+  - `install.ps1` had the identical intermediate-parent orphan as the
+    `install.sh` finding above, one level higher: `New-Item -ItemType
+    Directory -Force -Path $Dir`, unconditional and run before the health
+    check even starts, is the `mkdir -p` equivalent and creates every
+    missing parent of `$Dir`, with nothing removing them on a subsequent
+    health-check refusal. `$Dir`'s first not-yet-existing ancestor is now
+    recorded before that `New-Item` call and, on a subsequent health-check
+    refusal, each directory from `$Dir` up to that ancestor is removed with
+    a NON-recursive `[System.IO.Directory]::Delete($p, $false)` -- the same
+    `rm -rf`-on-a-shared-ancestor data-loss risk as the `install.sh` finding
+    above, here on the default `$Dir` (`%LOCALAPPDATA%\Programs\tan`),
+    whose first-new-ancestor is `%LOCALAPPDATA%\Programs` -- a root other
+    per-user installers populate -- and with a wider window (the whole
+    checksums fetch/download/sha256/extract sequence). Verified end-to-end
+    against real `pwsh 7.4.6`: a write injected while `$Dir` exists but
+    before the health check completes survives the refusal cleanup.
+  - `install.ps1`'s round-8 `Add-Type` fix gated and try/catch-wrapped the
+    `SendMessageTimeout` P/Invoke *call*, but left the `Add-Type` statement
+    that COMPILES the helper class itself sitting at column 0: unconditional,
+    outside `if (-not $alreadyPresent)`, and outside any try/catch of its
+    own. `-ErrorAction SilentlyContinue` on `Add-Type` only suppresses a
+    NON-terminating error; a compile/assembly-load failure from `Add-Type`
+    itself is a TERMINATING one under this script's own
+    `$ErrorActionPreference = "Stop"` -- precisely what an AppLocker DLL rule
+    or a Software Restriction Policy over `%TEMP%` (the exact host class the
+    health-check retry earlier in this same script exists for) produces --
+    so it could abort the whole script even on a run that never touched the
+    Path at all (a fresh `-NoModifyPath` run, or one where `$Dir` was
+    already on the Path), turning an install that would otherwise have
+    succeeded into a reported failure. `Add-Type` now lives inside the same
+    write branch as the registry Path update and inside its own try/catch;
+    a new text-only test (no `pwsh` needed, so it runs on every OS this
+    suite runs on) asserts the shipped source keeps it there. (Inspected,
+    not executed against a real `pwsh`.) (#490)
+- **`tan flash`'s `swd_probe` OpenOCD and pyOCD arms read no probe-selection
+  field at all**, so a multi-probe host had no way to say which one to use --
+  an ABSENT feature, not (#513)'s accept-and-ignore shape (that fix covered
+  only the J-Link arm's `flash_args.jlink_serial`). Two new fields, not one
+  neutral field reused across all three tools: `flash_args.
+  openocd_usb_location` renders as its own `adapter usb location {<path>}` `-c`
+  word (braced, matching the flash artefact's own `-c` word, so whitespace in
+  the value cannot split it into extra Tcl words -- and refused outright, at
+  plan time, when the value is whitespace-ONLY, rather than reaching OpenOCD
+  as `adapter usb location {  }`), ahead of the target config (OpenOCD
+  selects a probe by USB path); `flash_args.pyocd_uid` renders as pyOCD's own
+  `--uid <value>`. `JLinkExe` keeps `jlink_serial` (serial-only; it has no
+  USB-path selector at all) -- the three fields are different identifiers
+  for different tools, not three spellings of one. Each new field is
+  charset-guarded the way #486 already guards `interface`/`target`/
+  `jlink_serial` (`validate_openocd_word` for the Tcl word; `pyocd_uid` gets
+  `validate_pyocd_uid`, `validate_identifier` deliberately widened by exactly
+  one shape to accept pyOCD's own documented `<plugin>:<uid>` form), and each
+  is refused, not silently dropped, when set on an arm that cannot honour it
+  -- mirroring #513's own wrong-arm refusal. The OpenOCD/pyOCD split itself
+  resolves the arm ONCE, by the SAME `if openocd: ... elif pyocd: ...`
+  precedence the argv build uses, rather than by each field's own
+  tool-availability check in isolation -- the original version of this fix
+  used availability alone, which stayed silent on a host with BOTH tools
+  present (OpenOCD always wins the arm there, but a `pyocd_uid`-only refusal
+  keyed off pyOCD merely being *available* never fired, silently dropping the
+  probe selector on exactly the shared-serial, multi-probe host this fix was
+  written for -- caught in review before this reached anyone). This matters
+  most on the alplab-gw bench, where two physically different probes
+  enumerate with the same OEM-cloned serial and only a USB path can tell
+  them apart. `--dry-run` previews these two fields the same way a real run
+  on the same host would, in BOTH directions: the arm resolution that
+  decides `chosen` (and every refusal keyed off it) now consults `which()`
+  for real whenever EITHER field is named, the same scoping the J-Link side
+  of the split already had -- the first version of this fix only scoped the
+  J-Link side, so a manifest naming `openocd_usb_location`/`pyocd_uid` still
+  hit an unconditional "assume J-Link is absent, the other tool is present"
+  bypass on the OTHER side, unchanged by whether that tool was actually on
+  PATH. Measured on a pyocd-only host: a `pyocd_uid` preview used to refuse
+  while a real run on that host succeeded, and an `openocd_usb_location`
+  preview used to print a full `openocd -f ... -c 'adapter usb location ...'`
+  command line -- a tool not installed on that host -- while a real run
+  refused; both now agree, in both directions. The unconditional bypass is
+  kept, unchanged, when NEITHER field is named -- every oracle-pinned `would
+  run JLinkExe` `--dry-run` fixture relies on that path staying
+  replay-host-independent. On a host with NO probe tool at all, a manifest
+  naming `openocd_usb_location`/`pyocd_uid` used to get two different, both
+  misleading, refusals depending on mode -- `--dry-run` said "this run is
+  taking the J-Link path" (its own bare-host preview default), a real run
+  said "this run is not taking the OpenOCD/pyOCD path" (naming the OTHER
+  tool as if it were available) -- neither names the actual cause. Both now
+  refuse with the same `swd_probe: no flash tool found -- install SEGGER
+  J-Link (preferred), or openocd, or pyocd` message the bottom of this
+  function already gives that host shape when neither field is named.
+  (#519)
+- **`tan flash`'s Flow D (`alif_mram_jlink`) reported `verified and
+  PIN-reset` even on a run whose reset chain ended in `Failed to halt CPU`**
+  -- the documented busy-resident case, where an image that never idles keeps
+  the core running so `VC_CORERESET` cannot halt it. JLinkExe still exits 0
+  here and the write itself is genuinely fine (`verifybin` passed), so this
+  was not a missed failure; it was a success message asserting an INTENT
+  (the same class as (#487) defect 6's asserted-but-never-sent address, not
+  a new one). `data.entries[].message` is what a `--format json` consumer
+  renders as the flash outcome, and the identical string used to cover both
+  a landed reset and a failed one. The message now reads the transcript
+  (`; verified and PIN-reset`) and swaps it for `; verified; reset requested,
+  core was busy and did not halt` when the transcript names the halt
+  failure -- a targeted substring swap scoped to Flow D's own message shape,
+  not a general transcript-scraping layer. Text-mode runs -- the default,
+  standalone invocation, not only `--format json` -- get the same qualified
+  message: `tan flash`'s live-console spawn now TEES a written child's
+  combined output onto a background thread instead of only streaming it, so
+  the transcript this qualification reads is populated regardless of
+  `--format`. Two defects found reviewing the first version of that tee, both
+  fixed in this same change: it read the child through a TEXT-mode stream in
+  fixed 4096-*character* chunks, which blocks until that many characters are
+  decoded or EOF -- measured against a slowly-dribbling child, this withheld
+  console output for over a second at a time, the opposite of the "live"
+  streaming the tee exists to provide, so it now reads the raw pipe directly
+  (bytes ready, not characters decoded) and decodes the bytes itself; and its
+  own thread-join had no timeout, so a killed child's own orphaned
+  grandchild holding the pipe open (a backgrounded `sleep &`, say) could hang
+  `tan flash` indefinitely past `_FLASH_TIMEOUT_S` -- now bounded by the same
+  `_DRAIN_JOIN_S` the pipeline's stderr drain already uses, and for the
+  identical reason (`_spawn` joins TWO of these tees, one per stream, so the
+  real ceiling on a single flash entry is `_FLASH_TIMEOUT_S` plus up to
+  `2 * _DRAIN_JOIN_S`, not one -- measured: `timeout=3` overran to 4.00s,
+  `timeout=2` to 6.01s). **A parallel, unfixed risk, noted here rather than fixed
+  in this change (out of scope, #540): `swd_probe`'s own J-Link arm asserts
+  `{device} flashed via J-Link @ {base}` from the exit code alone, and
+  `jlink_commander_script` gives it no `verifybin` at all (`r`/`halt` before
+  the load, `r`/`g` after) -- the same intent-vs-observed gap this fix closes
+  for Flow D, on a backend with no verify step to fall back on if a future
+  review finds the same halt-survives-nonzero-exit shape there.**
+
+  Two more consequences of that same tee, both found reviewing THIS round
+  (#519/#522 round 3): first, `_execute_message`'s own text-mode fallback
+  changed shape along with it -- before, an ORDINARY text-mode failure (the
+  child streamed straight to the console, no tan-authored diagnosis) always
+  left `outcome.stdout`/`.stderr` empty and fell back to the bare `flash
+  command failed` sentence; now that `_spawn`'s single-tool branches capture
+  the child's transcript in every mode, that same failure surfaces whatever
+  the child actually printed instead (e.g. `swd_probe[e1]: Error: could not
+  connect to target`, measured) -- a customer-visible change to
+  `data.entries[].message` and the text-mode `FAIL:` line for every
+  `_spawn`-backed method. Second, `subprocess.PIPE` (required to read the
+  child's own stdout/stderr at all) means the CHILD's `stdout.isatty()`/
+  `stderr.isatty()` now report `False` where direct fd inheritance let them
+  report `True` on a real terminal (measured on a real pty) -- `pyocd
+  flash`/`west flash`/`openocd` gate their own `\r`-updated progress bar and
+  colour output on `isatty()`, so on a terminal an operator now loses that
+  live progress indicator during a multi-minute GD32/Alif write. Console
+  output itself stays complete and live, line by line; only the CHILD's own
+  rendering of it changes. Deliberately not fixed here -- driving the tee
+  through a pty is real machinery and this branch has already had three
+  review rounds -- tracked as #541. (#522)
+
+
+- **`tan faultdecode`'s `addr2line` probe was spoofable via a Windows CWD
+  decoy, and the emitted shell completions advertised stale/wrong flags and
+  values.** Two independent defects, closed together:
+  - `resolve_symbol`'s `addr2line`-class tool probe used `shutil.which`,
+    which inserts the current directory ahead of `$PATH` on Windows, so a
+    decoy `addr2line.exe`/`llvm-addr2line.exe`/`arm-zephyr-eabi-addr2line.exe`
+    sitting at a checked-out project's root was reported "available" and
+    then spawned by bare name (reopening the same hole a second way). Now
+    uses `doctor_cmd.on_path` and spawns the resolved absolute path, the
+    same `on_path` call `flash_cmd` already makes for its own tool probes
+    (`size_cmd`/`build/execute.py` harden their own probes independently,
+    with a different hand-rolled bool-returning walk -- not this pattern).
+  - The emitted bash/zsh/fish completion scripts advertised `tan doctor
+    --target-kind`/`--server`, which `doctor_cmd.py` deliberately never
+    ported; removed from `doctor`'s arm on all three shells (unchanged for
+    `support-bundle`/`debug-config`, which genuinely still take both).
+    bash/zsh's `--format` value-list selection assumed the subcommand
+    always sat at a fixed word index, silently offering the narrow list
+    whenever a global flag (e.g. `--sdk-root`) preceded it; both now scan
+    for the real subcommand. The bash scan's own loop variable (`vf`,
+    iterating `$value_flags`) was missing from its `local` declaration, so
+    it leaked into and clobbered a `$vf` already set in the sourcing
+    interactive shell -- confirmed by sourcing the completion script with
+    `vf` pre-set and completing `tan --sdk-root /x validate --format <TAB>`:
+    `$vf` came back overwritten as `--sdk-root` before the fix, unchanged
+    after it. fish's `generate --target` value list was hand-typed and
+    missing 3 of the 12 real values (`os-topology` -- a member of the
+    default/`--all` set -- `composed-route-table`, `ipc-contract-h`); now
+    spliced from `generate_cmd`'s own tables.
+
+  A piped/pasted dump being silently discarded whenever a register flag was
+  also given -- despite the command's own help promising "Explicit flags win
+  over a parsed dump", true only if the dump is still read when flags are
+  present too -- is NOT fixed here. It was, briefly, on this branch: the
+  implicit stdin read was made unconditional, with `sys.stdin is None`
+  (fd 0 closed -- a daemon/service parent, some CI runners, a frozen
+  no-console launch) guarded explicitly on both the `--file -` and implicit
+  paths so the change wouldn't trade one crash for another. But making the
+  implicit read unconditional makes EVERY flag-bearing invocation newly
+  dependent on `_stdin_offers_input`/`_stdin_offers_input_by_reading` (the
+  bounded-readiness reader that closed the original tan-cli#388 hang) --
+  including the primary documented invocation, `tan faultdecode --cfsr
+  0x8200`, which used to return with no stdin interaction at all. Several
+  rounds of bounding that reader more tightly (an idle+total dual timeout, a
+  background queue drain, `sys.stdin.reconfigure(encoding="utf-8",
+  errors="ignore")` for a stray non-UTF-8 byte) each closed one shape of hang
+  or data loss and opened a different one, so this change reverts `_read_dump`
+  to `dev`'s own `auto_consume_stdin=not registers_given` gate byte-for-byte
+  -- a flag-bearing invocation behaves exactly as it does on `dev`, including
+  `dev`'s own known defect (a producer that writes a dump and then holds the
+  pipe open without closing it can still lose that dump, or hang past the
+  readiness probe) -- rather than reopen tan-cli#388 for the flag-bearing case
+  to fix it. Both the flags-plus-dump merge and the `sys.stdin is None` guard
+  now move to tan-cli#537 together with the reader itself: neither can be
+  fixed correctly without touching it.
+
+  Two smaller things this issue also raised are DEFERRED, not closed here:
+  - `_parse_hexint` still accepts a negative/out-of-range hex value
+    (`int(text, 16)` parses a leading `-`), matching the v0.4.1 oracle
+    exactly: measured, `tan faultdecode --cfsr 0x100000000` and `--cfsr
+    -8200` both exit 0 on the shipped binary. A 32-bit range check was
+    tried and reverted -- it was an undeclared divergence from the oracle,
+    not an authorised one.
+  - `BFSR.LSPERR`/`MMFSR.MLSPERR` escalated to `FORCED` still falls through
+    to the generic "its own status bits are clear" `root_cause`, matching
+    the oracle's own (self-contradictory, but unaltered) text. A corrected
+    message was tried and reverted; whether to diverge from the oracle here
+    deliberately is an open question for a separate issue, not decided in
+    this change.
+  (Refs #503, #537)
+
+
 
 ## [0.5.1] — 2026-08-04
 

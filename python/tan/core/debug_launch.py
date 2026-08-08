@@ -167,6 +167,25 @@ def _core_not_in_manifest_message(core: str, slices: list[dict[str, Any]]) -> st
     )
 
 
+def explicit_core_unknown_message(core: str, slices: list[dict[str, Any]]) -> str:
+    """tan-cli#489 (5): the `--target-kind`-EXPLICIT counterpart of
+    [`_core_not_in_manifest_message`] above. An explicit `--target-kind`
+    bypasses [`infer_target_kind`] (and ITS OWN `--core`-vs-manifest guard,
+    the function above) entirely, so `debug_config_cmd.py` calls this
+    directly once it has resolved a real target/server of its own to report,
+    instead of the placeholder pair `_core_not_in_manifest_message`'s caller
+    reports. Not private (unlike its sibling): the command module is the
+    caller here, so pure logic stays in `tan.core` per this file's own
+    convention rather than duplicating the "list the cores this build
+    produced" formatting there."""
+    cores = ", ".join(dict.fromkeys(s["core_id"] for s in slices))
+    return (
+        f"--core {core} does not match any slice in this project's own "
+        f"build/system-manifest.yaml (its cores: {cores}); pass a --core "
+        "value this project's build actually produced."
+    )
+
+
 def _ambiguous_target_classes_message(targets: set[str]) -> str:
     # The mapped --target-kind SPELLINGS (`zephyr-mcu`), never the raw
     # manifest `os` value (`zephyr`) -- pasting the bare `os` value into
@@ -696,6 +715,164 @@ def _is_resolved(value: Any) -> bool:
     return isinstance(value, str) and not is_unresolved_placeholder(value)
 
 
+def _list_item_identity(item: Any) -> Any:
+    """The stable identity a per-list-element merge matches an incoming
+    (draft) item against an existing one BY, before falling back to shared
+    index (see [`_merge_list_by_identity`]).
+
+    `setupCommands`' dicts are identified by their own `text` field -- the
+    real cppdbg command string, the one thing that names WHICH command this
+    is; `ignoreFailures` is a modifier on that SAME command, not a separate
+    identity. Anything else (a bare string -- `configFiles`'s own shape -- or
+    a dict with no `text`) is its own identity, compared by value.
+    """
+    if isinstance(item, dict) and isinstance(item.get("text"), str):
+        return item["text"]
+    return item
+
+
+def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[Any]:
+    """Merge `next_value` into `existing`. Port target: `_merge_value`'s list
+    branch, factored out so its own docstring can stay about the OVERALL
+    merge rule.
+
+    tan-cli#489 review round (second pass): identity-only matching, with no
+    positional fallback, was NON-IDEMPOTENT -- measured through the real CLI,
+    rebuilding only `runners.yaml`'s `--config=` between runs, three
+    consecutive `tan debug-config` runs left `configFiles` holding all THREE
+    values, because an incoming value that matches NOTHING already in the
+    file (the whole point: it is a NEW resolution) was always treated as an
+    ADDITION, never a REPLACEMENT of whatever tan itself wrote last time.
+    OpenOCD sources every `-f` in turn, so that is not "a stale value
+    surviving one run too many" -- it is repeated `target create` on the
+    same TAP, and the session fails to start at all. The SAME version also
+    emitted in the DRAFT's own order rather than `existing`'s, which could
+    sequence an adapter driver AFTER the config that needs it, or reorder
+    `setupCommands`, whose commands gdb executes in order.
+
+    tan-cli#489 review round (THIRD pass): the second pass's positional
+    fallback used the UNMATCHED draft item's OWN index `i` against
+    `existing[i]` directly -- correct only when nothing before `i` in the
+    draft has ALSO matched something in `existing`, which shifts the two
+    index spaces out of alignment. Measured: a customer-prepended
+    `configFiles` entry ahead of tan's own two resolved values (`interface`,
+    which matches every run, plus a per-revision `target/revN.cfg`) meant
+    `i`, the target entry's DRAFT index, never lined up with a genuinely
+    free `existing` slot -- `i` was always either already consumed by the
+    interface match or past `len(existing)` -- so it fell to the `append`
+    branch on EVERY run, accumulating one more revision each time. Still
+    fatal to the same OpenOCD session for the same reason; still reachable
+    through ordinary multi-`--config`/`openocd_search` boards, not an
+    exotic shape.
+
+    **Anchor-relative placement replaces index-relative placement.** An
+    "anchor" is a draft item that DID identity-match, at the `existing`
+    index it matched -- these are fixed points neither pass moves. An
+    unmatched draft item is placed into the first free `existing` slot that
+    lies AFTER the nearest anchor before it (in draft order) and BEFORE the
+    nearest anchor after it -- i.e. between the two anchors bracketing its
+    position in the draft, not at its own raw index. This is deliberately
+    NOT the simpler "collect every unmatched draft item, then assign them to
+    every free existing slot in existing's own order" two-pass: that
+    ignores which UNMATCHED items are near which anchors, so a customer's
+    LEADING entry (no anchor before it at all) is just as free a slot as any
+    other and can still be claimed by an unrelated tan-resolved value.
+
+    1. Every draft item is matched against an UNCONSUMED `existing` entry
+       with the SAME [`_list_item_identity`], wherever it sits -- merged
+       recursively there (so a matched `setupCommands` dict keeps a
+       customer-added key like `ignoreFailures` the draft never writes), IN
+       PLACE, never moved. This is what fixes the reordering defect: the
+       result is always emitted in `existing`'s OWN order, not the draft's.
+    2. A draft item with NO identity match ANYWHERE is tan's own NEW
+       resolution for a field it has always owned positionally -- placed at
+       the first `existing` index strictly between the anchor of the
+       nearest matched draft item BEFORE it (or the start of `existing`, if
+       none) and the anchor of the nearest matched draft item AFTER it (or
+       the end of `existing`, if none) that no earlier placement in THIS
+       merge already claimed. This is what fixes the accumulation defect
+       for the general case, not only the no-anchors-at-all one: a value
+       that keeps replacing a PRIOR run's own single resolved value
+       overwrites it in place regardless of what else in the list matched
+       by identity around it.
+    3. Anything neither an anchor nor a placement claims is untouched, kept
+       at its own position: the customer's own addition tan never resolves
+       for (a hand-added second `.cfg`, an extra `setupCommands` entry), the
+       tan-cli#489 (3) case this whole function exists for.
+    4. A draft item with no identity match and no free slot in its own
+       bracketing window (the window is empty, or every slot in it was
+       already claimed by an earlier placement in this same merge) is a
+       genuinely NEW value -- appended.
+
+    **Known, accepted limitation**, precisely what remains after the above:
+    position is still a HEURISTIC, not real provenance. A customer's
+    hand-added entry that (a) matches nothing in the fresh draft AND (b)
+    sits in the SAME bracketing window an unmatched draft item is being
+    placed into can still be overwritten -- e.g. `["mine.cfg"] + ["board/x.cfg"]
+    -> ["board/x.cfg"]`, no anchors on either side to protect `mine.cfg`,
+    exactly the way the pre-#489 code always overwrote whatever sat at that
+    lone position. [`sdk_identity_overwrites`] exists precisely to disclose
+    this one case when a caller can identify it (an SDK-filled, not
+    build-resolved, single value) -- there is still no general provenance
+    record ("did TAN write THIS value, in a prior run") to close the gap
+    further; tan-cli#518 tracks the deferred in-file-marker-vs-`.alp/`-sidecar
+    follow-up.
+    """
+    n_existing = len(existing)
+    # Pass 1: identity match, anywhere in `existing`, greedily consuming at
+    # most one `existing` index per match. Keyed by DRAFT index so pass 2 can
+    # look up "the nearest matched draft item before/after me" directly.
+    anchor_of_draft_index: dict[int, int] = {}
+    consumed: set[int] = set()
+    for i, item in enumerate(next_value):
+        identity = _list_item_identity(item)
+        match_index = next(
+            (
+                j
+                for j, existing_item in enumerate(existing)
+                if j not in consumed and _list_item_identity(existing_item) == identity
+            ),
+            None,
+        )
+        if match_index is not None:
+            anchor_of_draft_index[i] = match_index
+            consumed.add(match_index)
+
+    result = list(existing)
+    for i, match_index in anchor_of_draft_index.items():
+        result[match_index] = _merge_value(existing[match_index], next_value[i])
+
+    # Pass 2: anchor-relative placement for every draft item pass 1 did not
+    # match, processed in DRAFT order so "first free slot" within a window
+    # shared by more than one unmatched item is deterministic.
+    sorted_anchor_draft_indices = sorted(anchor_of_draft_index)
+    claimed = set(anchor_of_draft_index.values())
+    appended: list[Any] = []
+    for i, item in enumerate(next_value):
+        if i in anchor_of_draft_index:
+            continue
+        window_start = -1
+        for j in sorted_anchor_draft_indices:
+            if j >= i:
+                break
+            window_start = anchor_of_draft_index[j]
+        window_end = n_existing
+        for j in sorted_anchor_draft_indices:
+            if j > i:
+                window_end = anchor_of_draft_index[j]
+                break
+        slot = next(
+            (k for k in range(window_start + 1, window_end) if k not in claimed), None
+        )
+        if slot is not None:
+            result[slot] = _merge_value(existing[slot], item)
+            claimed.add(slot)
+        else:
+            appended.append(item)
+    result.extend(appended)
+    return result
+
+
 def _merge_value(existing: Any, next_value: Any) -> Any:
     """Merge one incoming value over what the file already holds.
 
@@ -720,10 +897,15 @@ def _merge_value(existing: Any, next_value: Any) -> Any:
         # per element, so an entry we did resolve wins.
         if next_value and existing and all(_is_unresolved(v) for v in next_value):
             return list(existing)
-        return [
-            _merge_value(existing[i] if i < len(existing) else None, item)
-            for i, item in enumerate(next_value)
-        ]
+        return _merge_list_by_identity(existing, next_value)
+    if isinstance(next_value, dict) and isinstance(existing, dict):
+        # tan-cli#489 (3): recurse instead of replacing wholesale. A dict
+        # *inside* a list element (`setupCommands`' `{"text": ..., "ignoreFailures":
+        # ...}`) can carry a customer-added key our own draft never writes;
+        # only [`_merge_configuration`]'s "visit only the incoming keys"
+        # discipline preserves it, the same protection top-level launch-config
+        # keys already had.
+        return _merge_configuration(existing, next_value)
     if _is_unresolved(next_value) and _is_resolved(existing):
         return existing
     return next_value
@@ -800,7 +982,9 @@ def _legacy_name(next_name: str) -> str | None:
 
 
 def create_launch_json_write_plan(
-    existing_content: str | None, draft: dict[str, Any]
+    existing_content: str | None,
+    draft: dict[str, Any],
+    explicit_omissions: frozenset[str] = frozenset(),
 ) -> LaunchJsonWritePlan:
     """Merge ``draft`` into an existing launch.json (or a fresh document),
     merging key-by-key over any configuration with the same ``name``. Mirrors TS
@@ -821,6 +1005,25 @@ def create_launch_json_write_plan(
     The legacy entry is left exactly as it is: nothing decides which of two
     possibly-hand-edited entries is authoritative, so nothing is merged or
     deleted on this run's say-so (tan-cli#179 reports it instead).
+
+    ``explicit_omissions`` (tan-cli#489 (6)): the KEYS the caller explicitly
+    asked to have no value for this run -- today only ``preLaunchTask``, via
+    ``--pre-launch-task ''``. [`create_launch_draft`] implements that opt-out
+    by building the key then deleting it, which is indistinguishable, to
+    [`_merge_configuration`]'s "only visit the draft's OWN keys" rule, from
+    ``preLaunchTask`` never existing on this target's shape at all (the
+    yocto-userspace "no default" case, tan-cli#138 vs #321, which must stay
+    untouched when the file already carries one). Both mean "the key is
+    absent from ``draft``"; only one of them means "remove it from the
+    file too". So an explicit opt-out merged against an entry that already
+    carries a ``preLaunchTask`` from a PRIOR run silently kept the old value
+    -- exit 0, ``issues: []``, no signal the flag did nothing. `--pre-launch-
+    task ''`'s whole point (alp-sdk-vscode#406) is escaping a task that fails
+    every F5; the escape hatch not working on the one file that matters is
+    the same shape of bug this run's OTHER four defects are. Applied AFTER
+    the ordinary merge, on the merged result -- never on `pre_merge` or
+    `draft` themselves, so `_merge_configuration`'s own "visit only the
+    incoming keys" contract stays true for every OTHER key.
     """
     document = _parse_launch_json_or_default(existing_content)
     next_name = _configuration_name(draft)
@@ -844,6 +1047,8 @@ def create_launch_json_write_plan(
     if existing_index is not None:
         pre_merge = configs[existing_index]
         entry = _merge_configuration(pre_merge, draft)
+        for key in explicit_omissions:
+            entry.pop(key, None)
         unchanged = entry == pre_merge
         configs[existing_index] = entry
         legacy = _legacy_name(next_name)
@@ -862,6 +1067,8 @@ def create_launch_json_write_plan(
             pre_merge = configs[legacy_index]
             migrated_from = pre_merge.get("name")
             entry = _merge_configuration(pre_merge, draft)
+            for key in explicit_omissions:
+                entry.pop(key, None)
             unchanged = entry == pre_merge
             configs[legacy_index] = entry
             replaced = True

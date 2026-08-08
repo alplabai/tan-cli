@@ -228,8 +228,17 @@ def trace(
         )
 
     def fail(exit_code: ExitCode, code: str, message: str, data: dict, text_lines: list[str]) -> None:
-        issues = [*_resolution_issues(), Issue(f"trace.{code}", "error", message)]
+        resolution_issues = _resolution_issues()
+        issues = [*resolution_issues, Issue(f"trace.{code}", "error", message)]
         if not json_mode:
+            # tan-cli#478 review finding 6: `_resolution_issues()` fed only the
+            # JSON envelope below -- the DEFAULT text path printed `text_lines`
+            # and nothing else, so `tan trace` with no `--format` stayed silent
+            # about resolving another project's checkout, the literal repro
+            # #478 opened with ("prints the alp_project.py a build would run
+            # from the *other* project's checkout, no warning").
+            for issue in resolution_issues:
+                typer.echo(issue.message, err=True)
             for line in text_lines:
                 typer.echo(line, err=True)
         if json_mode:
@@ -304,6 +313,11 @@ def trace(
     }
 
     if not json_mode:
+        # tan-cli#478 review finding 6, success path: same silence as `fail()`
+        # above, unconditional (unlike the `--quiet`-suppressed decision
+        # lines) and printed first.
+        for issue in _resolution_issues():
+            typer.echo(issue.message, err=True)
         for line in _trace_text_lines(decisions, quiet):
             typer.echo(line, err=True)
 

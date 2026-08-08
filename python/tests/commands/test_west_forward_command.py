@@ -235,6 +235,44 @@ def test_success_exits_zero_and_reports_ok(monkeypatch, tmp_path):
     assert env["issues"] == []
 
 
+def test_text_mode_discloses_a_foreign_global_default_before_spawning_west(
+    monkeypatch, tmp_path
+):
+    """tan-cli#478 review finding 8: `west build`-class commands SPAWN out of
+    the resolved SDK root, same shape as `validate`'s spawn -- and unlike
+    JSON mode (which gets the warning for free from `Envelope.__init__`'s
+    central seam via `context.sdk`), text mode inherits the child's stdio
+    directly, so the only place left to print it is `_run_text`, before the
+    child ever runs. Monkeypatches `resolve_project_context` rather than
+    replaying a real two-project bootstrap (`test_foreign_global_default_
+    coverage.py` already proves the resolution mechanics); this test is only
+    about whether `_run_text` reads what it was handed.
+    """
+    context = west_forward_cmd.ProjectContext(
+        workspace_root=str(tmp_path).replace("\\", "/"),
+        board_yaml=str(tmp_path / "board.yaml").replace("\\", "/"),
+        sdk=west_forward_cmd.SdkInfo(
+            root=str(tmp_path / "other-sdk").replace("\\", "/"),
+            source_tier="globalDefault",
+            foreign_global_default_for=str(tmp_path / "projB").replace("\\", "/"),
+        ),
+    )
+    monkeypatch.setattr(
+        west_forward_cmd, "resolve_project_context", lambda *a, **k: context
+    )
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(west_forward_cmd.subprocess, "run", lambda *a, **k: _Ok())
+    result = runner.invoke(app, ["migrate", "--project", str(tmp_path), "--check"])
+    assert result.exit_code == 0
+    assert "machine-global default SDK" in result.output, result.output
+    assert "sdk-default" in result.output
+
+
 def test_nonzero_exit_is_reported_without_crashing(monkeypatch, tmp_path):
     class _Failed:
         returncode = 3

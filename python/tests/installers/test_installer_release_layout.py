@@ -44,10 +44,16 @@ import subprocess
 import sys
 import tarfile
 import threading
+import uuid
 import zipfile
 from pathlib import Path
 
 import pytest
+
+try:
+    import winreg  # Windows-only stdlib module; used only by the registry-kind test below.
+except ImportError:
+    winreg = None
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "install.sh"
@@ -274,6 +280,13 @@ windows_only = pytest.mark.skipif(
 posix_only = pytest.mark.skipif(
     os.name == "nt", reason="install.sh refuses a Windows host and points at install.ps1"
 )
+# Unlike windows_only, this does NOT require os.name == "nt": Get-Win32ErrorCode
+# and Test-AccessDeniedSignature are pure functions over a real
+# System.ComponentModel.Win32Exception (a cross-platform .NET type -- its
+# NativeErrorCode is just the int the constructor was given, no Win32 API
+# involved), so they run correctly under pwsh on Linux/macOS too. GitHub-hosted
+# ubuntu-latest/macos-latest/windows-latest runners all ship pwsh preinstalled.
+pwsh_only = pytest.mark.skipif(not PWSH, reason="needs PowerShell (pwsh) on PATH")
 
 
 def _run(
@@ -397,6 +410,69 @@ def _fake_sudo(unlock_target: Path, calls_log: Path) -> Path:
     )
     script.chmod(0o755)
     return bin_dir
+
+
+def _noexec_probe() -> bool:
+    """Best-effort: mounting a `noexec` tmpfs needs `CAP_SYS_ADMIN`, which
+    `unshare --map-root-user -m` grants inside a fresh, unprivileged user+mount
+    namespace -- but some sandboxes/CI images block unprivileged user
+    namespaces outright (or lack `unshare`/`mount` entirely, e.g. macOS). Used
+    only to decide whether the tan-cli#490 noexec tests below can run for
+    real; see their own docstrings for why a real mount is used instead of a
+    permission-bit trick.
+    """
+    if os.name == "nt" or shutil.which("unshare") is None:
+        return False
+    try:
+        probe = subprocess.run(
+            [
+                "unshare", "--map-root-user", "-m", "--", "sh", "-c",
+                "d=$(mktemp -d) && mount -t tmpfs -o noexec tmpfs \"$d\"",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        return probe.returncode == 0
+    except OSError:
+        return False
+
+
+noexec_capable = pytest.mark.skipif(
+    not _noexec_probe(),
+    reason="host cannot mount a noexec tmpfs via unshare -- cannot simulate tan-cli#490's failure mode for real",
+)
+
+
+def _install_sh_under_noexec_tmpdir(
+    base_url: str, dest: Path, home: Path, noexec_dir: Path, *args: str
+) -> subprocess.CompletedProcess:
+    """Runs `install.sh` with `$TMPDIR` pointed at a REAL `noexec`-mounted
+    tmpfs (tan-cli#490), inside one `unshare --map-root-user -m` so the mount
+    is unprivileged and vanishes with the process -- nothing persists on the
+    host. A real mount is used rather than stripping the execute bit off a
+    staging dir: the two are different kernel-level refusals (`noexec` blocks
+    `exec(2)` outright, even for root, via the VFS mount flags; a missing
+    directory search bit is a DAC permission check that root/`CAP_DAC_OVERRIDE`
+    -- which `--map-root-user` grants inside the namespace -- bypasses), and
+    only the mount reproduces the exact "Permission denied", exit-126 signature
+    install.sh now keys off.
+    """
+    script = (
+        "set -e\n"
+        f'mount -t tmpfs -o noexec tmpfs "{noexec_dir}"\n'
+        # `--map-root-user` maps this process to uid 0 inside the namespace but
+        # `tar`'s default same-owner extraction still tries (and, on some
+        # kernels, fails) to chown to the archive's recorded uid/gid -- a
+        # userns-mapping artefact unrelated to noexec (also hit and noted the
+        # same way in the tan-cli#490 report's own repro).
+        'TAR_OPTIONS="--no-same-owner" '
+        f'TMPDIR="{noexec_dir}" TAN_INSTALL_BASE_URL="{base_url}" '
+        f'HOME="{home}" USERPROFILE="{home}" '
+        f'sh "{INSTALL_SH}" --dir "{dest}" --no-modify-path {" ".join(args)}\n'
+    )
+    return subprocess.run(
+        ["unshare", "--map-root-user", "-m", "--", "sh", "-c", script],
+        capture_output=True, text=True, timeout=180,
+    )
 
 
 def _skip_unless_latest_is_a_fixture_tag(result: subprocess.CompletedProcess) -> None:
@@ -599,6 +675,354 @@ def test_ps1_bad_payload_on_upgrade_leaves_previous_install_working(release_serv
     combined = result.stdout + result.stderr
     assert "your existing installation" in combined
     assert "was never touched" in combined
+
+
+@windows_only
+def test_ps1_temp_execute_denied_retries_staging_inside_dest_dir(release_server, tmp_path):
+    """tan-cli#490, Windows half: a host-level "no execute from here" refusal
+    over the staging location -- the same shape an AppLocker / Software
+    Restriction Policy "block execution from %TEMP%" rule produces
+    (`CreateProcess` fails with `ERROR_ACCESS_DENIED`, which .NET surfaces as
+    `Win32Exception: Access is denied`) -- must not sink the install.
+    `icacls /deny (X)` reproduces that refusal for real on the staging
+    directory (rather than mocking it), the same way install.sh's sibling
+    test (`test_sh_noexec_tmpdir_retries_staging_inside_install_dir`) uses a
+    real `noexec` mount instead of a permission-bit trick.
+    """
+    temp_root = tmp_path / "denied-temp"
+    temp_root.mkdir()
+    deny = subprocess.run(
+        ["icacls", str(temp_root), "/deny", "Everyone:(OI)(CI)(X)"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert deny.returncode == 0, f"could not set up the deny-execute ACE: {deny.stdout}\n{deny.stderr}"
+
+    dest = tmp_path / "prog"
+    result = _install_ps1(
+        release_server, dest, tmp_path, "-Version", "v0.4.1",
+        extra_env={"TEMP": str(temp_root), "TMP": str(temp_root)},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert (dest / "tan.exe").is_file()
+    combined = result.stdout + result.stderr
+    assert "security policy" in combined
+
+
+@windows_only
+def test_ps1_temp_execute_denied_distinguishes_from_a_broken_binary(release_server, tmp_path):
+    """tan-cli#490's hard requirement, Windows half: when the retry ALSO
+    fails (here, `-Dir` is put inside the SAME deny-execute directory, so
+    there is no exec-able place left to stage), the failure has to say this
+    is a host security policy, not the generic "missing runtime dependency /
+    security software altered it" wording install.ps1 gives for an
+    actually-corrupt payload.
+    """
+    denied_root = tmp_path / "denied"
+    denied_root.mkdir()
+    deny = subprocess.run(
+        ["icacls", str(denied_root), "/deny", "Everyone:(OI)(CI)(X)"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert deny.returncode == 0, f"could not set up the deny-execute ACE: {deny.stdout}\n{deny.stderr}"
+
+    dest = denied_root / "prog"  # -Dir itself is under the same deny-execute ACE
+    result = _install_ps1(
+        release_server, dest, tmp_path, "-Version", "v0.4.1",
+        extra_env={"TEMP": str(denied_root), "TMP": str(denied_root)},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "Access is denied" in combined
+    assert "security policy" in combined
+    # Must not misattribute a host security policy to a missing dependency.
+    assert "may be missing a runtime dependency" not in combined
+
+
+@pwsh_only
+def test_ps1_access_denied_signature_accepts_the_applocker_policy_codes(tmp_path):
+    """tan-cli#490 review, MAJOR 2: the two icacls-based tests above only
+    reproduce an NTFS deny-execute ACE, which fails CreateProcess with
+    ERROR_ACCESS_DENIED (5) -- they cannot exercise the scenario the issue
+    actually names, a real AppLocker/Software Restriction Policy "block
+    executables from %TEMP%" rule, because that needs live policy
+    enforcement (the Application Identity service, or a Safer/SRP registry
+    policy) that is not something a hosted CI runner should be made to carry
+    for one assertion. That policy class fails CreateProcess with
+    ERROR_ACCESS_DISABLED_BY_POLICY (1260) or, when configured with no
+    user-facing notification, ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY
+    (786) -- and pre-fix, Test-AccessDeniedSignature only ever matched 5, so
+    neither the retry nor the "security policy" wording would ever fire
+    against the issue's own named case.
+
+    tan-cli#490 review, round 5 also paired a second, real symbol,
+    ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY -- the same policy configured
+    with no user-facing notification -- with the wrong number, 1261. Round 6
+    checked Microsoft's system-error-codes table, found 1261 is
+    ERROR_REG_NAT_CONSUMPTION (an unrelated Itanium invalid-register-value
+    fault), and -- having only checked the 1000-1299 and 1300-1699 pages --
+    concluded the symbol does not exist and dropped it entirely. It exists:
+    it is 786 (0x312), on the 500-999 page
+    (learn.microsoft.com/windows/win32/debug/system-error-codes--500-999-,
+    "Access to %1 has been restricted by your Administrator by policy rule
+    %2."), confirmed also against MS-ERREF
+    (openspecs/windows_protocols/ms-erref, 0x00000312). Both 1260 and 786 are
+    verified, real codes for this scenario and are probed below.
+
+    This exercises the REAL discriminator function extracted verbatim out of
+    install.ps1 (not a reimplementation that could silently drift from it),
+    against a REAL System.ComponentModel.Win32Exception -- the same object
+    type Get-Win32ErrorCode unwraps at install.ps1:381-388 -- rather than a
+    bare integer, so a change to how the exception is unwrapped is covered
+    too.
+    """
+    text = INSTALL_PS1.read_text()
+    start = text.index("function Get-Win32ErrorCode(")
+    end = text.index("function Invoke-HealthCheck(")
+    assert start != -1 and end > start, "install.ps1's Get-Win32ErrorCode/Test-AccessDeniedSignature functions moved or were renamed"
+    funcs_ps1 = tmp_path / "funcs.ps1"
+    funcs_ps1.write_text(text[start:end])
+
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(
+        f'. "{funcs_ps1}"\n'
+        'function Probe($code) {\n'
+        '    if ($null -eq $code) { $exc = New-Object System.Exception "plain, no Win32Exception anywhere in the chain" }\n'
+        '    else {\n'
+        '        $inner = New-Object System.ComponentModel.Win32Exception -ArgumentList $code\n'
+        '        $exc = New-Object System.Exception -ArgumentList "wrapped", $inner  # exercise the InnerException walk too\n'
+        '    }\n'
+        '    return Test-AccessDeniedSignature (Get-Win32ErrorCode $exc)\n'
+        '}\n'
+        'Write-Output ("5=" + (Probe 5))\n'
+        'Write-Output ("1260=" + (Probe 1260))  # ERROR_ACCESS_DISABLED_BY_POLICY -- the AppLocker/SRP case #490 names\n'
+        'Write-Output ("786=" + (Probe 786))    # ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY -- same policy, no user-facing notification\n'
+        'Write-Output ("2="    + (Probe 2))     # ERROR_FILE_NOT_FOUND -- must NOT match\n'
+        'Write-Output ("none=" + (Probe $null))\n'
+    )
+
+    result = subprocess.run(
+        [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    lines = result.stdout.split()
+    assert "5=True" in lines
+    assert "1260=True" in lines
+    assert "786=True" in lines
+    assert "2=False" in lines
+    assert "none=False" in lines
+
+
+def test_ps1_broadcast_helper_compile_is_gated_and_guarded(tmp_path):
+    """tan-cli#490 round 8 shipped `Add-Type -Namespace TanInstall ...
+    -ErrorAction SilentlyContinue` at column 0 in the script -- unconditional,
+    outside `if (-not $alreadyPresent)`, and outside any try/catch of its own.
+    `-ErrorAction SilentlyContinue` only suppresses a NON-terminating error; a
+    compile/assembly-load failure from `Add-Type` itself is TERMINATING (under
+    this script's own `$ErrorActionPreference = "Stop"`), so on a host whose
+    AppLocker DLL rule or Software Restriction Policy blocks compiling into
+    %TEMP% -- precisely the host class the health-check retry earlier in this
+    same script exists for -- `Add-Type` aborted the WHOLE script, even a run
+    that never touched the Path at all (a fresh `-NoModifyPath` run, or one
+    where `$Dir` was already on the Path). This is a pure text assertion --
+    no `pwsh` needed, so it runs on every OS this suite runs on, including
+    this Linux host that has none installed -- proving the shipped source has
+    `Add-Type` (a) inside the `if (-not $alreadyPresent) { ... }` write branch
+    and (b) inside its own `try { } catch { }`, both of which round 8's
+    zero-test-coverage version lacked.
+    """
+    text = INSTALL_PS1.read_text()
+    branch_start = text.index("if (-not $alreadyPresent) {")
+    branch_end = text.index('if ($layout -eq "archive") {\n\tWrite-Host "install.ps1: installed tan')
+    assert branch_end > branch_start, "install.ps1's Path-write branch moved or was renamed"
+    branch = text[branch_start:branch_end]
+
+    add_type_at = branch.index("Add-Type -Namespace TanInstall -Name NativeMethods")
+    call_at = branch.index("[TanInstall.NativeMethods]::SendMessageTimeout")
+    assert call_at > add_type_at, "the broadcast call must come after Add-Type defines the type"
+
+    try_at = branch.rindex("try {", 0, add_type_at)
+    catch_at = branch.index("} catch {", add_type_at)
+    assert try_at < add_type_at < catch_at, (
+        "Add-Type must be wrapped in its own try/catch -- SilentlyContinue alone does not "
+        "suppress the TERMINATING error a blocked compile raises"
+    )
+
+
+@windows_only
+def test_ps1_commit_resets_the_source_temp_acl_after_move(release_server, tmp_path):
+    """tan-cli#490, MAJOR 2: `Move-Item` carries the SOURCE item's ACL into
+    its new home rather than picking up the destination's -- under `-System`
+    that would leave a machine-wide install writable by whichever
+    unprivileged user ran the installer (a local-privilege-escalation
+    shape). Repro's here without needing elevation: grant `Everyone` an
+    explicit ACE on the staging %TEMP% dir (so the downloaded payload
+    inherits it, the same way it would inherit the invoking user's own
+    ownership/ACEs on a real host), then assert that ACE is gone from the
+    installed file -- only whatever `dest`'s own parent grants should remain.
+    """
+    temp_root = tmp_path / "acl-temp"
+    temp_root.mkdir()
+    grant = subprocess.run(
+        ["icacls", str(temp_root), "/grant", "Everyone:(OI)(CI)F"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert grant.returncode == 0, f"could not set up the source ACE: {grant.stdout}\n{grant.stderr}"
+
+    dest = tmp_path / "prog"
+    result = _install_ps1(
+        release_server, dest, tmp_path, "-Version", "v0.4.1",
+        extra_env={"TEMP": str(temp_root), "TMP": str(temp_root)},
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    exe = dest / "tan.exe"
+    assert exe.is_file()
+
+    acl_out = subprocess.run(
+        ["icacls", str(exe)], capture_output=True, text=True, timeout=30
+    ).stdout
+    assert "Everyone" not in acl_out, (
+        f"the installed file still carries the staging %TEMP% dir's explicit ACE:\n{acl_out}"
+    )
+
+
+@windows_only
+def test_ps1_registry_path_write_preserves_expand_sz_and_does_not_expand_vars(release_server, tmp_path):
+    """tan-cli#490's highest-priority defect, and the one no test actually
+    exercised: the fix reads the User/Machine Path UNEXPANDED
+    (`DoNotExpandEnvironmentNames`) and writes it back with the SAME
+    `RegistryValueKind` it already had, instead of round-tripping it through
+    `[Environment]::GetEnvironmentVariable`/`SetEnvironmentVariable`, which
+    would silently collapse a `REG_EXPAND_SZ` Path (one containing `%VAR%`
+    references) to a `REG_SZ` one with those references expanded and frozen.
+
+    Every OTHER test in this file passes `-NoModifyPath` (see `_install_ps1`)
+    specifically so it never touches the real User/Machine Path on the
+    machine running the suite -- which means none of them, across three
+    rounds of fixes to this same file, ever ran this code at all. This test
+    is the one that does, by pointing install.ps1's registry read/write at a
+    disposable scratch HKCU subkey instead (a seam in `Get-PathRegistryKey`,
+    `TAN_INSTALL_TEST_PATH_REGISTRY_KEY`, that exists only for this test) --
+    exercising the exact registry mechanics (open, read raw, write back with
+    the preserved kind) without permanently rewriting the real key in either
+    hive, and without needing the elevation the Machine hive would require.
+    """
+    assert winreg is not None
+    test_subkey = f"Software\\TanInstallTest\\{uuid.uuid4().hex}"
+    hkcu = winreg.HKEY_CURRENT_USER
+    seeded_path = r"%TAN_INSTALL_TEST_VAR%\bin;C:\Windows\system32"
+    key = winreg.CreateKeyEx(hkcu, test_subkey, 0, winreg.KEY_ALL_ACCESS)
+    try:
+        winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, seeded_path)
+        winreg.CloseKey(key)
+
+        dest = tmp_path / "prog"
+        # No -NoModifyPath: this is the one test that must reach the write.
+        result = _run(
+            [
+                PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", str(INSTALL_PS1), "-Dir", str(dest), "-Version", "v0.4.1",
+            ],
+            release_server,
+            tmp_path,
+            extra_env={"TAN_INSTALL_TEST_PATH_REGISTRY_KEY": test_subkey},
+        )
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert (dest / "tan.exe").is_file()
+
+        read_key = winreg.OpenKey(hkcu, test_subkey, 0, winreg.KEY_READ)
+        try:
+            new_value, new_kind = winreg.QueryValueEx(read_key, "Path")
+        finally:
+            winreg.CloseKey(read_key)
+
+        # The kind must survive the round-trip -- this is the defect itself:
+        # SetEnvironmentVariable always writes REG_SZ regardless of what was
+        # there before.
+        assert new_kind == winreg.REG_EXPAND_SZ
+        # The pre-existing %VAR% reference must still be LITERAL, not expanded
+        # to whatever TAN_INSTALL_TEST_VAR happened to resolve to (usually
+        # nothing, which GetEnvironmentVariable would have collapsed to "").
+        assert "%TAN_INSTALL_TEST_VAR%" in new_value
+        assert r"C:\Windows\system32" in new_value
+        # And the install actually did its job: $Dir was appended.
+        assert str(dest) in new_value.split(";")
+    finally:
+        try:
+            winreg.DeleteKey(hkcu, test_subkey)
+        except OSError:
+            pass
+        try:
+            winreg.DeleteKey(hkcu, "Software\\TanInstallTest")
+        except OSError:
+            pass
+
+
+@windows_only
+def test_ps1_relative_dir_is_resolved_against_pwd_not_process_startup_dir(release_server, tmp_path):
+    """tan-cli#490 review, round four's MAJOR-1: a relative `-Dir` used to be
+    resolved via `[System.IO.Path]::GetFullPath($Dir)`, which anchors against
+    `[Environment]::CurrentDirectory` -- the PROCESS's startup directory --
+    not against `$PWD`, the directory a `Set-Location`/`cd` actually moves.
+    `cd .\\tools; irm .../install.ps1 | iex -Dir .\\bin` would then silently
+    install wherever the PowerShell process itself started (often `$HOME` for
+    a fresh `irm | iex` invocation), never `.\\tools\\bin` as asked.
+
+    This is reproduced here as a genuine divergence between the *process's
+    own* starting directory and the directory a subsequent `Set-Location`
+    leaves `$PWD` pointing at -- `subprocess.run(..., cwd=workdir)` starts the
+    `pwsh` PROCESS in `workdir` (standing in for wherever `irm | iex` itself
+    began), and the script passed via `-Command` then does the user's own
+    `cd .\\tools` before invoking install.ps1 with a `-Dir` relative to
+    THAT. A correct fix must install under `workdir/tools/bin`; the pre-fix
+    behaviour installed under `workdir/bin` instead.
+
+    install.ps1's own module comment once claimed PowerShell 7 keeps
+    `[Environment]::CurrentDirectory` and `$PWD` in sync, so only Windows
+    PowerShell 5.1 needed this fix -- that claim does not hold: measured
+    directly against a real PowerShell 7 (`Set-Location` into a
+    subdirectory, then compare `$PWD.Path` with
+    `[Environment]::CurrentDirectory`), the two diverge on 7 exactly as they
+    do on 5.1. This test therefore does not gate on the PowerShell version at
+    all -- whatever `pwsh`/`powershell` the CI runner has must resolve `-Dir`
+    correctly.
+    """
+    workdir = tmp_path / "work"
+    subdir = workdir / "tools"
+    subdir.mkdir(parents=True)
+    ps_command = (
+        f"Set-Location -LiteralPath '{subdir}'; "
+        f"& '{INSTALL_PS1}' -Dir '.\\bin' -NoModifyPath -Version v0.4.1"
+    )
+    result = subprocess.run(
+        [
+            PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-Command", ps_command,
+        ],
+        cwd=workdir,  # the pwsh PROCESS itself starts here, never moves
+        env={
+            **os.environ,
+            "TAN_INSTALL_BASE_URL": release_server,
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
+        },
+        capture_output=True, text=True, timeout=180,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    wrong_install = workdir / "bin" / "tan.exe"
+    right_install = subdir / "bin" / "tan.exe"
+    assert not wrong_install.is_file(), (
+        f"installed at {wrong_install} -- resolved against the pwsh PROCESS's "
+        f"own startup directory ({workdir}) instead of $PWD ({subdir}), the "
+        f"exact tan-cli#490 regression"
+    )
+    assert right_install.is_file(), (
+        f"expected the install under {subdir / 'bin'} (where Set-Location left "
+        f"$PWD); {result.stdout}\n{result.stderr}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -806,3 +1230,767 @@ def test_sh_bad_payload_on_upgrade_leaves_previous_install_working(release_serve
     combined = result.stdout + result.stderr
     assert "your existing installation" in combined
     assert "was never touched" in combined
+
+
+@posix_only
+@noexec_capable
+def test_sh_noexec_tmpdir_retries_staging_inside_install_dir(release_server, tmp_path):
+    """tan-cli#490: a `$TMPDIR` mounted `noexec` -- common on CIS/STIG-hardened
+    images, which is exactly where customers install `tan` from via
+    `curl | sh` -- must not sink the install. `$INSTALL_DIR` (here, a normal
+    writable dir OUTSIDE the noexec mount) already has to be exec-able for
+    `tan` to ever run once installed, so install.sh retries the health check
+    staged there instead of refusing outright.
+    """
+    dest = tmp_path / "bin"
+    home = tmp_path / "home"
+    home.mkdir()
+    noexec_dir = tmp_path / "noexec-tmp"
+    noexec_dir.mkdir()
+
+    result = _install_sh_under_noexec_tmpdir(
+        release_server, dest, home, noexec_dir, "--version", "v0.4.1"
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    installed = dest / "tan"
+    assert installed.is_file()
+    assert FIXTURE_VERSION_LINE in installed.read_text(encoding="utf-8")
+    assert os.access(installed, os.X_OK)
+    # No retry staging directory left behind under $INSTALL_DIR.
+    assert list(dest.iterdir()) == [installed]
+    combined = result.stdout + result.stderr
+    assert "noexec" in combined
+
+
+@posix_only
+def test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic(tmp_path):
+    """tan-cli#490 review, MAJOR 1 (install.sh's `run_health_check`): a
+    command-prefix assignment (`LC_ALL=C "$1" --version`) sets LC_ALL only in
+    the ENVIRONMENT HANDED TO THE CHILD ABOUT TO BE EXEC'D. When exec(2)
+    itself fails -- the noexec case this whole health check exists for -- no
+    child ever replaces the running shell's image, so the "Permission
+    denied" diagnostic is printed by the shell (or its command-substitution
+    subshell) in whatever locale IT was already running in, not the
+    temporarily-prefixed one. On a bash-as-/bin/sh host
+    (RHEL/Rocky/Alma/Fedora/SLES -- exactly the hardened enterprise/
+    government image class #490 targets) a localized ambient locale then
+    gets a translated `strerror(EACCES)`, `is_noexec_signature`'s English
+    substring match misses, and the retry silently never fires.
+
+    Getting a REAL translated "Permission denied" onto a CI runner needs a
+    glibc language pack that is not guaranteed present on
+    ubuntu-latest/macos-latest (confirmed for real on a Fedora 40 container
+    with `glibc-langpack-de` installed while writing this fix: under a
+    de_DE.UTF-8 ambient locale, the pre-fix command-prefix form prints "Keine
+    Berechtigung" for a real noexec exec failure; the fixed
+    export-in-subshell form prints "Permission denied" -- not reproduced
+    here for that reason). So this proves the underlying, portable half of
+    the same mechanism instead: bash always warns on stderr when asked to
+    set a locale that does not exist ("...: warning: setlocale: LC_ALL:
+    cannot change locale ..."), on every host, no package install required.
+    That warning is bash calling `setlocale()` on the CURRENT process as a
+    side effect of the assignment -- which is exactly, and only, what
+    `export` does; a command-prefix assignment builds an envp for the child
+    about to be exec'd and never calls the current process's own
+    `setlocale()` at all, so it produces no warning regardless of whether the
+    value is valid. Once `setlocale()` has actually been called (the `export`
+    form, always, even for a valid value like install.sh's real "C") the
+    change is a property of the PROCESS and persists into every later
+    statement in that same subshell -- including the next statement's own
+    exec-failure message, which is the mechanism the Fedora repro above
+    exercises for real. The warning is checked across the whole process's
+    combined output rather than narrowly inside `$verify_out` on purpose: it
+    is emitted by the `export` statement itself, a separate statement from
+    the one `2>&1` is attached to, so it would never land inside
+    `$verify_out` in EITHER form -- that is exactly why it is the right
+    portable proxy for "did this reach the process's own setlocale()", not a
+    claim about install.sh's own capture, which "C" never triggers because
+    "C" is always a valid locale.
+
+    The two forms compared below are the exact shapes install.sh had before
+    and after this fix (with `C` swapped for an invalid locale value purely
+    so the shell has something to warn about). The final assertions then pin
+    the ACTUAL line in install.sh to the export-in-subshell shape, so a
+    regression back to the command-prefix shape fails this test even without
+    re-deriving the mechanism proof.
+    """
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash -- the '/bin/sh IS bash' class tan-cli#490 targets")
+
+    target = tmp_path / "target.sh"
+    target.write_text("#!/bin/sh\necho reached\n")
+    target.chmod(0o755)
+
+    def run_form(body: str) -> str:
+        probe = tmp_path / "probe.sh"
+        probe.write_text(f'#!/bin/bash\n{body}\nprintf \'%s\' "$verify_out"\n')
+        probe.chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(probe), str(target)], capture_output=True, text=True, timeout=15
+        )
+        return result.stdout + result.stderr
+
+    prefix_out = run_form('verify_out="$(LC_ALL=xx_YY.bogus "$1" 2>&1)"')
+    export_out = run_form('verify_out="$(export LC_ALL=xx_YY.bogus; "$1" 2>&1)"')
+
+    assert "cannot change locale" not in prefix_out, (
+        "a command-prefix LC_ALL assignment was not expected to reach the "
+        f"running shell's own setlocale(), but it did: {prefix_out!r}"
+    )
+    assert "cannot change locale" in export_out, (
+        "export inside the command-substitution subshell was expected to "
+        f"reach that subshell's own setlocale(): {export_out!r}"
+    )
+
+    text = INSTALL_SH.read_text()
+    assert 'verify_out="$(export LC_ALL=C; "$1" --version 2>&1)"' in text, (
+        "install.sh:run_health_check must set LC_ALL=C via `export` inside "
+        "the $(...) subshell, not as a command-prefix assignment on the "
+        "probed binary -- see this test's docstring for why the prefix form "
+        "cannot reach the running shell's own exec-failure diagnostic."
+    )
+    assert 'verify_out="$(LC_ALL=C "$1" --version 2>&1)"' not in text
+
+
+@posix_only
+@noexec_capable
+def test_sh_noexec_tmpdir_archive_layout_retries_staging_inside_install_dir(release_server, tmp_path):
+    """Same as above, for the `--onedir` archive layout (tan-cli#349): the
+    thing that has to move off the noexec mount is `$stage/tan/tan`, not the
+    launcher (which is never executed while staged), and the retry has to
+    carry the runtime's `_internal/` tree along with it.
+    """
+    dest = tmp_path / "bin"
+    home = tmp_path / "home"
+    home.mkdir()
+    noexec_dir = tmp_path / "noexec-tmp"
+    noexec_dir.mkdir()
+
+    result = _install_sh_under_noexec_tmpdir(
+        release_server, dest, home, noexec_dir, "--version", FIRST_ARCHIVE_TAG
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    launcher = dest / "tan"
+    assert launcher.is_file() and os.access(launcher, os.X_OK)
+    payload = dest / "tan-cli-lib" / "tan"
+    assert payload.is_file() and os.access(payload, os.X_OK)
+    assert (dest / "tan-cli-lib" / "_internal").is_dir()
+    # No retry staging directory left behind under $INSTALL_DIR.
+    assert sorted(p.name for p in dest.iterdir()) == ["tan", "tan-cli-lib"]
+    combined = result.stdout + result.stderr
+    assert "noexec" in combined
+
+
+@posix_only
+@noexec_capable
+def test_sh_noexec_tmpdir_distinguishes_noexec_from_a_broken_binary(release_server, tmp_path):
+    """tan-cli#490's hard requirement: when the retry ALSO fails (here,
+    `--dir` is put INSIDE the same noexec mount, so there is no exec-able
+    place left to stage), the failure has to say this is a noexec mount, not
+    the generic "your glibc may be too old" guidance install.sh gives for an
+    actually-corrupt payload -- a customer who cannot tell those two apart
+    from the message alone files a support ticket against the wrong thing.
+    """
+    noexec_dir = tmp_path / "noexec-tmp"
+    noexec_dir.mkdir()
+    dest = noexec_dir / "bin"  # $INSTALL_DIR itself is on the noexec mount too
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = _install_sh_under_noexec_tmpdir(
+        release_server, dest, home, noexec_dir, "--version", "v0.4.1"
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "noexec" in combined
+    assert "Permission denied" in combined
+    assert "PATH was not modified" in combined
+    # Must not misattribute a mount option to a libc floor.
+    assert "GLIBC" not in combined
+    assert "glibc" not in combined
+
+
+def _fake_noop_chmod(tmp_path: Path) -> Path:
+    """A `chmod` stub that never actually sets any bit -- shadowing the real
+    one reproduces the exact exit-126 "Permission denied" health-check
+    signature (the staged payload simply never becomes executable) WITHOUT a
+    real noexec mount, so `$INSTALL_DIR` can be an ordinary, directly
+    inspectable path rather than something living inside an `unshare -m`
+    mount namespace that vanishes -- taking any evidence written under it --
+    the moment that subprocess exits.
+    """
+    bin_dir = tmp_path / "fake-noop-chmod-bin"
+    bin_dir.mkdir()
+    script = bin_dir / "chmod"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+    script.chmod(0o755)
+    return bin_dir
+
+
+@posix_only
+def test_sh_noop_chmod_retry_failure_leaves_no_empty_install_dir(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:428): the retry gate's
+    `mkdir -p "$INSTALL_DIR"` ran even when the install was ultimately
+    refused, leaving an empty directory behind where pre-fix nothing existed.
+    A no-op `chmod` ahead of the real one on PATH means the staged (and,
+    after the retry, re-staged) binary never actually becomes executable --
+    the same exit-126 "Permission denied" signature a noexec mount produces,
+    without one -- so `$INSTALL_DIR` here is a normal path this test can
+    inspect directly after the subprocess exits (unlike the noexec-mount
+    tests above, whose `$INSTALL_DIR` lives inside a private mount namespace
+    that is torn down, and any evidence with it, the moment the `unshare`d
+    process exits).
+    """
+    dest = tmp_path / "bin"  # must not exist before this run
+    chmod_dir = _fake_noop_chmod(tmp_path)
+    env_path = f"{chmod_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", "v0.4.1",
+        extra_env={"PATH": env_path},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "Permission denied" in combined
+    assert not dest.exists(), "a refused install must not leave an empty install dir behind"
+
+
+@posix_only
+def test_sh_noop_chmod_retry_failure_leaves_no_orphaned_intermediate_parents(release_server, tmp_path):
+    """tan-cli#490 round 9: the retry gate's `mkdir -p "$INSTALL_DIR"` creates
+    every missing INTERMEDIATE parent too (like `mkdir -p` always does), but
+    the refusal cleanup this test's sibling above covers
+    (`test_sh_noop_chmod_retry_failure_leaves_no_empty_install_dir`) used to
+    `rmdir "$INSTALL_DIR"`, which removes only the LEAF -- the same class of
+    orphan round 8 already fixed once in the relative-`--dir` argument-parsing
+    path, surviving here in the retry-gate path. MEASURED pre-fix:
+    `--dir <tmp>/orph/deep/bin` refused left `<tmp>/orph` and
+    `<tmp>/orph/deep` behind. `--dir` here is THREE levels deep so the fix has
+    to walk, not just handle the immediate parent.
+    """
+    dest = tmp_path / "orph" / "deep" / "bin"  # none of these must exist before this run
+    chmod_dir = _fake_noop_chmod(tmp_path)
+    env_path = f"{chmod_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", "v0.4.1",
+        extra_env={"PATH": env_path},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "Permission denied" in combined
+    assert not (tmp_path / "orph").exists(), (
+        "a refused install must not leave any intermediate parent directory behind, "
+        "not just the immediate --dir leaf"
+    )
+
+
+def _install_sh_noexec_with_exhausted_install_dir(
+    base_url: str, dest: Path, home: Path, noexec_dir: Path, install_mount: Path, *args: str
+) -> subprocess.CompletedProcess:
+    """Reproduces the exact tan-cli#490 review scenario: `$TMPDIR` noexec AND
+    `$INSTALL_DIR` on a filesystem that cannot stage a NEW directory. A real
+    `nr_inodes=2` tmpfs at `$install_mount` (one inode for its own root, one
+    for `$dest` pre-created below to stand in for whatever already lived
+    there) leaves none for the retry's `mktemp -d` -- so `$INSTALL_DIR` itself
+    stays writable (unlike the noexec-tmpdir tests above) while staging a
+    retry inside it genuinely fails, the way an inode-exhausted filesystem
+    would.
+    """
+    script = (
+        "set -e\n"
+        f'mount -t tmpfs -o noexec tmpfs "{noexec_dir}"\n'
+        f'mkdir -p "{install_mount}"\n'
+        f'mount -t tmpfs -o size=4k,nr_inodes=2 tmpfs "{install_mount}"\n'
+        f'mkdir -p "{dest}"\n'
+        'TAR_OPTIONS="--no-same-owner" '
+        f'TMPDIR="{noexec_dir}" TAN_INSTALL_BASE_URL="{base_url}" '
+        f'HOME="{home}" USERPROFILE="{home}" '
+        f'sh "{INSTALL_SH}" --dir "{dest}" --no-modify-path {" ".join(args)}\n'
+    )
+    return subprocess.run(
+        ["unshare", "--map-root-user", "-m", "--", "sh", "-c", script],
+        capture_output=True, text=True, timeout=180,
+    )
+
+
+@posix_only
+@noexec_capable
+def test_sh_noexec_retry_staging_failure_is_reported_not_misattributed(release_server, tmp_path):
+    """tan-cli#490 review, MAJOR finding (install.sh:429): `retried=1` used to
+    be set BEFORE the retry was actually attempted, so a retry that could
+    never even get staged was reported as one that RAN and failed -- blaming
+    the wrong mount, exactly the misattributed-diagnostic class #490 itself is
+    about. Reproduced for real (not mocked): `$TMPDIR` is a noexec tmpfs (the
+    original failure) and `$INSTALL_DIR` sits on a SEPARATE tmpfs whose inode
+    budget is already exhausted (the retry's own `mktemp -d` has nowhere to
+    land), which is the report's own example ("$TMPDIR noexec + $INSTALL_DIR
+    on an inode-exhausted fs").
+
+    Against the unfixed script this prints "Retrying staged inside .../bin..."
+    followed by "exit 126 (Permission denied) persisted even after staging
+    inside" -- neither of which happened; the retry's own `mktemp` never even
+    ran to completion. The fixed script must instead surface the real staging
+    error and never claim the retry persisted when it never got staged.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    noexec_dir = tmp_path / "noexec-tmp"
+    noexec_dir.mkdir()
+    install_mount = tmp_path / "install-mount"
+    dest = install_mount / "bin"
+
+    result = _install_sh_noexec_with_exhausted_install_dir(
+        release_server, dest, home, noexec_dir, install_mount, "--version", "v0.4.1"
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "Permission denied" in combined
+    # The retry must never be reported as having actually run and failed --
+    # it never got staged in the first place.
+    assert "persisted even after staging inside" not in combined
+    assert "could not stage a retry inside" in combined
+
+
+@posix_only
+def test_sh_no_curl_or_wget_prints_a_diagnostic(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:228): the FIRST `download` call
+    (checksums.txt) redirected its own `need curl or wget on PATH` message to
+    /dev/null, so a host with neither tool exited 1 with ZERO further output
+    -- and because that call always runs before any other download, the
+    message was unreachable on every code path. A PATH built from real
+    coreutils but deliberately missing curl/wget reproduces the real failure
+    (not a mock of `download`) -- everything upstream of the transport check
+    (OS/arch/musl detection, the sha256-tool check) still runs for real and
+    still has to fall through correctly to the actual missing-transport
+    refusal.
+    """
+    dest = tmp_path / "bin"
+    bin_dir = tmp_path / "no-curl-wget-bin"
+    bin_dir.mkdir()
+    needed = (
+        "sh", "uname", "sha256sum", "shasum", "mktemp", "mkdir", "mv", "rm", "rmdir",
+        "chmod", "grep", "awk", "sed", "basename", "dirname", "cat", "printf", "cut",
+        "tar", "ls", "sort", "head", "tail", "ldd", "id",
+    )
+    for tool in needed:
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", "v0.4.1",
+        extra_env={"PATH": str(bin_dir)},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "need curl or wget on PATH" in combined
+
+
+@posix_only
+def test_sh_no_curl_or_wget_prints_a_diagnostic_on_the_default_latest_invocation(tmp_path):
+    """tan-cli#490 review, MAJOR finding (install.sh:184-192): the test above
+    only covers `--version vX.Y.Z`, which skips the `latest` redirect
+    resolution entirely -- but that block is what actually runs FIRST on the
+    DEFAULT invocation (`curl ... | sh`, no `--version`, exactly the
+    documented one-liner), and it has its own inline curl/wget branching that
+    is not routed through `download()` at all: when neither tool exists it
+    silently falls through both `if`/`elif` arms, `resolved` is never
+    assigned, and the script prints "could not resolve which release
+    'latest' points at" -- true in isolation, but not the actual problem, and
+    it masks the real one. Confirmed against the real, unfixed script while
+    writing this (2>&1 output):
+
+        install.sh: resolving the latest release tag...
+        install.sh: could not resolve which release 'latest' points at.
+        install.sh: refusing to install -- without a tag there is no
+        checksums.txt to verify against. Retry, or pass an explicit
+        --version vX.Y.Z.
+
+    instead of "need curl or wget on PATH". Deliberately does NOT use
+    `release_server`/`TAN_INSTALL_BASE_URL` -- the whole point is that a host
+    with neither transport must refuse before ever reaching the network, `latest`
+    included, using the sha256-tool-check idiom (:234-246 today): check for
+    the tool up front, before anything that assumes it exists.
+    """
+    dest = tmp_path / "bin"
+    bin_dir = tmp_path / "no-curl-wget-bin"
+    bin_dir.mkdir()
+    needed = (
+        "sh", "uname", "sha256sum", "shasum", "mktemp", "mkdir", "mv", "rm", "rmdir",
+        "chmod", "grep", "awk", "sed", "basename", "dirname", "cat", "printf", "cut",
+        "tar", "ls", "sort", "head", "tail", "ldd", "id",
+    )
+    for tool in needed:
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--dir", str(dest), "--no-modify-path"],
+        env={**os.environ, "PATH": str(bin_dir), "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "need curl or wget on PATH" in combined
+    assert "could not resolve which release 'latest' points at" not in combined
+
+
+@posix_only
+def test_sh_system_style_install_attempts_to_chown_the_installed_files_to_root(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:459): `$payload`/`$stage` are
+    staged UNPRIVILEGED (`mktemp`), and `mv` preserves ownership on both a
+    same-filesystem rename and, as real root, a cross-filesystem copy -- so
+    without a `chown`, a `--system`-shaped install would leave the whole tree
+    owned by the invoking (non-root) user despite living in a root-owned dir
+    early on root's own PATH. `_fake_sudo` cannot exercise a REAL ownership
+    change (chowning to a different user needs real root/CAP_CHOWN, which is
+    off the table here the same way elevation itself is -- see its own
+    docstring), but it does prove the code path is REACHED: the logged sudo
+    invocations must include a `chown` of both the launcher and the runtime
+    dir.
+    """
+    dest = tmp_path / "system-style-bin"
+    dest.mkdir()
+    dest.chmod(0o555)
+    calls_log = tmp_path / "sudo-calls.log"
+    sudo_dir = _fake_sudo(dest, calls_log)
+    env_path = f"{sudo_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", FIRST_ARCHIVE_TAG,
+        extra_env={"PATH": env_path},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    logged = calls_log.read_text(encoding="utf-8")
+    assert "chown root" in logged
+    assert "tan-cli-lib" in logged.split("chown root", 1)[1] or "chown -R root" in logged
+
+
+@posix_only
+def test_sh_relative_install_dir_is_normalised_to_absolute(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:373): a relative `--dir` used to
+    be baked verbatim into the archive layout's generated launcher
+    (`exec "${LIB_DIR}/tan" "$@"`), which then only worked while the CWD was
+    the one install.sh happened to run in. Running from a specific CWD with a
+    relative `--dir` must still produce a launcher whose `exec` target is an
+    ABSOLUTE path.
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--dir", "./mybin", "--no-modify-path", "--version", FIRST_ARCHIVE_TAG],
+        cwd=workdir,
+        env={
+            **os.environ,
+            "TAN_INSTALL_BASE_URL": release_server,
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
+        },
+        capture_output=True, text=True, timeout=180,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    launcher = workdir / "mybin" / "tan"
+    assert launcher.is_file()
+    launcher_text = launcher.read_text(encoding="utf-8")
+    assert "./mybin" not in launcher_text
+    assert str((workdir / "mybin" / "tan-cli-lib").resolve()) in launcher_text
+    # The launcher must work from a DIFFERENT cwd than the one install.sh ran in.
+    run_elsewhere = subprocess.run([str(launcher), "--version"], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert run_elsewhere.returncode == 0, f"{run_elsewhere.stdout}\n{run_elsewhere.stderr}"
+    assert FIXTURE_VERSION_LINE in run_elsewhere.stdout
+
+
+@posix_only
+def test_sh_relative_dir_normalisation_creates_nothing_on_a_refused_install(release_server, tmp_path):
+    """tan-cli#490 review MINOR (install.sh:66-67): the relative-`--dir`
+    normalisation block runs during ARGUMENT PARSING, before any network call
+    or health check, and used to `mkdir -p` the not-yet-existing parent of a
+    relative `--dir` just to resolve it to an absolute path -- e.g. `--dir
+    new/deep/bin` created `./new/deep` in the CWD even when the install was
+    then refused (here: an unknown --version, so `checksums.txt` 404s).
+    Normalisation must not touch disk; only the later, deliberate
+    `mkdir -p "$INSTALL_DIR"` -- reached only once an install is actually
+    going ahead -- may create anything, and that path is never reached here.
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--dir", "new/deep/bin", "--no-modify-path", "--version", "v9.9.9-does-not-exist"],
+        cwd=workdir,
+        env={
+            **os.environ,
+            "TAN_INSTALL_BASE_URL": release_server,
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
+        },
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert result.returncode != 0
+    assert not (workdir / "new").exists(), "install.sh must not create any part of a relative --dir before the install actually proceeds"
+
+
+@posix_only
+def test_sh_relative_install_dir_rc_file_gets_an_absolute_path(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:373): the rc-file PATH line was
+    built from the same un-normalised `$INSTALL_DIR`, permanently putting a
+    CWD-relative entry first on PATH. `SHELL=/bin/sh` pins the rc file to
+    `~/.profile` deterministically (matching `_install_sh_modify_path`'s own
+    convention).
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--dir", "./mybin", "--version", FIRST_ARCHIVE_TAG],
+        cwd=workdir,
+        env={
+            **os.environ,
+            "TAN_INSTALL_BASE_URL": release_server,
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "SHELL": "/bin/sh",
+        },
+        capture_output=True, text=True, timeout=180,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    rc = home / ".profile"
+    assert rc.is_file()
+    rc_text = rc.read_text(encoding="utf-8")
+    assert "./mybin" not in rc_text
+    assert str((workdir / "mybin").resolve()) in rc_text
+
+
+@posix_only
+def test_sh_fish_shell_gets_fish_syntax_in_its_own_config_file(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:507): fish never reads
+    ~/.profile and does not understand POSIX `export FOO=bar` -- falling
+    through to the `*)` default silently wrote a line fish can never source
+    and then claimed 'tan' now worked "anywhere", which was false. fish gets
+    its own rc file (`~/.config/fish/config.fish`, which does not exist yet on
+    a fresh account) and its own `set -gx` syntax.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/usr/bin/fish"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    rc = home / ".config" / "fish" / "config.fish"
+    assert rc.is_file(), "install.sh must create ~/.config/fish/ if it does not exist yet"
+    rc_text = rc.read_text(encoding="utf-8")
+    assert "set -gx PATH" in rc_text
+    assert "export PATH" not in rc_text
+    combined = result.stdout + result.stderr
+    assert "source" in combined  # the re-source hint must use fish's own command
+
+
+@posix_only
+def test_sh_tcsh_shell_gets_csh_syntax_in_tcshrc(release_server, tmp_path):
+    """tan-cli#490 review finding (install.sh:507): tcsh/csh do not read
+    ~/.profile and do not parse `export` -- they need `setenv` in
+    ~/.tcshrc (or ~/.cshrc for plain csh).
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/tcsh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    rc = home / ".tcshrc"
+    assert rc.is_file()
+    rc_text = rc.read_text(encoding="utf-8")
+    assert "setenv PATH" in rc_text
+    assert "export PATH" not in rc_text
+
+
+@posix_only
+def test_sh_tcsh_shell_appends_to_existing_cshrc_instead_of_shadowing_it(release_server, tmp_path):
+    """tan-cli#490 review MAJOR: tcsh(1), STARTUP AND SHUTDOWN -- on login it
+    reads ~/.tcshrc OR, only if ~/.tcshrc is NOT found, ~/.cshrc, never both.
+    A user whose whole csh config lives in ~/.cshrc would have it stop
+    loading, silently and unrecoverably (the idempotency guard makes a
+    re-run a no-op), the moment this installer created a bare ~/.tcshrc
+    containing only the PATH line. When ~/.tcshrc does not exist yet but
+    ~/.cshrc does, the PATH line must be appended to ~/.cshrc instead, so
+    the user's existing config keeps loading.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    cshrc = home / ".cshrc"
+    cshrc.write_text("alias ll 'ls -l'\nsetenv EDITOR vim\n", encoding="utf-8")
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/tcsh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert not (home / ".tcshrc").exists(), "must not create ~/.tcshrc -- that would shadow the existing ~/.cshrc"
+    cshrc_text = cshrc.read_text(encoding="utf-8")
+    assert "alias ll 'ls -l'" in cshrc_text, "the user's pre-existing ~/.cshrc content must survive"
+    assert "setenv EDITOR vim" in cshrc_text
+    assert "setenv PATH" in cshrc_text
+    assert "export PATH" not in cshrc_text
+
+
+@posix_only
+def test_sh_csh_shell_gets_tcshrc_when_neither_rc_file_exists(release_server, tmp_path):
+    """tan-cli#490 round 9: on macOS, FreeBSD, and Debian/Ubuntu-via-
+    alternatives, /bin/csh IS tcsh (a compat symlink/build, not a distinct
+    binary) -- so SHELL=/bin/csh must get the exact same shadowing-aware
+    logic as SHELL=/bin/tcsh, not a bare ~/.cshrc write. Shape 1 of 4: neither
+    rc file exists yet -- nothing to shadow, so a fresh ~/.tcshrc is created
+    (mirrors test_sh_tcsh_shell_gets_csh_syntax_in_tcshrc).
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/csh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    rc = home / ".tcshrc"
+    assert rc.is_file()
+    rc_text = rc.read_text(encoding="utf-8")
+    assert "setenv PATH" in rc_text
+    assert "export PATH" not in rc_text
+    assert not (home / ".cshrc").exists()
+
+
+@posix_only
+def test_sh_csh_shell_appends_to_existing_cshrc_instead_of_shadowing_it(release_server, tmp_path):
+    """tan-cli#490 round 9, the MEASURED bug this fix closes. Shape 2 of 4:
+    only ~/.cshrc exists (the review's own repro: SHELL=/bin/csh, a real tcsh
+    6.24.10 binary, both ~/.tcshrc and ~/.cshrc seeded). Pre-fix, the bare
+    `csh)` arm always wrote ~/.cshrc no matter what, which happens to be
+    right when ~/.tcshrc does not exist yet -- so this shape alone would not
+    have caught the bug; it is here for completeness alongside the other
+    three shapes and to guard the correct branch this fix takes when
+    ~/.tcshrc is genuinely absent.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    cshrc = home / ".cshrc"
+    cshrc.write_text("alias ll 'ls -l'\nsetenv EDITOR vim\n", encoding="utf-8")
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/csh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert not (home / ".tcshrc").exists(), "must not create ~/.tcshrc -- that would shadow the existing ~/.cshrc"
+    cshrc_text = cshrc.read_text(encoding="utf-8")
+    assert "alias ll 'ls -l'" in cshrc_text, "the user's pre-existing ~/.cshrc content must survive"
+    assert "setenv EDITOR vim" in cshrc_text
+    assert "setenv PATH" in cshrc_text
+    assert "export PATH" not in cshrc_text
+
+
+@posix_only
+def test_sh_csh_shell_appends_to_existing_tcshrc_when_only_tcshrc_exists(release_server, tmp_path):
+    """tan-cli#490 round 9. Shape 3 of 4: only ~/.tcshrc exists. tcsh(1) reads
+    ~/.tcshrc FIRST when it exists, so the PATH line has to land there, not in
+    a freshly-created ~/.cshrc a real tcsh binary invoked as `csh` would never
+    read on this host.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    tcshrc = home / ".tcshrc"
+    tcshrc.write_text("alias ll 'ls -l'\nsetenv EDITOR vim\n", encoding="utf-8")
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/csh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert not (home / ".cshrc").exists(), "must not create ~/.cshrc when ~/.tcshrc is the file actually read"
+    tcshrc_text = tcshrc.read_text(encoding="utf-8")
+    assert "alias ll 'ls -l'" in tcshrc_text, "the user's pre-existing ~/.tcshrc content must survive"
+    assert "setenv EDITOR vim" in tcshrc_text
+    assert "setenv PATH" in tcshrc_text
+    assert "export PATH" not in tcshrc_text
+
+
+@posix_only
+def test_sh_csh_shell_prefers_tcshrc_when_both_rc_files_exist(release_server, tmp_path):
+    """tan-cli#490 round 9. Shape 4 of 4 -- the exact scenario MEASURED
+    against real tcsh 6.24.10: both ~/.tcshrc and ~/.cshrc exist, SHELL=
+    /bin/csh. tcsh(1) reads ~/.tcshrc and STOPS -- it never reaches
+    ~/.cshrc at all when ~/.tcshrc is present -- so the PATH line must land
+    in ~/.tcshrc; writing it to ~/.cshrc (the pre-fix behaviour) is exactly
+    what `tcsh -c 'echo $PATH' | grep -c binF` measured as 0 despite the
+    installer's own success message.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    tcshrc = home / ".tcshrc"
+    tcshrc.write_text("setenv EDITOR vim\n", encoding="utf-8")
+    cshrc = home / ".cshrc"
+    cshrc.write_text("alias ll 'ls -l'\n", encoding="utf-8")
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/csh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    tcshrc_text = tcshrc.read_text(encoding="utf-8")
+    assert "setenv EDITOR vim" in tcshrc_text, "the user's pre-existing ~/.tcshrc content must survive"
+    assert "setenv PATH" in tcshrc_text
+    assert "export PATH" not in tcshrc_text
+    # ~/.cshrc must be untouched -- tcsh with a ~/.tcshrc present never reads it.
+    assert cshrc.read_text(encoding="utf-8") == "alias ll 'ls -l'\n"
+
+
+@posix_only
+def test_sh_fish_rerun_is_idempotent(release_server, tmp_path):
+    """The idempotency guard (`grep -qF "$INSTALL_DIR" "$rc"`) must still
+    recognise fish's own line format on a re-run, the same way it does for
+    the POSIX `export` line -- otherwise every re-run duplicates the entry.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    dest = tmp_path / "bin"
+    extra_env = {"SHELL": "/usr/bin/fish"}
+
+    first = _install_sh_modify_path(release_server, dest, home, "--version", "v0.4.1", extra_env=extra_env)
+    assert first.returncode == 0, f"{first.stdout}\n{first.stderr}"
+    rc = home / ".config" / "fish" / "config.fish"
+    before = rc.read_text(encoding="utf-8")
+
+    second = _install_sh_modify_path(release_server, dest, home, "--version", "v0.4.1", extra_env=extra_env)
+    assert second.returncode == 0, f"{second.stdout}\n{second.stderr}"
+    assert rc.read_text(encoding="utf-8") == before
+    assert "already referenced in" in (second.stdout + second.stderr)
