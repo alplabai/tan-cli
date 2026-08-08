@@ -409,7 +409,7 @@ def _run_kconfig(
             json_mode=json_mode,
         )
         return
-    sdk_info = SdkInfo(sdk.path, sdk.tier)
+    sdk_info = SdkInfo.from_resolution(sdk.path, sdk)
 
     try:
         resolved_core = _resolve_core(core, board_path)

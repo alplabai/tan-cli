@@ -147,13 +147,25 @@ def test_every_command_discloses_a_foreign_global_default(name, argv, two_projec
 
 
 def test_the_support_bundle_file_itself_records_it(two_projects):
-    """The envelope alone is not enough for this one. `support-bundle`'s whole
-    purpose is the FILE, and that file is what gets attached to a bug report
-    -- so the fact that explains "my build used the wrong SDK" has to survive
-    into the run that produces it.
+    """The envelope is not enough for this one, and an earlier revision of this
+    test only checked the envelope -- which was false assurance over a real
+    miss (caught in review of #504).
 
-    Measured on v0.5.1 before the fix: the string
-    `global-default-foreign-project` appeared nowhere in the bundle at all.
+    `support-bundle`'s whole purpose is the FILE. That file is what a user
+    attaches to a bug report, so the fact explaining "my build used the wrong
+    SDK" has to survive INTO it. The previous revision resolved
+    `bundle_path`, asserted `is_file()`, and then asserted on `codes(env)` --
+    the envelope, which the parametrized case above already covers -- so
+    `bundle_path` was loaded and never opened. It would have passed with the
+    payload change absent, which is exactly what happened.
+
+    Measured on v0.5.1 and on the first revision of this PR: the string
+    `global-default-foreign-project` appeared NOWHERE in the bundle.
+
+    Reads the file. The bundle redacts the home directory (see
+    support_bundle_cmd's REDACTION POLICY), which is why this asserts on the
+    CODE -- redaction never touches it -- rather than on the project path,
+    which may legitimately come back as `<home>/...`.
     """
     sub_a, _proj_b, _new_sdk_b, env_extra = two_projects
 
@@ -162,7 +174,13 @@ def test_the_support_bundle_file_itself_records_it(two_projects):
     )
     bundle_path = Path(env["data"]["outputPath"])
     assert bundle_path.is_file(), "support-bundle reported a path it did not write"
-    # Assert on the CODE, not the project path: the bundle redacts the home
-    # directory (support_bundle_cmd's REDACTION POLICY), so a legitimate path
-    # can come back as `<home>/...` while the code never changes.
-    assert "sdk.global-default-foreign-project" in codes(env)
+
+    written = json.loads(bundle_path.read_text(encoding="utf-8"))
+    codes_in_file = [entry["code"] for entry in written.get("sdkResolution", [])]
+    assert "sdk.global-default-foreign-project" in codes_in_file, (
+        "DEFECT (tan-cli#478): the bundle FILE does not record which project's "
+        f"SDK answered -- sdkResolution={written.get('sdkResolution')!r}"
+    )
+    # And the raw-string form of #478's own repro, so a future refactor that
+    # renames the key without dropping the fact still has to keep it findable.
+    assert "global-default-foreign-project" in bundle_path.read_text(encoding="utf-8")

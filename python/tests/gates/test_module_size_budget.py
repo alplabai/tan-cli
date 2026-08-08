@@ -344,7 +344,11 @@ _MODULE_BUDGET: dict[str, int] = {
     # 834 -> 842: tan-cli#478, same reason as `validate_cmd.py` above --
     # the bundle is the one artefact that never carried the foreign-default
     # warning, and its embedded doctor set could not have supplied it.
-    "tan/commands/support_bundle_cmd.py": 842,
+    # 842 -> 859, tan-cli#478 review round: the `sdkResolution` block now
+    # goes into the bundle PAYLOAD, before `_write_bundle` -- the earlier
+    # revision computed it after the write, so the file a user attaches
+    # still answered False to the issue's own repro.
+    "tan/commands/support_bundle_cmd.py": 859,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring

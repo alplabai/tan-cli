@@ -694,19 +694,12 @@ def diff(
 
     root, board_path = resolve_project_paths(project, board_yaml)
     sdk = resolve_sdk(sdk_root, root)
-    sdk_info = SdkInfo(sdk.path, sdk.tier) if sdk is not None else None
-    # tan-cli#478: `diff` normalises THROUGH the resolved SDK, so a
-    # `globalDefault` written for another project means another project's
-    # normalisation decided what 'no effective-config differences' means
-    # here. `resolve_sdk` returns a bare `None` when nothing resolved, and
-    # then there is no pointer to have been foreign -- hence the guard.
-    sdk_context_issues: list[Issue] = (
-        sdk_resolution_issues(
-            sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for
-        )
-        if sdk is not None
-        else []
-    )
+    sdk_info = SdkInfo.from_resolution(sdk.path, sdk) if sdk is not None else None
+    # tan-cli#478: no hand-call here. `SdkInfo.from_resolution` above carries
+    # the pair, and `Envelope.__init__` appends it for EVERY command -- which
+    # is what stops the 33rd from forgetting. Removing this call is the proof
+    # the seam works: `diff` still discloses without it.
+    sdk_context_issues: list[Issue] = []
     board_file = Path(board_path)
 
     if not board_file.exists():

@@ -688,6 +688,23 @@ def _run(
         },
         "doctor": doctor_report,
         "notes": notes,
+        # tan-cli#478's headline requirement, and the item review called worth
+        # fixing FIRST: the FILE has to carry it, not just the stdout envelope.
+        # An earlier revision computed these AFTER `_write_bundle` below, so
+        # the bundle a user attaches to a bug report -- the whole point of the
+        # command -- still answered False to the issue's own repro:
+        #   'global-default-foreign-project' in open(BUNDLE).read()
+        # Its own `doctor` section could not have supplied it either: that set
+        # keeps host checks only (tan-cli#441), 8 where a standalone doctor
+        # emits ~17.
+        "sdkResolution": [
+            {"code": issue.code, "severity": issue.severity, "message": issue.message}
+            for issue in sdk_resolution_issues(
+                context.broken_project_pin,
+                context.sdk_tier,
+                context.foreign_global_default_for,
+            )
+        ],
     }
 
     try:
