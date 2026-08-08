@@ -574,28 +574,54 @@ def _empty_data(generated_at: str, target: str, server: str) -> dict[str, Any]:
 
 
 def _internal_failure(
-    generated_at: str, message: str, target: str, server: str, sdk: SdkInfo | None
+    generated_at: str,
+    message: str,
+    target: str,
+    server: str,
+    sdk: SdkInfo | None,
+    *,
+    broken_project_pin: str | None = None,
+    sdk_tier: str = "none",
+    foreign_global_default_for: str | None = None,
 ) -> _Outcome:
+    # tan-cli#478 MAJOR 1: this early-return path used to drop the
+    # SDK-resolution pair entirely -- exactly the customer who most needs it,
+    # since it fires on a machine where something has already gone wrong.
+    # `sdk_resolution_issues` is `[]` when neither fires, so callers that
+    # have not resolved a project context yet (the outer exception guard)
+    # can pass the defaults and get the prior behaviour unchanged.
+    issues = sdk_resolution_issues(broken_project_pin, sdk_tier, foreign_global_default_for)
+    issues.append(Issue("support-bundle.internal-failure", "error", message))
     return _Outcome(
         exit_code=ExitCode.INTERNAL_FAILURE,
         data=_empty_data(generated_at, target, server),
         project=Project(root=None, board_yaml=None),
         sdk=sdk,
-        issues=[Issue("support-bundle.internal-failure", "error", message)],
+        issues=issues,
         text=["support-bundle: internal failure", message],
     )
 
 
 def _server_incompatible(
-    generated_at: str, target: str, server: str, sdk: SdkInfo | None
+    generated_at: str,
+    target: str,
+    server: str,
+    sdk: SdkInfo | None,
+    *,
+    broken_project_pin: str | None = None,
+    sdk_tier: str = "none",
+    foreign_global_default_for: str | None = None,
 ) -> _Outcome:
+    # tan-cli#478 MAJOR 1: same fix as `_internal_failure` above.
     message = f"Server '{server}' is not supported for target '{target}'."
+    issues = sdk_resolution_issues(broken_project_pin, sdk_tier, foreign_global_default_for)
+    issues.append(Issue("support-bundle.server-compatibility", "error", message))
     return _Outcome(
         exit_code=ExitCode.DOCTOR_FAILURE,
         data=_empty_data(generated_at, target, server),
         project=Project(root=None, board_yaml=None),
         sdk=sdk,
-        issues=[Issue("support-bundle.server-compatibility", "error", message)],
+        issues=issues,
         text=[f"support-bundle: server '{server}' is not supported for target '{target}'."],
     )
 
@@ -624,16 +650,40 @@ def _run(
         server = parse_server_kind(server_arg)
     except DebugConfigError as err:
         return _internal_failure(
-            generated_at, str(err), NATIVE_HOST, SERVER_NONE, context.sdk
+            generated_at,
+            str(err),
+            NATIVE_HOST,
+            SERVER_NONE,
+            context.sdk,
+            broken_project_pin=context.broken_project_pin,
+            sdk_tier=context.sdk_tier,
+            foreign_global_default_for=context.foreign_global_default_for,
         )
 
     if not is_server_supported_for_target(target, server):
-        return _server_incompatible(generated_at, target, server, context.sdk)
+        return _server_incompatible(
+            generated_at,
+            target,
+            server,
+            context.sdk,
+            broken_project_pin=context.broken_project_pin,
+            sdk_tier=context.sdk_tier,
+            foreign_global_default_for=context.foreign_global_default_for,
+        )
 
     try:
         decisions = _create_bundle_trace_decisions(context, target_arg, path_arg)
     except TraceTargetError as err:
-        return _internal_failure(generated_at, str(err), target, server, context.sdk)
+        return _internal_failure(
+            generated_at,
+            str(err),
+            target,
+            server,
+            context.sdk,
+            broken_project_pin=context.broken_project_pin,
+            sdk_tier=context.sdk_tier,
+            foreign_global_default_for=context.foreign_global_default_for,
+        )
 
     # Port of `doctor.rs::project_selected`: `--project`/`--board-yaml` are the
     # whole selection surface, so with neither given the resolved board.yaml
@@ -710,7 +760,16 @@ def _run(
     try:
         output_path = _write_bundle(destination_arg, context.workspace_root, generated_at, payload)
     except OSError as err:
-        return _internal_failure(generated_at, str(err), target, server, context.sdk)
+        return _internal_failure(
+            generated_at,
+            str(err),
+            target,
+            server,
+            context.sdk,
+            broken_project_pin=context.broken_project_pin,
+            sdk_tier=context.sdk_tier,
+            foreign_global_default_for=context.foreign_global_default_for,
+        )
 
     # tan-cli#357: the doctor summary IS this command's verdict, exactly as in
     # the oracle (`if doctor.summary.fail > 0 { ExitCode::DoctorFailure }`).

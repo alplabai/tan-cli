@@ -244,6 +244,50 @@ def test_the_sdk_advisory_never_leaks_into_validates_board_documents(two_project
         )
 
 
+def test_support_bundles_early_return_paths_still_disclose_it(two_projects):
+    """PR #504 review MAJOR 1: `support-bundle`'s early-return failure paths
+    (`_internal_failure`/`_server_incompatible`) built their `_Outcome` from a
+    bare `issues=[Issue(...)]` list, dropping the SDK-resolution pair on
+    exactly the runs a customer hits when something has already gone wrong --
+    a `--target-kind`/`--server` parse refusal or an unsupported target/server
+    pairing. Drives both shapes from inside the same foreign-global-default
+    state the parametrized case above proves for the success path.
+    """
+    sub_a, proj_b, _new_sdk_b, env_extra = two_projects
+
+    parse_failure = _envelope(
+        run_tan_with_env(
+            "support-bundle", "--target-kind", "bogus", "--format", "json",
+            cwd=sub_a, env_extra=env_extra,
+        )
+    )
+    assert parse_failure["exitCode"] == 5
+    assert "support-bundle.internal-failure" in codes(parse_failure)
+    assert "sdk.global-default-foreign-project" in codes(parse_failure), (
+        "DEFECT: the --target-kind parse-refusal path dropped the SDK-"
+        "resolution pair"
+    )
+
+    server_incompatible = _envelope(
+        run_tan_with_env(
+            "support-bundle", "--target-kind", "yocto-userspace", "--server", "jlink",
+            "--format", "json", cwd=sub_a, env_extra=env_extra,
+        )
+    )
+    assert server_incompatible["exitCode"] == 4
+    assert "support-bundle.server-compatibility" in codes(server_incompatible)
+    assert "sdk.global-default-foreign-project" in codes(server_incompatible), (
+        "DEFECT: the server-incompatibility refusal path dropped the SDK-"
+        "resolution pair"
+    )
+    for env in (parse_failure, server_incompatible):
+        message = next(
+            i["message"] for i in env["issues"]
+            if i["code"] == "sdk.global-default-foreign-project"
+        )
+        assert str(proj_b).replace("\\", "/") in message
+
+
 def test_a_missing_board_yaml_keeps_its_own_verdict_wording(two_projects):
     """tan-cli#350's wording, which the first revision of this PR regressed.
 

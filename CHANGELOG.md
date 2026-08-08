@@ -25,10 +25,11 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
-- **`sdk.global-default-foreign-project` now reaches every command that
-  resolves an SDK, in DEFAULT text output as well as `--format json`, not
-  only the five `doctor`/`generate`/`build`/`presets`/`examples` that
-  happened to be wired for it (#464).** A customer building against a
+- **`sdk.global-default-foreign-project` now reaches DEFAULT text output
+  too, not only `--format json`, for `inspect`/`trace`/`validate`/`diff`/
+  `support-bundle` and the three west-forwarding verbs `migrate`/`lock`/
+  `quality` -- on top of the five (`doctor`/`generate`/`build`/`presets`/
+  `examples`) already wired for it since #464.** A customer building against a
   different SDK than they think got no warning from `inspect`, `trace`,
   `validate`, `diff`, `support-bundle`, or `migrate`/`lock`/`quality`
   (`west_forward_cmd.py`) -- `ok: true`, `issues: []`, while `validate`
@@ -51,7 +52,13 @@ All notable changes to `tan` are documented here. Format follows
   JSON/SARIF/diagnostic-v1 documents keep the advisory OUT of
   `data.issueCount` and out of the board-anchored formats, so a CI job
   uploading SARIF does not annotate line 1 of a customer's board.yaml with a
-  fact about the host. (#478)
+  fact about the host. `support-bundle`'s three early-return failure paths
+  (a `--target-kind`/`--server` parse refusal, an unsupported target/server
+  pairing, and a bundle-write `OSError`) now carry the same pair too --
+  previously they built their `_Outcome` from a bare `issues=[Issue(...)]`
+  list, so the one command whose whole purpose is explaining a broken
+  machine stayed silent on exactly the runs where something had already
+  gone wrong. (#478)
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
   gaps found reviewing the fix.** All under (#489):

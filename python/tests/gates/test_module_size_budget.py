@@ -1022,7 +1022,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # `foreign_global_default_for` nor `broken_project_pin` (measured: a
     # first revision that read `outcome.sdk` printed nothing, the exact
     # silent-drop shape this whole issue is about).
-    "tan/commands/support_bundle_cmd.py": 876,
+    # 876 -> 935, PR #504 review MAJOR 1: the three early-return failure
+    # paths (`_internal_failure` x2, `_server_incompatible`) built their
+    # `_Outcome` from a bare `issues=[Issue(...)]` list, dropping the
+    # SDK-resolution pair on exactly the paths a customer hits when
+    # something has already gone wrong -- a parse refusal, an unsupported
+    # target/server pairing, or a bundle-write `OSError`. Both helpers now
+    # take the same three `broken_project_pin`/`sdk_tier`/
+    # `foreign_global_default_for` keyword-only fields `_run`'s success path
+    # already threads, defaulted so the outer exception guard (which never
+    # resolved a project context) keeps its prior empty-list behaviour.
+    "tan/commands/support_bundle_cmd.py": 935,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring
