@@ -365,6 +365,15 @@
       "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the wrong verdict for a precondition the command can name and the caller can fix, the same distinction tan-cli#262 settled for `tan validate`. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
     },
     {
+      "code": "debug-config.project-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config` refusing a `--project` that names a directory which does not exist -- exits `ValidationFailure` (2).",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#476: the command used to CREATE the directory and write a `launch.json` into it at exit 0 with `issues: []`, because the writer calls `mkdir(parents=True)`. A deliberate divergence from the Rust oracle, which does the same thing (measured); no parity CASE pins it, since all four frozen `debug-config` argvs run in an existing work_dir."
+    },
+    {
       "code": "debug-config.core-unknown",
       "status": "reserved",
       "severity": "error",
