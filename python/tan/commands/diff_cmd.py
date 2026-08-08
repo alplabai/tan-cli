@@ -160,6 +160,7 @@ from tan.commands.validate_cmd import (
     OUTCOME_FAILED,
     VALIDATOR_SCRIPT,
     VALIDATOR_TIMEOUT_S,
+    _Finding,
     _synthesised_finding,
     analyze_validator_output,
 )
@@ -561,7 +562,9 @@ def _emit_failure(
     raise typer.Exit(int(exit_code))
 
 
-def _spawn_validator(python_binary: str, script: str, board_path: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+def _spawn_validator(
+    python_binary: str, script: str, board_path: str
+) -> tuple[str, tuple[Any, ...]]:
     """`(outcome, findings)` for one run of the SDK's own validator, or a
     `ParseFailure("spawn-failed", ...)` when the subprocess could not even be
     started -- `validate_cmd`'s own split (tan-cli#262/#455 review round),
@@ -583,7 +586,7 @@ def _spawn_validator(python_binary: str, script: str, board_path: str) -> tuple[
         # The child STARTED, so this is a verdict that never arrived, not a
         # launch failure -- mirrors validate_cmd's own tan-cli#262 shape.
         return OUTCOME_FAILED, (
-            (
+            _Finding(
                 "error",
                 f"the SDK validator did not finish within {VALIDATOR_TIMEOUT_S}s "
                 f"and was killed: {command_line}",
@@ -636,7 +639,14 @@ def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path:
     outcome, findings = _spawn_validator(python_binary, script, board_path)
     if outcome == OUTCOME_CLEAN:
         return
-    detail = "; ".join(message for _severity, message in findings)
+    # `finding.message`, not a `(severity, message)` unpack: tan-cli#498
+    # defect 2 turned `validate_cmd`'s findings into a `_Finding` record so a
+    # rich `error[ALP-Bxxx]` block's code, hint and source range survive the
+    # walk. This module reuses that parser wholesale, so it follows the shape.
+    # The bare `.message` is deliberate here -- `diff` folds every finding into
+    # ONE sentence and points the reader at `tan validate` for the full
+    # diagnostics, which is where the code and hint are rendered.
+    detail = "; ".join(finding.message for finding in findings)
     raise ParseFailure(
         outcome,
         "board.yaml is not valid: the SDK's own validator rejects it -- run "

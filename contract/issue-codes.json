@@ -1276,12 +1276,20 @@
       "note": "The `validate.` prefix is applied by the local `fail()` closure. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "validate.board-yaml-unreadable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "note": "The `validate.` prefix is applied by the local `fail()` closure. Added by tan-cli#498 defect 3, splitting the `--offline` read failure (a directory named board.yaml, a cp1252/latin-1 file, a permission error) off `validate.internal-failure` and off exit 5. Exit 5 said `tan` had crashed, for an error the inline comment on the same line already called the user's to fix, and disagreed with the SPAWN path, which reports the identical file as exit 2 `validate.failed` (measured, both directions). Now exit 2 (VALIDATION_FAILURE) with `data.outcome: \"failed\"`, which is what this command's own outcome->exit mapping says that outcome is worth; text mode prints its own verdict line (`validate: board.yaml could not be read`) rather than \"validation failure\", since nothing was validated -- the same treatment tan-cli#350 gave `validate.board-yaml-missing`, its sibling in the file-level-problem family. The frozen Rust oracle keeps exit 5 here; this is a deliberate divergence in the family of tan-cli#262 and commit 49a5fde. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "validate.internal-failure",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/validate_cmd.py",
-      "note": "The `validate.` prefix is applied by the local `fail()` closure; two call sites share it -- an unreadable/non-UTF-8 board.yaml, and `validate_board_text` raising unexpectedly. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `validate.` prefix is applied by the local `fail()` closure. ONE call site since tan-cli#498 defect 3 moved the unreadable-board.yaml case out to `validate.board-yaml-unreadable` at exit 2: `validate_board_text` raising something that is not a `BoardShapeError`, i.e. a genuine tan bug, which is what exit 5 means. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "validate.schema-violation",

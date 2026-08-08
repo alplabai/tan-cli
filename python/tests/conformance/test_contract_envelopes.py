@@ -136,6 +136,25 @@ DELIBERATE_DIVERGENCE = {
         "tan-cli#138: restores the v0.3.1 preLaunchTask default"
     ),
     "debug-config-preview-native-host": "tan-cli#138: restores the v0.3.1 preLaunchTask default",
+    "validate-offline-clean": (
+        "tan-cli#498 defect 1: the two v2 structural checks in `validate_board_text` were "
+        "gated on `schemaVersion >= 2`, a condition no conforming alp-sdk project can meet "
+        "(alp-sdk pins `LATEST = 1` with an empty migration registry, and 0 of the 100 "
+        "board.yaml files under `alp-sdk/examples` declare the key), so they never ran. "
+        "They are unconditional now, because `metadata/schemas/board.schema.json` conditions "
+        "NOTHING on `schemaVersion` -- its root carries `required: [som, cores]` and "
+        "`not: {required: [os]}` outright. This case's INPUT board.yaml is `som:` + `preset:` "
+        "with no `cores:`, which alp-sdk's own `scripts/validate_board_yaml.py` refuses with "
+        "`error[ALP-B001]: required key 'cores' is missing` at exit 1 (measured, alp-sdk "
+        "99e47476) -- so the golden records tan calling a board clean that the SDK rejects, "
+        "and the port now answers exit 2 `validate.schema-violation`. Declared rather than "
+        "re-recorded for this map's own reason: the file is the CROSS-LANGUAGE contract the "
+        "frozen Rust binary is held to by `crates/tan-cli/tests/contract.rs`, and "
+        "`crates/tan-core/src/validate.rs:282` carries the identical dead gate. The clean "
+        "envelope's SHAPE is covered instead by "
+        "`test_validate_command.py::test_text_and_json_formats_are_unchanged`, on a board.yaml "
+        "that is genuinely clean."
+    ),
     "debug-config-preview-yocto-userspace": (
         "tan-cli#321: adds the debug-config.gdbserver-address-unresolved info issue "
         "(this target's default gdbserver <host>:<port> is unresolved) that the frozen "
