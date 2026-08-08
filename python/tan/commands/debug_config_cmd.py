@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import os
 import stat
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,6 +55,7 @@ from typing import Any
 import typer
 
 from tan.commands.build_output import read_sdk_som_and_soc, resolve_project_context
+from tan.core.atomic_write import atomic_write_text
 from tan.core.debug_launch import (
     BAREMETAL_MCU,
     GDBSERVER,
@@ -941,127 +941,6 @@ def _no_debuggable_target_class_failure(
     )
 
 
-def _atomic_write_launch_json(path: str, content: str) -> None:
-    """Write `content` to `path` atomically and durably. Raises `OSError` on
-    any failure; the caller decides how to report it (`_write_failure`).
-
-    tan-cli#489 review round, findings 4 + 5 -- two gaps the original
-    temp-sibling-plus-`os.replace` fix (matching
-    `bootstrap_cmd.reconcile_west_manifest_path`'s own pattern) still had:
-
-    * **Symlink-safe.** `.vscode/launch.json` can be a symlink -- dotfile-
-      managed, or a canonical file shared across worktrees. `os.path.realpath`
-      resolves the REAL target FIRST, both for where the temp sibling is
-      created and for what `os.replace` targets: writing the temp beside the
-      UN-resolved `path` and replacing THAT would put a regular file where
-      the symlink was (destroying the link) while the real file silently
-      stops being updated -- measured: `os.replace` on a symlink replaces the
-      link itself, it does not write through it the way `open(path, "w")`
-      always did. Resolving first also keeps the temp on the SAME filesystem
-      as the real target when the two differ (`.vscode/` and the symlink's
-      destination can be different mounts), which `os.replace` requires for
-      its atomicity guarantee and fails outright (`EXDEV`) without.
-    * **Durable, not just atomic-in-naming.** `os.replace` is atomic with
-      respect to the RENAME only -- it says nothing about whether the
-      renamed-TO content has actually reached stable storage. A bare
-      `write`+`close` leaves the data in the page cache; power loss after
-      `os.replace` returns but before the temp's data blocks are flushed can
-      journal the rename without the content on a filesystem that does not
-      order the two together (XFS, btrfs, APFS, NTFS via `MoveFileExW`, and
-      network filesystems generally) -- ext4's `auto_da_alloc` heuristic
-      happens to cover the common Linux case, but nothing here may depend on
-      a heuristic that is filesystem-specific. `os.fsync` on the temp file's
-      OWN descriptor before the rename covers the content; a directory
-      `fsync` after the rename (POSIX only -- Windows has no directory
-      handle to fsync, and `ReplaceFile`/`MoveFileExW` already journal the
-      rename itself) covers the rename entry surviving a crash too.
-
-    **Mode, not ACL, is carried across the inode swap** -- `stat.S_IMODE` +
-    `os.chmod` below copies exactly the nine permission bits and nothing
-    more: no explicit ACL entry survives, and on Windows
-    `os.replace`/`MoveFileExW` itself drops a non-inherited DACL regardless
-    of anything this function does. `os.replace` swaps the DIRECTORY ENTRY,
-    not the file's own permission bits, so without this a `664`-mode
-    `launch.json` a shared `.vscode/` convention set deliberately would come
-    back at whatever the temp happened to be created with -- read BEFORE the
-    write (`existing_mode`, `None` for a first-ever write) and applied to
-    the REAL path AFTER a successful `os.replace`, never to the temp file
-    itself: `shutil.copymode`-ing the temp to match a READ-ONLY existing
-    file, before attempting the replace, would leave a temp this function's
-    own `except`-cleanup then also cannot `unlink` (Windows refuses to
-    delete a read-only file) -- a permanent leak on exactly the failure path
-    meant to prevent one. Best-effort throughout: a mode this process cannot
-    read or `chmod` must not fail an otherwise-successful write.
-
-    **Creating launch.json for the first time respects the process umask**,
-    rather than keeping `mkstemp`'s own hardcoded `0600` (deliberately
-    narrow -- POSIX designed `mkstemp` for secrets, which this temp file is
-    not) forever: every later run's `existing_mode` read would otherwise
-    just copy that `0600` forward, silently narrowing a file a shared
-    checkout or a devcontainer running as a different uid needs to read.
-    """
-    resolved = os.path.realpath(path)
-    directory = os.path.dirname(resolved)
-    existing_mode: int | None = None
-    try:
-        existing_mode = stat.S_IMODE(os.stat(resolved).st_mode)
-    except OSError:
-        pass
-    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tan-tmp")
-    try:
-        try:
-            handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
-        except OSError:
-            # `fdopen` failing before a file object takes ownership of `fd`
-            # would otherwise leak the raw descriptor `mkstemp` opened.
-            os.close(fd)
-            raise
-        with handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, resolved)
-    except OSError:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-    if existing_mode is not None:
-        try:
-            os.chmod(resolved, existing_mode)
-        except OSError:
-            pass
-    else:
-        try:
-            # No race-free way to READ the process umask -- the standard
-            # idiom sets a harmless value and reads back the PREVIOUS one,
-            # then restores it immediately. `os.umask` is PROCESS-global, so
-            # this brief set-then-restore is safe only because `tan` itself
-            # is single-threaded here; a second thread calling `os.umask` (or
-            # doing anything umask-sensitive, like creating its own file)
-            # inside this same window would observe -- or set -- the wrong
-            # value.
-            current_umask = os.umask(0o022)
-            os.umask(current_umask)
-            os.chmod(resolved, 0o666 & ~current_umask)
-        except OSError:
-            pass
-    if os.name != "nt":
-        try:
-            dir_fd = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            # Best-effort insurance for the RENAME entry surviving a crash,
-            # on top of the file's own fsync above (which already protects
-            # the content): some filesystems/mounts (overlayfs, certain
-            # FUSE/NFS setups) refuse a bare directory fsync outright.
-            pass
-
-
 def _write_failure(
     generated_at: str, target: str, server: str, launch_json_path: str, message: str
 ) -> _Outcome:
@@ -1473,11 +1352,13 @@ def _run(
     # SIGKILL, power loss, the VS Code extension killing the child) destroys
     # every hand-written configuration with no way for tan to repair it: the
     # next run reads the wreckage, hits the malformed-JSON guard above, and
-    # refuses at exit 5 forever. `_atomic_write_launch_json`'s own docstring
-    # covers the rest: symlink-safe, fsync'd before the rename, and mode-
-    # preserving.
+    # refuses at exit 5 forever. `atomic_write_text`'s own docstring
+    # (`tan/core/atomic_write.py`) covers the rest: symlink-safe, fsync'd
+    # before the rename, and mode-preserving -- shared with
+    # `bootstrap_cmd.reconcile_west_manifest_path` (tan-cli#516) rather than
+    # a second hand-synchronised copy living beside this call site.
     try:
-        _atomic_write_launch_json(launch_json_path, plan.content)
+        atomic_write_text(launch_json_path, plan.content)
     except OSError as err:
         return _write_failure(
             generated_at, target, server, launch_json_path, str(err)

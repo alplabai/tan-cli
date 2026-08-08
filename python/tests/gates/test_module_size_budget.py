@@ -168,7 +168,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # f-string was the exact shape that printed a stringified `None` and then
     # advised dropping a `--workspace` the invocation never carried, and
     # nothing stopped that gate from being loosened again.
-    "tan/commands/bootstrap_cmd.py": 2917,
+    # 2919, not 2917, as of tan-cli#516: `reconcile_west_manifest_path`'s
+    # write moved from a bare `Path.write_text` + `os.replace` (no `fsync` at
+    # all) to the new shared `atomic_write_text` (`tan/core/atomic_write.py`),
+    # plus a comment explaining the durability gap the old shape had. Net
+    # growth is small -- the call site itself SHRANK (the caller's own
+    # temp-cleanup `except` is gone, `atomic_write_text` does its own) -- the
+    # import line and the expanded rationale comment account for the +2.
+    "tan/commands/bootstrap_cmd.py": 2919,
     "tan/core/bootstrap.py": 1890,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
@@ -536,7 +543,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # entry) plus a single-threaded-CLI caveat on the `os.umask` set-restore
     # -- the list-merge algorithm change that dominates this round's diff
     # lives in `debug_launch.py` below, not here.
-    "tan/commands/debug_config_cmd.py": 1661,
+    # 1661 -> 1542, tan-cli#516 review round: `_atomic_write_launch_json`
+    # (the 119-line function this file grew across the three rounds recorded
+    # immediately above) is GONE, not grown again -- the fsync/symlink/mode
+    # shape it carried moved into the new shared `tan/core/atomic_write.py:
+    # atomic_write_text`, which `bootstrap_cmd.reconcile_west_manifest_path`
+    # now also calls, so the write plan's own docstring comment ("`_atomic_
+    # write_launch_json`'s own docstring covers the rest") stopped being true
+    # the moment #516 gave `reconcile_west_manifest_path` its own unsynchronised
+    # copy of the same durability gap this module had already closed once.
+    # The call site now reads `atomic_write_text(launch_json_path, plan.content)`
+    # directly; nothing here duplicates the durability sequence any more.
+    "tan/commands/debug_config_cmd.py": 1542,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -962,6 +980,30 @@ _MIRRORED = ("tan/planner/",)
 # the former. Re-walked with the gate's own `ast` logic (span > 50 over all
 # of `tan/`, planner included) against this exact tree.
 #
+# 212, not 211, as of tan-cli#516 (first pass): the new shared `tan/core/
+# atomic_write.py:atomic_write_text` (54 lines, docstring included) was a
+# genuinely NEW function over the cap -- `reconcile_west_manifest_path`'s own
+# body did not cross it either before or after this change, so that was a
+# pure +1, not a replacement.
+#
+# 211, not 212, as of the tan-cli#516 REVIEW round: `debug_config_cmd.py:
+# _atomic_write_launch_json` -- the 81-line function that was ALREADY over
+# the cap before this issue, one of the 199 baseline never enumerated here --
+# is gone outright. `_write` now calls the shared `atomic_write_text`
+# directly instead of keeping a second, hand-synchronised copy of the same
+# durability sequence beside it (the drift #516 itself was filed to close);
+# `atomic_write_text` grew to 95 lines picking up that copy's mode-
+# preservation and its broadened exception handling, but it was already
+# counted once in the 212 above and staying one function does not add a
+# second count. Net: +1 (atomic_write_text, counted in the prior step) - 1
+# (`_atomic_write_launch_json`, deleted) against the pre-#516 211 baseline
+# nets back to 211, not a coincidence -- re-measured with the gate's own
+# `ast` walk against this exact tree, not summed on faith.
+# `_FUNCTION_WORST_BUDGET` is untouched: re-measuring the CURRENT worst
+# (`bootstrap_cmd.py:_run`) with this gate's own `ast` walk finds 701 lines,
+# not 707 -- unrelated to this change (that function is untouched here) and
+# still comfortably under the recorded ceiling, so the ceiling is left as
+# recorded rather than tightened on faith.
 # 212, not 211, as of tan-cli#496's remaining-defects pass:
 # `new_som_cmd.py:_rollback_write_failure` is a genuinely NEW function (61
 # lines) extracted from the write-failure `except OSError:` block so the
@@ -973,6 +1015,7 @@ _MIRRORED = ("tan/planner/",)
 # `_FUNCTION_WORST_BUDGET` is untouched -- `_rollback_write_failure` is 61
 # lines and `new_som` (grown to 506) is still well under `bootstrap_cmd.
 # _run`'s 701, itself under the recorded 707.
+
 # 213, not 211, as of the tan-cli#510 REVIEW round: two functions crossed 50
 # lines, both docstring/parameter growth, not new branching:
 # `build/execute.py:_resolve_tool` (47 -> 71) gained an `env` parameter
@@ -989,6 +1032,12 @@ _MIRRORED = ("tan/planner/",)
 # 214 on the merged tree, MEASURED by AST walk -- neither side's number: #496
 # contributed one crossing (212) and tan-cli#530's resolver two (213), and the
 # union is 214, not either. Taking either side here fails the gate.
+# 213 on the merged tree, measured by AST walk: #516 added no long function, and
+# tan-cli#530 (#510's resolver) added two -- so dev's figure carries, not #516's
+# pre-merge 211.
+#
+# 214 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- #496 contributes one crossing that dev's 213 does not.
 _FUNCTION_COUNT_BUDGET = 214
 _FUNCTION_WORST_BUDGET = 707
 
