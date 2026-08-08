@@ -132,7 +132,10 @@ _MODULE_BUDGET: dict[str, int] = {
     # block for the constant this module no longer defines (only imports)
     # is gone, not merely moved, so the net measures out to exactly the
     # pre-existing count.
-    "tan/commands/doctor_cmd.py": 3289,
+    # +2, tan-cli#478: `SdkInfo.from_resolution` wrapped over the
+    # ternary. The seam is what lets `Envelope.__init__` disclose a
+    # foreign global default without this command knowing about it.
+    "tan/commands/doctor_cmd.py": 3291,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -181,7 +184,10 @@ _MODULE_BUDGET: dict[str, int] = {
     # was computed, so the dominant refusal reported neither -- `_error` now
     # takes the resolution facts and calls the shared `sdk_cmd.
     # sdk_resolution_issues` itself, so no future early return can skip them.
-    "tan/commands/flash_cmd.py": 1829,
+    # +4, tan-cli#478: `SdkInfo.from_resolution` wrapped over the
+    # ternary. The seam is what lets `Envelope.__init__` disclose a
+    # foreign global default without this command knowing about it.
+    "tan/commands/flash_cmd.py": 1833,
     "tan/planner/kconfig.py": 1639,
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a

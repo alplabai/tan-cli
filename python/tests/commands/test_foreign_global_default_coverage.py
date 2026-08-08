@@ -239,3 +239,83 @@ def test_a_missing_board_yaml_keeps_its_own_verdict_wording(two_projects):
         "tan-cli#350's wording regressed: nothing was checked, so nothing was "
         "found wrong"
     )
+
+
+#: Commands that cannot be driven bare in this fixture: they need an argument,
+#: a built project, hardware, or they mutate the very pointer under test.
+#: Everything else is enumerated from the CLI itself, so command 33 is covered
+#: the day it is registered.
+NOT_DRIVABLE_BARE = frozenset(
+    {
+        "bootstrap",     # rewrites ~/.alp/sdk-default -- the state under test
+        "init",          # writes the project pin, same reason
+        "new-som",       # would scaffold into the SDK checkout
+        "flash",         # programs hardware
+        "monitor",       # opens a serial port
+        "completion",    # emits a shell script, no envelope
+        "faultdecode",   # no project, no SDK
+        "west",          # forwards argv to a real west
+    }
+)
+
+
+def test_no_command_reports_a_foreign_global_default_without_saying_so(two_projects):
+    """The invariant, enumerated from `cli.py` rather than a hand-written list.
+
+    tan-cli#478 asks for the warning "from one place, so a new command cannot
+    forget it". A hardcoded tuple of command names cannot express that: it is
+    exactly what the 33rd command would not be added to. This walks every
+    registered subcommand instead, so a new one is covered the day it lands.
+
+    The assertion is deliberately one-directional and cheap: no envelope may
+    report `sdk.sourceTier == "globalDefault"` without the warning in
+    `issues[]`. A REFUSAL must carry it too -- knowing which checkout answered
+    matters most when the answer was no -- so no command needs a working build
+    fixture to be meaningful here.
+
+    Commands that cannot be driven bare are named in `NOT_DRIVABLE_BARE` with
+    the reason, never skipped silently.
+    """
+    import tan.cli as cli_module
+
+    sub_a, _proj_b, _new_sdk_b, env_extra = two_projects
+    registered = sorted(
+        {
+            info.name or getattr(info.callback, "__name__", "").replace("_", "-")
+            for info in cli_module.app.registered_commands
+        }
+    )
+    assert registered, "could not enumerate the CLI's registered commands"
+
+    offenders = []
+    checked = []
+    for name in registered:
+        if name in NOT_DRIVABLE_BARE:
+            continue
+        proc = run_tan_with_env(name, "--format", "json", cwd=sub_a, env_extra=env_extra)
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        if not lines:
+            continue  # no envelope on stdout (usage error) -- nothing to assert
+        try:
+            env = json.loads(lines[-1])
+        except json.JSONDecodeError:
+            continue
+        sdk = env.get("sdk")
+        if not sdk or sdk.get("sourceTier") != "globalDefault":
+            continue
+        checked.append(name)
+        if "sdk.global-default-foreign-project" not in codes(env):
+            offenders.append(f"{name} (exit {env.get('exitCode')})")
+
+    # A vacuous pass is the failure mode this whole file exists to prevent: if
+    # no command reached `globalDefault`, the loop above asserts nothing while
+    # reporting green. Measured on the fixture -- keep this floor honest rather
+    # than trusting the loop ran.
+    assert len(checked) >= 5, (
+        f"only {len(checked)} command(s) reached globalDefault: {checked}. "
+        "The invariant asserted almost nothing -- fix the fixture, not this bound."
+    )
+    assert offenders == [], (
+        "these commands resolved ANOTHER project's SDK through the machine-global "
+        "pointer and said nothing about it:\n  " + "\n  ".join(offenders)
+    )

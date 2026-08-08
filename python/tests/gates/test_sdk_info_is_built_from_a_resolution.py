@@ -48,13 +48,9 @@ PACKAGE = REPO / "python" / "tan"
 #: the seam, and this gate only looks at `SdkInfo(` by name.
 LEGACY_RAW_CONSTRUCTIONS: dict[str, int] = {
     "tan/commands/bootstrap_cmd.py": 4,
-    "tan/commands/inspect_cmd.py": 1,
     "tan/commands/run_cmd.py": 1,
     "tan/commands/generate_cmd.py": 1,
     "tan/commands/renode_cmd.py": 2,
-    "tan/commands/doctor_cmd.py": 1,
-    "tan/commands/validate_cmd.py": 1,
-    "tan/commands/flash_cmd.py": 1,
     "tan/commands/build_cmd.py": 1,
 }
 

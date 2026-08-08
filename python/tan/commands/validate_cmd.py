@@ -907,7 +907,7 @@ def validate(
         if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk):
             resolved_sdk = None
         if resolved_sdk is not None:
-            sdk_info = SdkInfo(str(resolved_sdk), sdk_tier)
+            sdk_info = SdkInfo.from_resolution(str(resolved_sdk), sdk_resolution)
         # tan-cli#478: `validate` SPAWNS out of the resolved root, so a
         # foreign `globalDefault` means another project's schemas decided
         # `clean` for this board.yaml. Reported `ok: true`, `issues: []`.

@@ -1517,7 +1517,11 @@ def _run(
     sdk_resolution = _resolve_sdk(sdk_root_arg, cwd)
     resolved_sdk = sdk_resolution.path
     tier = sdk_resolution.tier
-    sdk = SdkInfo(resolved_sdk, tier) if resolved_sdk is not None else None
+    sdk = (
+        SdkInfo.from_resolution(resolved_sdk, sdk_resolution)
+        if resolved_sdk is not None
+        else None
+    )
     if resolved_sdk is None:
         # Faithful to the Python `find_sdk_root() is None` die: `buildRoot` is
         # reported EMPTY on this path, not the value computed above (verified

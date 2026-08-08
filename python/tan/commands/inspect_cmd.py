@@ -144,7 +144,9 @@ def resolve_debug_project_context(
     resolved_sdk = sdk_resolution.path
     sdk_tier = sdk_resolution.tier
     sdk_root = _abs_posix(str(resolved_sdk)) if resolved_sdk is not None else None
-    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
+    sdk = (
+        SdkInfo.from_resolution(sdk_root, sdk_resolution) if sdk_root is not None else None
+    )
 
     python_binary = "python" if os.name == "nt" else "python3"
 
