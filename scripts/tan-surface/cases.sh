@@ -295,9 +295,31 @@ phase_workspace() {
   # Until 0.5.1 (#454) neither command exposed the argument its west extension
   # declares required, so both were unreachable under every input. Assert both
   # halves: the working invocation, and the refusal when the argument is absent.
-  step "quality --profile quick"       0 -- quality --project "$PROJ" --profile quick --sdk-root "$SDK"
+  #
+  # The two working invocations are gated on can_mutate even though NEITHER
+  # writes. What they report is a verdict on the PROJECT'S OWN content, not on
+  # tan: `tan migrate --help` documents `--check` verbatim as "Report version
+  # drift; nonzero on drift", and `quality --profile quick` grades the board
+  # against the SDK's rules. Hard-asserting exit 0 against an operator's real
+  # --project therefore scores THEIR drift or THEIR quality findings as a tan
+  # regression -- the same "reports a verdict it did not earn" shape the
+  # `model build` gate in phase_diag closes, for the same reason. Against the
+  # scaffolded sandbox project the assertion is real (it is generated from the
+  # current templates on the spot, so it cannot be drifted), so it keeps its
+  # exit 0 there and asks for the operator's explicit --allow-mutate signal
+  # before running against a real tree.
+  #
+  # The two REFUSAL halves stay ungated: they are argument validation, decided
+  # before either command looks at the project's content at all, so they say
+  # the same thing about tan whatever the board.yaml holds.
+  if can_mutate; then
+    step "quality --profile quick"     0 -- quality --project "$PROJ" --profile quick --sdk-root "$SDK"
+    step "migrate --check"             0 -- migrate --project "$PROJ" --check --sdk-root "$SDK"
+  else
+    skip "quality --profile quick, migrate --check" \
+        "real project without --allow-mutate (their own drift/findings are not a tan regression)"
+  fi
   step "quality demands --profile"     2 -- quality --project "$PROJ" --sdk-root "$SDK"
-  step "migrate --check"               0 -- migrate --project "$PROJ" --check --sdk-root "$SDK"
   step "migrate demands a mode"        2 -- migrate --project "$PROJ" --sdk-root "$SDK"
 
   # `lock` WRITES a lock file into the project -- gate it like the other
@@ -397,7 +419,15 @@ phase_build() {
     # tan renode's exit code says nothing about whether the firmware reached
     # main(); --expect is the only assertion it offers. On the pinned Renode
     # v1.16.1 an MRAM-linked AEN image cannot complete a boot (documented in the
-    # SDK's own alif_ensemble_e8.resc), and the command is slated for removal.
+    # SDK's own alif_ensemble_e8.resc).
+    #
+    # #448 is a support PAUSE, not a removal -- the maintainer reframed it on
+    # 2026-08-04 ("renode is PAUSED, not removed"; the issue title now reads
+    # "emit a support-paused warning; retain the command, modules, fixtures and
+    # CI models"). So this entry is not waiting for the command to disappear:
+    # the command and its models are retained, and this xstep stays until the
+    # boot itself is fixed. Do not delete the case on the assumption `renode`
+    # is going away.
     xstep 448 "renode reaches the app console" 1 --timeout 300 \
         -- renode --project "$PROJ" --core "$CORE" --expect "$EXPECT_MARKER" --sdk-root "$SDK"
   else

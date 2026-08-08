@@ -54,6 +54,18 @@ costs (10+ minutes and several GB of disk the first time — see below).
 `--allow-mutate`, a `--project` run touches nothing but reads and the
 in-sandbox scratch fixtures under `--work`.
 
+The same gate also covers three steps that only READ but report a verdict on
+**your project's content** rather than on `tan`: `quality --profile quick`,
+`migrate --check` (documented as *"nonzero on drift"*) and `model build`. Hard-
+asserting exit 0 on those against a real tree would score your own drift or
+quality findings as a `tan` regression, so they skip until you ask for them.
+
+**`--work` is never deleted out from under you.** Only a directory this run
+created is removed at exit. Pass an existing one and it becomes the *parent*
+of a per-run `tan-surface.XXXXXX` sandbox inside it — that subdirectory is
+what gets cleaned (`--keep` keeps it), so repeat runs against the same
+`--work` neither destroy it nor pile up SDK copies and scratch trees in it.
+
 **Presence on PATH is not proof `--tan PATH` (or a bare `tan`) IS tan.** The
 harness runs `$TAN --version` and requires it to print `tan <version>` before
 doing anything else, and aborts naming what it actually got otherwise. If
@@ -88,9 +100,11 @@ where you specifically want "0 skip" enforced too.
 
 `build`, and the `quality`/`migrate`/`lock`/`kconfig` half of `workspace`, need a
 bootstrapped west workspace. The harness **detects one automatically**: if the
-checkout you passed as `--sdk-root` sits inside a directory holding
-`.west/config` and `.venv`, those phases run. Otherwise they `SKIP` — loudly,
-never silently.
+checkout you passed as `--sdk-root` sits inside a directory holding a `.venv`
+*and* a `.west/config` whose `[manifest] path` names that same checkout, those
+phases run. Otherwise they `SKIP` — loudly, never silently, and the header line
+names which of those three conditions actually failed rather than blaming the
+manifest for a missing `.venv`.
 
 To have the harness build one for you, pass `--allow-bootstrap`. Read this first:
 
@@ -176,7 +190,12 @@ remains:
 
 | Issue | What is asserted as broken |
 |---|---|
-| [#448](https://github.com/alplabai/tan-cli/issues/448) | `renode` never reaches the app console (command is slated for removal) |
+| [#448](https://github.com/alplabai/tan-cli/issues/448) | `renode` never reaches the app console |
+
+#448 is a support **pause**, not a removal — the maintainer reframed it on
+2026-08-04 and the issue now reads *"emit a support-paused warning; retain the
+command, modules, fixtures and CI models"*. The entry therefore stays until the
+boot itself is fixed; it is not waiting for `tan renode` to disappear.
 
 ### What this harness has already caught
 

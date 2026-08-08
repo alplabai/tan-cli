@@ -57,7 +57,9 @@ Options
   --tan PATH           tan binary to drive (default: $TAN, else `tan` on PATH)
   --sdk-root PATH      alp-sdk checkout (required)
   --project PATH       run against an EXISTING project instead of scaffolding
-  --work PATH          sandbox root (default: a fresh mktemp -d)
+  --work PATH          sandbox root (default: a fresh mktemp -d). An EXISTING
+                        directory is used as the PARENT of a per-run sandbox
+                        inside it, never as the sandbox itself
   --phase NAME         discovery|project|generate|workspace|build|diag|teardown|all
   --som SKU            SoM for the scaffolded project (default: E1M-AEN801)
   --template ID        template for the scaffolded project (default: sensor-starter)
@@ -71,9 +73,11 @@ Options
                         whole surface ran", not just "nothing that ran failed"
   -h, --help           this text
 
-`--work` is deleted at exit ONLY when this run created it (the mktemp -d
-default, or a --work path that did not already exist). An EXISTING directory
-passed to --work is never touched, no matter what --keep says.
+Only a directory THIS run created is ever deleted at exit: the mktemp -d
+default, a --work path that did not already exist, or the per-run
+`tan-surface.XXXXXX` subdirectory made inside an EXISTING --work. The
+directory you pass to --work is never itself removed; --keep additionally
+keeps the per-run sandbox inside it.
 
 `tan flash` is never run and there is no flag to enable it.
 
@@ -84,20 +88,30 @@ Exit status
 TXT
 }
 
+# A value-taking flag given with no value used to die on bash's own `$2:
+# unbound variable` under `set -u` -- exit 1, no usage text, and a message that
+# names a shell variable rather than the flag the operator mistyped. The usage
+# block above documents exit 2 for "the harness could not start", so say that
+# instead. `"$@"` here is the whole remaining argument list, so `$# -ge 2`
+# is exactly "this flag has something after it".
+need_value() {  # need_value <flag> <rest-of-argv...>
+  [ "$#" -ge 2 ] || { echo "ABORT: $1 needs a value" >&2; usage >&2; exit 2; }
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tan)             TAN=$2; shift 2 ;;
-    --sdk-root)        SDK=$2; shift 2 ;;
-    --project)         MODE=inplace; PROJ=$2; shift 2 ;;
-    --work)            WORK=$2; shift 2 ;;
-    --phase)           PHASES=$2; shift 2 ;;
-    --som)             SOM=$2; shift 2 ;;
-    --template)        TEMPLATE=$2; shift 2 ;;
-    --core)            CORE=$2; shift 2 ;;
+    --tan)             need_value "$@"; TAN=$2; shift 2 ;;
+    --sdk-root)        need_value "$@"; SDK=$2; shift 2 ;;
+    --project)         need_value "$@"; MODE=inplace; PROJ=$2; shift 2 ;;
+    --work)            need_value "$@"; WORK=$2; shift 2 ;;
+    --phase)           need_value "$@"; PHASES=$2; shift 2 ;;
+    --som)             need_value "$@"; SOM=$2; shift 2 ;;
+    --template)        need_value "$@"; TEMPLATE=$2; shift 2 ;;
+    --core)            need_value "$@"; CORE=$2; shift 2 ;;
     --allow-mutate)    ALLOW_MUTATE=1; shift ;;
     --allow-bootstrap) ALLOW_BOOTSTRAP=1; shift ;;
     --keep)            KEEP=1; shift ;;
-    --json)            LEDGER=$2; shift 2 ;;
+    --json)            need_value "$@"; LEDGER=$2; shift 2 ;;
     --strict)          STRICT=1; shift ;;
     -h|--help)         usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -135,11 +149,23 @@ SDK=$(CDPATH= cd -- "$SDK" && pwd)
 # WORK_CREATED gates the cleanup trap below: only a directory THIS run made
 # is ever deleted. Passing an existing directory to --work is a request to
 # use it, not permission to destroy it at exit.
+#
+# An EXISTING --work therefore becomes the PARENT of a per-run sandbox rather
+# than the sandbox itself. Without that, "never delete what the operator gave
+# us" turned into "never clean up at all": every run left its SDK copy
+# (several GB under --allow-bootstrap), its new-som/invalid-board/model-build
+# scratch trees and its .out/.err capture files behind, forever, in a
+# directory the operator most likely passed precisely BECAUSE they intended to
+# reuse it. The per-run subdirectory is this run's own creation, so it is
+# cleaned like the mktemp default, while the directory that was passed in is
+# still never removed.
 if [ -z "$WORK" ]; then
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/tan-surface.XXXXXX") || exit 2
   WORK_CREATED=1
 elif [ -d "$WORK" ]; then
   WORK=$(CDPATH= cd -- "$WORK" && pwd)
+  WORK=$(mktemp -d "$WORK/tan-surface.XXXXXX") || exit 2
+  WORK_CREATED=1
 else
   mkdir -p "$WORK" || exit 2
   WORK=$(CDPATH= cd -- "$WORK" && pwd)
@@ -193,15 +219,35 @@ _west_manifest_path() {  # _west_manifest_path <west/config path>
   ' "$1" 2>/dev/null
 }
 
+#
+# The three ways this can be false are DIFFERENT reasons, and the diagnostic
+# must name the one that actually applies. Collapsing them into one "manifest
+# path does not name this checkout" line states a false cause whenever the
+# manifest DOES name the checkout and it is the `.venv` that is absent --
+# measured on a real host (`~/.west/config` carrying `path = alp-sdk` beside
+# an `--sdk-root` whose basename IS `alp-sdk`, with no `~/.venv`): the verdict
+# (unbootstrapped) was right and the printed reason was wrong, which sends the
+# reader looking at west's manifest instead of at the missing venv.
 SDK_PARENT=$(dirname "$SDK")
+SDK_BASE=$(basename "$SDK")
+WEST_CONFIG="$SDK_PARENT/.west/config"
 MANIFEST_PATH=""
-[ -f "$SDK_PARENT/.west/config" ] && MANIFEST_PATH=$(_west_manifest_path "$SDK_PARENT/.west/config")
-if [ -n "$MANIFEST_PATH" ] && [ -d "$SDK_PARENT/.venv" ] && [ "$MANIFEST_PATH" = "$(basename "$SDK")" ]; then
+[ -f "$WEST_CONFIG" ] && MANIFEST_PATH=$(_west_manifest_path "$WEST_CONFIG")
+MANIFEST_NAMES_SDK=0
+[ -n "$MANIFEST_PATH" ] && [ "$MANIFEST_PATH" = "$SDK_BASE" ] && MANIFEST_NAMES_SDK=1
+
+if [ "$MANIFEST_NAMES_SDK" = 1 ] && [ -d "$SDK_PARENT/.venv" ]; then
   BOOTSTRAPPED=1
   printf '  workspace %s (already bootstrapped)\n' "$SDK_PARENT"
-elif [ -f "$SDK_PARENT/.west/config" ] || [ -d "$SDK_PARENT/.venv" ]; then
-  printf '  workspace none detected at %s (found .west/config or .venv there, but manifest path=%s does not name this checkout -- treating as unbootstrapped)\n' \
-      "$SDK_PARENT" "${MANIFEST_PATH:-<unset>}"
+elif [ "$MANIFEST_NAMES_SDK" = 1 ]; then
+  printf '  workspace none detected at %s (.west/config there DOES name this checkout (path=%s), but %s/.venv is missing -- treating as unbootstrapped)\n' \
+      "$SDK_PARENT" "$MANIFEST_PATH" "$SDK_PARENT"
+elif [ -f "$WEST_CONFIG" ]; then
+  printf '  workspace none detected at %s (.west/config there has manifest path=%s, which does not name this checkout (%s) -- treating as unbootstrapped)\n' \
+      "$SDK_PARENT" "${MANIFEST_PATH:-<unset>}" "$SDK_BASE"
+elif [ -d "$SDK_PARENT/.venv" ]; then
+  printf '  workspace none detected at %s (found a .venv there but no .west/config -- treating as unbootstrapped)\n' \
+      "$SDK_PARENT"
 else
   printf '  workspace none detected at %s\n' "$SDK_PARENT"
 fi
@@ -228,8 +274,9 @@ restore_global() {
     printf '        restored your previous ~/.alp/sdk-default\n'
   fi
   # Only ever delete a $WORK this run itself created (see the option parsing
-  # above) -- an operator-supplied EXISTING directory is never touched here,
-  # in EITHER --project or sandbox mode. Un-gating this from `MODE = sandbox`
+  # above) -- an operator-supplied EXISTING directory is never removed here,
+  # in EITHER --project or sandbox mode; what gets removed in that case is the
+  # per-run subdirectory made inside it. Un-gating this from `MODE = sandbox`
   # also closes the leak the old condition had in --project mode: a
   # --project run's own mktemp'd scratch dir (used for the invalid-board
   # fixture, a bootstrap SDK copy, ...) used to survive every run untouched.
