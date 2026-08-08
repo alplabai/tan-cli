@@ -357,12 +357,14 @@ def _assemble_bundle(
                 # is disclosure, matching the module's established shape
                 # for every other excluded item.
                 #
-                # Gated on `status is not None`, mirroring `tan.core.
-                # system_manifest._nested_probe_ok`'s identical absent-vs-
-                # explicit distinction: an ABSENT status is a plan-time
-                # manifest (before any build ran) -- oracle-measured, pinned
-                # by `test_nonfinite_floats.py`, at `issues: []` -- not a
-                # run that recorded an outcome and said it was not `ok`.
+                # Gated on `status is not None`: an ABSENT status would be a
+                # plan-time manifest (before any build ran) -- oracle-measured,
+                # at `issues: []` -- not a run that recorded an outcome and
+                # said it was not `ok`. In practice every schema-valid
+                # manifest carries an explicit `status` (`_SLICE_REQUIRED_
+                # STRINGS` in `system_manifest.py`), so this notice fires for
+                # `pending` too -- a slice this particular build invocation
+                # never touched, not just one that failed.
                 notices.append(
                     _Notice(
                         "image.slice-not-built",

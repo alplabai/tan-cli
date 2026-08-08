@@ -28,8 +28,10 @@ All notable changes to `tan` are documented here. Format follows
 - **SDK-resolution warnings were computed and then dropped by several
   commands, so a customer could build, run, or solve Kconfig against a
   different alp-sdk checkout than the one their `.alp/sdk-path` project pin
-  named, with no signal anywhere.** All under (#497), following the
-  disclosure shape (#464) established:
+  named, with no signal anywhere.** Under (#497), following the disclosure
+  shape (#464) established (`sdk list --online` bypassing `ALL_PROXY` is a
+  separate proxy-handling defect and stays open under #497, unaddressed
+  here):
   - `tan sdk current` resolved through the narrow `resolve_sdk_tiered`
     alone, which has no candidate for a CHILD `<ws>/alp-sdk` (the README
     Quickstart layout) -- it now resolves through the same
@@ -66,16 +68,6 @@ All notable changes to `tan` are documented here. Format follows
   wrote a `bundle-manifest.json` whose `boot_order` still named a core
   `slices[]` carried no artefact for. Now emits `image.slice-not-built`
   (warning) and keeps assembling. (#499)
-- **`tan size` could report a stale, previous-run artefact as the current
-  measurement for a slice a later run explicitly recorded as `failed`.**
-  The I-18 nested `/build` fallback probe (added so a real `west build`
-  tree with no `output_artefact` recorded yet is still measured, not
-  reported `not-built`) is now gated on the slice's own `status`: still
-  probed for an ABSENT status (a plan-time manifest, before any build ran)
-  or `"ok"`, but not for any other explicit status -- so a `failed`/
-  `skipped` slice with no recorded `output_artefact` can no longer pick a
-  leftover artefact back up from one directory deeper than the one it
-  actually built into. (#499)
 - **`tan clean` could crash with an uncaught `TypeError` instead of
   reporting `clean.remove-failed`, abandoning every other queued removal
   target (including the orchestrator state file).** `shutil.rmtree`'s

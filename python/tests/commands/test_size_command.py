@@ -299,30 +299,6 @@ def test_the_un_nested_path_still_wins_when_both_exist(tmp_path):
     assert doc["data"]["slices"][0]["flash"]["used"] == 11
 
 
-def test_a_failed_slice_with_no_output_artefact_does_not_pick_up_a_stale_nested_elf(
-    tmp_path,
-):
-    # tan-cli#499: run 1 succeeded and left a real ELF at the NESTED I-18 path;
-    # run 2 explicitly recorded `status: failed` with no `output_artefact` --
-    # the nested probe must not resurrect run 1's leftover as a current
-    # measurement (the oracle, with no such probe at all, reports
-    # `not-built` here; this port must at least stop reporting `ok`/a
-    # measured row from a manifest that says the run did not succeed).
-    write(
-        tmp_path / "br" / "system-manifest.yaml",
-        "schema_version: 1\nhw_info: {}\nslices:\n"
-        "- core_id: m55_hp\n  os: zephyr\n  build_dir: m55_hp-zephyr\n  status: failed\n",
-    )
-    nested = tmp_path / "br" / "m55_hp-zephyr" / "build"
-    write(nested / "rom.json", '{"symbols":{"size":4096}}')
-    write(nested / "ram.json", '{"symbols":{"size":2048}}')
-    doc = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "br"))
-    row = doc["data"]["slices"][0]
-    assert row["status"] == "not-built"
-    assert row["flash"]["used"] is None
-    assert row["source"] is None
-
-
 def test_an_absent_status_still_gets_the_nested_probe(tmp_path):
     # The counterpart to the failed-slice case above: a slice with NO
     # `status` at all (a plan-time manifest, before any build ran) must keep

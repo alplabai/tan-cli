@@ -768,23 +768,6 @@ _MODULE_BUDGET: dict[str, int] = {
     # ("assign every leftover draft item to every leftover existing slot in
     # order") was rejected, not just what shipped.
     "tan/core/debug_launch.py": 1275,
-    # 818, not under the 800 cap, as of tan-cli#499: `slice_elf_candidates`/
-    # `slice_footprint_dirs`' I-18 nested `/build` probe is now gated by a
-    # new `_nested_probe_ok` helper -- `True` for an absent `status` (a
-    # plan-time manifest) or `"ok"`, `False` for any OTHER explicit status,
-    # so a `failed`/`skipped` slice with no recorded `output_artefact`
-    # cannot pick a stale artefact back up from a directory one level
-    # deeper than the one it actually built into. Net growth is mostly the
-    # new helper's docstring explaining why the gate is absent-or-ok, not
-    # just ok.
-    # 833, not 818, as of tan-cli#499's `_CORE_RESOLVERS` int-regex fix: the
-    # sign now applies to every radix branch (`0x`/`0o`, not just plain
-    # decimal), and a `0b` branch was added -- both transcribing the
-    # oracle's actual `serde_yaml::parse_signed_int`, not the YAML 1.2 spec
-    # core schema this row's own header comment claimed to. Net growth is
-    # mostly the docstring recording the four oracle-measured values that
-    # pinned the fix.
-    "tan/core/system_manifest.py": 833,
     # 1003, not 941, as of tan-cli#510: `_command_on_path`/`_tool_is_
     # available` (a bool-only availability check, and a spawn that repeated
     # a SEPARATE, unhardened PATH lookup) were replaced by one
