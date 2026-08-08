@@ -803,7 +803,16 @@ All notable changes to `tan` are documented here. Format follows
   refused; both now agree, in both directions. The unconditional bypass is
   kept, unchanged, when NEITHER field is named -- every oracle-pinned `would
   run JLinkExe` `--dry-run` fixture relies on that path staying
-  replay-host-independent. (#519)
+  replay-host-independent. On a host with NO probe tool at all, a manifest
+  naming `openocd_usb_location`/`pyocd_uid` used to get two different, both
+  misleading, refusals depending on mode -- `--dry-run` said "this run is
+  taking the J-Link path" (its own bare-host preview default), a real run
+  said "this run is not taking the OpenOCD/pyOCD path" (naming the OTHER
+  tool as if it were available) -- neither names the actual cause. Both now
+  refuse with the same `swd_probe: no flash tool found -- install SEGGER
+  J-Link (preferred), or openocd, or pyocd` message the bottom of this
+  function already gives that host shape when neither field is named.
+  (#519)
 - **`tan flash`'s Flow D (`alif_mram_jlink`) reported `verified and
   PIN-reset` even on a run whose reset chain ended in `Failed to halt CPU`**
   -- the documented busy-resident case, where an image that never idles keeps
@@ -833,13 +842,38 @@ All notable changes to `tan` are documented here. Format follows
   grandchild holding the pipe open (a backgrounded `sleep &`, say) could hang
   `tan flash` indefinitely past `_FLASH_TIMEOUT_S` -- now bounded by the same
   `_DRAIN_JOIN_S` the pipeline's stderr drain already uses, and for the
-  identical reason. **A parallel, unfixed risk, noted here rather than fixed
+  identical reason (`_spawn` joins TWO of these tees, one per stream, so the
+  real ceiling on a single flash entry is `_FLASH_TIMEOUT_S` plus up to
+  `2 * _DRAIN_JOIN_S`, not one -- measured: `timeout=3` overran to 4.00s,
+  `timeout=2` to 6.01s). **A parallel, unfixed risk, noted here rather than fixed
   in this change (out of scope, #540): `swd_probe`'s own J-Link arm asserts
   `{device} flashed via J-Link @ {base}` from the exit code alone, and
   `jlink_commander_script` gives it no `verifybin` at all (`r`/`halt` before
   the load, `r`/`g` after) -- the same intent-vs-observed gap this fix closes
   for Flow D, on a backend with no verify step to fall back on if a future
-  review finds the same halt-survives-nonzero-exit shape there.** (#522)
+  review finds the same halt-survives-nonzero-exit shape there.**
+
+  Two more consequences of that same tee, both found reviewing THIS round
+  (#519/#522 round 3): first, `_execute_message`'s own text-mode fallback
+  changed shape along with it -- before, an ORDINARY text-mode failure (the
+  child streamed straight to the console, no tan-authored diagnosis) always
+  left `outcome.stdout`/`.stderr` empty and fell back to the bare `flash
+  command failed` sentence; now that `_spawn`'s single-tool branches capture
+  the child's transcript in every mode, that same failure surfaces whatever
+  the child actually printed instead (e.g. `swd_probe[e1]: Error: could not
+  connect to target`, measured) -- a customer-visible change to
+  `data.entries[].message` and the text-mode `FAIL:` line for every
+  `_spawn`-backed method. Second, `subprocess.PIPE` (required to read the
+  child's own stdout/stderr at all) means the CHILD's `stdout.isatty()`/
+  `stderr.isatty()` now report `False` where direct fd inheritance let them
+  report `True` on a real terminal (measured on a real pty) -- `pyocd
+  flash`/`west flash`/`openocd` gate their own `\r`-updated progress bar and
+  colour output on `isatty()`, so on a terminal an operator now loses that
+  live progress indicator during a multi-minute GD32/Alif write. Console
+  output itself stays complete and live, line by line; only the CHILD's own
+  rendering of it changes. Deliberately not fixed here -- driving the tee
+  through a pty is real machinery and this branch has already had three
+  review rounds -- tracked as #541. (#522)
 
 
 

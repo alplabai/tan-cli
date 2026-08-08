@@ -360,7 +360,22 @@ _MODULE_BUDGET: dict[str, int] = {
     # {  }`, an empty selector the tool would only reject at runtime; now
     # refused at plan time. Net growth is the re-scoped bypass's own
     # docstring plus the whitespace-only guard and its explanation.
-    "tan/core/flash_plan.py": 2699,
+    # 2751, not 2699, as of the tan-cli#519/#522 close-out (a NIT, not a new
+    # issue): a bare host (no J-Link, no OpenOCD, no pyOCD) that names
+    # `flash_args.openocd_usb_location`/`pyocd_uid` used to get two DIFFERENT
+    # misleading refusals depending on mode -- `--dry-run` said "taking the
+    # J-Link path" (its own bare-host preview default), a real run said "not
+    # taking the OpenOCD/pyOCD path" (naming a tool that also is not there).
+    # A shared `_SWD_PROBE_NO_TOOL_FOUND` constant plus a `jlink_is_bare_host_
+    # fallback` flag (threaded through the J-Link branch's own two wrong-arm
+    # checks) and a `chosen is None and new_probe_selector_named` guard (ahead
+    # of the openocd/pyocd arm's own two wrong-arm checks) now both raise the
+    # SAME "no flash tool found" diagnosis the bottom-of-function fallback
+    # already gives this exact host shape when neither field is named. Net
+    # growth is almost entirely the two guards' own docstrings explaining why
+    # a field-specific "not taking the OTHER tool's path" message is the
+    # wrong diagnosis when NO tool resolved at all.
+    "tan/core/flash_plan.py": 2751,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
@@ -522,7 +537,27 @@ _MODULE_BUDGET: dict[str, int] = {
     # rewritten `_Tee` docstring/body (binary read + incremental decode + the
     # bounded join + the narrower exception handling) plus one `flash_plan.py`
     # MAJOR-2 companion fix's own `flash_cmd.py`-side commentary.
-    "tan/commands/flash_cmd.py": 2551,
+    # 2629, not 2551, as of the tan-cli#519/#522 close-out review (three
+    # findings, no new issue): MAJOR 1's `_execute_message`/`_half_lines`
+    # docstrings were corrected -- an ORDINARY text-mode failure no longer
+    # unconditionally leaves `outcome.stdout`/`.stderr` empty now that
+    # `_spawn`'s single-tool branches capture the child's transcript in every
+    # mode, and the old test asserting that as "unaffected" was split into a
+    # narrower still-true case (a genuinely silent child) plus a NEW test
+    # guarding the changed case against a real `_spawn` outcome, not only a
+    # hand-built `_Outcome`; MAJOR 2's `_Tee` docstring dropped its overstated
+    # "nothing is silently withheld" claim and documents the tty-vs-pipe
+    # consequence measured on a real pty (tracked as tan-cli#541); MINOR 1
+    # documents that `_spawn` joins TWO `_Tee`s, so the real overrun past
+    # `_FLASH_TIMEOUT_S` is up to `2 * _DRAIN_JOIN_S`, not one, at both
+    # constants' own definitions; and the NIT on `_flow_d_reset_qualified_
+    # message` names the one residual risk a bounded transcript join leaves:
+    # a truncated transcript falls through to the OPTIMISTIC "verified and
+    # PIN-reset" claim, not a refusal. Net growth is docstring/comment plus
+    # one new decoder test (`test_tee_decodes_a_multibyte_utf8_sequence_
+    # split_across_a_read1_boundary`, MINOR 2) proving the incremental
+    # decoder against a naive per-chunk one.
+    "tan/commands/flash_cmd.py": 2629,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks

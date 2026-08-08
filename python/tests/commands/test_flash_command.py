@@ -961,6 +961,35 @@ def test_tee_sink_write_failure_only_drops_console_display_not_the_transcript():
     assert tee.text() == "clean line\ncafé\n"
 
 
+def test_tee_decodes_a_multibyte_utf8_sequence_split_across_a_read1_boundary():
+    """tan-cli#519/#522 review, MINOR 2: `_Tee`'s own docstring promises a
+    multi-byte UTF-8 sequence split across two `read1` calls is "never
+    corrupted or double-counted" -- `codecs.getincrementaldecoder`, not a
+    naive per-chunk `bytes.decode()`. Nothing pinned that: the only decoder
+    test before this one feeds single-byte ASCII chunks (`b"a"`/`b"b"`/
+    `b"c"`), which pass identically under a naive per-chunk decode too, so a
+    regression from the incremental decoder back to a plain `.decode()` per
+    `read1()` result would ship green. Here U+20AC (`€`, 3 UTF-8 bytes) is
+    split 1/2 across the chunk boundary -- confirmed to FAIL against a naive
+    per-chunk decode (`b"A\\xe2".decode("utf-8")` alone raises
+    `UnicodeDecodeError`, measured)."""
+    import io
+
+    from tan.commands.flash_cmd import _Tee
+
+    class _FakeBinaryStream:
+        def __init__(self, chunks):
+            self._chunks = [*chunks, b""]
+
+        def read1(self, _n):
+            return self._chunks.pop(0)
+
+    stream = _FakeBinaryStream([b"A\xe2", b"\x82\xacB"])
+    sink = io.StringIO()
+    tee = _Tee(stream, sink)
+    assert tee.text() == "A€B"
+
+
 # ── `_execute_message` text-mode gate + the TimeoutExpired partial output ──
 # (tan-cli#487, defect 4)
 
@@ -984,16 +1013,46 @@ def test_execute_message_surfaces_a_tan_authored_diagnosis_in_text_mode():
     assert message == "yocto_wic[a55]: timed out after 900s and was killed"
 
 
-def test_execute_message_text_mode_ordinary_stream_failure_is_unaffected():
-    """The case this fix must NOT change: an ordinary text-mode failure whose
-    child already streamed straight to the console leaves BOTH `stdout`/
-    `stderr` empty on the `_Outcome` -- there is nothing tan itself has to
-    add, so this still falls back to the generic sentence exactly as
-    before."""
+def test_execute_message_text_mode_truly_silent_failure_still_falls_back():
+    """The narrow case that survives (tan-cli#519/#522 review, MAJOR 1): a
+    child that genuinely printed NOTHING on either stream leaves `outcome.
+    stdout`/`.stderr` both empty regardless of mode, so there is still
+    nothing for `_execute_message` to surface and it falls back to the
+    generic sentence. `_Outcome` built by hand here (not via `_spawn`) is
+    still a legitimate stand-in for this one case: a silent child's real
+    `_spawn` outcome has BOTH fields empty too, whichever branch handled it."""
     from tan.commands.flash_cmd import _Outcome, _execute_message
 
     outcome = _Outcome(success=False, returncode=1, captured=False)
     assert _execute_message(outcome, "yocto_wic", "a55") == "yocto_wic[a55]: flash command failed"
+
+
+def test_execute_message_text_mode_now_surfaces_a_real_spawn_diagnosis():
+    """The case round 3's `_Tee`/capture-and-replay fix actually changed,
+    guarded here against a REAL `_spawn` outcome rather than a hand-built
+    `_Outcome` (tan-cli#519/#522 review, MAJOR 1): a text-mode child that
+    prints a diagnosis on stderr and then exits non-zero -- the ordinary
+    failure shape the old test above claimed was "unaffected" -- now has
+    that diagnosis in `outcome.stderr` (both of `_spawn`'s single-tool
+    branches capture the child's transcript in every mode now, not only
+    under `--format json`), so `_execute_message` surfaces it instead of the
+    bare `flash command failed` sentence. Fails against the pre-round-3
+    source (measured: `outcome.stderr` was `""` here, and this asserted the
+    bare fallback)."""
+    from tan.commands.flash_cmd import _execute_message, _spawn
+
+    outcome = _spawn(
+        [
+            sys.executable, "-c",
+            "import sys; print('Error: could not connect to target', file=sys.stderr); "
+            "sys.exit(3)",
+        ],
+        capture=False,
+        timeout=5.0,
+    )
+    assert outcome.stderr.strip() == "Error: could not connect to target"
+    message = _execute_message(outcome, "swd_probe", "e1")
+    assert message == "swd_probe[e1]: Error: could not connect to target"
 
 
 def test_spawn_timeout_folds_in_output_the_child_printed_before_the_kill():

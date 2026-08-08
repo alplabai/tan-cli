@@ -75,6 +75,16 @@ _DEFAULT_JLINK_DEVICE = "GD32G553MEY7TR"
 _DEFAULT_JLINK_SPEED = 4000
 _JLINK_BINARIES = ("JLinkExe", "JLink")
 
+#: tan-cli#519/#522 review, NIT: shared verbatim between the fallback refusal
+#: at the bottom of `plan_swd_probe` (`chosen` still `None` after BOTH arms
+#: were tried) and the two wrong-arm checks it is now also raised from (see
+#: `_swd_probe_no_tool_found` below) -- one string, not two spellings of the
+#: same diagnosis.
+_SWD_PROBE_NO_TOOL_FOUND = (
+    "swd_probe: no flash tool found -- install SEGGER J-Link (preferred), "
+    "or `openocd`, or `pyocd`."
+)
+
 #: tan-cli#520 REVIEW round 2, nit: the backend-registry key AND the string
 #: `validate_flow_d_preflight_args`/`flow_d_preflight_script`/`_flow_d_
 #: preflight` read as `method` to pick which backend a refusal names --
@@ -1380,6 +1390,14 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     # the same machine.
     new_probe_selector_named = openocd_usb_location is not None or pyocd_uid is not None
     jlink: str | None = None
+    # tan-cli#519/#522 review, NIT: tracks the ONE branch below where `jlink`
+    # is a synthetic placeholder rather than a tool this host actually has --
+    # the bare-host `--dry-run` fallback a few lines down, armed only when NO
+    # probe tool at all could be found. The two wrong-arm refusals just below
+    # need this to tell "a real J-Link is genuinely the arm this run takes"
+    # apart from "no tool resolved at all, and J-Link is merely this
+    # function's default preview assumption" -- see their own comments.
+    jlink_is_bare_host_fallback = False
     if not (force_pyocd or force_openocd):
         if inp.dry_run and not new_probe_selector_named:
             jlink = _JLINK_BINARIES[0]
@@ -1387,13 +1405,29 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
             jlink = next((n for n in _JLINK_BINARIES if which(n)), None)
             if jlink is None and inp.dry_run and not (which("openocd") or which("pyocd")):
                 jlink = _JLINK_BINARIES[0]
+                jlink_is_bare_host_fallback = True
     if jlink is not None:
         # tan-cli#519: the SAME wrong-arm refusal #513 gave `jlink_serial` on
         # the OTHER side of this split (below), mirrored here -- a manifest
         # naming an OpenOCD/pyOCD-only selector that then lands on the J-Link
         # arm must refuse, not silently drop it. `JLinkExe` has no USB-path or
         # `--uid` selector of its own; `jlink_serial` is its ONLY one.
+        #
+        # tan-cli#519/#522 review, NIT: EXCEPT when `jlink` is only here
+        # because of the bare-host `--dry-run` fallback just above -- there,
+        # no probe tool was actually found on PATH at all (that is the one
+        # condition that fallback checks), so "this run is taking the J-Link
+        # path" is not true; it is this function's own preview default for a
+        # host with nothing installed. The more useful diagnosis there is the
+        # same one a REAL run on that host reaches (`_SWD_PROBE_NO_TOOL_
+        # FOUND`, below) -- previously a `--dry-run` on a bare host that named
+        # `openocd_usb_location`/`pyocd_uid` reported "taking the J-Link
+        # path" while a real run on the SAME host reported "not taking the
+        # OpenOCD path", two different wrong root causes for one actual fact:
+        # no flash tool is installed.
         if openocd_usb_location is not None:
+            if jlink_is_bare_host_fallback:
+                raise FlashPlanError(_SWD_PROBE_NO_TOOL_FOUND)
             raise FlashPlanError(
                 "swd_probe: flash_args.openocd_usb_location is set, but this run is "
                 "taking the J-Link path, which has no USB-location selector of its "
@@ -1404,6 +1438,8 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
                 "path flash_args.openocd_usb_location belongs to."
             )
         if pyocd_uid is not None:
+            if jlink_is_bare_host_fallback:
+                raise FlashPlanError(_SWD_PROBE_NO_TOOL_FOUND)
             raise FlashPlanError(
                 "swd_probe: flash_args.pyocd_uid is set, but this run is taking the "
                 "J-Link path, which has no --uid selector of its own -- pyOCD's "
@@ -1560,6 +1596,25 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     # (and the argv build itself) shares one answer to "which arm is this run
     # actually taking" instead of each asking a differently-shaped question.
     chosen = "openocd" if openocd else "pyocd" if pyocd else None
+    # tan-cli#519/#522 review, NIT: on a BARE host (no J-Link, no OpenOCD, no
+    # pyOCD) that names `openocd_usb_location`/`pyocd_uid`, `chosen` lands on
+    # `None` here for the SAME reason the fallback refusal at the bottom of
+    # this function raises `_SWD_PROBE_NO_TOOL_FOUND` -- no probe tool
+    # resolved, forced or not (`openocd`/`pyocd` above already fold `force_
+    # pyocd`/`force_openocd` in). Without this check the two field-specific
+    # wrong-arm messages just below fire instead: "not taking the OpenOCD
+    # path" / "not taking the pyOCD path" is technically true but names the
+    # wrong root cause on a bare host -- there is no path this run COULD
+    # take, and naming one specific OTHER tool implies one is available when
+    # none is (measured, paired with the `--dry-run` mirror of this same gap
+    # a few lines up: the same manifest got "taking the J-Link path" under
+    # `--dry-run` and "not taking the OpenOCD path" on a real run, two
+    # different wrong causes for one fact). Scoped to `new_probe_selector_
+    # named` -- a manifest naming NEITHER field never reaches a field-
+    # specific message anyway, so its own diagnosis choice (the `interface`/
+    # `target` gate just below, ahead of the generic fallback) is unaffected.
+    if chosen is None and new_probe_selector_named:
+        raise FlashPlanError(_SWD_PROBE_NO_TOOL_FOUND)
     if openocd_usb_location is not None and chosen != "openocd":
         raise FlashPlanError(
             "swd_probe: flash_args.openocd_usb_location is set, but this run is not "
@@ -1653,10 +1708,7 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
         parts.append(inp.artefact)
         argv = tuple(parts)
     else:
-        raise FlashPlanError(
-            "swd_probe: no flash tool found -- install SEGGER J-Link (preferred), "
-            "or `openocd`, or `pyocd`."
-        )
+        raise FlashPlanError(_SWD_PROBE_NO_TOOL_FOUND)
     # The same #402 fix as the J-Link line above, on the worse of the two: this
     # arm named `GD32G553` and echoed no device AT ALL, so nothing in the
     # message could contradict it. `target` is the only device identity this

@@ -121,6 +121,12 @@ _DATA_SCHEMA_VERSION = "1"
 #: timeout with no output at all. Generous -- a real MRAM/eMMC write is seconds
 #: to minutes, and a wrongly-short timeout would abort a write MID-FLIGHT, which
 #: on a bootloader partition is worse than waiting.
+#:
+#: tan-cli#519/#522 review, MINOR 1: NOT the whole wall-clock bound on a
+#: live-console `_spawn` call. After the kill (or the child's own exit),
+#: `_spawn` still joins its two `_Tee` drain threads -- see `_DRAIN_JOIN_S`'s
+#: own comment -- so the real ceiling on a single flash entry is this value
+#: PLUS up to `2 * _DRAIN_JOIN_S`, not this value alone.
 _FLASH_TIMEOUT_S = 900.0
 
 #: The read-only DPIDR preflight is a connect-and-quit; it must not inherit the
@@ -132,6 +138,18 @@ _PREFLIGHT_TIMEOUT_S = 60.0
 #: decompressor's diagnosis into the outcome (tan-cli#401), but a `tan` that
 #: hangs on a thread rather than reporting a flash result would be the worse
 #: trade -- both children have already exited by every path that joins it.
+#:
+#: `_Tee` (tan-cli#519/#522) reuses this SAME constant for the identical
+#: reason, but `_spawn` joins TWO of them -- `out_tee.text()` and
+#: `err_tee.text()`, one per stream -- so the real overrun past a `_spawn`
+#: caller's own `timeout` is bounded by UP TO `2 * _DRAIN_JOIN_S`, not one
+#: `_DRAIN_JOIN_S`: worst case both tees straggle behind a lingering
+#: grandchild in sequence. Measured: `timeout=3` -> 4.00s; `timeout=2` ->
+#: 6.01s. Still bounded and still the better trade than an unbounded join,
+#: but a reader of `_FLASH_TIMEOUT_S` alone would not learn a `tan flash`
+#: timeout is really `timeout + up to 2 * _DRAIN_JOIN_S` from this constant
+#: on its own -- see `_Tee.join`'s own docstring for where that bound is
+#: actually spent.
 _DRAIN_JOIN_S = 2.0
 
 
@@ -594,8 +612,12 @@ def _half_lines(half: _Half, *, captured: bool) -> list[str]:
     processes inherit stdio instead -- so "it exited 9 and said nothing" is
     not a diagnosis there, it is an artifact of never having listened, and a
     body-less header for it produced a dangling `"<program> exited rc=1:"`
-    with nothing following, contradicting `_execute_message`'s own docstring
-    claim that an ordinary text-mode failure leaves `outcome.stderr` empty."""
+    with nothing following. (tan-cli#519/#522 review, MAJOR 1: this pipeline
+    case is the ONE ordinary text-mode failure shape that still, genuinely,
+    leaves `outcome.stderr` empty -- `_spawn`'s single-tool branches no
+    longer do, now that they [`_Tee`]/capture-and-replay the child's
+    transcript in every mode; see `_execute_message`'s own docstring, which
+    used to make that claim unconditionally.)"""
     body = [line for line in half.stderr.splitlines() if line.strip()]
     if not body and (half.returncode == 0 or not captured):
         return []
@@ -672,8 +694,27 @@ class _Tee:
     means the console's stdout/stderr interleaving is no longer OS-arbitrated
     the way direct fd inheritance was -- each thread's own chunks stay in
     order with themselves, but the two streams may interleave differently
-    than before. Both still land on the SAME console, visibly, in real time;
-    nothing is silently withheld from the operator.
+    than before. Both still land on the SAME console, visibly, in real time.
+
+    That is the ONE console-visible change this class was believed to make.
+    There is a SECOND, tan-cli#519/#522 review round 3 found only after
+    measuring on a real pty: `subprocess.PIPE` means the CHILD's own
+    `stdout.isatty()`/`stderr.isatty()` now report `False`, where direct fd
+    inheritance (the pre-`_Tee` behaviour) let them report `True` on a real
+    terminal. Measured: same invocation, real pty --
+    `origin/dev  child sees  stdout_isatty=True   stderr_isatty=True`;
+    `this class  child sees  stdout_isatty=False  stderr_isatty=False`.
+    `pyocd flash` / `west flash` / `openocd` gate their own `\r`-updated
+    progress bar and colour output on `isatty()`, so on a real terminal an
+    operator now loses the live progress indicator for a multi-minute
+    GD32/Alif write -- console output is still complete and still live line-
+    by-line, but the CHILD renders it differently once it can no longer see a
+    tty of its own. Deliberately NOT fixed here (driving this tee through a
+    pty is real machinery, tracked as **tan-cli#541**): the claim this
+    docstring used to make -- "nothing is silently withheld from the
+    operator" -- overstated what changed; the console still sees everything
+    the child prints, but not necessarily in the shape/cadence the child
+    itself would have chosen for a real terminal.
 
     `join`'s default timeout is `_DRAIN_JOIN_S`, the SAME bound [`_Drain`]
     uses and for the identical reason (tan-cli#519/#522 review round 3,
@@ -687,7 +728,16 @@ class _Tee:
     hanging past an outer kill entirely on the TimeoutExpired path. A `tan`
     that hangs on a thread rather than reporting a flash result would be the
     worse trade -- the exact sentence `_Drain.join`'s own docstring already
-    uses for this same class of problem."""
+    uses for this same class of problem.
+
+    tan-cli#519/#522 review, MINOR 1: `_DRAIN_JOIN_S` alone documents ONE
+    stream's bound. `_spawn` calls [`text`] on TWO `_Tee`s (stdout's and
+    stderr's), one after the other, so the real overrun past `_spawn`'s own
+    `timeout` is up to `2 * _DRAIN_JOIN_S`, not one -- a straggling
+    grandchild can make BOTH joins spend their full bound in sequence.
+    Measured: `_spawn(..., timeout=3)` -> 4.00s; `timeout=2` -> 6.01s.
+    Bounded and still the right trade, but see `_DRAIN_JOIN_S`'s own comment
+    for why that bound alone understates it by 2x."""
 
     def __init__(self, stream, sink) -> None:
         self._chunks: list[str] = []
@@ -1058,12 +1108,28 @@ def _execute_message(outcome: _Outcome, method: str, entry_id: str) -> str:
     <err>`, `_spawn_pipeline`'s `_timed_out_stderr`, and `_spawn_jlink`'s
     `could not write the J-Link Commander script: <err>` were all composed
     and then discarded, reported as a bare `flash command failed` even though
-    every one of them populates `outcome.stderr` regardless of mode. The
-    ORDINARY text-mode failure (the child streamed straight to the console
-    and then exited non-zero) leaves BOTH `stderr`/`stdout` empty -- there is
-    nothing tan itself has to add there, so that case is unaffected: `outcome.
-    stderr.strip() or outcome.stdout.strip()` is false and this still falls
-    through to the generic sentence, exactly as before."""
+    every one of them populates `outcome.stderr` regardless of mode.
+
+    tan-cli#519/#522 review, MAJOR 1: an ORDINARY text-mode failure -- the
+    child streamed straight to the console and then exited non-zero, with no
+    tan-authored diagnosis at all -- used to leave BOTH `stderr`/`stdout`
+    empty unconditionally, so this always fell through to the bare `flash
+    command failed` sentence. That is no longer true for `_spawn`'s two
+    single-tool branches (the wrapped-console capture-and-replay branch, and
+    the live-console branch now [`_Tee`]s instead of only streaming): both
+    populate `outcome.stdout`/`.stderr` with the child's own transcript in
+    EVERY mode now, so an ordinary text-mode failure whose child printed a
+    diagnosis on stderr/stdout (`Error: could not connect to target`, say)
+    now surfaces that diagnosis here too, in place of the old generic
+    sentence -- a CUSTOMER-VISIBLE change to the exact string
+    `data.entries[].message` (and the text-mode `FAIL:` line) reports for
+    every `_spawn`-backed method (`swd_probe`, `alif_setools`, `west_flash`,
+    ...), declared in this change's own CHANGELOG entry. The bare fallback
+    now survives only for a child that truly prints nothing (both streams
+    genuinely empty) and for `_spawn_pipeline`'s UNCAPTURED text-mode path,
+    which pipes neither half's stderr at all and so still reaches
+    `_Outcome.stderr == ""` unconditionally -- see [`_half_lines`]'s own
+    docstring for that narrower, still-true case."""
     if outcome.captured or outcome.stderr.strip() or outcome.stdout.strip():
         tail = _capture_tail(outcome)
         if tail:
@@ -1119,7 +1185,19 @@ def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
     populated in every mode and this function needs no mode split of its
     own. Not a general transcript-scraping layer: this reads only the one
     tail `plan_alif_mram_jlink` always appends, and only for
-    `FLOW_D_METHOD`."""
+    `FLOW_D_METHOD`.
+
+    tan-cli#519/#522 review, NIT (residual risk, not fixed): the transcript
+    this reads is [`_Tee.text`]'s bounded join, which can be INCOMPLETE if a
+    grandchild the killed child leaves behind still holds the pipe open past
+    `_DRAIN_JOIN_S` -- see that method's own docstring. Should that bound
+    ever truncate a real JLinkExe transcript mid-halt-failure, the marker
+    substring search above finds nothing and this function falls through to
+    `return ok_message` UNCHANGED -- the OPTIMISTIC `"; verified and
+    PIN-reset"` claim, the exact wrong claim tan-cli#522 exists to stop. No
+    plausible JLinkExe repro for this was constructible during this review
+    (a 24 MB transcript drains through the tee in ~0.13s, far under the
+    2s/4s bound), so this is documented risk, not a reproduced defect."""
     if _FLOW_D_VERIFIED_AND_RESET not in ok_message:
         return ok_message
     transcript = outcome.stdout + outcome.stderr
