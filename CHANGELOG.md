@@ -238,8 +238,17 @@ All notable changes to `tan` are documented here. Format follows
     the noexec retry silently never fired.
   - `install.ps1`'s AppLocker signature matched on the "Access is denied"
     message text alone; `install.sh`'s equivalent already requires exit code
-    126 AND the text. `install.ps1` now reads the actual Win32 status
-    (`ERROR_ACCESS_DENIED`, 5) off the underlying `Win32Exception` instead.
+    126 AND the text. `install.ps1` now reads the actual Win32 status off the
+    underlying `Win32Exception` and matches it against all three codes
+    `CreateProcess` can return for this class of refusal:
+    `ERROR_ACCESS_DENIED` (5, an NTFS deny-execute ACE),
+    `ERROR_ACCESS_DISABLED_BY_POLICY` (1260, the stock AppLocker/Software
+    Restriction Policy "block executables from %TEMP%" rule), and
+    `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (786, `0x312`, the same
+    SAFER/SRP policy class configured with no user-facing notification --
+    confirmed against
+    `learn.microsoft.com/windows/win32/debug/system-error-codes--500-999-`
+    and MS-ERREF, `openspecs/windows_protocols/ms-erref`, `0x00000312`).
   - The retry gate's speculative `mkdir -p "$INSTALL_DIR"` ran even when the
     install was then refused, leaving an empty directory where pre-fix
     nothing existed; it is now removed on that path.
@@ -311,7 +320,7 @@ All notable changes to `tan` are documented here. Format follows
   the install lands under the subdirectory rather than wherever the `pwsh`
   PROCESS itself started -- `windows_only` like the rest of this file's ps1
   coverage. (#490)
-- **Three more defects found reviewing the (#490) fixes above, all shipping
+- **Two more defects found reviewing the (#490) fixes above, all shipping
   the exact misattribution the fix exists to prevent:**
   - `install.sh`'s noexec health check forced `LC_ALL=C` as a COMMAND-PREFIX
     assignment (`LC_ALL=C "$1" --version`), which sets the variable only in
@@ -329,14 +338,6 @@ All notable changes to `tan` are documented here. Format follows
     `export` inside the `$(...)` subshell -- which does reach that
     subshell's own `setlocale()`, and a shell's locale state persists across
     the rest of that same process -- prints "Permission denied" instead.
-  - `install.ps1`'s `Test-AccessDeniedSignature` matched
-    `ERROR_ACCESS_DENIED` (5) only, but the scenario this whole fix names --
-    the stock AppLocker/Software Restriction Policy "block executables from
-    %TEMP%" rule -- fails `CreateProcess` with
-    `ERROR_ACCESS_DISABLED_BY_POLICY` (1260), which is not 5; the two
-    `icacls`-based tests this issue's own prior round added only reproduce
-    an NTFS deny-execute ACE, which genuinely does yield 5 and so never
-    exercised this path. Both codes now match.
   - `install.sh`'s `latest` redirect resolution (the DEFAULT invocation --
     no `--version`, exactly the documented `curl | sh` one-liner) has its
     own inline curl/wget branching that does not go through `download()` and
@@ -348,25 +349,57 @@ All notable changes to `tan` are documented here. Format follows
     this block entirely. Now checked up front, before `latest` resolution or
     any other download, the same idiom the sha256-tool check further down
     already uses. (#490)
-- **This CHANGELOG's own round-5 entry for the fix above named a real Win32
-  symbol with the wrong number, and round 6 then dropped the symbol entirely
-  instead of correcting it.** Round 5 credited
-  `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (1261) alongside the real
-  `ERROR_ACCESS_DISABLED_BY_POLICY` (1260) as a second AppLocker/SRP "silent
-  policy block" code; `install.ps1` and its test both matched and probed
-  1261 on that basis. 1261 is in fact `ERROR_REG_NAT_CONSUMPTION`, an
-  Itanium-specific invalid-register fault unrelated to policy -- round 6
-  caught that -- but round 6 then searched only the 1000-1299 and 1300-1699
-  system-error-codes pages, found no `*NO_SAFER_UI*` symbol on either, and
-  concluded the symbol does not exist at all, deleting it from both
-  `install.ps1` and its test. The symbol was never fabricated: it is real,
-  it lives on the 500-999 page, and its value is **786** (`0x312`),
-  "Access to %1 has been restricted by your Administrator by policy rule
-  %2." -- confirmed against
-  `learn.microsoft.com/windows/win32/debug/system-error-codes--500-999-`
-  and MS-ERREF (`openspecs/windows_protocols/ms-erref`, `0x00000312`).
-  `install.ps1`'s `Test-AccessDeniedSignature` now matches 1260 and 786
-  alongside `ERROR_ACCESS_DENIED` (5), and the test probes all three. (#490)
+- **Four more defects found reviewing the (#490) fixes above, closing the
+  last release-blocker on this issue:**
+  - `install.sh`'s own tcsh arm silently disabled a user's existing shell
+    config. tcsh(1), STARTUP AND SHUTDOWN, reads FIRST `~/.tcshrc` or, only
+    if that file is not found, `~/.cshrc` -- never both -- so creating a bare
+    `~/.tcshrc` on a host whose config lived entirely in `~/.cshrc` stopped
+    that config from loading at all, from the next shell on, with no warning
+    and no recovery (the idempotency guard makes a re-run a no-op). The tcsh
+    arm now appends to an existing `~/.cshrc` instead of creating
+    `~/.tcshrc` when the latter does not already exist.
+  - `install.ps1` could report a successful install as a failure. The
+    `WM_SETTINGCHANGE` broadcast added to keep already-running apps in sync
+    with a direct registry Path write compiles a small C# helper via
+    `Add-Type ... -ErrorAction SilentlyContinue` -- which an AppLocker DLL
+    rule or a Software Restriction Policy over `%TEMP%` (the exact host
+    class the health-check retry above exists for) can block, leaving the
+    type undefined -- and referencing that unresolved type at the broadcast
+    call site is then a TERMINATING error under this script's
+    `$ErrorActionPreference = "Stop"`, reached only AFTER the commit and the
+    registry Path write had already succeeded. The broadcast is now gated on
+    the type actually existing and wrapped in its own try/catch, matching
+    `Reset-InheritedAcl`'s already-established "an install that already
+    succeeded must not be turned into a failure over a best-effort side
+    effect" rule just above it.
+  - `install.ps1`'s noexec/AppLocker retry discarded the real error from a
+    failed `New-Item`/`Copy-Item` in an empty `catch` block and substituted
+    a hardcoded, never-measured guess ("$Dir could not be used for a retry
+    without elevation") in the failure message -- the real cause could
+    equally be disk-full, an AV quarantine, a locked file, or MAX_PATH.
+    Mirrors `install.sh`'s own fix for the identical class on the POSIX side
+    (`retry_stage_err`): the catch block now captures
+    `$_.Exception.Message` into `$retryStageErr` and the failure message
+    reports it instead of guessing.
+  - This CHANGELOG's own entry for `Test-AccessDeniedSignature` was spread
+    across three separate bullets from three review rounds, each describing
+    a different intermediate state (5 alone; then "+1260"; then a
+    correction of a wrong 1261 to 786) with no single bullet describing what
+    actually ships. Collapsed into one: `install.ps1` matches all three
+    Win32 codes `CreateProcess` can return for this refusal class --
+    `ERROR_ACCESS_DENIED` (5), `ERROR_ACCESS_DISABLED_BY_POLICY` (1260), and
+    `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (786, `0x312`) -- verified
+    against `install.ps1`'s shipped `Test-AccessDeniedSignature`. (#490)
+  Also closed, a MINOR from the same review: `install.sh`'s relative-`--dir`
+  normalisation ran a speculative `mkdir -p` on the not-yet-existing parent
+  of a relative `--dir` during ARGUMENT PARSING, before any network call or
+  health check -- so `--dir new/deep/bin` against a subsequently refused
+  install (e.g. an unresolvable `--version`) still left `./new/deep` behind
+  in the caller's CWD. Normalisation now walks up to the nearest EXISTING
+  ancestor to resolve the absolute path without creating anything; the real
+  `mkdir -p "$INSTALL_DIR"` still runs later, but only once an install is
+  actually going ahead.
 
 ## [0.5.1] — 2026-08-04
 

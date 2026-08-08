@@ -1646,6 +1646,36 @@ def test_sh_relative_install_dir_is_normalised_to_absolute(release_server, tmp_p
 
 
 @posix_only
+def test_sh_relative_dir_normalisation_creates_nothing_on_a_refused_install(release_server, tmp_path):
+    """tan-cli#490 review MINOR (install.sh:66-67): the relative-`--dir`
+    normalisation block runs during ARGUMENT PARSING, before any network call
+    or health check, and used to `mkdir -p` the not-yet-existing parent of a
+    relative `--dir` just to resolve it to an absolute path -- e.g. `--dir
+    new/deep/bin` created `./new/deep` in the CWD even when the install was
+    then refused (here: an unknown --version, so `checksums.txt` 404s).
+    Normalisation must not touch disk; only the later, deliberate
+    `mkdir -p "$INSTALL_DIR"` -- reached only once an install is actually
+    going ahead -- may create anything, and that path is never reached here.
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--dir", "new/deep/bin", "--no-modify-path", "--version", "v9.9.9-does-not-exist"],
+        cwd=workdir,
+        env={
+            **os.environ,
+            "TAN_INSTALL_BASE_URL": release_server,
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
+        },
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert result.returncode != 0
+    assert not (workdir / "new").exists(), "install.sh must not create any part of a relative --dir before the install actually proceeds"
+
+
+@posix_only
 def test_sh_relative_install_dir_rc_file_gets_an_absolute_path(release_server, tmp_path):
     """tan-cli#490 review finding (install.sh:373): the rc-file PATH line was
     built from the same un-normalised `$INSTALL_DIR`, permanently putting a
@@ -1727,6 +1757,37 @@ def test_sh_tcsh_shell_gets_csh_syntax_in_tcshrc(release_server, tmp_path):
     rc_text = rc.read_text(encoding="utf-8")
     assert "setenv PATH" in rc_text
     assert "export PATH" not in rc_text
+
+
+@posix_only
+def test_sh_tcsh_shell_appends_to_existing_cshrc_instead_of_shadowing_it(release_server, tmp_path):
+    """tan-cli#490 review MAJOR: tcsh(1), STARTUP AND SHUTDOWN -- on login it
+    reads ~/.tcshrc OR, only if ~/.tcshrc is NOT found, ~/.cshrc, never both.
+    A user whose whole csh config lives in ~/.cshrc would have it stop
+    loading, silently and unrecoverably (the idempotency guard makes a
+    re-run a no-op), the moment this installer created a bare ~/.tcshrc
+    containing only the PATH line. When ~/.tcshrc does not exist yet but
+    ~/.cshrc does, the PATH line must be appended to ~/.cshrc instead, so
+    the user's existing config keeps loading.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    cshrc = home / ".cshrc"
+    cshrc.write_text("alias ll 'ls -l'\nsetenv EDITOR vim\n", encoding="utf-8")
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/tcsh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert not (home / ".tcshrc").exists(), "must not create ~/.tcshrc -- that would shadow the existing ~/.cshrc"
+    cshrc_text = cshrc.read_text(encoding="utf-8")
+    assert "alias ll 'ls -l'" in cshrc_text, "the user's pre-existing ~/.cshrc content must survive"
+    assert "setenv EDITOR vim" in cshrc_text
+    assert "setenv PATH" in cshrc_text
+    assert "export PATH" not in cshrc_text
 
 
 @posix_only

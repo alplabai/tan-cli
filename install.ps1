@@ -406,6 +406,7 @@ try {
 	$verifyWin32Code = $check.Win32ErrorCode
 
 	$retried = $false
+	$retryStageErr = $null
 	if ($verifyExit -ne 0 -and (Test-AccessDeniedSignature $verifyWin32Code)) {
 		$retryDir = Join-Path $Dir (".tan-install-retry." + [Guid]::NewGuid().ToString("N"))
 		try {
@@ -424,9 +425,13 @@ try {
 			$verifyExit = $check.Exit
 			$verifyWin32Code = $check.Win32ErrorCode
 		} catch {
-			# $Dir could not be used for the retry (e.g. -System without
-			# elevation) -- fall through to the failure branch below with the
-			# ORIGINAL %TEMP% result.
+			# $Dir could not be used for the retry -- capture the REAL reason
+			# (mirrors install.sh's retry_stage_err, tan-cli#490: discarding
+			# it is exactly the misattributed-diagnostic class #490 is
+			# about) rather than guessing a cause the code never measured;
+			# fall through to the failure branch below with the ORIGINAL
+			# %TEMP% result.
+			$retryStageErr = $_.Exception.Message
 		} finally {
 			Remove-Item -LiteralPath $retryDir -Recurse -Force -ErrorAction SilentlyContinue
 		}
@@ -444,8 +449,10 @@ try {
 		if (Test-AccessDeniedSignature $verifyWin32Code) {
 			if ($retried) {
 				Write-Host "install.ps1: Access is denied persisted even after staging inside $Dir -- a security policy (AppLocker / Software Restriction Policy) very likely blocks running tan from there too, not only from %TEMP%." -ForegroundColor Red
+			} elseif ($retryStageErr) {
+				Write-Host "install.ps1: Access is denied, with the file freshly downloaded and sha256-verified, almost always means a security policy (AppLocker / Software Restriction Policy) blocks running an executable from %TEMP% -- not a broken download. (Could not stage a retry inside ${Dir}: $retryStageErr)" -ForegroundColor Red
 			} else {
-				Write-Host "install.ps1: Access is denied, with the file freshly downloaded and sha256-verified, almost always means a security policy (AppLocker / Software Restriction Policy) blocks running an executable from %TEMP% -- not a broken download. ($Dir could not be used for a retry without elevation.)" -ForegroundColor Red
+				Write-Host "install.ps1: Access is denied, with the file freshly downloaded and sha256-verified, almost always means a security policy (AppLocker / Software Restriction Policy) blocks running an executable from %TEMP% -- not a broken download." -ForegroundColor Red
 			}
 			Write-Error "install.ps1: refusing to install. The Path was not modified. This is a policy on this host, NOT evidence the download is broken -- the sha256 check above already proved the bytes match the release. Ask an administrator to allow execution from $Dir, or install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
 		} else {
@@ -703,9 +710,27 @@ if (-not $alreadyPresent) {
 		} finally {
 			$pathKey.Close()
 		}
-		$result = [UIntPtr]::Zero
-		[TanInstall.NativeMethods]::SendMessageTimeout(
-			[IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
+		# Best-effort, like Reset-InheritedAcl above: the registry write just
+		# above already committed, so a broadcast that cannot run must not
+		# turn an install that already succeeded into a failure. `Add-Type`
+		# compiles this class into a temp assembly it then loads -- which an
+		# AppLocker DLL rule or a Software Restriction Policy over %TEMP%
+		# (the exact host class the health-check retry above exists for) can
+		# block, leaving `-ErrorAction SilentlyContinue` on the `Add-Type`
+		# call above with no type defined; referencing the unresolved type
+		# name is then a TERMINATING error under this script's
+		# $ErrorActionPreference = "Stop", reached only after the Path was
+		# already written. Gate on the type actually existing, and wrap the
+		# call itself too in case the broadcast fails for some other reason.
+		if ('TanInstall.NativeMethods' -as [type]) {
+			try {
+				$result = [UIntPtr]::Zero
+				[TanInstall.NativeMethods]::SendMessageTimeout(
+					[IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
+			} catch {
+				Write-Host "install.ps1: warning -- could not broadcast the Path change to running apps ($($_.Exception.Message)); open a NEW terminal to pick it up." -ForegroundColor Yellow
+			}
+		}
 		Write-Host "install.ps1: added $Dir to the $scope Path -- restart the terminal for it to take effect."
 	}
 }

@@ -63,13 +63,27 @@ done
 case "$INSTALL_DIR" in
 /*) : ;; # already absolute
 *)
-	install_dir_parent="$(dirname -- "$INSTALL_DIR")"
-	mkdir -p "$install_dir_parent" 2>/dev/null || true
-	install_dir_abs_parent="$(cd "$install_dir_parent" 2>/dev/null && pwd -P)" || {
-		echo "install.sh: could not resolve --dir '${INSTALL_DIR}' to an absolute path -- '${install_dir_parent}' does not exist." >&2
+	# Resolve to an absolute path WITHOUT creating anything on disk: this
+	# block runs during argument parsing, before any network call or health
+	# check, and `mkdir -p`'ing a not-yet-existing --dir here used to leave
+	# an orphan directory behind (e.g. `--dir new/deep/bin` against an
+	# unreachable/unresolved release created `./new/deep`) even when the
+	# install was then refused -- tan-cli#490 review. Walk up from the
+	# target's parent until an EXISTING ancestor is found (the only part
+	# `cd` can actually enter), resolve THAT to absolute, then reattach the
+	# not-yet-existing tail. The real `mkdir -p "$INSTALL_DIR"` still runs
+	# later, but only once an install is actually going ahead.
+	install_dir_tail="$(basename -- "$INSTALL_DIR")"
+	install_dir_walk="$(dirname -- "$INSTALL_DIR")"
+	while [ ! -d "$install_dir_walk" ] && [ "$install_dir_walk" != "." ] && [ "$install_dir_walk" != "/" ]; do
+		install_dir_tail="$(basename -- "$install_dir_walk")/${install_dir_tail}"
+		install_dir_walk="$(dirname -- "$install_dir_walk")"
+	done
+	install_dir_abs_parent="$(cd "$install_dir_walk" 2>/dev/null && pwd -P)" || {
+		echo "install.sh: could not resolve --dir '${INSTALL_DIR}' to an absolute path -- '${install_dir_walk}' does not exist." >&2
 		exit 1
 	}
-	INSTALL_DIR="${install_dir_abs_parent}/$(basename -- "$INSTALL_DIR")"
+	INSTALL_DIR="${install_dir_abs_parent}/${install_dir_tail}"
 	;;
 esac
 
@@ -741,7 +755,20 @@ case ":${PATH}:" in
 			source_hint="source \"${rc}\""
 			;;
 		tcsh)
-			rc="$HOME/.tcshrc"
+			# tcsh(1), "STARTUP AND SHUTDOWN": on login it reads FIRST
+			# ~/.tcshrc, "or, if ~/.tcshrc is not found, ~/.cshrc" -- never
+			# both. A user whose config lives entirely in ~/.cshrc would have
+			# it stop loading from the next shell on the moment this script
+			# creates a bare ~/.tcshrc (unrecoverable: a re-run then sees the
+			# new file already references INSTALL_DIR and no-ops). Only write
+			# ~/.tcshrc fresh when there is no ~/.cshrc to shadow, or when
+			# ~/.tcshrc already exists (nothing new to shadow either way);
+			# otherwise append to the ~/.cshrc that is actually being read.
+			if [ ! -f "$HOME/.tcshrc" ] && [ -f "$HOME/.cshrc" ]; then
+				rc="$HOME/.cshrc"
+			else
+				rc="$HOME/.tcshrc"
+			fi
 			path_line="setenv PATH \"${INSTALL_DIR}:\${PATH}\"  # added by tan install.sh"
 			source_hint="source \"${rc}\""
 			;;
