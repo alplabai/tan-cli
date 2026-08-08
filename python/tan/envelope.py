@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Machine-readable result envelope. JSON mode writes exactly one to stdout."""
+from __future__ import annotations
+
 import json
 import math
 import os
@@ -101,6 +103,42 @@ class Project:
 class SdkInfo:
     root: str
     source_tier: str
+    #: tan-cli#478. CARRIED from the resolution, never re-derived at emit time,
+    #: and deliberately NOT part of `as_dict` -- the wire shape stays
+    #: `{root, sourceTier}`, which is the extension handshake.
+    #:
+    #: Carried rather than recomputed because `~/.alp/sdk-default` is MUTABLE
+    #: mid-run: `bootstrap` rewrites it with its own `writtenFor` before its
+    #: envelope goes out, and `init` writes the project pin after resolving.
+    #: `test_bootstrap_command.py` pins the resolution-time semantic ("`init`
+    #: surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk`
+    #: writes"), so an emit-time re-read would report the POST-mutation state
+    #: and the warning would vanish on exactly the two commands that change
+    #: it. That is the difference from `_with_sdk_divergence` below, which may
+    #: re-derive safely: #407 is a stateless property of the filesystem,
+    #: #464 is a property of the resolution THIS run acted on.
+    foreign_global_default_for: str | None = None
+    #: The unreadable/unresolvable `.alp/sdk-path` pin, same carry-through --
+    #: `sdk_resolution_issues` emits the two together, in this order.
+    broken_project_pin: str | None = None
+
+    @classmethod
+    def from_resolution(cls, root: str, resolution: Any) -> SdkInfo:
+        """The ONE blessed constructor. `resolution` is any object carrying
+        `tier`/`foreign_global_default_for`/`broken_project_pin` -- every
+        ladder already answers with one (`SdkRootResolution`, `ActiveSdk`).
+
+        A raw `SdkInfo(root, tier)` silently drops both facts, which is how 16
+        of ~32 commands ended up disclosing a foreign global default and the
+        rest staying quiet; `tests/gates/test_sdk_info_is_built_from_a_resolution.py`
+        refuses new raw constructions outside the seams that predate this.
+        """
+        return cls(
+            root,
+            resolution.tier,
+            getattr(resolution, "foreign_global_default_for", None),
+            getattr(resolution, "broken_project_pin", None),
+        )
 
     def as_dict(self) -> dict[str, str]:
         # Forward slashes ALWAYS, mirroring `crates/tan-cli/src/sdk_report.rs`'s
@@ -129,9 +167,46 @@ class Envelope:
         self.command = command
         self.project = project
         self.data = data
-        self.issues = self._with_sdk_divergence(command, project, issues, sdk)
+        issues = self._with_sdk_divergence(command, project, issues, sdk)
+        self.issues = self._with_sdk_resolution_advisories(issues, sdk)
         self.exit_code = int(exit_code)
         self.sdk = sdk
+
+    @staticmethod
+    def _with_sdk_resolution_advisories(issues, sdk):
+        """Append tan-cli#464's pair -- `sdk.project-pin-unresolved` and
+        `sdk.global-default-foreign-project` -- from what the resolution
+        already recorded on `sdk`.
+
+        Same argument as `_with_sdk_divergence` below, applied to a second
+        fact: doing it at the one seam every envelope passes through, instead
+        of at each command, is what stops the 33rd command from forgetting.
+        Before this, 16 of ~32 commands hand-called `sdk_resolution_issues`
+        and the rest silently resolved another project's checkout -- `validate`
+        spawning ITS schema validator for this project's board.yaml, `trace`
+        printing ITS orchestrator path -- at `ok: true, issues: []`.
+
+        DEDUPED BY CODE, and that is load-bearing rather than defensive: the
+        hand-call sites still exist, and several fold these two into a
+        command-specific ORDER this must not disturb. A command that already
+        emitted the pair keeps its own copy and position; one that never did
+        gets it here.
+
+        Appends to a NEW list -- several commands keep rendering their own
+        text from the list they passed in.
+        """
+        if sdk is None:
+            return issues
+        from tan.commands.sdk_cmd import sdk_resolution_issues
+
+        advisories = sdk_resolution_issues(
+            sdk.broken_project_pin, sdk.source_tier, sdk.foreign_global_default_for
+        )
+        if not advisories:
+            return issues
+        seen = {issue.code for issue in issues}
+        extra = [issue for issue in advisories if issue.code not in seen]
+        return [*issues, *extra] if extra else issues
 
     @staticmethod
     def _with_sdk_divergence(command, project, issues, sdk):

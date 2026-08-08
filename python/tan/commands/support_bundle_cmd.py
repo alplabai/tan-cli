@@ -77,7 +77,7 @@ from tan.commands.inspect_cmd import (
     collect_resolved_values,
     resolve_debug_project_context,
 )
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.commands.trace_cmd import (
     TraceTargetError,
     build_trace_decisions,
@@ -574,28 +574,54 @@ def _empty_data(generated_at: str, target: str, server: str) -> dict[str, Any]:
 
 
 def _internal_failure(
-    generated_at: str, message: str, target: str, server: str, sdk: SdkInfo | None
+    generated_at: str,
+    message: str,
+    target: str,
+    server: str,
+    sdk: SdkInfo | None,
+    *,
+    broken_project_pin: str | None = None,
+    sdk_tier: str = "none",
+    foreign_global_default_for: str | None = None,
 ) -> _Outcome:
+    # tan-cli#478 MAJOR 1: this early-return path used to drop the
+    # SDK-resolution pair entirely -- exactly the customer who most needs it,
+    # since it fires on a machine where something has already gone wrong.
+    # `sdk_resolution_issues` is `[]` when neither fires, so callers that
+    # have not resolved a project context yet (the outer exception guard)
+    # can pass the defaults and get the prior behaviour unchanged.
+    issues = sdk_resolution_issues(broken_project_pin, sdk_tier, foreign_global_default_for)
+    issues.append(Issue("support-bundle.internal-failure", "error", message))
     return _Outcome(
         exit_code=ExitCode.INTERNAL_FAILURE,
         data=_empty_data(generated_at, target, server),
         project=Project(root=None, board_yaml=None),
         sdk=sdk,
-        issues=[Issue("support-bundle.internal-failure", "error", message)],
+        issues=issues,
         text=["support-bundle: internal failure", message],
     )
 
 
 def _server_incompatible(
-    generated_at: str, target: str, server: str, sdk: SdkInfo | None
+    generated_at: str,
+    target: str,
+    server: str,
+    sdk: SdkInfo | None,
+    *,
+    broken_project_pin: str | None = None,
+    sdk_tier: str = "none",
+    foreign_global_default_for: str | None = None,
 ) -> _Outcome:
+    # tan-cli#478 MAJOR 1: same fix as `_internal_failure` above.
     message = f"Server '{server}' is not supported for target '{target}'."
+    issues = sdk_resolution_issues(broken_project_pin, sdk_tier, foreign_global_default_for)
+    issues.append(Issue("support-bundle.server-compatibility", "error", message))
     return _Outcome(
         exit_code=ExitCode.DOCTOR_FAILURE,
         data=_empty_data(generated_at, target, server),
         project=Project(root=None, board_yaml=None),
         sdk=sdk,
-        issues=[Issue("support-bundle.server-compatibility", "error", message)],
+        issues=issues,
         text=[f"support-bundle: server '{server}' is not supported for target '{target}'."],
     )
 
@@ -624,16 +650,40 @@ def _run(
         server = parse_server_kind(server_arg)
     except DebugConfigError as err:
         return _internal_failure(
-            generated_at, str(err), NATIVE_HOST, SERVER_NONE, context.sdk
+            generated_at,
+            str(err),
+            NATIVE_HOST,
+            SERVER_NONE,
+            context.sdk,
+            broken_project_pin=context.broken_project_pin,
+            sdk_tier=context.sdk_tier,
+            foreign_global_default_for=context.foreign_global_default_for,
         )
 
     if not is_server_supported_for_target(target, server):
-        return _server_incompatible(generated_at, target, server, context.sdk)
+        return _server_incompatible(
+            generated_at,
+            target,
+            server,
+            context.sdk,
+            broken_project_pin=context.broken_project_pin,
+            sdk_tier=context.sdk_tier,
+            foreign_global_default_for=context.foreign_global_default_for,
+        )
 
     try:
         decisions = _create_bundle_trace_decisions(context, target_arg, path_arg)
     except TraceTargetError as err:
-        return _internal_failure(generated_at, str(err), target, server, context.sdk)
+        return _internal_failure(
+            generated_at,
+            str(err),
+            target,
+            server,
+            context.sdk,
+            broken_project_pin=context.broken_project_pin,
+            sdk_tier=context.sdk_tier,
+            foreign_global_default_for=context.foreign_global_default_for,
+        )
 
     # Port of `doctor.rs::project_selected`: `--project`/`--board-yaml` are the
     # whole selection surface, so with neither given the resolved board.yaml
@@ -688,12 +738,38 @@ def _run(
         },
         "doctor": doctor_report,
         "notes": notes,
+        # tan-cli#478's headline requirement, and the item review called worth
+        # fixing FIRST: the FILE has to carry it, not just the stdout envelope.
+        # An earlier revision computed these AFTER `_write_bundle` below, so
+        # the bundle a user attaches to a bug report -- the whole point of the
+        # command -- still answered False to the issue's own repro:
+        #   'global-default-foreign-project' in open(BUNDLE).read()
+        # Its own `doctor` section could not have supplied it either: that set
+        # keeps host checks only (tan-cli#441), 8 where a standalone doctor
+        # emits ~17.
+        "sdkResolution": [
+            {"code": issue.code, "severity": issue.severity, "message": issue.message}
+            for issue in sdk_resolution_issues(
+                context.broken_project_pin,
+                context.sdk_tier,
+                context.foreign_global_default_for,
+            )
+        ],
     }
 
     try:
         output_path = _write_bundle(destination_arg, context.workspace_root, generated_at, payload)
     except OSError as err:
-        return _internal_failure(generated_at, str(err), target, server, context.sdk)
+        return _internal_failure(
+            generated_at,
+            str(err),
+            target,
+            server,
+            context.sdk,
+            broken_project_pin=context.broken_project_pin,
+            sdk_tier=context.sdk_tier,
+            foreign_global_default_for=context.foreign_global_default_for,
+        )
 
     # tan-cli#357: the doctor summary IS this command's verdict, exactly as in
     # the oracle (`if doctor.summary.fail > 0 { ExitCode::DoctorFailure }`).
@@ -704,7 +780,15 @@ def _run(
     # and exit 0 beside error-severity issues in the same envelope. The bundle
     # file is still written on the failing path -- it is what the user
     # attaches, and a doctor failure is the reason they are attaching it.
-    issues = _doctor_issues(checks)
+    # tan-cli#478: the SDK-resolution pair FIRST, then the doctor rollup.
+    # This bundle is what a user sends to explain a broken machine, and it
+    # was the only place the foreign-default warning never appeared. The
+    # embedded doctor set would not have covered it either -- it keeps host
+    # checks only (tan-cli#441): 8, where a standalone doctor emitted ~17.
+    issues = sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_tier, context.foreign_global_default_for
+    )
+    issues.extend(_doctor_issues(checks))
     exit_code = doctor_cmd.exit_code_for(checks)
 
     data = {
@@ -812,6 +896,20 @@ def support_bundle(
         )
 
     if not json_mode:
+        # tan-cli#478 review finding 6: the bundle FILE and the JSON envelope
+        # both carry `sdkResolution`/the foreign-default pair now, but
+        # `outcome.text` (every `_Outcome` constructor above) never did --
+        # the default `tan support-bundle` with no `--format` stayed silent.
+        # Read off `outcome.issues`, which every `_Outcome` constructor above
+        # now builds from `context`'s own carried
+        # `broken_project_pin`/`sdk_tier`/`foreign_global_default_for` --
+        # including the three early-return failure paths. Re-deriving here
+        # from `outcome.sdk` instead would be a second copy of the same
+        # decision in the one command whose whole purpose is explaining a
+        # broken machine; this only ever re-prints what is already there.
+        for issue in outcome.issues:
+            if issue.code.startswith("sdk."):
+                typer.echo(issue.message, err=True)
         for line in outcome.text:
             typer.echo(line, err=True)
         if verbose and outcome.verbose_hint_eligible:

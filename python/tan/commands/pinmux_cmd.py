@@ -522,7 +522,7 @@ def pinmux(
         data,
         issues,
         exit_code,
-        sdk=SdkInfo(sdk.path, sdk.tier) if sdk is not None else None,
+        sdk=SdkInfo.from_resolution(sdk.path, sdk) if sdk is not None else None,
     )
     if json_mode:
         emit(envelope)

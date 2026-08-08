@@ -2222,7 +2222,9 @@ def _run(
     sdk_resolution = _resolve_sdk(sdk_root_arg, cwd)
     resolved_sdk = sdk_resolution.path
     tier = sdk_resolution.tier
-    sdk = SdkInfo(resolved_sdk, tier) if resolved_sdk is not None else None
+    sdk = (
+        SdkInfo.from_resolution(resolved_sdk, sdk_resolution) if resolved_sdk is not None else None
+    )
     # tan-cli#487, defect 3 (review finding 4): absolutised ONCE, right after
     # `resolved_sdk` reaches the envelope's `sdk.root` above -- oracle-
     # parity-pinned to report a relative `--sdk-root` LITERALLY (e.g.
