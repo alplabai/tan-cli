@@ -25,6 +25,38 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan init`/`tan scaffold` put wrong content into a new project, in five
+  separate ways** (#494):
+  - `--from-example` on an SDK example that carries an in-place `build/`
+    (a real, gitignored artifact of building that example) hard-failed on
+    the first non-UTF-8 build artifact `read_example_tree` walked into, or --
+    where the tree happened to be all-text -- silently copied hundreds of
+    CMake/ninja/generated files into the new project. `read_example_tree`
+    now skips any `build/`, `build_*/`, or `cmake-build-*/` directory
+    component, and skips a FILE symlink (matching the file-type check the
+    frozen Rust oracle already makes) rather than following it and inlining
+    an arbitrary target's bytes.
+  - The same command's `init.example-unreadable` refusal for a genuinely
+    unreadable file named no path at all (`'utf-8' codec can't decode byte
+    0xff in position 88: invalid start byte`, with nothing telling the
+    customer which of hundreds of files was the culprit) -- it now names the
+    file.
+  - `tan init --template <edge-ai-starter|sensor-starter|board-diagnostics|
+    zephyr-app> --som <sku>` accepted any SoM SKU and rendered the vendored
+    tree's `cores:`/`pins:`/`chips:` block verbatim regardless of whether
+    that SKU's real topology matches it -- `--som E1M-AEN301` (no Cortex-A32)
+    got E1M-AEN801's `a32_cluster` core, reported `ok:true`, and the very
+    next `tan validate` hard-errored. Every family-split template now gates
+    `--som` to the SKUs its vendored tree is actually correct for (the exact
+    SKU for the Alif tree, or the whole V2N/V2M family -- one shared PCB --
+    for the Renesas tree), refusing up front (`init.invalid-som`) instead of
+    scaffolding wrong hardware facts.
+  - A removed working directory turned a plain `tan init --preview` (no
+    `--project`) into `init.internal-failure` at exit 5 with no preview at
+    all, where the two sibling commands making the identical `Path.cwd()`
+    call (`clean`, `presets`) already fall back to `"."` -- `init` now does
+    too.
+
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
   gaps found reviewing the fix.** All under (#489):

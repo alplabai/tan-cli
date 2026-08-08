@@ -99,6 +99,50 @@ IOT_STARTER_SUPPORTED_SKU = "E1M-AEN801"
 #: the two representative SKUs the SDK catalog declares.
 _FAMILY_TREES = ("E1M-AEN801", "E1M-V2N101")
 
+#: `--som` values a family-split template's VENDORED `cores:`/`pins:`/`chips:`
+#: content is actually correct for, keyed by `_family_bucket`'s tree name.
+#: tan-cli#494 defect 2: `_family_bucket` used to be the ONLY gate -- it picks
+#: a vendored tree by prefix but never checks the exact SKU is one the tree's
+#: `board.yaml` was captured against, so `--som E1M-AEN301` (no Cortex-A32)
+#: silently inherited E1M-AEN801's `a32_cluster` core, and an unrecognised
+#: family (E1M-NX9101; `_family_bucket`'s own docstring) silently fell back to
+#: that same Alif tree. The Alif bucket has exactly one correct SKU; the
+#: Renesas bucket has four -- E1M-V2N101/102 and E1M-V2M101/102 are one PCB,
+#: variant-populated (memory/DEEPX population only), so they share one
+#: topology and one vendored tree correctly.
+_FAMILY_SUPPORTED_SKUS: dict[str, tuple[str, ...]] = {
+    _FAMILY_TREES[0]: (_FAMILY_TREES[0],),
+    _FAMILY_TREES[1]: ("E1M-V2N101", "E1M-V2N102", "E1M-V2M101", "E1M-V2M102"),
+}
+
+
+def family_supported_skus(sku: str) -> tuple[str, ...]:
+    """The `--som` values whose vendored `cores:`/`pins:`/`chips:` content
+    matches the tree `_family_bucket(sku)` would pick FOR `sku` -- i.e. the
+    set `sku` itself must be a member of for a family-split template to be
+    safe to render against it. Used both to VALIDATE (`sku in
+    family_supported_skus(sku)`) and to name the accepted alternatives in a
+    refusal message."""
+    return _FAMILY_SUPPORTED_SKUS[_family_bucket(sku)]
+
+
+def supported_skus_for(template_id: str, sku: str) -> tuple[str, ...] | None:
+    """The full set of `--som` values `template_id` may be safely rendered
+    against for THIS `sku`'s family, or `None` when `template_id` carries no
+    such restriction. `minimal-app` has no vendored tree and thus no fixed
+    topology to mismatch -- its single core comes from `app_core_for_sku(sku)`,
+    defined for every SKU. `iot-starter` keeps its own long-standing one-item
+    set (`IOT_STARTER_SUPPORTED_SKU`); every OTHER template is gated by
+    [`family_supported_skus`]. `None` also covers the case `sku` is already
+    valid -- the caller only needs this to BUILD a refusal message, and
+    checks membership separately first (see `init_cmd._plan_from_template`,
+    tan-cli#494 defect 2)."""
+    if template_id == "minimal-app":
+        return None
+    if template_id == "iot-starter":
+        return (IOT_STARTER_SUPPORTED_SKU,)
+    return family_supported_skus(sku)
+
 
 def _read_verbatim(path: Path) -> str:
     """Read `path` as UTF-8 text with newlines UNTRANSLATED.
@@ -968,30 +1012,65 @@ def _feature_file(unit_name: str, todo_line: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_build_output_dir(name: str) -> bool:
+    """True for a directory NAME alp-sdk's own `.gitignore` names as ad-hoc,
+    in-place build output (`build/`, `build_*/`, `cmake-build-*/`) -- never
+    checked in, but routinely present on a checkout an example was built from.
+    tan-cli#494 defect 1: `read_example_tree` used to `rglob` straight through
+    one of these, so `--from-example` hard-failed on the first non-UTF-8
+    artifact it walked into (a `.ninja_deps`, a `.a`), or -- where the tree
+    happened to be all-text -- silently copied hundreds of CMake/ninja/
+    generated files into the new project."""
+    return name == "build" or name.startswith(("build_", "cmake-build-"))
+
+
 def read_example_tree(source_dir: Path) -> list[PlannedFile]:
     """Read every regular file under `source_dir` verbatim as UTF-8 text, paths
     forward-slash normalised and sorted by that relative path (NOT by `Path` --
     see `_vendored_files` for why that ordering is platform-dependent).
 
+    Two exclusions `rglob("*")` does not apply on its own, both tan-cli#494:
+    a path with any [`_is_build_output_dir`] component is skipped outright
+    (see that function), and a FILE symlink is skipped too, matching the
+    frozen Rust oracle's `DirEntry::file_type()` (which reports a symlink's
+    own type, never the target's) -- `Path.is_file()` follows a symlink and
+    would otherwise inline an arbitrary target's bytes into the customer's
+    project under the in-project logical path. A directory symlink still
+    isn't traversed either way: `rglob` never descends into one.
+
     UTF-8 only, like the Rust: a binary-carrying example surfaces as an
-    `ExampleReadError` instead of being copied corrupt. All shipped examples are
+    `ExampleReadError` instead of being copied corrupt -- and, tan-cli#494
+    defect 4, NAMING THE FILE: `_read_verbatim` folds a `UnicodeDecodeError`
+    into an `OSError` with no path attached (its own docstring explains why),
+    so the read below is wrapped per-file rather than around the whole walk,
+    the one place that still has the path in hand. All shipped examples are
     text today.
     """
     if not source_dir.is_dir():
         raise ExampleReadError(f"'{source_dir}' is not a directory.", not_found=True)
     files: list[PlannedFile] = []
-    try:
-        for path in sorted(
-            (p for p in source_dir.rglob("*") if p.is_file()),
-            key=lambda p: p.relative_to(source_dir).as_posix(),
-        ):
-            files.append(
-                PlannedFile(path.relative_to(source_dir).as_posix(), _read_verbatim(path))
+    candidates = sorted(
+        (
+            p
+            for p in source_dir.rglob("*")
+            if p.is_file()
+            and not p.is_symlink()
+            and not any(
+                _is_build_output_dir(part)
+                for part in p.relative_to(source_dir).parts[:-1]
             )
-    except (OSError, UnicodeDecodeError) as err:
-        # UnicodeDecodeError is a ValueError, not an OSError -- catching only
-        # OSError would let a binary file in an example escape as a traceback.
-        raise ExampleReadError(str(err), not_found=False) from err
+        ),
+        key=lambda p: p.relative_to(source_dir).as_posix(),
+    )
+    for path in candidates:
+        try:
+            content = _read_verbatim(path)
+        except OSError as err:
+            # `_read_verbatim` already folds a `UnicodeDecodeError` into an
+            # `OSError` -- see its own docstring -- so this one except covers
+            # both a permission failure and a non-UTF-8 file.
+            raise ExampleReadError(f"{path}: {err}", not_found=False) from err
+        files.append(PlannedFile(path.relative_to(source_dir).as_posix(), content))
     return files
 
 

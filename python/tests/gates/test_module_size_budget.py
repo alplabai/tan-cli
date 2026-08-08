@@ -555,8 +555,34 @@ _MODULE_BUDGET: dict[str, int] = {
     # The call site now reads `atomic_write_text(launch_json_path, plan.content)`
     # directly; nothing here duplicates the durability sequence any more.
     "tan/commands/debug_config_cmd.py": 1542,
-    "tan/planner/template.py": 1199,
-    "tan/core/scaffold.py": 1106,
+    # 1243, not 1199, as of tan-cli#494 defect 6: `_safe_catalog_join` (plus
+    # its call sites in `_rendered_bytes`/`render_to_envelope`) closes the
+    # catalog-driven arbitrary-file-READ gap `test_planner_relocation_
+    # freshness.py`'s own `HAND_PORT_HASHES` comment already named --
+    # `scripts/alp_template.py` gained the identical `_safe_join` upstream
+    # (alp-sdk#1126) and this hand-port never picked it up. Growth is almost
+    # entirely the docstring explaining the threat model (a hostile/tampered
+    # catalog, not a hostile customer input) and reusing
+    # `tan.core.fs_confine.resolve_confined` rather than a third hand-rolled
+    # resolver.
+    # 1259, not 1243, as of tan-cli#494 defect 9: `_derive_pin_doc_renames`
+    # gains the same ambiguity-collision guard its two siblings
+    # (`_derive_pin_renames`/`_derive_pin_macro_renames`) already raise --
+    # two `pins:` entries sharing one `doc:` string but resolving to
+    # different targets used to collapse silently onto whichever resolved
+    # last.
+    "tan/planner/template.py": 1259,
+    # 1185, not 1106, as of tan-cli#494 defects 1/2/4: `_is_build_output_dir`
+    # (a `.gitignore`-shaped exclusion so `--from-example` on a built example
+    # tree no longer walks into `build/`) plus `read_example_tree`'s
+    # per-file try/except (naming the actual unreadable path, defect 4,
+    # instead of a bare codec error) account for most of it; the rest is
+    # `family_supported_skus`/`supported_skus_for` (defect 2), gating every
+    # family-split template's `--som` the same way `iot-starter` already
+    # gated its own, so a SKU outside the vendored tree's topology is refused
+    # up front instead of silently inheriting the wrong `cores:`/`pins:`/
+    # `chips:` block.
+    "tan/core/scaffold.py": 1185,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one
@@ -683,7 +709,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # filter, and the returned `--preview`/`--force` message), +14 lines,
     # single cause -- the `init.would-overwrite` call site itself stayed the
     # same length, swapping a literal string for a call.
-    "tan/commands/init_cmd.py": 1023,
+    # 1044, not 1023, as of tan-cli#494: `_cwd_or_dot` (defect 10 -- a removed
+    # cwd used to escape `init` as `init.internal-failure` where every sibling
+    # command's identical `Path.cwd()` call already falls back to `"."`) plus
+    # `_plan_from_template`'s `supported_skus_for` gate (defect 2, described
+    # beside `tan/core/scaffold.py`'s own entry above).
+    "tan/commands/init_cmd.py": 1044,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
@@ -1038,7 +1069,10 @@ _MIRRORED = ("tan/planner/",)
 #
 # 214 on the merged tree, MEASURED by AST walk over all of `tan/` including
 # `tan/planner/` -- #496 contributes one crossing that dev's 213 does not.
-_FUNCTION_COUNT_BUDGET = 214
+# 215, not 214, as of tan-cli#494 defect 9: `template.py:_derive_pin_doc_
+# renames` crossed 50 lines (44 -> 54) picking up the same ambiguity-
+# collision guard its two siblings already have.
+_FUNCTION_COUNT_BUDGET = 215
 _FUNCTION_WORST_BUDGET = 707
 
 

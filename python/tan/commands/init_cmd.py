@@ -100,7 +100,6 @@ from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
-    IOT_STARTER_SUPPORTED_SKU,
     TEMPLATE_IDS,
     CoresError,
     ExampleReadError,
@@ -118,6 +117,7 @@ from tan.core.scaffold import (
     scaffold_tree_preview,
     sdk_pointer_json,
     splice_companion_cores,
+    supported_skus_for,
     vendored_app_core_key,
     vendored_core_ids,
     write_files,
@@ -333,6 +333,18 @@ def _resolve_name(name: str | None) -> str:
     )
 
 
+def _cwd_or_dot() -> Path:
+    """`Path.cwd()`, falling back to `"."` on a removed cwd (tan-cli#494 defect
+    10) -- unguarded, this used to escape as `init.internal-failure` (exit 5,
+    no preview) where the oracle and this port's own `clean_cmd.
+    _cli_workspace_root` / `presets_cmd.resolve_project_paths` fall back to
+    `"."` (`current_dir().unwrap_or_else(|_| PathBuf::from("."))`)."""
+    try:
+        return Path.cwd()
+    except OSError:
+        return Path(".")
+
+
 def _join_display(dest: str, name: str) -> str:
     """Mirror `PathBuf::from(dest).join(name)`'s `.display()` text
     (`from_example.rs:70-74`): literal string concatenation with the native
@@ -457,14 +469,23 @@ def _plan_from_template(
 ) -> tuple[str, list[PlannedFile]]:
     template_id = _resolve_template(template)
     sku = som or DEFAULT_SOM_SKU
-    # Checked BEFORE anything is planned: `iot-starter` vendors exactly one SoM
-    # family (its Wi-Fi transport is silicon-validated on that SKU alone), so
-    # any other `--som` must be refused, never quietly rendered against it.
-    if template_id == "iot-starter" and sku != IOT_STARTER_SUPPORTED_SKU:
+    # Checked BEFORE anything is planned. `iot-starter` vendors exactly one SoM
+    # family (its Wi-Fi transport is silicon-validated on that SKU alone); every
+    # OTHER family-split template vendors a `cores:`/`pins:`/`chips:` block that
+    # is only correct for the SKUs its tree was captured against
+    # (`supported_skus_for`) -- tan-cli#494 defect 2. Both refuse the same way,
+    # rather than quietly rendering hardware content the requested SKU does not
+    # have (a customer's very next command, `tan validate`, is where the
+    # mismatch used to actually surface).
+    supported = supported_skus_for(template_id, sku)
+    if supported is not None and sku not in supported:
         raise InitError(
             "init.invalid-som",
-            f"Template 'iot-starter' supports only SoM SKU "
-            f"'{IOT_STARTER_SUPPORTED_SKU}'; got '{sku}'.",
+            f"Template '{template_id}' has no vendored scaffold for SoM SKU "
+            f"'{sku}' -- its cores:/pins:/chips: content is only valid for: "
+            f"{', '.join(supported)}. Use one of those, or --template "
+            "minimal-app, which derives its single core from any SKU instead "
+            "of vendoring a fixed hardware block.",
             ExitCode.VALIDATION_FAILURE,
         )
     try:
@@ -917,7 +938,7 @@ def init(
         project_root = Path(dest) / resolved_name if resolved_name else Path(dest)
         project_root_display = _join_display(dest, resolved_name)
 
-        workspace_root = Path(os.path.abspath(project)) if project else Path.cwd()
+        workspace_root = Path(os.path.abspath(project)) if project else _cwd_or_dot()
         resolved_sdk = _resolve_sdk_root(sdk_root, workspace_root)
         # tan-cli#407, and this is the command where it matters most: `init`
         # does not merely resolve an SDK, it WRITES the answer to

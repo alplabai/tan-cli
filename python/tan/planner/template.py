@@ -54,6 +54,8 @@ from typing import Any
 
 import yaml
 
+from tan.core.fs_confine import PathEscapeError, resolve_confined
+
 from .paths import METADATA_ROOT, REPO
 
 __all__ = [
@@ -194,6 +196,39 @@ def _substitutions_for(
     return per_file
 
 
+def _safe_catalog_join(root: Path, rel: str) -> Path:
+    """Join `rel` onto `root`, refusing anything that would resolve OUTSIDE
+    it -- an absolute `rel` (`Path.__truediv__` lets that replace the root
+    outright) or a `..` that walks back out.
+
+    tan-cli#494 defect 6. `record["example"]` and every `files.user_owned`
+    entry are read live out of a caller-supplied SDK checkout's
+    `metadata/templates/catalog-v1.json`, which `load_catalog` never
+    schema-validates (so the schema's own path-shape patterns are not
+    actually enforced here) -- normally tan's own trusted data, but this is
+    the one code path that reads a CALLER-supplied catalog. Without this
+    guard, a tampered catalog (`"example": "../outside"`, a `files.
+    user_owned` entry of `"../../../../outside/secret.txt"`, or an absolute
+    `"/etc/hostname"`) makes `_rendered_bytes`/`render_to_envelope` read an
+    arbitrary file the `tan` process can see and hand its bytes back in the
+    `--emit scaffold` `[{path, contents}]` envelope on stdout -- an arbitrary
+    file DISCLOSURE, the read-side twin of the arbitrary-WRITE alp-sdk closed
+    in `scripts/alp_template.py` with its own `_safe_join` (cb7f64ae,
+    alp-sdk#1126); this port never picked that fix up (see
+    `test_planner_relocation_freshness.py`'s own `HAND_PORT_HASHES` comment,
+    which names this exact gap). Reuses `tan.core.fs_confine.resolve_confined`
+    -- the one containment guard every catalog-driven WRITE in this package
+    already trusts -- rather than a second, hand-rolled resolver."""
+    try:
+        return resolve_confined(root, root / rel)
+    except PathEscapeError as err:
+        raise TemplateError(
+            f"catalog path {rel!r} resolves outside {root.resolve()} -- "
+            f"refusing to read it") from err
+    except (OSError, ValueError) as err:
+        raise TemplateError(f"catalog path {rel!r} is not readable: {err}") from err
+
+
 def _rendered_bytes(
     template_id: str,
     record: dict[str, Any],
@@ -206,12 +241,17 @@ def _rendered_bytes(
     same order. Shared by render()'s disk-write loop and
     render_to_envelope()'s in-memory capture -- the same bytes a
     customer gets from `alp_template.py render` are what `--emit
-    scaffold` hands back as JSON `contents` (see the module docstring)."""
-    example = base_dir / record["example"]
+    scaffold` hands back as JSON `contents` (see the module docstring).
+
+    Both joins go through [`_safe_catalog_join`] (tan-cli#494 defect 6):
+    `record["example"]` names a directory relative to `base_dir`, and each
+    `rel` (a `files.user_owned` catalog entry) names a file relative to
+    THAT resolved, already-confined directory."""
+    example = _safe_catalog_join(base_dir, record["example"])
     file_subs = _substitutions_for(record, resolved)
     out: list[tuple[str, bytes]] = []
     for rel in files:
-        data = (example / rel).read_bytes()
+        data = _safe_catalog_join(example, rel).read_bytes()
         subs = file_subs.get(rel)
         if subs:
             text = data.decode("utf-8")
@@ -570,7 +610,19 @@ def _derive_pin_doc_renames(
     loader already falls back to the resolved board's own `doc:` in
     that case (metadata/schemas/board.schema.json), so dropping it is
     safe, not a silent content gap. An entry without its own `doc:`
-    at all contributes nothing (nothing to re-derive)."""
+    at all contributes nothing (nothing to re-derive).
+
+    Same ambiguity-collision guard `_derive_pin_renames`/`_derive_pin_
+    macro_renames` both already raise (tan-cli#494 defect 9): this map
+    is keyed by doc TEXT rather than by pad, so two `pins:` entries
+    that happen to share one `doc:` string but resolve to two DIFFERENT
+    target routes used to collapse onto whichever resolved last, and
+    `_substitute_board_yaml_pin_docs`'s replace-ALL `subn` then stamped
+    that single doc onto BOTH entries -- one pad shipping documented
+    with the other pad's electricals. Latent against every catalog
+    board.yaml today (no two pins share a `doc:`), but the sibling
+    functions raise on this exact shape rather than trust it stays
+    that way, and this one silently didn't."""
     renames: dict[str, str | None] = {}
     for item in original_pins:
         if not isinstance(item, dict):
@@ -582,11 +634,15 @@ def _derive_pin_doc_renames(
         if target is None:
             continue
         new_doc = target.get("doc")
-        if isinstance(new_doc, str):
-            if new_doc != old_doc:
-                renames[old_doc] = new_doc
-        else:
-            renames[old_doc] = None
+        resolved: str | None = new_doc if isinstance(new_doc, str) else None
+        if resolved == old_doc:
+            continue
+        if old_doc in renames and renames[old_doc] != resolved:
+            raise TemplateError(
+                f"doc {old_doc!r} re-derives to two different targets "
+                f"({renames[old_doc]!r} and {resolved!r}) across "
+                f"`pins:` entries for sku {sku!r} -- ambiguous")
+        renames[old_doc] = resolved
     return renames
 
 
@@ -1088,7 +1144,11 @@ def render_to_envelope(
     metadata_root = metadata_root or METADATA_ROOT
     preset = _default_preset_for_sku(sku, metadata_root)
 
-    board_yaml_text = (base / record["example"] / "board.yaml").read_text(encoding="utf-8")
+    # `_safe_catalog_join`, not a raw `/` -- see its own docstring
+    # (tan-cli#494 defect 6): `record["example"]` is catalog-controlled.
+    board_yaml_text = (_safe_catalog_join(base, record["example"]) / "board.yaml").read_text(
+        encoding="utf-8"
+    )
     example_doc = yaml.safe_load(board_yaml_text) or {}
     original_core_ids = list((example_doc.get("cores") or {}).keys())
     example_sku = (example_doc.get("som") or {}).get("sku", "")
