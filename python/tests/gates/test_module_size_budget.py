@@ -132,7 +132,57 @@ _MODULE_BUDGET: dict[str, int] = {
     # block for the constant this module no longer defines (only imports)
     # is gone, not merely moved, so the net measures out to exactly the
     # pre-existing count.
-    "tan/commands/doctor_cmd.py": 3289,
+    # 3531, not 3289, as of tan-cli#488 (the eight wrong-verdict defects):
+    # `probe_status` (spawn-vs-parse split, `west_resolved_check`'s new `ran`
+    # arm), `_is_own_git_checkout` (the nested-git-repo guard for
+    # `_git_short_commit`/`_git_behind_upstream`), `_module_importable` (asks
+    # the workspace venv's interpreter, not tan's own, for `fdt`), the
+    # `schemaVersion`-first read and the host-keyed (not `windows`-bool-keyed)
+    # tool list in `_load_manifest`/`_collect`, `zephyr_python_floor`'s
+    # three-way fallback split, and the bare-PATH-re-probe fix for `west` --
+    # each earns its own paragraph of "why", which is most of the growth; the
+    # `doctor()` prologue also grew by one `try:` level (the whole
+    # `cwd = Path.cwd()`-onward body, not just `_collect`, now reports
+    # `doctor.internal-failure` instead of a raw traceback on a deleted
+    # working directory) plus five pre-try defaults for the names its
+    # exception handler and final `emit()` read.
+    # 3575, not 3531, as of tan-cli#488 ROUND 2 (the six remaining findings a
+    # first pass reported fixed but left half-done): `west_check` gained a
+    # `resolved_ran` parameter and a new branch (a resolved-but-unspawnable
+    # west can no longer report `pass`, closing the one branch defect 1's own
+    # `ran` fix did not touch), the `schemaVersion`-mismatch message dropped
+    # its trailing period (it is always read back through a string that
+    # supplies its own), and `sys.stdin.isatty()` gained an `is not None`
+    # guard alongside the existing `sys.stderr` one.
+    # 3588, not 3575, as of tan-cli#488 ROUND 3: round 2's `is not None` guard
+    # landed only inside `fix_suppressed_issue`'s own local duplicate of the
+    # tty check, one call AFTER `doctor()`'s `fix_allowed = fix and
+    # can_prompt(...)` had already crashed on the same `None` `sys.stdin` --
+    # the real fix moved into `can_prompt` itself (`tan.core.consent`, not
+    # counted here), and `fix_suppressed_issue`'s docstring grew a correction
+    # explaining why its own copy of the guard stays (per-condition reporting)
+    # even though the crash it originally cited is now closed one call site
+    # earlier.
+    # 3600, not 3588, as of tan-cli#488 ROUND 5: rounds 3/4 guarded
+    # `sys.stdin` in `fix_suppressed_issue`'s local tty check but left the
+    # NEXT operand of the same `and` chain, `sys.stderr`, unguarded -- a live
+    # non-tty stdin with a detached stderr still raised the identical
+    # `AttributeError`. `fix_suppressed_issue` gained the matching
+    # `sys.stderr is not None` guard plus a docstring paragraph explaining the
+    # recurrence.
+    # 3612, not 3600, as of tan-cli#488 ROUND 6: rounds 3-5's `is not None`
+    # guards stopped a detached (`None`) `sys.stdin`/`sys.stderr` from
+    # crashing `fix_suppressed_issue`'s local tty check, but not a handle
+    # that EXISTS and simply has no `.isatty()` -- exactly what `sys.stderr`
+    # is under `--format json` (`tan.cli.main`'s `_TeeStderr`). The local
+    # `sys.stdin is not None and sys.stdin.isatty() and sys.stderr is not
+    # None and sys.stderr.isatty()` check is now `stdin_is_tty() and
+    # stderr_is_tty()` (imported from `tan.env`, the shared probe tan-cli#288
+    # already built for this exact class), plus a docstring paragraph
+    # recording the recurrence and why this copy was never itself observed
+    # to crash (its own `not json_mode` guard in front) even though the
+    # sibling copy in `build_cmd._dispatch` did.
+    "tan/commands/doctor_cmd.py": 3612,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -476,6 +526,46 @@ _MODULE_BUDGET: dict[str, int] = {
     # failed/cancelled slice (never folded into `reason` -- see both
     # functions' own docstrings).
     "tan/commands/build_cmd.py": 1732,
+    # 1720, not 1703, as of tan-cli#488 defect 8: `build()`'s resolution
+    # prologue (`Path.cwd()` through `Project.resolved(...)`) moved inside a
+    # `try`, with pre-try safe defaults for every name the exception handler
+    # and the final `emit()` read -- mirroring `doctor_cmd.doctor`'s identical
+    # fix for the same defect class -- so a raise anywhere in it produces the
+    # `build.internal-failure` envelope instead of a raw traceback.
+    # 1732, not 1720, as of tan-cli#488 round 5 class sweep: `_dispatch`'s
+    # `_Heartbeat(enabled=...)` read a bare `sys.stderr.isatty()`, the exact
+    # unguarded shape `tan.core.consent.can_prompt` was fixed for -- a
+    # detached-stdio `tan build`/`tan run` raised the same `AttributeError`
+    # arming the heartbeat, before a single slice ever dispatched. Gained a
+    # `sys.stderr is not None` guard plus a docstring paragraph.
+    # 1754, not 1732, as of tan-cli#488 ROUND 6: round 5's `sys.stderr is not
+    # None` guard stopped a detached (`None`) stderr from crashing this line,
+    # but not a stderr that EXISTS and simply has no `.isatty()` -- exactly
+    # what `sys.stderr` is under `--format json` (`tan.cli.main`'s
+    # `_TeeStderr`). Measured against the real binary: `tan run --format
+    # json --sdk-root <sdk>` from a real project crashed with `AttributeError:
+    # '_TeeStderr' object has no attribute 'isatty'` (exit 5,
+    # `run.internal-failure`) before a single slice dispatched, on every run
+    # -- `run_cmd._run` calls `_build` with no `json_mode` of its own, so
+    # `_dispatch` always saw the `json_mode=False` default and never
+    # short-circuited past this line. `enabled=not json_mode and sys.stderr
+    # is not None and sys.stderr.isatty()` is now `enabled=not json_mode and
+    # stderr_is_tty()`, importing the shared probe `tan.env` already built
+    # for this exact class (tan-cli#288) instead of a fourth hand-rolled
+    # copy, which also collapses back onto one line under the 100-column
+    # limit. Also corrects six stale `run_cmd._build_then_run` docstring/
+    # comment references (a name that was never real in `run_cmd.py`, which
+    # has only ever defined `_run`) to the actual name while editing the
+    # same paragraphs, and two `run_cmd.py:258` line citations that pointed
+    # at `_run`'s docstring line rather than its actual `_build(` call site
+    # (`run_cmd.py:267`). Net growth is almost entirely the docstring
+    # recording the round-6 recurrence and the residual `json_mode`-
+    # threading gap this round deliberately still leaves open.
+    # 1783 on the merged tree, MEASURED with `wc -l`: both sides grew this file
+    # -- tan-cli#530's resolver on `dev` and #488's doctor/consent guards here --
+    # and the auto-merge kept only one side's number.
+    "tan/commands/build_cmd.py": 1783,
+
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
@@ -607,60 +697,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # "record-shaped" line makes stderr not a tty, which already returns
     # `None` and skips wrapping wholesale.
     "tan/commands/sdk_cmd.py": 1274,
-    "tan/commands/validate_cmd.py": 1093,
+    # 1122, not 1093, as of tan-cli#488 defect 8: `validate()`'s whole body
+    # (from the SDK-root ladder through the final `_emit(...)`) moved inside a
+    # `try`/`except typer.Exit: raise`/`except Exception`, so the identical
+    # unguarded-prologue shape `build_cmd.build` already had (`os.path.abspath`
+    # calling `os.getcwd()` on a deleted cwd) now also produces a
+    # `validate.internal-failure` envelope instead of a raw traceback.
+    "tan/commands/validate_cmd.py": 1122,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
     # resolved, the same cost `project_pin_issue` above already justified.
-    # 1091, not 1057, as of tan-cli#496: the write-failure rollback loop now
-    # walks a deduplicated LIST (not a `set` -- the PYTHONHASHSEED-dependent
-    # iteration order that non-deterministically left a half-written preset
-    # on disk) and guards each `unlink()` individually, so a second `OSError`
-    # during cleanup is collected and reported instead of escaping uncaught
-    # with zero bytes on stdout in either output mode.
-    # 1250, not 1091, closing the five remaining tan-cli#496 defects that
-    # PR's own fix left open: (1) `_yaml_scalar` -- both `default_hw_rev`
-    # and `default_board` now render through PyYAML's own emitter instead
-    # of raw f-string splicing, closing the YAML-injection hole a multi-line
-    # `--default-hw-rev` used to open (defect 3); (2) `default_hw_rev` is
-    # now pattern-checked by this command itself, before render, so a bad
-    # value on a brand-new family is `new-som.failed` rather than
-    # `new-som.internal-failure` (defect 5); (3) a `--cores` duplicate is
-    # now refused up front instead of landing as a duplicate YAML/JSON key
-    # in both skeletons (defect 4); (4) `_rollback_write_failure` replaces
-    # the inline cleanup loop -- it RESTORES a pre-existing `--force`
-    # preset's original bytes instead of deleting it (defect 2), and only
-    # ever reports a path as an undoable cleanup failure when that path
-    # PHYSICALLY EXISTS, closing the finding against this file's own
-    # earlier fix (a target this run never reached disk for was reported
-    # "may be half-written"); (5) every `click.prompt` call in
-    # `_interactive` is now `err=True` (defect 6); (6) the bare
-    # `sys.stdin.isatty()` at the top-level input-gathering step now guards
-    # `sys.stdin is None` first (a console-less launcher raises
-    # `AttributeError` there otherwise).
-    # 1342, not 1250, closing the tan-cli#496 round-2 review's remaining
-    # findings against that same PR's own fix: (blocker 1+2) `_yaml_scalar`
-    # now calls `yaml.safe_dump(value, width=float("inf"))` instead of
-    # PyYAML's default 80-column fold -- the old width silently truncated
-    # any `--default-board`/`--default-hw-rev` past 80 columns into the
-    # generated preset (reported as success) and, longer still, could land
-    # the cut inside an emitted quoted scalar, corrupting `preset_text` into
-    # invalid YAML; (blocker 3) `_rollback_write_failure` gates the preset
-    # branch on a new `preset_write_attempted` flag the caller sets before
-    # the write starts, not on membership in `written` (appended only AFTER
-    # a successful `write_text`) -- a write that fails PARTWAY (ENOSPC/
-    # EDQUOT/EFBIG/EIO) left a partially-written file `written` never knew
-    # about, unrolled-back; (major 1) the top-level "no real terminal" gate
-    # now checks `sys.stderr.isatty()` too, not only `sys.stdin` -- every
-    # `_interactive` prompt rides stderr (defect 6), so a redirected stderr
-    # with a real stdin terminal used to block on a question nobody could
-    # see; (major 2) `yaml.safe_load(preset_text)` is now guarded (a
-    # `yaml.YAMLError` routes through `fail()` instead of an unhandled
-    # traceback), and the new shared `_has_control_char` helper rejects DEL
-    # (0x7F) alongside the C0 range at every call site, closing the one
-    # value shape (a raw DEL byte in `--display-name`) that used to reach
-    # that unguarded parse and crash it.
-    "tan/commands/new_som_cmd.py": 1342,
+    "tan/commands/new_som_cmd.py": 1341,
+
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
@@ -980,6 +1029,31 @@ _MIRRORED = ("tan/planner/",)
 # the former. Re-walked with the gate's own `ast` logic (span > 50 over all
 # of `tan/`, planner included) against this exact tree.
 #
+# 214, not 211, as of tan-cli#488: three NEW functions crossed 50 lines --
+# `doctor_cmd.py:zephyr_python_floor` (28 -> 59, the three-way fallback
+# split), `doctor_cmd.py:_load_manifest` (48 -> 80, the `schemaVersion`-first
+# read), and `doctor_cmd.py:west_resolved_check` (50 -> 81, the `ran` arm).
+# `doctor` (269 -> 286) and `_collect` (343 -> 380) both grew too, but were
+# already over the cap, so neither moves this count. `_FUNCTION_WORST_BUDGET`
+# is untouched -- 380 lines is nowhere near 707.
+#
+# 215, not 214, as of tan-cli#488 ROUND 2: `doctor_cmd.py:fix_suppressed_issue`
+# crossed 50 lines with its `sys.stdin is not None` guard and the docstring
+# paragraph explaining it (defect 6). `west_check` (already over the cap)
+# grew further with the `resolved_ran` branch (defect 3) but does not move
+# this count. `_FUNCTION_WORST_BUDGET` is untouched -- nothing here is close
+# to 707.
+#
+# 216, not 215, as of tan-cli#488 ROUND 6: `tan/core/consent.py:can_prompt`
+# crossed 50 lines (45 -> 60) with the docstring paragraph explaining why
+# `is not None` was never the whole guard -- a stream that EXISTS but lacks
+# `.isatty()` (`_TeeStderr` under `--format json`) still crashes it, the
+# same class `build_cmd._dispatch` and `doctor_cmd.fix_suppressed_issue`
+# were fixed for in this same round. `fix_suppressed_issue` (76 -> 88) and
+# `_dispatch` (186 -> 209) both grew too, but were already over the cap, so
+# neither moves this count. `_FUNCTION_WORST_BUDGET` is untouched --
+# measured (AST walk, all of `tan/` including `tan/planner/`) at 701 lines
+# worst (`bootstrap_cmd.py:_run`), under the 707 ceiling.
 # 212, not 211, as of tan-cli#516 (first pass): the new shared `tan/core/
 # atomic_write.py:atomic_write_text` (54 lines, docstring included) was a
 # genuinely NEW function over the cap -- `reconcile_west_manifest_path`'s own
@@ -1036,9 +1110,16 @@ _MIRRORED = ("tan/planner/",)
 # tan-cli#530 (#510's resolver) added two -- so dev's figure carries, not #516's
 # pre-merge 211.
 #
+# 218 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- neither side's figure; #488's doctor/consent work and dev's
+# tan-cli#530 resolver both add crossings.
 # 214 on the merged tree, MEASURED by AST walk over all of `tan/` including
 # `tan/planner/` -- #496 contributes one crossing that dev's 213 does not.
-_FUNCTION_COUNT_BUDGET = 214
+#
+# 219 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- neither #488's 218 nor dev's 214: the two branches' crossings
+# are disjoint and `new_som_cmd.py`'s gate resolution adds none of its own.
+_FUNCTION_COUNT_BUDGET = 219
 _FUNCTION_WORST_BUDGET = 707
 
 

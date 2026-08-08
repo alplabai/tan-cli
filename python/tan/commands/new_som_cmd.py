@@ -112,6 +112,7 @@ from tan.commands.sdk_cmd import (
     project_pin_issue,
     resolve_sdk_tiered,
 )
+from tan.env import stderr_is_tty, stdin_is_tty
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -948,29 +949,27 @@ def new_som(
             if value is None
         ]
         # `sys.stdin`/`sys.stderr` are bare references, not guaranteed
-        # streams: either is `None` under a console-less launcher (e.g. a
-        # frozen build run without a console, or any host that closes
-        # standard streams instead of redirecting them to `os.devnull`),
-        # and `None.isatty()` is an `AttributeError` -- an unhandled
-        # traceback instead of this command's own coded refusal, in
-        # exactly the "no real terminal" case this check exists to name
-        # cleanly.
+        # streams. Two distinct failures, and a guard has to cover both:
+        # either can be `None` under a console-less launcher, and either can
+        # be an object that EXISTS but has no `.isatty()` -- `cli.py`'s own
+        # `_TeeStderr` under `--format json` is exactly that shape. A
+        # hand-rolled `X is None or not X.isatty()` catches the first and
+        # raises `AttributeError` on the second.
         #
         # tan-cli#496 round-2 major 1: BOTH streams are checked, not only
         # `stdin`. `_interactive`'s prompts are `err=True` (defect 6 above)
         # -- the question rides stderr, the answer rides stdin -- so a
         # redirected/piped stderr with a real stdin terminal has no way to
         # show the human the question, and the old stdin-only gate admitted
-        # exactly that shape, blocking on a prompt nobody could see. This
-        # mirrors `tan.core.consent.can_prompt`'s own "a prompt is a
-        # question-and-answer pair; each half needs its own real terminal"
-        # rule.
-        if (
-            sys.stdin is None
-            or not sys.stdin.isatty()
-            or sys.stderr is None
-            or not sys.stderr.isatty()
-        ):
+        # exactly that shape, blocking on a prompt nobody could see.
+        #
+        # tan-cli#488 round 5: both operands route through
+        # `tan.env.stdin_is_tty`/`stderr_is_tty` -- the one shared probe
+        # (tan-cli#288) that catches `AttributeError` (replaced stream) and
+        # `ValueError` (closed stream) alike -- rather than repeating the
+        # hand-rolled shape a sixth time. `tan.core.consent.can_prompt`
+        # carries the same pair for the same reason.
+        if not (stdin_is_tty() and stderr_is_tty()):
             fail(
                 "stdin or stderr is not a terminal, so interactive prompts "
                 "are unavailable; pass the missing required flag(s): "

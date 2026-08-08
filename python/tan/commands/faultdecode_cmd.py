@@ -241,13 +241,33 @@ def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
     IMPLICIT read, and the caller passes `False` once any fault register was
     supplied as a flag -- there is nothing left for a dump to contribute, so
     there is no reason to wait on a pipe for one (tan-cli#388).
+
+    tan-cli#488 round 5 class sweep: `sys.stdin` itself, not just the result
+    of calling `.isatty()` on it, can be `None` -- a process launched with
+    its standard handles detached (a GUI launcher, a `pythonw`-style spawn,
+    or a shell that closed fd 0 before exec). `--file -` names stdin
+    explicitly, so a detached stdin there is refused with a clear message
+    rather than a raw `AttributeError`; the IMPLICIT auto-consume path below
+    treats a detached stdin the same as one that offers nothing (`""`) -- it
+    was already never blocking on a stdin that has no answer to give.
     """
     if file_ == "-":
+        if sys.stdin is None:
+            raise typer.BadParameter(
+                "stdin is detached (no standard input handle for this process), "
+                "so `--file -` cannot read a dump from it",
+                param_hint="--file",
+            )
         return sys.stdin.read()
     if file_ is not None:
         return Path(file_).read_text(encoding="utf-8", errors="ignore")
     # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works.
-    if not auto_consume_stdin or sys.stdin.isatty() or not _stdin_offers_input():
+    if (
+        not auto_consume_stdin
+        or sys.stdin is None
+        or sys.stdin.isatty()
+        or not _stdin_offers_input()
+    ):
         return ""
     if _PREREAD_STDIN:
         # The readiness check had to consume stdin to answer (Windows, or a

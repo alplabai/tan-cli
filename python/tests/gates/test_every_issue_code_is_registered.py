@@ -861,13 +861,32 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `_KNOWN_CODE_FORWARDS` entry above rather than by this count -- the
         # count moves anyway, because what it pins is how many `Check(...)`
         # sites exist, not how many of them this spec classifies.
+        #
+        # 57 as of tan-cli#488 defect 1: `west_resolved_check` grew a new
+        # `not ran` return -- a `west` that resolves but cannot be executed.
+        # It passes no `code=` override, so it is NOT skipped -- but its
+        # literal name is still `"westResolved"`, the SAME name the existing
+        # `found is None` arm already uses, so `doctor.west-resolved` needs no
+        # new registry entry. The count moves because one more `Check(...)`
+        # call site exists now (3 -> 4 in that function), not because a new
+        # code exists.
+        #
+        # 58 as of tan-cli#488 ROUND 2, defect 3: `west_check` grew a new
+        # `resolved is not None and not resolved_ran` return -- the sibling of
+        # the `west_resolved_check` case above, for a `west` that resolves
+        # through the workspace venv but cannot actually be spawned. It passes
+        # no `code=` override either, and its literal name is still `"west"`,
+        # the SAME name every other arm of this function already uses, so
+        # `doctor.west` needs no new registry entry. The count moves because
+        # one more `Check(...)` call site exists now, not because a new code
+        # exists.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=56,
+        expected_calls=58,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
