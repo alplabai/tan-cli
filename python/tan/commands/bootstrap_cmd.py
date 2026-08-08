@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1263,6 +1264,41 @@ def _list_entries(parent: Path) -> list[str] | None:
         return None
 
 
+def _target_west_config_names_checkout(target: Path, checkout_name: str) -> bool:
+    """Whether `target`'s OWN `.west/config` (if any) verifiably names THIS
+    checkout as its manifest repo -- the guard that makes the "resumable
+    half-built workspace" exemption below safe.
+
+    `west init -l <checkout>` forces the topdir to be the checkout's own
+    PARENT and writes `[manifest] path = <checkout's own directory name>` --
+    a single path COMPONENT, since the checkout sits directly under the
+    topdir. That is true whether `target` IS the checkout's current parent
+    (the ordinary case) or `target` is a relocation destination the checkout
+    has not been moved into yet: either way, the manifest names the checkout
+    by NAME, not by a path resolved against the checkout's current, possibly
+    already-rolled-back, location. Comparing `target / rel` against the
+    checkout's CURRENT absolute path (`_manifest_points_at`, used everywhere
+    else in this module) is therefore the WRONG check here -- on the exact
+    retry-after-rollback case this exemption exists for, the checkout has
+    already been moved back to its original parent by the time this runs, so
+    `target / rel` would never equal it even for tan's own leftover `.west`.
+    Comparing by NAME instead matches regardless of which side of a
+    relocation the checkout currently sits on, and still refuses an
+    UNRELATED west workspace previously initialised at `target` (a different
+    SDK, a different customer project) the moment its manifest names a
+    different checkout, which is the realistic shape a foreign `.west` here
+    takes.
+    """
+    config = _read_text(target / ".west" / "config")
+    if config is None:
+        return False
+    rel = get_manifest_path(config)
+    if rel is None:
+        return False
+    name = re.split(r"[\\/]", rel.strip())[-1] if rel.strip() else ""
+    return name == checkout_name
+
+
 def _relocation_target_occupied(target: Path, checkout_name: str, venv_dir_name: str) -> bool:
     """Whether `target` -- the directory an auto- or explicit relocation is
     about to move the checkout INTO -- already holds content that should
@@ -1286,11 +1322,25 @@ def _relocation_target_occupied(target: Path, checkout_name: str, venv_dir_name:
     at THIS location) is exempt too: `west_phase`'s "already initialised"
     branch exists precisely to resume that, not to be refused before it ever
     gets the chance.
+
+    That `.west` exemption must not fire on JUST any `.west/config` at
+    `target`, though -- an UNRELATED west workspace previously initialised
+    there (a different SDK, a different customer project that happened to
+    reuse this same default `alp-workspace` name) is exactly the "content of
+    its own" the guard exists to protect, and moving THIS checkout's git
+    directory into it is irreversible from the customer's point of view. The
+    first cut of this fix fed a bare `_is_file(target / ".west" / "config")`
+    into `parent_needs_workspace_guard`, which only asks "does a config file
+    exist", not "whose workspace is it" -- so it exempted every foreign
+    workspace along with tan's own half-built one. `target`'s `.west/config`
+    is now also required to verifiably name `checkout_name`
+    ([`_target_west_config_names_checkout`]) before it counts as "resumable,
+    not foreign".
     """
     entries = _list_entries(target)
     if entries is None:
         return False
-    dot_west_is_workspace = _is_file(target / ".west" / "config")
+    dot_west_is_workspace = _target_west_config_names_checkout(target, checkout_name)
     return parent_needs_workspace_guard(
         entries, checkout_name, venv_dir_name, dot_west_is_workspace
     )

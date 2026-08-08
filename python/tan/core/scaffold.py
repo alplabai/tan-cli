@@ -100,30 +100,77 @@ IOT_STARTER_SUPPORTED_SKU = "E1M-AEN801"
 _FAMILY_TREES = ("E1M-AEN801", "E1M-V2N101")
 
 #: `--som` values a family-split template's VENDORED `cores:`/`pins:`/`chips:`
-#: content is actually correct for, keyed by `_family_bucket`'s tree name.
-#: tan-cli#494 defect 2: `_family_bucket` used to be the ONLY gate -- it picks
-#: a vendored tree by prefix but never checks the exact SKU is one the tree's
-#: `board.yaml` was captured against, so `--som E1M-AEN301` (no Cortex-A32)
-#: silently inherited E1M-AEN801's `a32_cluster` core, and an unrecognised
-#: family (E1M-NX9101; `_family_bucket`'s own docstring) silently fell back to
-#: that same Alif tree. The Alif bucket has exactly one correct SKU; the
-#: Renesas bucket has four -- E1M-V2N101/102 and E1M-V2M101/102 are one PCB,
-#: variant-populated (memory/DEEPX population only), so they share one
-#: topology and one vendored tree correctly.
+#: content is DOCUMENTED-safe for, keyed by `_family_bucket`'s tree name --
+#: consulted only for a template/family combo whose tree needs it at all
+#: (see [`_tree_extra_core_ids`]/[`family_supported_skus`] below). The Alif
+#: bucket has exactly one SKU documented with the Cortex-A32 cluster
+#: (`a32_cluster`) `edge-ai-starter`'s Alif tree pre-declares; the Renesas
+#: bucket's four SKUs all share the SAME PCB and silicon variant (memory/
+#: DEEPX population only) and therefore all genuinely carry the
+#: `a55_cluster` its Renesas tree pre-declares.
 _FAMILY_SUPPORTED_SKUS: dict[str, tuple[str, ...]] = {
     _FAMILY_TREES[0]: (_FAMILY_TREES[0],),
     _FAMILY_TREES[1]: ("E1M-V2N101", "E1M-V2N102", "E1M-V2M101", "E1M-V2M102"),
 }
 
 
-def family_supported_skus(sku: str) -> tuple[str, ...]:
-    """The `--som` values whose vendored `cores:`/`pins:`/`chips:` content
-    matches the tree `_family_bucket(sku)` would pick FOR `sku` -- i.e. the
-    set `sku` itself must be a member of for a family-split template to be
-    safe to render against it. Used both to VALIDATE (`sku in
-    family_supported_skus(sku)`) and to name the accepted alternatives in a
-    refusal message."""
-    return _FAMILY_SUPPORTED_SKUS[_family_bucket(sku)]
+def vendored_tree_core_ids(template_id: str, sku: str) -> frozenset[str]:
+    """Core ids `template_id`'s vendored tree declares for the family
+    `_family_bucket(sku)` selects -- exactly what `plan_template_files` is
+    about to render into `sku`'s `board.yaml` `cores:` block, before any
+    `--cores` splicing. Reads straight off tan's own vendored capture on
+    disk -- no SDK checkout, per this module's I-32 invariant (see the
+    module docstring); a caller that DOES have a resolved checkout (e.g.
+    `init_cmd`'s SDK-metadata override, tan-cli#494 defect 2 follow-up) uses
+    this to know what to check the checkout's OWN SoM catalogue against.
+    Empty, not raising, for a template with no vendored tree at all
+    (`minimal-app`) or an unreadable one -- `plan_template_files` is the one
+    place a genuinely broken install is reported (`TemplateDataError`/
+    `init.template-unreadable`)."""
+    tree = _VENDORED_TEMPLATE_DIR.get(template_id)
+    if tree is None:
+        return frozenset()
+    family_tree = _family_bucket(sku)
+    try:
+        board_yaml = _read_verbatim(VENDORED_ROOT / tree / family_tree / "board.yaml")
+    except OSError:
+        return frozenset()
+    return frozenset(core_id for core_id, _os in vendored_core_ids(board_yaml))
+
+
+def _tree_extra_core_ids(template_id: str, family_tree: str) -> frozenset[str]:
+    """Core ids `template_id`'s vendored tree for `family_tree` declares
+    BEYOND the family's guaranteed baseline core (`app_core_for_sku`) --
+    empty for every template except `edge-ai-starter`, whose heterogeneous
+    scaffold pre-declares one companion application-cluster core
+    (`a32_cluster` on the Alif tree, `a55_cluster` on the Renesas one) that
+    not every SKU in the family necessarily has. `family_tree` is itself a
+    valid representative SKU of its own bucket (`_FAMILY_TREES`), so
+    [`vendored_tree_core_ids`] resolves it to the SAME tree."""
+    return vendored_tree_core_ids(template_id, family_tree) - {app_core_for_sku(family_tree)}
+
+
+def family_supported_skus(template_id: str, sku: str) -> tuple[str, ...] | None:
+    """The `--som` values `template_id`'s vendored tree is documented-safe
+    for `sku`'s family, or `None` for no restriction beyond the family match
+    `_family_bucket` already makes.
+
+    tan-cli#494 defect 2 follow-up: the fix that introduced this function
+    first applied ONE family-wide allow-list to every family-split template
+    UNIFORMLY, so the single strictest member of the Alif bucket
+    (E1M-AEN801, the only Alif SKU `edge-ai-starter`'s heterogeneous tree is
+    captured against) refused 15 otherwise-valid combinations --
+    `board-diagnostics`/`sensor-starter`/`zephyr-app` x every OTHER Alif SKU,
+    none of which declare anything but the family's own baseline core
+    (`m55_hp`) and are therefore correct for the WHOLE family, same as
+    `minimal-app`. The restriction now applies only when the specific
+    template's tree for THIS family actually declares a core beyond that
+    baseline ([`_tree_extra_core_ids`]) -- which today is `edge-ai-starter`
+    alone, on both its trees."""
+    family_tree = _family_bucket(sku)
+    if not _tree_extra_core_ids(template_id, family_tree):
+        return None
+    return _FAMILY_SUPPORTED_SKUS[family_tree]
 
 
 def supported_skus_for(template_id: str, sku: str) -> tuple[str, ...] | None:
@@ -141,7 +188,7 @@ def supported_skus_for(template_id: str, sku: str) -> tuple[str, ...] | None:
         return None
     if template_id == "iot-starter":
         return (IOT_STARTER_SUPPORTED_SKU,)
-    return family_supported_skus(sku)
+    return family_supported_skus(template_id, sku)
 
 
 def _read_verbatim(path: Path) -> str:

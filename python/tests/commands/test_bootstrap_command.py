@@ -1004,6 +1004,71 @@ def test_the_auto_relocation_target_retries_past_its_own_leftover_venv(tmp_path)
     assert (target / sdk.name).exists()
 
 
+def test_the_auto_relocation_target_refuses_an_unrelated_west_workspace_already_there(tmp_path):
+    """The `.west` exemption `test_the_auto_relocation_target_retries_past_its_
+    own_leftover_venv` exercises for tan's OWN leftover venv must not also wave
+    through a west workspace `target` already holds that has nothing to do
+    with THIS checkout -- e.g. an unrelated SDK/project a prior, wholly
+    separate `tan bootstrap` run auto-relocated into this same default
+    `alp-workspace` name. The first cut of the tan-cli#495 defect 3 fix
+    exempted `target` from the occupied check the moment ANY `.west/config`
+    existed there, with no check on WHOSE workspace it was -- feeding
+    `dot_west_is_workspace=True` into `parent_needs_workspace_guard`
+    regardless of what the manifest actually named. That moved a customer's
+    git checkout into a west workspace it has nothing to do with instead of
+    refusing. `target`'s `.west/config` here names a checkout called
+    `other-project`, never `sdk.name` (`alp-sdk`) -- the shape a genuinely
+    foreign workspace takes -- so the checkout must stay exactly where it
+    started."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    target = sdk.parent / "alp-workspace"
+    (target / ".west").mkdir(parents=True)
+    (target / ".west" / "config").write_text(
+        "[manifest]\npath = other-project\nfile = west.yml\n", encoding="utf-8"
+    )
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 2
+    assert codes(env) == ["bootstrap.workspace-guard"]
+    # The checkout was never moved into the unrelated workspace.
+    assert sdk.exists()
+    assert not (target / sdk.name).exists()
+    assert (target / ".west" / "config").read_text(encoding="utf-8").endswith(
+        "path = other-project\nfile = west.yml\n"
+    )
+
+
+def test_the_auto_relocation_target_retries_past_its_own_half_built_west(tmp_path):
+    """Contrast with the sibling test above: `target`'s `.west/config` here
+    names THIS checkout (`sdk.name`) -- the shape a genuinely interrupted
+    `west init -l` at `target` leaves behind, per `rollback_relocation_
+    after`'s own docstring (the checkout itself moves back to its original
+    location on rollback, but a `.west`/`.venv` a later step already created
+    under the vacated target survives). That must still resume, not refuse,
+    on the very next retry."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    target = sdk.parent / "alp-workspace"
+    (target / ".west").mkdir(parents=True)
+    (target / ".west" / "config").write_text(
+        f"[manifest]\npath = {sdk.name}\nfile = west.yml\n", encoding="utf-8"
+    )
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0, env
+    assert "bootstrap.workspace-guard" not in codes(env)
+    assert (target / sdk.name).exists()
+
+
 def test_print_env_agrees_with_dry_run_on_a_dirty_parent(tmp_path):
     """tan-cli#459: `--print-env` used to answer BEFORE the workspace-parent
     guard above ever ran, so on the exact dirty-parent host that guard

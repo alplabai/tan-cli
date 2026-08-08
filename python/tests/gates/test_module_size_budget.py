@@ -196,7 +196,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # trusts) instead of the HOST-keyed `facts.venv_bin_dir(is_windows)`,
     # which used to disagree with the same run's `Next steps:` block for a
     # `.venv` whose layout does not match the reading host.
-    "tan/commands/bootstrap_cmd.py": 3068,
+    # 3118, not 3068, as of the fix/494-495-init-and-bootstrap blocker-1
+    # follow-up: `_relocation_target_occupied`'s `.west` exemption used to
+    # feed a bare `_is_file(target / ".west" / "config")` into
+    # `parent_needs_workspace_guard`, waving through ANY west workspace
+    # sitting at the auto-relocation target regardless of whose it was --
+    # moving a customer's checkout into a workspace it has nothing to do
+    # with. The new `_target_west_config_names_checkout` helper (+ its
+    # docstring explaining why a NAME comparison is correct here and
+    # `_manifest_points_at`'s path-based one is not, post-rollback) is the
+    # fix; `import re` is the only new import.
+    "tan/commands/bootstrap_cmd.py": 3118,
     # 1963, not 1890, as of tan-cli#495 defect 6: `manual_install_posix`
     # (the `manualInstallHints.posix.note` field `manual_install_windows`
     # already had a twin for) is parsed (optionally -- an SDK predating
@@ -628,7 +638,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # gated its own, so a SKU outside the vendored tree's topology is refused
     # up front instead of silently inheriting the wrong `cores:`/`pins:`/
     # `chips:` block.
-    "tan/core/scaffold.py": 1185,
+    # 1232, not 1185, as of the fix/494-495-init-and-bootstrap blocker-2
+    # follow-up: `family_supported_skus`'s blanket per-family allow-list
+    # over-refused 15 previously-valid template/SKU combinations (every
+    # family-split template besides `edge-ai-starter` declares nothing but
+    # the family's own baseline core, so it is correct for the WHOLE family,
+    # not just the one representative SKU). `_tree_extra_core_ids`/
+    # `vendored_tree_core_ids` now derive the restriction PER template from
+    # what its own vendored tree actually declares, restricting only when a
+    # tree needs a core beyond that baseline.
+    "tan/core/scaffold.py": 1232,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one
@@ -760,7 +779,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # command's identical `Path.cwd()` call already falls back to `"."`) plus
     # `_plan_from_template`'s `supported_skus_for` gate (defect 2, described
     # beside `tan/core/scaffold.py`'s own entry above).
-    "tan/commands/init_cmd.py": 1044,
+    # 1091, not 1044, as of the fix/494-495-init-and-bootstrap blocker-2
+    # follow-up: `_sdk_confirms_sku_topology` (+ its docstring explaining why
+    # `iot-starter` is excluded) lets a RESOLVED alp-sdk checkout's own SoM
+    # catalogue override `supported_skus_for`'s SDK-free refusal with real
+    # topology, so a legitimate, just-added SKU is not told its hardware is
+    # unsupported just because tan's own static table has not heard of it
+    # yet -- `_plan_from_template` threads `resolved_sdk` through to reach it.
+    "tan/commands/init_cmd.py": 1091,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself

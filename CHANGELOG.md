@@ -25,8 +25,11 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
-- **`tan init`/`tan scaffold` put wrong content into a new project, in five
-  separate ways** (#494):
+- **`tan init`/`tan scaffold` put wrong content into a new project, in six
+  separate ways** (#494; four further defects from the same review --
+  `_vendored_files`'s all-or-nothing completeness check, `module_template.py`'s
+  missing build-wiring guidance, and two shapes of the vendored README's
+  board-target rewrite -- remain open, see "Still open" below):
   - `--from-example` on an SDK example that carries an in-place `build/`
     (a real, gitignored artifact of building that example) hard-failed on
     the first non-UTF-8 build artifact `read_example_tree` walked into, or --
@@ -46,16 +49,68 @@ All notable changes to `tan` are documented here. Format follows
     tree's `cores:`/`pins:`/`chips:` block verbatim regardless of whether
     that SKU's real topology matches it -- `--som E1M-AEN301` (no Cortex-A32)
     got E1M-AEN801's `a32_cluster` core, reported `ok:true`, and the very
-    next `tan validate` hard-errored. Every family-split template now gates
-    `--som` to the SKUs its vendored tree is actually correct for (the exact
-    SKU for the Alif tree, or the whole V2N/V2M family -- one shared PCB --
-    for the Renesas tree), refusing up front (`init.invalid-som`) instead of
-    scaffolding wrong hardware facts.
+    next `tan validate` hard-errored. A family-split template now refuses
+    up front (`init.invalid-som`) only for the ONE `--som` shape its own
+    vendored tree actually mismatches: `edge-ai-starter`'s heterogeneous
+    scaffold pre-declares a companion application-cluster core
+    (`a32_cluster` on the Alif tree, present on E1M-AEN801 alone; `a55_cluster`
+    on the Renesas tree, present on every E1M-V2N/E1M-V2M SKU, since the four
+    share one PCB and one silicon variant) and stays restricted to the SKUs
+    that genuinely carry it; `board-diagnostics`/`sensor-starter`/
+    `zephyr-app` declare nothing but each family's own guaranteed baseline
+    core and are therefore correct for -- and now accept -- any SKU in the
+    family. An initial version of this fix applied ONE family-wide
+    restriction to every family-split template uniformly and shipped refusing
+    15 previously-valid combinations before landing here; caught and
+    corrected before release, not after.
   - A removed working directory turned a plain `tan init --preview` (no
     `--project`) into `init.internal-failure` at exit 5 with no preview at
     all, where the two sibling commands making the identical `Path.cwd()`
     call (`clean`, `presets`) already fall back to `"."` -- `init` now does
     too.
+  - `tan/planner/template.py`'s catalog-driven reads (`_rendered_bytes`,
+    `render_to_envelope`) joined `record["example"]` and every `files.
+    user_owned` entry straight onto the SDK root with no containment check,
+    unlike alp-sdk's own upstream fix for the identical hole (`_safe_join`,
+    alp-sdk#1126) that this port never picked up -- a tampered
+    `metadata/templates/catalog-v1.json` (an absolute path, or a `../` climb)
+    could make `--emit scaffold` read an arbitrary file the `tan` process can
+    see and hand its bytes back on stdout. Both joins now go through
+    `tan.core.fs_confine.resolve_confined` via a new `_safe_catalog_join`,
+    the same containment guard every catalog-driven WRITE in this package
+    already trusts.
+  - `_derive_pin_doc_renames` keyed its rename map by the pin's `doc:` TEXT
+    and overwrote without a collision check, unlike its two siblings
+    (`_derive_pin_renames`/`_derive_pin_macro_renames`), which both raise
+    `TemplateError ... -- ambiguous` -- so two `pins:` entries that happen to
+    share one `doc:` string but resolve to two DIFFERENT target routes
+    collapsed onto whichever resolved last, and the replace-all substitution
+    that applies the map then stamped that single doc onto BOTH entries (one
+    pad shipping documented with the other pad's electricals). Latent against
+    every catalog `board.yaml` today (no two pins share a `doc:`); now raises
+    the same ambiguity error the sibling functions already do.
+
+  **Still open, Refs #494 (not Closes):** four defects from the same review
+  are not fixed here. `_vendored_files`'s completeness guard
+  (`tan/core/scaffold.py`) only checks the vendored tree directory is
+  non-empty, not that it holds every file a template's own `CMakeLists.txt`
+  expects, so a partially-corrupted install (a mode-000 `src/`, a
+  mis-scoped packaging step) can still scaffold a project whose first
+  `tan build` dies in CMake with `ok:true`/exit 0 from `tan init` itself.
+  `tan/core/module_template.py`'s `tan scaffold` output is wired into no
+  shipped template's `target_sources`/include path at all (inherited
+  verbatim from the frozen Rust oracle, a pre-existing product gap rather
+  than a port regression). `tan/planner/template.py`'s vendored-README
+  board-target rewrite (`_scaffold_readme`) has two remaining shapes: it can
+  duplicate an already-qualified Zephyr board id instead of leaving it alone
+  (non-idempotent), and it silently no-ops -- with no verification that it
+  fired at all -- when the source README documents a `west build -b` target
+  that is not the example SoM's own board id (`edge-ai`'s vendored capture
+  reproduces this today: an `E1M-V2N101` scaffold ships instructions to
+  build for Alif silicon). Both are cross-cutting with alp-sdk's own
+  `scripts/alp_template.py`, which emits byte-identical output and shares
+  the defect; a tan-only fix would break `test_planner_emit_parity.py`
+  until the upstream script is fixed in lockstep.
 - **`tan bootstrap` could resolve, sign, and print against the wrong
   workspace, in eight separate ways** (#495):
   - `find_workspace_venv`'s upward `.venv` search accepted any west-capable
@@ -88,7 +143,19 @@ All notable changes to `tan` are documented here. Format follows
     rollback message also used to tell the customer to delete a path
     (the checkout's own vacated location) that no longer exists the instant
     the move-back succeeds; it now names the directory that genuinely still
-    holds the leftover.
+    holds the leftover. A target that already holds its OWN `.west` (a
+    half-built west workspace from an interrupted `west init -l` at THIS
+    location) is exempt from the occupied check too, so that exact retry
+    resumes instead of refusing -- but only when that `.west/config`
+    verifiably names THIS checkout (`_target_west_config_names_checkout`,
+    matched by directory NAME rather than by resolving the manifest path
+    against the checkout's current location, which the post-rollback retry
+    this exists for would never match even for tan's own leftover). An
+    earlier version of this exemption accepted ANY `.west/config` present at
+    the target with no ownership check at all, which would have moved a
+    customer's checkout into an unrelated west workspace that happened to
+    already sit at that path (a different SDK, a different project) instead
+    of refusing; caught and corrected before release, not after.
   - `--print-env` in text mode routed every refusal computed ahead of its
     short-circuit (`sdk-root-unresolved`, `workspace-guard`, the
     `--workspace`/`--print-env` conflict, and others) to STDOUT instead of
