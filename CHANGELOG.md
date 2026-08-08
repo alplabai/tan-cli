@@ -333,11 +333,10 @@ All notable changes to `tan` are documented here. Format follows
     `ERROR_ACCESS_DENIED` (5) only, but the scenario this whole fix names --
     the stock AppLocker/Software Restriction Policy "block executables from
     %TEMP%" rule -- fails `CreateProcess` with
-    `ERROR_ACCESS_DISABLED_BY_POLICY` (1260) or, with no user notification,
-    `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (1261), neither of which is
-    5; the two `icacls`-based tests this issue's own prior round added only
-    reproduce an NTFS deny-execute ACE, which genuinely does yield 5 and so
-    never exercised this path. All three codes now match.
+    `ERROR_ACCESS_DISABLED_BY_POLICY` (1260), which is not 5; the two
+    `icacls`-based tests this issue's own prior round added only reproduce
+    an NTFS deny-execute ACE, which genuinely does yield 5 and so never
+    exercised this path. Both codes now match.
   - `install.sh`'s `latest` redirect resolution (the DEFAULT invocation --
     no `--version`, exactly the documented `curl | sh` one-liner) has its
     own inline curl/wget branching that does not go through `download()` and
@@ -349,6 +348,19 @@ All notable changes to `tan` are documented here. Format follows
     this block entirely. Now checked up front, before `latest` resolution or
     any other download, the same idiom the sha256-tool check further down
     already uses. (#490)
+- **This CHANGELOG's own round-5 entry for the fix above named a second,
+  fabricated Win32 constant.** It credited
+  `ERROR_ACCESS_DISABLED_NO_SAFER_UI_BY_POLICY` (1261) alongside the real
+  `ERROR_ACCESS_DISABLED_BY_POLICY` (1260) as a second AppLocker/SRP
+  "silent policy block" code; `install.ps1` and its test both matched and
+  probed 1261 on that basis. Checked against Microsoft's published
+  system-error-codes table
+  (learn.microsoft.com/windows/win32/debug/system-error-codes--1000-1299-):
+  1261 is `ERROR_REG_NAT_CONSUMPTION`, an Itanium-specific invalid-register
+  fault with nothing to do with policy, and no symbol matching
+  `*NO_SAFER_UI*` exists anywhere in that table. `install.ps1` now matches
+  only the verified 1260, and the test that probed 1261 as `True` was
+  narrowed to 1260 only. (#490)
 
 ## [0.5.1] — 2026-08-04
 
