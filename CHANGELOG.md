@@ -341,6 +341,28 @@ All notable changes to `tan` are documented here. Format follows
     (`tan/planner/orchestrator.py::_slice_command`) only ever emits the
     bare identities `west`/`bitbake`/`cmake`, never an absolute path.
     (#510, #530)
+- **`tan bootstrap`'s `reconcile_west_manifest_path` never `fsync`'d the
+  temp sibling it writes `.west/config` through, so `os.replace`'s atomicity
+  guarantee (the RENAME only) was covering nothing about the CONTENT
+  reaching stable storage** -- a power loss between the rename landing and
+  the temp's data blocks flushing could leave the topdir's only manifest
+  pointer, shared by every SDK version under it, renamed to its real name
+  with truncated or missing content. This is the identical gap #489 closed
+  in `tan debug-config`'s `launch.json` write, from which this shape was
+  originally copied; the fix had landed on one call site and not the other.
+  Both now share one helper, `tan/core/atomic_write.py:atomic_write_text`
+  (`fsync`'d before the rename, a POSIX directory `fsync` after, symlink-safe,
+  mode-preserving across the inode swap), rather than two independently
+  hand-synchronised copies of the same durability sequence -- the drift that
+  let this one gap outlive the other's fix. Two further gaps closed in the
+  same round: the extraction had initially reproduced `mkstemp`'s hardcoded
+  `0600` with nothing to restore a rewritten file's original mode after the
+  swap, which would have unconditionally narrowed `.west/config`'s
+  permissions on every rewrite; and the helper's failure cleanup only caught
+  `OSError`, so an unencodable `content` (`UnicodeEncodeError`, a `ValueError`)
+  or an unrecognised `encoding=` (`LookupError` from `os.fdopen` itself) both
+  left the `*.tan-tmp` sibling on disk, un-unlinked, instead of being
+  reported and cleaned up like any other write failure. (#516)
 - **The published `envelope-contract.json` release asset re-packaged five
   `debug-config-preview-*` goldens that no longer describe the shipping CLI,
   and `contract/README.md` claimed coverage it did not have.** The five
@@ -360,6 +382,7 @@ All notable changes to `tan` are documented here. Format follows
   envelope contract" step comment is corrected to match: it no longer
   asserts the re-packaging is "pure" with no possible drift from what ships.
   (#502)
+
 
 ## [0.5.1] — 2026-08-04
 
