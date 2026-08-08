@@ -74,7 +74,6 @@ All notable changes to `tan` are documented here. Format follows
   directory-creation thing -- measured, not assumed; no frozen parity case
   pins it, since every `debug-config` argv there runs in an existing
   `work_dir`. (#476)
-
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
   gaps found reviewing the fix.** All under (#489):
