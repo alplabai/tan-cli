@@ -703,7 +703,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # `resolved_sdk` local so an error raised before SDK resolution reports
     # `sdk` as genuinely absent rather than raising `NameError`) now go
     # through.
-    "tan/commands/init_cmd.py": 1069,
+    # 1092, not 1069, as of the tan-cli#491 review: the `sdk=` fix above
+    # opened a NEW divergence it did not have before -- `_resolve_sdk_root`
+    # ran before `_resolve_template`, so an unknown `--template` now resolved
+    # (and reported) `sdk` in any real workspace with one, where the oracle
+    # (`init::run`, step 1) validates the template UNCONDITIONALLY FIRST and
+    # never touches `--sdk-root`/discovery until step 6 -- measured against
+    # `target/debug/tan`, even an explicit, resolvable `--sdk-root` alongside
+    # `--template bogus-template` gets no `sdk` key at all. Fixed by an early,
+    # from-example-exempt `_resolve_template(template)` call (mirroring the
+    # oracle's own step ordering) ahead of SDK resolution, +23 lines: the
+    # explanatory comment justifying the reorder against the oracle's actual
+    # source, not the call itself.
+    "tan/commands/init_cmd.py": 1092,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
@@ -837,7 +849,21 @@ _MODULE_BUDGET: dict[str, int] = {
     # plus the one new branch in `main()`'s `SystemExit` handler that reports
     # a real Ctrl-C as `cli.interrupted` at an in-range exit code instead of
     # a false `cli.parse-error` at exit 130 (+62).
-    "tan/cli.py": 964,
+    # 1022, not 964, as of the tan-cli#491 review round: closed the BLOCKER
+    # (the arity-aware `_wants_json` walk credited a global flag like
+    # `--sdk-root` with consuming `--format` as its own value even where
+    # `root` never declares it, so a genuine Click parse failure answered
+    # zero stdout bytes instead of the coded envelope both the oracle and
+    # pre-fix `main` gave it -- fixed by refusing to consume a hyphen-leading
+    # next token as any option's value, +30) and MAJOR 1 (`_TeeStderr.
+    # isatty()`'s delegation let Typer/Click's Rich renderer colour a captured
+    # usage error, which `_usage_error_envelope` then folded verbatim into
+    # `data.message` -- ANSI escapes inside a JSON field; now unconditionally
+    # `False`, +19 net for the corrected docstring) plus a new `fileno()`
+    # (+19) so `monitor_cmd._stdout_sink`'s `return sys.stderr` branch is
+    # reachable again (MAJOR 2, `tan/commands/monitor_cmd.py` itself did not
+    # grow -- the fix lives entirely in the class this file already owns).
+    "tan/cli.py": 1022,
 }
 
 #: Some of these are `tan/planner/**`, which is a hash-audited MIRROR of
@@ -1067,7 +1093,15 @@ _MIRRORED = ("tan/planner/",)
 #
 # 214 on the merged tree, MEASURED by AST walk over all of `tan/` including
 # `tan/planner/` -- #496 contributes one crossing that dev's 213 does not.
-_FUNCTION_COUNT_BUDGET = 214
+#
+# 215, not 214, as of the tan-cli#491 review round: `cli.py:_wants_json`
+# crossed 50 lines carrying the docstring explaining the BLOCKER fix (the
+# arity walk no longer credits a value-taking global flag with consuming a
+# hyphen-leading next token as its own value). Re-walked with the gate's own
+# `ast` logic against this exact tree, not computed from the diff alone.
+# `_FUNCTION_WORST_BUDGET` is untouched: `bootstrap_cmd.py:_run` is still the
+# worst, still under 707.
+_FUNCTION_COUNT_BUDGET = 215
 _FUNCTION_WORST_BUDGET = 707
 
 

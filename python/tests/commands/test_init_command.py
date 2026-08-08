@@ -340,6 +340,31 @@ def test_an_error_path_before_sdk_resolution_has_no_sdk_key(tmp_path):
     assert "sdk" not in env, env
 
 
+def test_an_unknown_template_has_no_sdk_key_even_with_a_resolvable_sdk_root(tmp_path):
+    """tan-cli#491 review, MAJOR 3: the oracle validates `--template` at step
+    1 of `init::run`, unconditionally first -- it does not resolve
+    `--sdk-root`/discovery until step 6, well after template/som/name/
+    destination/cores/board-yaml have all already succeeded. Measured against
+    `target/debug/tan`: `init --template bogus-template --sdk-root
+    <real-checkout> --format json` answers no `sdk` key at all, even with a
+    resolvable checkout explicitly named -- `contract/envelopes/
+    init-invalid-template` itself cannot surface this (its scratch dir/fresh
+    HOME leave `--sdk-root` unset, so `_resolve_sdk_root` returns `None`
+    either way and the divergence is invisible there), but a real workspace
+    with a resolvable SDK is not so lucky. Confirmed failing (env['sdk'] was
+    populated) against the unfixed ordering, where `_resolve_sdk_root` ran
+    before `_resolve_template`, while writing this test."""
+    sdk = _real_sdk_checkout(tmp_path / "alp-sdk")
+    proc = run_tan(
+        "init", "--template", "bogus-template", "--sdk-root", str(sdk),
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 2
+    assert issue(env)["code"] == "init.invalid-template"
+    assert "sdk" not in env, env
+
+
 def test_help_distinguishes_template_ids_from_the_sdk_example_catalog(tmp_path):
     """tan-cli#1: `--template` and the SDK's `metadata/templates/catalog-v1.json`
     are two different id vocabularies (`zephyr-app` vs. `minimal`, and the

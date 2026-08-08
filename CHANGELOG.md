@@ -38,9 +38,20 @@ All notable changes to `tan` are documented here. Format follows
   `--format json`) had no `isatty()`**, so any probe of it -- `tan run`'s
   build heartbeat, `tan/core/consent.py`'s prompt gate -- crashed with a bare
   `AttributeError`. Not tty-dependent: a piped/redirected/CI run crashed
-  identically to a real terminal. Now delegates to the real stream, guarded
-  the same way `tan.env._stderr_is_tty` already guards this exact probe.
-  (#491)
+  identically to a real terminal. A first fix delegated to the real stream,
+  which stopped the crash but let Typer/Click's own Rich-based usage-error
+  renderer emit ANSI colour whenever a real terminal WAS attached (an
+  interactive run, or one under `script`/a pty) -- and `_usage_error_envelope`
+  folded that captured, coloured text verbatim into `data.message`, landing
+  raw escape sequences inside a JSON field a machine consumer has to parse.
+  `isatty()` now answers `False` unconditionally instead: every other real
+  caller reachable while the tee is installed is already gated by
+  `json_mode` first and never reaches the call, so nothing legitimate reads
+  the true answer. `_TeeStderr` also gained `fileno()`, delegated to the real
+  stream: without it, `sys.stderr.fileno()` raised the same bare
+  `AttributeError` this whole class exists to stop, unconditionally, on
+  every `--format json` `tan monitor` session -- see that fix below, which
+  this one silently defeated until now. (#491)
 - **`_wants_json` was an arity-blind textual scan of the WHOLE process
   argv**, so a `--format json` forwarded past `--` to a west child (`tan
   quality -- --format json`), or sitting in another option's value position,
@@ -48,7 +59,21 @@ All notable changes to `tan` are documented here. Format follows
   text mode -- replacing a real, coded refusal with an unrequested
   `cli.parse-error` envelope on stdout for a caller that never asked for
   JSON. Rewritten with the same arity-aware, `--`-respecting walk tan-cli#394
-  already gave the sibling `_wants_help` scan. (#491)
+  already gave the sibling `_wants_help` scan -- but the arity table itself
+  over-trusted a subcommand's own declared params: every command declares
+  global flags like `--sdk-root` (`accept_global_flags`), which `root` does
+  NOT declare pre-subcommand, so `tan --sdk-root --format json build`
+  credited `--sdk-root` with consuming `--format` as its own value and lost
+  sync on the `json` that followed -- `_wants_json` answered `False` for an
+  argv Click itself goes on to refuse as a genuine parse error, and the run
+  fell into the un-wrapped text-mode branch: zero bytes on stdout for a
+  `cli.parse-error` both the oracle and the pre-fix scan answer with a coded
+  envelope. A value-taking option credits itself with consuming the next
+  token only when that token does not itself look like another option (does
+  not start with `-`) -- the same thing the oracle's real parser does
+  (`clap` does not swallow a hyphen-leading token as some OTHER option's
+  value without `allow_hyphen_values`, confirmed against `target/debug/tan`).
+  (#491)
 - **An interrupted `--format json` run (Ctrl-C) reported the command line as
   invalid.** SIGINT never reaches `tan.cli.main` as a raw
   `KeyboardInterrupt` -- Typer's own command wrapper converts it to
@@ -63,15 +88,32 @@ All notable changes to `tan` are documented here. Format follows
   coded error -- omitted the envelope's `sdk` key entirely, an undeclared
   divergence from the oracle's `sdk:{root,sourceTier}`. `_resolve_sdk_root`
   now carries the resolved tier through `_Sdk`, and both `_emit_outcome` and
-  `_emit_error` report it. (#491)
+  `_emit_error` report it -- but reporting it from `_emit_error` opened a
+  SECOND, narrower divergence: the SDK was resolved before `--template` was
+  ever validated, so an unknown `--template` started reporting `sdk` in any
+  real workspace with a resolvable one, where the oracle (`init::run`, step
+  1) validates the template unconditionally first and does not touch
+  `--sdk-root`/discovery until step 6 -- measured against `target/debug/tan`,
+  even an explicit, resolvable `--sdk-root` alongside `--template
+  bogus-template` gets no `sdk` key at all. `--template` (when `--from-example`
+  is not given, which the oracle short-circuits past template resolution
+  entirely) is now validated before SDK resolution, matching the oracle's own
+  step order. (#491)
 - **`tan monitor --format json` could corrupt its own envelope with live
   board traffic.** The spawned miniterm passed no `stdout=` at all, so the
   child inherited tan's real stdout -- on a successful session the board's
   bytes preceded the envelope and broke a whole-stdout `JSON.parse` on an
   `ok:true`, exit-0 run. Worst on Windows, where a piped, non-interactive
-  spawn (the extension's own shape) has no tty gate to stop it. Now routed
-  to stderr under `--format json` (or `DEVNULL` when stderr has no real OS
-  handle to inherit), leaving text mode's live console unchanged. (#491)
+  spawn (the extension's own shape) has no tty gate to stop it. Routed to
+  stderr under `--format json` (or `DEVNULL` when stderr has no real OS
+  handle to inherit), leaving text mode's live console unchanged -- except
+  the real stderr installed for the duration of `--format json` is
+  `_TeeStderr`, which had no `fileno()`, so `sys.stderr.fileno()` raised the
+  same `AttributeError` this same PR's own `isatty()` fix exists to stop,
+  caught by this fix's own guard and silently downgraded to `DEVNULL` on
+  100% of real `--format json` monitor sessions: board bytes discarded, not
+  routed to stderr, regardless of whether the real stderr had a genuine OS
+  handle. `_TeeStderr.fileno()` now delegates to the real stream. (#491)
 - **A malformed `--plan-from` plan could be misdiagnosed as a tan bug instead
   of a bad plan, three separate ways.** (1) `warnings[]` entries were never
   validated per-entry, so a bare string or `null` parsed clean and reached

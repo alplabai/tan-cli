@@ -962,6 +962,29 @@ def init(
         project_root = Path(dest) / resolved_name if resolved_name else Path(dest)
         project_root_display = _join_display(dest, resolved_name)
 
+        # tan-cli#491 review: an unknown `--template` must be refused BEFORE
+        # the SDK is ever resolved -- the oracle's own step order
+        # (`crates/tan-cli/src/commands/init/mod.rs::run`) validates the
+        # template at step 1, unconditionally first, and does not touch
+        # `--sdk-root`/discovery until step 6 (`resolve_sdk_root`, called only
+        # once the whole plan -- template, som, name, destination, cores,
+        # board-yaml -- has already succeeded). Measured against the oracle:
+        # `tan init --template bogus-template --sdk-root <real-checkout>
+        # --format json` answers NO `sdk` key at all, even with a resolvable
+        # checkout explicitly named. `_resolve_sdk_root` below now running
+        # first would resolve one anyway (and `_emit_error` -- also this PR --
+        # now reports whatever it finds), so an unmoved call here would have
+        # started reporting `sdk` on this one refusal in any real workspace
+        # where an SDK genuinely resolves -- a divergence the isolated
+        # `contract/envelopes/init-invalid-template` fixture cannot surface
+        # (its scratch dir and fresh HOME make `_resolve_sdk_root` return
+        # `None` either way) but a real customer workspace can. `--from-example`
+        # is exempt, matching the oracle's own short-circuit ("before template
+        # resolution so it never engages the non-interactive ZephyrApp
+        # default"): that branch does not read `--template` at all.
+        if from_example is None:
+            _resolve_template(template)
+
         workspace_root = Path(os.path.abspath(project)) if project else Path.cwd()
         resolved_sdk = _resolve_sdk_root(sdk_root, workspace_root)
         # tan-cli#407, and this is the command where it matters most: `init`

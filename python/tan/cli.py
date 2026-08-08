@@ -661,6 +661,29 @@ def _wants_json(argv: list[str]) -> bool:
     adjacent `json`) sitting in another option's value position is skipped
     over rather than matched, and nothing after a `--` is ever considered --
     the same two guarantees `_wants_help` already makes for `--help`.
+
+    A value-taking option is only credited with consuming the NEXT token when
+    that token does not itself look like another option (does not start with
+    `-`) -- tan-cli#491's own regression: this is what the oracle's real
+    parser does (clap does not swallow a hyphen-leading token as some OTHER
+    option's value without `allow_hyphen_values`, confirmed empirically --
+    `target/debug/tan --sdk-root --format json build` answers "a value is
+    required for '--sdk-root <PATH>' but none was supplied" as a coded
+    envelope, never treating `--format` as `--sdk-root`'s value), and this
+    port's own `--sdk-root`/`--project`/`--board-yaml`/`--target` are
+    global-flag names that EVERY command declares (`accept_global_flags`), so
+    `takes_value` includes them for whichever subcommand name this scan finds
+    anywhere in argv -- unconditional two-token consumption there walked
+    `--sdk-root --format json build` past `--format` entirely (crediting it
+    as `--sdk-root`'s value, then losing sync on the literal `json` that
+    followed), so `_wants_json` returned `False` for an argv Click *itself*
+    goes on to refuse as a genuine parse error ("No such option: --sdk-root",
+    since `root` never declares it either) -- zero bytes on stdout for a run
+    both the oracle and pre-fix `main` answer with a `cli.parse-error`
+    envelope. Skipping only a non-hyphen next token preserves every original
+    motivating case (`--name bogus`, `--destination json` when NOT preceded
+    by `--format`) while no longer crediting `--sdk-root`/`--project`/etc.
+    with swallowing a token that is itself a recognised flag.
     """
     takes_value = _value_taking_options(
         next((token for token in argv if token in _SUBCOMMAND_NAMES), None)
@@ -674,7 +697,12 @@ def _wants_json(argv: list[str]) -> bool:
             return True
         if token == "--format" and i + 1 < len(argv) and argv[i + 1] == "json":
             return True
-        i += 2 if token in takes_value else 1
+        consumes_next = (
+            token in takes_value
+            and i + 1 < len(argv)
+            and not argv[i + 1].startswith("-")
+        )
+        i += 2 if consumes_next else 1
     return False
 
 
@@ -790,22 +818,52 @@ class _TeeStderr:
         dispatch, `main()` below) hit a bare `AttributeError` -- not
         tty-dependent, not specific to a real terminal: the attribute lookup
         itself fails before any tty question is even asked, so a piped/
-        redirected/CI run crashes identically. Two live call sites hit this
-        for real: `build_cmd.py`'s `_Heartbeat(enabled=not json_mode and
-        sys.stderr.isatty())` (reachable with `json_mode=False` from `tan run`,
-        which does not thread its own `--format json` down to `_build`) and
-        `tan/core/consent.py`'s unguarded `sys.stderr.isatty()`. Delegating to
-        the real stream -- the one this class already tees every write to --
-        answers the actual question ("is stderr a terminal") instead of
-        raising; `(AttributeError, ValueError)` mirrors `tan.env._stderr_is_tty`,
-        the one other place in this tree that already guards this exact probe,
-        for the same two failure modes (a real stream with no `isatty` at all,
-        or one that has been closed).
+        redirected/CI run crashes identically.
+
+        Always `False`, never delegated to the real stream -- a first cut of
+        this fix delegated (`return self._real.isatty()`), which stopped the
+        crash but opened a WORSE defect: this object is only ever installed
+        as `sys.stderr` for the DURATION of the tee'd `--format json`
+        dispatch, and Typer/Click's own Rich-based usage-error renderer also
+        probes `isatty()` to decide whether to emit ANSI colour -- so a run
+        attached to a real terminal (interactively, or under `script`/a pty)
+        got a coloured usage error, and `_usage_error_envelope` folds that
+        captured text VERBATIM into `data.message`, landing raw escape
+        sequences inside a JSON field a machine consumer has to parse.
+        Measured: `tan build --bogus --format json` under a pty answered
+        `data.message` containing literal `\\u001b[1;33m` / `\\u001b[0m` runs.
+        Every OTHER caller of `sys.stderr.isatty()` reachable while this tee
+        is installed is already gated `and not json_mode` / `not json_mode
+        and ...` first (`build_cmd.py`'s `_Heartbeat`, `tan/core/consent.py`'s
+        `can_prompt`) -- and this tee is only ever installed from inside
+        `main()`'s `json_mode` branch, so those checks short-circuit before
+        the `isatty()` call is ever reached; answering `False` here changes
+        nothing for either. `(AttributeError, ValueError)` handling is no
+        longer needed since this never touches `self._real` at all.
         """
-        try:
-            return self._real.isatty()
-        except (AttributeError, ValueError):
-            return False
+        return False
+
+    def fileno(self) -> int:
+        """Delegates to the real stream's OS-level file descriptor
+        (tan-cli#491 round two): `monitor_cmd._stdout_sink` routes a spawned
+        miniterm child's stdout to `sys.stderr` under `--format json` --
+        `subprocess.run(..., stdout=sys.stderr)` needs an actual `fileno()`
+        to hand the child, and this class had none, so that call site's own
+        `except (OSError, ValueError, AttributeError): return
+        subprocess.DEVNULL` caught the resulting `AttributeError` on EVERY
+        `--format json` monitor session, unconditionally -- board bytes were
+        silently discarded rather than reaching the real stderr the fix
+        intended. Delegating (rather than reading through `write`/`_buffer`)
+        is the point: a subprocess `stdout=` redirect is a raw fd dup done by
+        the OS, entirely outside this object's `write()` -- board traffic
+        never touches `_buffer` (which exists only to capture Click's own
+        pre-dispatch usage-error text) and reaches the real terminal exactly
+        as fast as text mode does. Raises whatever `self._real.fileno()`
+        raises (no real fd -- a frozen/piped test double) rather than
+        swallowing it, so the caller's own guard (identical shape to
+        `isatty()`'s pre-fix crash) is what falls back to `DEVNULL`.
+        """
+        return self._real.fileno()
 
 
 def _reconfigure_stdio() -> None:

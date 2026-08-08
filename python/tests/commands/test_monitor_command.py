@@ -193,6 +193,32 @@ def test_stdout_sink_inherits_in_text_mode_and_never_targets_the_real_stdout_in_
     assert monitor_cmd._stdout_sink(True) is subprocess.DEVNULL
 
 
+def test_stdout_sink_routes_to_the_real_teestderr_not_devnull(monkeypatch):
+    """tan-cli#491 round two: the unit pin above never exercises the REAL
+    object `main()` actually installs as `sys.stderr` for the whole
+    `--format json` dispatch -- `cli._TeeStderr`, which is what `tan monitor
+    --format json` runs behind in the shipped CLI. Before `_TeeStderr`
+    declared `fileno()`, `sys.stderr.fileno()` raised a bare
+    `AttributeError` on EVERY such session, caught by `_stdout_sink`'s own
+    guard and silently downgraded to `subprocess.DEVNULL` -- board bytes
+    discarded, not routed to stderr, on 100% of real `--format json` monitor
+    runs, regardless of whether the real stderr had a genuine OS handle.
+    Confirmed failing (result was `subprocess.DEVNULL`) against `_TeeStderr`
+    before `fileno()` was added."""
+    from tan.cli import _TeeStderr
+
+    real_stderr = sys.stderr
+    tee = _TeeStderr(real_stderr)
+    monkeypatch.setattr(monitor_cmd.sys, "stderr", tee)
+    result = monitor_cmd._stdout_sink(True)
+    assert result is tee, result
+    assert result is not subprocess.DEVNULL
+    # And the delegated fd is the REAL stream's, not a value `_TeeStderr`
+    # invented -- proving `fileno()` actually reaches through to `_real`
+    # rather than merely not-raising.
+    assert tee.fileno() == real_stderr.fileno()
+
+
 def test_json_mode_never_lets_the_spawn_inherit_the_real_stdout(monkeypatch):
     """tan-cli#491, the integration-level pin: under `--format json`, the
     `stdout=` kwarg `subprocess.run` actually receives for the miniterm spawn

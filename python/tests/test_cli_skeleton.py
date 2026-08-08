@@ -161,14 +161,26 @@ def test_tee_stderr_writes_through_synchronously_and_keeps_a_copy():
     assert tee.getvalue() == "hello world"
 
 
-def test_tee_stderr_isatty_delegates_instead_of_raising_attributeerror():
-    """tan-cli#491: `_TeeStderr` used to implement only `write`/`flush`/
-    `getvalue` -- `sys.stderr.isatty()` (`build_cmd.py`'s `_Heartbeat(enabled=
-    not json_mode and sys.stderr.isatty())`, `tan/core/consent.py`'s
-    unguarded probe) raised a bare `AttributeError` whenever `--format json`
-    had installed this class as `sys.stderr`, regardless of whether a real
-    terminal was attached -- the attribute lookup itself failed before any
-    tty question was even asked."""
+def test_tee_stderr_isatty_is_always_false_never_raises_never_delegates():
+    """tan-cli#491, round two: `_TeeStderr` used to implement only `write`/
+    `flush`/`getvalue` -- `sys.stderr.isatty()` (`build_cmd.py`'s
+    `_Heartbeat(enabled=not json_mode and sys.stderr.isatty())`,
+    `tan/core/consent.py`'s unguarded probe) raised a bare `AttributeError`
+    whenever `--format json` had installed this class as `sys.stderr`,
+    regardless of whether a real terminal was attached -- the attribute
+    lookup itself failed before any tty question was even asked.
+
+    The FIRST fix delegated to the real stream (`return self._real.isatty()`)
+    -- that stopped the crash but reopened a worse defect: Typer/Click's own
+    Rich-based usage-error renderer ALSO probes `sys.stderr.isatty()` to
+    decide whether to emit ANSI colour, so a run attached to a real terminal
+    got a COLOURED usage error, and `_usage_error_envelope` folds that
+    captured text verbatim into `data.message` -- raw escape sequences inside
+    a JSON field. `isatty()` must answer `False` unconditionally: never raise,
+    and never report a real terminal as attached, since every OTHER live
+    caller reachable while this tee is installed is already gated by
+    `json_mode` first (see the class's own docstring) and does not depend on
+    the true answer."""
     import io as _io
 
     from tan.cli import _TeeStderr
@@ -198,10 +210,63 @@ def test_tee_stderr_isatty_delegates_instead_of_raising_attributeerror():
     tee = _TeeStderr(_ClosedIsatty())
     assert tee.isatty() is False
 
-    # And the real answer is DELEGATED, not hardcoded, in both directions.
+    # A stream that IS a real terminal must still answer False -- the exact
+    # tan-cli#491 round-two regression: a naive delegation would answer True
+    # here and let Rich colour the captured usage error.
+    class _RealTty:
+        def write(self, s):
+            return len(s)
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return True
+
+    tee = _TeeStderr(_RealTty())
+    assert tee.isatty() is False
+
     real = _io.StringIO()
     tee = _TeeStderr(real)
-    assert tee.isatty() == real.isatty()  # StringIO.isatty() is always False
+    assert tee.isatty() is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty is POSIX-only")
+def test_a_real_terminal_does_not_leak_ansi_colour_into_the_envelope():
+    """tan-cli#491 round two, subprocess-level: `capture_output=True` (the
+    `run()` helper every other test in this module uses) hands the child a
+    PIPE for stderr, which is never a tty -- so it cannot exercise the defect
+    the first `_TeeStderr.isatty()` fix opened. This attaches a real pty to
+    stderr instead, the one condition that makes Typer/Click's Rich-based
+    usage-error renderer emit ANSI colour, and proves the captured text
+    `_usage_error_envelope` folds into `data.message` carries none of it."""
+    import pty
+
+    master_fd, slave_fd = pty.openpty()
+    try:
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+            ),
+        }
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "tan", "build", "--bogus", "--format", "json"],
+            stdin=slave_fd,
+            stdout=subprocess.PIPE,
+            stderr=slave_fd,
+            env=env,
+        )
+        os.close(slave_fd)
+        stdout_bytes, _ = proc.communicate()
+    finally:
+        os.close(master_fd)
+
+    assert proc.returncode == 2, stdout_bytes
+    env_doc = json.loads(stdout_bytes)
+    message = env_doc["data"]["message"]
+    assert "\x1b[" not in message, repr(message)
+    assert "No such option" in message, message
 
 
 def test_interrupted_envelope_reports_a_real_event_at_an_in_range_exit_code():

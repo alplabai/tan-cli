@@ -61,6 +61,15 @@ _POSITION_CASES = [
     (["init", "--name", "--format", "--destination", "json"], False),  # "json" is `--destination`'s value, not `--format`'s
     (["build", "--verbose", "--format", "json"], True),  # a BOOLEAN flag consumes nothing
     (["--format", "json", "badcmd"], True),           # unknown command: stay conservative like `_wants_help`
+    (["--sdk-root", "--format", "json", "build"], True),  # tan-cli#491 regression: `--sdk-root` (a
+    # global flag EVERY command declares) must not be credited with consuming
+    # `--format` as its own value just because it precedes `build` in argv --
+    # the oracle's real parser never swallows a hyphen-leading token as
+    # another option's value either (measured against `target/debug/tan`:
+    # "a value is required for '--sdk-root <PATH>' but none was supplied",
+    # not "--format" folded in as the value), and `root` does not declare
+    # `--sdk-root` at all -- this argv is a genuine Click parse failure that
+    # must still answer a `cli.parse-error` envelope, not zero stdout bytes.
     ([], False),
 ]
 
@@ -94,3 +103,27 @@ def test_real_format_json_after_the_subcommand_still_answers_an_envelope():
     envelope = json.loads(p.stdout)
     assert envelope["command"] == "quality", envelope
     assert envelope["issues"][0]["code"] == "quality.profile-required", envelope
+
+
+def test_a_global_flag_dangling_before_format_json_still_answers_an_envelope():
+    """tan-cli#491 regression: `--sdk-root` is a value-taking flag every
+    subcommand declares (`accept_global_flags`), but `root` itself does not,
+    so `tan --sdk-root --format json build` (no value ever supplied for
+    `--sdk-root`) is a genuine Click-level parse failure -- "No such option:
+    --sdk-root" -- not a successful dispatch to `build`. The unfixed arity
+    walk credited `--sdk-root` with consuming `--format` as its OWN value
+    (matching Python's declared-params table, but not how any real parser --
+    Click's or the oracle's clap -- actually resolves a hyphen-leading next
+    token), so `_wants_json` answered `False` and this argv fell into the
+    UN-wrapped text-mode branch: zero bytes on stdout for a run the oracle
+    (`target/debug/tan --sdk-root --format json build`, measured) answers
+    with a `cli.parse-error` envelope. Confirmed failing against the unfixed
+    `tan/cli.py` before writing this test (empty stdout, `SystemExit(2)` from
+    Click's raw usage error on stderr only)."""
+    p = run("--sdk-root", "--format", "json", "build")
+    assert p.returncode == 2, (p.returncode, p.stdout, p.stderr)
+    assert p.stdout.strip() != "", "stdout must carry the envelope, not be empty"
+    envelope = json.loads(p.stdout)
+    assert envelope["command"] == "cli", envelope
+    assert envelope["exitCode"] == 2, envelope
+    assert envelope["issues"][0]["code"] == "cli.parse-error", envelope
