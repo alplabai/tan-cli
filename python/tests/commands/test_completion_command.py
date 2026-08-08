@@ -40,6 +40,7 @@ from the oracle's own `--format json` output, not retyped by hand.
 
 from __future__ import annotations
 
+import functools as _functools
 import json
 
 import pytest
@@ -423,13 +424,38 @@ def _bash_complete(argv: list[str]) -> list[str]:
     return [line for line in proc.stdout.splitlines() if line]
 
 
+@_functools.lru_cache(maxsize=1)
 def _bash_available() -> bool:
+    """`shutil.which("bash") is not None` is not proof bash is on this host --
+    on Windows, `C:\\Windows\\System32\\bash.exe` is the WSL launcher stub,
+    installed whenever the "Windows Subsystem for Linux" optional feature is
+    enabled even with zero distributions registered. It is a real,
+    `PATH`-resolvable, executable `bash.exe` that is NOT bash: run with `-c`,
+    it ignores the command and prints a UTF-16LE "Windows Subsystem for Linux
+    has no installed distributions..." banner instead, which `_bash_complete`
+    would then misread as `COMPREPLY`. Spawn a trivial command and require the
+    literal expected output before treating `bash` as usable, rather than
+    trusting presence on `PATH`."""
     import shutil as _shutil
+    import subprocess as _sp
 
-    return _shutil.which("bash") is not None
+    if _shutil.which("bash") is None:
+        return False
+    try:
+        proc = _sp.run(  # noqa: S603, S607 -- fixed args, no shell metacharacters
+            ["bash", "-c", "echo tan-bash-ok"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except OSError:
+        return False
+    return proc.returncode == 0 and "tan-bash-ok" in proc.stdout
 
 
-@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+@pytest.mark.skipif(
+    not _bash_available(), reason="no real bash on this host (WSL launcher stub is not bash)"
+)
 def test_bash_format_completion_finds_the_subcommand_past_a_leading_global_flag():
     """`tan --sdk-root /x validate --format <TAB>` used to offer only `text
     json` (`${COMP_WORDS[1]}` was `--sdk-root`, matching no `case` arm), the
@@ -495,6 +521,13 @@ def test_bash_format_completion_does_not_leak_its_loop_variable():
 
 
 def _zsh_available() -> bool:
+    """Unlike `bash` (see `_bash_available`), a plain `which` IS proof here:
+    Windows has no `zsh.exe` launcher stub anywhere on the default `PATH` --
+    the WSL-installer-provided stub is specifically `%SystemRoot%\\System32\\
+    bash.exe` (and `wsl.exe`/`wslconfig.exe`), never a `zsh.exe`, and
+    `windows-latest`/`macos-latest`/`ubuntu-latest` GitHub runner images carry
+    no other program named `zsh` that could shadow the real one. Verified,
+    not assumed."""
     import shutil as _shutil
 
     return _shutil.which("zsh") is not None
