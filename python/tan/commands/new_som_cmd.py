@@ -120,6 +120,17 @@ _SKU_RE = re.compile(r"^E1M-[A-Z0-9-]+$")
 _SOC_REF_RE = re.compile(r"^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$")
 _FAMILY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _CORE_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$")
+#: `som-preset-v1.schema.json`'s own `default_hw_rev` pattern, verbatim
+#: (`metadata/schemas/som-preset-v1.schema.json` `properties.default_hw_rev
+#: .pattern`). tan-cli#496 defect 5: this used to be checked ONLY by the
+#: post-render schema self-check, which -- for a brand-new family, where the
+#: `_family_hw_revisions` cross-check below is skipped -- reported a bad
+#: value as `new-som.internal-failure` ("a tan bug, never bad user input"),
+#: not the `new-som.failed` every other bad flag gets. Validated up front now
+#: (`.fullmatch`, not `.match`: a trailing `$` still matches just before a
+#: FINAL newline in non-MULTILINE mode, which is exactly the shape defect 3's
+#: multi-line injection needs to slip past a `.match` check unnoticed).
+_HW_REV_RE = re.compile(r"^[a-z0-9_-]+$")
 
 #: Canonical backend keys already known to the device dispatcher, plus the
 #: schema-legal lowercase `tbd` placeholder -- verbatim from the original.
@@ -240,14 +251,76 @@ def _internal_error(subject: str, schema: str, errors: list[str], json_mode: boo
     raise typer.Exit(int(ExitCode.RUNTIME_FAILURE))
 
 
+def _has_control_char(value: str) -> bool:
+    r"""True if ``value`` carries a C0 control character (0x00-0x1F) or DEL
+    (0x7F) -- the full ASCII control set, not just C0.
+
+    tan-cli#496 round-2 major 2: DEL alone used to pass the narrower
+    `ord(ch) < 0x20` check every call site here used to write inline, reach
+    a rendered YAML double-quoted scalar unescaped (`_yaml_dquote` below
+    only escapes `\` and `"`), and crash the unguarded
+    `yaml.safe_load(preset_text)` self-check with a raw
+    `yaml.reader.ReaderError` -- exit 1, zero bytes on stdout under
+    `--format json` (measured: `--display-name $'X\x7fY'`). One shared
+    check closes it at every call site instead of widening each inline
+    comparison by hand.
+    """
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
 def _yaml_dquote(value: str) -> str:
     r"""Escape ``value`` for embedding in a YAML double-quoted scalar.
 
     YAML double-quoted style uses C-like escapes, so `\` and `"` are the
     only characters that need escaping here (control characters are
-    rejected up front by the command's validation).
+    rejected up front by the command's validation, `_has_control_char`).
     """
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _yaml_scalar(value: str) -> str:
+    """A single-line YAML scalar for ``value``, chosen by PyYAML's OWN
+    emitter -- plain, single- or double-quoted, whichever round-trips
+    exactly -- rather than a hand-rolled quoting rule.
+
+    tan-cli#496 defect 3: `_yaml_dquote` above is a SECOND, independently
+    maintained escaping implementation, and it only ever covered
+    `display_name`; `default_hw_rev`/`default_board` were spliced RAW, so
+    `--default-hw-rev $'r1\\ncapabilities: {secure_element: true}'` did not
+    need to defeat any quoting at all -- the literal newline in the raw
+    argument became a second YAML mapping-key line the instant it was
+    f-string-joined into the preset, planting a fabricated hardware
+    capability the schema self-check never sees (it only re-parses the
+    ALREADY-INJECTED document). Routing both fields through the real
+    emitter instead removes the second implementation, not just patches it.
+
+    Raises ``ValueError`` -- "must not contain newlines or other control
+    characters" -- for a ``value`` this cannot represent on one line; the
+    caller pre-refuses those before render time, so this is the backstop,
+    not the primary gate (`fail()`-worded messages belong at the call site,
+    which knows the flag name).
+
+    tan-cli#496 round-2 blocker 1: this used to call `yaml.safe_dump(value)`
+    at PyYAML's DEFAULT 80-column `best_width` and keep only
+    `.splitlines()[0]` -- fine for a value that fits in 80 columns, but
+    PyYAML folds anything longer at a space, so any `--default-board`/
+    `--default-hw-rev` past that width was SILENTLY TRUNCATED into the
+    generated preset and reported as a clean success (a SoM vendor
+    hardware fact, corrupted with no error). Blocker 2: at greater length
+    the fold can land INSIDE an emitted quoted scalar, so the truncated
+    text is not even valid YAML -- `new_som`'s unguarded
+    `yaml.safe_load(preset_text)` self-check then raised a raw
+    `yaml.scanner.ScannerError`, exit 1 with zero bytes on stdout under
+    `--format json` (measured: `--default-board "$(python3 -c "print('word
+    '*30)")"`). `width=float("inf")` tells the emitter never to fold at
+    all, so whatever style it picks always lands on ONE content line --
+    `dumped[0]` then keeps the full value, and any trailing lines are only
+    PyYAML's own `...` document-end marker, never truncated content.
+    """
+    if _has_control_char(value):
+        raise ValueError("must not contain newlines or other control characters")
+    dumped = yaml.safe_dump(value, width=float("inf")).splitlines()
+    return dumped[0] if dumped else "''"
 
 
 def _som_schema_path(sdk_root: Path) -> Path:
@@ -358,50 +431,67 @@ def _interactive(
     """Ask the same questions, in the same order, the original's
     `questionary`-based `_interactive` did -- see the module docstring for
     why the answer widget is `click.prompt`/`click.Choice` here instead.
+
+    Every prompt below is `err=True`: `click.prompt`'s OWN default is
+    `err=False` (the question goes to stdout), which is backwards for a
+    command whose consent gate (`tan.core.consent.can_prompt`,
+    `_interactive`'s only caller checks stdin+STDERR) already promises the
+    question rides stderr and the answer rides stdin -- stdout stays free
+    for whatever the invocation is piping or redirecting (tan-cli#496
+    defect 6). Without this, `tan new-som > log.txt` with a real terminal
+    on stdin/stderr writes the question into `log.txt` instead of the
+    terminal and blocks on a question the human never saw.
     """
     if sku is None:
-        sku = click.prompt("New SoM SKU (E1M-<UPPERCASE> shaped)").strip()
+        sku = click.prompt("New SoM SKU (E1M-<UPPERCASE> shaped)", err=True).strip()
     if soc_ref is None:
         soc_ref = click.prompt(
-            "Silicon triple-colon ref (vendor:family:part, e.g. nxp:imx9:imx95)"
+            "Silicon triple-colon ref (vendor:family:part, e.g. nxp:imx9:imx95)", err=True
         ).strip()
     if family is None:
-        family = click.prompt("Human-readable family slug (e.g. nxp-imx9)").strip()
+        family = click.prompt(
+            "Human-readable family slug (e.g. nxp-imx9)", err=True
+        ).strip()
     if vendor is None:
         vendor = click.prompt(
             "Vendor display name for the SoC JSON",
             default=soc_ref.split(":")[0] if _SOC_REF_RE.match(soc_ref) else "",
+            err=True,
         ).strip()
     if display_name is None:
         display_name = click.prompt(
             "Display name",
             default=f"{sku} ({vendor} -- scaffold, silicon facts TBD)",
+            err=True,
         ).strip()
     if inference_backend is None:
         inference_backend = click.prompt(
             "Inference backend (silicon-determined; pick `tbd` when unknown)",
             type=click.Choice(INFERENCE_BACKENDS),
             default="tbd",
+            err=True,
         )
     if inference_backend == "ethos_u" and ethos_u_variant is None:
         ethos_u_variant = click.prompt(
             "Primary Ethos-U variant",
             type=click.Choice(ETHOS_U_VARIANTS),
+            err=True,
         )
     if cores is None:
         answer = click.prompt(
             "Canonical core ids, comma-separated (leave the tbd placeholder "
             "when unknown)",
             default=",".join(DEFAULT_CORES),
+            err=True,
         )
         cores = tuple(s.strip() for s in answer.split(",") if s.strip())
     if default_board is None:
         default_board = click.prompt(
-            "Default board (stock carrier)", default=DEFAULT_BOARD
+            "Default board (stock carrier)", default=DEFAULT_BOARD, err=True
         ).strip()
     if default_hw_rev is None:
         default_hw_rev = click.prompt(
-            "Default hw rev", default=DEFAULT_HW_REV
+            "Default hw rev", default=DEFAULT_HW_REV, err=True
         ).strip()
     return (
         sku,
@@ -551,10 +641,10 @@ def _render_preset(
     a("# E1M-V2N102.yaml `gd32_bridge`).  Omit when the module has none.")
     a("")
     a("# Must resolve against metadata/e1m_modules/<family-dir>/hw-revisions.yaml.")
-    a(f"default_hw_rev:         {default_hw_rev}")
+    a(f"default_hw_rev:         {_yaml_scalar(default_hw_rev)}")
     a("")
     a("# Stock carrier board this SoM ships on (see metadata/boards/).")
-    a(f"default_board:          {default_board}")
+    a(f"default_board:          {_yaml_scalar(default_board)}")
     a("")
     a("# Keep both flags true until every TBD above is resolved from the")
     a("# authoritative HW config.  `preliminary: true` is also the marker")
@@ -621,6 +711,82 @@ def _schema_errors(doc, schema_path: Path) -> list[str]:
         f"{'/'.join(str(p) for p in err.absolute_path) or '<root>'}: {err.message}"
         for err in sorted(validator.iter_errors(doc), key=lambda e: list(e.absolute_path))
     ]
+
+
+def _rollback_write_failure(
+    preset_path: Path,
+    preset_existed_before: bool,
+    preset_backup: bytes | None,
+    preset_write_attempted: bool,
+    soc_path: Path,
+    soc_doc,
+) -> list[str]:
+    """Undo whatever THIS invocation actually touched after a write failure,
+    and report exactly what could not be undone -- never more. Returns a
+    description string per candidate that could not be undone; an empty
+    list means the rollback is clean.
+
+    Three tan-cli#496 fixes live here:
+
+    * **Defect 2.** `preset_path` is RESTORED to its original bytes when it
+      pre-existed (a `--force` re-scaffold whose SoC-spec write then
+      failed), never deleted -- a destructive op must not remove a good,
+      pre-existing artifact before its replacement is proven good. A
+      brand-new preset (did not exist before this run) is still removed;
+      there is nothing of the customer's to lose there.
+    * **The finding against #496's own fix.** `soc_path` is removed only
+      when it PHYSICALLY EXISTS -- `Path.exists()` swallows `OSError`
+      (including the `NotADirectoryError` a regular file below
+      `--output-root` raises), unlike `unlink(missing_ok=True)`, which only
+      swallows `FileNotFoundError` and lets that one through. The issue's
+      own primary repro (a regular file at `<output-root>/metadata/socs`)
+      fails at `mkdir()` before `soc_path` is ever created, so `exists()`
+      is False and nothing is attempted -- the old code attempted the
+      unlink anyway, got a second `NotADirectoryError`, and told the
+      caller "this may be a half-written scaffold" for a path that was
+      never written at all.
+    * **tan-cli#496 round-2 blocker 3.** The preset branch below is gated
+      on `preset_write_attempted`, a flag the caller sets the instant the
+      preset write is ABOUT to start -- not on membership in a `written`
+      list the caller only appended to AFTER `write_text` returned
+      successfully. `Path.write_text` opens the file (truncating any
+      pre-existing content) and issues one `write()` call; an `OSError`
+      from THAT call (`ENOSPC`/`EDQUOT`/`EFBIG`/`EIO`) leaves a physically
+      created, partially-written file on disk but raises before the
+      caller's `written.append(preset_path)` ever ran. Gating on `written`
+      alone treated that file as never touched by this run and left the
+      partial write unrolled-back; `preset_write_attempted` covers that
+      case too, on top of the "wrote fine, the SoC-spec write after it
+      failed" case a `written` check alone already caught.
+    """
+    cleanup_failures: list[str] = []
+    if preset_write_attempted:
+        if preset_existed_before:
+            if preset_backup is None:
+                cleanup_failures.append(
+                    f"{preset_path} (no backup was captured; its content "
+                    "cannot be safely restored -- left as written by this run)"
+                )
+            else:
+                try:
+                    preset_path.write_bytes(preset_backup)
+                except OSError as exc:
+                    cleanup_failures.append(
+                        f"{preset_path} (could not restore its original content: {exc})"
+                    )
+        else:
+            try:
+                if preset_path.exists():
+                    preset_path.unlink()
+            except OSError as exc:
+                cleanup_failures.append(f"{preset_path} ({exc})")
+    if soc_doc is not None:
+        try:
+            if soc_path.exists():
+                soc_path.unlink()
+        except OSError as exc:
+            cleanup_failures.append(f"{soc_path} ({exc})")
+    return cleanup_failures
 
 
 def new_som(
@@ -781,10 +947,34 @@ def new_som(
             for flag, value in (("--sku", sku), ("--soc-ref", soc_ref), ("--family", family))
             if value is None
         ]
-        if not sys.stdin.isatty():
+        # `sys.stdin`/`sys.stderr` are bare references, not guaranteed
+        # streams: either is `None` under a console-less launcher (e.g. a
+        # frozen build run without a console, or any host that closes
+        # standard streams instead of redirecting them to `os.devnull`),
+        # and `None.isatty()` is an `AttributeError` -- an unhandled
+        # traceback instead of this command's own coded refusal, in
+        # exactly the "no real terminal" case this check exists to name
+        # cleanly.
+        #
+        # tan-cli#496 round-2 major 1: BOTH streams are checked, not only
+        # `stdin`. `_interactive`'s prompts are `err=True` (defect 6 above)
+        # -- the question rides stderr, the answer rides stdin -- so a
+        # redirected/piped stderr with a real stdin terminal has no way to
+        # show the human the question, and the old stdin-only gate admitted
+        # exactly that shape, blocking on a prompt nobody could see. This
+        # mirrors `tan.core.consent.can_prompt`'s own "a prompt is a
+        # question-and-answer pair; each half needs its own real terminal"
+        # rule.
+        if (
+            sys.stdin is None
+            or not sys.stdin.isatty()
+            or sys.stderr is None
+            or not sys.stderr.isatty()
+        ):
             fail(
-                "stdin is not a terminal, so interactive prompts are "
-                "unavailable; pass the missing required flag(s): " + ", ".join(missing)
+                "stdin or stderr is not a terminal, so interactive prompts "
+                "are unavailable; pass the missing required flag(s): "
+                + ", ".join(missing)
             )
             return
         if json_mode:
@@ -854,6 +1044,18 @@ def new_som(
     if bad_cores:
         fail(f"core id(s) {bad_cores} must match ^[a-z][a-z0-9_]+$")
         return
+    # tan-cli#496 defect 4: a repeated `--cores` id used to reach both
+    # skeletons -- a duplicate `<id>: {}` mapping key in the preset's
+    # `topology:` block (invalid YAML; PyYAML keeps the last, a strict
+    # loader like alp-sdk's `validate_metadata.py` rejects it outright) and
+    # two identical `cores[]` rows in the SoC JSON -- reported as a clean
+    # success by both schema self-checks, since neither schema forbids a
+    # repeated id within its own document. `tan init`'s sibling parser
+    # (`tan.core.scaffold.parse_cores`) already refuses this; new-som didn't.
+    dup_cores = sorted({c for c in cores if cores.count(c) > 1})
+    if dup_cores:
+        fail(f"--cores has duplicate id(s) {dup_cores}; every core id must be unique")
+        return
     if inference_backend == "ethos_u" and ethos_u_variant is None:
         fail("--inference-backend ethos_u requires --ethos-u-variant (u55/u65/u85)")
         return
@@ -861,8 +1063,31 @@ def new_som(
         vendor = soc_ref.split(":")[0]
     if display_name is None:
         display_name = f"{sku} ({vendor} -- scaffold, silicon facts TBD)"
-    if any(ord(ch) < 0x20 for ch in display_name):
+    if _has_control_char(display_name):
         fail("display name must not contain newlines or other control characters")
+        return
+    # tan-cli#496 defect 3/5: `default_hw_rev` used to reach the RENDERED
+    # preset unchecked by this command itself -- only the post-render schema
+    # self-check saw it, and only after the value had already been spliced
+    # into YAML text. A single-line-but-out-of-pattern value (`R1`) then
+    # surfaced as `new-som.internal-failure` for a brand-new family (defect
+    # 5: the `_family_hw_revisions` cross-check below is skipped there, the
+    # one place that would otherwise have caught it as `new-som.failed`
+    # first) -- a caller mistake misreported as a tan bug. A MULTI-LINE
+    # value defeated the self-check entirely (defect 3): the injected lines
+    # became sibling YAML keys, so `default_hw_rev` itself still read back
+    # pattern-clean. `.fullmatch`, not `.match`+`$`: see `_HW_REV_RE`'s
+    # comment for why `$` alone is not equivalent here.
+    if not _HW_REV_RE.fullmatch(default_hw_rev):
+        fail(f"default hw rev '{default_hw_rev}' must match {_HW_REV_RE.pattern!r}")
+        return
+    # `default_board` has no schema pattern (a bare `type: string`, since a
+    # real carrier name may contain spaces/hyphens the SKU-shaped fields
+    # don't), so the injection above is closed by refusing control
+    # characters -- the one thing a single-line preset value can never
+    # legitimately need -- rather than by a charset it does not have.
+    if _has_control_char(default_board):
+        fail("default board must not contain newlines or other control characters")
         return
 
     # Resolve the cross-references the checklist used to defer: the stock
@@ -900,17 +1125,26 @@ def new_som(
     # disk): the skeletons must be schema-valid on arrival.  The one
     # sanctioned exception is a SKU outside the schema's current pattern --
     # extending that pattern IS a porting step (see below).
-    preset_text = _render_preset(
-        sku,
-        soc_ref,
-        family,
-        display_name,
-        inference_backend,
-        ethos_u_variant,
-        cores,
-        default_board,
-        default_hw_rev,
-    )
+    try:
+        preset_text = _render_preset(
+            sku,
+            soc_ref,
+            family,
+            display_name,
+            inference_backend,
+            ethos_u_variant,
+            cores,
+            default_board,
+            default_hw_rev,
+        )
+    except ValueError as exc:
+        # Backstop for `_yaml_scalar`, not the primary gate: the checks above
+        # already refuse every value that would land here. Never reached in
+        # a correct build; kept so a future field spliced in without its own
+        # upfront check fails loud (`new-som.failed`) instead of an unhandled
+        # traceback with zero bytes on stdout under `--format json`.
+        fail(f"could not render the preset skeleton: {exc}")
+        return
     soc_doc = None if soc_path.exists() else _soc_skeleton(sku, soc_ref, vendor, cores)
 
     som_schema_path = _som_schema_path(resolved_sdk)
@@ -925,7 +1159,20 @@ def new_som(
         # be named explicitly beside it.
         fail(f"could not read {som_schema_path} ({exc})")
         return
-    preset_doc = yaml.safe_load(preset_text)
+    try:
+        preset_doc = yaml.safe_load(preset_text)
+    except yaml.YAMLError as exc:
+        # tan-cli#496 round-2 major 2: this was unguarded -- a value that
+        # slipped past every upfront check above (the DEL byte
+        # `_has_control_char` now rejects; a hypothetical future field
+        # spliced into `_render_preset` without its own check) reached the
+        # rendered document and could still make it unparseable, raising a
+        # raw `yaml.reader.ReaderError`/`yaml.scanner.ScannerError` -- exit
+        # 1, zero bytes on stdout under `--format json`. Backstop, not the
+        # primary gate, same shape as the `_render_preset` `ValueError`
+        # catch just above.
+        fail(f"could not parse the rendered preset skeleton: {exc}")
+        return
     if preset_doc is not None:
         try:
             errors = _schema_errors(preset_doc, som_schema_path)
@@ -959,6 +1206,21 @@ def new_som(
     planned: list[Path] = [preset_path] + ([soc_path] if soc_doc is not None else [])
     existing: list[Path] = [] if soc_doc is not None else [soc_path]
     written: list[Path] = []
+    # tan-cli#496 defect 2: captured BEFORE any write touches `preset_path`,
+    # so a `--force` re-scaffold whose SoC-spec write later fails can
+    # restore the customer's original preset instead of deleting it (see
+    # `_rollback_write_failure`). `None` when the preset is brand new --
+    # there was nothing to back up, and nothing must be restored either.
+    preset_existed_before = preset_path.exists()
+    preset_backup: bytes | None = None
+    # tan-cli#496 round-2 blocker 3: set the instant the write is ABOUT to
+    # start, not after it succeeds -- `written.append(preset_path)` below
+    # only runs once `write_text` has already returned, so gating the
+    # rollback on `preset_path in written` alone missed a write that
+    # started, physically created/truncated the file, and THEN raised
+    # (ENOSPC/EDQUOT/EFBIG/EIO) partway through. See
+    # `_rollback_write_failure`'s docstring.
+    preset_write_attempted = False
     if dry_run:
         say(f"Would create {preset_path}")
         if soc_doc is None:
@@ -968,6 +1230,9 @@ def new_som(
     else:
         try:
             preset_path.parent.mkdir(parents=True, exist_ok=True)
+            if preset_existed_before:
+                preset_backup = preset_path.read_bytes()
+            preset_write_attempted = True
             preset_path.write_text(preset_text, encoding="utf-8", newline="\n")
             written.append(preset_path)
             if soc_doc is not None:
@@ -977,12 +1242,32 @@ def new_som(
                 )
                 written.append(soc_path)
         except OSError as exc:
-            # Never leave a half-written scaffold behind: remove both the
-            # partially-written target and anything already created.
-            targets = [preset_path] + ([soc_path] if soc_doc is not None else [])
-            for path in {*written, *targets}:
-                path.unlink(missing_ok=True)
-            fail(f"could not write the skeletons ({exc}); removed any partial output")
+            # Never leave a half-written scaffold behind, and never destroy
+            # a pre-existing one either -- `_rollback_write_failure` is both
+            # halves of tan-cli#496 (defect 2's restore-not-delete and the
+            # finding against this file's OWN earlier fix: only a path that
+            # PHYSICALLY EXISTS is ever reported as a cleanup failure, so a
+            # target this run never reached disk for is never called
+            # "may be half-written") plus round-2 blocker 3's
+            # attempted-not-just-succeeded tracking.
+            cleanup_failures = _rollback_write_failure(
+                preset_path,
+                preset_existed_before,
+                preset_backup,
+                preset_write_attempted,
+                soc_path,
+                soc_doc,
+            )
+            if cleanup_failures:
+                fail(
+                    f"could not write the skeletons ({exc}); cleanup also "
+                    "failed, so this may be a half-written scaffold -- "
+                    "could not remove: " + "; ".join(cleanup_failures)
+                )
+            else:
+                # "Rolled back", not "removed": a --force re-scaffold whose
+                # preset pre-existed was RESTORED, not deleted (defect 2).
+                fail(f"could not write the skeletons ({exc}); rolled back any partial output")
             return
         say(f"Created {preset_path}")
         if soc_doc is None:

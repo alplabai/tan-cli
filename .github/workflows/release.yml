@@ -521,10 +521,19 @@ jobs:
       # side. Publishing the goldens lets the extension's own contract test
       # diff against THIS instead of a hand-copied fixture that drifts.
       #
-      # Pure re-packaging: every input is a committed file already gated by
-      # `cargo test -p alp-tan-cli --test contract`, so there is no fact here
-      # that can be right in the repo and wrong in the asset. Run it locally
-      # with `python3` from the repo root to see exactly what ships.
+      # Pure re-packaging of committed `contract/envelopes/*` files -- but
+      # "committed" is not "matches what ships". Every case is gated by
+      # `cargo test -p alp-tan-cli --test contract` (the frozen Rust v0.4.1
+      # oracle) and, for every case EXCEPT the five `debug-config-preview-*`
+      # goldens, also by `python -m pytest tests/conformance` against the
+      # actual shipping Python CLI. Those five are `pytest.mark.xfail(strict=True)`
+      # there on a documented, permanent divergence (see contract/README.md,
+      # "Known divergence: debug-config-preview-*", tan-cli#502) -- this step
+      # re-packages their frozen-oracle `expected.json` verbatim, so this
+      # asset's five `envelopes["debug-config-preview-*"]` entries do NOT
+      # reflect what `tan` actually emits for `data.configuration`/`issues[]`.
+      # Run it locally with `python3` from the repo root to see exactly what
+      # ships.
       - name: Bundle the envelope contract
         shell: bash
         run: |

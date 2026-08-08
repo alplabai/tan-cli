@@ -168,7 +168,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # f-string was the exact shape that printed a stringified `None` and then
     # advised dropping a `--workspace` the invocation never carried, and
     # nothing stopped that gate from being loosened again.
-    "tan/commands/bootstrap_cmd.py": 2917,
+    # 2919, not 2917, as of tan-cli#516: `reconcile_west_manifest_path`'s
+    # write moved from a bare `Path.write_text` + `os.replace` (no `fsync` at
+    # all) to the new shared `atomic_write_text` (`tan/core/atomic_write.py`),
+    # plus a comment explaining the durability gap the old shape had. Net
+    # growth is small -- the call site itself SHRANK (the caller's own
+    # temp-cleanup `except` is gone, `atomic_write_text` does its own) -- the
+    # import line and the expanded rationale comment account for the +2.
+    "tan/commands/bootstrap_cmd.py": 2919,
     "tan/core/bootstrap.py": 1890,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
@@ -459,7 +466,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # function-length ratchet's 50-line cap (49 lines) rather than paying
     # that ratchet too, matching this file's own established precedent
     # (`doctor_render.py:render_doctor_footer`, above).
-    "tan/commands/build_cmd.py": 1703,
+    # 1706, not 1703, as of tan-cli#510: `_missing_tool_issues`'s match
+    # dropped its `endswith("` not found")` half (the message now carries a
+    # `-- searched ...` tail) and gained its own two-line explanation of why.
+    # 1732, not 1706, as of the tan-cli#510 REVIEW round: `_slice_result`
+    # gained the new, always-present `resolvedTool` field plus the docstring
+    # explaining why it is the one exception to "omitted when absent", and
+    # `_text_recap` gained the resolved-tool note it now composes for a
+    # failed/cancelled slice (never folded into `reason` -- see both
+    # functions' own docstrings).
+    "tan/commands/build_cmd.py": 1732,
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
     # entry points (`_run`, `--sim-mode`) append
@@ -527,7 +543,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # entry) plus a single-threaded-CLI caveat on the `os.umask` set-restore
     # -- the list-merge algorithm change that dominates this round's diff
     # lives in `debug_launch.py` below, not here.
-    "tan/commands/debug_config_cmd.py": 1661,
+    # 1661 -> 1542, tan-cli#516 review round: `_atomic_write_launch_json`
+    # (the 119-line function this file grew across the three rounds recorded
+    # immediately above) is GONE, not grown again -- the fsync/symlink/mode
+    # shape it carried moved into the new shared `tan/core/atomic_write.py:
+    # atomic_write_text`, which `bootstrap_cmd.reconcile_west_manifest_path`
+    # now also calls, so the write plan's own docstring comment ("`_atomic_
+    # write_launch_json`'s own docstring covers the rest") stopped being true
+    # the moment #516 gave `reconcile_west_manifest_path` its own unsynchronised
+    # copy of the same durability gap this module had already closed once.
+    # The call site now reads `atomic_write_text(launch_json_path, plan.content)`
+    # directly; nothing here duplicates the durability sequence any more.
+    "tan/commands/debug_config_cmd.py": 1542,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -585,7 +612,55 @@ _MODULE_BUDGET: dict[str, int] = {
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
     # resolved, the same cost `project_pin_issue` above already justified.
-    "tan/commands/new_som_cmd.py": 1057,
+    # 1091, not 1057, as of tan-cli#496: the write-failure rollback loop now
+    # walks a deduplicated LIST (not a `set` -- the PYTHONHASHSEED-dependent
+    # iteration order that non-deterministically left a half-written preset
+    # on disk) and guards each `unlink()` individually, so a second `OSError`
+    # during cleanup is collected and reported instead of escaping uncaught
+    # with zero bytes on stdout in either output mode.
+    # 1250, not 1091, closing the five remaining tan-cli#496 defects that
+    # PR's own fix left open: (1) `_yaml_scalar` -- both `default_hw_rev`
+    # and `default_board` now render through PyYAML's own emitter instead
+    # of raw f-string splicing, closing the YAML-injection hole a multi-line
+    # `--default-hw-rev` used to open (defect 3); (2) `default_hw_rev` is
+    # now pattern-checked by this command itself, before render, so a bad
+    # value on a brand-new family is `new-som.failed` rather than
+    # `new-som.internal-failure` (defect 5); (3) a `--cores` duplicate is
+    # now refused up front instead of landing as a duplicate YAML/JSON key
+    # in both skeletons (defect 4); (4) `_rollback_write_failure` replaces
+    # the inline cleanup loop -- it RESTORES a pre-existing `--force`
+    # preset's original bytes instead of deleting it (defect 2), and only
+    # ever reports a path as an undoable cleanup failure when that path
+    # PHYSICALLY EXISTS, closing the finding against this file's own
+    # earlier fix (a target this run never reached disk for was reported
+    # "may be half-written"); (5) every `click.prompt` call in
+    # `_interactive` is now `err=True` (defect 6); (6) the bare
+    # `sys.stdin.isatty()` at the top-level input-gathering step now guards
+    # `sys.stdin is None` first (a console-less launcher raises
+    # `AttributeError` there otherwise).
+    # 1342, not 1250, closing the tan-cli#496 round-2 review's remaining
+    # findings against that same PR's own fix: (blocker 1+2) `_yaml_scalar`
+    # now calls `yaml.safe_dump(value, width=float("inf"))` instead of
+    # PyYAML's default 80-column fold -- the old width silently truncated
+    # any `--default-board`/`--default-hw-rev` past 80 columns into the
+    # generated preset (reported as success) and, longer still, could land
+    # the cut inside an emitted quoted scalar, corrupting `preset_text` into
+    # invalid YAML; (blocker 3) `_rollback_write_failure` gates the preset
+    # branch on a new `preset_write_attempted` flag the caller sets before
+    # the write starts, not on membership in `written` (appended only AFTER
+    # a successful `write_text`) -- a write that fails PARTWAY (ENOSPC/
+    # EDQUOT/EFBIG/EIO) left a partially-written file `written` never knew
+    # about, unrolled-back; (major 1) the top-level "no real terminal" gate
+    # now checks `sys.stderr.isatty()` too, not only `sys.stdin` -- every
+    # `_interactive` prompt rides stderr (defect 6), so a redirected stderr
+    # with a real stdin terminal used to block on a question nobody could
+    # see; (major 2) `yaml.safe_load(preset_text)` is now guarded (a
+    # `yaml.YAMLError` routes through `fail()` instead of an unhandled
+    # traceback), and the new shared `_has_control_char` helper rejects DEL
+    # (0x7F) alongside the C0 range at every call site, closing the one
+    # value shape (a raw DEL byte in `--display-name`) that used to reach
+    # that unguarded parse and crash it.
+    "tan/commands/new_som_cmd.py": 1342,
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
@@ -670,7 +745,40 @@ _MODULE_BUDGET: dict[str, int] = {
     # ("assign every leftover draft item to every leftover existing slot in
     # order") was rejected, not just what shipped.
     "tan/core/debug_launch.py": 1275,
-    "tan/commands/build/execute.py": 941,
+    # 1003, not 941, as of tan-cli#510: `_command_on_path`/`_tool_is_
+    # available` (a bool-only availability check, and a spawn that repeated
+    # a SEPARATE, unhardened PATH lookup) were replaced by one
+    # `_resolve_tool` returning the resolved absolute path AND what it
+    # searched -- the spawn now runs that path, never the bare identity, and
+    # the missingTool refusal names the search. The per-slice resolved-tool
+    # note appended ahead of `output_artefact` resolution accounts for the
+    # rest.
+    # 1075, not 1003, as of the tan-cli#510 REVIEW round: that per-slice
+    # resolved-tool note (appended to `message`) is GONE -- `resolved_tool`
+    # is now a dedicated `SliceOutcome` field, computed once per slice and
+    # threaded through every outcome constructor -- but the review's other
+    # three findings cost more lines than that removal saved: `_resolve_tool`
+    # takes an `env` parameter and resolves against it (MAJOR 2, moving the
+    # whole env-assembly block earlier in the loop plus its own explanatory
+    # comment), the env-assembly-before-resolution reordering itself carries
+    # a paragraph explaining why (MAJOR 2), `SliceOutcome.resolved_tool` and
+    # a second `execute.py` module-docstring divergence paragraph (mirroring
+    # the existing tan-cli#307 one) are both new, and the absolute-path-miss
+    # message split into two non-circular returns (the review's minor
+    # finding) plus the `os.get_exec_path(env)` POSIX comment (MAJOR 2).
+    # 1119, not 1075, as of the tan-cli#510 REVIEW ROUND 3: the missing-tool
+    # refusal's searched-`PATH` text was reaching the persisted
+    # `system-manifest.yaml` `reason` (a support-ticket-forwarded artefact),
+    # not just the transient message/envelope -- `SliceOutcome` gained a
+    # `manifest_message` field (and its own docstring) plus a short-form
+    # value threaded through the missing-tool call site and
+    # `_write_manifest_after_dispatch`'s `reason=` line; `SliceOutcome.
+    # resolved_tool`'s docstring also grew a paragraph documenting a
+    # deliberate ambiguity the review flagged as a NIT (an already-absolute
+    # `tool` that fails to launch reports `resolvedTool: null`,
+    # indistinguishable from "never resolved" without a separate field this
+    # port does not add).
+    "tan/commands/build/execute.py": 1119,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather
@@ -871,7 +979,66 @@ _MIRRORED = ("tan/planner/",)
 # survives rebasing #520's work onto the `dev` tip that now carries all of
 # the former. Re-walked with the gate's own `ast` logic (span > 50 over all
 # of `tan/`, planner included) against this exact tree.
-_FUNCTION_COUNT_BUDGET = 211
+#
+# 212, not 211, as of tan-cli#516 (first pass): the new shared `tan/core/
+# atomic_write.py:atomic_write_text` (54 lines, docstring included) was a
+# genuinely NEW function over the cap -- `reconcile_west_manifest_path`'s own
+# body did not cross it either before or after this change, so that was a
+# pure +1, not a replacement.
+#
+# 211, not 212, as of the tan-cli#516 REVIEW round: `debug_config_cmd.py:
+# _atomic_write_launch_json` -- the 81-line function that was ALREADY over
+# the cap before this issue, one of the 199 baseline never enumerated here --
+# is gone outright. `_write` now calls the shared `atomic_write_text`
+# directly instead of keeping a second, hand-synchronised copy of the same
+# durability sequence beside it (the drift #516 itself was filed to close);
+# `atomic_write_text` grew to 95 lines picking up that copy's mode-
+# preservation and its broadened exception handling, but it was already
+# counted once in the 212 above and staying one function does not add a
+# second count. Net: +1 (atomic_write_text, counted in the prior step) - 1
+# (`_atomic_write_launch_json`, deleted) against the pre-#516 211 baseline
+# nets back to 211, not a coincidence -- re-measured with the gate's own
+# `ast` walk against this exact tree, not summed on faith.
+# `_FUNCTION_WORST_BUDGET` is untouched: re-measuring the CURRENT worst
+# (`bootstrap_cmd.py:_run`) with this gate's own `ast` walk finds 701 lines,
+# not 707 -- unrelated to this change (that function is untouched here) and
+# still comfortably under the recorded ceiling, so the ceiling is left as
+# recorded rather than tightened on faith.
+# 212, not 211, as of tan-cli#496's remaining-defects pass:
+# `new_som_cmd.py:_rollback_write_failure` is a genuinely NEW function (61
+# lines) extracted from the write-failure `except OSError:` block so the
+# restore-vs-delete logic (defect 2) and the exists()-gated cleanup
+# reporting (the finding against this file's own earlier fix) are
+# unit-testable on their own; every other function this pass touched
+# (`_interactive`, `_render_preset`, `new_som`, `scaffold_cmd.py:scaffold`)
+# was already over 50 lines before it, so growing them moves nothing here.
+# `_FUNCTION_WORST_BUDGET` is untouched -- `_rollback_write_failure` is 61
+# lines and `new_som` (grown to 506) is still well under `bootstrap_cmd.
+# _run`'s 701, itself under the recorded 707.
+
+# 213, not 211, as of the tan-cli#510 REVIEW round: two functions crossed 50
+# lines, both docstring/parameter growth, not new branching:
+# `build/execute.py:_resolve_tool` (47 -> 71) gained an `env` parameter
+# (MAJOR 2: resolve against the slice's OWN assembled env, not
+# `os.environ`) plus the docstring explaining why, and split its absolute-
+# path miss into its own non-circular message (the review's own minor
+# finding); `build_cmd.py:_text_recap` (48 -> 61) gained the resolved-tool
+# note it prints for a failed/cancelled slice (MAJOR 1: carried in the new
+# `resolvedTool` field, never folded into `reason`, so `_text_recap` is
+# where the note is actually composed for default text). Neither is
+# anywhere near `_FUNCTION_WORST_BUDGET`. Re-walked with the gate's own
+# `ast` logic against this exact tree, not computed from the diff alone.
+#
+# 214 on the merged tree, MEASURED by AST walk -- neither side's number: #496
+# contributed one crossing (212) and tan-cli#530's resolver two (213), and the
+# union is 214, not either. Taking either side here fails the gate.
+# 213 on the merged tree, measured by AST walk: #516 added no long function, and
+# tan-cli#530 (#510's resolver) added two -- so dev's figure carries, not #516's
+# pre-merge 211.
+#
+# 214 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- #496 contributes one crossing that dev's 213 does not.
+_FUNCTION_COUNT_BUDGET = 214
 _FUNCTION_WORST_BUDGET = 707
 
 
