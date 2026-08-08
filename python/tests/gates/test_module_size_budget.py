@@ -175,8 +175,54 @@ _MODULE_BUDGET: dict[str, int] = {
     # growth is small -- the call site itself SHRANK (the caller's own
     # temp-cleanup `except` is gone, `atomic_write_text` does its own) -- the
     # import line and the expanded rationale comment account for the +2.
-    "tan/commands/bootstrap_cmd.py": 2919,
-    "tan/core/bootstrap.py": 1890,
+    # 3053, not 2919, as of tan-cli#495: `resolve_python_floor` gains a
+    # `zephyr_base_adopts` gate (defect 2 -- a tree `_select_workspace` is
+    # about to ignore must not still set the enforced Python floor);
+    # `_relocation_target_occupied` (defect 3) replaces a raw non-emptiness
+    # check with `parent_needs_workspace_guard`'s own predicate so a retry
+    # is not refused for the venv `rollback_relocation_after` itself leaves
+    # behind, plus its own rollback-message path-naming fix; the
+    # `--print-env` text-mode dispatch gains an `outcome.exit_code ==
+    # ExitCode.SUCCESS` gate (defect 4) so a refusal computed ahead of the
+    # short-circuit reaches stderr, not stdout; and `_append_git_config_
+    # override` (defect 5) replaces `Runner._env`'s blind `dict.update` so
+    # `FORCE_GIT_LONG_PATHS_ENV` no longer silently deletes a caller's own
+    # `GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n` chain (a corporate proxy/mirror
+    # override). Net growth is mostly each fix's own docstring explaining
+    # the customer-visible failure it closes.
+    # 3068, not 3053, same issue, defect 7: `_print_env_outcome` resolves the
+    # venv-activation hint's bin dir through `Workspace.venv_bin()` (the
+    # EXISTENCE-derived, directory-wins probe every other consumer already
+    # trusts) instead of the HOST-keyed `facts.venv_bin_dir(is_windows)`,
+    # which used to disagree with the same run's `Next steps:` block for a
+    # `.venv` whose layout does not match the reading host.
+    "tan/commands/bootstrap_cmd.py": 3068,
+    # 1963, not 1890, as of tan-cli#495 defect 6: `manual_install_posix`
+    # (the `manualInstallHints.posix.note` field `manual_install_windows`
+    # already had a twin for) is parsed (optionally -- an SDK predating
+    # alp-sdk#917 has no `posix` key at all), carried through the fallback
+    # facts (transcribed verbatim from the frozen Rust oracle's own
+    # fallback), and rendered by `optional_libs_block` for `Linux | MacOs`
+    # after the optional-native-libs section -- the whole "NOT
+    # auto-installed (manual, one-time):" section a Linux/macOS customer
+    # never saw at all. Growth is almost entirely the transcribed prose
+    # (three manifest-shaped paragraphs, twice -- once as the parser's
+    # docstring reference, once as the fallback's literal text) plus each
+    # site's own rationale comment.
+    # 1994, not 1963, same issue, defect 8: `resolve_workspace_target` gains
+    # a drive-RELATIVE refusal (`C:ws`, bare `C:`) using the real
+    # `ntpath.isabs`, not `ntpath_isabs`'s own deliberately-wider
+    # `^[A-Za-z]:` regex -- that regex made a drive-relative value read as
+    # fully absolute and fall through unresolved, verbatim, into the
+    # relocation TARGET for a customer's checkout. Growth is mostly the
+    # docstring explaining why this reuses `ntpath.isabs` directly instead of
+    # the broader helper the rest of the file already has.
+    # 2004, not 1994, same issue: `manual_install_posix`'s fallback text drops
+    # one clause naming `tan sdk switch` (not yet ported in this build --
+    # `tests/commands/test_sdk_onboarding_dead_end.py`'s own AST gate caught
+    # it) and gained a comment explaining why the fallback deliberately is
+    # not byte-verbatim with the oracle on that one point.
+    "tan/core/bootstrap.py": 2004,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
     # newline/`"`-injection hole on the artefact/atoc/serial interpolations,
@@ -1069,11 +1115,28 @@ _MIRRORED = ("tan/planner/",)
 #
 # 214 on the merged tree, MEASURED by AST walk over all of `tan/` including
 # `tan/planner/` -- #496 contributes one crossing that dev's 213 does not.
-# 215, not 214, as of tan-cli#494 defect 9: `template.py:_derive_pin_doc_
+# 215, not 214, as of tan-cli#495: `bootstrap.py:optional_libs_block` crossed
+# 50 lines (its own docstring grew, plus the new `Linux | MacOs` manual-
+# install-hints tail -- defect 6) for the one new crossing; `bootstrap_cmd.py:
+# _run` (below, `_FUNCTION_WORST_BUDGET`) grew too but was already over the
+# cap, so it does not move this count a second time.
+# 216, not 215, same issue, defect 7: `bootstrap_cmd.py:_print_env_outcome`
+# crossed 50 lines (48 -> 65) once its own venv-bin-dir resolution grew from
+# one line (`facts.venv_bin_dir(is_windows)`) to a `Workspace(...).venv_bin()`
+# construction plus the docstring explaining why the host-keyed read used to
+# disagree with the same run's `Next steps:` block.
+# 217, not 216, as of tan-cli#494 defect 9: `template.py:_derive_pin_doc_
 # renames` crossed 50 lines (44 -> 54) picking up the same ambiguity-
 # collision guard its two siblings already have.
-_FUNCTION_COUNT_BUDGET = 215
-_FUNCTION_WORST_BUDGET = 707
+_FUNCTION_COUNT_BUDGET = 217
+# 717, not 707, as of tan-cli#495: `_run` picked up defects 2/3/4's own
+# call-site changes (`resolve_python_floor`'s new keyword argument,
+# `_relocation_target_occupied`'s call plus its comment, the `--print-env`
+# dispatch's exit-code gate lives in the top-level `bootstrap()` wrapper, not
+# `_run`, so that one is NOT what moved this number) -- still the one linear
+# refusal ladder tan-cli#408's own `# noqa: PLR0911, PLR0912, PLR0915` stands
+# in front of.
+_FUNCTION_WORST_BUDGET = 717
 
 
 def _modules() -> list[Path]:

@@ -427,7 +427,7 @@ class PythonFloor:
     manifest: tuple[int, int]
 
 
-def resolve_python_floor(facts: BootstrapFacts) -> PythonFloor:
+def resolve_python_floor(facts: BootstrapFacts, *, zephyr_base_adopts: bool) -> PythonFloor:
     """The EFFECTIVE Python floor: the highest anything in the build chain
     enforces.
 
@@ -439,6 +439,21 @@ def resolve_python_floor(facts: BootstrapFacts) -> PythonFloor:
     reporting Pass on a host `bootstrap` refuses (or the reverse) is worse than
     either verdict alone.
 
+    `zephyr_base_adopts` (tan-cli#495 defect 2) gates whether `$ZEPHYR_BASE` is
+    read AT ALL: the caller passes `_zephyr_base_will_adopt(pin, repo_root)`'s
+    own verdict -- computed well before this runs, at the same point
+    `guard_applies` is decided -- so a tree `_select_workspace` is about to
+    IGNORE (no `$ZEPHYR_BASE`, a foreign manifest, or one `decide_workspace_
+    reuse` rejects outright) is never consulted for the floor either. Before
+    this parameter, an exported `$ZEPHYR_BASE` naming a tree bootstrap was
+    about to discard still set the enforced floor AND its reported source, so
+    `bootstrap.python-floor-skew` attributed the floor to a `python.cmake`
+    inside a tree the very next warning said was being ignored, and a foreign
+    tree's `PYTHON_MINIMUM_REQUIRED` exceeding tan's own pin could hard-refuse
+    `bootstrap.python-too-old` -- with a remedy naming the wrong fix (install a
+    newer Python, where the real fix is `unset ZEPHYR_BASE`) -- before
+    `_select_workspace` ever got to say the tree was being discarded.
+
     Skipped: reading the workspace's OWN `zephyr/cmake/modules/python.cmake`
     when one already exists. On the path that matters -- a fresh host, nothing
     bootstrapped -- there is no workspace to read, and a second candidate doctor
@@ -446,7 +461,9 @@ def resolve_python_floor(facts: BootstrapFacts) -> PythonFloor:
     bootstrapped Zephyr is found to LOWER the floor below tan's pin.
     """
     manifest_floor = facts.python_min_version
-    zephyr_floor, zephyr_source = zephyr_python_floor(_env("ZEPHYR_BASE"))
+    zephyr_floor, zephyr_source = zephyr_python_floor(
+        _env("ZEPHYR_BASE") if zephyr_base_adopts else None
+    )
     effective = max(manifest_floor, zephyr_floor)
     source = (
         zephyr_source
@@ -532,7 +549,19 @@ class Runner:
         if self.clear_zephyr_base:
             env.pop("ZEPHYR_BASE", None)
         if extra_env:
-            env.update(extra_env)
+            # `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` (`FORCE_GIT_LONG_PATHS_
+            # ENV`'s shape) are APPENDED onto the inherited git ad hoc config
+            # chain rather than blindly overwritten at index 0 -- tan-cli#495
+            # defect 5, see `_append_git_config_override`'s own docstring.
+            # `GIT_CONFIG_COUNT` is consumed there too, never copied verbatim.
+            # Every other `extra_env` key still overwrites, unchanged.
+            key_0 = extra_env.get("GIT_CONFIG_KEY_0")
+            if key_0 is not None:
+                _append_git_config_override(env, key_0, extra_env.get("GIT_CONFIG_VALUE_0", ""))
+            for key, value in extra_env.items():
+                if key in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+                    continue
+                env[key] = value
         return env
 
     def run(
@@ -888,11 +917,52 @@ def _west_argv(venv: VenvBin, args: list[str]) -> list[str]:
 #: scope (system/global/local) without touching any of them, and it is
 #: inherited by every child process `west update`'s own children spawn, so
 #: it reaches every project git touches in one shot.
+#: The literal `"1"`/`"_0"` here name the SHAPE `Runner._env` recognises
+#: (`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`), not the index this override
+#: actually lands at: `_append_git_config_override` (tan-cli#495 defect 5)
+#: appends it after whatever the caller's OWN `GIT_CONFIG_COUNT`/`_KEY_n`/
+#: `_VALUE_n` chain already carries -- a corporate host's proxy/mirror
+#: override, most realistically -- rather than claiming index 0 and silently
+#: deleting it.
 FORCE_GIT_LONG_PATHS_ENV = {
     "GIT_CONFIG_COUNT": "1",
     "GIT_CONFIG_KEY_0": "core.longpaths",
     "GIT_CONFIG_VALUE_0": "true",
 }
+
+
+def _append_git_config_override(env: dict[str, str], key: str, value: str) -> None:
+    """Append one git ad hoc config override (`key=value`, e.g.
+    `core.longpaths=true`) onto `env`'s EXISTING `GIT_CONFIG_COUNT`/
+    `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` chain, mutating `env` in
+    place -- tan-cli#495 defect 5.
+
+    Before this, `Runner._env` merged `FORCE_GIT_LONG_PATHS_ENV` with a bare
+    `dict.update`, which claims index 0 and sets `GIT_CONFIG_COUNT` back down
+    to `1` unconditionally. On a host that already exported its OWN ad hoc
+    override -- `GIT_CONFIG_COUNT=2` plus a `KEY_0`/`VALUE_0` PROXY pair and a
+    `KEY_1`/`VALUE_1` MIRROR `insteadOf` pair is git's own documented shape,
+    realistic on a corporate machine or CI runner -- that `update` silently
+    OVERWROTE `KEY_0`/`VALUE_0` with `core.longpaths`/`true`, and the COUNT
+    reset made git stop reading index 1 onward even though `KEY_1`/`VALUE_1`
+    were still sitting in the environment, unread by git, invisible to every
+    `git clone`/`git fetch` inside `west update`. A read-only `git config
+    --get-all` grep against a live subprocess proved both losses independent
+    of each other (the proxy override AND the mirror override, gone).
+
+    `count` is clamped to `>= 0`: a non-integer or negative `GIT_CONFIG_COUNT`
+    the caller's own environment carries is a corrupt value this port does
+    not try to interpret, so it is treated as "nothing to preserve" (append at
+    0) rather than raising out of a step that must not itself fail the run.
+    """
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        count = 0
+    count = max(count, 0)
+    env[f"GIT_CONFIG_KEY_{count}"] = key
+    env[f"GIT_CONFIG_VALUE_{count}"] = value
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
 
 
 def west_phase(
@@ -1191,6 +1261,39 @@ def _list_entries(parent: Path) -> list[str] | None:
         return [entry.name for entry in parent.iterdir()]
     except OSError:
         return None
+
+
+def _relocation_target_occupied(target: Path, checkout_name: str, venv_dir_name: str) -> bool:
+    """Whether `target` -- the directory an auto- or explicit relocation is
+    about to move the checkout INTO -- already holds content that should
+    still refuse the move, tan-cli#495 defect 3.
+
+    Before this, the call site tested raw non-emptiness (`_list_entries(target)`
+    truthy), which read the venv `rollback_relocation_after` DELIBERATELY
+    leaves behind after a failed retry (its own docstring: "left on disk...
+    delete it by hand if you do not want it") as "occupied", refusing the very
+    next, identical retry of the documented quickstart's first command with
+    `bootstrap.workspace-guard` -- telling the customer to hand-delete a
+    directory tan itself created moments earlier.
+
+    Reuses [`parent_needs_workspace_guard`]'s exact predicate rather than a
+    second, narrower one: `checkout_name`/`venv_dir_name` are exactly the two
+    entries a COMPLETED relocation leaves under `target`, so the same
+    exemption that already lets the checkout's own parent hold "nothing but
+    the checkout [and] bootstrap's OWN venv" applies here, one level down --
+    plus, unlike that call site, a `target` that already holds its OWN
+    `.west` (a half-built west workspace from an interrupted `west init -l`
+    at THIS location) is exempt too: `west_phase`'s "already initialised"
+    branch exists precisely to resume that, not to be refused before it ever
+    gets the chance.
+    """
+    entries = _list_entries(target)
+    if entries is None:
+        return False
+    dot_west_is_workspace = _is_file(target / ".west" / "config")
+    return parent_needs_workspace_guard(
+        entries, checkout_name, venv_dir_name, dot_west_is_workspace
+    )
 
 
 def default_relocation_target(
@@ -1922,7 +2025,22 @@ def _print_env_outcome(
         if zephyr_base is not None:
             top = Path(zephyr_base).parent
             print_paths = RunPaths(paths.repo_root, top, top / facts.venv_dir_name)
-    text = print_env_block(facts, print_paths.tokens(), facts.venv_bin_dir(is_windows), is_windows)
+    # `Workspace.venv_bin().bin_dir`, not `facts.venv_bin_dir(is_windows)`
+    # (tan-cli#495 defect 7): the HOST-keyed layout disagreed with the SAME
+    # run's `Next steps:` block (`bootstrap_cmd.py`'s own `venv_bin_dir =
+    # venv.bin_dir if venv else ...` a few hundred lines below), which reads
+    # the layout that actually EXISTS on disk -- a `.venv` created under
+    # git-bash/Windows (a `Scripts/` layout) read from a POSIX host prints a
+    # `source ".../bin/activate"` hint that does not exist. The comment is a
+    # COMMENT (`#   source "..."`), so a redirected `env.sh` still sources
+    # cleanly either way -- the damage was confined to a human copy-pasting
+    # the hint -- but `Workspace.venv_bin()` is the one existence-derived
+    # resolver every other consumer already trusts, not a second copy of its
+    # directory-wins probe.
+    print_venv_bin_dir = Workspace(
+        is_windows, facts, print_paths.repo_root, print_paths.workspace_dir, print_paths.venv_dir
+    ).venv_bin().bin_dir
+    text = print_env_block(facts, print_paths.tokens(), print_venv_bin_dir, is_windows)
     print_project = reported_project
     if print_paths is not paths:
         print_project = Project.resolved(
@@ -2197,11 +2315,16 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             target = default_relocation_target(
                 paths.repo_root, paths.workspace_dir, facts.venv_dir_name
             )
-            if target is not None and _list_entries(target):
+            if target is not None and _relocation_target_occupied(
+                target, paths.repo_root.name, facts.venv_dir_name
+            ):
                 # The one case that still refuses (tan-cli#302): `target` --
                 # the directory the auto-relocation below would move the
                 # checkout INTO -- already exists and already holds content of
-                # its own. Auto-relocating there anyway would be the exact
+                # its own (tan-cli#495 defect 3: content genuinely foreign to
+                # this checkout/its own venv -- see `_relocation_target_
+                # occupied`'s docstring for why raw non-emptiness over-refused
+                # here). Auto-relocating there anyway would be the exact
                 # "wrote into a directory without asking" hazard this guard
                 # exists to prevent, one level down. An ABSENT or genuinely
                 # EMPTY `target` (the ordinary case) falls straight through to
@@ -2322,7 +2445,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # would refuse a board that can bootstrap its Zephyr cores.
         log.warn("yocto-host", yocto_mixed_warning())
 
-    floor = resolve_python_floor(facts)
+    floor = resolve_python_floor(facts, zephyr_base_adopts=zephyr_base_adopts)
     skew = python_floor_skew_warning(
         floor.manifest, floor.effective, floor.source, from_manifest=facts.from_manifest
     )
@@ -2493,13 +2616,24 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             # `old_root`, so every reported path must say so, whether or not
             # the pointer restore below it also succeeded.
             if undo.detail is None:
+                # tan-cli#495 defect 3's own aggravating fact: `moved_to` is the
+                # checkout's OWN vacated location, gone the instant the move-back
+                # above succeeds -- "delete `moved_to`" told the customer to
+                # remove a path that no longer exists. What `step` actually left
+                # behind (the comment above already says so: "beside the
+                # checkout, not inside it") is `moved_to`'s PARENT -- the
+                # relocation target directory itself, still holding the
+                # partial venv/west checkout tan-cli#495 defect 3's own primary
+                # fix (`_relocation_target_occupied`, above) now knows how to
+                # look past on the very next retry.
+                leftover = moved_to.parent
                 log.warn(
                     "workspace-relocation-rolled-back",
                     f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
                     f"moved it back to {_native(relocation_undo.old_root)} and restored "
                     f"the previous default SDK. Anything {step} already created under "
-                    f"{_native(moved_to)} (a partial venv/west checkout) was left on "
-                    f"disk -- delete {_native(moved_to)} by hand if you do not want it.",
+                    f"{_native(leftover)} (a partial venv/west checkout) was left on "
+                    f"disk -- delete {_native(leftover)} by hand if you do not want it.",
                 )
             else:
                 # The checkout moved back; only the pointer restore that
@@ -2899,8 +3033,23 @@ def bootstrap(
                 "bootstrap", reported, outcome.data, outcome.issues, outcome.exit_code, sdk=sdk
             )
         )
-    elif print_env:
-        # STDOUT, not stderr. This block is meant to be redirected --
+    elif print_env and outcome.exit_code == ExitCode.SUCCESS:
+        # STDOUT, not stderr -- but ONLY for `_print_env_outcome`'s own
+        # success (tan-cli#495 defect 4: that function is the ONLY
+        # `--print-env` path that ever returns `ExitCode.SUCCESS`, so this
+        # condition is exactly the success gate that was missing). Every
+        # OTHER refusal computed ahead of the `--print-env` short-circuit
+        # (`sdk-root-unresolved`, `manifest`, `workspace-invalid`,
+        # `workspace-guard`, `enclosing-west-workspace`,
+        # `workspace-orphan-refused`, `print-env-workspace-conflict`, the
+        # `internal-failure` catch-all above) used to land HERE too, keyed on
+        # the bare `print_env` FLAG rather than on what actually happened --
+        # so the customer's terminal showed nothing (stderr empty, the whole
+        # point of `--print-env > env.sh`) while `env.sh` received the
+        # refusal's PROSE instead of shell: parens and backticks a strict
+        # `sh -n` (or a `>> ~/.bashrc` append) chokes on, matching neither the
+        # oracle (refusals go to stderr there, stdout empty) nor this port's
+        # own `--dry-run` sibling. This block is meant to be redirected --
         # `tan bootstrap --print-env > env.sh` -- so on stderr the redirect
         # target is empty while the lines still appear on the terminal: it
         # looks like it worked and wrote nothing. See `_outprint`.

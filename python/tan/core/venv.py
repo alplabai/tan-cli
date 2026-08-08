@@ -47,6 +47,34 @@ def _resolve_layout(venv: Path) -> VenvLayout | None:
     return None
 
 
+def _upward_venv_directory_ok(directory: Path, sdk_root: str | None) -> bool:
+    """Step 1's per-candidate guard (tan-cli#495 defect 1): reject `directory`
+    only when it holds its OWN `.west` that verifiably names a DIFFERENT
+    workspace than `sdk_root` -- the same `manifest_ok` shape
+    `west_workspace_dir`'s upward walk already applies (tan-cli#307), which
+    this sibling search lacked, so the two disagreed on a dirty host with a
+    foreign west-capable `.venv` closer to `start` than the real workspace.
+
+    Deliberately NOT a bare mirror of `west_workspace_dir.manifest_ok`: THAT
+    function is asking "is `directory` itself the workspace topdir", so
+    `sdk_root is None` there means unconditional accept because there is
+    nothing to check yet. Here `directory` is merely the PARENT of a
+    candidate `.venv` and need not be a west workspace at all -- a
+    project-local `.venv` with no `.west` beside it (the exact shape
+    tan-cli#307's own e2e test plants at `build_root/.venv`) is the common
+    case this must keep accepting. Only a `.west` that actively exists and
+    actively disagrees is disqualifying; `sdk_root` absent, or no `.west`
+    present, both mean "nothing here contradicts this venv" -- same as
+    before this fix."""
+    if sdk_root is None:
+        return True
+    if not (directory / ".west").is_dir():
+        return True
+    from tan.commands.bootstrap_cmd import _manifest_points_at  # noqa: PLC0415
+
+    return _manifest_points_at(directory, Path(sdk_root))
+
+
 def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
     """Locate the west-capable workspace `.venv`, mirroring Rust's
     `find_workspace_venv` but resolving the bin-dir layout directory-wins
@@ -54,7 +82,9 @@ def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
     being present under EITHER layout (not just the directory existing), in
     this order:
 
-      1. a `.venv` in the project tree, searched from `start` upward;
+      1. a `.venv` in the project tree, searched from `start` upward, each
+         candidate also passing [`_upward_venv_directory_ok`] (tan-cli#495
+         defect 1);
       2. the workspace venv derived from `$ZEPHYR_BASE`
          (`<ZEPHYR_BASE>/../.venv`), manifest-guarded against `sdk_root` (see
          `_zephyr_base_venv`, tan-cli#292 consequence 2);
@@ -66,7 +96,9 @@ def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
     directory: Path | None = Path(start)
     while directory is not None:
         candidate = directory / ".venv"
-        if _resolve_layout(candidate) is not None:
+        if _resolve_layout(candidate) is not None and _upward_venv_directory_ok(
+            directory, sdk_root
+        ):
             return candidate
         parent = directory.parent
         directory = parent if parent != directory else None

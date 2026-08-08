@@ -384,6 +384,13 @@ class BootstrapFacts:
     hint_macos: NativeLibHint
     hint_windows: NativeLibHint
     manual_install_windows: tuple[str, ...]
+    #: `manualInstallHints.posix.note` (tan-cli#495 defect 6). Added at
+    #: alp-sdk v0.14.0 as the POSIX twin of `manual_install_windows` above --
+    #: OPTIONAL on the wire (unlike the Windows key, `posix` may be absent on
+    #: an SDK checkout that predates it), so its absence degrades to an empty
+    #: tuple rather than a hard `BootstrapManifestError`, matching the same
+    #: "OPTIONAL on the wire" reasoning `prerequisites_macos` documents above.
+    manual_install_posix: tuple[str, ...]
     from_manifest: bool
 
     def venv_bin_dir(self, is_windows: bool) -> str:
@@ -573,6 +580,17 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
             f"{BOOTSTRAP_MANIFEST_REL_PATH} could not be read: missing or mistyped "
             f"`manualInstallHints.windows`"
         )
+    # `posix` is OPTIONAL, unlike `windows` above (tan-cli#495 defect 6): an SDK
+    # checkout that predates alp-sdk v0.14.0 has no `manualInstallHints.posix`
+    # at all, and that must degrade to "nothing to render" (empty tuple), not
+    # a hard manifest-parse failure that would make bootstrap unusable against
+    # every older SDK.
+    manual_posix_node = manual.get("posix") if isinstance(manual, dict) else None
+    manual_install_posix = (
+        _str_list(manual_posix_node.get("note"), "manualInstallHints.posix.note")
+        if isinstance(manual_posix_node, dict)
+        else ()
+    )
 
     return BootstrapFacts(
         zephyr_version=_require(zephyr, "version", str, "zephyr"),
@@ -613,6 +631,7 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
         manual_install_windows=_str_list(
             manual_node.get("note"), "manualInstallHints.windows.note"
         ),
+        manual_install_posix=manual_install_posix,
         from_manifest=True,
     )
 
@@ -788,6 +807,53 @@ def fallback_facts(min_python: tuple[int, int]) -> BootstrapFacts:
             "https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads (tick "
             "'Add path to environment variable' during install).",
             "native_sim / Yocto need WSL2 (docs/cross-platform-setup.md section 5).",
+        ),
+        # Transcribed verbatim from the frozen Rust oracle's OWN fallback
+        # (`crates/tan-core/src/bootstrap/manifest.rs`, `manual_install_hints.
+        # posix`) -- tan-cli#495 defect 6. This port's `fallback_facts` had
+        # `manual_install_windows` above but no POSIX twin at all, so a
+        # Linux/macOS host with no `metadata/bootstrap.json` (every SDK before
+        # alp-sdk#917) never saw the "NOT auto-installed" section either,
+        # exactly as a manifest missing `manualInstallHints.posix` did before
+        # the parser fix above.
+        #
+        # Deliberately NOT byte-verbatim from the oracle's own fallback on one
+        # point: the trailing "... and the `tan sdk switch` step that pins it
+        # per project" clause is dropped. `sdk switch` is in this port's own
+        # `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` -- it refuses outright in this
+        # build (tan-cli#305/#381's own recurring defect, guarded by
+        # `tests/commands/test_sdk_onboarding_dead_end.py::test_no_shipped_
+        # string_literal_names_a_refused_subcommand`) -- so shipping a literal
+        # naming it as the fix would be the identical dead end that guard
+        # exists to catch, sixth site.
+        manual_install_posix=(
+            "The Zephyr SDK (`west sdk install`) is a separate, manual, one-time "
+            "install on Linux/macOS -- not auto-installed by bootstrap.sh. It is "
+            "the one every Zephyr-on-M customer needs: it provides the "
+            "`arm-zephyr-eabi` cross toolchain the real-silicon build (`west "
+            "build` / `west flash`) actually uses. Run it from your west "
+            "workspace's top-level directory -- the alp-sdk checkout's parent "
+            "directory -- after this script completes, e.g. `west sdk install "
+            "--gnu-toolchains arm-zephyr-eabi --no-hosttools --install-dir "
+            '"$PWD/zephyr-sdk"`; see docs/getting-started.md for the full '
+            "one-liner.",
+            "The Arm GNU Toolchain (`arm-none-eabi-gcc`) is a SEPARATE manual "
+            "install, needed by three opt-in paths -- rebuilding the GD32 "
+            "bridge firmware (custom-carrier bring-up or bridge recovery), "
+            "building the CC3501E bridge firmware's silicon-free stub target "
+            "(its production image builds with TI ticlang, not this "
+            "toolchain), or hand-writing bare-metal firmware for a real "
+            "M-class core -- most customers never touch any of them, since "
+            "the GD32G553 ships pre-flashed by Alp Lab (rebuilding it is "
+            "optional and fully open, see docs/gd32-bridge.md). See "
+            "docs/cross-platform-setup.md section 2.3 (Linux) / 3.4 (macOS) "
+            "for the apt/brew/curl install.",
+            "`west sdk install` may print \"could not find a 'file' "
+            'executable, falling back to guess mime type by file extension" '
+            "-- patool's extension-based fallback works fine without it; "
+            "this is WARN-only, not a bootstrap.sh prerequisite. Install "
+            "`file` (`apt-get install -y file` / it ships by default on "
+            "macOS) only to silence the message.",
         ),
         from_manifest=False,
     )
@@ -1421,6 +1487,9 @@ def parent_needs_workspace_guard(
     return any(entry != checkout_name and entry != venv_top for entry in entries)
 
 
+_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+
+
 def resolve_workspace_target(raw: str, cwd: str) -> str:
     """Validate + absolutise `--workspace <path>`. Raises `ValueError`.
 
@@ -1429,9 +1498,28 @@ def resolve_workspace_target(raw: str, cwd: str) -> str:
     (an MSYS-style `/e/foo/ws` on Windows) must never resolve to a guess. Pure
     validation -- no IO.
     """
+    import ntpath  # noqa: PLC0415 -- one call site, mirrors `ntpath_isabs`'s own
+
     trimmed = raw.strip()
     if not trimmed:
         raise ValueError("--workspace requires a non-empty path")
+    # tan-cli#495 defect 8: `C:ws` (or a bare `C:`) -- DRIVE-RELATIVE, no `\`
+    # or `/` right after the drive letter -- resolves against drive C's own
+    # remembered current directory, which this process has no portable way to
+    # read and must never guess (this function's own docstring, same
+    # "never resolve to a guess" treatment the rooted-but-driveless shapes
+    # get below). Checked with the REAL `ntpath.isabs`, not the broader
+    # `ntpath_isabs` helper below: that helper's own `^[A-Za-z]:` regex is
+    # deliberately WIDER than true ntpath absoluteness for its OTHER caller
+    # (`is_plain_relative`, where over-refusing a manifest-supplied name is
+    # safe) -- `ntpath.isabs('C:ws')` is `False` where `ntpath_isabs('C:ws')`
+    # was `True`, and using the broader helper here is exactly what let
+    # `C:ws` fall through to `os.path.normpath(trimmed)` below unresolved,
+    # verbatim, instead of being refused: the relocation TARGET for a
+    # customer's alp-sdk checkout, silently wrong on whichever drive the
+    # process happens to be running from.
+    if _DRIVE_PREFIX.match(trimmed) and not ntpath.isabs(trimmed):
+        raise ValueError(_drive_relative_ambiguous(trimmed))
     if os.path.isabs(trimmed) or ntpath_isabs(trimmed):
         # `\x` on Windows has a root but no drive: rooted-but-driveless is
         # rejected just below, so only a fully absolute path passes here.
@@ -1448,6 +1536,15 @@ def _rooted_no_drive(trimmed: str) -> str:
         f"--workspace '{trimmed}' has a root but no drive, which is ambiguous on this "
         f"host (it would resolve against whichever drive the process happens to be "
         f"running from); pass a full absolute path instead"
+    )
+
+
+def _drive_relative_ambiguous(trimmed: str) -> str:
+    return (
+        f"--workspace '{trimmed}' names a drive but no root (drive-relative), which is "
+        f"ambiguous on this host (it would resolve against drive "
+        f"{trimmed[0].upper()}:'s own remembered current directory, not this process's); "
+        f"pass a full absolute path instead"
     )
 
 
@@ -1706,12 +1803,29 @@ def optional_libs_block(facts: BootstrapFacts, host: str) -> list[str]:
     hint = facts.native_lib_hint(host)
     if hint is None:
         lines.append("  (OS not auto-detected; see docs/testing.md)")
-        return lines
-    lines.append("")
-    lines.extend(f"  {line}" for line in hint.note)
-    if hint.command:
+    else:
         lines.append("")
-        lines.append(f"  {hint.command}")
+        lines.extend(f"  {line}" for line in hint.note)
+        if hint.command:
+            lines.append("")
+            lines.append(f"  {hint.command}")
+    # `manualInstallHints.posix.note` (tan-cli#495 defect 6, alp-sdk#949
+    # addendum A4): appended AFTER the optional-native-libs section above,
+    # regardless of whether that section had a real hint or the "OS not
+    # auto-detected" fallback -- mirrors the frozen Rust oracle's own
+    # `optional_libs_block` exactly (`crates/tan-core/src/bootstrap/
+    # blocks.rs`), which checks `host` again, separately, at the very end of
+    # the function rather than folding this into the `match hint` above. A
+    # blank line and the SAME heading the Windows arm uses, one two-space-
+    # indented line per element -- and nothing at all when the list is empty
+    # (an SDK checkout with no `manualInstallHints.posix`), matching Rust's
+    # own `.filter(|m| !m.note.is_empty())`. `Linux | MacOs` ONLY, matching
+    # the oracle's own match exactly -- NOT `OTHER`, an unrecognised host
+    # with no native-lib hint of its own either.
+    if host in (LINUX, MACOS) and facts.manual_install_posix:
+        lines.append("")
+        lines.append("bootstrap: NOT auto-installed (manual, one-time):")
+        lines.extend(f"  {line}" for line in facts.manual_install_posix)
     return lines
 
 

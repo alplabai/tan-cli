@@ -87,6 +87,7 @@ from tan.core.bootstrap import (
     windows_python_not_runnable,
     windows_refusal,
     workspace_sdk_record_json,
+    venv_layout,
     yocto_gate,
     zephyr_requirements_hint,
 )
@@ -244,7 +245,7 @@ def test_bootstrap_and_doctor_derive_the_effective_floor_from_one_reader(monkeyp
     monkeypatch.setenv("ZEPHYR_BASE", str(zephyr))
 
     facts = parse_bootstrap_manifest(REAL_MANIFEST)
-    floor = resolve_python_floor(facts)
+    floor = resolve_python_floor(facts, zephyr_base_adopts=True)
     doctor_floor, doctor_source = doctor_cmd.zephyr_python_floor(str(zephyr))
 
     # Read from the real file on the customer's machine, so a Zephyr bump raises
@@ -576,6 +577,30 @@ def test_print_env_answers_on_a_host_that_is_still_missing_tools(tmp_path):
     assert env["data"]["zephyrBase"].endswith("zephyr")
 
 
+def test_print_env_names_the_venv_layout_that_actually_exists_on_disk(tmp_path):
+    """tan-cli#495 defect 7. `--print-env`'s venv-activation comment used to
+    be keyed off the HOST (`facts.venv_bin_dir(is_windows)`), not off which
+    layout the workspace `.venv` actually has -- so a `.venv` created under
+    git-bash/Windows (a `Scripts/` layout, the exact case `Workspace.
+    venv_bin()`'s own docstring says it exists to support) read from a POSIX
+    host printed `source ".../bin/activate"`, a path that does not exist,
+    while the SAME run's `Next steps:` block (which already reads
+    `Workspace.venv_bin()`) correctly said `Scripts/activate`."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    workspace = sdk.parent
+    # The OTHER platform's layout, deliberately: on this (POSIX) test host,
+    # that is `Scripts/` -- no `bin/` at all.
+    other_bin, other_exe = ("bin", "west") if os.name == "nt" else ("Scripts", "west.exe")
+    venv_bin = workspace / ".venv" / other_bin
+    venv_bin.mkdir(parents=True)
+    (venv_bin / other_exe).write_text("", encoding="utf-8")
+
+    proc = run_tan("bootstrap", "--print-env", "--sdk-root", str(sdk), cwd=workspace)
+    assert proc.returncode == 0, proc.stderr
+    assert f"/{other_bin}/activate" in proc.stdout
+    assert f"/{venv_layout(os.name == 'nt').bin_dir}/activate" not in proc.stdout
+
+
 def test_print_env_and_workspace_are_refused_together(tmp_path):
     sdk = make_sdk(tmp_path)
     proc = run_tan(
@@ -584,6 +609,39 @@ def test_print_env_and_workspace_are_refused_together(tmp_path):
     )
     assert proc.returncode == 2
     assert codes(envelope(proc)) == ["bootstrap.print-env-workspace-conflict"]
+
+
+def test_a_print_env_refusal_in_text_mode_goes_to_stderr_not_stdout(tmp_path):
+    """tan-cli#495 defect 4. `--print-env`'s TEXT-mode dispatch used to key on
+    the bare `print_env` flag, routing every refusal computed ahead of the
+    `--print-env` short-circuit to `_outprint` (stdout) -- so a customer piping
+    `tan bootstrap --print-env > env.sh` on a host with no resolvable alp-sdk
+    saw NOTHING on the terminal (stderr empty) while `env.sh` received the
+    refusal's prose, parens and backticks included, instead of shell. Two
+    refusal shapes here, ahead of and after the workspace resolution split, to
+    prove the fix is the exit-code gate and not one call site's own flag."""
+    empty = tmp_path / "no-sdk-anywhere"
+    empty.mkdir()
+    unresolved = run_tan("bootstrap", "--print-env", cwd=empty)
+    assert unresolved.returncode == 2
+    assert unresolved.stdout == ""
+    assert "alp-sdk root is unresolved" in unresolved.stderr
+    assert "(" not in unresolved.stdout and "`" not in unresolved.stdout
+
+    sdk = make_sdk(tmp_path)
+    conflict = run_tan(
+        "bootstrap", "--print-env", "--workspace", str(tmp_path / "elsewhere"),
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    assert conflict.returncode == 2
+    assert conflict.stdout == ""
+    assert "--print-env and --workspace cannot be combined" in conflict.stderr
+
+    # The success case is unaffected: still stdout, still exit 0.
+    ok = run_tan("bootstrap", "--print-env", "--sdk-root", str(sdk), cwd=sdk.parent)
+    assert ok.returncode == 0
+    assert ok.stdout.strip() != ""
+    assert ok.stderr == ""
 
 
 @pytest.mark.parametrize(
@@ -660,16 +718,29 @@ def test_a_non_utf8_manifest_is_refused_rather_than_read_as_mojibake(tmp_path):
         ("", "requires a non-empty path"),
         ("   ", "requires a non-empty path"),
         ("/e/foo/ws", "has a root but no drive"),
+        ("C:ws", "names a drive but no root"),
+        ("C:ws/alp-sdk", "names a drive but no root"),
+        ("C:", "names a drive but no root"),
     ],
 )
 def test_workspace_is_validated_before_anything_touches_the_disk(value, fragment):
     """This relocates a customer's checkout, so `--workspace ""` (the classic
-    unset-`$WS` shell accident) or an MSYS-style `/e/foo/ws` on Windows must
-    never resolve to a guess."""
+    unset-`$WS` shell accident), an MSYS-style `/e/foo/ws` on Windows, or a
+    drive-RELATIVE `C:ws`/bare `C:` (tan-cli#495 defect 8 -- resolves against
+    drive C's own remembered cwd, unknowable to this process) must never
+    resolve to a guess."""
     if value.strip().startswith("/") and os.name != "nt":
         pytest.skip("a rooted path is unambiguous off Windows")
     with pytest.raises(ValueError, match=fragment):
         resolve_workspace_target(value, os.getcwd())
+
+
+def test_a_drive_absolute_workspace_is_still_accepted_verbatim():
+    """The fix must not over-refuse the SIBLING shape: `C:\\ws` (and `C:/ws`)
+    genuinely IS absolute -- `ntpath.isabs` says so -- and must resolve
+    exactly as before, unaffected by the new drive-relative guard."""
+    assert resolve_workspace_target("C:\\ws", "D:\\proj") == "C:\\ws"
+    assert resolve_workspace_target("C:/ws", "D:\\proj") == os.path.normpath("C:/ws")
 
 
 def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(tmp_path):
@@ -910,6 +981,29 @@ def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_pa
     assert "interactively" not in message
 
 
+def test_the_auto_relocation_target_retries_past_its_own_leftover_venv(tmp_path):
+    """tan-cli#495 defect 3. `rollback_relocation_after` deliberately leaves
+    the auto-relocation target's `.venv` on disk after a failed retry (its own
+    docstring: "left on disk... delete it by hand if you do not want it") --
+    a customer re-running the IDENTICAL, documented quickstart command must not
+    be refused for the venv tan itself just created. Contrast with the sibling
+    test above: a genuinely foreign `leftover` directory still refuses;
+    `.venv` alone must not."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    target = sdk.parent / "alp-workspace"
+    (target / ".venv").mkdir(parents=True)
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0, env
+    assert "bootstrap.workspace-guard" not in codes(env)
+    assert (target / sdk.name).exists()
+
+
 def test_print_env_agrees_with_dry_run_on_a_dirty_parent(tmp_path):
     """tan-cli#459: `--print-env` used to answer BEFORE the workspace-parent
     guard above ever ran, so on the exact dirty-parent host that guard
@@ -997,6 +1091,48 @@ def test_print_env_agrees_with_dry_run_on_an_adopted_zephyr_base(tmp_path):
     assert print_env["data"]["sdkRoot"] == bootstrap_cmd._native(str(sdk))
     assert sdk.exists()
     assert not (tmp_path / "fake-home" / ".alp" / "sdk-default").exists()
+
+
+def test_a_zephyr_base_about_to_be_rejected_never_sets_the_python_floor(tmp_path):
+    """tan-cli#495 defect 2. `$ZEPHYR_BASE` names a tree with a FOREIGN
+    manifest (`.west/config`'s `path` does not resolve to the SDK under test),
+    so `_select_workspace` is about to ignore it entirely -- yet before the
+    fix, `resolve_python_floor` still read that tree's own
+    `python.cmake` unconditionally. Its `PYTHON_MINIMUM_REQUIRED` (3.13) is set
+    ABOVE the manifest's real floor (Zephyr's own built-in fallback, 3.12) --
+    the exact host running this suite (>= 3.12, < 3.13 by
+    `pyproject.toml`'s floor) clears the real floor and must NOT be refused
+    for a tree that plays no part in this run."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])  # <tmp_path>/ws/alp-sdk
+
+    foreign = tmp_path / "foreign"
+    foreign_zephyr = foreign / "zephyr"
+    (foreign_zephyr / "cmake" / "modules").mkdir(parents=True)
+    (foreign_zephyr / "VERSION").write_text(
+        "VERSION_MAJOR = 4\nVERSION_MINOR = 5\nPATCHLEVEL = 0\nEXTRAVERSION =\n",
+        encoding="utf-8",
+    )
+    (foreign_zephyr / "cmake" / "modules" / "python.cmake").write_text(
+        "set(PYTHON_MINIMUM_REQUIRED 3.13)\n", encoding="utf-8"
+    )
+    (foreign / ".west").mkdir()
+    (foreign / ".west" / "config").write_text(
+        "[manifest]\npath = zephyr\nfile = west.yml\n", encoding="utf-8"
+    )
+
+    dry_run = envelope(
+        run_tan(
+            "bootstrap", "--dry-run", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
+            env_extra={"ZEPHYR_BASE": str(foreign_zephyr)},
+        )
+    )
+
+    assert dry_run["ok"] is True, dry_run
+    assert "bootstrap.python-too-old" not in codes(dry_run)
+    skew = [i for i in dry_run["issues"] if i["code"] == "bootstrap.python-floor-skew"]
+    for issue in skew:
+        assert str(foreign_zephyr) not in issue["message"], issue
 
 
 # ---------------------------------------------------------------------------
@@ -1755,11 +1891,21 @@ def test_a_bad_format_value_is_a_usage_error_not_a_crash(tmp_path):
 def test_the_fallback_constants_match_the_real_manifest_field_for_field():
     """The fallback is what a customer on a RELEASED SDK actually gets, and
     `check_bootstrap_manifest.py` does not scan this repo -- so nothing but this
-    holds the two in step."""
+    holds the two in step.
+
+    `manual_install_posix` is the one deliberate exception (tan-cli#495
+    defect 6): the real manifest's own text names `tan sdk switch` as part of
+    the Zephyr SDK install one-liner, but `sdk switch` is in THIS port's own
+    `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` -- it refuses outright in this build
+    -- so the fallback (unlike the manifest-sourced text, which nothing here
+    can edit) deliberately drops that one clause rather than reproduce a
+    dead end `tests/commands/test_sdk_onboarding_dead_end.py`'s own AST gate
+    exists to catch. See `fallback_facts`'s own comment at the field.
+    """
     manifest = parse_bootstrap_manifest(REAL_MANIFEST)
     fallback = fallback_facts(manifest.python_min_version)
     for field in vars(manifest):
-        if field == "from_manifest":
+        if field in ("from_manifest", "manual_install_posix"):
             continue
         assert getattr(fallback, field) == getattr(manifest, field), field
 
@@ -2365,12 +2511,50 @@ def test_the_posix_hint_block_carries_the_per_os_note_and_command():
     linux = optional_libs_block(facts, LINUX)
     assert linux[1] == "bootstrap: Optional native libraries unlock the Yocto-side backends:"
     assert "  libmosquitto-dev  -> alp_mqtt_* (cleartext + TLS)" in linux
-    assert linux[-1].startswith("  sudo apt-get install -y libmosquitto-dev")
-    assert "brew install mosquitto pkg-config" in optional_libs_block(facts, MACOS)[-1]
-    # `OTHER` has no hint at all -- just the not-detected line.
+    assert any("sudo apt-get install -y libmosquitto-dev" in line for line in linux)
+    assert any(
+        "brew install mosquitto pkg-config" in line for line in optional_libs_block(facts, MACOS)
+    )
+    # `OTHER` has no hint at all -- just the not-detected line, and no
+    # `manualInstallHints.posix` block either (tan-cli#495 defect 6's own
+    # scope: `Linux | MacOs` only, matching the oracle's exact match).
     assert optional_libs_block(facts, OTHER)[-1] == (
         "  (OS not auto-detected; see docs/testing.md)"
     )
+
+
+def test_the_posix_manual_install_block_follows_the_optional_libs_section(tmp_path):
+    """tan-cli#495 defect 6. `manualInstallHints.posix.note` used to be parsed
+    for round-trip fidelity but rendered by NOTHING -- a Linux/macOS customer
+    never saw the "NOT auto-installed (manual, one-time):" section at all,
+    where alp-sdk's own `bootstrap.sh` prints it (v0.14.0:594-611) right
+    after the optional-native-libs section, every run. Both parsed-manifest
+    and fallback (no `metadata/bootstrap.json`) sources are covered -- the
+    fallback is what every SDK checkout predating alp-sdk#917 takes."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    assert facts.manual_install_posix  # the real manifest declares three
+
+    for host in (LINUX, MACOS):
+        lines = optional_libs_block(facts, host)
+        heading_at = lines.index("bootstrap: NOT auto-installed (manual, one-time):")
+        # It follows the optional-libs section: at least one populated line
+        # (the install command) sits between the two headings.
+        assert heading_at > 1
+        assert lines[heading_at - 1] == ""
+        tail = lines[heading_at + 1 :]
+        assert tail == [f"  {line}" for line in facts.manual_install_posix]
+
+    # `WINDOWS` is unaffected -- still only its OWN manual-install block.
+    windows = optional_libs_block(facts, WINDOWS)
+    assert windows.count("bootstrap: NOT auto-installed (manual, one-time):") == 1
+
+    # The fallback source (no manifest) carries its OWN transcribed text, not
+    # an empty tuple.
+    fallback = fallback_facts((3, 12))
+    assert fallback.manual_install_posix
+    fb_lines = optional_libs_block(fallback, LINUX)
+    assert "bootstrap: NOT auto-installed (manual, one-time):" in fb_lines
+    assert any("west sdk install" in line for line in fb_lines)
 
 
 def test_next_steps_routes_the_posix_build_through_tan_with_absolute_paths():
@@ -2440,6 +2624,53 @@ def test_runner_run_extra_env_reaches_the_real_child_process():
     # Without it, the same probe must fail -- otherwise this test would pass
     # for the wrong reason (the variable already being set some other way).
     assert runner.run(probe) is not None
+
+
+def test_force_git_long_paths_appends_rather_than_overwrites_a_callers_own_override(
+    monkeypatch, tmp_path
+):
+    """tan-cli#495 defect 5. A corporate host's own ad hoc git config override
+    (`GIT_CONFIG_COUNT=2`, a proxy KEY_0/VALUE_0 pair, a mirror KEY_1/VALUE_1
+    `insteadOf` pair) must survive `FORCE_GIT_LONG_PATHS_ENV` being merged in
+    -- the real `west update` child (and every nested `git clone`/`git fetch`
+    it spawns) must still see the proxy AND the mirror, with
+    `core.longpaths=true` appended at the next index, not overwriting index 0
+    and dropping `GIT_CONFIG_COUNT` back to 1 (which made git stop reading
+    index 1 at all)."""
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "http.proxy")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "http://proxy.corp:3128")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "url.https://mirror.corp/.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "https://github.com/")
+
+    runner = bootstrap_cmd.Runner(json=True)
+    env = runner._env(bootstrap_cmd.FORCE_GIT_LONG_PATHS_ENV)
+
+    assert env["GIT_CONFIG_COUNT"] == "3"
+    assert env["GIT_CONFIG_KEY_0"] == "http.proxy"
+    assert env["GIT_CONFIG_VALUE_0"] == "http://proxy.corp:3128"
+    assert env["GIT_CONFIG_KEY_1"] == "url.https://mirror.corp/.insteadOf"
+    assert env["GIT_CONFIG_VALUE_1"] == "https://github.com/"
+    assert env["GIT_CONFIG_KEY_2"] == "core.longpaths"
+    assert env["GIT_CONFIG_VALUE_2"] == "true"
+
+    # Proven against a REAL git subprocess too, not just the dict shape: every
+    # override -- inherited and appended -- must actually be what `git config
+    # --get-all` reads back inside a child spawned with this exact env.
+    for key, expected in (
+        ("http.proxy", "http://proxy.corp:3128"),
+        ("url.https://mirror.corp/.insteadOf", "https://github.com/"),
+        ("core.longpaths", "true"),
+    ):
+        out = subprocess.run(
+            ["git", "config", "--get-all", key],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert out.stdout.strip() == expected, (key, out.stdout, out.stderr)
 
 
 def test_the_no_pyyaml_board_scan_reads_cores_in_both_forms():

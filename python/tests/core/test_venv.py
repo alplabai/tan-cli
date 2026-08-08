@@ -141,6 +141,82 @@ def test_find_workspace_venv_zephyr_base_venv_wins_unconditionally_when_sdk_root
     assert find_workspace_venv(str(start), None) == foreign / ".venv"
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#495 defect 1: the upward `.venv` walk (step 1) must apply the SAME
+# manifest guard `west_workspace_dir`'s own upward walk already applies
+# (tan-cli#307) -- an ancestor `.venv` with a FOREIGN `.west` beside it must
+# not outrank the real workspace venv `west_workspace_dir` already resolves.
+# ---------------------------------------------------------------------------
+
+
+def test_an_ancestor_venv_with_a_foreign_west_does_not_outrank_the_real_workspace(
+    tmp_path, monkeypatch
+):
+    """Reproduces tan-cli#495 defect 1's failure scenario: `<X>/unrelated/proj`
+    (a west-capable `.venv` plus an unrelated `.west/config` sit in
+    `<X>/unrelated`, an ANCESTOR of the project), and the real SDK workspace
+    at the sibling `<X>/wsroot` (`wsroot/.venv`, `wsroot/.west/config` naming
+    `alp-sdk`). Before this fix, `find_workspace_venv` returned the foreign
+    ancestor venv while `west_workspace_dir` (unaffected -- it already had
+    this guard) correctly resolved `wsroot`; `tan build` then spawned the
+    wrong venv's `west`/`python` against the RIGHT workspace's cwd."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    root = tmp_path / "X"
+    unrelated = root / "unrelated"
+    proj = unrelated / "proj"
+    proj.mkdir(parents=True)
+    (unrelated / ".west").mkdir()
+    (unrelated / ".west" / "config").write_text(
+        "[manifest]\npath = someother\n", encoding="utf-8"
+    )
+    _plant_west_capable_venv(unrelated / ".venv")
+
+    wsroot = root / "wsroot"
+    sdk = wsroot / "alp-sdk"
+    sdk.mkdir(parents=True)
+    (wsroot / ".west").mkdir()
+    (wsroot / ".west" / "config").write_text("[manifest]\npath = alp-sdk\n", encoding="utf-8")
+    _plant_west_capable_venv(wsroot / ".venv")
+
+    assert find_workspace_venv(str(proj), str(sdk)) == wsroot / ".venv"
+    assert venv_bin_dir(str(proj), str(sdk)) == wsroot / ".venv" / _venv_parts()[0]
+
+
+def test_a_foreign_ancestor_west_still_wins_when_sdk_root_is_unresolved(tmp_path, monkeypatch):
+    """`sdk_root is None` means nothing to verify a candidate's own `.west`
+    against -- the OLD unconditional accept stands, matching every other
+    "nothing to check" fallback in this module."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    unrelated = tmp_path / "unrelated"
+    proj = unrelated / "proj"
+    proj.mkdir(parents=True)
+    (unrelated / ".west").mkdir()
+    (unrelated / ".west" / "config").write_text(
+        "[manifest]\npath = someother\n", encoding="utf-8"
+    )
+    _plant_west_capable_venv(unrelated / ".venv")
+
+    assert find_workspace_venv(str(proj), None) == unrelated / ".venv"
+
+
+def test_a_project_local_venv_with_no_west_at_all_is_unaffected(tmp_path, monkeypatch):
+    """tan-cli#495 defect 1's own caveat (b): the fix must not be a naive
+    mirror of `west_workspace_dir`'s guard -- `manifest_ok` there is False for
+    a directory with no `.west` at all, which would wrongly reject the
+    supported project-local `.venv` shape tan-cli#307's own e2e test plants at
+    `build_root/.venv` (no `.west` beside it). A candidate directory with no
+    `.west` must keep resolving exactly as before, `sdk_root` known or not."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    build_root = tmp_path / "proj" / "build"
+    build_root.mkdir(parents=True)
+    _plant_west_capable_venv(build_root / ".venv")
+
+    sdk = tmp_path / "ws" / "alp-sdk"
+    sdk.mkdir(parents=True)
+
+    assert find_workspace_venv(str(build_root), str(sdk)) == build_root / ".venv"
+
+
 def test_tool_in_venv_resolves_only_files_that_exist(tmp_path):
     bin_dir, west_exe = _venv_parts()
     venv_bin = tmp_path / bin_dir

@@ -37,6 +37,7 @@ from typer.testing import CliRunner
 from tan.cli import app
 from tan.commands import doctor_cmd
 from tan.core.bootstrap import venv_layout, workspace_sdk_record_json
+from tan.core.venv import find_workspace_venv
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``.
@@ -565,19 +566,34 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _plant_venv_with_record(venv_dir: Path, record_json: str | None) -> None:
+def _plant_venv_with_record(
+    venv_dir: Path, record_json: str | None, *, manifest_path: str | None = None
+) -> None:
     """A west-capable `.venv` at `venv_dir`, with `record_json` (if given)
     written as its sibling `.west/tan-workspace-sdk` -- the exact on-disk
     shape `bootstrap_cmd.record_workspace_sdk` produces, one level up from
-    the venv itself."""
+    the venv itself.
+
+    `manifest_path`, when given, ALSO plants a real `.west/config` naming it
+    (an absolute path works regardless of `venv_dir`'s own location -- see
+    `_manifest_points_at`) -- the shape every REAL tan-bootstrapped workspace
+    actually has (`west init -l` writes `.west/config` before the venv is
+    ever created), which `find_workspace_venv`'s tan-cli#495 defect-1 guard
+    now reads. Omitted by default for the tests that predate that guard and
+    do not care about it."""
     layout = venv_layout(os.name == "nt")
     bin_dir = venv_dir / layout.bin_dir
     bin_dir.mkdir(parents=True)
     (bin_dir / layout.west).write_text("", encoding="utf-8")
-    if record_json is not None:
+    if record_json is not None or manifest_path is not None:
         record_dir = venv_dir.parent / ".west"
         record_dir.mkdir(parents=True, exist_ok=True)
-        (record_dir / "tan-workspace-sdk").write_text(record_json, encoding="utf-8")
+        if record_json is not None:
+            (record_dir / "tan-workspace-sdk").write_text(record_json, encoding="utf-8")
+        if manifest_path is not None:
+            (record_dir / "config").write_text(
+                f"[manifest]\npath = {manifest_path}\n", encoding="utf-8"
+            )
 
 
 def test_venv_provenance_warns_when_the_record_names_a_different_sdk(tmp_path, monkeypatch):
@@ -590,8 +606,15 @@ def test_venv_provenance_warns_when_the_record_names_a_different_sdk(tmp_path, m
     new_sdk = tmp_path / "sdk-v2"
     new_sdk.mkdir()
     workspace = tmp_path / "ws"
+    # `.west/config` names the CURRENT sdk (`new_sdk`) -- this IS that SDK's
+    # own workspace, genuinely; only the cached provenance RECORD is stale
+    # (tan-cli#495 defect 1's guard checks the manifest, never the record, so
+    # it must see a match here for `find_workspace_venv` to resolve this venv
+    # at all).
     _plant_venv_with_record(
-        workspace / ".venv", workspace_sdk_record_json(str(old_sdk))
+        workspace / ".venv",
+        workspace_sdk_record_json(str(old_sdk)),
+        manifest_path=str(new_sdk),
     )
 
     checks = doctor_cmd._collect(str(new_sdk), workspace_root=str(workspace))
@@ -608,7 +631,7 @@ def test_venv_provenance_passes_when_the_record_matches_the_resolved_sdk(tmp_pat
     sdk.mkdir()
     workspace = tmp_path / "ws"
     _plant_venv_with_record(
-        workspace / ".venv", workspace_sdk_record_json(str(sdk))
+        workspace / ".venv", workspace_sdk_record_json(str(sdk)), manifest_path=str(sdk)
     )
 
     checks = doctor_cmd._collect(str(sdk), workspace_root=str(workspace))
@@ -619,32 +642,42 @@ def test_venv_provenance_passes_when_the_record_matches_the_resolved_sdk(tmp_pat
 def test_venv_provenance_catches_a_neighbouring_tan_bootstrapped_projects_venv(
     tmp_path, monkeypatch
 ):
-    """Consequence 1 (a neighbouring project's venv wins the upward walk):
-    reproduced with the neighbour ITSELF tan-bootstrapped -- for a different
-    SDK -- so it carries a record `venvProvenance` can actually compare
-    against. A neighbour with no tan record at all (a bare `west init`, the
-    #278 shape) is the documented, still-open gap this mechanism does not
-    close; see `venv_provenance_check`'s docstring."""
+    """Consequence 1 (a neighbouring project's venv wins the upward walk) --
+    UPDATED for tan-cli#495 defect 1: `find_workspace_venv`'s upward walk now
+    guards a candidate directory's OWN `.west` against the resolved
+    `sdk_root`, exactly the fix `west_workspace_dir`'s sibling walk already
+    had (tan-cli#307). A genuinely tan-bootstrapped neighbour -- a real
+    `.west/config` naming its OWN, different SDK, which every real bootstrap
+    writes alongside the `.venv` -- is now skipped by the RESOLVER itself, so
+    it never reaches `venvProvenance` at all: the hazard this warning used to
+    be the only mitigation for is closed one layer down, and no check fires
+    because there is nothing left to warn about. The still-open gap this
+    mechanism (and the resolver fix) both leave -- a neighbour venv with NO
+    `.west` beside it at all, e.g. a bare `west update` outside any tan
+    involvement -- carries no provenance record either, so it is
+    indistinguishable from `test_venv_provenance_emits_no_check_on_a_record_
+    less_bootstrap_sh_workspace` below; see `venv_provenance_check`'s own
+    docstring."""
     monkeypatch.delenv("ZEPHYR_BASE", raising=False)
     other_sdk = tmp_path / "other-project" / "alp-sdk"
     other_sdk.mkdir(parents=True)
     # The neighbour's venv sits ABOVE the customer's own project in the tree,
     # so `find_workspace_venv`'s upward walk from the project reaches it
-    # before any SDK-derived candidate.
+    # BEFORE any SDK-derived candidate -- and must now walk PAST it instead.
     neighbour_root = tmp_path / "other-project"
     _plant_venv_with_record(
         neighbour_root / ".venv",
         workspace_sdk_record_json(str(other_sdk)),
+        manifest_path=str(other_sdk),
     )
     project = neighbour_root / "nested" / "my-app"
     project.mkdir(parents=True)
 
     my_sdk = tmp_path / "my-sdk"
     my_sdk.mkdir()
+    assert find_workspace_venv(str(project), str(my_sdk)) != neighbour_root / ".venv"
     checks = doctor_cmd._collect(str(my_sdk), workspace_root=str(project))
-    check = next(c for c in checks if c.name == "venvProvenance")
-    assert check.status == "warn", check.detail
-    assert str(other_sdk) in check.detail
+    assert not any(c.name == "venvProvenance" for c in checks)
 
 
 def test_venv_provenance_emits_no_check_on_a_record_less_bootstrap_sh_workspace(

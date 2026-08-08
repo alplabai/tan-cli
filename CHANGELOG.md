@@ -56,6 +56,79 @@ All notable changes to `tan` are documented here. Format follows
     all, where the two sibling commands making the identical `Path.cwd()`
     call (`clean`, `presets`) already fall back to `"."` -- `init` now does
     too.
+- **`tan bootstrap` could resolve, sign, and print against the wrong
+  workspace, in eight separate ways** (#495):
+  - `find_workspace_venv`'s upward `.venv` search accepted any west-capable
+    venv with no manifest check, while its sibling `west_workspace_dir`
+    already guarded the identical upward walk against a foreign `.west`
+    (#307) -- so a west-capable `.venv` sitting in ANY ancestor of the
+    project outranked the real bootstrapped workspace venv, and `tan build`
+    could spawn that ancestor's `west`/`python` against the correct
+    workspace's cwd. The upward walk now applies the same guard, refusing
+    only a candidate whose OWN `.west` verifiably names a different SDK --
+    a project-local `.venv` with no `.west` beside it (the shape #307's own
+    fixture plants) is unaffected.
+  - `resolve_python_floor` read `$ZEPHYR_BASE`'s `python.cmake`
+    unconditionally, even when `_select_workspace` was about to ignore that
+    tree entirely (no manifest match, or `decide_workspace_reuse` refusing
+    it outright) -- so a stale exported `$ZEPHYR_BASE` could both
+    misattribute `bootstrap.python-floor-skew`'s warning to a tree that was
+    never used, and hard-refuse `bootstrap.python-too-old` with a remedy
+    naming the wrong fix (install a newer Python, where the real fix is
+    `unset ZEPHYR_BASE`). It now only consults `$ZEPHYR_BASE` when
+    `_zephyr_base_will_adopt` says the tree will actually be used.
+  - The auto-relocation target's occupied check tested raw directory
+    non-emptiness instead of the same foreign-content predicate
+    (`parent_needs_workspace_guard`) the checkout's own parent guard already
+    uses, so the `.venv` `rollback_relocation_after` deliberately leaves
+    behind after a failed retry made the identical next run refuse
+    (`bootstrap.workspace-guard`) instead of resuming -- the documented
+    quickstart's own first command was not retryable after its most likely
+    transient failure (a dropped network mid-`pip install west`). The
+    rollback message also used to tell the customer to delete a path
+    (the checkout's own vacated location) that no longer exists the instant
+    the move-back succeeds; it now names the directory that genuinely still
+    holds the leftover.
+  - `--print-env` in text mode routed every refusal computed ahead of its
+    short-circuit (`sdk-root-unresolved`, `workspace-guard`, the
+    `--workspace`/`--print-env` conflict, and others) to STDOUT instead of
+    STDERR, keyed on the bare `--print-env` flag rather than on whether the
+    run actually succeeded -- `tan bootstrap --print-env > env.sh` on a host
+    with no resolvable SDK showed nothing on the terminal while `env.sh`
+    received the refusal's prose (parens and backticks included) instead of
+    shell. It now checks the outcome's own exit code, matching the oracle
+    (refusals on stderr, success on stdout).
+  - `FORCE_GIT_LONG_PATHS_ENV` (the ad hoc `core.longpaths=true` override
+    every Windows `west update` spawns with) was merged with a blind
+    `dict.update`, silently deleting any `GIT_CONFIG_COUNT`/`_KEY_n`/
+    `_VALUE_n` override the caller's own environment already carried -- a
+    corporate host's proxy or mirror `insteadOf` override, most realistically.
+    It is now appended at the next free index instead of claiming index 0.
+  - `manualInstallHints.posix.note` (the Zephyr SDK / Arm toolchain
+    "NOT auto-installed" section alp-sdk added at v0.14.0) was parsed for
+    round-trip fidelity but rendered by nothing -- a Linux/macOS customer
+    never saw it at all, only the Windows twin. `optional_libs_block` now
+    renders it for `Linux`/`MacOs`, after the optional-native-libs section,
+    matching the frozen Rust oracle's placement; the no-manifest fallback
+    facts gained the equivalent text, minus one clause naming `tan sdk
+    switch` -- not yet ported in this build, so recommending it would be the
+    same dead end (#305/#381) closed everywhere else in this port.
+  - `--print-env`'s venv-activation hint resolved its bin-dir name from the
+    HOST (`facts.venv_bin_dir(is_windows)`) instead of the layout that
+    actually exists on disk, disagreeing with the same run's `Next steps:`
+    block for a `.venv` created under the other platform's layout (a
+    git-bash `Scripts/` venv read from a POSIX host printed a
+    `bin/activate` hint that does not exist). It now resolves through the
+    same existence-derived `Workspace.venv_bin()` every other consumer
+    already uses.
+  - `--workspace C:ws` (a Windows drive-RELATIVE path -- no `\`/`/` right
+    after the drive letter) was treated as fully absolute by `ntpath_isabs`'s
+    own broader `^[A-Za-z]:` regex and used verbatim, unresolved, as the
+    relocation target for a customer's checkout -- `C:ws` resolves against
+    drive C's own remembered current directory, which the process cannot
+    portably read. It is now refused explicitly (`bootstrap.workspace-invalid`)
+    rather than silently guessed; a genuinely drive-absolute `C:\ws`/`C:/ws`
+    is unaffected.
 
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
