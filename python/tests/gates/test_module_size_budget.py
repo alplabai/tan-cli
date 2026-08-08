@@ -612,7 +612,55 @@ _MODULE_BUDGET: dict[str, int] = {
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
     # resolved, the same cost `project_pin_issue` above already justified.
-    "tan/commands/new_som_cmd.py": 1057,
+    # 1091, not 1057, as of tan-cli#496: the write-failure rollback loop now
+    # walks a deduplicated LIST (not a `set` -- the PYTHONHASHSEED-dependent
+    # iteration order that non-deterministically left a half-written preset
+    # on disk) and guards each `unlink()` individually, so a second `OSError`
+    # during cleanup is collected and reported instead of escaping uncaught
+    # with zero bytes on stdout in either output mode.
+    # 1250, not 1091, closing the five remaining tan-cli#496 defects that
+    # PR's own fix left open: (1) `_yaml_scalar` -- both `default_hw_rev`
+    # and `default_board` now render through PyYAML's own emitter instead
+    # of raw f-string splicing, closing the YAML-injection hole a multi-line
+    # `--default-hw-rev` used to open (defect 3); (2) `default_hw_rev` is
+    # now pattern-checked by this command itself, before render, so a bad
+    # value on a brand-new family is `new-som.failed` rather than
+    # `new-som.internal-failure` (defect 5); (3) a `--cores` duplicate is
+    # now refused up front instead of landing as a duplicate YAML/JSON key
+    # in both skeletons (defect 4); (4) `_rollback_write_failure` replaces
+    # the inline cleanup loop -- it RESTORES a pre-existing `--force`
+    # preset's original bytes instead of deleting it (defect 2), and only
+    # ever reports a path as an undoable cleanup failure when that path
+    # PHYSICALLY EXISTS, closing the finding against this file's own
+    # earlier fix (a target this run never reached disk for was reported
+    # "may be half-written"); (5) every `click.prompt` call in
+    # `_interactive` is now `err=True` (defect 6); (6) the bare
+    # `sys.stdin.isatty()` at the top-level input-gathering step now guards
+    # `sys.stdin is None` first (a console-less launcher raises
+    # `AttributeError` there otherwise).
+    # 1342, not 1250, closing the tan-cli#496 round-2 review's remaining
+    # findings against that same PR's own fix: (blocker 1+2) `_yaml_scalar`
+    # now calls `yaml.safe_dump(value, width=float("inf"))` instead of
+    # PyYAML's default 80-column fold -- the old width silently truncated
+    # any `--default-board`/`--default-hw-rev` past 80 columns into the
+    # generated preset (reported as success) and, longer still, could land
+    # the cut inside an emitted quoted scalar, corrupting `preset_text` into
+    # invalid YAML; (blocker 3) `_rollback_write_failure` gates the preset
+    # branch on a new `preset_write_attempted` flag the caller sets before
+    # the write starts, not on membership in `written` (appended only AFTER
+    # a successful `write_text`) -- a write that fails PARTWAY (ENOSPC/
+    # EDQUOT/EFBIG/EIO) left a partially-written file `written` never knew
+    # about, unrolled-back; (major 1) the top-level "no real terminal" gate
+    # now checks `sys.stderr.isatty()` too, not only `sys.stdin` -- every
+    # `_interactive` prompt rides stderr (defect 6), so a redirected stderr
+    # with a real stdin terminal used to block on a question nobody could
+    # see; (major 2) `yaml.safe_load(preset_text)` is now guarded (a
+    # `yaml.YAMLError` routes through `fail()` instead of an unhandled
+    # traceback), and the new shared `_has_control_char` helper rejects DEL
+    # (0x7F) alongside the C0 range at every call site, closing the one
+    # value shape (a raw DEL byte in `--display-name`) that used to reach
+    # that unguarded parse and crash it.
+    "tan/commands/new_som_cmd.py": 1342,
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
@@ -956,6 +1004,18 @@ _MIRRORED = ("tan/planner/",)
 # not 707 -- unrelated to this change (that function is untouched here) and
 # still comfortably under the recorded ceiling, so the ceiling is left as
 # recorded rather than tightened on faith.
+# 212, not 211, as of tan-cli#496's remaining-defects pass:
+# `new_som_cmd.py:_rollback_write_failure` is a genuinely NEW function (61
+# lines) extracted from the write-failure `except OSError:` block so the
+# restore-vs-delete logic (defect 2) and the exists()-gated cleanup
+# reporting (the finding against this file's own earlier fix) are
+# unit-testable on their own; every other function this pass touched
+# (`_interactive`, `_render_preset`, `new_som`, `scaffold_cmd.py:scaffold`)
+# was already over 50 lines before it, so growing them moves nothing here.
+# `_FUNCTION_WORST_BUDGET` is untouched -- `_rollback_write_failure` is 61
+# lines and `new_som` (grown to 506) is still well under `bootstrap_cmd.
+# _run`'s 701, itself under the recorded 707.
+
 # 213, not 211, as of the tan-cli#510 REVIEW round: two functions crossed 50
 # lines, both docstring/parameter growth, not new branching:
 # `build/execute.py:_resolve_tool` (47 -> 71) gained an `env` parameter
@@ -969,10 +1029,16 @@ _MIRRORED = ("tan/planner/",)
 # anywhere near `_FUNCTION_WORST_BUDGET`. Re-walked with the gate's own
 # `ast` logic against this exact tree, not computed from the diff alone.
 #
+# 214 on the merged tree, MEASURED by AST walk -- neither side's number: #496
+# contributed one crossing (212) and tan-cli#530's resolver two (213), and the
+# union is 214, not either. Taking either side here fails the gate.
 # 213 on the merged tree, measured by AST walk: #516 added no long function, and
 # tan-cli#530 (#510's resolver) added two -- so dev's figure carries, not #516's
 # pre-merge 211.
-_FUNCTION_COUNT_BUDGET = 213
+#
+# 214 on the merged tree, MEASURED by AST walk over all of `tan/` including
+# `tan/planner/` -- #496 contributes one crossing that dev's 213 does not.
+_FUNCTION_COUNT_BUDGET = 214
 _FUNCTION_WORST_BUDGET = 707
 
 
