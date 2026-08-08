@@ -225,8 +225,29 @@ _MODULE_BUDGET: dict[str, int] = {
     # growth is small -- the call site itself SHRANK (the caller's own
     # temp-cleanup `except` is gone, `atomic_write_text` does its own) -- the
     # import line and the expanded rationale comment account for the +2.
-    "tan/commands/bootstrap_cmd.py": 2919,
-    "tan/core/bootstrap.py": 1890,
+    # 3034, not 2919, as of tan-cli#495: five defect fixes plus their
+    # rationale. The largest single share is prose, not logic -- defect 2's
+    # `_zephyr_base_will_adopt` gate, defect 3's `_relocation_target_occupied`
+    # (which records the two `.west`-exemption cuts that were tried and
+    # reverted), defect 4's stdout/stderr split, defect 5's
+    # `_append_git_config_override`, and defect 7's `_existing_venv_bin_dir`.
+    # Two functions LEFT this file in the same change (`_manifest_points_at`,
+    # `_same_directory`, both moved down to `tan/core/bootstrap.py`), so the
+    # figure is net of that removal.
+    "tan/commands/bootstrap_cmd.py": 3034,
+    # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
+    # field, its parse arm, its render arm and the three-element fallback
+    # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
+    # fallback prose alone is ~30 lines; plus defect 8's `_is_drive_relative`
+    # and its message; plus `manifest_points_at`/`same_directory` MOVED DOWN
+    # here from `tan/commands/bootstrap_cmd.py` so `tan/core/venv.py` stops
+    # reaching up into the command layer through four deferred imports.
+    # 2049 after review: the fallback's POSIX notes are re-transcribed from
+    # `contract/fixtures/bootstrap/manifest.json` (the source the field-for-
+    # field gate holds them against) rather than the oracle's older copy, and
+    # carry the comment recording the one clause that must diverge because
+    # `test_sdk_onboarding_dead_end.py` refuses a shipped `tan sdk switch`.
+    "tan/core/bootstrap.py": 2049,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
     # newline/`"`-injection hole on the artefact/atoc/serial interpolations,
@@ -826,7 +847,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # `west flash --host <board-ip>` rule (alp-sdk#1266). Same mirrored-module
     # reasoning as `kconfig.py` above: raised, not extracted.
     "tan/planner/template.py": 1329,
-    "tan/core/scaffold.py": 1106,
+    # 1341, not 1106, as of tan-cli#494: defects 1-4 -- `_example_source_files`
+    # (the `os.walk` with build-output pruning, `onerror`, and the symlink
+    # skip), `retarget_board_yaml_cores` with its two span helpers,
+    # `_require_complete_tree` with its derived expectation, and the
+    # file-naming `OSError`. Each carries the docstring recording what it was
+    # measured against, which is most of the growth.
+    "tan/core/scaffold.py": 1341,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one
@@ -945,7 +972,10 @@ _MODULE_BUDGET: dict[str, int] = {
     # filter, and the returned `--preview`/`--force` message), +14 lines,
     # single cause -- the `init.would-overwrite` call site itself stayed the
     # same length, swapping a literal string for a call.
-    "tan/commands/init_cmd.py": 1023,
+    # 1042, not 1023, as of tan-cli#494 defect 10: `_cwd_or_dot` and the
+    # docstring recording that the frozen oracle exits 0 on the identical
+    # removed cwd where this port raised `init.internal-failure` / exit 5.
+    "tan/commands/init_cmd.py": 1042,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
@@ -1408,7 +1438,38 @@ _MIRRORED = ("tan/planner/",)
 # 221 crossings live there) after the merge, exactly as the paragraph above
 # says to: taking either side's figure by ownership is the arithmetic mistake,
 # and here it would have shipped a budget the tree already exceeds.
-_FUNCTION_COUNT_BUDGET = 221
+#
+# 226, not 221, as of tan-cli#494/#495, RE-WALKED after the rebase onto
+# tan-cli#582's dev with the gate's own AST walk over all of `tan/` INCLUDING
+# `tan/planner/` (49 of the 226 crossings live there) -- never 221 + 5
+# arithmetic, and never the pre-rebase 224 carried over. FIVE functions
+# crossed 50 lines; the newly-over set was diffed by name against dev, and
+# nothing dropped BELOW the cap to mask a crossing:
+#   * `core/scaffold.py:retarget_board_yaml_cores` -- NEW (82), #494 defect 2's
+#     `cores:` re-derivation. The block walk is the size it is because it must
+#     find the entries, identify the single `app:` one, and leave an
+#     unrecognised shape verbatim rather than half-rewritten.
+#   * `core/module_template.py:_wiring` -- NEW (67), #494 defect 5's README
+#     section. 40 of the 67 are the docstring recording the measurement
+#     against the frozen scaffold trees and why the oracle's bytes are not the
+#     fixed point here; the returned string is most of the rest.
+#   * `core/venv.py:find_workspace_venv` (44 -> 61) -- #495 defect 1's
+#     `_not_a_foreign_topdir` guard on the upward walk, plus the docstring
+#     paragraph on why it is conditional on `.west` rather than a naive mirror
+#     of tan-cli#307's `manifest_ok`.
+#   * `core/bootstrap.py:optional_libs_block` (46 -> 58) -- #495 defect 6's
+#     POSIX manual-install arm and the comment transcribing the oracle's
+#     `case linux|macos)` shape it is keyed to.
+#   * `commands/bootstrap_cmd.py:_print_env_outcome` (50 -> 51) -- #495 defect
+#     7 by ONE line, after `_existing_venv_bin_dir` was already extracted to
+#     hold it down. Not trimmed further: the remaining line is the call, not
+#     commentary, and shaving a comment to dodge a ratchet is how the ratchet
+#     stops meaning anything.
+# `_FUNCTION_WORST_BUDGET` is untouched and NOT raised: `bootstrap_cmd.py:_run`
+# measured 704 here (701 at `origin/dev` -- +3 for defect 2's
+# `_zephyr_base_will_adopt` gate and defect 3's occupied-target call), still
+# under the 707 ceiling.
+_FUNCTION_COUNT_BUDGET = 226
 _FUNCTION_WORST_BUDGET = 707
 
 

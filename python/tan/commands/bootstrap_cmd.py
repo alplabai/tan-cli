@@ -100,6 +100,7 @@ from tan.core.bootstrap import (
     die,
     fallback_facts,
     get_manifest_path,
+    manifest_points_at,
     in_play_runtimes,
     next_steps_block,
     optional_libs_block,
@@ -117,6 +118,7 @@ from tan.core.bootstrap import (
     reported_missing,
     resolve_workspace_target,
     resolve_zephyr_pin,
+    same_directory,
     set_manifest_path,
     venv_exe_names,
     windows_python_not_runnable,
@@ -174,20 +176,6 @@ def _native(path: Path | str) -> str:
     Windows copy-paste blocks."""
     rendered = str(path)
     return rendered.replace("/", "\\") if os.name == "nt" else rendered
-
-
-def _same_directory(a: Path, b: Path) -> bool:
-    """True when `a` and `b` name the same directory. `realpath` when both exist
-    (the reliable answer); a lexical `normpath`+`normcase` comparison when either
-    does not -- e.g. a stale config's target SDK version since pruned."""
-    try:
-        if a.exists() and b.exists():
-            return os.path.realpath(a) == os.path.realpath(b)
-    except OSError:
-        pass
-    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(
-        os.path.normpath(str(b))
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1148,7 +1136,7 @@ def reconcile_west_manifest_path(sdk_root: str) -> tuple[str, str | None, str | 
         # No `[manifest] path` line carries no pointer to reconcile; `west`
         # itself is what complains about that.
         return "not-applicable", None, None
-    if _same_directory(topdir / current.strip(), sdk_path):
+    if same_directory(topdir / current.strip(), sdk_path):
         return "already-matches", current, None
     new_rel = sdk_path.name
     if not new_rel:
@@ -1471,7 +1459,7 @@ def relocate_checkout(
     flag that reports a planned destination must never be the thing that
     creates it.
     """
-    if _same_directory(repo_root.parent, target_parent):
+    if same_directory(repo_root.parent, target_parent):
         return repo_root, None
     checkout_name = repo_root.name
     if not checkout_name:
@@ -1866,21 +1854,8 @@ def _existing_workspace_facts(repo_root: Path) -> tuple[str, bool, bool] | None:
     return (
         version_file,
         _is_dir(top / ".west"),
-        _manifest_points_at(top, repo_root),
+        manifest_points_at(top, repo_root),
     )
-
-
-def _manifest_points_at(topdir: Path, repo_root: Path) -> bool:
-    """Whether `<topdir>/.west/config`'s `[manifest] path` resolves to
-    `repo_root`. west and the venv are not set up yet at this point, so the
-    config is read directly rather than shelling `west config manifest.path`."""
-    config = _read_text(topdir / ".west" / "config")
-    if config is None:
-        return False
-    rel = get_manifest_path(config)
-    if rel is None:
-        return False
-    return _same_directory(topdir / rel.strip(), repo_root)
 
 
 @dataclass(frozen=True)
@@ -2399,7 +2374,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         source_topdir = paths.repo_root.parent
         if target is not None and _is_file(
             source_topdir / ".west" / "config"
-        ) and _manifest_points_at(source_topdir, paths.repo_root):
+        ) and manifest_points_at(source_topdir, paths.repo_root):
             return (
                 _refusal(
                     ExitCode.VALIDATION_FAILURE,

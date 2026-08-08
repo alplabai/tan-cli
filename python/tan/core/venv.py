@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from tan.core.bootstrap import VenvLayout, venv_layout
+from tan.core.bootstrap import VenvLayout, manifest_points_at, venv_layout
 
 
 def _resolve_layout(venv: Path) -> VenvLayout | None:
@@ -62,11 +62,34 @@ def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
          legacy `<sdk-parent>/zephyrproject/.venv`.
 
     `None` when none resolve (CI, an activated venv, the contract harness).
+
+    **tan-cli#495 defect 1: step 1 skips an ancestor that IS a west topdir
+    whose manifest is not alp-sdk's.** Step 1 used to accept any `.venv` with
+    a `west` in it, with no `sdk_root` involvement at all, while the sibling
+    resolver `west_workspace_dir` (below) rejects that same ancestor via its
+    tan-cli#307 `manifest_ok` guard -- so on a dirty host the two DISAGREED:
+    `tan build` spawned the ancestor venv's `west` with `cwd` pinned to the
+    correct workspace, and baked the ancestor venv's `python` into every
+    Zephyr slice as `-DPython3_EXECUTABLE`. That interpreter has none of
+    `zephyr/scripts/requirements.txt`, so `west build` died inside Zephyr's
+    own CMake configure naming Zephyr rather than tan -- the exact class
+    tan-cli#307 closed for the topdir, mirrored onto the binary. Worse when
+    the ancestor is a FULL Zephyr venv: no failure at all, just a silent
+    build against a different Zephyr's pinned requirements.
+
+    Deliberately NOT a naive mirror of #307's guard: `manifest_points_at` is
+    False for a project directory with no `.west` at all, so requiring it
+    outright would reject the SUPPORTED project-local `.venv` -- the exact
+    shape #307's own e2e test plants at `build_root/.venv`. The guard is
+    therefore conditional on the candidate's directory actually HOLDING a
+    `.west`: a directory that claims to be a west topdir must be the right
+    one, and a directory that claims nothing is judged on its `.venv` alone,
+    exactly as before.
     """
     directory: Path | None = Path(start)
     while directory is not None:
         candidate = directory / ".venv"
-        if _resolve_layout(candidate) is not None:
+        if _resolve_layout(candidate) is not None and _not_a_foreign_topdir(directory, sdk_root):
             return candidate
         parent = directory.parent
         directory = parent if parent != directory else None
@@ -85,6 +108,33 @@ def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
                 return candidate
 
     return None
+
+
+def _not_a_foreign_topdir(directory: Path, sdk_root: str | None) -> bool:
+    """Whether `directory` may supply the workspace venv (tan-cli#495 defect 1).
+
+    True in the two cases that carry no claim to check -- `sdk_root` did not
+    resolve, so there is nothing to verify against (the same "nothing to check"
+    fallback `_zephyr_base_venv` and `west_workspace_dir.manifest_ok` already
+    apply), or `directory` is not a west topdir, which is the ordinary
+    project-local `.venv`. False ONLY for a directory that really is a west
+    topdir whose manifest does not point at `sdk_root`: that one is a different
+    workspace, and its venv is a different Zephyr's.
+
+    **Topdir-ness is `.west/config`, not the `.west` DIRECTORY.** An earlier
+    cut tested `(directory / ".west").is_dir()` and broke `tan doctor`'s
+    `venvProvenance` check outright: tan writes its OWN provenance record to
+    `<workspace>/.west/tan-workspace-sdk` (`bootstrap_cmd.
+    record_workspace_sdk`), so a workspace carrying that record but no west
+    config -- every workspace between `record_workspace_sdk` and a completed
+    `west init` -- has a `.west` directory that is not a topdir. It was judged
+    foreign, its venv was refused, and the check vanished from the report
+    instead of passing. `manifest_points_at` reads `.west/config`, so keying on
+    that same file is what makes the guard and its verdict agree.
+    """
+    if sdk_root is None or not (directory / ".west" / "config").is_file():
+        return True
+    return manifest_points_at(directory, Path(sdk_root))
 
 
 def _zephyr_base_venv(zephyr_base: Path, sdk_root: str | None) -> Path | None:
@@ -110,14 +160,7 @@ def _zephyr_base_venv(zephyr_base: Path, sdk_root: str | None) -> Path | None:
     if _resolve_layout(candidate) is None:
         return None
     if sdk_root is not None:
-        # Lazy for the same reason `_zephyr_base_workspace` is lazy: `tan.
-        # commands.bootstrap_cmd` pulls in typer + the whole bootstrap
-        # command surface, and this `tan.core` module must not depend on it
-        # at import time -- only this one, rarely-taken branch ($ZEPHYR_BASE
-        # set AND an sdk_root resolved) ever needs the manifest check at all.
-        from tan.commands.bootstrap_cmd import _manifest_points_at  # noqa: PLC0415
-
-        if not _manifest_points_at(workspace, Path(sdk_root)):
+        if not manifest_points_at(workspace, Path(sdk_root)):
             return None
     return candidate
 
@@ -177,13 +220,7 @@ def west_workspace_dir(start: str, sdk_root: Path | None) -> Path | None:
         fallback every other candidate in this function already applies."""
         if sdk_root is None:
             return True
-        # Lazy for the same reason `_zephyr_base_workspace` below is lazy:
-        # `tan.commands.bootstrap_cmd` pulls in typer + the whole bootstrap
-        # command surface, and this `tan.core` module must not depend on it
-        # at import time.
-        from tan.commands.bootstrap_cmd import _manifest_points_at  # noqa: PLC0415
-
-        return _manifest_points_at(d, sdk_root)
+        return manifest_points_at(d, sdk_root)
 
     directory: Path | None = Path(start)
     while directory is not None:
@@ -220,14 +257,7 @@ def _zephyr_base_workspace(zephyr_base: Path, sdk_root: Path | None) -> Path | N
     if not (workspace / ".west").is_dir():
         return None
     if sdk_root is not None:
-        # Lazy, deliberately: `tan.commands.bootstrap_cmd` is a `tan.commands`
-        # module (pulls in typer + the whole bootstrap command surface), and
-        # this `tan.core` module must not depend on it at import time -- only
-        # this one, rarely-taken branch ($ZEPHYR_BASE set AND an sdk_root
-        # resolved) ever needs the manifest check at all.
-        from tan.commands.bootstrap_cmd import _manifest_points_at  # noqa: PLC0415
-
-        if not _manifest_points_at(workspace, sdk_root):
+        if not manifest_points_at(workspace, sdk_root):
             return None
     return workspace
 

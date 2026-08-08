@@ -1764,9 +1764,48 @@ def test_the_fallback_constants_match_the_real_manifest_field_for_field():
     manifest = parse_bootstrap_manifest(REAL_MANIFEST)
     fallback = fallback_facts(manifest.python_min_version)
     for field in vars(manifest):
-        if field == "from_manifest":
+        if field in ("from_manifest", "manual_install_posix"):
             continue
         assert getattr(fallback, field) == getattr(manifest, field), field
+
+
+def test_the_posix_fallback_matches_the_manifest_except_for_the_refused_subcommand():
+    """`manual_install_posix` is the ONE field the check above cannot demand
+    equality on, because two gates genuinely conflict over it (tan-cli#495
+    defect 6).
+
+    The vendored fixture's first note ends by sending the reader to `tan sdk
+    switch`, which is in `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` -- this build
+    REFUSES it. Copying it would end a manual-install hint on a dead command
+    and `test_sdk_onboarding_dead_end.py` fails the build for exactly that.
+    Not copying it fails the field-for-field check above. Something has to
+    give, so what gives is recorded here rather than by widening either gate:
+    the substituted clause is the LIVE alp-sdk manifest's own current wording
+    for the same sentence (the SDK has already corrected it; the vendored
+    fixture is the stale copy), so this is a fixture refresh waiting to happen,
+    not a permanent divergence.
+
+    Held to an EXACT one-clause difference so the field still cannot drift:
+    the other two notes must match byte for byte, and the first must match up
+    to its closing sentence.
+    """
+    manifest = parse_bootstrap_manifest(REAL_MANIFEST)
+    fallback = fallback_facts(manifest.python_min_version)
+
+    assert len(fallback.manual_install_posix) == len(manifest.manual_install_posix) == 3
+    assert fallback.manual_install_posix[1:] == manifest.manual_install_posix[1:]
+
+    stale = "the `tan sdk switch` step that pins it per project."
+    fixed = "select the checkout with `tan build --sdk-root <path>` or `.alp/sdk-path`."
+    assert manifest.manual_install_posix[0].endswith(stale)
+    assert fallback.manual_install_posix[0].endswith(fixed)
+    # Identical up to that clause -- nothing else was reworded in passing.
+    assert (
+        fallback.manual_install_posix[0][: -len(fixed)]
+        == manifest.manual_install_posix[0][: -len(stale)]
+    )
+    # And the refused verb appears in no shipped fallback string at all.
+    assert not any("tan sdk switch" in note for note in fallback.manual_install_posix)
 
 
 def test_the_reuse_test_compares_the_full_patch_level(tmp_path):
@@ -2366,16 +2405,30 @@ def test_the_windows_manual_install_block_prints_the_manifests_note_only():
 
 
 def test_the_posix_hint_block_carries_the_per_os_note_and_command():
+    """The install command is no longer the block's LAST line: tan-cli#495
+    defect 6 appends the `manualInstallHints.posix.note` section after it, as
+    the oracle does (`blocks.rs:229-245`, after `bootstrap.sh:594` vs `:638`).
+    So this pins the command as the end of the NATIVE-LIBS section -- the line
+    immediately before the manual-install heading -- rather than the end of the
+    list, which is what it happened to be when only Windows had manual hints."""
     facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    manual_heading = "bootstrap: NOT auto-installed (manual, one-time):"
+
     linux = optional_libs_block(facts, LINUX)
     assert linux[1] == "bootstrap: Optional native libraries unlock the Yocto-side backends:"
     assert "  libmosquitto-dev  -> alp_mqtt_* (cleartext + TLS)" in linux
-    assert linux[-1].startswith("  sudo apt-get install -y libmosquitto-dev")
-    assert "brew install mosquitto pkg-config" in optional_libs_block(facts, MACOS)[-1]
-    # `OTHER` has no hint at all -- just the not-detected line.
-    assert optional_libs_block(facts, OTHER)[-1] == (
-        "  (OS not auto-detected; see docs/testing.md)"
-    )
+    # The blank line the manual section opens with sits between the two.
+    linux_end = linux.index(manual_heading) - 2
+    assert linux[linux_end].startswith("  sudo apt-get install -y libmosquitto-dev")
+
+    macos = optional_libs_block(facts, MACOS)
+    assert "brew install mosquitto pkg-config" in macos[macos.index(manual_heading) - 2]
+
+    # `OTHER` has no hint at all -- just the not-detected line, and no
+    # POSIX-specific manual section either.
+    other = optional_libs_block(facts, OTHER)
+    assert other[-1] == "  (OS not auto-detected; see docs/testing.md)"
+    assert manual_heading not in other
 
 
 def test_next_steps_routes_the_posix_build_through_tan_with_absolute_paths():
