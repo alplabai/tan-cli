@@ -510,7 +510,7 @@ def examples(
                 },
                 issues,
                 exit_code,
-                sdk=SdkInfo(sdk.display, sdk.tier) if sdk is not None else None,
+                sdk=SdkInfo.from_resolution(sdk.display, sdk) if sdk is not None else None,
             )
         )
     else:

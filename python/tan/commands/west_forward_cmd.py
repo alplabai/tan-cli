@@ -112,9 +112,10 @@ from typing import NoReturn
 import typer
 
 from tan.commands.build_output import ProjectContext, resolve_project_context, to_posix
+from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
-from tan.envelope import Envelope, Issue, emit
+from tan.envelope import Envelope, Issue, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
@@ -308,8 +309,40 @@ def _spawn_captured(plan: _Forward) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _run_text(plan: _Forward) -> None:
-    """Inherit stdio: the child streams its own progress and may prompt."""
+def _echo_sdk_resolution(sdk: SdkInfo | None) -> None:
+    """tan-cli#478: the SDK-resolution pair on stderr, for the text paths.
+
+    Every `--format json` path in this module gets the pair for free from
+    `Envelope.__init__`'s central seam. NO text path does -- neither
+    `_run_text` (which hands stdio to the child) nor `_refuse_required`'s
+    refusal (which never builds an envelope at all) reaches `Envelope`. Both
+    call this instead of open-coding the loop, so a third text path cannot
+    be added that discloses in JSON and stays silent on the screen: that is
+    precisely how `_refuse_required` shipped silent while `_run_text` did
+    not.
+    """
+    if sdk is None:
+        return
+    for issue in sdk_resolution_issues(
+        sdk.broken_project_pin, sdk.source_tier, sdk.foreign_global_default_for
+    ):
+        typer.echo(issue.message, err=True)
+
+
+def _run_text(plan: _Forward, sdk: SdkInfo | None) -> None:
+    """Inherit stdio: the child streams its own progress and may prompt.
+
+    tan-cli#478 review finding 8: `_plan` resolves `west_bin`/`workspace` off
+    `context.sdk.root` (see `_plan`'s own `sdk_path` line), so this command
+    SPAWNS `west` out of the resolved SDK root -- same shape as `validate`'s
+    spawn, worse consequence, since the child is a real build rather than a
+    schema check. The JSON envelope below already discloses a foreign
+    `globalDefault` via `Envelope.__init__`'s central seam. Text mode never
+    reaches `Envelope` at all (the child inherits stdio directly), so this
+    is printed BEFORE the spawn -- once stdio is handed to the child, tan
+    has no stream left of its own to write a warning to.
+    """
+    _echo_sdk_resolution(sdk)
     try:
         result = subprocess.run(plan.full_argv, cwd=plan.run_cwd, env=plan.env, check=False)
     except OSError as err:
@@ -372,6 +405,11 @@ def _refuse_required(
             )
         )
     else:
+        # tan-cli#478 (PR #504 review): this branch printed the refusal ALONE
+        # while the JSON branch above disclosed the SDK-resolution pair -- and
+        # a bare `tan quality` / `tan migrate` lands here, having resolved the
+        # checkout `_plan` would have run `west` out of. Order as `_run_text`.
+        _echo_sdk_resolution(context.sdk)
         typer.echo(f"{subcommand}: {message}", err=True)
     raise typer.Exit(int(ExitCode.VALIDATION_FAILURE))
 
@@ -394,7 +432,7 @@ def _run_forward(
     context = resolve_project_context(project, board_yaml, sdk_root)
     plan = _plan(subcommand, passthrough, extra_args, context)
     if output_format != "json":
-        _run_text(plan)
+        _run_text(plan, context.sdk)
         return
     try:
         out = _spawn_captured(plan)

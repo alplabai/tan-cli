@@ -262,7 +262,7 @@ from tan.commands.doctor_cmd import resolve_manifest_python_floor
 # oracle's own "(VS Code users can instead set alpSdk.pythonPath)" sentence. A
 # third copy here would make it the pattern.
 from tan.commands.generate_cmd import _python_too_old
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -748,11 +748,30 @@ def _emit(
     command_line: str = "",
     sdk: SdkInfo | None = None,
 ) -> None:
+    # tan-cli#478 review: `issues` may now carry the SDK-resolution pair
+    # (`sdk.project-pin-unresolved`, `sdk.global-default-foreign-project`)
+    # alongside this command's own findings. Those belong in the ENVELOPE and
+    # nowhere else here:
+    #
+    #   * `data.issueCount` reads as "how many findings does this board have";
+    #     counting a host fact made a CLEAN board report `outcome: "clean"`,
+    #     `exitCode: 0`, `issueCount: 1`.
+    #   * `--format diagnostic-v1` / `--format sarif` are ported alp-sdk
+    #     documents whose every entry is anchored at `board.yaml` 1:1. A CI job
+    #     uploading the SARIF would annotate line 1 of the customer's
+    #     board.yaml with "the machine-global default SDK was last set by ..."
+    #     -- a fact about the host, presented as a finding about the file.
+    #   * the tan-cli#350 text verdict keyed off `len(issues) == 1`, so a
+    #     prepended warning silently restored the "validate: validation
+    #     failure" wording that issue removed for the nothing-was-checked case.
+    #
+    # Split once, here, rather than at each of the four readers below.
+    findings = [issue for issue in issues if not issue.code.startswith("sdk.")]
     if output_format == ValidateOutputFormat.JSON:
         data = {
             "schemaVersion": DATA_SCHEMA_VERSION,
             "outcome": outcome,
-            "issueCount": len(issues),
+            "issueCount": len(findings),
             # The validator command line that actually ran, or `""` -- which
             # every guard and the whole offline path keep, and which the two
             # committed conformance fixtures pin.
@@ -782,13 +801,13 @@ def _emit(
         # `json.dumps(to_machine_json(collector), indent=2)` -- these two
         # formats are ported documents, not the envelope (which is
         # deliberately compact; see `tan.envelope.emit`'s `separators`).
-        typer.echo(json.dumps(_diagnostic_v1_document(issues, board_path), indent=2))
+        typer.echo(json.dumps(_diagnostic_v1_document(findings, board_path), indent=2))
     elif output_format == ValidateOutputFormat.SARIF:
         # indent=2, matching scripts/alp_cli/validate.py:36.
-        typer.echo(json.dumps(_sarif_document(issues, board_path), indent=2))
+        typer.echo(json.dumps(_sarif_document(findings, board_path), indent=2))
     else:
         stream = typer.get_text_stream("stderr")
-        if len(issues) == 1 and issues[0].code == "validate.board-yaml-missing":
+        if len(findings) == 1 and findings[0].code == "validate.board-yaml-missing":
             # tan-cli#350: this is not a VALIDATION failure -- there is no
             # board.yaml to validate, so nothing was checked and found
             # wrong. Every other non-clean outcome below still says
@@ -797,7 +816,16 @@ def _emit(
             # `--format json`'s `issues[].message`) already names where tan
             # looked and the remedy -- see the guard above.
             stream.write("validate: no board.yaml to validate\n")
-            stream.write(f"{issues[0].message}\n")
+            # tan-cli#478 review finding 6: this branch prints `findings[0]`
+            # alone -- deliberately, per tan-cli#350, to keep the verdict
+            # wording narrow -- but the sdk.* advisories `findings` filters
+            # OUT of `issueCount`/sarif/diagnostic-v1 still belong on the
+            # customer's screen; the other two branches below already print
+            # them because they loop over the unfiltered `issues`.
+            for issue in issues:
+                if issue.code.startswith("sdk."):
+                    stream.write(f"{issue.message}\n")
+            stream.write(f"{findings[0].message}\n")
         elif outcome != OUTCOME_CLEAN:
             stream.write("validate: validation failure\n")
             for issue in issues:
@@ -881,6 +909,11 @@ def validate(
         # `--sdk-root`).
         resolved_sdk: Path | None = None
         sdk_info: SdkInfo | None = None
+        # tan-cli#478. Declared OUTSIDE the `offline` branch: that path consults
+        # no pointer, so this stays empty -- but `fail()` and the success `_emit`
+        # both read it unconditionally below, so no future early return can drop
+        # the pair (tan-cli#464 review).
+        sdk_context_issues: list[Issue] = []
         if not offline:
             sdk_resolution = resolve_sdk_root_ladder(sdk_root, Path(os.path.abspath(root)))
             resolved_sdk = sdk_resolution.path
@@ -896,7 +929,15 @@ def validate(
             if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk):
                 resolved_sdk = None
             if resolved_sdk is not None:
-                sdk_info = SdkInfo(str(resolved_sdk), sdk_tier)
+                sdk_info = SdkInfo.from_resolution(str(resolved_sdk), sdk_resolution)
+            # tan-cli#478: `validate` SPAWNS out of the resolved root, so a
+            # foreign `globalDefault` means another project's schemas decided
+            # `clean` for this board.yaml. Reported `ok: true`, `issues: []`.
+            sdk_context_issues = sdk_resolution_issues(
+                sdk_resolution.broken_project_pin,
+                sdk_tier,
+                sdk_resolution.foreign_global_default_for,
+            )
 
         def fail(code: str, message: str, exit_code: ExitCode) -> None:
             _emit(
@@ -904,7 +945,7 @@ def validate(
                 root=root,
                 board_path=board_path,
                 outcome=OUTCOME_FAILED,
-                issues=[Issue(f"validate.{code}", "error", message)],
+                issues=[*sdk_context_issues, Issue(f"validate.{code}", "error", message)],
                 exit_code=exit_code,
                 sdk=sdk_info,
             )
@@ -1076,8 +1117,11 @@ def validate(
                     )
 
         issues = [
-            Issue(f"validate.{result.outcome}", severity, message)
-            for severity, message in result.findings
+            *sdk_context_issues,
+            *(
+                Issue(f"validate.{result.outcome}", severity, message)
+                for severity, message in result.findings
+            ),
         ]
         exit_code = (
             ExitCode.SUCCESS

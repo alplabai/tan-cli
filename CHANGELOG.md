@@ -80,6 +80,46 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`sdk.global-default-foreign-project` now reaches DEFAULT text output
+  too, not only `--format json`, for `inspect`/`trace`/`validate`/`diff`/
+  `support-bundle` and the three west-forwarding verbs `migrate`/`lock`/
+  `quality` -- on top of the five (`doctor`/`generate`/`build`/`presets`/
+  `examples`) already wired for it since #464.** A customer building against a
+  different SDK than they think got no warning from `inspect`, `trace`,
+  `validate`, `diff`, `support-bundle`, or `migrate`/`lock`/`quality`
+  (`west_forward_cmd.py`) -- `ok: true`, `issues: []`, while `validate`
+  SPAWNED that foreign checkout's own schema validator and
+  `migrate`/`lock`/`quality` spawned `west` itself out of it. `support-bundle`
+  was the sharpest case: the one artefact a user sends to explain a broken
+  machine carried the fact nowhere, not in the envelope and not in the
+  bundle FILE. Fixed at one seam -- every SDK ladder already answers with
+  `foreign_global_default_for`/`broken_project_pin`; `SdkInfo.from_resolution`
+  now carries both through onto the envelope's `sdk` block (off the wire --
+  the wire shape stays `{root, sourceTier}`), and `Envelope.__init__` turns
+  them into the `sdk.global-default-foreign-project`/`sdk.project-pin-unresolved`
+  pair for every command's JSON envelope from there, so a new command cannot
+  forget it (`tests/gates/test_sdk_info_is_built_from_a_resolution.py` is
+  the ratchet that keeps a raw `SdkInfo(...)` construction from reintroducing
+  the drop). Text mode has no `Envelope` to lean on -- `diff`/`inspect`/
+  `trace`/`support-bundle`/`validate` and the three `west`-forwarding verbs
+  all write straight to stderr (or, for `west`-forwarding, hand stdio to the
+  child) -- so each now prints the same warning first, including the two
+  `west` verbs that refuse BEFORE spawning anything: `--profile` (`quality`)
+  and one-of `--check`/`--preview`/`--apply` (`migrate`) are required by the
+  child's own argparse, so a bare `tan quality` / `tan migrate` is the run
+  that reaches that refusal, and it had disclosed the pair in `--format json`
+  while printing the flag error alone on the default text path.
+  `validate`'s own
+  JSON/SARIF/diagnostic-v1 documents keep the advisory OUT of
+  `data.issueCount` and out of the board-anchored formats, so a CI job
+  uploading SARIF does not annotate line 1 of a customer's board.yaml with a
+  fact about the host. `support-bundle`'s three early-return failure paths
+  (a `--target-kind`/`--server` parse refusal, an unsupported target/server
+  pairing, and a bundle-write `OSError`) now carry the same pair too --
+  previously they built their `_Outcome` from a bare `issues=[Issue(...)]`
+  list, so the one command whose whole purpose is explaining a broken
+  machine stayed silent on exactly the runs where something had already
+  gone wrong. (#478)
 - **`tan debug-config --project <path>` created the directory tree when
   `<path>` did not exist, and wrote a `native-host` launch.json into it at
   exit 0 with `issues: []`.** `--project` names a project that already
