@@ -146,6 +146,25 @@ if ($Version -eq "latest") {
 }
 $sumsUrl = "$baseUrl/$Version/checksums.txt"
 
+# tan-cli#490 round 9: mirror install.sh's `install_dir_created_for_retry` --
+# `New-Item -ItemType Directory -Force` below is the ps1 equivalent of
+# `mkdir -p`, and creates $Dir AND any missing PARENT directories in one call.
+# A refused install (the health-check failure branch below) must not leave
+# behind anything this line created that pre-fix would never have existed --
+# so the first ancestor that does not exist yet is recorded here. Removing
+# just THAT one, recursively, removes everything New-Item is about to create
+# and nothing that already existed, the same "first new ancestor" trick
+# install.sh's own retry gate now uses.
+$dirFirstNewAncestor = $null
+if (-not (Test-Path -LiteralPath $Dir)) {
+	$ancestor = $Dir
+	while (-not (Test-Path -LiteralPath $ancestor)) {
+		$dirFirstNewAncestor = $ancestor
+		$parent = Split-Path -Path $ancestor -Parent
+		if (-not $parent -or $parent -eq $ancestor) { break }
+		$ancestor = $parent
+	}
+}
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 $LibDir = Join-Path $Dir "tan-cli-lib"
 
@@ -446,6 +465,13 @@ try {
 		} else {
 			Write-Host "install.ps1: no previous installation existed, so there is nothing to fall back to."
 		}
+		# tan-cli#490 round 9: a refused install must not leave an orphaned $Dir
+		# (or its freshly-created parents) behind -- see the New-Item comment
+		# above. Only reached when $dirFirstNewAncestor was actually recorded,
+		# i.e. $Dir did not exist before this run.
+		if ($dirFirstNewAncestor) {
+			Remove-Item -LiteralPath $dirFirstNewAncestor -Recurse -Force -ErrorAction SilentlyContinue
+		}
 		if (Test-AccessDeniedSignature $verifyWin32Code) {
 			if ($retried) {
 				Write-Host "install.ps1: Access is denied persisted even after staging inside $Dir -- a security policy (AppLocker / Software Restriction Policy) very likely blocks running tan from there too, not only from %TEMP%." -ForegroundColor Red
@@ -662,19 +688,6 @@ function Get-PathRegistryKey([bool]$writable) {
 		return [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $writable)
 	}
 }
-# WM_SETTINGCHANGE broadcast, done by hand: [Environment]::SetEnvironmentVariable
-# sends this itself (target User/Machine) so already-running GUI apps (Explorer,
-# and consoles it spawns afterward) pick up the change without a reboot -- a
-# direct registry write bypasses that side effect entirely, so it has to be
-# replicated here or a working installer would silently start requiring a
-# logoff/logon it never used to.
-Add-Type -Namespace TanInstall -Name NativeMethods -MemberDefinition @'
-[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-public static extern IntPtr SendMessageTimeout(
-	IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
-	uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
-'@ -ErrorAction SilentlyContinue
-
 # Read-only first: reading either hive's Environment key needs no elevation,
 # and -NoModifyPath must keep working exactly as before even when this
 # process is not elevated for -System (only the WRITE below needs that).
@@ -716,12 +729,31 @@ if (-not $alreadyPresent) {
 		# compiles this class into a temp assembly it then loads -- which an
 		# AppLocker DLL rule or a Software Restriction Policy over %TEMP%
 		# (the exact host class the health-check retry above exists for) can
-		# block, leaving `-ErrorAction SilentlyContinue` on the `Add-Type`
-		# call above with no type defined; referencing the unresolved type
-		# name is then a TERMINATING error under this script's
-		# $ErrorActionPreference = "Stop", reached only after the Path was
-		# already written. Gate on the type actually existing, and wrap the
-		# call itself too in case the broadcast fails for some other reason.
+		# block. `-ErrorAction SilentlyContinue` on `Add-Type` only suppresses
+		# a NON-terminating error; a compile/assembly-load failure from
+		# `Add-Type` itself is a TERMINATING one, so without a try/catch of
+		# its own it would abort the whole script here -- with the Path
+		# already committed to the registry -- turning a should-be-cosmetic
+		# broadcast failure into a reported install failure. WM_SETTINGCHANGE,
+		# done by hand: [Environment]::SetEnvironmentVariable sends this
+		# itself (target User/Machine) so already-running GUI apps (Explorer,
+		# and consoles it spawns afterward) pick up the change without a
+		# reboot -- a direct registry write bypasses that side effect
+		# entirely, so it has to be replicated here or a working installer
+		# would silently start requiring a logoff/logon it never used to.
+		try {
+			Add-Type -Namespace TanInstall -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(
+	IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+	uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@ -ErrorAction SilentlyContinue
+		} catch {
+			Write-Host "install.ps1: warning -- could not compile the Path-broadcast helper ($($_.Exception.Message)); open a NEW terminal to pick it up." -ForegroundColor Yellow
+		}
+		# Gate on the type actually existing (Add-Type above may have been
+		# unable to define it), and wrap the call itself too in case the
+		# broadcast fails for some other reason.
 		if ('TanInstall.NativeMethods' -as [type]) {
 			try {
 				$result = [UIntPtr]::Zero

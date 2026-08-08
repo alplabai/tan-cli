@@ -815,6 +815,42 @@ def test_ps1_access_denied_signature_accepts_the_applocker_policy_codes(tmp_path
     assert "none=False" in lines
 
 
+def test_ps1_broadcast_helper_compile_is_gated_and_guarded(tmp_path):
+    """tan-cli#490 round 8 shipped `Add-Type -Namespace TanInstall ...
+    -ErrorAction SilentlyContinue` at column 0 in the script -- unconditional,
+    outside `if (-not $alreadyPresent)`, and outside any try/catch of its own.
+    `-ErrorAction SilentlyContinue` only suppresses a NON-terminating error; a
+    compile/assembly-load failure from `Add-Type` itself is TERMINATING (under
+    this script's own `$ErrorActionPreference = "Stop"`), so on a host whose
+    AppLocker DLL rule or Software Restriction Policy blocks compiling into
+    %TEMP% -- precisely the host class the health-check retry earlier in this
+    same script exists for -- `Add-Type` aborted the WHOLE script, even a run
+    that never touched the Path at all (a fresh `-NoModifyPath` run, or one
+    where `$Dir` was already on the Path). This is a pure text assertion --
+    no `pwsh` needed, so it runs on every OS this suite runs on, including
+    this Linux host that has none installed -- proving the shipped source has
+    `Add-Type` (a) inside the `if (-not $alreadyPresent) { ... }` write branch
+    and (b) inside its own `try { } catch { }`, both of which round 8's
+    zero-test-coverage version lacked.
+    """
+    text = INSTALL_PS1.read_text()
+    branch_start = text.index("if (-not $alreadyPresent) {")
+    branch_end = text.index('if ($layout -eq "archive") {\n\tWrite-Host "install.ps1: installed tan')
+    assert branch_end > branch_start, "install.ps1's Path-write branch moved or was renamed"
+    branch = text[branch_start:branch_end]
+
+    add_type_at = branch.index("Add-Type -Namespace TanInstall -Name NativeMethods")
+    call_at = branch.index("[TanInstall.NativeMethods]::SendMessageTimeout")
+    assert call_at > add_type_at, "the broadcast call must come after Add-Type defines the type"
+
+    try_at = branch.rindex("try {", 0, add_type_at)
+    catch_at = branch.index("} catch {", add_type_at)
+    assert try_at < add_type_at < catch_at, (
+        "Add-Type must be wrapped in its own try/catch -- SilentlyContinue alone does not "
+        "suppress the TERMINATING error a blocked compile raises"
+    )
+
+
 @windows_only
 def test_ps1_commit_resets_the_source_temp_acl_after_move(release_server, tmp_path):
     """tan-cli#490, MAJOR 2: `Move-Item` carries the SOURCE item's ACL into
@@ -1423,6 +1459,37 @@ def test_sh_noop_chmod_retry_failure_leaves_no_empty_install_dir(release_server,
     assert not dest.exists(), "a refused install must not leave an empty install dir behind"
 
 
+@posix_only
+def test_sh_noop_chmod_retry_failure_leaves_no_orphaned_intermediate_parents(release_server, tmp_path):
+    """tan-cli#490 round 9: the retry gate's `mkdir -p "$INSTALL_DIR"` creates
+    every missing INTERMEDIATE parent too (like `mkdir -p` always does), but
+    the refusal cleanup this test's sibling above covers
+    (`test_sh_noop_chmod_retry_failure_leaves_no_empty_install_dir`) used to
+    `rmdir "$INSTALL_DIR"`, which removes only the LEAF -- the same class of
+    orphan round 8 already fixed once in the relative-`--dir` argument-parsing
+    path, surviving here in the retry-gate path. MEASURED pre-fix:
+    `--dir <tmp>/orph/deep/bin` refused left `<tmp>/orph` and
+    `<tmp>/orph/deep` behind. `--dir` here is THREE levels deep so the fix has
+    to walk, not just handle the immediate parent.
+    """
+    dest = tmp_path / "orph" / "deep" / "bin"  # none of these must exist before this run
+    chmod_dir = _fake_noop_chmod(tmp_path)
+    env_path = f"{chmod_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", "v0.4.1",
+        extra_env={"PATH": env_path},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "Permission denied" in combined
+    assert not (tmp_path / "orph").exists(), (
+        "a refused install must not leave any intermediate parent directory behind, "
+        "not just the immediate --dir leaf"
+    )
+
+
 def _install_sh_noexec_with_exhausted_install_dir(
     base_url: str, dest: Path, home: Path, noexec_dir: Path, install_mount: Path, *args: str
 ) -> subprocess.CompletedProcess:
@@ -1788,6 +1855,123 @@ def test_sh_tcsh_shell_appends_to_existing_cshrc_instead_of_shadowing_it(release
     assert "setenv EDITOR vim" in cshrc_text
     assert "setenv PATH" in cshrc_text
     assert "export PATH" not in cshrc_text
+
+
+@posix_only
+def test_sh_csh_shell_gets_tcshrc_when_neither_rc_file_exists(release_server, tmp_path):
+    """tan-cli#490 round 9: on macOS, FreeBSD, and Debian/Ubuntu-via-
+    alternatives, /bin/csh IS tcsh (a compat symlink/build, not a distinct
+    binary) -- so SHELL=/bin/csh must get the exact same shadowing-aware
+    logic as SHELL=/bin/tcsh, not a bare ~/.cshrc write. Shape 1 of 4: neither
+    rc file exists yet -- nothing to shadow, so a fresh ~/.tcshrc is created
+    (mirrors test_sh_tcsh_shell_gets_csh_syntax_in_tcshrc).
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/csh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    rc = home / ".tcshrc"
+    assert rc.is_file()
+    rc_text = rc.read_text(encoding="utf-8")
+    assert "setenv PATH" in rc_text
+    assert "export PATH" not in rc_text
+    assert not (home / ".cshrc").exists()
+
+
+@posix_only
+def test_sh_csh_shell_appends_to_existing_cshrc_instead_of_shadowing_it(release_server, tmp_path):
+    """tan-cli#490 round 9, the MEASURED bug this fix closes. Shape 2 of 4:
+    only ~/.cshrc exists (the review's own repro: SHELL=/bin/csh, a real tcsh
+    6.24.10 binary, both ~/.tcshrc and ~/.cshrc seeded). Pre-fix, the bare
+    `csh)` arm always wrote ~/.cshrc no matter what, which happens to be
+    right when ~/.tcshrc does not exist yet -- so this shape alone would not
+    have caught the bug; it is here for completeness alongside the other
+    three shapes and to guard the correct branch this fix takes when
+    ~/.tcshrc is genuinely absent.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    cshrc = home / ".cshrc"
+    cshrc.write_text("alias ll 'ls -l'\nsetenv EDITOR vim\n", encoding="utf-8")
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/csh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert not (home / ".tcshrc").exists(), "must not create ~/.tcshrc -- that would shadow the existing ~/.cshrc"
+    cshrc_text = cshrc.read_text(encoding="utf-8")
+    assert "alias ll 'ls -l'" in cshrc_text, "the user's pre-existing ~/.cshrc content must survive"
+    assert "setenv EDITOR vim" in cshrc_text
+    assert "setenv PATH" in cshrc_text
+    assert "export PATH" not in cshrc_text
+
+
+@posix_only
+def test_sh_csh_shell_appends_to_existing_tcshrc_when_only_tcshrc_exists(release_server, tmp_path):
+    """tan-cli#490 round 9. Shape 3 of 4: only ~/.tcshrc exists. tcsh(1) reads
+    ~/.tcshrc FIRST when it exists, so the PATH line has to land there, not in
+    a freshly-created ~/.cshrc a real tcsh binary invoked as `csh` would never
+    read on this host.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    tcshrc = home / ".tcshrc"
+    tcshrc.write_text("alias ll 'ls -l'\nsetenv EDITOR vim\n", encoding="utf-8")
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/csh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert not (home / ".cshrc").exists(), "must not create ~/.cshrc when ~/.tcshrc is the file actually read"
+    tcshrc_text = tcshrc.read_text(encoding="utf-8")
+    assert "alias ll 'ls -l'" in tcshrc_text, "the user's pre-existing ~/.tcshrc content must survive"
+    assert "setenv EDITOR vim" in tcshrc_text
+    assert "setenv PATH" in tcshrc_text
+    assert "export PATH" not in tcshrc_text
+
+
+@posix_only
+def test_sh_csh_shell_prefers_tcshrc_when_both_rc_files_exist(release_server, tmp_path):
+    """tan-cli#490 round 9. Shape 4 of 4 -- the exact scenario MEASURED
+    against real tcsh 6.24.10: both ~/.tcshrc and ~/.cshrc exist, SHELL=
+    /bin/csh. tcsh(1) reads ~/.tcshrc and STOPS -- it never reaches
+    ~/.cshrc at all when ~/.tcshrc is present -- so the PATH line must land
+    in ~/.tcshrc; writing it to ~/.cshrc (the pre-fix behaviour) is exactly
+    what `tcsh -c 'echo $PATH' | grep -c binF` measured as 0 despite the
+    installer's own success message.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    tcshrc = home / ".tcshrc"
+    tcshrc.write_text("setenv EDITOR vim\n", encoding="utf-8")
+    cshrc = home / ".cshrc"
+    cshrc.write_text("alias ll 'ls -l'\n", encoding="utf-8")
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", "v0.4.1",
+        extra_env={"SHELL": "/bin/csh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    tcshrc_text = tcshrc.read_text(encoding="utf-8")
+    assert "setenv EDITOR vim" in tcshrc_text, "the user's pre-existing ~/.tcshrc content must survive"
+    assert "setenv PATH" in tcshrc_text
+    assert "export PATH" not in tcshrc_text
+    # ~/.cshrc must be untouched -- tcsh with a ~/.tcshrc present never reads it.
+    assert cshrc.read_text(encoding="utf-8") == "alias ll 'ls -l'\n"
 
 
 @posix_only

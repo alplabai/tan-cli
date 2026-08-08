@@ -508,8 +508,27 @@ run_health_check "$staged_bin"
 retried=0
 retry_stage_err=""
 install_dir_created_for_retry=0
+install_dir_first_new_ancestor=""
 if is_noexec_signature "$health_rc" "$verify_out"; then
 	if [ ! -e "$INSTALL_DIR" ]; then
+		# tan-cli#490 round 9: `mkdir -p` below creates $INSTALL_DIR AND any
+		# missing PARENT directories, the same way the relative-path
+		# normalisation above once did before ITS orphan fix -- but the
+		# refusal cleanup further down used to `rmdir "$INSTALL_DIR"`, which
+		# only removes the (by-then-empty) LEAF, leaving every intermediate
+		# parent this `mkdir -p` also created behind. MEASURED:
+		# `--dir <W>/orph/deep/bin` refused left `<W>/orph` and
+		# `<W>/orph/deep` on disk. Walk up from $INSTALL_DIR recording the
+		# first ancestor that does not exist yet; removing just THAT one,
+		# recursively, on refusal removes everything this `mkdir -p` is about
+		# to create and nothing that already existed.
+		install_dir_walk_new="$INSTALL_DIR"
+		while [ ! -e "$install_dir_walk_new" ]; do
+			install_dir_first_new_ancestor="$install_dir_walk_new"
+			install_dir_walk_parent="$(dirname -- "$install_dir_walk_new")"
+			[ "$install_dir_walk_parent" = "$install_dir_walk_new" ] && break
+			install_dir_walk_new="$install_dir_walk_parent"
+		done
 		if mkdir -p "$INSTALL_DIR" 2>/dev/null; then
 			install_dir_created_for_retry=1
 		fi
@@ -566,11 +585,17 @@ else
 	# tan-cli#490: if the only thing this noexec probe accomplished was to
 	# create an install dir that pre-fix would never have existed, do not
 	# leave it behind on a refused install -- `rm -rf "$stage"` first so a
-	# staged-but-failed retry_dir under it (if any) is gone before the rmdir,
-	# which only removes an EMPTY directory.
+	# staged-but-failed retry_dir under it (if any) is gone, then remove the
+	# FIRST new ancestor recorded above (round 9): that is a superset of the
+	# old `rmdir "$INSTALL_DIR"`, which only ever removed the (by-then-empty)
+	# leaf and left any intermediate parent `mkdir -p` also created behind.
 	if [ "$install_dir_created_for_retry" = "1" ]; then
 		rm -rf "$stage" 2>/dev/null || true
-		rmdir "$INSTALL_DIR" 2>/dev/null || true
+		if [ -n "$install_dir_first_new_ancestor" ]; then
+			rm -rf "$install_dir_first_new_ancestor" 2>/dev/null || true
+		else
+			rmdir "$INSTALL_DIR" 2>/dev/null || true
+		fi
 	fi
 	echo "install.sh: newly downloaded binary failed to run: ${verify_out}" >&2
 	if [ -e "$dest" ] || [ -e "$LIB_DIR" ]; then
@@ -754,7 +779,7 @@ case ":${PATH}:" in
 			path_line="set -gx PATH \"${INSTALL_DIR}\" \$PATH  # added by tan install.sh"
 			source_hint="source \"${rc}\""
 			;;
-		tcsh)
+		tcsh | csh)
 			# tcsh(1), "STARTUP AND SHUTDOWN": on login it reads FIRST
 			# ~/.tcshrc, "or, if ~/.tcshrc is not found, ~/.cshrc" -- never
 			# both. A user whose config lives entirely in ~/.cshrc would have
@@ -764,16 +789,23 @@ case ":${PATH}:" in
 			# ~/.tcshrc fresh when there is no ~/.cshrc to shadow, or when
 			# ~/.tcshrc already exists (nothing new to shadow either way);
 			# otherwise append to the ~/.cshrc that is actually being read.
+			#
+			# tan-cli#490 round 9: the `csh` name gets the EXACT same check, not a
+			# bare ~/.cshrc write -- on macOS, FreeBSD, and Debian/Ubuntu-via-
+			# alternatives, /bin/csh IS tcsh (a compat symlink/build, not a
+			# distinct binary), so SHELL=/bin/csh reaches this arm on a host that
+			# may ALSO have ~/.tcshrc. MEASURED against real tcsh 6.24.10 with
+			# both ~/.tcshrc and ~/.cshrc seeded and SHELL=/bin/csh: the old
+			# bare-cshrc arm reported "added .../binF to PATH in .../homeF/
+			# .cshrc", then `tcsh -c 'echo $PATH' | grep -c binF` -> 0 -- tcsh
+			# read ~/.tcshrc first and never saw the line. A real (non-tcsh) csh
+			# only ever reads ~/.cshrc, so writing there when ~/.tcshrc exists is
+			# a safe no-op for it too.
 			if [ ! -f "$HOME/.tcshrc" ] && [ -f "$HOME/.cshrc" ]; then
 				rc="$HOME/.cshrc"
 			else
 				rc="$HOME/.tcshrc"
 			fi
-			path_line="setenv PATH \"${INSTALL_DIR}:\${PATH}\"  # added by tan install.sh"
-			source_hint="source \"${rc}\""
-			;;
-		csh)
-			rc="$HOME/.cshrc"
 			path_line="setenv PATH \"${INSTALL_DIR}:\${PATH}\"  # added by tan install.sh"
 			source_hint="source \"${rc}\""
 			;;

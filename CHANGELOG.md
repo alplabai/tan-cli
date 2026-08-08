@@ -251,7 +251,11 @@ All notable changes to `tan` are documented here. Format follows
     and MS-ERREF, `openspecs/windows_protocols/ms-erref`, `0x00000312`).
   - The retry gate's speculative `mkdir -p "$INSTALL_DIR"` ran even when the
     install was then refused, leaving an empty directory where pre-fix
-    nothing existed; it is now removed on that path.
+    nothing existed; it is now removed on that path -- including any
+    intermediate PARENT directories that same `mkdir -p` also created (a
+    round-9 fix: the first version of this only `rmdir`'d the leaf, which
+    left a multi-level `--dir` like `<dir>/orph/deep/bin` orphaning
+    `<dir>/orph` and `<dir>/orph/deep` behind on refusal).
   - `restore_previous`'s `as_root rm -rf "$dest" "$LIB_DIR"` was unguarded,
     so under `set -eu` a failure there aborted the script mid-rollback,
     skipping both the backup restore and the warning that names it.
@@ -397,9 +401,62 @@ All notable changes to `tan` are documented here. Format follows
   health check -- so `--dir new/deep/bin` against a subsequently refused
   install (e.g. an unresolvable `--version`) still left `./new/deep` behind
   in the caller's CWD. Normalisation now walks up to the nearest EXISTING
-  ancestor to resolve the absolute path without creating anything; the real
-  `mkdir -p "$INSTALL_DIR"` still runs later, but only once an install is
-  actually going ahead.
+  ancestor to resolve the absolute path without creating anything. (The real
+  `mkdir -p "$INSTALL_DIR"` still runs later, during the noexec-retry health
+  check -- itself a path a refused install can still reach; see the
+  intermediate-parent fix for that gate above.)
+- **Four more defects found reviewing the (#490) fixes above, closing the
+  issue:**
+  - `install.sh`'s round-8 tcsh fix left the plain `csh)` arm unchanged,
+    still writing `~/.cshrc` unconditionally. On macOS, FreeBSD, and
+    Debian/Ubuntu-via-alternatives `/bin/csh` IS tcsh (a compat symlink/
+    build, not a distinct binary), so `SHELL=/bin/csh` on a host that also
+    has `~/.tcshrc` hit the exact tcsh(1) STARTUP-AND-SHUTDOWN shadowing bug
+    round 8 fixed for the `tcsh` name, just under a different `$SHELL`
+    value: `~/.tcshrc` is read first and `~/.cshrc` never is, so the PATH
+    line written there is inert. MEASURED against real tcsh 6.24.10 (both
+    `~/.tcshrc` and `~/.cshrc` seeded, `SHELL=/bin/csh`): the installer
+    reported `added .../binF to PATH in .../homeF/.cshrc`, then
+    `tcsh -c 'echo $PATH' | grep -c binF` -> `0`. `csh` now shares the exact
+    same shadowing-aware logic as `tcsh` (one case arm, `tcsh | csh)`),
+    covered in all four rc-file shapes: neither exists, `~/.cshrc` only,
+    `~/.tcshrc` only, and both.
+  - `install.sh`'s noexec-retry gate's speculative `mkdir -p "$INSTALL_DIR"`
+    creates every missing INTERMEDIATE parent too, and the round-8 fix for
+    this gate's orphan directory only `rmdir`'d the LEAF on refusal -- the
+    same class of orphan round 8 already fixed once in the relative-`--dir`
+    argument-parsing path, surviving here. MEASURED: `--dir <dir>/orph/deep/
+    bin` refused left `<dir>/orph` and `<dir>/orph/deep` on disk. The gate
+    now walks up from `$INSTALL_DIR` to the first ancestor that does not
+    exist yet and removes that one, recursively, on refusal -- the same
+    "first new ancestor" trick as the argument-parsing fix.
+  - `install.ps1` had the identical intermediate-parent orphan as the
+    `install.sh` finding above, one level higher: `New-Item -ItemType
+    Directory -Force -Path $Dir`, unconditional and run before the health
+    check even starts, is the `mkdir -p` equivalent and creates every
+    missing parent of `$Dir`, with nothing removing them on a subsequent
+    health-check refusal. `$Dir`'s first not-yet-existing ancestor is now
+    recorded before that `New-Item` call and removed, recursively, if the
+    health check then refuses. (Inspected, not executed against a real
+    `pwsh` -- none was available in this environment.)
+  - `install.ps1`'s round-8 `Add-Type` fix gated and try/catch-wrapped the
+    `SendMessageTimeout` P/Invoke *call*, but left the `Add-Type` statement
+    that COMPILES the helper class itself sitting at column 0: unconditional,
+    outside `if (-not $alreadyPresent)`, and outside any try/catch of its
+    own. `-ErrorAction SilentlyContinue` on `Add-Type` only suppresses a
+    NON-terminating error; a compile/assembly-load failure from `Add-Type`
+    itself is a TERMINATING one under this script's own
+    `$ErrorActionPreference = "Stop"` -- precisely what an AppLocker DLL rule
+    or a Software Restriction Policy over `%TEMP%` (the exact host class the
+    health-check retry earlier in this same script exists for) produces --
+    so it could abort the whole script even on a run that never touched the
+    Path at all (a fresh `-NoModifyPath` run, or one where `$Dir` was
+    already on the Path), turning an install that would otherwise have
+    succeeded into a reported failure. `Add-Type` now lives inside the same
+    write branch as the registry Path update and inside its own try/catch;
+    a new text-only test (no `pwsh` needed, so it runs on every OS this
+    suite runs on) asserts the shipped source keeps it there. (Inspected,
+    not executed against a real `pwsh`.) (#490)
 
 ## [0.5.1] — 2026-08-04
 
