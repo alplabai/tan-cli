@@ -46,7 +46,7 @@ from typing import Any
 import typer
 
 from tan.commands.inspect_cmd import resolve_debug_project_context
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -216,9 +216,29 @@ def trace(
             "decisions": [],
         }
 
+    def _resolution_issues() -> list[Issue]:
+        """tan-cli#478, computed once and prepended on BOTH exits. `trace`'s
+        output names the `alp_project.py` a build would run; when that path
+        came from another project's `~/.alp/sdk-default` the envelope said so
+        nowhere. A failure path needs it as much as the success one -- more,
+        even: "no SDK resolved" and "resolved SOMEONE ELSE'S" read identically
+        without it."""
+        return sdk_resolution_issues(
+            context.broken_project_pin, context.sdk_tier, context.foreign_global_default_for
+        )
+
     def fail(exit_code: ExitCode, code: str, message: str, data: dict, text_lines: list[str]) -> None:
-        issues = [Issue(f"trace.{code}", "error", message)]
+        resolution_issues = _resolution_issues()
+        issues = [*resolution_issues, Issue(f"trace.{code}", "error", message)]
         if not json_mode:
+            # tan-cli#478 review finding 6: `_resolution_issues()` fed only the
+            # JSON envelope below -- the DEFAULT text path printed `text_lines`
+            # and nothing else, so `tan trace` with no `--format` stayed silent
+            # about resolving another project's checkout, the literal repro
+            # #478 opened with ("prints the alp_project.py a build would run
+            # from the *other* project's checkout, no warning").
+            for issue in resolution_issues:
+                typer.echo(issue.message, err=True)
             for line in text_lines:
                 typer.echo(line, err=True)
         if json_mode:
@@ -293,13 +313,23 @@ def trace(
     }
 
     if not json_mode:
+        # tan-cli#478 review finding 6, success path: same silence as `fail()`
+        # above, unconditional (unlike the `--quiet`-suppressed decision
+        # lines) and printed first.
+        for issue in _resolution_issues():
+            typer.echo(issue.message, err=True)
         for line in _trace_text_lines(decisions, quiet):
             typer.echo(line, err=True)
 
     if json_mode:
         emit(
             Envelope(
-                "trace", context.project, data, [], ExitCode.SUCCESS, sdk=context.sdk
+                "trace",
+                context.project,
+                data,
+                _resolution_issues(),
+                ExitCode.SUCCESS,
+                sdk=context.sdk,
             )
         )
     raise typer.Exit(int(ExitCode.SUCCESS))

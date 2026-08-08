@@ -1042,7 +1042,7 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
         # place whose resolution IS "the active SDK". Recorded even for an
         # invalid `--sdk-root`, matching the `if let Some(root)` there -- and
         # absent entirely (never `null`) when nothing resolved.
-        sdk=SdkInfo(active.path, active.tier) if active.path is not None else None,
+        sdk=SdkInfo.from_resolution(active.path, active) if active.path is not None else None,
     )
 
 

@@ -607,7 +607,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # one new decoder test (`test_tee_decodes_a_multibyte_utf8_sequence_
     # split_across_a_read1_boundary`, MINOR 2) proving the incremental
     # decoder against a naive per-chunk one.
-    "tan/commands/flash_cmd.py": 2629,
+    # +2, tan-cli#478: `SdkInfo.from_resolution` -- the seam that lets
+    # `Envelope.__init__` disclose a foreign global default without this
+    # command knowing the issue exists -- does not fit on one line here
+    # (101 chars against the 100 `[tool.ruff] line-length`), so the ternary
+    # wraps. `doctor_cmd.py`/`clean_cmd.py`/`inspect_cmd.py` took the same
+    # conversion at 97/92/93 chars and kept their one-liners, which is why
+    # only this one moves a number.
+    "tan/commands/flash_cmd.py": 2631,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -869,14 +876,42 @@ _MODULE_BUDGET: dict[str, int] = {
     # width only when stderr IS a tty, and any pipe/grep that could read a
     # "record-shaped" line makes stderr not a tty, which already returns
     # `None` and skips wrapping wholesale.
+    # 800 -> 812, tan-cli#478 review finding 6: the JSON envelope discloses a
+    # foreign global default via the `Envelope` seam, but `diff`'s text mode
+    # never touches `Envelope` -- `_emit_failure`'s `else` branch and the
+    # success branch both write straight to stderr. `sdk_context_issues` is
+    # now computed for real (was a permanently-empty placeholder left by the
+    # #478 review round that deleted the hand-call, reasoning the JSON seam
+    # alone was enough) and printed in both text branches. A brand-new
+    # module in this ledger, not a raised number: this is the first time
+    # `diff_cmd.py` crossed the 800-line cap.
+    "tan/commands/diff_cmd.py": 812,
     "tan/commands/sdk_cmd.py": 1274,
-    # 1122, not 1093, as of tan-cli#488 defect 8: `validate()`'s whole body
-    # (from the SDK-root ladder through the final `_emit(...)`) moved inside a
-    # `try`/`except typer.Exit: raise`/`except Exception`, so the identical
-    # unguarded-prologue shape `build_cmd.build` already had (`os.path.abspath`
-    # calling `os.getcwd()` on a deleted cwd) now also produces a
-    # `validate.internal-failure` envelope instead of a raw traceback.
-    "tan/commands/validate_cmd.py": 1122,
+    # 1093 -> 1108: tan-cli#478 wired `sdk_resolution_issues` through the
+    # spawn path, so a `globalDefault` written for ANOTHER project stops
+    # being silent here. Raised rather than absorbed by cutting the
+    # comments that explain why: extracting from a 1100-line module is
+    # tan-cli#408's job, and holding a defect fix hostage to it would
+    # leave the silence in place for the sake of a number.
+    # 1108 -> 1127, tan-cli#478 review round: `_emit` now splits this
+    # command's own findings from the SDK-resolution advisories, so
+    # `data.issueCount`, `--format sarif`, `--format diagnostic-v1` and the
+    # tan-cli#350 text verdict stop treating a HOST fact as a board finding.
+    # 1127 -> 1157, dev-merge with tan-cli#488 defect 8: `validate()`'s whole
+    # body (from the SDK-root ladder through the final `_emit(...)`) moved
+    # inside a `try`/`except typer.Exit: raise`/`except Exception`, so the
+    # identical unguarded-prologue shape `build_cmd.build` already had
+    # (`os.path.abspath` calling `os.getcwd()` on a deleted cwd) now also
+    # produces a `validate.internal-failure` envelope instead of a raw
+    # traceback -- combined with the #478 seam above, which stays inside the
+    # new `try`.
+    # 1157 -> 1166, tan-cli#478 review finding 6: the "no board.yaml to
+    # validate" text branch printed `findings[0]` alone (deliberately, per
+    # tan-cli#350's narrow verdict wording) but dropped the `sdk.*`
+    # advisories `findings` filters OUT of `issueCount`/sarif/diagnostic-v1
+    # -- the other two text branches already show them because they loop
+    # over the unfiltered `issues`.
+    "tan/commands/validate_cmd.py": 1166,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
@@ -1026,7 +1061,33 @@ _MODULE_BUDGET: dict[str, int] = {
     # bench. Raised, not extracted -- same mirrored-generator reasoning as the
     # tan-cli#432 entry above.
     "tan/planner/zephyr_board.py": 1027,
-    "tan/commands/support_bundle_cmd.py": 834,
+    # 834 -> 842: tan-cli#478, same reason as `validate_cmd.py` above --
+    # the bundle is the one artefact that never carried the foreign-default
+    # warning, and its embedded doctor set could not have supplied it.
+    # 842 -> 859, tan-cli#478 review round: the `sdkResolution` block now
+    # goes into the bundle PAYLOAD, before `_write_bundle` -- the earlier
+    # revision computed it after the write, so the file a user attaches
+    # still answered False to the issue's own repro.
+    # 859 -> 876, tan-cli#478 review finding 6: the JSON envelope and the
+    # bundle file both carry the foreign-default pair, but `outcome.text`
+    # (the default, non-JSON path) never did. Filters `outcome.issues` for
+    # its `sdk.*` entries at the print site -- NOT recomputed from
+    # `outcome.sdk`, which is `resolve_debug_project_context`'s legacy bare
+    # `SdkInfo(sdk_root, sdk_tier)` and carries neither
+    # `foreign_global_default_for` nor `broken_project_pin` (measured: a
+    # first revision that read `outcome.sdk` printed nothing, the exact
+    # silent-drop shape this whole issue is about).
+    # 876 -> 935, PR #504 review MAJOR 1: the three early-return failure
+    # paths (`_internal_failure` x2, `_server_incompatible`) built their
+    # `_Outcome` from a bare `issues=[Issue(...)]` list, dropping the
+    # SDK-resolution pair on exactly the paths a customer hits when
+    # something has already gone wrong -- a parse refusal, an unsupported
+    # target/server pairing, or a bundle-write `OSError`. Both helpers now
+    # take the same three `broken_project_pin`/`sdk_tier`/
+    # `foreign_global_default_for` keyword-only fields `_run`'s success path
+    # already threads, defaulted so the outer exception guard (which never
+    # resolved a project context) keeps its prior empty-list behaviour.
+    "tan/commands/support_bundle_cmd.py": 932,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring
@@ -1323,7 +1384,31 @@ _MIRRORED = ("tan/planner/",)
 # `render_to_envelope`, `_emit_hw_info_h` -- was already over 50 before it.
 # `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
 # `bootstrap_cmd.py:_run` at 701, which this change does not go near.
-_FUNCTION_COUNT_BUDGET = 220
+#
+# 220, tan-cli#478 review finding 6 (default text disclosure): `diff_cmd.py`'s
+# `_emit_failure` crossed from 44 to 52 lines printing `sdk_context_issues`'
+# messages on the text path -- the one new crossing; `diff`/`inspect`/`trace`/
+# `support_bundle`/`_run_text` all grew too but were already over the cap.
+# Re-measured by the gate's own AST walk over all of `tan/`, not inferred.
+#
+# STILL 220 after the dev merge that brings tan-cli#507/#508 in -- re-walked on
+# the MERGED tree, not carried over: `debug_config_cmd.py`'s two new refusals
+# add no function over 50 lines, and this branch's own `west_forward_cmd.
+# _refuse_required` lands at exactly 50 (the cap is `> 50`), with the SDK-
+# resolution echo extracted into an 18-line `_echo_sdk_resolution` rather than
+# open-coded. Of the 220, `tan/planner/` contributes 48 -- it is NOT excluded
+# from the walk, which is the arithmetic mistake to avoid when two branches'
+# numbers are compared instead of the merged tree being measured.
+#
+# 221 ON THE MERGED TREE, and NEITHER side's 220 -- the two branches reached
+# the same number by disjoint routes (dev's `diff_cmd.py:_emit_failure`
+# crossing at 52, this branch's `tan/planner/partition.py:_reserved_spans`
+# crossing at 70), so the union is one higher than either. Re-walked with the
+# gate's own AST walk over all of `tan/` INCLUDING `tan/planner/` (49 of the
+# 221 crossings live there) after the merge, exactly as the paragraph above
+# says to: taking either side's figure by ownership is the arithmetic mistake,
+# and here it would have shipped a budget the tree already exceeds.
+_FUNCTION_COUNT_BUDGET = 221
 _FUNCTION_WORST_BUDGET = 707
 
 
