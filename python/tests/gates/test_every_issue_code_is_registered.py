@@ -783,15 +783,21 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `infer_target_kind`'s other two refusal shapes -- the SAME defect,
         # not a distinct one -- bringing this to 6. All four split-off codes
         # checked against the registry before each bump.
-        # 7 as of tan-cli#489 (5): `_explicit_core_unknown_failure` adds a
-        # SEVENTH call, reusing the ALREADY-registered `core-unknown` literal
-        # (not a new code) for the `--target-kind`-explicit path
-        # `infer_target_kind`'s own guard never reaches.
-        # 8 as of tan-cli#476: `_project_not_found_failure` refuses a `--project`
-        # that names a directory which does not exist, instead of creating it
-        # and writing a launch.json into it at exit 0. Code registered before
-        # this bump.
-        expected_calls=8,
+        # 9, not 7 or 8: THREE independent changes each added a `_failure(`
+        # call site to this module, and two separate two-way merges each
+        # wrote 8 on their own branch before the third landed.
+        #   tan-cli#489  `_explicit_core_unknown_failure` -- reuses the
+        #     already-registered `core-unknown` literal for the
+        #     `--target-kind`-explicit path `infer_target_kind`'s guard
+        #     never reaches.
+        #   tan-cli#477  `_invalid_argument_failure` -- splits every
+        #     bad-flag-VALUE refusal off `_internal_failure`'s blanket 5.
+        #   tan-cli#476  `_project_not_found_failure` refuses a `--project`
+        #     that names a directory which does not exist, instead of
+        #     creating it and writing a launch.json into it at exit 0.
+        # 6 on dev + 1 + 1 + 1. Resolved deliberately at the merge, not
+        # discovered from a red gate.
+        expected_calls=9,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(

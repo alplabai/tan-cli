@@ -500,22 +500,36 @@ def test_a_rewrite_preserves_the_existing_files_own_mode(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "argv",
+    "argv,want_target,want_server",
     [
-        ("--target-kind", "bogus-kind"),
-        ("--target-kind", ZEPHYR_MCU, "--server", "bogus-server"),
+        (("--target-kind", "bogus-kind"), ZEPHYR_MCU, "none"),
+        (("--target-kind", ZEPHYR_MCU, "--server", "bogus-server"), ZEPHYR_MCU, "none"),
         # A legal server for the wrong target class: gdbserver is yocto-only.
-        ("--target-kind", ZEPHYR_MCU, "--server", GDBSERVER),
+        # #508 review, Major 4 follow-up (tan-cli#477): both locals ARE bound
+        # by this point, so this reports the pairing it actually refused
+        # (zephyr-mcu/gdbserver), not the placeholder the first two rows
+        # still get -- neither of THOSE ever finished parsing.
+        (("--target-kind", ZEPHYR_MCU, "--server", GDBSERVER), ZEPHYR_MCU, GDBSERVER),
     ],
+    ids=["target-kind", "server", "pairing"],
 )
-def test_a_refused_selector_is_a_coded_envelope_at_exit_5(tmp_path, argv):
+def test_a_refused_selector_is_a_coded_envelope_at_exit_2(tmp_path, argv, want_target, want_server):
+    """tan-cli#477: exit 2, not 5. A flag VALUE outside the accepted set is
+    the caller's own input, and every one of these already answered with a
+    complete, actionable message -- only the verdict said "tan crashed".
+    tan-cli#462 made that argument for the four PRECONDITIONS; this is the
+    argument-validation half it left behind.
+
+    Everything else this case pinned is unchanged and still asserted: the
+    null configuration, the null project, and that no launch.json is
+    written. The reported `targetKind`/`server` are NOT unconditionally the
+    placeholder any more -- see `test_a_refusal_reports_the_target_and_
+    server_it_actually_knows` for the full split."""
     env = envelope(run_cli(tmp_path, *argv, "--format", "json"))
 
-    assert env["exitCode"] == 5 and env["ok"] is False
-    assert env["issues"][0]["code"] == "debug-config.internal-failure"
-    # The TS catch block never learned what was asked for, so the payload
-    # reports the zephyr-mcu/none placeholder and a NULL configuration.
-    assert env["data"]["targetKind"] == ZEPHYR_MCU and env["data"]["server"] == "none"
+    assert env["exitCode"] == 2 and env["ok"] is False
+    assert env["issues"][0]["code"] == "debug-config.invalid-argument"
+    assert env["data"]["targetKind"] == want_target and env["data"]["server"] == want_server
     assert env["data"]["configuration"] is None
     assert env["project"] == {"root": None, "boardYaml": None}
     assert not launch_json(tmp_path).exists()
@@ -524,13 +538,17 @@ def test_a_refused_selector_is_a_coded_envelope_at_exit_5(tmp_path, argv):
 def test_an_svd_path_that_cannot_be_read_fails_instead_of_writing(tmp_path):
     """Falling back to "no SVD" would make a typo indistinguishable from not
     passing the flag, and the failure would surface as an unexplained empty
-    peripheral view."""
+    peripheral view.
+
+    tan-cli#477 moves the VERDICT from 5 to 2 -- an unreadable `--svd` path
+    is the caller's own argument -- and leaves this test's actual point,
+    that it refuses rather than silently continues, exactly as it was."""
     env = envelope(
         run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
                 "--svd", str(tmp_path / "nope.svd"), "--format", "json")
     )
 
-    assert env["exitCode"] == 5
+    assert env["exitCode"] == 2
     assert "alp-sdk#948" in env["issues"][0]["message"]
     assert not launch_json(tmp_path).exists()
 
@@ -1677,7 +1695,7 @@ def test_an_empty_gdbserver_address_fails_instead_of_writing(tmp_path):
         run_cli(tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER,
                 "--gdbserver-address", "", "--preview", "--format", "json")
     )
-    assert env["exitCode"] == 5
+    assert env["exitCode"] == 2
     assert "empty value" in env["issues"][0]["message"]
     assert not launch_json(tmp_path).exists()
 
@@ -1872,6 +1890,190 @@ def test_a_project_arg_that_is_an_existing_file_is_refused_as_not_a_directory(tm
     message = env["issues"][0]["message"]
     assert "is not a directory" in message, message
     assert "does not exist" not in message, message
+
+
+@pytest.mark.parametrize(
+    "argv,what",
+    [
+        (("--target-kind", "bogus-kind"), "--target-kind"),
+        (("--target-kind", "zephyr-mcu", "--server", "bogus-srv"), "--server"),
+        # A legal server for the wrong target class.
+        (("--target-kind", "zephyr-mcu", "--server", GDBSERVER), "target+server pairing"),
+        (
+            ("--target-kind", "zephyr-mcu", "--server", JLINK, "--svd", "no/such/file.svd"),
+            "--svd",
+        ),
+        (
+            (
+                "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER,
+                "--gdbserver-address", "",
+            ),
+            "--gdbserver-address",
+        ),
+    ],
+    ids=["target-kind", "server", "pairing", "svd", "gdbserver-address"],
+)
+def test_a_bad_flag_value_is_the_callers_input_not_a_tan_crash(tmp_path, argv, what):
+    """tan-cli#477: exit 2, never 5.
+
+    Every one of these already produced a complete, actionable message --
+
+        Unsupported --target-kind 'bogus-kind'. Allowed values: zephyr-mcu,
+        baremetal-mcu, yocto-userspace, native-host.
+
+    -- and reported it as `debug-config.internal-failure` at exit 5, which
+    tells the user tan crashed and tells CI to treat a typo as a tool defect.
+    tan-cli#462 made that argument for the four PRECONDITIONS; this is the
+    argument-validation half it left behind.
+
+    EVERY CASE HERE MUST REACH ITS OWN REFUSAL, which is what an earlier
+    revision of this test got wrong (caught in review of #508). `--server`
+    defaults to `SERVER_NONE`, and `_SERVER_CHOICES[ZEPHYR_MCU]` does not
+    contain it, so `create_launch_draft` raises on the SERVER before a later
+    flag is consulted at all: a `--core`/`--svd`/`--gdbserver-address` case
+    that omits `--server` passes on the server refusal and would pass
+    identically with its own flag deleted. Each case below therefore supplies
+    a server its target accepts, except the two whose subject IS the server.
+
+    `--gdbserver-address` is deliberately the EMPTY string: that flag is not
+    shape-validated by design (`_resolve_gdbserver_address`'s own docstring --
+    "there is no single `host:port` shape narrow enough to validate without
+    rejecting a real one"), so `not-an-address` exits 0 and only `""` refuses.
+
+    `--core` is absent from this list on purpose: its refusal is
+    `debug-config.core-unknown`, not this code, and it needs a built manifest
+    to reach -- see `test_an_unknown_core_with_an_explicit_target_kind_refuses`.
+    """
+    env = envelope(run_cli(tmp_path, "--preview", "--format", "json", *argv))
+
+    assert env["exitCode"] == 2, f"{what}: {env}"
+    codes = [i["code"] for i in env["issues"]]
+    assert "debug-config.invalid-argument" in codes, f"{what}: {codes}"
+    assert "debug-config.internal-failure" not in codes, (
+        f"{what}: still reported as a tan crash"
+    )
+
+
+@pytest.mark.parametrize(
+    "argv,want_target,want_server",
+    [
+        (("--target-kind", "bogus-kind"), ZEPHYR_MCU, "none"),
+        (
+            ("--target-kind", NATIVE_HOST, "--server", JLINK),
+            NATIVE_HOST,
+            JLINK,
+        ),
+        (
+            ("--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER,
+             "--gdbserver-address", ""),
+            YOCTO_USERSPACE,
+            GDBSERVER,
+        ),
+    ],
+    ids=["unparsed", "pairing", "parsed"],
+)
+def test_a_refusal_reports_the_target_and_server_it_actually_knows(
+    tmp_path, argv, want_target, want_server
+):
+    """tan-cli#477 review: the placeholder is correct only where nothing has
+    been parsed yet.
+
+    A refusal raised while PARSING `--target-kind`/`--server` genuinely does
+    not know them, so `zephyr-mcu`/`none` is the honest answer -- that is the
+    `unparsed` case. A refusal raised AFTER -- an unsupported target+server
+    PAIRING (`create_launch_draft`, both values individually valid but not
+    together -- `native-host`/`jlink` here, matching the exact customer
+    report), `--svd`, or `--gdbserver-address` -- knows both, and reporting
+    the placeholder there misdescribes what the caller asked for. That excuse
+    held while this was a crash report; it does not hold for a validation
+    verdict the extension may render.
+    """
+    env = envelope(run_cli(tmp_path, "--preview", "--format", "json", *argv))
+
+    assert env["exitCode"] == 2, env
+    assert env["data"]["targetKind"] == want_target, env["data"]
+    assert env["data"]["server"] == want_server, env["data"]
+
+
+def test_an_unknown_core_with_an_explicit_target_kind_refuses(tmp_path):
+    """The `--core` half, which needs a built manifest to reach at all.
+
+    With `--target-kind` supplied, `infer_target_kind`'s own `core-unknown`
+    guard never runs -- that path is the OMITTED-`--target-kind` one. tan-cli
+    #489 added `_explicit_core_unknown_failure` for this one; pinned here
+    because #477's original report mis-attributed an exit 5 to `--core` (it
+    was the server refusal, with `--server` omitted), and the correction only
+    holds if something measures the real path.
+    """
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "system-manifest.yaml").write_text(
+        "schema_version: 1\n"
+        "hw_info: {sku: E1M-AEN801}\n"
+        "slices:\n"
+        "  - {core_id: m33_sm, os: zephyr, board: alp_e1m_aen801_m33, build_dir: build/app}\n",
+        encoding="utf-8",
+    )
+
+    bad = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                           "--core", "no_such_core", "--preview", "--format", "json"))
+    assert bad["exitCode"] == 2, bad
+    assert "debug-config.core-unknown" in [i["code"] for i in bad["issues"]]
+
+    good = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                            "--core", "m33_sm", "--preview", "--format", "json"))
+    assert good["exitCode"] == 0, good
+
+
+def test_an_unknown_core_with_no_manifest_at_all_is_a_known_open_gap(tmp_path):
+    """tan-cli#477 review, Major 2: pins a REMAINING, deliberately-open gap --
+    not a defect this branch claims to fix.
+
+    `test_an_unknown_core_with_an_explicit_target_kind_refuses` above only
+    measures the WITH-manifest half of this guard. With NO
+    `build/system-manifest.yaml` at all, on a real hardware project
+    (`som.sku` set), an unknown `--core` still sails through at exit 0 --
+    the omitted-`--target-kind` sibling of this precondition DOES refuse
+    that shape (`test_an_omitted_target_kind_refuses_rather_than_guess_
+    pre_build`), but this one cannot simply mirror it: `--core` pre-build
+    also has a second, legitimate job this call site cannot see -- selecting
+    which core's SDK-published debug-probe identity to resolve
+    (alp-sdk#1026) -- exercised by
+    `test_a_valid_core_with_no_published_jlink_device_map_keeps_the_key_
+    absent_code` and `test_write_discloses_when_sdk_identity_overwrites_a_
+    hand_filled_device`, both of which pass `--core m55_hp` with no build
+    manifest at all and expect it to resolve. A guard keyed only on
+    "does a manifest exist" cannot tell a typo apart from that legitimate
+    case without also consulting the SDK's own published core list, which
+    happens later in this command, not at this guard's call site. See
+    CHANGELOG for the `Refs #477` note this is pinned against."""
+    Path(tmp_path, "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\n", encoding="utf-8"
+    )
+
+    env = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                           "--core", "no_such_core", "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 0, env
+    assert env["issues"] == [], env["issues"]
+
+
+def test_a_malformed_existing_launch_json_stays_an_internal_failure(tmp_path):
+    """The other side of tan-cli#477's line, pinned so the reclassification
+    cannot creep. Exit 5 is still correct for state no flag value can produce
+    -- `_build_manifest_missing_failure`'s docstring reserves it for exactly
+    the `except Exception` backstop and an unreadable/malformed EXISTING
+    launch.json. This test covers only the LATTER (a malformed *existing*
+    launch.json); the `except Exception` backstop itself has no dedicated
+    case here."""
+    vscode = tmp_path / ".vscode"
+    vscode.mkdir()
+    (vscode / "launch.json").write_text("{ this is not json", encoding="utf-8")
+
+    env = envelope(run_cli(tmp_path, "--target-kind", "native-host", "--format", "json"))
+
+    assert env["exitCode"] == 5, env
+    assert "debug-config.internal-failure" in [i["code"] for i in env["issues"]]
 
 
 def test_an_omitted_target_kind_still_defaults_to_native_host_with_no_project_signal(tmp_path):
