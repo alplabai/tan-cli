@@ -160,7 +160,7 @@ xstep() {
   fi
 }
 
-# envelope <label> -- <tan args...>
+# envelope <label> [--timeout N] -- <tan args...>
 #
 # Runs the command with --format json and checks the contract alp-sdk-vscode
 # consumes. Two load-bearing assertions, not one:
@@ -169,10 +169,18 @@ xstep() {
 #     that has actually broken here (#327): the envelope is a self-consistent
 #     LIE if the JSON claims one exit code while the process left a different
 #     one for the shell. `_invoke` already has the real one in `$RC`.
+#
+# `--timeout` defaults to $STEP_TIMEOUT like every other primitive here, but
+# is settable per call site for the same reason `step` needs it: "build
+# envelope" drives a real `build --format json`, and without an override it
+# used to get 900s where the plain `step "build"` right above it (same
+# command, no --format) was given 1800 -- the SAME build re-run under a
+# SHORTER cap than the one already proven to need more.
 envelope() {
-  local label=$1; shift
+  local label=$1 t=$STEP_TIMEOUT; shift
+  [ "${1:-}" = "--timeout" ] && { t=$2; shift 2; }
   [ "${1:-}" = "--" ] && shift
-  _invoke "$STEP_TIMEOUT" "$@" --format json
+  _invoke "$t" "$@" --format json
   local verdict
   verdict=$(tail -1 "$OUT" | RC="$RC" python3 -c '
 import json, os, sys

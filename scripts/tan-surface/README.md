@@ -6,6 +6,12 @@ does not require anyone to reconstruct the command list from memory.
 
 `tan flash` is never run and there is no flag to enable it.
 
+**Requires:** bash + coreutils (`mktemp`, `grep -E`, `comm`, `awk`) and
+`python3` on `PATH`. Developed and run on Linux and macOS. On Windows there is
+no native cmd/PowerShell path — run it from WSL or Git Bash, and read the
+`bash.exe`-stub caution below first; a `tan.exe` release asset is still a
+valid `--tan` target from either.
+
 ## Run it
 
 ```sh
@@ -33,6 +39,13 @@ scripts/tan-surface/run.sh --sdk-root ~/src/alp-sdk --allow-bootstrap --strict
 Exit status: **0** everything met expectation · **1** something failed *or* a
 known-broken step started passing (or, under `--strict`, something was
 skipped) · **2** the harness could not start.
+
+**Runtime.** Without `--allow-bootstrap` (or an already-bootstrapped
+workspace beside `--sdk-root`), the workspace/build phases `SKIP` and the
+whole walk finishes in under a minute — comparable to the `~20s` discovery
+phase alone. With a bootstrapped workspace, budget several minutes more for
+the real `build`/`run`/`renode` steps on top of whatever bootstrapping itself
+costs (10+ minutes and several GB of disk the first time — see below).
 
 **"Read-only" is a real, enforced promise.** Every step that WRITES into
 `--project` — `build --materialise`, a real `build`, `run`, `lock`, and
@@ -103,8 +116,11 @@ xstep_out <issue> "<label>" '<regex-while-broken>' -- <args...>
 skip   "<label>" "<reason>"
 ```
 
-`step`, `xstep`, `step_out`, `step_out_rc`, and `xstep_out` all take an
-optional `--timeout N` before the `--`.
+`step`, `xstep`, `step_out`, `step_out_rc`, `envelope`, and `xstep_out` all
+take an optional `--timeout N` before the `--`. Give `envelope` one whenever
+the SAME command gets a longer one from a plain `step` elsewhere (`"build
+envelope"` needs `--timeout 1800` to match `step "build"` — without it,
+`envelope` silently re-runs the build under its own 900s default).
 
 Prefer `step_out_rc` over a separate `step` + `step_out` pair on the SAME
 command: `step_out` alone never checks the exit code, so a command that

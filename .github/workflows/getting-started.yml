@@ -96,6 +96,15 @@ jobs:
       - name: shellcheck install.sh
         run: shellcheck --shell=sh install.sh
 
+      # scripts/tan-surface/*.sh (tan-cli#475) is bash, not the installer's
+      # POSIX sh -- same "nothing lints this" gap install.sh had before the
+      # step above, closed the same way. Not driven end-to-end here (it needs
+      # a real alp-sdk checkout, an optionally-bootstrapped west workspace,
+      # and a real build, well beyond what this job's own steps already set
+      # up); this only proves the shell itself stays clean.
+      - name: shellcheck scripts/tan-surface
+        run: shellcheck -S warning scripts/tan-surface/*.sh
+
       # ---- 2. host prerequisites ------------------------------------------
 
       # `tan bootstrap` NAMES missing prerequisites and refuses; it never

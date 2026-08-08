@@ -175,11 +175,33 @@ fi
 #
 # The signature is west's own: bootstrap puts the checkout INSIDE the workspace
 # and writes <ws>/.west/config with `[manifest] path = <checkout basename>`,
-# alongside the <ws>/.venv it created.
+# alongside the <ws>/.venv it created. Checking only that the two files/dirs
+# EXIST beside $SDK is not enough -- an unrelated west workspace (a Zephyr
+# checkout, a different SDK) sitting next to this one would match on presence
+# alone and turn every workspace/build step into a confusing FAIL against a
+# workspace that was never built for this checkout. Read the `path` value back
+# and require it to actually name this checkout's own directory.
+_west_manifest_path() {  # _west_manifest_path <west/config path>
+  awk '
+    /^\[/  { insection = ($0 == "[manifest]"); next }
+    insection && match($0, /^[ \t]*path[ \t]*=/) {
+      v = substr($0, RSTART + RLENGTH)
+      gsub(/^[ \t]+|[ \t]+$/, "", v)
+      print v
+      exit
+    }
+  ' "$1" 2>/dev/null
+}
+
 SDK_PARENT=$(dirname "$SDK")
-if [ -f "$SDK_PARENT/.west/config" ] && [ -d "$SDK_PARENT/.venv" ]; then
+MANIFEST_PATH=""
+[ -f "$SDK_PARENT/.west/config" ] && MANIFEST_PATH=$(_west_manifest_path "$SDK_PARENT/.west/config")
+if [ -n "$MANIFEST_PATH" ] && [ -d "$SDK_PARENT/.venv" ] && [ "$MANIFEST_PATH" = "$(basename "$SDK")" ]; then
   BOOTSTRAPPED=1
   printf '  workspace %s (already bootstrapped)\n' "$SDK_PARENT"
+elif [ -f "$SDK_PARENT/.west/config" ] || [ -d "$SDK_PARENT/.venv" ]; then
+  printf '  workspace none detected at %s (found .west/config or .venv there, but manifest path=%s does not name this checkout -- treating as unbootstrapped)\n' \
+      "$SDK_PARENT" "${MANIFEST_PATH:-<unset>}"
 else
   printf '  workspace none detected at %s\n' "$SDK_PARENT"
 fi
