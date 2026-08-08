@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -158,6 +159,87 @@ def test_a_present_port_spawns_miniterm_and_reports_success(monkeypatch):
     # The interpreter this test runs under is not frozen, so the spawn must
     # use `sys.executable` -- never a bare re-derivation, and never empty.
     assert captured["argv"][0] == sys.executable
+
+
+def test_stdout_sink_inherits_in_text_mode_and_never_targets_the_real_stdout_in_json_mode(
+    monkeypatch,
+):
+    """tan-cli#491, the unit-level pin: `_stdout_sink` is the one seam that
+    decides where the spawned miniterm's stdout goes. `None` in text mode
+    means "inherit tan's own stdout" (`subprocess.Popen`'s own default) --
+    the live console `tan monitor`'s whole point is. Under `--format json`
+    the return value must NEVER be `None` (which would again let the child
+    inherit stdout, the exact defect this function exists to close) -- it is
+    either the real stderr stream (delegated, when it has a real OS handle)
+    or `subprocess.DEVNULL` (when it does not), both of which leave tan's own
+    stdout to the one envelope `emit()` writes."""
+    assert monitor_cmd._stdout_sink(False) is None
+
+    class _RealStream:
+        def fileno(self):
+            return 2
+
+    real_stderr = _RealStream()
+    monkeypatch.setattr(monitor_cmd.sys, "stderr", real_stderr)
+    assert monitor_cmd._stdout_sink(True) is real_stderr
+
+    class _NoFileno:
+        def fileno(self):
+            raise OSError("no OS handle")
+
+    # A wrapped/frozen capture object with no real OS handle: must fall back
+    # to DEVNULL, never None, never raise.
+    monkeypatch.setattr(monitor_cmd.sys, "stderr", _NoFileno())
+    assert monitor_cmd._stdout_sink(True) is subprocess.DEVNULL
+
+
+def test_json_mode_never_lets_the_spawn_inherit_the_real_stdout(monkeypatch):
+    """tan-cli#491, the integration-level pin: under `--format json`, the
+    `stdout=` kwarg `subprocess.run` actually receives for the miniterm spawn
+    must never be `None` -- `None` means "inherit the parent's stdout", which
+    is the envelope channel, and is exactly what let a successful session's
+    board bytes precede the JSON document and break a whole-stdout
+    `JSON.parse` on an `ok:true` run."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+
+    captured = {}
+
+    class _Completed:
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        captured["kwargs"] = kwargs
+        return _Completed()
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["--port", "COM7", "--format", "json"])
+    assert result.exit_code == 0
+    assert captured["kwargs"]["stdout"] is not None
+
+
+def test_text_mode_still_lets_the_spawn_inherit_the_real_stdout(monkeypatch):
+    """Preserved behaviour: in TEXT mode the child must keep inheriting
+    tan's stdout (`stdout=None`) -- that IS the live console session, and
+    this fix must not silence it."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+
+    captured = {}
+
+    class _Completed:
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        captured["kwargs"] = kwargs
+        return _Completed()
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["--port", "COM7"])
+    assert result.exit_code == 0
+    assert captured["kwargs"]["stdout"] is None
 
 
 def test_frozen_interpreter_spawns_a_path_python_not_sys_executable(monkeypatch):

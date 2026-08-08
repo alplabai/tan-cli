@@ -2515,6 +2515,15 @@
       "consumerEffect": "Distinguishes 'nothing to analyse' from a tan crash on the one refusal `faultdecode` has. Reachable only under `--format json`: the command's own `--json` is the unwrapped SDK report surface (see faultdecode_cmd.py's module docstring) and keeps writing the human error line to stderr, envelope-free, exactly as the forwarded child did.",
       "emittedBy": "python/tan/commands/faultdecode_cmd.py",
       "note": "Exit 2 (ValidationFailure), matching the `click.UsageError` the alp_cli original raised for the same input. Added by tan-cli#399, which made `--format json` emit tan's envelope with the decode report as `data`; without this the refusal path went out as `command: \"cli\"` / `cli.parse-error` while the success path emitted `command: \"faultdecode\"`. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "cli.interrupted",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code with `===` yet; registered so an interrupted run has a stable, honest spelling to bind to instead of the pre-fix `cli.parse-error`",
+      "consumerEffect": "Distinguishes 'the run was cut short by Ctrl-C' from 'the command line was invalid': a caller branching on `issues[].code` (or on `command`) could not previously tell the two apart, since both used to report `command: \"cli\"` / `cli.parse-error` at exit 130.",
+      "emittedBy": "python/tan/cli.py",
+      "note": "tan-cli#491: SIGINT (Ctrl-C) is a `BaseException` sibling of `Exception`, so no command's own `except Exception` catch-all can see it, and Typer's own command wrapper (`typer/core.py`) converts it to `click.exceptions.Exit(130)` wherever in the command's call stack it was raised -- which Click's `Command.main()` turns into a plain `sys.exit(130)` before `main()`'s own `except SystemExit` handler ever runs. Pre-fix, that handler had no way to tell a real interrupt apart from a genuine Click usage error, so BOTH fell into `_usage_error_envelope`: an interrupted `tan flash --format json` reported `command: \"cli\"` / `cli.parse-error` / \"invalid command line invocation\" at exit 130 -- a false claim about the command line, at an exit code outside the envelope contract's fixed 0-5 set (`tan.exit_codes.ExitCode`). `main()` now matches `SystemExit(130)` before the generic fallback and reports this code instead, remapped to exit 1 (RuntimeFailure) -- the run did not succeed, and nothing about it is an internal tan bug or a usage mistake. Registered by tan-cli#224's Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
     }
   ]
 }

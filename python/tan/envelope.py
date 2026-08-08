@@ -239,11 +239,43 @@ class Envelope:
             # `json_safe_floats`: `Infinity`/`-Infinity`/`NaN` are Python's
             # non-standard extension literals, not JSON (tan-cli#387). See that
             # function for why this is a projection and not `allow_nan=False`.
+            payload = json_safe_floats(self._as_dict())
+            text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+            # tan-cli#491: `ensure_ascii=False` happily writes a LONE
+            # surrogate (any path/argv token `os.fsdecode`'s `surrogateescape`
+            # produced from un-decodable filesystem bytes, carried verbatim
+            # into `project`/`data`) into `text` -- `json.dumps` does not
+            # reject it, because a lone surrogate is a perfectly ordinary
+            # Python `str` character. It is NOT valid UTF-8, though, so the
+            # failure used to surface one call later, at `emit()`'s bare
+            # `print(text)`, as an uncaught `UnicodeEncodeError` -- AFTER this
+            # function had already reported success, so `emit()` had nothing
+            # left to fall back on and the process died with zero bytes on
+            # stdout. Probing the encode HERE, inside the same try/except that
+            # already exists for a genuine serialise failure, means a
+            # surrogate is caught before this function ever claims success.
+            text.encode("utf-8")
+            return (text, self.exit_code)
+        except UnicodeEncodeError:
+            # Re-serialise with `ensure_ascii=True`: every non-ASCII
+            # codepoint, surrogates included, becomes a `\uXXXX` escape --
+            # exactly what `json.dumps`'s pre-tan-cli default already did,
+            # before this module switched to `ensure_ascii=False` for the
+            # byte-for-byte oracle match documented above -- and exactly
+            # ASCII, so the `print` below can never fail to encode it. A
+            # `\udcff` escape is ordinary, parseable JSON text -- `JSON.parse`
+            # in a browser/Node consumer accepts a lone-surrogate escape and
+            # yields a JS string holding that same unpaired code unit, so the
+            # extension still gets a string back, just not the raw byte. This
+            # trades the ONE payload that provoked the fallback for a working
+            # envelope over crashing outright; every other command's `data`
+            # is unaffected, since this only runs when the primary encode
+            # above raised.
             return (
                 json.dumps(
                     json_safe_floats(self._as_dict()),
                     separators=(",", ":"),
-                    ensure_ascii=False,
+                    ensure_ascii=True,
                 ),
                 self.exit_code,
             )

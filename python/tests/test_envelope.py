@@ -147,6 +147,54 @@ def test_a_non_finite_float_does_not_become_a_serialize_failure():
     assert parsed["issues"] == []
 
 
+def test_emit_writes_a_lone_surrogate_payload_instead_of_crashing(capsys):
+    """tan-cli#491: a lone surrogate (`os.fsdecode`'s `surrogateescape` on a
+    real Linux filename that is not valid UTF-8) reaching `project`/`data`
+    used to serialise CLEAN under `ensure_ascii=False` -- `json.dumps` has no
+    objection to a lone surrogate character -- and then crash the bare
+    `print(text)` in `emit()` with `UnicodeEncodeError`, AFTER `_serialise()`
+    had already reported success: zero bytes on stdout for a run that had
+    already finished its real work. `emit()` must still write exactly one
+    parseable envelope, with the field intact as a lone-surrogate escape
+    (`\\udcff`), not lose the payload.
+    """
+    from tan.envelope import emit
+
+    lone_surrogate = "proj\udcffx"
+    env = Envelope(
+        "test",
+        Project(root=lone_surrogate, board_yaml=None),
+        {"path": lone_surrogate},
+        [],
+        ExitCode.SUCCESS,
+    )
+    code = emit(env)
+    assert code == 0
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["project"]["root"] == lone_surrogate
+    assert parsed["data"]["path"] == lone_surrogate
+
+
+def test_to_json_escapes_a_lone_surrogate_instead_of_raising():
+    """The `to_json()`/`_serialise()` half of the same defect, isolated from
+    `emit()`'s stdout write: the text `to_json()` returns must itself be
+    encodable as UTF-8 (what `print()` requires under the process's
+    `_reconfigure_stdio()`-forced strict encoding) even when the payload
+    carries a lone surrogate. Before the fix, `to_json()` returned text that
+    LOOKED like success (no exception here) but could not actually be
+    written to stdout -- the crash was one call later, at `emit()`'s
+    `print`."""
+    lone_surrogate = "bad\udcffname"
+    env = Envelope("test", Project(None, None), {"name": lone_surrogate}, [], ExitCode.SUCCESS)
+    text = env.to_json()
+    # Must not raise -- this is the assertion that fails pre-fix.
+    text.encode("utf-8")
+    parsed = json.loads(text)
+    assert parsed["data"]["name"] == lone_surrogate
+    assert parsed["ok"] is True
+
+
 def test_sdk_root_is_always_posix_separated():
     """`sdk.root` must never diverge by separator style.
 

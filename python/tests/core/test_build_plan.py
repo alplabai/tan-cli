@@ -294,3 +294,216 @@ def test_valid_command_and_env_still_parse():
     assert cmd.tool == "west"
     assert cmd.args == ["build", "-b", "e1m_aen801"]
     assert cmd.cwd == "build/c1"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#491: an embedded NUL byte, five vectors -- caught at PARSE time
+# (build.plan-invalid) instead of at SPAWN time inside execute.py, where an
+# uncaught `ValueError: embedded null byte` used to be misreported as
+# `build.internal-failure` (exit 5, "a tan bug") for what is really a
+# malformed plan.
+# ---------------------------------------------------------------------------
+
+
+#: A JSON-syntax NUL escape (the six characters backslash-u-0-0-0-0), not a
+#: raw NUL byte -- a literal, unescaped control character in the JSON TEXT is
+#: invalid JSON syntax (`json.loads` refuses it: "Invalid control
+#: character"), which would exercise the wrong branch of `parse_build_plan`
+#: (the top-level `json.loads` failure) rather than the field-level `_no_nul`
+#: check this section is about. The DECODED Python value still carries a
+#: real NUL character either way -- JSON's own escape mechanism is what
+#: standardises getting one there.
+NUL = "\\u0000"
+
+
+def test_rejects_a_nul_byte_in_an_env_value():
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(_plan_with_env('{"AB": "a' + NUL + 'b"}'))
+    assert e.value.code == "build.plan-invalid"
+    assert "slices[0].env" in e.value.message
+
+
+def test_rejects_a_nul_byte_in_an_env_name():
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(_plan_with_env('{"A' + NUL + 'B": "x"}'))
+    assert e.value.code == "build.plan-invalid"
+    assert "slices[0].env" in e.value.message
+
+
+def test_rejects_a_nul_byte_in_an_env_append_path_entry():
+    plan_json = ("""{
+      "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml",
+      "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
+      "slices": [{
+        "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1", "appDir": "app",
+        "configArtefacts": [], "toolchain": null, "artifacts": {}, "debug": {},
+        "command": null, "env": {}, "envAppendPath": {"PYTHONPATH": ["a""" + NUL + """b"]}
+      }]
+    }""")
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(plan_json)
+    assert e.value.code == "build.plan-invalid"
+    assert "slices[0].envAppendPath" in e.value.message
+
+
+def test_rejects_a_nul_byte_in_a_command_arg():
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(
+            _plan_with_command('{"tool": "west", "args": ["a' + NUL + 'b"], "cwd": null}')
+        )
+    assert e.value.code == "build.plan-invalid"
+    assert "command.args" in e.value.message
+
+
+def test_rejects_a_nul_byte_in_a_command_cwd():
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(
+            _plan_with_command('{"tool": "west", "args": [], "cwd": "build/c' + NUL + '1"}')
+        )
+    assert e.value.code == "build.plan-invalid"
+    assert "command.cwd" in e.value.message
+
+
+def test_a_nul_byte_in_command_tool_still_degrades_gracefully_not_a_parse_error():
+    """`command.tool` is deliberately NOT NUL-checked at parse time
+    (`_no_nul`'s own docstring): `_tool_is_available`'s `shutil.which`
+    already turns a NUL-carrying tool name into a `skipped` slice rather
+    than raising, so this is a control -- proving the OTHER four vectors
+    needed a new guard, not that every field did."""
+    plan = parse_build_plan(_plan_with_command('{"tool": "a' + NUL + 'b", "args": [], "cwd": null}'))
+    assert plan.slices[0].command.tool == "a\x00b"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#491: `warnings[]` entries are validated per-entry, matching the
+# real oracle (`target/debug/tan`, measured) rather than the published JSON
+# schema, which over-declares `coreId` as required and `additionalProperties:
+# false` -- neither of which the shipped Rust struct actually enforces.
+# ---------------------------------------------------------------------------
+
+
+def _plan_with_warnings(warnings_json: str) -> str:
+    return f"""{{
+      "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml",
+      "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "slices": [],
+      "warnings": {warnings_json}
+    }}"""
+
+
+def test_rejects_a_bare_string_warning_entry():
+    """The exact repro from the issue: a bare string where the real oracle
+    (measured) refuses with `build.plan-invalid`, "invalid type: string
+    \\"oops\\", expected struct PlanWarning" -- this port used to accept it
+    and copy it verbatim into `data.warnings`."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(_plan_with_warnings('["oops"]'))
+    assert e.value.code == "build.plan-invalid"
+    assert "PlanWarning" in e.value.message
+
+
+def test_rejects_a_null_warning_entry():
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(_plan_with_warnings("[null]"))
+    assert e.value.code == "build.plan-invalid"
+
+
+def test_rejects_a_warning_entry_missing_code():
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(_plan_with_warnings('[{"coreId": "m55_hp", "message": "m"}]'))
+    assert e.value.code == "build.plan-invalid"
+    assert "code" in e.value.message
+
+
+def test_rejects_a_warning_entry_missing_message():
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(_plan_with_warnings('[{"code": "x.y", "coreId": "m55_hp"}]'))
+    assert e.value.code == "build.plan-invalid"
+    assert "message" in e.value.message
+
+
+def test_warning_entry_core_id_is_optional_matching_the_real_oracle():
+    """Measured against `target/debug/tan`: `coreId` absent, and `coreId:
+    null`, both parse `ok:true` on the real binary -- despite the published
+    schema marking it `required`. This port must match the ORACLE."""
+    plan = parse_build_plan(_plan_with_warnings('[{"code": "x.y", "message": "m"}]'))
+    assert plan.warnings == [{"code": "x.y", "message": "m"}]
+
+    plan = parse_build_plan(_plan_with_warnings('[{"code": "x.y", "coreId": null, "message": "m"}]'))
+    assert plan.warnings == [{"code": "x.y", "coreId": None, "message": "m"}]
+
+
+def test_warning_entry_extra_key_is_not_rejected_matching_the_real_oracle():
+    """Measured against `target/debug/tan`: an entry with an unrecognised
+    extra key parses `ok:true` and echoes the extra key verbatim -- despite
+    the published schema's `additionalProperties:false`. `PlanWarning` is
+    not `#[serde(deny_unknown_fields)]` in the shipped struct."""
+    plan = parse_build_plan(
+        _plan_with_warnings('[{"code": "x.y", "coreId": "m55_hp", "message": "m", "extra": true}]')
+    )
+    assert plan.warnings == [
+        {"code": "x.y", "coreId": "m55_hp", "message": "m", "extra": True}
+    ]
+
+
+def test_rejects_a_non_string_warning_code():
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(_plan_with_warnings('[{"code": 5, "coreId": "m55_hp", "message": "m"}]'))
+    assert e.value.code == "build.plan-invalid"
+
+
+def test_a_well_formed_warning_list_still_parses():
+    plan = parse_build_plan(
+        _plan_with_warnings('[{"code": "x.y", "coreId": "m55_hp", "message": "m"}]')
+    )
+    assert plan.warnings == [{"code": "x.y", "coreId": "m55_hp", "message": "m"}]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#491: `schemaVersion` type check -- `True == 1` and `1.0 == 1` in
+# Python let a boolean/float schemaVersion silently pass the old `!= 1`
+# comparison; a string/null/list schemaVersion was refused, but under the
+# WRONG code+message. Every shape below is measured against the real oracle.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("version_json", ["true", "false", "1.0"])
+def test_rejects_a_bool_or_float_schema_version_as_plan_invalid(version_json):
+    """`True == 1` and `1.0 == 1` in Python -- both used to slip past a bare
+    `!= SUPPORTED_SCHEMA_VERSION` check and get DISPATCHED as a real v1 plan,
+    where the real oracle refuses both outright (measured: `build.plan-
+    invalid`, "invalid type: boolean `true`/`false`" / "invalid type:
+    floating point `1.0`", ", expected u32")."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(MINIMAL.replace('"schemaVersion": 1', f'"schemaVersion": {version_json}'))
+    assert e.value.code == "build.plan-invalid"
+    assert "expected u32" in e.value.message
+
+
+@pytest.mark.parametrize(
+    "version_json,type_name",
+    [('"1"', 'string "1"'), ("null", "null"), ("[1]", "sequence")],
+)
+def test_rejects_a_wrongly_typed_schema_version_as_plan_invalid_not_unsupported_schema(
+    version_json, type_name
+):
+    """These were ALREADY refused pre-fix, but under `build.plan-unsupported-
+    schema` with a self-contradictory message ("unsupported ... (this tan
+    supports 1)" for a plan whose version WAS spelled `1`, just wrongly
+    typed). The real oracle's code AND message are `build.plan-invalid` /
+    "invalid type: <type>, expected u32" (measured) -- a type error, not a
+    version-skew refusal, and the two need different remediation."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(MINIMAL.replace('"schemaVersion": 1', f'"schemaVersion": {version_json}'))
+    assert e.value.code == "build.plan-invalid"
+    assert type_name in e.value.message
+    assert "expected u32" in e.value.message
+
+
+def test_schema_version_2_is_still_unsupported_schema_not_plan_invalid():
+    """Regression guard: a well-typed but out-of-range version (already
+    covered by `test_rejects_an_unsupported_schema_version` above) must stay
+    on the `build.plan-unsupported-schema` code -- the new type check must
+    not swallow this different, legitimate refusal."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(MINIMAL.replace('"schemaVersion": 1', '"schemaVersion": 2'))
+    assert e.value.code == "build.plan-unsupported-schema"

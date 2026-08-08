@@ -36,6 +36,38 @@ _REQUIRED_STR_SLICE = ("coreId", "backend", "buildDir")
 _OPTIONAL_STR_SLICE = ("appDir",)
 
 
+def _json_type_name(value: Any) -> str:
+    """serde_json's own spelling of an unexpected value's type, for the
+    `invalid type: <this>, expected u32` message a malformed `schemaVersion`
+    needs to match (tan-cli#491) -- measured against the real v0.4.1 oracle
+    (`target/debug/tan build --plan-from <plan> --format json`) for every
+    branch below: `true`/`false` -> "boolean `true`"/"boolean `false`", `1.0`
+    -> "floating point `1.0`", `"1"` -> 'string "1"', `null` -> "null", `[1]`
+    -> "sequence".
+
+    Deliberately NOT shared with `system_manifest._serde_type_name`: that one
+    serialises the same Python shapes for a DIFFERENT serde backend
+    (`serde_yaml`, for `system-manifest.yaml`), which spells a JSON-null
+    shape differently -- `system_manifest`'s own helper answers "unit value"
+    there, where THIS format's real oracle answers plain "null" for the
+    equivalent JSON input (measured, not assumed: the two backends are
+    different Rust `Deserialize` implementations of the same abstract
+    concept, not guaranteed to agree on wording)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return f"boolean `{str(value).lower()}`"
+    if isinstance(value, str):
+        return f'string "{value}"'
+    if isinstance(value, int):
+        return f"integer `{value}`"
+    if isinstance(value, float):
+        return f"floating point `{value}`"
+    if isinstance(value, (list, tuple)):
+        return "sequence"
+    return "map"
+
+
 class PlanParseError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -153,6 +185,56 @@ def _artefacts(raw: Any, context: str) -> list[dict[str, Any]]:
     return raw
 
 
+def _warning(raw: Any) -> dict[str, Any]:
+    """Validate one `warnings[]` entry at parse time (tan-cli#491): the whole
+    list used to pass through UNVALIDATED past a bare `isinstance(list)`
+    check on the list itself, so a non-object entry (a bare string, `null`)
+    parsed clean and reached the envelope's `data.warnings` verbatim --
+    where the real oracle refuses the identical plan outright
+    (`build.plan-invalid`, "invalid type: string \\"oops\\", expected struct
+    PlanWarning"). `data.warnings` is copied straight from this list into
+    every `tan build --plan-from ... --format json` envelope (`build_cmd.
+    py`), so an unvalidated entry reached a consumer's `.map(w =>
+    w.code/.coreId/.message)` as `undefined` (a bare string) or a throw.
+
+    Every shape below is MEASURED against the real v0.4.1 oracle, not read
+    off the published JSON schema, which over-declares: it marks `coreId`
+    `required` alongside `code`/`message`, but the shipped Rust struct
+    accepts it ABSENT or explicitly `null` -- both parse `ok:true` on the
+    real binary -- so `coreId` is `Option<String>` there, and this validator
+    matches the ORACLE. An extra key is likewise NOT rejected (measured:
+    an entry with `code`/`coreId`/`message` plus an unrecognised `extra`
+    parses clean and echoes `extra` verbatim) despite the schema's
+    `additionalProperties:false` -- `PlanWarning` is not `#[serde(deny_
+    unknown_fields)]`. Checked here: `code`/`message` present and
+    string-typed, `coreId` string-or-absent-or-null, nothing more."""
+    if not isinstance(raw, dict):
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"plan is not valid JSON: invalid type: {_json_type_name(raw)}, "
+            f"expected struct PlanWarning",
+        )
+    for key in ("code", "message"):
+        if key not in raw:
+            raise PlanParseError(
+                "build.plan-invalid", f"plan is not valid JSON: missing field `{key}`"
+            )
+        if not isinstance(raw[key], str):
+            raise PlanParseError(
+                "build.plan-invalid",
+                f"plan is not valid JSON: invalid type: {_json_type_name(raw[key])}, "
+                f"expected a string",
+            )
+    core_id = raw.get("coreId")
+    if core_id is not None and not isinstance(core_id, str):
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"plan is not valid JSON: invalid type: {_json_type_name(core_id)}, "
+            f"expected a string",
+        )
+    return raw
+
+
 def _foreign_os_absolute(tool: str) -> str | None:
     """Return a short name for the OTHER OS's path convention if `tool`
     looks absolute under it, else `None`.
@@ -177,8 +259,36 @@ def _foreign_os_absolute(tool: str) -> str | None:
 def _is_legal_env_name(name: str) -> bool:
     """`os.environ`/`subprocess` reject an empty name or one containing `=`
     with `ValueError: illegal environment variable name` -- catch that shape
-    here, at parse time, instead of at spawn time deep inside `execute.py`."""
-    return name != "" and "=" not in name
+    here, at parse time, instead of at spawn time deep inside `execute.py`.
+
+    Also refuses an embedded NUL byte (tan-cli#491): `subprocess.Popen`
+    raises `ValueError: embedded null byte` for a NUL anywhere in an env
+    name, value, `envAppendPath` entry, `command.args` element, or
+    `command.cwd` -- the SAME misclassification shape this function's own
+    docstring already describes for `=`/empty, just a second illegal
+    character `os.environ` rejects. Reported here at parse time
+    (`build.plan-invalid`) rather than at spawn time several frames inside
+    `execute.py`, where the executor's generic catch-all turned it into
+    `build.internal-failure` (exit 5, "a tan bug") for what is actually a
+    malformed plan. See `_no_nul` below for the sibling check applied to
+    every OTHER field this same `ValueError` is reachable from -- a NUL is
+    not scoped to env names alone."""
+    return name != "" and "=" not in name and "\x00" not in name
+
+
+def _no_nul(value: str) -> bool:
+    """Whether `value` is safe to hand to `os.environ`/`subprocess.Popen`,
+    which raise `ValueError: embedded null byte` for a NUL anywhere in an
+    env value, an `envAppendPath` entry, a `command.args` element, or
+    `command.cwd` (tan-cli#491) -- four vectors beyond the env-NAME case
+    `_is_legal_env_name` already covered before this fix, all reachable only
+    through a hand-authored or corrupted `--plan-from` file (the SDK planner
+    never emits a NUL). `command.tool` is deliberately NOT checked here:
+    `_tool_is_available`'s `shutil.which` already degrades a NUL-carrying
+    tool name gracefully to a `skipped` slice ("tool `...` not found") rather
+    than raising, so adding a parse-time guard there would only turn one
+    already-graceful outcome into another, not fix a misclassification."""
+    return "\x00" not in value
 
 
 def _validate_tool_shape(tool: str, context: str) -> None:
@@ -245,21 +355,29 @@ def _command(raw: Any, context: str) -> SliceCommand | None:
         raise PlanParseError("build.plan-invalid", f"`{context}.tool` must be a string")
     _validate_tool_shape(tool, context)
     args = raw.get("args", [])
-    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-        raise PlanParseError("build.plan-invalid", f"`{context}.args` must be a list of strings")
+    if not isinstance(args, list) or not all(isinstance(a, str) and _no_nul(a) for a in args):
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`{context}.args` must be a list of strings with no embedded NUL byte",
+        )
     cwd = raw.get("cwd")
-    if cwd is not None and not isinstance(cwd, str):
-        raise PlanParseError("build.plan-invalid", f"`{context}.cwd` must be a string or null")
+    if cwd is not None and (not isinstance(cwd, str) or not _no_nul(cwd)):
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`{context}.cwd` must be a string or null with no embedded NUL byte",
+        )
     return SliceCommand(tool=tool, args=list(args), cwd=cwd)
 
 
 def _env(raw: Any, context: str) -> dict[str, str]:
     if not isinstance(raw, dict) or not all(
-        isinstance(k, str) and _is_legal_env_name(k) and isinstance(v, str) for k, v in raw.items()
+        isinstance(k, str) and _is_legal_env_name(k) and isinstance(v, str) and _no_nul(v)
+        for k, v in raw.items()
     ):
         raise PlanParseError(
             "build.plan-invalid",
-            f"`{context}` must be an object mapping a legal env-var name to a string value",
+            f"`{context}` must be an object mapping a legal env-var name to a string value "
+            f"with no embedded NUL byte",
         )
     return dict(raw)
 
@@ -269,12 +387,13 @@ def _env_append_path(raw: Any, context: str) -> dict[str, list[str]]:
         isinstance(k, str)
         and _is_legal_env_name(k)
         and isinstance(v, list)
-        and all(isinstance(x, str) for x in v)
+        and all(isinstance(x, str) and _no_nul(x) for x in v)
         for k, v in raw.items()
     ):
         raise PlanParseError(
             "build.plan-invalid",
-            f"`{context}` must be an object mapping a legal env-var name to a list of strings",
+            f"`{context}` must be an object mapping a legal env-var name to a list of strings "
+            f"with no embedded NUL byte",
         )
     return {k: list(v) for k, v in raw.items()}
 
@@ -316,6 +435,27 @@ def parse_build_plan(text: str) -> BuildPlan:
         )
 
     version = raw["schemaVersion"]
+    # `bool` excluded explicitly, BEFORE the `int` check: `True == 1` in
+    # Python, so a bare `version != SUPPORTED_SCHEMA_VERSION` let
+    # `"schemaVersion": true` silently pass as version 1 and get DISPATCHED
+    # -- `BuildPlan.schema_version: int` ending up holding an actual `bool` --
+    # where the oracle refuses it outright (serde's `as_u64()` rejects a JSON
+    # boolean). `1.0 == 1` is the same trap for a float. Every non-int (and
+    # every bool) is refused HERE, as `build.plan-invalid` with serde's own
+    # "invalid type" wording, matching the oracle's real refusal of a
+    # malformed `schemaVersion` -- rather than falling through to the
+    # `!= SUPPORTED_SCHEMA_VERSION` branch below, which used to catch this
+    # shape too but under the WRONG code (`build.plan-unsupported-schema`)
+    # and a self-contradictory message ("unsupported ... (this tan supports
+    # 1)" for a plan whose version WAS 1, just not typed as one) -- see
+    # `tan/core/bootstrap.py::parse_bootstrap_manifest` and
+    # `tan/core/system_manifest.py` for the same `isinstance(..., bool)`
+    # guard already applied to their own sibling `schemaVersion`s.
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"plan is not valid JSON: invalid type: {_json_type_name(version)}, expected u32",
+        )
     if version != SUPPORTED_SCHEMA_VERSION:
         raise PlanParseError(
             "build.plan-unsupported-schema",
@@ -350,7 +490,7 @@ def parse_build_plan(text: str) -> BuildPlan:
         sku=raw["sku"], build_root=raw["buildRoot"],
         slices=[_slice(s, i) for i, s in enumerate(raw["slices"])],
         shared_artefacts=_artefacts(raw["sharedArtefacts"], "sharedArtefacts"),
-        warnings=raw["warnings"],
+        warnings=[_warning(w) for w in raw["warnings"]],
         sdk_version=raw.get("sdkVersion"), sdk_commit=raw.get("sdkCommit"),
         plan_path_mode=raw.get("planPathMode"), execution_policy=_policy(raw.get("executionPolicy")),
     )

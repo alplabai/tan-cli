@@ -2370,7 +2370,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # the checkout or repoint the machine-global default SDK.
         new_root, error = relocate_checkout(paths.repo_root, target, dry_run=dry_run)
         if error is not None:
-            return _fatal(error, payload(), []), reported_project, sdk
+            # `log.take_issues()`, not a literal `[]` (tan-cli#491): every
+            # OTHER fatal return here already does this -- a bare `[]`
+            # silently dropped every already-recorded warning (e.g.
+            # `bootstrap.python-floor-skew`) from the JSON envelope.
+            return _fatal(error, payload(), log.take_issues()), reported_project, sdk
         if new_root is not None and str(new_root) != str(paths.repo_root):
             old_root = sdk_root
             # Snapshotted BEFORE anything below is mutated (tan-cli#284):

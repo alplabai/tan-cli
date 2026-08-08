@@ -1293,6 +1293,40 @@ def test_a_relocation_is_rolled_back_when_a_later_step_fails(tmp_path):
     assert "moved it back" in rollback_message
 
 
+def test_an_occupied_workspace_relocation_refusal_still_carries_the_skew_warning(tmp_path):
+    """tan-cli#491: the `relocate_checkout` destination-exists refusal
+    (`--workspace <dir>` where `<dir>/alp-sdk` already exists) used to call
+    `_fatal(error, payload(), [])` -- a LITERAL empty list -- where every
+    OTHER fatal return in this function passes `log.take_issues()`. That
+    silently dropped every warning `log` had already recorded on this run
+    from the JSON envelope: concretely, `bootstrap.python-floor-skew`, which
+    fires on EVERY run against the shipped alp-sdk manifest (declares
+    pythonMinVersion 3.10 against the effective floor 3.12) and was printed
+    to stderr in text mode but never reached `issues[]` here -- the exact
+    print-only failure the `Log` class docstring says it exists to
+    prevent."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    workspace = tmp_path / "occupied"
+    (workspace / "alp-sdk").mkdir(parents=True)
+
+    proc = run_tan(
+        "bootstrap", "--format", "json",
+        "--sdk-root", str(sdk), "--workspace", str(workspace), "--dry-run", cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode != 0
+    issue_codes = codes(env)
+    assert "bootstrap.failed" in issue_codes
+    assert "already exists" in next(
+        i["message"] for i in env["issues"] if i["code"] == "bootstrap.failed"
+    )
+    # The warning that used to vanish.
+    assert "bootstrap.python-floor-skew" in issue_codes
+    # Nothing was moved -- the destination-exists refusal is a hard stop.
+    assert sdk.exists()
+    assert not (workspace / "alp-sdk" / sdk.name).exists()
+
+
 def test_a_blocked_rollback_reports_the_checkout_as_still_relocated(tmp_path):
     """tan-cli#284 blocker: `_undo_relocation` used to discard
     `relocate_checkout`'s own `(new_root, error)` return, so a move-back that

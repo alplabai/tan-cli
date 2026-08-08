@@ -122,7 +122,7 @@ from tan.core.scaffold import (
     vendored_core_ids,
     write_files,
 )
-from tan.envelope import Envelope, Issue, Project, emit
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
@@ -182,6 +182,12 @@ class _Outcome:
     written: list[str] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
     sdk_pinned: str | None = None
+    #: The resolved SDK `_finish` was called with, carried through so
+    #: `_emit_outcome` can report `sdk.{root,sourceTier}` on the wire
+    #: (tan-cli#491) -- distinct from `sdk_pinned`, which is only the string
+    #: that landed in `.alp/sdk-path` (`None` on every path that never wrote,
+    #: including a successful run whose checkout was not a real alp-sdk).
+    sdk: "_Sdk | None" = None
     issues: list[Issue] = field(default_factory=list)
     exit_code: ExitCode = ExitCode.SUCCESS
 
@@ -219,12 +225,31 @@ def _stderr(line: str) -> None:
     print(line, file=sys.stderr)
 
 
-def _emit_error(json_mode: bool, err: InitError) -> None:
+def _sdk_info(sdk: "_Sdk | None") -> SdkInfo | None:
+    """`_Sdk` -> the wire shape `Envelope(sdk=...)` takes, or `None` when
+    nothing was resolved yet (tan-cli#491). The one seam every `init`
+    envelope-emitting site now goes through, rather than five call sites each
+    re-deriving `SdkInfo(sdk.display, sdk.tier)` -- `examples_cmd.py`'s
+    `examples()` already carries this exact conversion inline at its own one
+    call site; `init` has five (`_emit_outcome`, and `_emit_error` from both
+    of `init()`'s except arms), so a shared helper is what keeps them from
+    drifting the way `init` simply never doing it at all was allowed to."""
+    return SdkInfo(sdk.display, sdk.tier) if sdk is not None else None
+
+
+def _emit_error(json_mode: bool, err: InitError, sdk: "_Sdk | None" = None) -> None:
     """The error envelope. Note the asymmetry with `_emit_outcome`, which is
     contract, not an oversight: an error reports `project.root: null` and an
     EMPTY `templateId`/`destination` even when the CLI had already resolved
     both, because nothing was created and there is no project to point a
     consumer at. `contract/envelopes/init-invalid-template` pins it.
+
+    `sdk` (tan-cli#491) is NOT similarly nulled: which alp-sdk checkout a
+    refusal was evaluated against is exactly the fact a caller needs to
+    retry sensibly, and the oracle reports it on every refusal path that
+    resolved one. `None` here only when the SDK genuinely was never resolved
+    -- an error raised before `_resolve_sdk_root` ever ran (e.g.
+    `--name`/`--template` validation).
     """
     written, unchanged = err.partial
     if json_mode:
@@ -243,6 +268,7 @@ def _emit_error(json_mode: bool, err: InitError) -> None:
                 ),
                 [Issue(err.code, "error", err.message)],
                 err.exit_code,
+                sdk=_sdk_info(sdk),
             )
         )
     else:
@@ -269,6 +295,7 @@ def _emit_outcome(json_mode: bool, outcome: _Outcome) -> None:
                 ),
                 outcome.issues,
                 outcome.exit_code,
+                sdk=_sdk_info(outcome.sdk),
             )
         )
     elif outcome.preview:
@@ -381,6 +408,15 @@ class _Sdk:
 
     path: Path
     display: str
+    #: `SdkRootResolution.tier` carried through (tan-cli#491): `"sdkRootFlag"`
+    #: on the `--sdk-root` branch, else whatever tier `resolve_sdk_root_wide`
+    #: actually resolved through (`projectPin` / `globalDefault` /
+    #: `discovery`). Reported on the wire as `sdk.sourceTier` -- see
+    #: `_sdk_info` below for why this was missing entirely before: `init`
+    #: never passed `sdk=` to `Envelope(...)` at all, on any of its four
+    #: outcome paths, so the field was silently absent rather than merely
+    #: wrong.
+    tier: str
     #: `SdkRootResolution.foreign_global_default_for` carried through
     #: (tan-cli#464). `None` on the `--sdk-root` branch (an explicit flag is
     #: never "foreign" -- there is nothing to fall through from) and on every
@@ -424,7 +460,7 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     option in this command does that either."""
     if sdk_root:
         resolved = Path(os.path.abspath(os.path.expanduser(sdk_root)))
-        return _Sdk(resolved, posix(resolved))
+        return _Sdk(resolved, posix(resolved), "sdkRootFlag")
     # `_broken_pin` unused: `init` is what WRITES `.alp/sdk-path`, so a broken
     # pin already sitting in the parent workspace is superseded by this run's
     # own resolution rather than something for `init` itself to disclose --
@@ -439,7 +475,7 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     found = resolution.path
     if found is None:
         return None
-    return _Sdk(found, posix(found), resolution.foreign_global_default_for)
+    return _Sdk(found, posix(found), resolution.tier, resolution.foreign_global_default_for)
 
 
 def _is_sdk_checkout(root: Path) -> bool:
@@ -709,6 +745,7 @@ def _finish(
             preview=True,
             file_changes=changes,
             files=files,
+            sdk=sdk,
         )
 
     if any(c.kind == "update" for c in changes) and not force:
@@ -727,6 +764,7 @@ def _finish(
                 )
             ],
             exit_code=ExitCode.WRITE_FAILURE,
+            sdk=sdk,
         )
 
     # A destination that exists as a FILE would otherwise surface as an
@@ -773,6 +811,7 @@ def _finish(
         written=result.written,
         unchanged=result.unchanged,
         sdk_pinned=sdk_pinned,
+        sdk=sdk,
     )
 
 
@@ -900,6 +939,12 @@ def init(
     # `tan init --help`'s TEXT diverge from the oracle's.
     del verbose, quiet, no_color, target, all_targets
     json_mode = output_format == "json"
+    # Bound before the try so an `InitError`/`Exception` raised BEFORE the SDK
+    # is resolved (`_resolve_name`, e.g.) still has a defined `resolved_sdk`
+    # to pass `_emit_error` -- `None`, honestly, since nothing was resolved at
+    # that point. Once `_resolve_sdk_root` below runs, every later refusal on
+    # this same call carries whatever it found (tan-cli#491).
+    resolved_sdk: _Sdk | None = None
 
     try:
         # `--destination`, then the global `--project`, then `.`. `--name` does
@@ -996,7 +1041,7 @@ def init(
         if foreign_issue is not None:
             outcome.issues.append(foreign_issue)
     except InitError as err:
-        _emit_error(json_mode, err)
+        _emit_error(json_mode, err, resolved_sdk)
         return
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring
         # Nothing gets to replace the envelope with a traceback. `typer.Exit`
@@ -1010,6 +1055,7 @@ def init(
                 f"init failed unexpectedly: {err.__class__.__name__}: {err}",
                 ExitCode.INTERNAL_FAILURE,
             ),
+            resolved_sdk,
         )
         return
 

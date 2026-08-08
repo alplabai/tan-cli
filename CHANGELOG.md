@@ -25,6 +25,76 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **A lone surrogate character reaching the envelope (a real thing on Linux,
+  where a path built from `os.fsdecode`'s `surrogateescape` can carry one)
+  crashed `--format json` AFTER the command's real work had already
+  succeeded**, leaving zero bytes on stdout instead of the one coded envelope
+  the CLI contract promises. `emit()`'s bare `print(text)` raised
+  `UnicodeEncodeError` on the surrogate; `_serialise()` now probes the encode
+  itself and falls back to `ensure_ascii=True` (a `\udcXX` escape, the same
+  shape the pre-tan-cli JSON default already produced) instead of claiming
+  success on text that cannot actually reach stdout. (#491)
+- **`_TeeStderr` (installed as `sys.stderr` for the whole dispatch under
+  `--format json`) had no `isatty()`**, so any probe of it -- `tan run`'s
+  build heartbeat, `tan/core/consent.py`'s prompt gate -- crashed with a bare
+  `AttributeError`. Not tty-dependent: a piped/redirected/CI run crashed
+  identically to a real terminal. Now delegates to the real stream, guarded
+  the same way `tan.env._stderr_is_tty` already guards this exact probe.
+  (#491)
+- **`_wants_json` was an arity-blind textual scan of the WHOLE process
+  argv**, so a `--format json` forwarded past `--` to a west child (`tan
+  quality -- --format json`), or sitting in another option's value position,
+  flipped the entire run into JSON mode even though the resolved command was
+  text mode -- replacing a real, coded refusal with an unrequested
+  `cli.parse-error` envelope on stdout for a caller that never asked for
+  JSON. Rewritten with the same arity-aware, `--`-respecting walk tan-cli#394
+  already gave the sibling `_wants_help` scan. (#491)
+- **An interrupted `--format json` run (Ctrl-C) reported the command line as
+  invalid.** SIGINT never reaches `tan.cli.main` as a raw
+  `KeyboardInterrupt` -- Typer's own command wrapper converts it to
+  `SystemExit(130)` first, wherever in the command's call stack it was
+  raised -- so it fell into the generic Click-usage-error fallback:
+  `command:"cli"` / `cli.parse-error` / "invalid command line invocation" at
+  exit 130, outside the envelope contract's fixed 0-5 exit-code range.
+  `main()` now matches `SystemExit(130)` before that fallback and reports
+  the real event (`cli.interrupted`) at exit 1 instead. (#491)
+- **`tan init` never reported which alp-sdk checkout it resolved.** Every
+  outcome -- `--preview`, a real write, the overwrite-guard refusal, every
+  coded error -- omitted the envelope's `sdk` key entirely, an undeclared
+  divergence from the oracle's `sdk:{root,sourceTier}`. `_resolve_sdk_root`
+  now carries the resolved tier through `_Sdk`, and both `_emit_outcome` and
+  `_emit_error` report it. (#491)
+- **`tan monitor --format json` could corrupt its own envelope with live
+  board traffic.** The spawned miniterm passed no `stdout=` at all, so the
+  child inherited tan's real stdout -- on a successful session the board's
+  bytes preceded the envelope and broke a whole-stdout `JSON.parse` on an
+  `ok:true`, exit-0 run. Worst on Windows, where a piped, non-interactive
+  spawn (the extension's own shape) has no tty gate to stop it. Now routed
+  to stderr under `--format json` (or `DEVNULL` when stderr has no real OS
+  handle to inherit), leaving text mode's live console unchanged. (#491)
+- **A malformed `--plan-from` plan could be misdiagnosed as a tan bug instead
+  of a bad plan, three separate ways.** (1) `warnings[]` entries were never
+  validated per-entry, so a bare string or `null` parsed clean and reached
+  the envelope's `data.warnings` verbatim, where a consumer's `.map(w =>
+  w.code)` throws -- now validated to match the real oracle (`code`/
+  `message` required strings, `coreId` optional, matching the SHIPPED struct
+  rather than the over-declared JSON schema). (2) A NUL byte in an env
+  value/name, an `envAppendPath` entry, a `command.args` element, or
+  `command.cwd` parsed clean and only detonated later at `subprocess.Popen`
+  as an uncaught `ValueError`, reported as `build.internal-failure` (exit 5,
+  "a tan bug") -- now caught at parse time as `build.plan-invalid`. (3)
+  `schemaVersion: true` / `1.0` slipped past a bare `!= 1` comparison
+  (`True == 1` and `1.0 == 1` in Python) and got DISPATCHED as a real v1
+  plan; a string/null/list `schemaVersion` was already refused, but under
+  the wrong code and a self-contradictory message ("unsupported ... this tan
+  supports 1" for a version that WAS 1, just wrongly typed). All three now
+  match the real oracle's own "invalid type" refusal. (#491)
+- **`tan bootstrap`'s occupied-`--workspace` relocation refusal silently
+  dropped every warning already recorded on the run** (most commonly
+  `bootstrap.python-floor-skew`, which fires on every run against the
+  shipped alp-sdk manifest) -- the one `_fatal(...)` call on this path
+  passed a literal `[]` instead of `log.take_issues()`, where every other
+  fatal return in the same function already did. (#491)
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
   gaps found reviewing the fix.** All under (#489):

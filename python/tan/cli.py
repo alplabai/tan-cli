@@ -635,17 +635,46 @@ def root(
 
 
 def _wants_json(argv: list[str]) -> bool:
-    """Textual scan for ``--format json`` / ``--format=json``, mirroring
-    Rust's ``wants_json`` (crates/tan-cli/src/main.rs). Needed because a
-    usage error (bare invocation, an unknown command, a bad flag) means Click
-    exits via its own machinery before any option ever gets parsed into
-    something this code could otherwise trust.
+    """Whether `--format json` / `--format=json` appears in an OPTION
+    position -- not as some other option's VALUE, and not past a `--`
+    terminator (tan-cli#491, the same fix `_wants_help` already got in
+    tan-cli#394; see that function's own docstring for the full mechanism).
+
+    Needed because a usage error (bare invocation, an unknown command, a bad
+    flag) means Click exits via its own machinery before any option ever
+    gets parsed into something this code could otherwise trust -- so `main()`
+    has to make this call from the raw argv, mirroring Rust's `wants_json`
+    (crates/tan-cli/src/main.rs). Unlike Rust's, though, that raw scan used
+    to be arity-blind: a plain adjacent-pair match, with no notion that
+    `--format`'s own VALUE position could hold something else, or that a `--`
+    forwards everything after it verbatim to a west child rather than to
+    tan's own parser. Two live vectors: `tan quality -- --format json`
+    forwards `--format json` to `west alp-quality` (tan's own `--format`
+    stays `text`), and a `--sdk-root --format` sequence puts the literal
+    token `--format` in ANOTHER option's value slot. Both used to flip
+    `main()` into JSON mode for a run whose resolved command was text mode,
+    so a real, coded refusal (`quality.profile-required`) got replaced on
+    stdout by an unrequested `cli.parse-error` envelope the caller never
+    asked for and that mislabels what actually happened.
+
+    Walking argv with the real arity table instead means a `--format` (or an
+    adjacent `json`) sitting in another option's value position is skipped
+    over rather than matched, and nothing after a `--` is ever considered --
+    the same two guarantees `_wants_help` already makes for `--help`.
     """
-    for i, arg in enumerate(argv):
-        if arg == "--format=json":
+    takes_value = _value_taking_options(
+        next((token for token in argv if token in _SUBCOMMAND_NAMES), None)
+    )
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--":
+            return False
+        if token == "--format=json":
             return True
-        if arg == "--format" and i + 1 < len(argv) and argv[i + 1] == "json":
+        if token == "--format" and i + 1 < len(argv) and argv[i + 1] == "json":
             return True
+        i += 2 if token in takes_value else 1
     return False
 
 
@@ -681,6 +710,49 @@ def _usage_error_envelope(exit_code: int, captured_stderr: str = "") -> str:
     return env.to_json()
 
 
+#: tan-cli#491: `KeyboardInterrupt` (SIGINT, Ctrl-C) is a `BaseException`
+#: sibling of `Exception`, so every command's own catch-all (`flash_cmd.py`'s
+#: `except Exception`, `build_cmd.py`'s dispatch, ...) cannot see it. It does
+#: NOT reach `main()` as a raw `KeyboardInterrupt`, though: Typer's own
+#: command wrapper (`typer/core.py`) already catches it, wherever in the
+#: command's call stack it was raised, and re-raises `click.exceptions.
+#: Exit(130)` (the POSIX 128+SIGINT convention) -- which Click's `Command.
+#: main()` then turns into a plain `sys.exit(130)`. So by the time control
+#: reaches the `except SystemExit` handler below, an interrupted run looks
+#: EXACTLY like any other non-zero exit with no envelope emitted, and used to
+#: fall into the same `_usage_error_envelope` branch every genuine Click usage
+#: error does: an interrupted `tan flash --format json` reported
+#: `command:"cli"` / `cli.parse-error` / "invalid command line invocation" at
+#: exit 130 -- a false claim that the COMMAND LINE was invalid, and an exit
+#: code outside the envelope contract's fixed 0-5 set (`tan.exit_codes.
+#: ExitCode`). `_SIGINT_EXIT_CODE` is what the handler below matches on to
+#: tell the two apart; `RUNTIME_FAILURE` (1) is what an
+#: interrupted-before-completion run actually is: the run did not succeed,
+#: and nothing about it is an internal tan bug (`INTERNAL_FAILURE`, 5) or a
+#: usage mistake (`cli.parse-error`'s own exit 2).
+_SIGINT_EXIT_CODE = 130
+_INTERRUPTED_MESSAGE = "interrupted (Ctrl-C)"
+
+
+def _interrupted_envelope() -> str:
+    """The one JSON envelope an interrupted `--format json` run reports,
+    replacing the `cli.parse-error` fallback a bare `KeyboardInterrupt` used
+    to fall through to (see `_INTERRUPTED_MESSAGE`'s docstring above). Not
+    command-specific: `KeyboardInterrupt` reaches this same catch from every
+    subcommand alike, so there is no coded `<command>.*` issue to report --
+    `cli.interrupted` names the actual event (the run was cut short) instead
+    of inventing a false one.
+    """
+    env = Envelope(
+        "cli",
+        Project(root=None, board_yaml=None),
+        {"message": _INTERRUPTED_MESSAGE},
+        [Issue("cli.interrupted", "error", _INTERRUPTED_MESSAGE)],
+        int(ExitCode.RUNTIME_FAILURE),
+    )
+    return env.to_json()
+
+
 class _TeeStderr:
     """Writes through to the REAL stderr immediately, while also keeping a
     copy -- needed only to fold a Click-level usage error's message into the
@@ -710,6 +782,30 @@ class _TeeStderr:
 
     def getvalue(self) -> str:
         return self._buffer.getvalue()
+
+    def isatty(self) -> bool:
+        """tan-cli#491: this class used to implement only `write`/`flush`/
+        `getvalue`, so ANY code that probes `sys.stderr.isatty()` while
+        `--format json` has this installed as `sys.stderr` (the whole
+        dispatch, `main()` below) hit a bare `AttributeError` -- not
+        tty-dependent, not specific to a real terminal: the attribute lookup
+        itself fails before any tty question is even asked, so a piped/
+        redirected/CI run crashes identically. Two live call sites hit this
+        for real: `build_cmd.py`'s `_Heartbeat(enabled=not json_mode and
+        sys.stderr.isatty())` (reachable with `json_mode=False` from `tan run`,
+        which does not thread its own `--format json` down to `_build`) and
+        `tan/core/consent.py`'s unguarded `sys.stderr.isatty()`. Delegating to
+        the real stream -- the one this class already tees every write to --
+        answers the actual question ("is stderr a terminal") instead of
+        raising; `(AttributeError, ValueError)` mirrors `tan.env._stderr_is_tty`,
+        the one other place in this tree that already guards this exact probe,
+        for the same two failure modes (a real stream with no `isatty` at all,
+        or one that has been closed).
+        """
+        try:
+            return self._real.isatty()
+        except (AttributeError, ValueError):
+            return False
 
 
 def _reconfigure_stdio() -> None:
@@ -834,6 +930,18 @@ def main() -> None:
             elif not isinstance(code, int):
                 code = int(ExitCode.RUNTIME_FAILURE)
             if not envelope_emitted():
+                # tan-cli#491: matched BEFORE the generic usage-error fallback
+                # below -- an interrupted run (see `_SIGINT_EXIT_CODE`'s own
+                # docstring for why this is a `SystemExit(130)`, never a raw
+                # `KeyboardInterrupt`, by the time it gets here) is not a
+                # Click usage error, and `sys.exit(130)` would also violate
+                # the envelope contract's fixed 0-5 exit-code range -- so this
+                # reports the real event and remaps the process exit code
+                # itself, rather than re-raising `exc` (which would still
+                # carry the raw 130).
+                if code == _SIGINT_EXIT_CODE:
+                    print(_interrupted_envelope())
+                    sys.exit(int(ExitCode.RUNTIME_FAILURE))
                 if code != 0:
                     print(_usage_error_envelope(code, captured_stderr.getvalue()))
                 raise

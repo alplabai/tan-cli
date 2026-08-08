@@ -148,7 +148,54 @@ def _refuse_listing_ports(reason: str) -> MonitorError:
     )
 
 
-def _run_monitor(port: str | None, baud: int) -> tuple[dict, list[Issue], ExitCode]:
+def _stdout_sink(json_mode: bool):
+    """The spawned miniterm's stdout target (tan-cli#491).
+
+    `None` in text mode: the child inherits tan's real stdout unchanged --
+    `tan monitor`'s whole point is a live, interactive console, board bytes
+    streamed to the terminal as they arrive.
+
+    Under `--format json`, though, stdout is the envelope channel and NOTHING
+    else may reach it (`flash_cmd.py`'s own module docstring states the same
+    rule for its own spawns: "Nothing but the single JSON envelope may reach
+    stdout under `--format json`"). `subprocess.run([python, "-m", "serial.
+    tools.miniterm", ...])` below used to pass no `stdout=` at all, so the
+    child inherited tan's stdout unconditionally -- pyserial's miniterm
+    writes every received board byte straight through `Console.write()` to
+    `sys.stdout`, with no `--format`/tty awareness of its own, so on a
+    successful session the board's own traffic preceded the envelope on
+    stdout and a whole-stdout `JSON.parse` failed on an `ok:true`, exit-0
+    run. Worst on Windows: pyserial's win32 `Console.__init__` needs only
+    `sys.stdout.fileno()`, so a piped, non-interactive `--format json` spawn
+    -- the extension's own shape -- streams board bytes onto the captured
+    stdout with no tty gate to stop it (POSIX's `Console.__init__` happens
+    to require a real tty stdin and dies first on a pipe, which is why this
+    was reachable, unqualified, only there).
+
+    Routed to stderr under json_mode, not swallowed to `DEVNULL`: a human
+    running `tan monitor --format json` from a real terminal still SEES the
+    board traffic live, on the channel that already carries every other
+    diagnostic (the `monitor: <port> @ <baud> ...` line just above); the
+    piped-extension shape this defect is actually about never reads tan's
+    stderr, so nothing it does is affected either way. Falls back to
+    `subprocess.DEVNULL` when stderr has no real OS handle to inherit (a
+    wrapped/frozen capture object, mirroring `flash_cmd._stderr_sink`'s own
+    guard) -- handing `subprocess.run`'s `stdout=` a stream with no
+    `fileno()` raises, and this call site has exactly one thing it may never
+    do: raise before the envelope is built.
+    """
+    if not json_mode:
+        return None
+    try:
+        sys.stderr.fileno()
+    except (OSError, ValueError, AttributeError):
+        return subprocess.DEVNULL
+    return sys.stderr
+
+
+def _run_monitor(
+    port: str | None, baud: int, *, json_mode: bool = False
+) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
     # `build_cmd._planner_python` -- NOT `sys.executable`, which under a
@@ -178,7 +225,8 @@ def _run_monitor(port: str | None, baud: int) -> tuple[dict, list[Issue], ExitCo
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
     try:
         rc = subprocess.run(
-            [python, "-m", "serial.tools.miniterm", port, str(baud)]
+            [python, "-m", "serial.tools.miniterm", port, str(baud)],
+            stdout=_stdout_sink(json_mode),
         ).returncode
     except OSError as err:
         raise MonitorError(
@@ -257,7 +305,7 @@ def monitor(
         raise typer.Exit(int(exit_code))
 
     try:
-        data, issues, exit_code = _run_monitor(port, baud)
+        data, issues, exit_code = _run_monitor(port, baud, json_mode=json_mode)
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)
         return

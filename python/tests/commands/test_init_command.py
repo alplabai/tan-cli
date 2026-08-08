@@ -239,6 +239,107 @@ def test_unknown_template_is_a_validation_failure(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#491: `sdk.{root,sourceTier}` on the wire
+# ---------------------------------------------------------------------------
+
+
+def _real_sdk_checkout(root: Path) -> Path:
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    return root
+
+
+def test_preview_carries_the_resolved_sdk_key(tmp_path):
+    """tan-cli#491, evidence (1): the oracle emits `sdk:{root,sourceTier}` on
+    a `--preview` run given `--sdk-root`; this port omitted the whole `sdk`
+    key on every outcome path. `--preview` is the first one the issue's own
+    evidence measures."""
+    sdk = _real_sdk_checkout(tmp_path / "alp-sdk")
+    proc = run_tan(
+        "init", "--template", "minimal-app", "--preview", "--sdk-root", str(sdk),
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0
+    assert env["sdk"] == {"root": sdk.as_posix(), "sourceTier": "sdkRootFlag"}
+
+
+def test_a_real_write_carries_the_resolved_sdk_key(tmp_path):
+    """Evidence (2): a real write must carry `sdk` too, not just `sdkPinned`
+    -- the two are DIFFERENT facts (`sdk.root` is what init RESOLVED against;
+    `data.sdkPinned` is only set when that checkout looked like a real
+    alp-sdk and the pointer write succeeded)."""
+    sdk = _real_sdk_checkout(tmp_path / "alp-sdk")
+    proc = run_tan(
+        "init", "--template", "minimal-app", "--sdk-root", str(sdk),
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0
+    assert env["sdk"] == {"root": sdk.as_posix(), "sourceTier": "sdkRootFlag"}
+    assert env["data"]["sdkPinned"] == sdk.as_posix()
+
+
+def test_the_overwrite_guard_refusal_carries_the_resolved_sdk_key(tmp_path):
+    """Evidence (3): the overwrite-guard refusal (`init.would-overwrite`) is
+    NOT routed through `_emit_error` -- it is a non-error `_Outcome` with a
+    non-zero exit code -- so it is a separate code path from every
+    `InitError` refusal, and the issue's own evidence measured it separately
+    from the oracle."""
+    sdk = _real_sdk_checkout(tmp_path / "alp-sdk")
+    first = run_tan(
+        "init", "--template", "minimal-app", "--sdk-root", str(sdk),
+        "--format", "json", cwd=tmp_path,
+    )
+    assert envelope(first)["ok"] is True
+    (tmp_path / "board.yaml").write_text("# local edit\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init", "--template", "minimal-app", "--sdk-root", str(sdk),
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 3
+    assert issue(env)["code"] == "init.would-overwrite"
+    assert env["sdk"] == {"root": sdk.as_posix(), "sourceTier": "sdkRootFlag"}
+
+
+def test_an_error_path_after_sdk_resolution_still_carries_the_sdk_key(tmp_path):
+    """Evidence (4): `_emit_error`'s asymmetry with `_emit_outcome` (nulled
+    `project`/`templateId`/`destination`, documented in `_emit_error`'s own
+    docstring) does not extend to `sdk` -- which alp-sdk checkout a refusal
+    was evaluated against is exactly what a caller needs to retry
+    sensibly, and it is resolved BEFORE `--board-yaml`'s own validation runs
+    (`init.board-yaml-unreadable`, an `InitError` raised well after
+    `_resolve_sdk_root`)."""
+    sdk = _real_sdk_checkout(tmp_path / "alp-sdk")
+    proc = run_tan(
+        "init", "--template", "minimal-app", "--sdk-root", str(sdk),
+        "--board-yaml", str(tmp_path / "does-not-exist.yaml"),
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+    assert proc.returncode != 0
+    assert env["sdk"] == {"root": sdk.as_posix(), "sourceTier": "sdkRootFlag"}
+
+
+def test_an_error_path_before_sdk_resolution_has_no_sdk_key(tmp_path):
+    """The honest counterpart: `--name ..` is refused by `_resolve_name`
+    BEFORE `_resolve_sdk_root` ever runs, so there is genuinely nothing to
+    report -- `sdk` must be ABSENT (never a null placeholder; matches
+    `test_sdk_key_is_absent_when_none_not_null` in `test_envelope.py`), not
+    silently invented."""
+    proc = run_tan(
+        "init", "--template", "minimal-app", "--name", "..",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 2
+    assert issue(env)["code"] == "init.invalid-name"
+    assert "sdk" not in env, env
+
+
 def test_help_distinguishes_template_ids_from_the_sdk_example_catalog(tmp_path):
     """tan-cli#1: `--template` and the SDK's `metadata/templates/catalog-v1.json`
     are two different id vocabularies (`zephyr-app` vs. `minimal`, and the

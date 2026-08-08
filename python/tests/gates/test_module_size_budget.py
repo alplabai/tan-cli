@@ -175,7 +175,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # growth is small -- the call site itself SHRANK (the caller's own
     # temp-cleanup `except` is gone, `atomic_write_text` does its own) -- the
     # import line and the expanded rationale comment account for the +2.
-    "tan/commands/bootstrap_cmd.py": 2919,
+    # 2923, not 2919, as of tan-cli#491: the `relocate_checkout`
+    # destination-exists refusal now passes `log.take_issues()` to `_fatal`
+    # instead of a literal `[]`, which was silently dropping every warning
+    # `log` had already recorded (`bootstrap.python-floor-skew`, in
+    # particular) from the JSON envelope on that one refusal path -- every
+    # OTHER fatal return in this function already did this correctly. Kept
+    # terse (4 comment lines, not the first draft's 12) specifically to stay
+    # under `_FUNCTION_WORST_BUDGET`: `_run` (this function's own enclosing
+    # scope) was already the package's longest function at 701 lines, 6
+    # under the recorded 707 ceiling.
+    "tan/commands/bootstrap_cmd.py": 2923,
     "tan/core/bootstrap.py": 1890,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
@@ -683,7 +693,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # filter, and the returned `--preview`/`--force` message), +14 lines,
     # single cause -- the `init.would-overwrite` call site itself stayed the
     # same length, swapping a literal string for a call.
-    "tan/commands/init_cmd.py": 1023,
+    # 1069, not 1023, as of tan-cli#491: `init` never passed `sdk=` to
+    # `Envelope(...)` on ANY outcome path, so `sdk.{root,sourceTier}` was
+    # silently absent on every run, oracle divergence included --
+    # `_Sdk` gained a `tier` field, `_Outcome` gained an `sdk` field carried
+    # through `_finish`'s three construction sites, the new `_sdk_info`
+    # helper is the one seam both `_emit_outcome` and `_emit_error` (which
+    # also gained an `sdk` parameter, plus a bound-before-the-try
+    # `resolved_sdk` local so an error raised before SDK resolution reports
+    # `sdk` as genuinely absent rather than raising `NameError`) now go
+    # through.
+    "tan/commands/init_cmd.py": 1069,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
@@ -808,7 +828,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # three-sentence message naming `tan doctor`/`tan init`/`tan build` and
     # `tan --help`, since exiting 2 at a user who typed the binary's own name
     # with nowhere to go next is the most-hit dead end in the CLI.
-    "tan/cli.py": 856,
+    # 964, not 856, as of tan-cli#491's three-defect envelope-contract fix:
+    # `_TeeStderr.isatty()` (delegates to the real stream, guarding
+    # `AttributeError`/`ValueError` the same way `tan.env._stderr_is_tty`
+    # already does -- +19), `_wants_json` rewritten with the same
+    # arity-aware, `--`-respecting walk tan-cli#394 already gave `_wants_help`
+    # (+27), and the new `_interrupted_envelope`/`_SIGINT_EXIT_CODE` machinery
+    # plus the one new branch in `main()`'s `SystemExit` handler that reports
+    # a real Ctrl-C as `cli.interrupted` at an in-range exit code instead of
+    # a false `cli.parse-error` at exit 130 (+62).
+    "tan/cli.py": 964,
 }
 
 #: Some of these are `tan/planner/**`, which is a hash-audited MIRROR of

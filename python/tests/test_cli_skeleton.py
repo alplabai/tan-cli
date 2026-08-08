@@ -161,6 +161,120 @@ def test_tee_stderr_writes_through_synchronously_and_keeps_a_copy():
     assert tee.getvalue() == "hello world"
 
 
+def test_tee_stderr_isatty_delegates_instead_of_raising_attributeerror():
+    """tan-cli#491: `_TeeStderr` used to implement only `write`/`flush`/
+    `getvalue` -- `sys.stderr.isatty()` (`build_cmd.py`'s `_Heartbeat(enabled=
+    not json_mode and sys.stderr.isatty())`, `tan/core/consent.py`'s
+    unguarded probe) raised a bare `AttributeError` whenever `--format json`
+    had installed this class as `sys.stderr`, regardless of whether a real
+    terminal was attached -- the attribute lookup itself failed before any
+    tty question was even asked."""
+    import io as _io
+
+    from tan.cli import _TeeStderr
+
+    class _NoIsatty:
+        def write(self, s):
+            return len(s)
+
+        def flush(self):
+            pass
+
+    # A real stream with no `isatty` at all -- the exact shape a captured
+    # pytest/CI stream can have -- must answer False, not raise.
+    tee = _TeeStderr(_NoIsatty())
+    assert tee.isatty() is False
+
+    class _ClosedIsatty:
+        def write(self, s):
+            return len(s)
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            raise ValueError("I/O operation on closed file")
+
+    tee = _TeeStderr(_ClosedIsatty())
+    assert tee.isatty() is False
+
+    # And the real answer is DELEGATED, not hardcoded, in both directions.
+    real = _io.StringIO()
+    tee = _TeeStderr(real)
+    assert tee.isatty() == real.isatty()  # StringIO.isatty() is always False
+
+
+def test_interrupted_envelope_reports_a_real_event_at_an_in_range_exit_code():
+    """Unit pin on `_interrupted_envelope` itself: `cli.interrupted`, not
+    `cli.parse-error`, and an exit code inside the envelope contract's fixed
+    0-5 set (`tan.exit_codes.ExitCode`) -- never the raw POSIX 128+SIGINT 130
+    Typer/Click report the process exiting with."""
+    from tan.cli import _interrupted_envelope
+
+    env = json.loads(_interrupted_envelope())
+    assert env["command"] == "cli"
+    assert env["exitCode"] == 1
+    assert 0 <= env["exitCode"] <= 5
+    assert env["issues"] == [
+        {"code": "cli.interrupted", "severity": "error", "message": "interrupted (Ctrl-C)"}
+    ]
+    assert env["data"]["message"] == "interrupted (Ctrl-C)"
+
+
+def test_sigint_during_a_json_run_reports_interrupted_not_a_parse_error(monkeypatch, capsys):
+    """tan-cli#491. A real Ctrl-C mid-command does NOT reach `tan.cli.main` as
+    a raw `KeyboardInterrupt`: Typer's own command wrapper
+    (`typer/core.py::TyperCommand.main`) already catches it, wherever in the
+    command's call stack it was raised, and re-raises `click.exceptions.
+    Exit(130)`, which Click's `Command.main()` turns into a plain
+    `sys.exit(130)` -- so `app(prog_name="tan")` raising `SystemExit(130)` is
+    exactly the shape a real interrupt produces, verified by reading the
+    installed typer/click source rather than assumed. Simulated here instead
+    of sent as a real OS signal (real work is hard to make hang
+    deterministically in a unit test) -- monkeypatching `app` isolates
+    exactly the boundary this fix touches, `tan.cli.main`'s own `SystemExit`
+    handler.
+
+    Pre-fix this fell into the generic Click-usage-error fallback and
+    reported `command:"cli"` / `cli.parse-error` / "invalid command line
+    invocation" at exit 130: a false claim that the COMMAND LINE was
+    invalid, at a process exit code outside the envelope contract's fixed
+    0-5 set.
+    """
+    import tan.cli as cli
+    import tan.envelope as envelope_module
+
+    # Isolate the process-global "has an envelope already gone to stdout"
+    # flag `emit()` sets: another test earlier in this same process may have
+    # already flipped it, and this test's own assertion is specifically
+    # about the "nothing emitted yet" branch.
+    monkeypatch.setattr(envelope_module, "_emitted", False)
+    monkeypatch.setattr(envelope_module, "_emitted_exit_code", None)
+
+    def _raise_sigint(self, *args, **kwargs):
+        raise SystemExit(130)
+
+    # Patched on the TYPE, not the `app` instance: `app(prog_name="tan")`
+    # dispatches through `type(app).__call__`, which an instance-level
+    # attribute never intercepts -- and `app` itself must stay a real
+    # `Typer` object, since `_wants_json`'s own `_value_taking_options` reads
+    # `get_command(app)` earlier in this same call.
+    monkeypatch.setattr(type(cli.app), "__call__", _raise_sigint)
+    monkeypatch.setattr(sys, "argv", ["tan", "flash", "--format", "json"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    assert 0 <= excinfo.value.code <= 5
+    out = capsys.readouterr().out
+    env = json.loads(out)
+    assert env["command"] == "cli"
+    assert env["exitCode"] == 1
+    assert env["issues"][0]["code"] == "cli.interrupted"
+    assert "invalid command line invocation" not in out
+
+
 def test_format_json_bad_command_help_process_exit_matches_envelope_exit_code():
     """`tan --format json badcmd --help` renders help for an UNKNOWN command,
     which both the oracle and Click exit 2 for. Pre-fix, `_emit_help_envelope`
