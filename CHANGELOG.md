@@ -79,7 +79,40 @@ All notable changes to `tan` are documented here. Format follows
   deliberate divergence from the Rust oracle, which does the same
   directory-creation thing -- measured, not assumed; no frozen parity case
   pins it, since every `debug-config` argv there runs in an existing
-  `work_dir`. (#476)
+  `work_dir`. Only HALF of tan-cli#476 (Refs, not Closes): the OTHER half --
+  a project directory that exists but has no `board.yaml` at all still
+  defaulting to `native-host` rather than refusing -- is deliberately left
+  open; `test_an_omitted_target_kind_still_defaults_to_native_host_with_no_
+  project_signal` protects that default on purpose, and tan-cli#456 scoped
+  its own inference fix to projects whose `board.yaml` DECLARES hardware.
+  (#476)
+
+- **`tan debug-config` reported a bad flag VALUE as a tan crash.**
+  `--target-kind`, `--server`, an unsupported target+server pairing, `--svd`
+  and an empty `--gdbserver-address` all exited `InternalFailure` (5) with
+  `debug-config.internal-failure`, though each already produced a complete,
+  actionable message. tan-cli#462 made that argument for the four
+  *preconditions* and reclassified them; this is the argument-validation half
+  it left behind. They now exit `ValidationFailure` (2) with the new
+  `debug-config.invalid-argument`. Exit 5 stays for what no flag value can
+  produce: the `except Exception` backstop and an unreadable or malformed
+  *existing* `launch.json`. A deliberate divergence from the Rust oracle,
+  which exits 5 -- the frozen parity case is retired with the reason recorded
+  rather than loosened. Every refusal raised *after* `--target-kind` and
+  `--server` are parsed -- `--svd`, `--gdbserver-address`, and (review round)
+  the target+server *pairing* refusal itself, e.g. `--target-kind
+  native-host --server jlink` -- now reports the real pair instead of the
+  `zephyr-mcu`/`none` placeholder, which was honest only where nothing had
+  been parsed yet. Refs tan-cli#477, not Closes: `--core` naming no slice in
+  this project's build is still refused only when
+  `build/system-manifest.yaml` *exists*; with `--target-kind` given
+  explicitly and no manifest at all, an unknown `--core` on a real hardware
+  project still silently succeeds at exit 0, because `--core` also has a
+  second, legitimate pre-build job here -- selecting which core's
+  SDK-published debug-probe identity to resolve (alp-sdk#1026) -- that a
+  manifest-existence guard alone cannot tell apart from a typo. That half
+  stays open; tracked in the linked issue. (#477)
+
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
   gaps found reviewing the fix.** All under (#489):

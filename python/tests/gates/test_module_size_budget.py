@@ -788,17 +788,25 @@ _MODULE_BUDGET: dict[str, int] = {
     # copy of the same durability gap this module had already closed once.
     # The call site now reads `atomic_write_text(launch_json_path, plan.content)`
     # directly; nothing here duplicates the durability sequence any more.
-    # 1542 -> 1583: tan-cli#476 added `_project_not_found_failure` and the
-    # guard that reaches it (at the top of `_run`, before anything can
-    # write), so a `--project` naming a directory which does not exist is
-    # refused instead of CREATED (the writer calls `mkdir(parents=True)`).
-    # Extracting from this module is tan-cli#408's job; a defect that
-    # silently materialises a project tree should not wait on it.
-    # 1583 -> 1597, review round: the guard now tells "missing" apart from
-    # "exists but is a file" instead of calling both "does not exist", and
-    # drops the redundant parenthetical resolved-path suffix when
-    # `--project` was already given as an absolute path.
-    "tan/commands/debug_config_cmd.py": 1597,
+    # MERGE (tan-cli#476 + tan-cli#477): dev's 1542 above is #516's number.
+    # #477 adds `_invalid_argument_failure` (1542 -> 1596, including its own
+    # review round threading `target`/`server` through the two POST-parse
+    # refusals). #476 independently adds `_project_not_found_failure` and
+    # the guard that reaches it (1542 -> 1597, including its own review
+    # round distinguishing "missing" from "exists but is a file"). Neither
+    # branch's own figure is the resolved one -- measured after the merge
+    # rather than copied from either side, which is the mistake a two-way
+    # conflict invites here.
+    # 1656 -> 1689, #477 SECOND review round: Major 1 splits the one `try`
+    # covering `parse_target_kind`/`parse_server_kind`/`create_launch_draft`
+    # into two, so the target+server PAIRING refusal (from `create_launch_
+    # draft`) reports the pair it actually has instead of the placeholder --
+    # +13 lines. Major 2 does NOT touch behaviour (the `--core`-with-no-
+    # manifest gap it names stays open on purpose -- see the inline comment
+    # and CHANGELOG) but documents why closing it is not a simple mirror of
+    # `infer_target_kind`'s own guard -- +20 lines of comment, 0 of code.
+    # Measured after both, not computed from the deltas above.
+    "tan/commands/debug_config_cmd.py": 1689,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -1333,6 +1341,15 @@ _MIRRORED = ("tan/planner/",)
 # messages on the text path -- the one new crossing; `diff`/`inspect`/`trace`/
 # `support_bundle`/`_run_text` all grew too but were already over the cap.
 # Re-measured by the gate's own AST walk over all of `tan/`, not inferred.
+#
+# STILL 220 after the dev merge that brings tan-cli#507/#508 in -- re-walked on
+# the MERGED tree, not carried over: `debug_config_cmd.py`'s two new refusals
+# add no function over 50 lines, and this branch's own `west_forward_cmd.
+# _refuse_required` lands at exactly 50 (the cap is `> 50`), with the SDK-
+# resolution echo extracted into an 18-line `_echo_sdk_resolution` rather than
+# open-coded. Of the 220, `tan/planner/` contributes 48 -- it is NOT excluded
+# from the walk, which is the arithmetic mistake to avoid when two branches'
+# numbers are compared instead of the merged tree being measured.
 _FUNCTION_COUNT_BUDGET = 220
 _FUNCTION_WORST_BUDGET = 707
 
