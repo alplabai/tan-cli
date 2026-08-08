@@ -1989,6 +1989,28 @@ def _select_workspace(
     return WorkspacePlan(clear_zephyr_base=True)
 
 
+def _existing_venv_bin_dir(facts: BootstrapFacts, paths: RunPaths, is_windows: bool) -> str:
+    """The venv bin sub-directory that EXISTS under `paths.venv_dir` -- `bin` or
+    `Scripts` -- falling back to the host's own layout when neither is there.
+
+    tan-cli#495 defect 7: `--print-env` rendered its activation hint from
+    `facts.venv_bin_dir(is_windows)`, the HOST-keyed name, so a workspace
+    `.venv` created under git-bash/Windows (a `Scripts/` layout) and then read
+    from a POSIX host printed `source "<venv>/bin/activate"` -- a path that does
+    not exist -- while the SAME run's `Next steps:` block, which reads the
+    existence-derived `venv.bin_dir`, printed `Scripts`. The mirror case (a
+    `bin/` venv read from Windows) is the same defect the other way round; it is
+    exactly the split-layout host `Workspace.venv_bin()`'s docstring says that
+    resolver was written for, so this delegates to it rather than growing a
+    second copy of its directory-wins probe. On a fresh host, where neither
+    directory exists yet, the fallback is the old behaviour unchanged.
+    """
+    workspace = Workspace(
+        is_windows, facts, paths.repo_root, paths.workspace_dir, paths.venv_dir
+    )
+    return workspace.venv_bin().bin_dir
+
+
 def _print_env_outcome(
     *, paths: RunPaths, sdk_root: str, facts: BootstrapFacts, pin: str,
     pin_issue: Issue | None, foreign_issue: Issue | None, flags: dict[str, bool],
@@ -2023,18 +2045,8 @@ def _print_env_outcome(
         if zephyr_base is not None:
             top = Path(zephyr_base).parent
             print_paths = RunPaths(paths.repo_root, top, top / facts.venv_dir_name)
-    # The bin dir that EXISTS under `print_paths.venv_dir`, not the host-keyed
-    # `facts.venv_bin_dir(is_windows)` (tan-cli#495 defect 7): a `.venv` created
-    # under git-bash/Windows (a `Scripts/` layout) then read from a POSIX host
-    # printed `source "<venv>/bin/activate"` -- a path that does not exist --
-    # while the SAME run's `Next steps:` block, which reads `venv.bin_dir`,
-    # printed `Scripts/`. `Workspace.venv_bin()` is the one existence-derived
-    # resolver every other consumer already trusts, and it falls back to the
-    # host layout when neither directory is there, so a fresh host is unchanged.
-    print_venv_bin_dir = Workspace(
-        is_windows, facts, print_paths.repo_root, print_paths.workspace_dir, print_paths.venv_dir
-    ).venv_bin().bin_dir
-    text = print_env_block(facts, print_paths.tokens(), print_venv_bin_dir, is_windows)
+    bin_dir = _existing_venv_bin_dir(facts, print_paths, is_windows)
+    text = print_env_block(facts, print_paths.tokens(), bin_dir, is_windows)
     print_project = reported_project
     if print_paths is not paths:
         print_project = Project.resolved(
