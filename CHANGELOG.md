@@ -25,6 +25,22 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan debug-config --project <path>` created the directory tree when
+  `<path>` did not exist, and wrote a `native-host` launch.json into it at
+  exit 0 with `issues: []`.** `--project` names a project that already
+  exists; a typo'd path (or a stale one in a script) used to be silently
+  MATERIALISED, because the writer calls `mkdir(parents=True)`. Refused
+  instead, at `ValidationFailure` (2) with the new
+  `debug-config.project-not-found` -- the same class tan-cli#462 settled for
+  the other four `debug-config` preconditions. The guard runs before
+  anything can write, so it holds on the writing path too, not only
+  `--preview`. A `--project` naming an existing FILE (not a directory) gets
+  its own phrasing rather than the same "does not exist" message. A
+  deliberate divergence from the Rust oracle, which does the same
+  directory-creation thing -- measured, not assumed; no frozen parity case
+  pins it, since every `debug-config` argv there runs in an existing
+  `work_dir`. (#476)
+
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge
   gaps found reviewing the fix.** All under (#489):
