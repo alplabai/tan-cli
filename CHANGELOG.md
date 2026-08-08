@@ -201,30 +201,6 @@ All notable changes to `tan` are documented here. Format follows
   surfaces the new warning code `flash.dpidr-preflight-unarmed` in BOTH
   `--format json` and tan's default text output, so that silent gap has a
   signal without making the field mandatory. (#520)
-<<<<<<< HEAD
-- **`tan bootstrap`'s `reconcile_west_manifest_path` never `fsync`'d the
-  temp sibling it writes `.west/config` through, so `os.replace`'s atomicity
-  guarantee (the RENAME only) was covering nothing about the CONTENT
-  reaching stable storage** -- a power loss between the rename landing and
-  the temp's data blocks flushing could leave the topdir's only manifest
-  pointer, shared by every SDK version under it, renamed to its real name
-  with truncated or missing content. This is the identical gap #489 closed
-  in `tan debug-config`'s `launch.json` write, from which this shape was
-  originally copied; the fix had landed on one call site and not the other.
-  Both now share one helper, `tan/core/atomic_write.py:atomic_write_text`
-  (`fsync`'d before the rename, a POSIX directory `fsync` after, symlink-safe,
-  mode-preserving across the inode swap), rather than two independently
-  hand-synchronised copies of the same durability sequence -- the drift that
-  let this one gap outlive the other's fix. Two further gaps closed in the
-  same round: the extraction had initially reproduced `mkstemp`'s hardcoded
-  `0600` with nothing to restore a rewritten file's original mode after the
-  swap, which would have unconditionally narrowed `.west/config`'s
-  permissions on every rewrite; and the helper's failure cleanup only caught
-  `OSError`, so an unencodable `content` (`UnicodeEncodeError`, a `ValueError`)
-  or an unrecognised `encoding=` (`LookupError` from `os.fdopen` itself) both
-  left the `*.tan-tmp` sibling on disk, un-unlinked, instead of being
-  reported and cleaned up like any other write failure. (#516)
-=======
 - **`tan build` spawned a slice's `command.tool` by its bare identity, never
   the absolute path it had just resolved -- ADR-0020 says the executor
   resolves by explicit path, never PATH, and the check/spawn split let the
@@ -365,7 +341,29 @@ All notable changes to `tan` are documented here. Format follows
     (`tan/planner/orchestrator.py::_slice_command`) only ever emits the
     bare identities `west`/`bitbake`/`cmake`, never an absolute path.
     (#510, #530)
-<<<<<<< HEAD
+- **`tan bootstrap`'s `reconcile_west_manifest_path` never `fsync`'d the
+  temp sibling it writes `.west/config` through, so `os.replace`'s atomicity
+  guarantee (the RENAME only) was covering nothing about the CONTENT
+  reaching stable storage** -- a power loss between the rename landing and
+  the temp's data blocks flushing could leave the topdir's only manifest
+  pointer, shared by every SDK version under it, renamed to its real name
+  with truncated or missing content. This is the identical gap #489 closed
+  in `tan debug-config`'s `launch.json` write, from which this shape was
+  originally copied; the fix had landed on one call site and not the other.
+  Both now share one helper, `tan/core/atomic_write.py:atomic_write_text`
+  (`fsync`'d before the rename, a POSIX directory `fsync` after, symlink-safe,
+  mode-preserving across the inode swap), rather than two independently
+  hand-synchronised copies of the same durability sequence -- the drift that
+  let this one gap outlive the other's fix. Two further gaps closed in the
+  same round: the extraction had initially reproduced `mkstemp`'s hardcoded
+  `0600` with nothing to restore a rewritten file's original mode after the
+  swap, which would have unconditionally narrowed `.west/config`'s
+  permissions on every rewrite; and the helper's failure cleanup only caught
+  `OSError`, so an unencodable `content` (`UnicodeEncodeError`, a `ValueError`)
+  or an unrecognised `encoding=` (`LookupError` from `os.fdopen` itself) both
+  left the `*.tan-tmp` sibling on disk, un-unlinked, instead of being
+  reported and cleaned up like any other write failure. (#516)
+
 - **`tan new-som`: a YAML-injection hole, a `--force` rollback that could
   destroy a customer's hand-filled preset, and three smaller correctness
   gaps in the porting-kit scaffolder.** Five defects beyond the
@@ -468,9 +466,7 @@ All notable changes to `tan` are documented here. Format follows
     character check (now a shared `_has_control_char` helper) rejects DEL
     alongside the C0 range, and the self-check's `yaml.safe_load` call is
     now itself guarded as a backstop. (#496)
-=======
->>>>>>> origin/dev
->>>>>>> origin/dev
+
 
 ## [0.5.1] — 2026-08-04
 
