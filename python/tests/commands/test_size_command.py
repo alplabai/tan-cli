@@ -420,7 +420,14 @@ def test_a_tool_in_the_current_directory_is_never_resolved(tmp_path, monkeypatch
     with its own `size.exe` at its root would be reported available and then
     SPAWNED. The oracle walks PATH by hand for exactly this reason, and
     `shutil.which` reintroduces it on Windows: it always inserts `os.curdir` ahead
-    of the search list, even when given an explicit `path=`."""
+    of the search list, even when given an explicit `path=`.
+
+    tan-cli#567: `_find_on_path` now answers the resolved PATH (or `None`)
+    rather than a bool -- the resolved value was the one thing the spawn needed
+    and the one thing this walk threw away. The property under test is
+    unchanged, and it is now enforced for `tan build` and `tan flash` too: the
+    walk moved to `tan.core.tool_lookup.resolve_tool`, whose POSIX branch had
+    to LEARN this empty-entry filter, which #510's copy never had."""
     from tan.commands.size_cmd import _find_on_path
 
     marker = "tan-size-cwd-probe"
@@ -431,18 +438,37 @@ def test_a_tool_in_the_current_directory_is_never_resolved(tmp_path, monkeypatch
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", os.pathsep.join(["", str(tmp_path / "nope"), ""]))
     monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
-    assert _find_on_path(marker) is False
+    assert _find_on_path(marker) is None
     # ...and it IS found once the directory is named on PATH, so the negative
     # above is about the CWD, not about the probe being broken.
     monkeypatch.setenv("PATH", str(tmp_path))
-    assert _find_on_path(marker) is True
+    found = _find_on_path(marker)
+    assert found is not None
+    assert Path(found).parent == tmp_path
 
 
-def test_an_unset_path_resolves_nothing_rather_than_raising(monkeypatch):
+def test_an_unset_path_resolves_from_the_default_path_never_the_cwd(monkeypatch, tmp_path):
+    """An unset `PATH` must not raise -- the original point of this test -- and
+    must not become an implicit current-directory search.
+
+    tan-cli#567 changed the ANSWER, deliberately: the shared lookup falls back
+    to `os.defpath` (`/bin:/usr/bin`), which is exactly what a POSIX `Popen`
+    with a bare `argv[0]` and no `PATH` consults for itself (`confstr(_CS_PATH)`)
+    and what `tan build` has done since tan-cli#510. So the check and the spawn
+    agree, which is the whole point of the issue; the old bare `False` meant
+    tan skipped a size tool it could in fact have run. What must NOT happen is
+    a cwd hit, which is what this pins."""
     from tan.commands.size_cmd import _find_on_path
 
+    probe = tmp_path / "tan-size-defpath-probe"
+    probe.write_text("")
+    probe.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PATH", raising=False)
-    assert _find_on_path("size") is False
+
+    assert _find_on_path("tan-size-defpath-probe") is None
+    resolved = _find_on_path("size")
+    assert resolved is None or Path(resolved).is_absolute()
 
 
 def test_clean_str_drops_a_padded_tbd_too():

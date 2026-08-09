@@ -736,7 +736,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # cost a paragraph of its own -- the `.bin` residual sentence had to STOP
     # naming the post-write `r`/`g` as the stage that failed, because under
     # the positional rule no post-load marker ever reaches that branch.
-    "tan/commands/flash_cmd.py": 3206,
+    # 3348, not 3206, as of tan-cli#567: no spawn on the write path may get a
+    # bare `argv[0]` any more. `_execute` resolves every program position to an
+    # absolute path before spawning and refuses a plan whose program is on
+    # neither PATH nor the venv (`_unresolved_program_outcome`), the DPIDR
+    # preflight does the same, `_child_env`/`_resolution_env` give the lookup
+    # and the spawn ONE definition of the child's environment, and the module
+    # docstring, `_tool_available` and `_execute` each carry the reasoning for
+    # why the resolved path -- not the identity the tool gate approved -- is
+    # what runs. Most of the +142 is that reasoning: `CreateProcess` searching
+    # the customer's project directory ahead of `%PATH%` is not self-evident
+    # from the diff, and the ORDER of the venv rewrite and the PATH resolution
+    # is load-bearing in a way a future reader would otherwise "simplify".
+    "tan/commands/flash_cmd.py": 3348,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -1238,7 +1250,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # `tool` that fails to launch reports `resolvedTool: null`,
     # indistinguishable from "never resolved" without a separate field this
     # port does not add).
-    "tan/commands/build/execute.py": 1119,
+    # 1073, not 1119, as of tan-cli#567: LOWERED. `_ToolResolution`/
+    # `_resolve_tool` moved out to `tan/core/tool_lookup.py` (-92) so the flash
+    # and size paths share the one hardened lookup instead of keeping a third
+    # and fourth opinion about it (tan-cli#532, 3 of its 5 sites); the private
+    # names stay as re-export aliases, and `_taskkill_program` (+16) came back
+    # the other way so the cancel path stops spawning a bare `taskkill`. The
+    # ratchet is re-pinned at the new, smaller size rather than left at the old
+    # ceiling -- a budget 46 lines above the file is a ratchet that stopped
+    # ratcheting.
+    "tan/commands/build/execute.py": 1073,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather
@@ -1779,7 +1800,20 @@ _MIRRORED = ("tan/planner/",)
 # MERGED VALUE, #581 rebased onto dev carrying #575: re-walked on the rebased
 # tree, 236. Not either side's number -- the crossing sets are disjoint.
 # MERGED VALUE, #581 rebased onto dev carrying #575/#577: re-walked, 237.
-_FUNCTION_COUNT_BUDGET = 237
+# 238, not 237, as of tan-cli#567 -- re-walked on THIS tree with the gate's own
+# `ast.walk` span>50 over all of `tan/` including `tan/planner/`, not derived by
+# arithmetic. The crossing set is measured, not assumed:
+#   * `flash_cmd.py:_execute` 47 -> 59, the ONE new crossing. Its docstring now
+#     carries why the venv rewrite must decide the PATH-prepend BEFORE the
+#     absolute-path resolution runs, and why the lookup uses the child's env.
+#   * `build/execute.py:_resolve_tool` (71) LEFT the walk and
+#     `core/tool_lookup.py:resolve_tool` (83) joined it -- a relocation, net 0.
+#     It grew by 12 on the way for the empty-`PATH`-entry paragraph.
+#   * `flash_cmd.py:_flow_d_preflight` 156 -> 172 and `size_cmd.py:_run`
+#     105 -> 110 were already over and move nothing.
+# `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
+# `bootstrap_cmd.py:_run`, measured at 704 here, and nothing above goes near it.
+_FUNCTION_COUNT_BUDGET = 238
 _FUNCTION_WORST_BUDGET = 707
 
 

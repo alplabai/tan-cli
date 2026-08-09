@@ -39,6 +39,20 @@ and rewrites the spawned program to the venv's own copy
 ([`_programs_resolved_in_venv`]), and `workspace` becomes every spawned
 child's cwd. The search itself is shared, not duplicated, with
 `tan.commands.build.execute` -- both consume `tan.core.venv`.
+
+**No spawn in this file ever gets a bare `argv[0]` (tan-cli#567).** The
+required-tool gate ([`_tool_available`]) walks `$PATH` by hand specifically so
+the current directory cannot supply a probe/programmer -- and then every spawn
+below used to hand `subprocess` the bare identity, which on Windows is resolved
+by `CreateProcess` (`lpApplicationName=NULL`), whose documented search order
+puts *the current directory for the parent process* ahead of `%PATH%`. tan's
+cwd for a flash is the customer's project. [`_execute`] now resolves every
+program position -- `argv[0]` AND the token after a `"|"` -- to an absolute
+path first, through the same `tan.core.tool_lookup` the build path has used
+since tan-cli#510, and refuses the entry outright rather than spawning a name
+the current directory could satisfy ([`_unresolved_program_outcome`]). The
+read-only DPIDR preflight gets the same treatment, for the stronger reason that
+it is what decides which board the write is about to go to.
 """
 from __future__ import annotations
 
@@ -78,7 +92,6 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_ladder
-from tan.commands.doctor_cmd import on_path
 from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.flash_plan import (
     FAIL,
@@ -122,6 +135,7 @@ from tan.core.setools import (
     sign_slot0,
     unresolved_message,
 )
+from tan.core.tool_lookup import resolve_program_positions, resolve_tool
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -385,13 +399,26 @@ def _tool_available(tool: str, venv_bin: Path | None = None) -> bool:
     west-capable workspace venv (`venv_bin`, when one resolved), mirroring
     Rust's `tool_available` (tan-cli#289/#59): `west` is the case that
     matters -- `tan bootstrap` installs it INSIDE the venv, and a
-    GUI-launched editor's PATH never has it. `doctor_cmd.on_path` walks
+    GUI-launched editor's PATH never has it. `tool_lookup.resolve_tool` walks
     `$PATH` by hand rather than using `shutil.which`, which on Windows probes
     the CURRENT DIRECTORY first -- a project checked out with its own
     `openocd.exe` at its root would otherwise be reported as this host's
-    tooling and then SPAWNED against attached silicon."""
+    tooling and then SPAWNED against attached silicon.
+
+    **This is the GO/NO-GO gate only, and it answers a bool** -- which is
+    exactly why tan-cli#567 was possible: the resolved path this walk produces
+    was computed and thrown away, and `_execute` then handed the platform the
+    bare identity the gate had just protected. The gate stays a bool (its
+    consumer, `flash_plan.tool_gate`, asks a yes/no question about a whole
+    `requires` list); the SPAWN now does its own resolution through the SAME
+    `tool_lookup` module, so the two can no longer disagree about what runs.
+    See [`_execute`], which does that resolution.
+
+    tan-cli#532: the walk itself is no longer `doctor_cmd.on_path`'s private
+    copy but the shared one -- three of the five hand-rolled implementations
+    that issue enumerates now share a single definition."""
     try:
-        if on_path(tool) is not None:
+        if resolve_tool(tool, os.environ).resolved is not None:
             return True
     except (OSError, ValueError):
         pass
@@ -588,7 +615,7 @@ def _spawn(
     `workspace` (tan-cli#289/#61), when given, becomes the child's cwd, so
     `west flash` can see alp-sdk's out-of-tree runners.
     """
-    env = prepend_path(dict(os.environ), venv_bin) if venv_bin is not None else None
+    env = _child_env(venv_bin)
     try:
         if capture:
             proc = subprocess.run(
@@ -1086,7 +1113,7 @@ def _spawn_pipeline(
     `venv_bin`/`workspace`: see [`_spawn`] -- the same PATH-prepend/cwd
     threading, applied to BOTH halves of the pipeline (tan-cli#289/#59/#61).
     """
-    env = prepend_path(dict(os.environ), venv_bin) if venv_bin is not None else None
+    env = _child_env(venv_bin)
     deadline = time.monotonic() + timeout
     try:
         first = subprocess.Popen(  # noqa: S603 -- argv comes from the pure planner
@@ -1261,6 +1288,74 @@ def _programs_resolved_in_venv(argv: list[str], venv_bin: Path | None) -> list[s
     return out
 
 
+def _child_env(venv_bin: Path | None) -> dict[str, str] | None:
+    """The `env=` every spawn in this module hands its child: the venv's bin dir
+    prepended onto PATH when one is in play, else `None` -- which `subprocess`
+    documents as "inherit this process's environment", and which is exactly the
+    pre-tan-cli#59 behaviour.
+
+    One definition, called by [`_spawn`], [`_spawn_pipeline`] and
+    [`_resolution_env`], rather than the same expression written out three
+    times: tan-cli#567's whole shape is a lookup and a spawn that drifted into
+    disagreeing, and the env is the other half of what they must agree on."""
+    if venv_bin is None:
+        return None
+    return prepend_path(dict(os.environ), venv_bin)
+
+
+def _resolution_env(venv_bin: Path | None) -> dict[str, str]:
+    """The environment a child spawned with this `venv_bin` will actually see
+    -- the ONE thing `argv[0]` may be resolved against (tan-cli#567/#510).
+
+    [`_child_env`], with its "inherit" `None` spelled out as the environment
+    that inheriting actually yields, because a lookup needs a real mapping.
+    Resolving against a different PATH than the child gets is precisely how
+    tan-cli#510's MAJOR 2 let an approved tool and a spawned tool be two
+    different files."""
+    return _child_env(venv_bin) or dict(os.environ)
+
+
+def _unresolved_program_outcome(program: str, venv_bin: Path | None, capture: bool) -> _Outcome:
+    """The refusal for a plan whose program is on neither PATH nor the venv.
+
+    **Refused, never spawned bare (tan-cli#567).** "Not on PATH and not in the
+    workspace venv" leaves exactly one place `CreateProcess` could still find
+    something by that name: the current directory -- the customer's project.
+    Handing the OS the bare name at that point is not "letting the OS report a
+    clean not-found", it is asking the project directory to supply the binary
+    that writes to the board. So this becomes a failed entry instead, with the
+    searched PATH named the same way `tool_lookup.resolve_tool`'s `missingTool`
+    refusal names it (tan-cli#510's acceptance: a refusal a customer can act on
+    without a support ticket).
+
+    On POSIX this replaces a message, not an outcome: `execvp` never searched
+    the current directory, so the same plan already failed here -- with
+    `could not spawn: [Errno 2] No such file or directory: 'dd'`. The `could
+    not spawn:` prefix is kept so both read the same way in
+    `data.entries[].message`.
+
+    Reachable in ordinary use because the go/no-go gate does not cover every
+    program a plan names: `tool_gate` only checks the backend's declared
+    `requires`, so the `gunzip`/`xz`/`dd` halves of a `.wic.gz` image pipeline
+    can reach the spawn ungated, and `--skip-missing-tools` is about the
+    declared list too."""
+    searched = resolve_tool(program, _resolution_env(venv_bin)).searched
+    venv_note = (
+        " and the workspace venv does not provide it"
+        if venv_bin is not None
+        else " (no workspace venv resolved for this run)"
+    )
+    return _Outcome(
+        success=False,
+        stderr=(
+            f"could not spawn: `{program}` was not found -- searched {searched}"
+            f"{venv_note}. Refusing to hand the bare name to the OS: on Windows "
+            "that lets the current directory supply the binary (tan-cli#567)."
+        ),
+        captured=capture,
+    )
+
+
 def _execute(
     plan: FlashPlan, capture: bool, venv_bin: Path | None = None, workspace: str | None = None
 ) -> _Outcome:
@@ -1275,10 +1370,41 @@ def _execute(
     (mirroring the oracle's `on_path = if argv == plan.argv { None } else {
     venv_bin }`) -- a plan naming only absolute/non-venv tools must not have
     its PATH silently rewritten for no reason.
+
+    **tan-cli#567: every remaining PROGRAM position is then resolved to an
+    absolute path, and a plan whose program does not resolve is REFUSED rather
+    than spawned.** The venv rewrite above only ever covered tools the venv
+    itself provides, so `west`, a host-PATH `openocd`/`pyocd`/`JLinkExe`, and
+    both halves of the `gunzip | dd` image pipeline all reached
+    `subprocess.run`/`Popen` as bare names -- and a bare `argv[0]` on Windows is
+    resolved by `CreateProcess` (`lpApplicationName=NULL`), whose documented
+    search order consults *the current directory for the parent process* BEFORE
+    `%PATH%`. tan's cwd for a flash is the customer's project. So a project
+    carrying its own `openocd.exe`/`dd.exe` at its root got that binary spawned
+    against attached silicon, having passed a tool gate that had carefully
+    looked at `%PATH%` and nowhere else. #510 closed exactly this on the build
+    path; this is the write path, where the consequence is a wrong image on a
+    customer's board.
+
+    The ORDER matters and is not interchangeable: `on_path_bin` is decided by
+    the VENV rewrite alone, before the PATH resolution runs. Deciding it after
+    would prepend the venv to the child's PATH whenever ANY program resolved to
+    an absolute path -- i.e. almost always -- which is the "must not have its
+    PATH silently rewritten for no reason" rule above, inverted. And the PATH
+    resolution is done against the env the child will ACTUALLY get
+    ([`_resolution_env`]), never `os.environ` when those differ: resolving
+    against one environment and spawning into another is tan-cli#510's own
+    MAJOR 2, and it would reintroduce the same check/spawn disagreement one
+    call up.
     """
     argv = list(plan.argv)
-    resolved = _programs_resolved_in_venv(argv, venv_bin)
-    on_path_bin = venv_bin if resolved != argv else None
+    venv_resolved = _programs_resolved_in_venv(argv, venv_bin)
+    on_path_bin = venv_bin if venv_resolved != argv else None
+    resolved, unresolved = resolve_program_positions(
+        venv_resolved, _resolution_env(on_path_bin), PIPE
+    )
+    if unresolved is not None:
+        return _unresolved_program_outcome(unresolved, on_path_bin, capture)
     if PIPE in resolved:
         cut = resolved.index(PIPE)
         return _spawn_pipeline(
@@ -2504,8 +2630,24 @@ def _flow_d_preflight(
         # refusal here would be proceeding to the WRITE with the identity
         # unconfirmed.
         return f"{method}: no J-Link binary on PATH or in the workspace venv for the DPIDR preflight."
-    resolved = _programs_resolved_in_venv([binary], venv_bin)
-    on_path_bin = venv_bin if resolved != [binary] else None
+    venv_resolved = _programs_resolved_in_venv([binary], venv_bin)
+    on_path_bin = venv_bin if venv_resolved != [binary] else None
+    # tan-cli#567: and then to an absolute PATH location, exactly as `_execute`
+    # does for the write itself -- this probe is the step that decides WHICH
+    # BOARD is about to be written, so a project-supplied `JLinkExe.exe` here
+    # would be answering the identity question with a value of its own choosing
+    # and then handing tan a green light. `unresolved` is not reachable via
+    # `_flash_entry` (the `binary is None` gate above already required
+    # PATH-or-venv availability through the same lookup) but is answered rather
+    # than asserted: an `assert` is stripped by `-O`, and the fallback must
+    # never be "spawn it bare anyway".
+    resolved, unresolved = resolve_program_positions(venv_resolved, _resolution_env(on_path_bin))
+    if unresolved is not None:
+        return (
+            f"{method}: the J-Link binary `{unresolved}` for the DPIDR preflight could "
+            "not be resolved to a real location on PATH or in the workspace venv; "
+            f"refusing to {verb} without confirming which board is attached."
+        )
     # No `-ExitOnError`: a failed connect is the SIGNAL being read here, not an
     # error to abort the probe on.
     outcome = _spawn_jlink([resolved[0], "-NoGui", "1", "-CommanderScript"], script, True,
