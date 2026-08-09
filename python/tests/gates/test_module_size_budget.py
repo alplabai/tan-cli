@@ -1661,7 +1661,9 @@ _MIRRORED = ("tan/planner/",)
 # crossings; the sets are disjoint, which is why neither side's number is the
 # answer and only a walk of the union is. `_FUNCTION_WORST_BUDGET` stays 707:
 # worst measured 704 here (`bootstrap_cmd.py:_run`, +3 from #583), not 701.
-_FUNCTION_COUNT_BUDGET = 230
+# MERGED VALUE on dev carrying #494/#495 (#583) and #498 (#576): re-walked on
+# the merged tree, 234. Disjoint crossing sets, so no side's number applies.
+_FUNCTION_COUNT_BUDGET = 234
 _FUNCTION_WORST_BUDGET = 707
 
 
