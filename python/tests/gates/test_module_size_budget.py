@@ -753,7 +753,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # correction from alp-sdk#1228. Raised rather than extracted: this file
     # mirrors an upstream module line for line, so a split here would make the
     # next port a hand-merge instead of a diff. Measured, not computed.
-    "tan/planner/kconfig.py": 1679,
+    # 2014, not 1679, as of the alp-sdk#1348 re-sync (tan-cli#557/#558/#559):
+    # `_split_server_url` + `_hawkbit_server_lines` + `_hawkbit_poll_line`
+    # (the OTA URI split and the seconds->minutes conversion), the `_LOG_
+    # MODULES` guard table with its transcription of the pinned Zephyr v4.4.1
+    # log_config `if` chains, `_enabled_symbols`, and the rewritten
+    # `_emit_diagnostics` that emits the choice-symbol form. +335 -- upstream's
+    # own delta to the byte (its `scripts/alp_orchestrate/kconfig.py` went
+    # 1684 -> 2019 across the same range). Raised, not extracted, for the
+    # reason above: this file mirrors an upstream module line for line.
+    # Measured with the gate's own reader on this branch's tree, not computed.
+    "tan/planner/kconfig.py": 2014,
 
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
@@ -1793,7 +1803,32 @@ _MIRRORED = ("tan/planner/",)
 # MERGED VALUE, #581 rebased onto dev carrying #575: re-walked on the rebased
 # tree, 236. Not either side's number -- the crossing sets are disjoint.
 # MERGED VALUE, #581 rebased onto dev carrying #575/#577: re-walked, 237.
-_FUNCTION_COUNT_BUDGET = 237
+# 242, not 237, after the alp-sdk#1345/#1347/#1348 planner re-sync. Re-walked
+# with the gate's own `ast.walk` span>50 over ALL of `tan/` (planner included)
+# on this branch's tree and diffed against the same walk on `origin/dev`: the
+# crossing set gained exactly five entries and lost none, 237 + 5 = 242.
+#   * `carveout.py:_place_pinned` 62 (new) and `partition.py:_place` 61 (new)
+#     -- the two-pass placement both fixes need. The pinned pass and the bump
+#     pass are one body each; splitting them would put the bounds check in a
+#     different function from the overlap check it feeds.
+#   * `kconfig.py:_split_server_url` 70 (new) -- the `ota.server.url` ->
+#     (host, port, scheme) decomposition, hand-parsed because `urlsplit`
+#     lowercases `.hostname` and a `${VAR}` placeholder is case-sensitive.
+#     Most of the span is the five refusal messages.
+#   * `kconfig.py:_emit_diagnostics` 66 -- a CROSSING, not a new function: it
+#     went from an int-form one-liner per module to the choice-symbol form
+#     with the per-module guard/log-gate checks and the three comment branches
+#     that explain each downgrade.
+#   * `sdk_compat.py:load_family_table` 62 -- also a crossing (it is the
+#     renamed `_load_family_table`, ~12 lines before): the fail-open read
+#     became four distinct refusals, and the docstring carries the
+#     ABSENT-vs-UNUSABLE distinction the whole fix turns on.
+# All five are mirror-file functions that exist upstream at the same shape, so
+# extracting here would make the next re-sync a hand-merge instead of a diff.
+# `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
+# `bootstrap_cmd.py:_run` at 704, which none of this goes near. Of the 242,
+# `tan/planner/` contributes 54 (was 49) -- and is NOT excluded from the walk.
+_FUNCTION_COUNT_BUDGET = 242
 _FUNCTION_WORST_BUDGET = 707
 
 

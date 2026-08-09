@@ -161,7 +161,55 @@ from tests.conftest import sdk_root
 #:     reachability rule alp-sdk's `check_library_registry.py` cross-checks,
 #:     so the two can no longer drift (9 curated libraries were silently
 #:     missing from the old list).
-PINNED_SDK_COMMIT = "f30f4d4ba76c235cbb2b2cc713666cb858677e03"  # alp-sdk origin/dev
+#:
+#: `f30f4d4b` -> `ccd34f06` (tan-cli#552/#553/#554/#555/#557/#558/#559/#562/
+#: #563). THREE upstream commits touch `scripts/alp_orchestrate/` in this
+#: range, all three BEHAVIOURAL, all three ported. Every one of the nine tan
+#: issues they close was reproduced on `dev` and re-run after the port; none
+#: was taken on the commit subject's word:
+#:
+#:   - `f6dcad09` (alp-sdk#1345) -> tan-cli#552/#553/#554. `carveout.py` gets
+#:     `_endpoint_window` (`access_windows:`, the RZ/V2N CM33's 256 MiB DDR
+#:     aperture -- a top-down allocation handed it `0x147f80000`, a 33-bit
+#:     address that truncates BELOW the DDR base when cast to a pointer on
+#:     the M33), `_first_free_down`, `placed_spans`, and a TWO-PASS placement
+#:     that runs explicit `ipc[].address:` pins before the bump allocator so
+#:     two channels can no longer resolve onto one physical address and both
+#:     report `ok`. `partition.py` gets the same two-pass shape for
+#:     `storage[].offset_kib:` -- in one pass a pin was only ever an obstacle
+#:     for the siblings that sorted BEFORE it, so `offset_kib: 0` collided
+#:     with an already-auto-allocated sibling and was dropped from
+#:     `dts-partitions.dtsi` entirely.
+#:   - `cf4ba601` (alp-sdk#1347) -> tan-cli#562/#563. `sdk_compat.py`'s
+#:     family-table reader stops failing open: `_load_family_table` is RENAMED
+#:     PUBLIC to `load_family_table` and now refuses four distinct
+#:     present-but-unusable shapes (unreadable, unparseable, not a mapping, no
+#:     `hw_revisions:` block) instead of answering `{}` -- which all three
+#:     hw_rev gates read as "nothing to judge", so one tab-indented line
+#:     disabled every one of them and emitted a wrong-hardware artefact at
+#:     exit 0. `secure.py` stops hard-defaulting every SoM family to `mcuboot`
+#:     (`_FAMILY_BOOT_METHOD_DEFAULTS`) and returns "" for a project with no
+#:     Zephyr slice at all, so a Yocto-only V2N project with
+#:     `boot.method: rsa3072` -- a value `validate.py` PERMITS for
+#:     renesas-rzv2n -- no longer takes the whole build-plan emit down with
+#:     sysbuild advice for a platform that never runs sysbuild.
+#:   - `f01a2b94` (alp-sdk#1348) -> tan-cli#555/#557/#558/#559. `libraries.py`
+#:     gains `scoped_names` + `_check_slice_requires` + `yocto_unwireable` so
+#:     the core-scoped `libraries:` channel goes through the SAME ADR-0018
+#:     layer as the project-wide one; `kconfig.py` gains `_split_server_url` /
+#:     `_hawkbit_server_lines` (the URI was handed whole to
+#:     `CONFIG_HAWKBIT_SERVER`, a DNS lookup that can never resolve, and
+#:     `_PORT`/`_USE_TLS` were never emitted), `_hawkbit_poll_line` (the
+#:     Kconfig symbol is MINUTES, board.yaml is SECONDS -- the schema's own
+#:     1800 s default was emitted as 1800 minutes = 30 hours), and the
+#:     `_LOG_MODULES` guard table behind a `_emit_diagnostics` that emits the
+#:     CHOICE-symbol form `CONFIG_<MOD>_LOG_LEVEL_<LEVEL>=y` (the old int form
+#:     was promptless and could not build for ANY key).
+#:
+#: alp-sdk#1344 is deliberately NOT in this range: it is still OPEN and
+#: CONFLICTING upstream, so tan-cli#550/#551 stay open and are NOT claimed by
+#: this bump.
+PINNED_SDK_COMMIT = "ccd34f0648cc4f26a3230f337935050cd999d8a0"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -172,21 +220,21 @@ PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "739a0288487997d6f1be7dc1f47fcf05b34a16386c0c81e8fe4eaadcfb84e3f0",
     "buildplan.py": "65542fca35c7fa960192fe8245539d9ea47192072d5c00747db7517b9d1bc66f",
-    "carveout.py": "cdc9d78544441ae6b05dbdb12c5790d2bf4d5cb97fed481df14b57f215265d18",
+    "carveout.py": "23e7920110c333a1f3cbf51ce186c4c2cebdb3ef1573c06df64ca1e9a80be478",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "af09c3315cd6f862b799f1244f2b1dccea13a3dceb3399a8ceaeaea1cfe4fa75",
+    "kconfig.py": "7d68f6d739f280c72b8cf20165385c474aed96bff38f82b21a97bdde7563744b",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
-    "libraries.py": "47b823e0fc06cc657a3c3068598b953e342720cf359443651a9996b93be7aaa5",
+    "libraries.py": "d3970c0a1b8bba1bf647a6383f668e0a46ceb83b1f235c438e5a228b4cb1c202",
     "loader.py": "bd051f509d04e1920263c13670e2b6b0a30c0bdf0d1d93f11ee620c026b9d7d0",
     "manifest.py": "930aa9c453fd86b487f66ec84be8f074a53f22a6077b0310390e176fee7918ba",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
     "models.py": "6d33258874d6f732d66668d30c22fd644e02de2fb9f35e7b497ddd2d81164109",
     "orchestrator.py": "01c7d90fc50bf85974fdbd228fac8319d687a121f45bc64c9528dd1fed3debff",
-    "partition.py": "03368920536ebc82a64f5220cb6c7defbc393c68b9f0815357c4f345eb681d03",
+    "partition.py": "7f37224ff1aa05dd6d943424a664bc4d115dc05853762072854d43ea3628591c",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
-    "sdk_compat.py": "ae8e5244877d3e9ad35f89e6b7782861f810825321052ed9f5770b9762c0281a",
-    "secure.py": "a6a5762fbac2f99fc4356f01b3ffedd15d366af6d2ddde0042223b3da749cbe6",
+    "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
+    "secure.py": "f58c5e4ff2c00908ccb3783ce925b26cdaa311548dc8694ffdb0fd01dfce8e95",
     "slugs.py": "339bffdb8e5fef41eefc0cd2eb05705c2b3e53580c7cfd775e1dd1c65127d5cb",
     "topology.py": "12f5f62d3adeb9e935594934fd2fc2b1fbeaec6f466d6dd89c329c54e844f3b1",
     "validate.py": "ca7b7f8339595cddc7ab3df1807bd1020b3e3e70d900ead3793b68afcca98c85",
@@ -265,7 +313,7 @@ PINNED_HASHES: dict[str, str] = {
 #:     `_m33_sm` `west flash --host <board-ip>` rule. Both change
 #:     `--emit scaffold` bytes, which is why `python/tan/templates/vendored/`
 #:     is re-vendored in this same change.
-HAND_PORT_PINNED_SDK_COMMIT = "f30f4d4ba76c235cbb2b2cc713666cb858677e03"  # alp-sdk origin/dev
+HAND_PORT_PINNED_SDK_COMMIT = "ccd34f0648cc4f26a3230f337935050cd999d8a0"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -275,7 +323,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "f30f4d4ba76c235cbb2b2cc713666cb858677e03"  # alp-
 #: PINNED_HASHES above, where the relocation is 1:1) cannot hold this.
 HAND_PORT_HASHES: dict[str, str] = {
     "scripts/gen_zephyr_board.py": "351d20dee0499605b9015f982edc7793f3a321109886ac762578ab79e3ad1af3",
-    "scripts/alp_project_loader.py": "5defcec1248f1246403f414119b342ad8caaf26e7db2fb1ab56bbecceecab79a",
+    "scripts/alp_project_loader.py": "d5f142173a13cfac9e130ef8fde90d35d6bb92d21d152925a275b3e8bdaa49db",
     "scripts/alp_template.py": "6e62ac385154cef4decb8bb54eb9fae27e45f9797faffe8159cedca770f1f352",
     "scripts/alp_project_emit/__init__.py": "62c4742bc373e7fafcd8aa864ad7692d3c05b610c6d7457023aeb82c98847d88",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",

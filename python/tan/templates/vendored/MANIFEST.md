@@ -9,9 +9,21 @@ from an un-revendored SDK change.
 
 ## Source
 
+- **`PINNED_SDK_TAG` has since moved past this vendor point, deliberately.**
+  The tan-cli#552…#563 planner re-sync bumped `parity.yml`'s `PINNED_SDK_TAG`
+  (and `ci.yml`'s `sdk_parity` checkout `ref:`) from `f30f4d4b` to `ccd34f06`,
+  and **no re-vendoring was needed**: nothing under `examples/`, the scaffold
+  catalog or the templates themselves changed in that range — the whole
+  alp-sdk diff is `scripts/`, `metadata/schemas|socs`, `docs/`, `tests/` and
+  `CHANGELOG.md`. Verified, not assumed: `scaffold_byte_parity.py --sdk
+  <ccd34f06>` is rc 0, **9/9** (template, sku) pairs PASS against this tree
+  unchanged. So the vendor point below stays where it is, and the two refs are
+  allowed to differ for exactly this reason.
+
 - **Current vendor point (all templates):** **`f30f4d4b`** (alp-sdk `dev`,
-  the same commit `parity.yml`'s `PINNED_SDK_TAG` now names) — re-vendored by
-  the tan-cli#543/#544/#545 planner re-sync. **Eleven** files moved:
+  the commit `parity.yml`'s `PINNED_SDK_TAG` named when this was captured) —
+  re-vendored by the tan-cli#543/#544/#545 planner re-sync. **Eleven** files
+  moved:
   - The **seven** `README.md` doc-link files (`diagnostics`, `minimal` and
     `sensor` for both SKUs, plus `iot`/E1M-AEN801) change only
     `blob|tree/v0.15.0-rc1/` → `blob|tree/v0.15.0/`. Those bytes are now the
