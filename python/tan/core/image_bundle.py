@@ -79,6 +79,33 @@ def is_plain_relative(path: str) -> bool:
     return True
 
 
+def is_plain_filename(name: str) -> bool:
+    """True when `name` is safe to use as ONE filename component -- the check
+    [`slice_archive_name`] needs, which is strictly narrower than
+    [`is_plain_relative`].
+
+    `is_plain_relative` answers "is this a safe RELATIVE PATH", so it correctly
+    accepts nested shapes: `a/b` and `a/./b` are both plain relative paths. A
+    value that gets interpolated into a single filename may not contain a
+    separator at all -- `a/b` there means a `slices/a/` subdirectory that was
+    never created, not a filename.
+
+    Both separators are rejected on BOTH platforms, unlike `is_plain_relative`'s
+    deliberately platform-dependent component scan. The resulting string is not
+    only a local filename: [`slice_artefact_rel`] folds it into the machine
+    contract in `bundle-manifest.json`, which is read on whatever OS consumes
+    the bundle, and a `\\` a Linux `tan image` treated as an ordinary character
+    is a separator to the Windows consumer that reads it back.
+    """
+    if not name or name in (".", ".."):
+        return False
+    if _SEPARATORS.search(name):
+        return False
+    if os.name == "nt" and os.path.splitdrive(name)[0]:
+        return False  # `C:` / `C:foo` -- a drive prefix, not a name
+    return True
+
+
 def slice_archive_name(core_id: str, os_name: str) -> str | None:
     """Archive filename for a slice: `<core_id>-<os>.tar.gz`.
 
@@ -92,8 +119,18 @@ def slice_archive_name(core_id: str, os_name: str) -> str | None:
     site, because [`slice_artefact_rel`] needs the identical check for the
     manifest's `artefact` string -- a per-call-site guard is how this class of
     bug keeps recurring.
+
+    The check is [`is_plain_filename`], NOT `is_plain_relative` (tan-cli#499
+    defect 9): the path guard accepts a nested `a/b`, which produced
+    `slices/a/b-zephyr.tar.gz` in a directory nothing had created, so
+    `image_cmd._tar_gzip_dir` raised and the WHOLE `tan image` run aborted at
+    exit 3 with no `bundle-manifest.json` and already-tarred slices orphaned --
+    where the equally-invalid `../x` took the intended `image.slice-unsafe-name`
+    warning-skip and still produced a bundle. This is a deliberate divergence
+    from the frozen oracle, which shares the defect; `is_plain_relative` itself
+    is unchanged, so its own nested-path contract (`a/./b` is plain) still holds.
     """
-    if not is_plain_relative(core_id) or not is_plain_relative(os_name):
+    if not is_plain_filename(core_id) or not is_plain_filename(os_name):
         return None
     return f"{core_id}-{os_name}.tar.gz"
 

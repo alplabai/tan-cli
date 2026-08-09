@@ -231,6 +231,39 @@ def budget_note_only(note: str) -> MemoryBudget:
     return MemoryBudget(None, None, note)
 
 
+def _saturating_u64(value: float) -> int:
+    """Rust's `as u64` cast: truncate toward zero, saturate at both ends.
+
+    `+inf` saturates to `u64::MAX`, and this must be handled EXPLICITLY: Python's
+    `int()` refuses it (`OverflowError: cannot convert float infinity to
+    integer`) where Rust's cast does not. `-inf` and NaN join every non-positive
+    input at 0.
+
+    That `int()` used to sit outside its caller's `try` (tan-cli#499 defect 8),
+    so an infinite `mram_mb` / `soc_flash_mb` / `tcm_kb` / `sram_banks_kb` entry
+    -- which `json.loads` produces for an `Infinity` literal or an overflowing
+    `1e400` in a SoC JSON -- collapsed the whole `tan size` run into
+    `size.internal-failure` at exit 5, with `data.slices` EMPTY (every other
+    slice's measurement discarded) and `project` null.
+
+    `u64::MAX` and not 0 because that is what the oracle emits for the nearest
+    input it can actually read: measured, `"mram_mb": 1e300` gives
+    `tan 0.4.1` `"flash":{"total":18446744073709551615}` at exit 0, so
+    saturating keeps this function continuous across the f64 range instead of
+    discontinuously reporting "no budget" one representable step past 1e300.
+    The oracle never reaches its own cast for `1e400`/`Infinity` -- serde_json
+    refuses the literal and the slice comes back with
+    `budget_note: "unreadable SoM preset for <SKU>"`, totals null, exit 0. That
+    remaining divergence is upstream of this file, in `size_cmd._as_f64`'s
+    unguarded `float()`, and is NOT fixed here.
+    """
+    if value != value or value <= 0:  # NaN, -inf, and every non-positive
+        return 0
+    if value == float("inf"):
+        return _U64_MAX
+    return min(int(value), _U64_MAX)
+
+
 def _mb_to_bytes(mb: float) -> int:
     """Megabytes -> bytes with Rust's `as u64` cast semantics: truncate toward
     zero, and saturate a negative or NaN input to 0. A `Some(0)` total counts as
@@ -240,9 +273,7 @@ def _mb_to_bytes(mb: float) -> int:
         value = float(mb) * 1024.0 * 1024.0
     except (TypeError, ValueError, OverflowError):
         return 0
-    if value != value or value <= 0:  # NaN or non-positive
-        return 0
-    return min(int(value), _U64_MAX)
+    return _saturating_u64(value)
 
 
 def _kib_to_bytes(kib: float) -> int:
@@ -250,15 +281,24 @@ def _kib_to_bytes(kib: float) -> int:
         value = float(kib) * 1024.0
     except (TypeError, ValueError, OverflowError):
         return 0
-    if value != value or value <= 0:
-        return 0
-    return min(int(value), _U64_MAX)
+    return _saturating_u64(value)
 
 
 def sram_banks(variant: dict) -> list[tuple[str, float]]:
     """A SoC-JSON variant's `sram_banks_kb` as ordered `(name, kib)` pairs,
-    dropping non-numeric entries. Insertion order is the wire order, so the
-    first-matching-bank rule in [`resolve_budget`] is deterministic."""
+    dropping non-numeric and unrepresentable entries. Insertion order is the
+    wire order, so the first-matching-bank rule in [`resolve_budget`] is
+    deterministic.
+
+    A JSON integer too large for an f64 is DROPPED, not crashed on
+    (tan-cli#499 defect 8): `float(10**400)` raises `OverflowError: int too
+    large to convert to float`, which took the whole `tan size` run to
+    `size.internal-failure` at exit 5. Dropping matches what `_mb_to_bytes`
+    already does with the identical value -- its own `float()` raises inside a
+    `try` and it returns the unresolved 0 -- so both regions answer "no budget"
+    for an unrepresentable integer rather than one crashing and one not. A
+    non-finite FLOAT is a different input and is passed through, to saturate in
+    [`_saturating_u64`]."""
     raw = variant.get("sram_banks_kb")
     if not isinstance(raw, dict):
         return []
@@ -266,7 +306,11 @@ def sram_banks(variant: dict) -> list[tuple[str, float]]:
     for name, value in raw.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
-        out.append((str(name), float(value)))
+        try:
+            kib = float(value)
+        except OverflowError:
+            continue
+        out.append((str(name), kib))
     return out
 
 
