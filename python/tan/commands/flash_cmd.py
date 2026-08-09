@@ -190,14 +190,18 @@ class _Entry:
     #: it, only `_run`'s own `issues` list reads it.
     preflight_unarmed: bool = False
     #: tan-cli#540: set on a CONFIRMED, real, `swd_probe` J-Link write whose
-    #: own transcript said the core never halted -- so the load went into a
-    #: running core, this backend runs no `verifybin`, and nothing observed
-    #: the bytes land. `_run` reads this to append its own
-    #: `flash.swd-probe-write-unconfirmed` warning `Issue` (and the matching
-    #: text line) alongside this entry's `ok` one; the entry's own `message`
-    #: is already qualified by `_swd_probe_unconfirmed_message`. NOT part of
-    #: the envelope contract -- `as_dict()` never emits it, exactly like
-    #: `preflight_unarmed` above.
+    #: own transcript said the core never halted AND whose Commander script
+    #: could carry no `verifybin` -- i.e. the ELF/HEX (`loadfile`) arm, where
+    #: the load went into a running core and nothing observed the bytes land.
+    #: NOT set on the raw-`.bin` arm, which since tan-cli#540 defect 2 reads
+    #: its own write back (`jlink_commander_script`) and is therefore
+    #: confirmed even when the halt failed -- only its post-write reset is in
+    #: doubt there, and the entry's message says so. `_run` reads this to
+    #: append its own `flash.swd-probe-write-unconfirmed` warning `Issue` (and
+    #: the matching text line) alongside this entry's `ok` one; the entry's
+    #: own `message` is already qualified by `_swd_probe_qualified_message`,
+    #: which is what decides this flag. NOT part of the envelope contract --
+    #: `as_dict()` never emits it, exactly like `preflight_unarmed` above.
     write_unconfirmed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
@@ -1530,15 +1534,22 @@ def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
     return ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY)
 
 
-#: The exact claim `plan_swd_probe`'s J-Link arm composes at PLAN time, in
-#: BOTH of its two `ok_message` shapes (`f"...{device} flashed via J-Link @
-#: {base}"` for a raw `.bin`, `f"...{device} flashed via J-Link"` for an
-#: ELF/HEX). Matched verbatim so the qualification below is a targeted
-#: substring swap of the one asserted word, not a re-derivation of the
-#: message shape -- the same discipline `_FLOW_D_VERIFIED_AND_RESET` applies
-#: one backend over.
+#: The exact claim `plan_swd_probe`'s J-Link arm composes at PLAN time for an
+#: ELF/HEX artefact (`f"...{device} flashed via J-Link"`) -- the arm whose
+#: Commander script takes `loadfile` and therefore carries NO `verifybin`
+#: (there is no address to give one; see `jlink_commander_script`). Matched
+#: verbatim so the qualification below is a targeted substring swap of the one
+#: asserted word, not a re-derivation of the message shape -- the same
+#: discipline `_FLOW_D_VERIFIED_AND_RESET` applies one backend over.
 _SWD_PROBE_FLASHED_CLAIM = "flashed via J-Link"
 _SWD_PROBE_ATTEMPTED_CLAIM = "write attempted via J-Link"
+
+#: The claim the SAME arm composes for a raw `.bin` (tan-cli#540 defect 2),
+#: whose script now ends its load with a `verifybin` read-back. Deliberately
+#: NOT a superstring-safe variant of the above by accident: `_SWD_PROBE_
+#: FLASHED_CLAIM` is not a substring of this one, so the two never both match
+#: and the unverifiable arm's wording can never land on a verified write.
+_SWD_PROBE_VERIFIED_CLAIM = "flashed and verified via J-Link"
 
 
 def _swd_probe_halt_markers(outcome: _Outcome) -> list[str]:
@@ -1643,20 +1654,49 @@ def _jlink_load_completed_at(transcript: str) -> int | None:
     return completed + len(_JLINK_LOAD_COMPLETED)
 
 
-def _swd_probe_unconfirmed_message(ok_message: str, markers: list[str]) -> str:
-    """Downgrade `swd_probe`'s claimed flash to what the transcript shows
-    (tan-cli#540).
+def _swd_probe_qualified_message(ok_message: str, markers: list[str]) -> tuple[str, bool]:
+    """Qualify `swd_probe`'s claim by what the transcript shows, and say
+    whether the WRITE itself is left unconfirmed (tan-cli#540). Returns
+    `(message, write_unconfirmed)`; `(ok_message, False)` unchanged when the
+    transcript named no halt failure, or when the message is not one this
+    backend's J-Link arm composed. Pure.
 
-    `plan_swd_probe` composes `{device} flashed via J-Link @ {base}` at PLAN
-    time, before anything has run, and `_flash_entry` asserts it on the exit
-    code ALONE. `jlink_commander_script` gives this arm `r`/`halt`, the load,
-    optionally `r`/`g`, and `qc` -- and, unlike Flow D, **no `verifybin` at
-    all**. So on a core that never halted this backend has neither of the two
-    things that could make "flashed" an observation: the exit code does not
-    reflect the halt (see [`_swd_probe_halt_markers`]), and nothing reads the
-    bytes back. The word `flashed` there is an intent, which is the same
-    class tan-cli#402/#487-defect-6/#522 already fixed elsewhere in this
-    message.
+    `plan_swd_probe` composes its claim at PLAN time, before anything has run,
+    and `_flash_entry` asserts it on the exit code -- which tan-cli#522
+    measured on real E1M-AEN801 silicon does NOT go non-zero when the core
+    fails to halt, even with `-ExitOnError 1` (this arm carries it). So the
+    exit code alone can never tell a halted write from a non-halted one; only
+    the transcript (see [`_swd_probe_halt_markers`]) and the script's own
+    read-back can.
+
+    **Two arms, two different truths, because only one can verify.**
+
+    * A raw `.bin` (`_SWD_PROBE_VERIFIED_CLAIM`) -- `jlink_commander_script`
+      now emits `verifybin` after the load (tan-cli#540 defect 2), so a run
+      that exits 0 has had its bytes COMPARED against the artefact. The write
+      is confirmed; `write_unconfirmed` is `False` and the
+      `flash.swd-probe-write-unconfirmed` advisory (whose own text says "this
+      backend runs no verifybin") would be false here and must not fire. What
+      a halt failure still costs is the RESET half: nothing took the part
+      through a halted reset into the image just written, so it may still be
+      executing the one it had. That is Flow D's exact residual and it gets
+      Flow D's exact treatment -- the message is qualified, the claim of a
+      verified write is not. The sentence deliberately does NOT name the
+      post-write `r`/`g` as the stage that failed, because after the
+      positional fix it cannot have been: [`_swd_probe_halt_markers`] drops
+      every marker printed after the load completes, so a marker that reaches
+      here is a PRE-load one (or one from a transcript that never reported a
+      load completing at all, where the stage is unknowable). Naming the
+      post-write reset would be the one wording that is wrong in every case
+      that still gets here.
+    * An ELF/HEX (`_SWD_PROBE_FLASHED_CLAIM`) -- `loadfile` takes no address,
+      `verifybin` requires one, and no `verifyfile` is emitted because nothing
+      in this repo has measured that the shipped Commander accepts it (see
+      `jlink_commander_script`). This arm therefore still has NEITHER of the
+      two things that could make `flashed` an observation, so the word becomes
+      `write attempted`, `write_unconfirmed` is `True`, and the advisory
+      fires. Narrowed, not deleted: a path that cannot check its own write
+      still owes the operator that sentence.
 
     Blast radius, for a reader wondering whether this matters: `swd_probe` is
     declared in alp-sdk metadata solely under `helper_firmware:` (`name:
@@ -1665,28 +1705,35 @@ def _swd_probe_unconfirmed_message(ok_message: str, markers: list[str]) -> str:
     firmware is flashed when it may not be", which then presents downstream as
     the bridge not answering with the flash step apparently clean.
 
-    Status stays `ok` and rc stays 0 (`_flash_entry`), deliberately. The write
-    may well have landed -- a busy-resident core is the documented benign
-    shape on the Flow D side -- and there is no bench evidence that a GD32
-    halt failure means a failed write. Turning a possibly-fine flash into a
-    hard failure without that evidence would be trading an overstatement for a
-    false negative, which is worse on a command that writes hardware. What
-    changes is the CLAIM, plus the `flash.swd-probe-write-unconfirmed` warning
-    `_run` raises off `_Entry.write_unconfirmed`, so an operator and a
-    `--format json` consumer both learn the write is unverified.
-
-    **This is tan-cli#540's option 1, not option 2.** The stronger fix -- give
-    the arm a real `verifybin` after the load, which is what Flow D already
-    does and what would make the success claim TRUE rather than inferred --
-    belongs in `tan.core.flash_plan.jlink_commander_script`, which composes
-    this backend's Commander script. Pure."""
+    Status stays `ok` and rc stays 0 in BOTH arms (`_flash_entry`),
+    deliberately. On the `.bin` arm a genuinely failed write no longer reaches
+    this function at all -- `verifybin` + `-ExitOnError 1` makes it a non-zero
+    exit and a `failed` entry. On the ELF/HEX arm the write may well have
+    landed (a busy-resident core is the documented benign shape on the Flow D
+    side) and there is no bench evidence that a GD32 halt failure means a
+    failed write, so failing the run there would trade an overstatement for a
+    false negative -- worse, on a command that writes hardware."""
+    if not markers:
+        return ok_message, False
     quoted = " / ".join(f'"{marker}"' for marker in markers)
+    if _SWD_PROBE_VERIFIED_CLAIM in ok_message:
+        return (
+            ok_message
+            + f"; the core did not halt (J-Link reported {quoted}), so the bytes "
+            "are verified but the target was never taken through a halted reset "
+            "-- it may still be running the firmware it had. Power-cycle it and "
+            "confirm the new firmware answers.",
+            False,
+        )
+    if _SWD_PROBE_FLASHED_CLAIM not in ok_message:
+        return ok_message, False
     return (
         ok_message.replace(_SWD_PROBE_FLASHED_CLAIM, _SWD_PROBE_ATTEMPTED_CLAIM)
         + f"; the core did not halt (J-Link reported {quoted}) and this backend "
-        "runs no verifybin, so nothing confirms the bytes landed -- re-run the "
-        "write with the target held in reset and confirm the firmware answers "
-        "before trusting it."
+        "runs no verifybin for an ELF/HEX load, so nothing confirms the bytes "
+        "landed -- re-run the write with the target held in reset and confirm the "
+        "firmware answers before trusting it.",
+        True,
     )
 
 
@@ -2359,14 +2406,19 @@ def _flash_entry(
         if method == FLOW_D_METHOD:
             ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
         # tan-cli#540: the same intent-vs-observed shape #522 closed for Flow
-        # D, on the one backend that has no `verifybin` to fall back on.
-        # Gated on `swd_probe_took_jlink_arm` (already computed above for the
-        # DPIDR preflight, so the two can never drift): the halt phrases are
-        # JLinkExe's, and the openocd/pyocd arm neither emits them nor makes
-        # the `flashed via J-Link` claim this qualifies.
+        # D. Gated on `swd_probe_took_jlink_arm` (already computed above for
+        # the DPIDR preflight, so the two can never drift): the halt phrases
+        # are JLinkExe's, and the openocd/pyocd arm neither emits them nor
+        # makes either of the two claims this qualifies.
+        #
+        # WHICH qualification, and whether the write is left unconfirmed at
+        # all, is decided by the pure `_swd_probe_qualified_message` off the
+        # claim the plan composed -- a `.bin` write now carries a `verifybin`
+        # read-back and is confirmed even when the core refused to halt (only
+        # its reset is in doubt); an ELF/HEX load still cannot be verified at
+        # all. Neither decision is re-derived here.
         halt_markers = _swd_probe_halt_markers(outcome) if swd_probe_took_jlink_arm else []
-        if halt_markers:
-            ok_message = _swd_probe_unconfirmed_message(ok_message, halt_markers)
+        ok_message, write_unconfirmed = _swd_probe_qualified_message(ok_message, halt_markers)
         lines.append(f"  ok: {ok_message}")
         return (
             0,
@@ -2376,7 +2428,7 @@ def _flash_entry(
                 0,
                 ok_message,
                 preflight_unarmed=swd_probe_preflight_unarmed,
-                write_unconfirmed=bool(halt_markers),
+                write_unconfirmed=write_unconfirmed,
             ),
             lines,
         )
@@ -2912,9 +2964,11 @@ def _run(
             # about it rather than only what happened.
             message = (
                 f"{entry.id}: swd_probe's J-Link write is UNCONFIRMED -- the core did "
-                "not halt and this backend runs no verifybin, so JLinkExe's exit code "
-                "0 does not mean the firmware landed. Re-run with the target held in "
-                "reset, then confirm the flashed firmware answers."
+                "not halt, and an ELF/HEX load takes `loadfile`, which this backend "
+                "has no verifybin for, so JLinkExe's exit code 0 does not mean the "
+                "firmware landed. Re-run with the target held in reset, then confirm "
+                "the flashed firmware answers. A raw .bin artefact takes the verified "
+                "path instead."
             )
             text_lines.append(message)
             issues.append(Issue("flash.swd-probe-write-unconfirmed", "warning", message))

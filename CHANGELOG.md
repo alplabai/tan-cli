@@ -115,6 +115,41 @@ All notable changes to `tan` are documented here. Format follows
   for. When the tool never reports a load COMPLETING -- the pre-load halt
   failed, the wording differs, or `_Tee`'s bounded join truncated it -- every
   marker counts and the unconfirmed verdict stands. (#540)
+- **`swd_probe`'s J-Link arm now READS BACK a raw `.bin` write instead of
+  inferring it from an exit code, so a write that did not land fails the run.**
+  `jlink_commander_script` emitted `r` / `halt` / `loadbin|loadfile` /
+  optional `r`,`g` / `qc` and no verify of any kind -- the gap the
+  qualification above could only describe, not close. The `.bin` arm now emits
+  `verifybin <artefact> <base>` after the load and before the optional
+  reset-and-go (Flow D's own line shape, comma-less, and Flow D's own
+  ordering: once `g` runs the core is executing and the memory being compared
+  is no longer quiescent). Both lines take the same `commander_path`
+  conditional quoting, so a spaced Windows path is quoted in the verify line
+  too (#369). Load-bearing consequence: `verifybin` + `-ExitOnError 1` makes a
+  mismatch a NON-ZERO exit, so a `.bin` write that did not land is now a
+  `failed` entry with `flash.entry-failed` and rc 1 rather than an `ok` with a
+  caveat -- and that arm's claim becomes `{device} flashed and verified via
+  J-Link @ {base}`, which is an observation. The ELF/HEX arm gets no verify:
+  `verifybin` takes an address, `loadfile` has none, and J-Link Commander's
+  own `verifyfile` is deliberately NOT emitted because no call site in this
+  repo has ever issued it, so nothing has measured that the shipped Commander
+  accepts it -- and under `-ExitOnError 1` an unrecognised command would turn
+  every working ELF write into a hard failure. So the
+  `flash.swd-probe-write-unconfirmed` advisory and the `write attempted`
+  wording are NARROWED to the ELF/HEX arm rather than deleted: a path that
+  cannot check its own write still owes the operator that sentence. A verified
+  `.bin` write whose core refused to halt keeps its verified claim and reports
+  the residual instead (`the bytes are verified but the target was never taken
+  through a halted reset -- it may still be running the firmware it had`),
+  which is Flow D's existing treatment, raising no issue code of its own. This
+  DIVERGES from the shipped Rust oracle, deliberately and measured: `target/
+  debug/tan` (`tan 0.4.1`) driven through a real `swd_probe` write with a
+  capturing Commander stub on `PATH` emits no verify line at all. A
+  silicon-safety fix on the backend that programs the GD32 bridge outranks
+  bug-for-bug parity, and the Commander script never reaches the envelope, so
+  no parity fixture moves. Needs on-silicon confirmation that the shipped
+  Commander accepts the line and that a mismatch really does move the exit
+  code. (#540)
 - **A flash tool spawned by `tan flash` sees a terminal again, and the
   diagnosis `tan` reports back is no longer damaged by what it draws on
   one.** `_Tee` (#522) gave the child `subprocess.PIPE` for both streams so

@@ -446,7 +446,20 @@ _MODULE_BUDGET: dict[str, int] = {
     # growth is almost entirely the two guards' own docstrings explaining why
     # a field-specific "not taking the OTHER tool's path" message is the
     # wrong diagnosis when NO tool resolved at all.
-    "tan/core/flash_plan.py": 2751,
+    # 2821, not 2751, as of tan-cli#540 defect 2 -- the half #575 deliberately
+    # scoped out. `jlink_commander_script` emitted `r`/`halt`/load/`r`,`g`/`qc`
+    # and NO verify of any kind, so `swd_probe`'s success was inferred from
+    # JLinkExe's exit code alone -- which #522 measured on real silicon does
+    # not go non-zero when the core refuses to halt, even with `-ExitOnError 1`
+    # on this arm's argv. The `.bin` arm now reads its own write back
+    # (`verifybin <path> <addr>`, Flow D's own line shape and placement), so a
+    # write that did not land FAILS the run instead of reporting `ok`, and
+    # `plan_swd_probe`'s claim for that arm can honestly say `flashed and
+    # verified`. Two emitted lines; the rest of the growth is the docstring
+    # recording the placement, the deliberate `.bin`-only asymmetry (no
+    # `verifyfile` is emitted on a guess) and the measured divergence from the
+    # oracle, which emits no verify line at all.
+    "tan/core/flash_plan.py": 2821,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
@@ -698,7 +711,32 @@ _MODULE_BUDGET: dict[str, int] = {
     # prose is the point: this is the SECOND defect caused by this one
     # function's model of what ends a line, and the next reader has to be
     # able to see the distinction without re-deriving it from a red CI leg.
-    "tan/commands/flash_cmd.py": 3152,
+    #
+    # 3206 as of tan-cli#540 defect 2's companion half here, `wc -l` on the
+    # tree rebased onto #575's post-CRLF 3152 -- not 3000 (this branch's own
+    # figure against #575's PRE-review 2953), not 3178 (its figure against
+    # #575 before the CRLF fix landed on it), and not any of those plus a
+    # delta. Re-measured on this tree after each rebase, every time, because
+    # the two branches overlap unevenly: both rewrite
+    # `_swd_probe_qualified_message`'s docstring, so THAT part does not
+    # stack, while #575's CRLF fix lands entirely in `_console_lines`, so
+    # that part does. Only a walk of the actual tree knows the sum. With a
+    # real `verifybin` in the Commander script,
+    # "write attempted ... this backend runs no verifybin" is FALSE for a raw
+    # `.bin` and the `flash.swd-probe-write-unconfirmed` advisory must not
+    # fire on it -- but an ELF/HEX load still cannot be verified at all, so
+    # the advisory is NARROWED to that arm rather than deleted.
+    # `_swd_probe_unconfirmed_message` became `_swd_probe_qualified_message`,
+    # returning `(message, write_unconfirmed)` so the two decisions cannot
+    # drift, and a verified write whose core refused to halt now gets Flow
+    # D's residual instead: the bytes are confirmed, the reset is not. The two
+    # fixes compose along different axes and both survive: the POSITION of a
+    # marker decides whether it speaks to the write at all (#575), and the ARM
+    # decides what an unconfirmed write means (this branch). Composing them
+    # cost a paragraph of its own -- the `.bin` residual sentence had to STOP
+    # naming the post-write `r`/`g` as the stage that failed, because under
+    # the positional rule no post-load marker ever reaches that branch.
+    "tan/commands/flash_cmd.py": 3206,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -1699,7 +1737,43 @@ _MIRRORED = ("tan/planner/",)
 # the merged tree, 234. Disjoint crossing sets, so no side's number applies.
 # MERGED VALUE on dev carrying #583/#576/#575: re-walked on the merged tree,
 # 235. Disjoint crossing sets, so no single side's number applies.
-_FUNCTION_COUNT_BUDGET = 235
+#
+# 227 as of tan-cli#540 defect 2's companion half here, RE-WALKED with the
+# gate's own `_long_functions` over all of `tan/` INCLUDING `tan/planner/` on
+# the tree rebased onto #575's post-CRLF 225 -- not 226 (this branch's figure
+# against #575 before the CRLF fix landed on it), and NOT 223 + anything.
+# Measured, and the measurement corrected a guess made on the way here: it
+# looked as though `_swd_probe_qualified_message` must already be one of the
+# three crossings #575's review round added, since #575 rewrote that
+# function's docstring too. Walking #575's own tip says otherwise -- its three
+# are `_swd_probe_halt_markers` 70, `_open_console_pty` 54 and `_capture_tail`
+# 53, and `_swd_probe_unconfirmed_message` is still UNDER the cap there. So
+# both of this branch's crossings are genuinely new on top of 224, both
+# docstring, neither a new function:
+#   * `flash_plan.jlink_commander_script` 48 -> 105: WHY the read-back exists
+#     (the exit code does not reflect the halt -- #522, measured on real
+#     silicon), why it sits between the load and the reset-and-go (once `g`
+#     runs the memory being compared is no longer quiescent), why only the
+#     `.bin` arm gets one (`verifybin` takes an address; `loadfile` has none,
+#     and no `verifyfile` is emitted on a guess), and that it DIVERGES from
+#     the measured oracle.
+#   * `flash_cmd._swd_probe_qualified_message` 45 -> 81 (renamed from
+#     `_swd_probe_unconfirmed_message`): it now decides between two materially
+#     different truths -- a verified `.bin` write whose reset did not take,
+#     versus an ELF/HEX write nothing can confirm -- and returns the
+#     `write_unconfirmed` flag rather than leaving the caller to re-derive it.
+#     The last paragraph is the composition with #575: it records why the
+#     `.bin` residual must NOT name the post-write `r`/`g`, since the
+#     positional rule guarantees no post-load marker ever reaches it.
+# Splitting either would put the reasoning somewhere a reader of the emitted
+# script, or of the claim it qualifies, would never see it.
+# `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
+# `bootstrap_cmd.py:_run` at 701, which none of this goes near. Of the 227,
+# `tan/planner/` contributes 49 -- unchanged, and NOT excluded from the walk.
+# MERGED VALUE, #581 rebased onto dev carrying #575: re-walked on the rebased
+# tree, 236. Not either side's number -- the crossing sets are disjoint.
+# MERGED VALUE, #581 rebased onto dev carrying #575/#577: re-walked, 237.
+_FUNCTION_COUNT_BUDGET = 237
 _FUNCTION_WORST_BUDGET = 707
 
 
