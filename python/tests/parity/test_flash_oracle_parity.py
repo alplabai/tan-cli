@@ -428,7 +428,9 @@ _HOST_ANCHORED_ABSOLUTE_CASES = frozenset({"absolute-artefact-passes-through"})
 #: LIVE tool-presence probe against PATH -- either `plan_yocto_wic`'s own
 #: `which("bmaptool")`/`which("dd")` (`tan/core/flash_plan.py:1002-1056`), or
 #: the required-tool gate `tool_gate` (`flash_plan.py:1524-1545`, reached via
-#: `doctor_cmd.on_path` at `flash_cmd.py:879-882`). The frozen fixture
+#: `flash_cmd._tool_available`, whose walk is `tan.core.tool_lookup.
+#: resolve_tool` since tan-cli#567 -- it was `doctor_cmd.on_path` when this
+#: comment was written). The frozen fixture
 #: recorded whichever tool inventory the CAPTURE host happened to have --
 #: `dd` present/`bmaptool` absent for the three yocto cases, `west` absent
 #: for the `zephyr_west_flash` one below -- so replaying on a host with
@@ -471,22 +473,41 @@ def _pin_tool_inventory(work_dir) -> str:
     where `dd`'s presence is irrelevant and `west` simply not being anywhere
     on this replaced PATH is what the frozen "none found" answer needs.
 
-    Replaces PATH outright rather than prepending: `doctor_cmd.on_path`
-    (what `plan_yocto_wic`'s and `tool_gate`'s `which` callables both
-    resolve to) walks every directory looking for a name match, so
-    prepending a `dd`-only directory ahead of the replay host's real PATH
-    would still let a REAL `bmaptool` or `west` further down it be found --
-    which is exactly the host-dependence this fixes. The stub's own content
-    is never read: every case that pins this is a `--dry-run` preview, an
-    unconfirmed "would run" plan, or the required-tool gate's own refusal/
-    skip message, so `dd` is only ever named in a message, never spawned.
-    `chmod` is a no-op on Windows (no execute bit there), where
-    `os.access(path, os.X_OK)` accepts any existing file -- covered by
-    `doctor_cmd.on_path`'s own docstring.
+    Replaces PATH outright rather than prepending: the `which` callable both
+    probes resolve to (`flash_cmd._tool_available` ->
+    `tan.core.tool_lookup.resolve_tool`) walks every directory looking for a
+    name match, so prepending a `dd`-only directory ahead of the replay
+    host's real PATH would still let a REAL `bmaptool` or `west` further down
+    it be found -- which is exactly the host-dependence this fixes. The
+    stub's own content is never read: every case that pins this is a
+    `--dry-run` preview, an unconfirmed "would run" plan, or the
+    required-tool gate's own refusal/skip message, so `dd` is only ever named
+    in a message, never spawned.
+
+    **`dd.exe` on Windows (tan-cli#567 review).** The stub used to be
+    extensionless on every platform, which quietly stopped standing in for
+    `dd` on the one platform the fixture was CAPTURED on
+    (`oracle_fixtures.CAPTURE_PLATFORM = "win32"`). `resolve_tool`'s Windows
+    walk tries `dd` + each `%PATHEXT%` suffix and never the bare
+    extensionless name -- deliberately, and in agreement with the ORACLE's
+    own `find_on_path` (`crates/tan-cli/src/util.rs`), which has no bare
+    candidate either; see `tan.core.tool_lookup.windows_candidate_names` for
+    the full reasoning. So the capture host's Rust `tan` could only ever have
+    found a SUFFIXED `dd` (Git-for-Windows ships `dd.exe`), and a bare `dd`
+    stub reproduced the frozen inventory on POSIX only. On windows-latest all
+    three `yocto-*` cases duly diverged from the frozen answer, the worst
+    being `yocto-unconfirmed-is-planned-not-ok` flipping `ok` True->False and
+    `exitCode` 0->1 as `status planned` became `failed`. `.EXE` is in the
+    default `%PATHEXT%` this walk falls back to, so `dd.exe` is what the
+    capture host's own lookup would have accepted -- this is not a pinned
+    divergence, it is the stub finally matching BOTH implementations.
+
+    `chmod` is a no-op on Windows (no execute bit there), where the walk asks
+    only `is_file()`.
     """
     stub_dir = work_dir / "tool-stub"
     stub_dir.mkdir()
-    dd_stub = stub_dir / "dd"
+    dd_stub = stub_dir / ("dd.exe" if os.name == "nt" else "dd")
     dd_stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     dd_stub.chmod(0o755)
     return str(stub_dir)

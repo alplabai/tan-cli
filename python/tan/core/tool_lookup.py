@@ -24,6 +24,46 @@ native search order. `where.exe` behaves the same way. The Rust oracle
 precisely so a project checked out with its own `west.exe`/`openocd.exe`/
 `size.exe` at its root can never be picked up in place of the real tool; this
 is that walk.
+
+**The Windows candidate set -- the one deliberate behaviour change here.**
+For a bare, extension-less identity this walk tries `tool` + each `%PATHEXT%`
+suffix and NEVER `tool` itself ([`windows_candidate_names`]). That is a
+Windows-arm behaviour change relative to `doctor_cmd.on_path`, one of the five
+hand-rolled lookups #532 consolidates, whose extension list is `[""] + PATHEXT`
+-- it accepts an extension-less `%PATH%` file, and accepts it AHEAD of every
+suffixed sibling. Three reasons the oracle's shape is the one to consolidate on:
+
+* **Oracle parity.** `crates/tan-cli/src/util.rs::find_on_path` is
+  `if has_ext { dir.join(command) } else { for ext in &exts { ... } }` -- no
+  bare candidate. The oracle is the fixed point this port is measured against,
+  and `build/execute.py::_resolve_tool` (the copy this module IS) already
+  agreed with it. Only `on_path` did not.
+* **Windows itself never selects one for a bare identity.** `CreateProcess`
+  with `lpApplicationName=NULL` appends ONLY `.exe` to an unqualified name and
+  does not consult `%PATHEXT%` at all -- the documented reason
+  `subprocess.run(["npm"])` raises `FileNotFoundError` while `npm.cmd` sits on
+  `%PATH%` (measured in `tests/commands/test_execute.py::_copy_interpreter_as`).
+  `cmd.exe` and PowerShell resolve a typed command name through `%PATHEXT%`
+  too. This walk is meant to be a HARDENED version of that search -- more
+  permissive along one axis only (`%PATHEXT%`), never admitting files no
+  Windows resolver would produce for the name.
+* **It would be unsafe now that the value is SPAWNED, not reduced to a bool.**
+  The extension-less files really found on a Windows `%PATH%` are
+  overwhelmingly POSIX shims -- `npm`/`yarn`/`git-*` sh scripts shipped beside
+  their `.cmd` sibling in the SAME directory -- and `""` going first means the
+  sh script wins. Since tan-cli#567 that value goes to `subprocess` as
+  `executable=`, i.e. `lpApplicationName` with no search, where a non-PE file
+  is `[WinError 193] %1 is not a valid Win32 application`. The leniency would
+  turn a working `.cmd` spawn into a hard spawn failure, and would make the
+  go/no-go gate approve a file the spawn cannot launch: the very check/spawn
+  disagreement #567 closes, re-entered from the other side.
+
+What is given up is bare-identity DISCOVERY of an extension-less file that is
+a valid PE. Windows will execute one of those -- `.exe` is appended only to a
+name carrying no path -- and that capability is untouched here: an absolute
+`tool` is answered by existence alone and spawned verbatim, so a plan or a
+venv rewrite may still name one. Only finding it by bare name on `%PATH%` is
+refused, and the refusal names the `%PATH%` it walked.
 """
 from __future__ import annotations
 
@@ -31,7 +71,7 @@ import os
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 @dataclass(frozen=True)
@@ -68,7 +108,11 @@ def resolve_tool(tool: str, env: Mapping[str, str]) -> ToolResolution:
     resolution the spawn itself uses instead of a second, divergent one:
     POSIX via `shutil.which` (no CWD special-case there); Windows via a
     hand-rolled `%PATH%` walk, deliberately NOT `shutil.which` -- see this
-    module's own docstring for both halves of that reasoning.
+    module's own docstring for both halves of that reasoning. The candidate
+    NAMES that walk tries are [`windows_candidate_names`], which is where the
+    one deliberate Windows-arm behaviour change this consolidation makes (an
+    extensionless PATH file is no longer a hit, matching the oracle rather
+    than `doctor_cmd.on_path`) is recorded and justified.
 
     `env` -- MAJOR 2 of the tan-cli#510 review: this used to read
     `os.environ["PATH"]` directly, 46 lines before `execute_slices`
@@ -126,8 +170,7 @@ def resolve_tool(tool: str, env: Mapping[str, str]) -> ToolResolution:
     path = env.get("PATH")
     if not path:
         return ToolResolution(None, "PATH is unset")
-    pathext = [e for e in env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep) if e]
-    names = [tool] if Path(tool).suffix else [tool + ext for ext in pathext]
+    names = windows_candidate_names(tool, env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD"))
     for directory in path.split(os.pathsep):
         if not directory:
             continue
@@ -136,6 +179,37 @@ def resolve_tool(tool: str, env: Mapping[str, str]) -> ToolResolution:
             if candidate.is_file():
                 return ToolResolution(str(candidate), f"PATH: {path}")
     return ToolResolution(None, f"PATH: {path}")
+
+
+def windows_candidate_names(tool: str, pathext: str) -> list[str]:
+    """The file names the `%PATH%` walk above may consider for the bare
+    identity `tool`: `tool` verbatim once it already carries an extension,
+    and otherwise `tool` + each `%PATHEXT%` suffix -- **never the bare,
+    extensionless name itself.**
+
+    Split out as a pure function purely so the Windows candidate set can be
+    unit-tested from any host: `resolve_tool`'s Windows branch is unreachable
+    on POSIX and cannot be forced there (`Path` dispatches on `os.name` at
+    construction, so patching it raises `NotImplementedError: cannot
+    instantiate 'WindowsPath'`). The Rust oracle splits its own search core
+    out for exactly this reason and says so
+    (`crates/tan-cli/src/util.rs::find_on_path`, "Pure search core split out
+    of `windows_path_lookup` purely for unit testing").
+
+    Excluding the bare name is the one deliberate Windows-arm behaviour
+    change tan-cli#567 makes; this module's own docstring carries the whole
+    justification under "The Windows candidate set", and
+    `test_bare_argv0_spawn.py::test_the_windows_walk_never_considers_the_bare
+    _extensionless_name` pins it.
+    """
+    if PureWindowsPath(tool).suffix:
+        return [tool]
+    # `;` literally, not `os.pathsep`: `%PATHEXT%` is a Windows-only variable
+    # and is always `;`-separated (the oracle splits it on `';'` too). They are
+    # the same character on the platform this runs on -- spelling it makes the
+    # function answer the Windows question from any host, which is the point of
+    # extracting it.
+    return [tool + ext for ext in pathext.split(";") if ext]
 
 
 def resolve_program_positions(

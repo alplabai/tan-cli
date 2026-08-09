@@ -3642,11 +3642,19 @@ def _stub_flow_d_probe(monkeypatch, tmp_path, stdout: str, stderr: str = "", suc
     That refusal is CORRECT: a fixture whose gate says "available" and whose
     PATH says "nowhere" is exactly the check/spawn disagreement #567 exists to
     make impossible, so the fixture is what was wrong. Seeding the tool the
-    way every other fake-tool test in this file does (zero-byte file, `0o755`
-    on POSIX so `shutil.which`'s `X_OK` probe sees it, `.exe` on Windows where
-    an extensionless file is not a program) exercises the real gate and the
-    real resolution, and the refusal arm keeps its own pin in
-    `test_bare_argv0_spawn.py`.
+    way the other PATH-seeding fake-tool tests in this file do (zero-byte
+    file, `0o755` on POSIX so `shutil.which`'s `X_OK` probe sees it, `.exe`
+    on Windows, where a bare extensionless file is not a `%PATH%` candidate
+    for that identity -- `tan.core.tool_lookup.windows_candidate_names`)
+    exercises the real gate and the real resolution, and the refusal arm
+    keeps its own pin in `test_bare_argv0_spawn.py`.
+
+    "The other PATH-seeding tests", not "every other test": `_SPAWN_PROBE`
+    below still seeds its whole tool dir extension-less. That is deliberately
+    left alone -- its cases are green on windows-latest (job 93300561998 at
+    01b2e73 names all fourteen failures, and none is a `_SPAWN_PROBE` case),
+    so nothing there depends on the seeded name resolving, and changing a
+    fixture no evidence indicts would be a guess.
 
     `_programs_resolved_in_venv` is likewise no longer patched: these calls
     pass no `venv_bin`, and the real function returns `argv` unchanged when
@@ -5250,7 +5258,14 @@ boot_order: []
 
     fake_tools = work / "faketools"
     fake_tools.mkdir()
-    jlink_path = fake_tools / "JLinkExe"
+    # `.exe` on Windows for the same reason the other seeds in this file
+    # spell it that way: since tan-cli#567 the spawn resolves `argv[0]` through
+    # `tool_lookup.resolve_tool`, whose Windows `%PATH%` walk tries the name +
+    # each `%PATHEXT%` suffix and never the bare extensionless file (matching
+    # the Rust oracle's own `find_on_path`). An extensionless stub is invisible
+    # there, and the run refuses before it ever builds the Commander script
+    # this test reads. Measured red on windows-latest at 01b2e73.
+    jlink_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
     jlink_path.write_text("", encoding="utf-8")
     if os.name != "nt":
         os.chmod(jlink_path, 0o755)
@@ -5294,6 +5309,21 @@ boot_order: []
 # ── Flow D's ok_message must not overstate the reset (tan-cli#522) ──────────
 
 
+def _jlink_stub_path(directory: Path) -> Path:
+    """Where a fake `JLinkExe` has to live to be findable, for the one setup
+    below that is seeded in one place and REWRITTEN in another.
+
+    `.exe` on Windows: `tool_lookup.resolve_tool`'s `%PATH%` walk tries the
+    identity + each `%PATHEXT%` suffix and never the bare extensionless file
+    (`tan.core.tool_lookup.windows_candidate_names` carries why, and the Rust
+    oracle's `find_on_path` agrees), so an extensionless stub is not a
+    candidate for `JLinkExe` there at all. Spelled once so the seed and the
+    rewrite cannot name two different files -- which on Windows would leave
+    the rewrite's transcript in a file nothing resolves to while the inert
+    seed still answers the lookup."""
+    return directory / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+
+
 def _flow_d_reset_report_setup(tmp_path, monkeypatch):
     """Shared scaffolding for the two cases below: a confirmed, non-dry-run
     Flow D write with `subprocess.run` stubbed -- no real J-Link, no board
@@ -5319,7 +5349,14 @@ boot_order: []
 
     fake_tools = work / "faketools"
     fake_tools.mkdir()
-    jlink_path = fake_tools / "JLinkExe"
+    # `.exe` on Windows -- see `_flow_d_atoc_...`'s seed above; an
+    # extensionless stub is not a `%PATH%` candidate for the identity
+    # `JLinkExe` there, so both callers of this helper refused instead of
+    # reaching the transcript they are about to assert on (measured red on
+    # windows-latest at 01b2e73). `_jlink_stub_path` is returned so the one
+    # caller that OVERWRITES this stub with a real script cannot drift from
+    # the name seeded here.
+    jlink_path = _jlink_stub_path(fake_tools)
     jlink_path.write_text("", encoding="utf-8")
     if os.name != "nt":
         os.chmod(jlink_path, 0o755)
@@ -5420,7 +5457,7 @@ def test_flow_d_ok_message_qualifies_a_reset_in_text_mode_too(tmp_path, monkeypa
     `verified and PIN-reset` here too, in text mode, same as JSON mode
     before that fix landed)."""
     work = _flow_d_reset_report_setup(tmp_path, monkeypatch)
-    jlink_path = work / "faketools" / "JLinkExe"
+    jlink_path = _jlink_stub_path(work / "faketools")
     jlink_path.write_text(
         "#!/bin/sh\n"
         "echo 'RSetType 2'\n"

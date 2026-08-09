@@ -28,6 +28,7 @@ import pytest
 
 from tan.commands import flash_cmd, size_cmd
 from tan.commands.build import execute as execute_module
+from tan.core.bootstrap import venv_layout
 from tan.core.flash_plan import FlashInputs, FlashPlan
 from tan.core.tool_lookup import ToolResolution
 
@@ -42,22 +43,35 @@ def createprocess_would_load(argv0: str, executable: str | None, cwd: str, path:
 
     Pure, so it states the hazard on every platform; POSIX `execvp` never
     searches cwd, which is why the hijack itself is Windows-only and why this
-    emulation, not the OS, is what shows it here."""
+    emulation, not the OS, is what shows it here.
+
+    `.exe` is appended to an extension-less name, because that is the other
+    half of the documented rule and it is what the fixtures on disk look
+    like: `CreateProcess` appends `.exe` (and ONLY `.exe` -- it never reads
+    `%PATHEXT%`) to an unqualified program name carrying no extension, which
+    is why `_executable` seeds `foo.exe` on Windows. Without this the
+    emulation would answer `<not found>` for every Windows fixture and the
+    file's negative assertions would pass vacuously there."""
     if executable is not None:
         return executable
     if os.path.isabs(argv0):
         return argv0
+    names = [argv0] if Path(argv0).suffix else [argv0, f"{argv0}.exe"]
     for directory in [cwd, *[d for d in path.split(os.pathsep) if d]]:
-        candidate = Path(directory) / argv0
-        if candidate.is_file():
-            return str(candidate)
+        for name in names:
+            candidate = Path(directory) / name
+            if candidate.is_file():
+                return str(candidate)
     return "<not found>"
 
 
 def _executable(directory: Path, name: str) -> Path:
-    """An executable file named `name` in `directory`. `.exe` on Windows, where
-    an extensionless file is not a program at all and the hardened `%PATH%`
-    walk correctly refuses to see one."""
+    """An executable file named `name` in `directory`. `.exe` on Windows,
+    where a bare extensionless file is not a `%PATH%` candidate for that
+    identity at all -- neither for `CreateProcess`, which appends only `.exe`
+    to an unqualified name, nor for the hardened walk, which matches the
+    oracle's `%PATHEXT%`-only candidate set (pinned by
+    `test_the_windows_walk_never_considers_the_bare_extensionless_name`)."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / (f"{name}.exe" if os.name == "nt" else name)
     path.write_text("", encoding="utf-8")
@@ -245,8 +259,20 @@ def test_flash_resolves_against_the_env_the_child_will_get(tmp_path, monkeypatch
     the check and the spawn are again looking at two different files.
 
     `venv_bin` holds the only copy of `flasher`; `os.environ["PATH"]` does not
-    have it. The spawn must still resolve, and to the venv's copy."""
-    venv_bin = tmp_path / "wsvenv" / "bin"
+    have it. The spawn must still resolve, and to the venv's copy.
+
+    The bin dir is named after the layout of the host it runs on, not `bin`
+    everywhere: `tool_in_venv` appends `.exe` keyed on the DIRECTORY that won
+    (`bin_dir.name == venv_layout(True).bin_dir`, i.e. `Scripts`), not on
+    `os.name` -- tan-cli#291, because `_resolve_layout`'s probe can pick
+    `Scripts/` on a POSIX-reporting host. A `Scripts`-less `bin/` holding
+    `flasher.exe` is therefore a venv shape `tool_in_venv` cannot resolve:
+    it looks for `bin/flasher`, finds nothing, and `_execute` refuses. That
+    is the FIXTURE being wrong about what a Windows venv looks like, not a
+    defect in the resolution -- measured red on windows-latest at 01b2e73
+    (`could not spawn: 'flasher' was not found`) at both commits of this
+    branch, i.e. it was never about the seeding fix."""
+    venv_bin = tmp_path / "wsvenv" / venv_layout(os.name == "nt").bin_dir
     tool = _executable(venv_bin, "flasher")
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -330,14 +356,41 @@ def test_flash_dpidr_preflight_refuses_rather_than_spawning_an_unresolved_jlink(
     refusal ON PURPOSE. `tan-cli#520`'s "refusing to write MRAM without
     confirming which board is attached" is the string a loosening of the
     resolution would have to delete, and this is what would go red.
+
+    Two details make this die on its OWN assertions rather than incidentally.
+
+    The stub returns a real, SUCCEEDING `_Outcome` carrying the expected
+    DPIDR banner, the way its sibling above does. A stub returning `None`
+    would make the most likely loosening (`if unresolved is not None:` ->
+    `if False:`) die at `flash_cmd.py`'s `outcome.stdout` with
+    `AttributeError: 'NoneType' object has no attribute 'stdout'` -- inside
+    production code, before `assert spawned == []` is ever reached. That
+    points the diagnostic at the wrong file. With a real outcome the
+    loosening spawns, answers "proceed", and this fails on `spawned == []`:
+    the deleted guard, named. (Measured under `if unresolved is not None:` ->
+    `if False:`.)
+
+    The cwd carries a DECOY `JLinkExe`, because "refuses" is only half the
+    property. What makes the refusal worth having is that the alternative is
+    not "no probe" but "the customer's own project directory answers the
+    question of which board is attached" -- `createprocess_would_load` shows
+    that a bare `JLinkExe` handed to `CreateProcess` with no `executable=`
+    loads exactly that decoy, ahead of every `%PATH%` entry.
     """
     empty = tmp_path / "empty"
     empty.mkdir()
+    project = tmp_path / "hostile-project"
+    decoy = _executable(project, "JLinkExe")
     monkeypatch.setenv("PATH", str(empty))
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(project)
     monkeypatch.setattr(flash_cmd, "_tool_available", lambda *_a, **_k: True)
     spawned: list[object] = []
-    monkeypatch.setattr(flash_cmd, "_spawn_jlink", lambda *a, **k: spawned.append(a))
+
+    def _spawn_jlink(*args, **_kwargs):
+        spawned.append(args)
+        return flash_cmd._Outcome(success=True, stdout="Found SW-DP with ID 0x6BA02477")
+
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _spawn_jlink)
 
     message = flash_cmd._flow_d_preflight(
         FlashInputs(
@@ -348,11 +401,22 @@ def test_flash_dpidr_preflight_refuses_rather_than_spawning_an_unresolved_jlink(
         )
     )
 
+    # The no-spawn property goes FIRST: it is the one with the hardware
+    # consequence, and asserting it before the message means a deleted guard
+    # is diagnosed as "it spawned" rather than as "the text changed".
+    assert spawned == [], "the preflight spawned a program it could not resolve"
+    # And that spawn would not have been harmless: with no `executable=`,
+    # THIS is the file `CreateProcess` would have loaded to answer "which
+    # board is attached" -- the decoy in the customer's own project dir,
+    # ahead of every `%PATH%` entry.
+    assert createprocess_would_load("JLinkExe", None, str(project), str(empty)) == str(decoy), (
+        "the decoy is not where CreateProcess would find it -- this assertion "
+        "is what makes the no-spawn assertion above worth making"
+    )
     assert message is not None, "an unresolvable J-Link produced no refusal"
     assert "JLinkExe" in message
     assert "could not be resolved" in message, message
     assert "refusing to write MRAM without confirming which board is attached" in message, message
-    assert spawned == [], "the preflight spawned a program it could not resolve"
 
 
 def test_flash_tool_available_is_still_a_gate_the_project_dir_cannot_satisfy(hostile):
@@ -401,6 +465,84 @@ def test_an_empty_path_entry_is_never_the_current_directory(tmp_path, monkeypatc
         f"resolved to {resolution.resolved!r} from an empty PATH entry -- that "
         "is the current directory, which the hardened walk exists to exclude"
     )
+
+
+@pytest.mark.parametrize(
+    "tool, expected",
+    [
+        ("npm", ["npm.COM", "npm.EXE", "npm.BAT", "npm.CMD"]),
+        ("JLinkExe", ["JLinkExe.COM", "JLinkExe.EXE", "JLinkExe.BAT", "JLinkExe.CMD"]),
+        ("dd.exe", ["dd.exe"]),
+        ("west.cmd", ["west.cmd"]),
+    ],
+    ids=["bare", "bare-mixed-case", "already-exe", "already-cmd"],
+)
+def test_the_windows_walk_never_considers_the_bare_extensionless_name(tool, expected):
+    """The ONE deliberate Windows-arm behaviour change tan-cli#567 makes,
+    pinned so the next reader cannot mistake it for an accident.
+
+    `doctor_cmd.on_path`, one of the five hand-rolled lookups #532
+    consolidates, tries `exts = [""] + PATHEXT` -- the bare, EXTENSIONLESS
+    name first, ahead of every suffixed sibling. `tool_lookup` does not, and
+    that is not an oversight in the consolidation:
+
+    * It is what the ORACLE does. `crates/tan-cli/src/util.rs::find_on_path`
+      is `if has_ext { dir.join(command) } else { for ext in &exts { ... } }`
+      -- no bare candidate anywhere. The oracle is the fixed point; a port
+      that is more permissive than it, on the one arm nobody here can run, is
+      drift. `build/execute.py::_resolve_tool`, the copy this module IS,
+      agreed with the oracle already; only `on_path` did not.
+    * It is what WINDOWS does. `CreateProcess` with `lpApplicationName=NULL`
+      appends only `.exe` to an unqualified name and never reads `%PATHEXT%`
+      at all, so a bare-name hit is a file the platform's own resolver would
+      never have selected for that identity; `cmd.exe` and PowerShell resolve
+      a typed command name through `%PATHEXT%` too.
+    * Admitting it would be actively unsafe NOW, in a way it was not while
+      the answer was only a bool. The extensionless files really found on a
+      Windows `%PATH%` are POSIX shims (`npm`, `yarn`, `git-*`: sh scripts
+      shipped beside their `.cmd` sibling in the same directory), and `""`
+      going first means the sh script WINS. Since #567 that value is handed
+      to `subprocess` as `executable=` -- `lpApplicationName`, no search --
+      where a non-PE file is `[WinError 193] %1 is not a valid Win32
+      application`. So the leniency would convert a working `.cmd` spawn into
+      a hard spawn failure, and make the go/no-go gate approve a file the
+      spawn cannot launch: the same check/spawn disagreement #567 closes,
+      re-entered from the other side.
+
+    Nothing is lost. Windows WILL execute an extensionless valid PE handed to
+    it as a path (`.exe` is appended only to a name carrying no path), and
+    `resolve_tool` still answers an absolute `tool` by existence alone and
+    spawns it verbatim -- a plan or a venv rewrite may still name one. Only
+    bare-identity DISCOVERY of such a file on `%PATH%` is refused, with the
+    walked `%PATH%` named in the refusal.
+
+    Portable by construction: the walk's candidate names are a pure function
+    precisely so this runs on Linux CI, where `resolve_tool`'s Windows branch
+    cannot be reached at all (`Path` dispatches on `os.name` at construction,
+    so patching `os.name` raises rather than reaching it)."""
+    from tan.core.tool_lookup import windows_candidate_names
+
+    names = windows_candidate_names(tool, ".COM;.EXE;.BAT;.CMD")
+    assert names == expected
+    assert tool not in names or Path(tool).suffix, (
+        f"the bare, extensionless {tool!r} is a candidate again -- `CreateProcess` "
+        "would never select it for that identity, and on a Windows PATH it is "
+        "almost always a POSIX shim that `executable=` cannot launch"
+    )
+
+
+def test_an_empty_pathext_entry_never_becomes_the_bare_name_by_accident():
+    """The back door into the case above: `%PATHEXT%` legitimately arrives
+    with a trailing or doubled `;` (`.COM;.EXE;;`), and `""` joined to the
+    tool is the bare name again. Dropping empty entries is what keeps the
+    invariant above from depending on how tidy the host's `%PATHEXT%` is --
+    the same reason the `%PATH%` walk itself skips empty directory entries,
+    and the same class of defect as
+    `test_an_empty_path_entry_is_never_the_current_directory` above."""
+    from tan.core.tool_lookup import windows_candidate_names
+
+    assert windows_candidate_names("npm", ".COM;;.EXE;") == ["npm.COM", "npm.EXE"]
+    assert windows_candidate_names("npm", "") == []
 
 
 # ── tan size ────────────────────────────────────────────────────────────────
