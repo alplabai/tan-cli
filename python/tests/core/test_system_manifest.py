@@ -235,6 +235,61 @@ def test_the_yaml_12_core_schema_governs_the_passthrough_not_pyyamls_yaml_11():
     }
 
 
+def test_the_int_resolver_is_serde_yamls_parse_signed_int_not_the_spec_regex():
+    """tan-cli#499 defect 10. The `_CORE_RESOLVERS` int row transcribed the YAML
+    1.2 SPEC core schema, which puts the sign OUTSIDE the radix alternation and
+    has no `0b`. serde_yaml's `parse_signed_int` strips a leading `+`/`-` BEFORE
+    testing the prefixes and does accept `0b`, so exactly two shapes -- a binary
+    literal, and a sign-prefixed `0x`/`0o`/`0b` -- stayed STRINGS here while
+    `tan 0.4.1` produced integers.
+
+    Every expectation below was measured on the oracle
+    (`tan image --format json --build-root br`, `data.hw_info`), not derived
+    from the spec text. It reaches two surfaces: `data.hw_info` /
+    `data.boot_order` on stdout AND the persisted `bundle-manifest.json` for
+    `tan image`, and `parse_system_manifest_raw` -> `serialize_system_manifest_raw`
+    for `tan build`'s post-build manifest rewrite.
+    """
+    hw_info, boot_order = raw_passthrough(
+        "schema_version: 1\nhw_info:\n"
+        "  mask: 0b1010\n  off: -0x1E\n  pos: +0x1E\n  noct: -0o17\n"
+        "  posoct: +0o17\n  negbin: -0b11\n  posbin: +0b11\n  hexzero: 0x0\n"
+        "  eeprom:\n    straps: 0b0101\n"
+        "boot_order: [0b11, 0x10]\n"
+    )
+    assert hw_info == {
+        "mask": 10,
+        "off": -30,
+        "pos": 30,
+        "noct": -15,
+        "posoct": 15,
+        "negbin": -3,
+        "posbin": 3,
+        "hexzero": 0,
+        "eeprom": {"straps": 5},
+    }
+    # Two different TYPES inside one list was the worst of it.
+    assert boot_order == [3, 16]
+
+
+@pytest.mark.parametrize(
+    "scalar",
+    # Measured on the oracle: every one of these stays a STRING. This is why the
+    # regex has to remain the gate -- PyYAML's `construct_yaml_int` strips `_`
+    # and would resolve the underscore forms if it were asked.
+    [
+        "0B11", "0XA5", "0O17", "-0B11",   # uppercase prefix
+        "0x1_F", "0b1_0", "0o1_7", "1_000", "0_1",  # underscores
+        "0x", "0b", "0o", "-0x",           # bare prefix, no digits
+        "0o8", "0xG", "0b2",               # digit outside the radix
+        "007", "+007", "++5",              # leading zero / double sign
+    ],
+)
+def test_the_widened_int_resolver_still_leaves_these_shapes_as_strings(scalar):
+    hw_info, _ = raw_passthrough(f"schema_version: 1\nhw_info:\n  v: {scalar}\n")
+    assert hw_info == {"v": scalar}
+
+
 def test_an_integer_serde_yaml_cannot_hold_drops_the_whole_passthrough():
     # `serde_yaml::Value` spans i64::MIN..=u64::MAX; outside it the Value parse
     # fails and `raw_passthrough` yields its defaults, silently dropping BOTH
