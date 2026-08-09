@@ -114,14 +114,23 @@ All notable changes to `tan` are documented here. Format follows
     identity to resolve (alp-sdk#1026), which "a guard keyed only on 'does a
     manifest exist' cannot tell apart from a typo without also consulting the
     SDK's own published core list". It now consults it: the SoC JSON's
-    `cores[].id`, unioned with the `variants[].debug.jlink_device` keys, off
-    the same `--sdk-root` the identity fallback already reads. Same
+    `cores[].id`, unioned with the `variants[].debug.jlink_device` keys. Same
     `debug-config.core-unknown` code and exit 2 as the with-manifest arm,
-    naming the cores it could have meant. Two ordered authorities, never
-    merged: a real build decides whenever a manifest exists, and both arms
-    refuse only what they can PROVE unknown — no slices and no resolvable SDK
-    core list means "cannot be asked", which stays silent, so a legitimate
-    pre-build `--core m55_hp` still resolves exactly as before. Closes #477.
+    naming the cores it could have meant — and naming the alp-sdk checkout the
+    core list came from, plus the tier that chose it, since `debug-config`
+    publishes no `sdk` envelope block to look it up in. Two ordered
+    authorities, never merged: a real build decides whenever a manifest
+    exists, and both arms refuse only what they can PROVE unknown — no slices
+    and no resolvable SDK core list means "cannot be asked", which stays
+    silent, so a legitimate pre-build `--core m55_hp` still resolves exactly
+    as before. That same rule decides WHICH checkout may refuse: with no
+    `--sdk-root` and no project pin, tan falls through to the machine-global
+    default, which `tan bootstrap` may have last pointed at an unrelated
+    project — measured, one project and one `--core m55_hp` flipped between
+    exit 0 and exit 2 on two checkouts differing only in `e8.json`'s
+    `cores[]`. A global default another project's bootstrap set cannot prove
+    anything about this project's SoM, so it does not refuse; every other tier
+    does. Closes #477.
   - Two tests were INVERTED rather than deleted, since each pinned one of
     these defects as intended behaviour:
     `test_an_omitted_target_kind_still_defaults_to_native_host_with_no_project_signal`
