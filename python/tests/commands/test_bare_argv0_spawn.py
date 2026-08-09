@@ -194,9 +194,18 @@ def test_flash_spawns_the_path_copy_not_the_one_in_the_project(hostile, spy, cap
 
 
 def test_flash_pipeline_resolves_BOTH_halves(hostile, spy):
-    """`gunzip | dd` -- the `.wic.gz` image path. The decompressor is not in any
-    backend's `requires` list, so it reaches the spawn with no tool gate in
-    front of it at all; the right half writes to a real block device."""
+    """`gunzip | dd` -- the `.wic.gz` image path, whose right half writes to a
+    real block device.
+
+    Both halves ARE checked before the spawn today, contrary to this fix's own
+    first telling: `dd` is in `flash_plan._REGISTRY["yocto_wic"].requires`
+    (`('bmaptool', 'dd')`) so `tool_gate` covers it, and `plan_yocto_wic`
+    `which`-checks `gunzip`/`gzip` itself and raises `FlashPlanError` when
+    neither answers. What this pins is the SPAWN end: the file the check
+    approved and the file the OS loads must be the same one, for the token
+    after the `"|"` as well as for `argv[0]` -- the only remaining opening is
+    the plan-time-to-spawn-time window, which is what a resolved
+    `executable=` closes."""
     project, realbin = hostile
     flash_cmd._execute(
         FlashPlan(argv=("gunzip", "-c", "i.gz", "|", "dd", "of=/dev/null"), ok_message="ok"), True

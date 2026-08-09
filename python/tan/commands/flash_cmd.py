@@ -1347,11 +1347,22 @@ def _unresolved_program_outcome(program: str, venv_bin: Path | None, capture: bo
     not spawn:` prefix is kept so both read the same way in
     `data.entries[].message`.
 
-    Reachable in ordinary use because the go/no-go gate does not cover every
-    program a plan names: `tool_gate` only checks the backend's declared
-    `requires`, so the `gunzip`/`xz`/`dd` halves of a `.wic.gz` image pipeline
-    can reach the spawn ungated, and `--skip-missing-tools` is about the
-    declared list too."""
+    **Defence in depth, not a hole being plugged** -- correcting this fix's own
+    first telling, that the `gunzip`/`xz`/`dd` halves of a `.wic.gz` pipeline
+    reach the spawn "with no tool gate in front of them at all". False in both
+    halves, measured: `dd` IS declared (`_REGISTRY["yocto_wic"].requires ==
+    ('bmaptool', 'dd')`, same for `yocto_wic_to_sd_or_emmc`) so `tool_gate`
+    covers it, and `plan_yocto_wic` `which`-checks `gunzip`/`gzip`/`xz` itself
+    through the callable this module hands it ([`_tool_available`], the same
+    walk) -- `plan_yocto_wic(inp, which=lambda t: t in ("dd",))` raises
+    `FlashPlanError` and never returns a plan for this function to see.
+
+    What is left is the window between plan time (gate, planner) and spawn time
+    (here): a tool removed, a `PATH` rewritten or a venv torn down in between --
+    as would a backend naming a program its `requires` never declares and its
+    planner never `which`-es (`xspi_flashwriter` already: `requires=()`, argv[0]
+    `flash-writer-scif`, unreachable only because its confirmed arm raises).
+    `--skip-missing-tools` is about the declared list, not about this."""
     searched = resolve_tool(program, _resolution_env(venv_bin)).searched
     venv_note = (
         " and the workspace venv does not provide it"

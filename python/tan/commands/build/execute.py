@@ -42,6 +42,25 @@ module's own `_ToolResolution` docstring for why one resolver, not two. Not
 back-ported to `crates/`, which ships to nobody (`docs/ROADMAP.md`); fixed
 Python-side only.
 
+**tan-cli#567, a third DELIBERATE divergence from the frozen Rust oracle** --
+the one above, widened, and recorded here so the register stays complete.
+Two things in this file still handed the platform a bare identity after #510.
+(1) `_terminate`'s Windows `taskkill`: `CreateProcess` reaches
+`%SystemRoot%\\System32` only AFTER the current directory, so a cancelled build
+in a project carrying its own `taskkill.exe` ran that one -- now resolved
+first, see [`_taskkill_program`]. (2) The lookup itself, on POSIX: an EMPTY
+`PATH` entry (`PATH="$PATH:"`, `PATH=":$PATH"` -- both routine) means "the
+current directory" to every POSIX consumer, and `shutil.which` duly joins `""`
+with the name and probes it relative to cwd. Measured on `dev`,
+`_resolve_tool("cwdprobe", {"PATH": ":/nope:"})` answered the RELATIVE string
+`'cwdprobe'` for a file that existed only in the process's own working
+directory, which `execute_slices` then spawned -- live on this path since #510,
+because the Windows branch already filtered empty entries and the POSIX branch
+did not. Empty entries are dropped before the walk; the same tree now answers
+`None`. See `tan.core.tool_lookup.resolve_tool`, which is where that walk now
+lives (this module keeps `_ToolResolution`/`_resolve_tool` as re-export
+aliases). Not back-ported to `crates/`; fixed Python-side only.
+
 **How the post-build write reaches `tan run` without a `build_cmd.py` change.**
 The Rust oracle's executor (`execute/mod.rs::execute_slices_outcome`) returns
 a `NativeBuildOutcome` bundling the dispatch result with the write's two
