@@ -7,6 +7,61 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [0.5.2] — Unreleased
 
+### Added
+
+- **`scripts/tan-surface/` — a command-surface walk that drives every `tan`
+  command, in dependency order, against a real project.** `scripts/e2e-full.sh`
+  is a release *regression* harness: it hijacks `$HOME`, wipes its tree every
+  run, and drives seven commands deeply (`--version`, `bootstrap`, `init`,
+  `doctor`, `build`, `generate`, `examples`) to prove already-fixed bugs stay
+  fixed. Measured 2026-08-05, those seven were its whole surface out of the 32
+  `tan --help` lists — the other 25 commands had no end-to-end coverage at all.
+  This is the other axis: 31 of the 32 commands (`flash` is excluded by design
+  and there is no flag to enable it), on the operator's own machine, with no
+  `$HOME` hijack. Neither replaces the other; the regression suite needs a
+  hermetic home to mean anything and this one needs a real environment to mean
+  anything. Ships no runtime change — `python/tan/` is untouched. Refs #448,
+  Refs #470.
+  - **An xfail ledger that expires itself.** Known defects are pinned to their
+    issue with `xstep`/`xstep_out`: while the bug stands the run is green, and
+    the day it is fixed the harness reports `XPASS`, exits non-zero, and names
+    the entry to retire. Written against 0.5.0, its first run against 0.5.1
+    reported 8 `XPASS` — #453, #454 (×2), #455, #456, #457, #469, #470 — all
+    now positive assertions instead. One `xstep` remains: #448, `renode` never
+    reaching the app console.
+  - **Two defects were found by writing it**: #470 (`renode` accepted
+    `--project` and resolved the build root from the CWD anyway) and #469 (the
+    workspace-orphan refusal printed a stringified `None`).
+  - **`--project` is read-only unless `--allow-mutate`.** Every step that
+    writes into a real project — `build --materialise`, a real `build`, `run`,
+    `lock`, `support-bundle`, `generate`, `scaffold`, `new-som`, `clean`,
+    `model build` — is gated, not only the ones whose phase name says so. So
+    are `quality --profile quick` and `migrate --check`, which write nothing
+    but report a verdict on the *project's* content (`--check` is documented as
+    "nonzero on drift"), so hard-asserting exit 0 against a real tree would
+    score the operator's own drift as a `tan` regression.
+  - **`--work` is never deleted out from under the operator.** Only a
+    directory the run itself created is removed at exit; an existing `--work`
+    becomes the parent of a per-run `tan-surface.XXXXXX` sandbox inside it, so
+    repeat runs neither destroy it nor accumulate SDK copies and scratch trees
+    in it.
+  - **`bootstrap` is opt-in and runs on a copy of the SDK**, because
+    `tan bootstrap` *moves* the checkout (#185); `~/.alp/sdk-default` is saved
+    beforehand and restored on exit.
+  - **`--strict` makes "green" falsifiable.** By default a `SKIP` (no
+    bootstrapped workspace, no `renode` on `PATH`, …) does not fail the run but
+    is always counted and reported; `--strict` additionally requires zero, so
+    green means "the whole surface ran" rather than "nothing that ran failed".
+  - **`check_command_surface` proves the case list against the binary's own
+    `--help` every run**, in both directions, so command 33 landing uncovered
+    is a loud `FAIL` rather than silent drift — the shell-side equivalent of
+    `tan/cli.py`'s `_SUBCOMMAND_NAMES` derivation.
+  - **`.github/workflows/getting-started.yml` gained a
+    `shellcheck -S warning scripts/tan-surface/*.sh` step**, closing the same
+    "nothing lints this" gap `install.sh` had. The walk itself is not driven in
+    CI: it needs a real alp-sdk checkout, an optionally-bootstrapped west
+    workspace and a real build.
+
 ### Changed
 
 - **`tan debug-config --core <id>` now refuses a `--core` matching no build
