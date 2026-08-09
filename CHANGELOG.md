@@ -25,6 +25,73 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan flash` no longer claims `swd_probe`'s J-Link write landed when
+  JLinkExe's own transcript shows it did not -- and no longer doubts one it
+  shows DID.** `plan_swd_probe` composes `{device} flashed via J-Link @
+  {base}` at PLAN time, before anything runs, and `_flash_entry` asserted it
+  on the exit code alone. #522 measured on real E1M-AEN801 silicon that a
+  halt failure does NOT move JLinkExe's exit code even with `-ExitOnError 1`
+  (which this arm carries), and unlike Flow D this backend runs no
+  `verifybin` at all, so the exit code cannot tell a load into a halted core
+  apart from a load into one that kept running. When the transcript records a
+  halt failure with no completed load, the claim is now downgraded to
+  `{device} write attempted via J-Link @ {base}; the core did not halt
+  (J-Link reported "...") and this backend runs no verifybin, so nothing
+  confirms the bytes landed -- re-run the write with the target held in reset
+  and confirm the firmware answers before trusting it`, and a new
+  `flash.swd-probe-write-unconfirmed` warning carries the same fact to a
+  `--format json` consumer. Status stays `ok` and rc stays `0` deliberately:
+  the write may well have landed and there is no bench evidence a GD32 halt
+  failure means a failed write, so turning it into a hard failure would trade
+  an overstatement for a false negative on a command that writes hardware.
+  Blast radius: `swd_probe` is declared in alp-sdk metadata solely under
+  `helper_firmware:` (`name: gd32_bridge`, `chip: gd32g553`) on `E1M-V2N101`,
+  `E1M-V2M101` and `E1M-V2M102`. The marker search is **positional**:
+  `jlink_commander_script` emits TWO halt-capable stages, `r`/`halt` before
+  the load and `r`/`g` after it, and the second is ON BY DEFAULT
+  (`do_reset = _default(fa_bool_checked(fa, "reset"), True)`), so a resident
+  image that starts the instant `loadbin` finishes cannot be halted by it and
+  a perfectly successful flash prints `Failed to halt CPU` / `CPU is not
+  halted` at exit 0. A positionless substring search over the whole
+  transcript therefore told the operator to re-flash hardware on a write the
+  same transcript reported as `Downloading file [...] ... O.K.`; only markers
+  BEFORE the load completes can speak to whether the write happened, and
+  markers after it speak to the reset -- which is all Flow D ever claims them
+  for. When the tool never reports a load COMPLETING -- the pre-load halt
+  failed, the wording differs, or `_Tee`'s bounded join truncated it -- every
+  marker counts and the unconfirmed verdict stands. (#540)
+- **A flash tool spawned by `tan flash` sees a terminal again, and the
+  diagnosis `tan` reports back is no longer damaged by what it draws on
+  one.** `_Tee` (#522) gave the child `subprocess.PIPE` for both streams so
+  the transcript could be read in DEFAULT text mode, which flipped the
+  child's own `stdout.isatty()`/`stderr.isatty()` from `True` to `False`
+  (measured, same invocation). `pyocd flash`, `west flash` and `openocd` all
+  gate their `\r`-redrawn progress bar and their colour on `isatty()`, so a
+  bench operator watching a multi-minute GD32G553 or Alif MRAM write lost the
+  live progress indicator -- and a write that shows no progress reads as
+  hung. The live-console tee now runs over a pty (POSIX only; Windows, a
+  non-terminal sink such as a pipe/file/CI, and a host that cannot allocate
+  one all keep today's pipes unchanged), with `ONLCR` cleared so the captured
+  transcript carries plain `\n` and `TIOCSWINSZ` set from `tan`'s own window
+  so the bar is drawn to the width the operator is looking at. `_capture_tail`
+  -- which composes the text-mode `FAIL:` line and `data.entries[].message`
+  -- now reads the lines a TERMINAL would be showing rather than what
+  `str.splitlines()` finds: it splits on `\n` alone, keeps only the segment
+  after the last `\r`, and strips CSI/OSC escape sequences. Without that, a
+  `\r`-redrawn bar is one line on screen and N lines to `splitlines()`, so
+  three of the tail's four slots went to redraws of the same bar and pushed
+  the tool's real diagnosis out, while raw `\x1b[31m` shipped verbatim inside
+  a customer-visible string (measured: `swd_probe[gd32_bridge]: [40%] writing
+  image | [70%] writing image | [100%] writing image | Error: could not
+  connect to target` where the pipe path reported `swd_probe[gd32_bridge]:
+  Error: could not connect to target`; now `swd_probe[gd32_bridge]: [100%]
+  writing image | Error: could not connect to target`). A pty is ONE device,
+  so a pty run's whole transcript arrives in `_Outcome.stdout` with `.stderr`
+  empty and `_capture_tail`'s stderr-first preference has nothing to choose
+  between; that is deliberate -- splitting it back into two ptys would hand
+  the child two different terminals and would cost the #540 marker search the
+  chronological ordering its positional reading depends on. The pipe path is
+  untouched: two streams, `.stderr` preferred exactly as before. (#541)
 - **`sdk.global-default-foreign-project` now reaches DEFAULT text output
   too, not only `--format json`, for `inspect`/`trace`/`validate`/`diff`/
   `support-bundle` and the three west-forwarding verbs `migrate`/`lock`/

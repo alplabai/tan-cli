@@ -646,7 +646,25 @@ _MODULE_BUDGET: dict[str, int] = {
     # `None` arm exists for which failure -- the same density the rest of this
     # module's spawn machinery already carries, and the reason a reader can
     # tell a deliberate platform difference from a silent one.
-    "tan/commands/flash_cmd.py": 2953,
+    #
+    # 3124 as of the tan-cli#540/#541 REVIEW, `wc -l` on the final tree after
+    # rebasing onto dev's 707927f -- not 2953, and not 2953 plus a guess at
+    # the review's own diff. Two MAJORs, both paid for in prose:
+    #   * #540's marker search became POSITIONAL. `jlink_commander_script`
+    #     emits two halt-capable stages and the post-load `r`/`g` is ON BY
+    #     DEFAULT, so a positionless search reported a SUCCESSFUL flash as
+    #     unconfirmed and told the operator to re-flash hardware. One new
+    #     pure helper (`_jlink_load_completed_at`, 8 lines of body) plus the
+    #     docstring recording the transcript ordering that was established by
+    #     RUNNING the Commander script through a capturing stub, and why the
+    #     boundary is the load COMPLETING rather than starting.
+    #   * #541's pty merge was damaging the customer-visible string.
+    #     `_console_lines` (7 lines of body, under a docstring naming both
+    #     things `str.splitlines()` gets wrong for a transcript drawn on a
+    #     terminal) plus `_ANSI_ESCAPE_RE`, and `_capture_tail`'s own
+    #     docstring now answers the question a reader of it will have -- why
+    #     a pty run has no stderr to prefer, measured rather than asserted.
+    "tan/commands/flash_cmd.py": 3124,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -1441,19 +1459,35 @@ _MIRRORED = ("tan/planner/",)
 # says to: taking either side's figure by ownership is the arithmetic mistake,
 # and here it would have shipped a budget the tree already exceeds.
 #
-# RE-MEASURED BELOW on the tree rebased onto that 220. Both sides read 220 and
-# both were right about their own tree -- each reached it from the same 219 by
-# a DIFFERENT crossing (dev: `diff_cmd._emit_failure`; this branch:
-# `flash_cmd._open_console_pty`) -- so "they agree, keep 220" is exactly the
-# arithmetic trap the paragraph above warns about. The crossings are disjoint.
-# This branch's one is `flash_cmd._open_console_pty` at 54
-# lines, of which 12 are body -- the rest is the docstring recording why the
-# pipe tee cost a flash tool its `isatty()` (with the measured before/after),
-# and the three cases that deliberately keep the pipe (Windows, a non-terminal
-# sink, a host that cannot allocate a pty). Extracting from it would only move
-# that prose somewhere a reader of the function would not find it; the three
-# siblings it was split into already sit under the cap.
-_FUNCTION_COUNT_BUDGET = 221
+# 224 as of the tan-cli#540/#541 REVIEW, RE-WALKED with this gate's own
+# `_long_functions` over all of `tan/` INCLUDING `tan/planner/` on the final
+# tree, after rebasing onto dev's 707927f. Never arithmetic: dev independently
+# measures 221 on the same walk, and 221 + "three new helpers" would have been
+# wrong twice over, because two of the three crossings are functions that
+# ALREADY existed and grew past the cap rather than new ones. The three, all
+# in `flash_cmd.py`, all docstring:
+#   * `_swd_probe_halt_markers` 70 (from 19), ~10 of body. The MAJOR-1 fix
+#     turns a positionless substring search into a positional one; the prose
+#     is the transcript ordering established by RUNNING the Commander script
+#     through a capturing stub, why the boundary is the load COMPLETING, and
+#     why a mid-load marker cannot reach the function at all (`-ExitOnError 1`
+#     moves the exit code, so `_flash_entry` never gets to the ok path).
+#   * `_open_console_pty` 54, 12 of body -- unchanged by the review, carried
+#     over from #541: why the pipe tee cost a flash tool its `isatty()` (with
+#     the measured before/after) and the three cases that deliberately keep
+#     the pipe (Windows, a non-terminal sink, a host with no pty to give).
+#   * `_capture_tail` 53 (from 13), 8 of body. It answers the question a
+#     reader of it will now ask -- why a pty run has no `.stderr` to prefer
+#     -- with the measurement rather than an assertion, and says what the
+#     alternative (two ptys) would cost the #540 marker search. The `\r`/CSI
+#     work itself was extracted into `_console_lines`, which sits UNDER the
+#     cap and is why this is 53 and not 90-odd.
+# Extracting further would only move that prose somewhere a reader of the
+# function would not find it. `_FUNCTION_WORST_BUDGET` is untouched: the worst
+# is still `bootstrap_cmd.py:_run` at 701, which none of this goes near. Of
+# the 224, `tan/planner/` contributes 49 -- unchanged, and NOT excluded from
+# the walk.
+_FUNCTION_COUNT_BUDGET = 224
 _FUNCTION_WORST_BUDGET = 707
 
 

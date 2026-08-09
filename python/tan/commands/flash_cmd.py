@@ -1287,16 +1287,106 @@ def _execute(
     return _spawn(resolved, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace)
 
 
+#: Terminal control sequences a tool emits ONLY because it can see a tty:
+#: CSI (`\x1b[31m` colour, `\x1b[K` erase-line, `\x1b[1G` cursor-move,
+#: `\x1b[?25l` hide-cursor), OSC (`\x1b]0;title\x07`, terminated by BEL or
+#: ST), and the two-character escapes (`\x1bM`, `\x1b7`). Stripped from the
+#: message only -- never from what is streamed live to the console, where they
+#: are exactly what the operator should see (tan-cli#541 review, MAJOR 2).
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+    r"|\x1b[@-Z\\-_]"  # two-character escapes
+)
+
+
+def _console_lines(text: str) -> list[str]:
+    """The lines a TERMINAL would be showing after `text` was drawn on it --
+    the input `_capture_tail` actually wants (tan-cli#541 review, MAJOR 2).
+    Pure.
+
+    Two things `str.splitlines()` gets wrong for a transcript that came off a
+    pty, and got wrong the moment tan-cli#541 gave the child a tty back:
+
+    * **It splits on `\\r`.** A `\\r`-redrawn progress bar -- which is what
+      `pyocd`/`west`/`openocd` draw once they can see a terminal, and the
+      whole reason #541 exists -- is ONE line on the screen and N lines to
+      `splitlines()`. Measured on the pty path before this fix, three of
+      `_capture_tail`'s four slots went to redraws of the same bar
+      (`'[40%] writing image | [70%] writing image | [100%] writing image |
+      Error: could not connect to target'`) and pushed the tool's actual
+      diagnosis out. Split on `\\n` alone and keep only the segment after the
+      LAST `\\r`, and the bar costs one slot showing its final state, which is
+      what the operator was looking at. (`splitlines()` also splits on `\\v`,
+      `\\f`, `\\x1c`-`\\x1e`, `\\x85`, `\\u2028`/`\\u2029` -- none of which
+      end a line on a terminal either, and any of which can appear verbatim in
+      a binary-ish tool dump.)
+    * **It leaves the escapes in.** `data.entries[].message` and the text-mode
+      `FAIL:` line are strings a customer reads and a `--format json` consumer
+      may store or re-render; measured, a raw `\\x1b[31m` shipped inside one.
+
+    Deliberately NOT a terminal emulator: no cursor-position model, no
+    scrollback. It collapses `\\r` runs and drops escape sequences, which is
+    the whole of the damage a progress bar does to a captured transcript."""
+    lines = []
+    for raw in text.split("\n"):
+        # After the last `\r`: what the redraws finally left on that row.
+        drawn = _ANSI_ESCAPE_RE.sub("", raw.rsplit("\r", 1)[-1]).rstrip()
+        if drawn.strip():
+            lines.append(drawn)
+    return lines
+
+
 def _capture_tail(outcome: _Outcome) -> str | None:
     """The failure tail from the ALREADY-captured output -- a pure read, no
     second spawn. The last 4 non-empty lines joined by " | ", or `None` when the
-    process actually succeeded."""
+    process actually succeeded.
+
+    Lines as a TERMINAL would show them ([`_console_lines`]), not as
+    `str.splitlines()` finds them: since tan-cli#541 handed the child a pty,
+    the transcript can carry the `\\r` redraws and the colour a tool only
+    emits for a tty, and both were reaching the customer-visible string.
+
+    **stderr-first is preserved where the streams still exist, and is
+    deliberately not reconstructed where they do not.** A pty is ONE device by
+    construction -- that is what makes it a terminal -- so a pty run's whole
+    transcript arrives in `.stdout` with `.stderr` empty (see [`_tee_text`])
+    and this preference has nothing to choose between. tan-cli#541 review,
+    MAJOR 2 asked whether that loss is acceptable; the answer, measured rather
+    than asserted:
+
+    * The reported harm was a bar displacing the diagnosis, and that was the
+      `\\r` split above, not the merge -- with it fixed the bar costs ONE slot
+      and the measured 3-line diagnosis arrives whole (`'[100%] writing image
+      | Error: flash algo timed out |   target reported SWD fault at
+      0x08000000 |   the image on the device may be partial'`, against dev's
+      `'Error: flash algo timed out | ...'`). What is left is one line of TRUE
+      context -- how far the write got before it failed.
+    * The residual loss is bounded and one-sided: only a diagnosis longer than
+      three lines loses its OLDEST line, and only on a terminal.
+    * Splitting it back apart is not free. Giving the child two ptys would
+      restore the preference but would hand it two DIFFERENT terminals, would
+      re-interleave the two streams through two reader threads instead of the
+      child's own write order, and -- the load-bearing one -- would cost
+      `_swd_probe_halt_markers` the chronological ordering its positional
+      reading depends on (tan-cli#540 review, MAJOR 1: whether a halt failure
+      came before or after the load is the entire distinction between a failed
+      write and a benign busy core). Trading a correct flash verdict for a
+      fourth line of tail is the wrong way round.
+    * And the preference is not uniformly a win even where it survives: it
+      picks stderr over stdout whenever stderr is non-blank, so a tool whose
+      real diagnosis goes to stdout and whose stderr carries only a
+      deprecation notice is reported by the notice. The merged transcript
+      shows the diagnosis.
+
+    The PIPE path is untouched: two streams, `.stderr` preferred exactly as
+    before."""
     if outcome.success:
         return None
     text = outcome.stderr
     if not text.strip():
         text = outcome.stdout
-    tail = [line for line in text.splitlines() if line.strip()][-4:]
+    tail = _console_lines(text)[-4:]
     if not tail:
         return f"exited rc={outcome.returncode}"
     return " | ".join(tail)
@@ -1439,9 +1529,90 @@ def _swd_probe_halt_markers(outcome: _Outcome) -> list[str]:
     Returned as a LIST rather than a bool so the message below can quote what
     the tool actually said instead of paraphrasing it -- the difference
     between "tan thinks the core did not halt" and "J-Link said `Failed to
-    halt CPU`" is the whole point of tan-cli#540. Pure."""
+    halt CPU`" is the whole point of tan-cli#540.
+
+    **POSITIONAL, not a whole-transcript substring search** (tan-cli#540
+    review, MAJOR 1). `jlink_commander_script` emits TWO halt-capable stages,
+    not one: the pre-load `r`/`halt`, and then -- after the load -- `r`/`g`,
+    which `do_reset = _default(fa_bool_checked(fa, "reset"), True)` turns ON
+    BY DEFAULT, so a shipped `E1M-V2N101` manifest carrying no `reset:` key
+    gets it. Established by RUNNING the script through a capturing Commander
+    stub on `PATH` rather than assuming an order: the script really is `r,
+    halt, loadbin <art>, <base>, r, g, qc`, and the transcript really does
+    report the load finishing (`Downloading file [...]` then `O.K.`) BEFORE
+    the reset chatter that follows it.
+
+    That ordering is the whole distinction. A resident image -- the GD32
+    bridge firmware is exactly one -- starts running the instant `loadbin`
+    finishes, so the post-load `r` cannot halt it and JLinkExe prints the same
+    two phrases a never-halted core would, on a flash that landed perfectly.
+    Searched positionlessly, a COMPLETELY SUCCESSFUL write was reported as
+    unconfirmed and the operator was told to re-flash hardware. Markers after
+    the load speak to the RESET (which is all Flow D ever claims them for --
+    `_flow_d_reset_qualified_message` scopes them to `reset requested, core
+    was busy and did not halt`); only markers BEFORE it can speak to whether
+    the write happened.
+
+    Conservative in the direction that matters: when the transcript never
+    reports a completed load -- because the pre-load halt failed and the write
+    never had a halted target, because the tool worded it differently, or
+    because [`_Tee`]'s bounded join truncated it -- there is no boundary, every
+    marker counts, and the unconfirmed verdict stands. Only a load the tool
+    itself reported FINISHING moves a marker to the reset side.
+
+    A marker landing between the two -- i.e. during the download -- cannot
+    reach here at all: this arm carries `-ExitOnError 1` (measured on the real
+    argv), so a `loadbin` that fails moves the exit code, `outcome.success` is
+    `False`, and `_flash_entry` reports a failure rather than qualifying a
+    success.
+
+    The search runs over `stdout + stderr`, the same concatenation
+    `_flow_d_reset_qualified_message` reads, so a marker on `stderr` sorts
+    after all of `stdout`. That is the real ordering in both transports that
+    exist here: JLinkExe writes this transcript to one stream, and a pty run
+    is ONE device whose entire transcript lands in `.stdout` with `.stderr`
+    empty (see [`_tee_text`]). Pure."""
     transcript = outcome.stdout + outcome.stderr
-    return [marker for marker in _FLOW_D_HALT_FAILURE_MARKERS if marker in transcript]
+    loaded_at = _jlink_load_completed_at(transcript)
+    markers = []
+    for marker in _FLOW_D_HALT_FAILURE_MARKERS:
+        at = transcript.find(marker)
+        if at < 0:
+            continue
+        if loaded_at is not None and at >= loaded_at:
+            continue  # after the load: the reset stage's, not the write's
+        markers.append(marker)
+    return markers
+
+
+#: The two phrases JLinkExe's own transcript uses to open and to close a load
+#: -- `loadbin` (raw `.bin`) and `loadfile` (ELF/HEX) print the same pair, so
+#: the positional reading below covers BOTH of `jlink_commander_script`'s
+#: arms. Matched verbatim, as substrings, exactly as the halt markers above
+#: are: the path inside the brackets varies per run and the completion token
+#: stands alone on its own line.
+_JLINK_LOAD_OPENED = "Downloading file"
+_JLINK_LOAD_COMPLETED = "O.K."
+
+
+def _jlink_load_completed_at(transcript: str) -> int | None:
+    """The index just past the point JLinkExe said the load FINISHED, or `None`
+    when it never said so (tan-cli#540 review, MAJOR 1). Pure.
+
+    Completion, not commencement: the opening `Downloading file [...]` alone
+    proves only that a write was attempted, which is the very thing already in
+    doubt. The completion token is required to come AFTER the opening one so a
+    stray `O.K.` from an earlier stage (a connect, a `halt`) cannot be read as
+    this load's, and so a download that opens and then goes quiet -- the
+    truncated-transcript case -- yields `None` and keeps every marker
+    counting."""
+    opened = transcript.find(_JLINK_LOAD_OPENED)
+    if opened < 0:
+        return None
+    completed = transcript.find(_JLINK_LOAD_COMPLETED, opened)
+    if completed < 0:
+        return None
+    return completed + len(_JLINK_LOAD_COMPLETED)
 
 
 def _swd_probe_unconfirmed_message(ok_message: str, markers: list[str]) -> str:
