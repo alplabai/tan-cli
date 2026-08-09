@@ -1594,7 +1594,10 @@ _MIRRORED = ("tan/planner/",)
 # measured 704 here (701 at `origin/dev` -- +3 for defect 2's
 # `_zephyr_base_will_adopt` gate and defect 3's occupied-target call), still
 # under the 707 ceiling.
-_FUNCTION_COUNT_BUDGET = 225
+# MERGED VALUE, tan-cli#540/#541 on top of dev carrying #494/#495 (#583):
+# re-walked on the MERGED tree with the gate's own AST walk, 230. The
+# crossing sets above are disjoint, so neither side's number is the answer.
+_FUNCTION_COUNT_BUDGET = 230
 _FUNCTION_WORST_BUDGET = 707
 
 
