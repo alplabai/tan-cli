@@ -1323,7 +1323,23 @@ def _bash_setlocale_warning_probe() -> _BashLocaleProbe:
             ["bash", "-c", "export LC_ALL=xx_YY.bogus"],
             capture_output=True, text=True, timeout=15,
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # NOT just OSError. This probe runs at MODULE SCOPE, so anything it
+        # raises is an `Interrupted: 1 error during collection` that takes the
+        # whole file's 48 tests with it -- including
+        # `test_install_sh_pins_lc_all_as_an_export_inside_the_subshell`, which
+        # was split out of the mechanism proof precisely so it would keep
+        # running on a host the proof cannot measure. A hung `bash` defeating
+        # that split is the exact outcome the split exists to prevent.
+        # `subprocess.TimeoutExpired` is a `SubprocessError`, NOT an `OSError`,
+        # so the narrower catch missed it: measured with a `bash` stub of
+        # `sleep 30`, collection died with
+        # `subprocess.TimeoutExpired: Command '['bash', '--version']' timed out
+        # after 15 seconds` rather than skipping one test. `ValueError` covers
+        # a `UnicodeDecodeError` out of `text=True` on a non-UTF-8 host.
+        # An unmeasurable shell is exactly the "cannot be asked" case, which
+        # this returns as "cannot warn" -> skip with a reason, never a silent
+        # pass.
         return _BashLocaleProbe(False, resolved, "<unrunnable>")
     first_line = (version_run.stdout or version_run.stderr).splitlines()
     matched = re.search(r"version\s+([0-9][^\s(]*)", first_line[0]) if first_line else None
