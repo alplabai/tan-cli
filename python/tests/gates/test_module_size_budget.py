@@ -1473,16 +1473,20 @@ _MIRRORED = ("tan/planner/",)
 # says to: taking either side's figure by ownership is the arithmetic mistake,
 # and here it would have shipped a budget the tree already exceeds.
 #
-# RE-MEASURED as of tan-cli#498, on this branch rebased onto dev's 221 --
-# never 221 + 3 arithmetic. Four functions crossed 50, each named
-# with its measured span and each because its RATIONALE grew, not its
-# branching: `validate_board_text` 82 (the argument for ungating two dead
-# structural checks, and for the one conformance case that costs),
-# `resolve_targets` 75 (why `--all` + an explicit `--target` is refused rather
-# than silently resolved one way), `_missing_emit_output` 75 (why a zero-byte
-# artefact is a real emit, and how tan-cli#397's guarantee survives the
-# widening) and `_ensure_writable` 60 (why the writability probe now removes
-# the file it created). The worst function is untouched at 701 <= 707.
+# 225 as of tan-cli#498, RE-WALKED with the gate's own AST walk over all of
+# `tan/` INCLUDING `tan/planner/` (49 of the 225 crossings live there) after
+# this branch was rebased onto dev's 221 -- never carried over from the
+# pre-rebase figure and never 221 + 4 arithmetic. Set-differenced against dev
+# the four new crossings are all in this change and all in `generate_cmd.py`/
+# `validate_cmd.py`, each because its RATIONALE grew, not its branching:
+# `validate_board_text` 89 (the argument for ungating two dead structural
+# checks, and for the one conformance case that costs), `resolve_targets` 75
+# (why `--all` + an explicit `--target` is refused rather than silently
+# resolved one way), `_missing_emit_output` 75 (why a zero-byte artefact is a
+# real emit, and how tan-cli#397's guarantee survives the widening) and
+# `_ensure_writable` 60 (why the writability probe now removes the file it
+# created). Nothing dropped below the cap. The worst function is untouched at
+# `bootstrap_cmd.py:_run` 701 <= 707.
 _FUNCTION_COUNT_BUDGET = 225
 _FUNCTION_WORST_BUDGET = 707
 
