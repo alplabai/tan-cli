@@ -1697,7 +1697,9 @@ _MIRRORED = ("tan/planner/",)
 # on the merged tree, 231. Disjoint crossing sets, so no side's number applies.
 # MERGED VALUE on dev carrying #494/#495 (#583) and #498 (#576): re-walked on
 # the merged tree, 234. Disjoint crossing sets, so no side's number applies.
-_FUNCTION_COUNT_BUDGET = 231
+# MERGED VALUE on dev carrying #583/#576/#575: re-walked on the merged tree,
+# 235. Disjoint crossing sets, so no single side's number applies.
+_FUNCTION_COUNT_BUDGET = 235
 _FUNCTION_WORST_BUDGET = 707
 
 
