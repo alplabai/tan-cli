@@ -333,6 +333,25 @@ def _resolve_name(name: str | None) -> str:
     )
 
 
+def _cwd_or_dot() -> Path:
+    """`Path.cwd()`, falling back to `"."` when the cwd has been removed
+    (tan-cli#494 defect 10).
+
+    Unguarded, `Path.cwd()`'s `FileNotFoundError` escaped to `init`'s catch-all
+    as `init.internal-failure` / exit 5 with an empty preview, where the oracle
+    exits 0 and emits the full envelope (measured: same argv, same deleted cwd).
+    `clean_cmd._cli_workspace_root` and `presets_cmd.resolve_project_paths`
+    already wrap the identical call this way, quoting the Rust
+    `current_dir().unwrap_or_else(|_| PathBuf::from("."))`; `init` -- the one
+    command that also WRITES its answer into `.alp/sdk-path` -- was the one
+    that skipped it.
+    """
+    try:
+        return Path.cwd()
+    except OSError:
+        return Path(".")
+
+
 def _join_display(dest: str, name: str) -> str:
     """Mirror `PathBuf::from(dest).join(name)`'s `.display()` text
     (`from_example.rs:70-74`): literal string concatenation with the native
@@ -917,7 +936,7 @@ def init(
         project_root = Path(dest) / resolved_name if resolved_name else Path(dest)
         project_root_display = _join_display(dest, resolved_name)
 
-        workspace_root = Path(os.path.abspath(project)) if project else Path.cwd()
+        workspace_root = Path(os.path.abspath(project)) if project else _cwd_or_dot()
         resolved_sdk = _resolve_sdk_root(sdk_root, workspace_root)
         # tan-cli#407, and this is the command where it matters most: `init`
         # does not merely resolve an SDK, it WRITES the answer to

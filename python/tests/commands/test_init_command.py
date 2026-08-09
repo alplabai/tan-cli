@@ -917,3 +917,57 @@ def test_would_overwrite_names_the_files_and_offers_preview(tmp_path):
     assert "src/main.c" not in message      # only the "update" kind collides
     assert "--preview" in message
     assert "--force" in message
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#494 defect 10 -- a removed cwd
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(WINDOWS, reason="Windows refuses to remove a process's own cwd")
+def test_a_preview_still_answers_from_a_cwd_that_has_been_removed(tmp_path):
+    """`Path.cwd()` was called unguarded, so a cwd deleted out from under the
+    process -- the extension re-spawning `tan` into a directory the user just
+    renamed, or a CI step clearing its scratch dir -- turned the whole command
+    into `init.internal-failure` / exit 5 with an empty envelope.
+
+    Measured against the frozen oracle on the same argv in the same removed
+    cwd: `target/debug/tan` exits 0 and emits the full 8-file preview, and so
+    does this port's own `tan clean`. The fallback is
+    `current_dir().unwrap_or_else(|_| PathBuf::from("."))`, which
+    `clean_cmd._cli_workspace_root` and `presets_cmd.resolve_project_paths`
+    already spell out; `init` -- the command that also PINS its answer into
+    `.alp/sdk-path` -- was the one that skipped it.
+
+    The child removes its OWN cwd (`subprocess` needs the directory to exist at
+    spawn time), then runs the real `python -m tan`, so this exercises the argv
+    parsing and stdout framing too, not just the helper.
+    """
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+        ),
+    }
+    proc = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import os, runpy, sys\n"
+            "os.rmdir(os.getcwd())\n"
+            "sys.argv = ['tan', 'init', '--preview', '--template', 'minimal-app',"
+            " '--format', 'json']\n"
+            "runpy.run_module('tan', run_name='__main__')\n",
+        ],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(gone), env=env,
+    )
+    body = envelope(proc)
+
+    assert proc.returncode == 0, body["issues"]
+    assert body["ok"] is True
+    assert body["issues"] == []
+    assert body["data"]["preview"] is True
+    assert [c["relativePath"] for c in body["data"]["fileChanges"]], body["data"]
+    assert not gone.exists()
