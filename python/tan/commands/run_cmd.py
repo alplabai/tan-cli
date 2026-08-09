@@ -437,6 +437,20 @@ def run(
     foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
     if foreign_issue is not None:
         issues = [foreign_issue, *issues]
+    # tan-cli#497 defect 4: both of the above went into `issues` and NOWHERE
+    # else, while text mode prints `text_lines` -- so the warnings reached
+    # `--format json` and were silently discarded on the DEFAULT path. `tan
+    # build` in the identical workspace printed the pin line and `tan run` did
+    # not, which is precisely the silence tan-cli#263 exists to remove.
+    # Prefixed `{severity}: {message}`, the shape `_build_text_lines` already
+    # uses for a build issue, and taken from the head of `issues` so the two
+    # channels can never disagree about which warnings applied or in what
+    # order.
+    warning_count = (pin_issue is not None) + (foreign_issue is not None)
+    if warning_count:
+        text_lines = [
+            f"{issue.severity}: {issue.message}" for issue in issues[:warning_count]
+        ] + text_lines
 
     if json_mode:
         emit(Envelope("run", project_obj, data, issues, exit_code, sdk=sdk))

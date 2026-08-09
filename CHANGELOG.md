@@ -7,6 +7,61 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [0.5.2] — Unreleased
 
+### Added
+
+- **`scripts/tan-surface/` — a command-surface walk that drives every `tan`
+  command, in dependency order, against a real project.** `scripts/e2e-full.sh`
+  is a release *regression* harness: it hijacks `$HOME`, wipes its tree every
+  run, and drives seven commands deeply (`--version`, `bootstrap`, `init`,
+  `doctor`, `build`, `generate`, `examples`) to prove already-fixed bugs stay
+  fixed. Measured 2026-08-05, those seven were its whole surface out of the 32
+  `tan --help` lists — the other 25 commands had no end-to-end coverage at all.
+  This is the other axis: 31 of the 32 commands (`flash` is excluded by design
+  and there is no flag to enable it), on the operator's own machine, with no
+  `$HOME` hijack. Neither replaces the other; the regression suite needs a
+  hermetic home to mean anything and this one needs a real environment to mean
+  anything. Ships no runtime change — `python/tan/` is untouched. Refs #448,
+  Refs #470.
+  - **An xfail ledger that expires itself.** Known defects are pinned to their
+    issue with `xstep`/`xstep_out`: while the bug stands the run is green, and
+    the day it is fixed the harness reports `XPASS`, exits non-zero, and names
+    the entry to retire. Written against 0.5.0, its first run against 0.5.1
+    reported 8 `XPASS` — #453, #454 (×2), #455, #456, #457, #469, #470 — all
+    now positive assertions instead. One `xstep` remains: #448, `renode` never
+    reaching the app console.
+  - **Two defects were found by writing it**: #470 (`renode` accepted
+    `--project` and resolved the build root from the CWD anyway) and #469 (the
+    workspace-orphan refusal printed a stringified `None`).
+  - **`--project` is read-only unless `--allow-mutate`.** Every step that
+    writes into a real project — `build --materialise`, a real `build`, `run`,
+    `lock`, `support-bundle`, `generate`, `scaffold`, `new-som`, `clean`,
+    `model build` — is gated, not only the ones whose phase name says so. So
+    are `quality --profile quick` and `migrate --check`, which write nothing
+    but report a verdict on the *project's* content (`--check` is documented as
+    "nonzero on drift"), so hard-asserting exit 0 against a real tree would
+    score the operator's own drift as a `tan` regression.
+  - **`--work` is never deleted out from under the operator.** Only a
+    directory the run itself created is removed at exit; an existing `--work`
+    becomes the parent of a per-run `tan-surface.XXXXXX` sandbox inside it, so
+    repeat runs neither destroy it nor accumulate SDK copies and scratch trees
+    in it.
+  - **`bootstrap` is opt-in and runs on a copy of the SDK**, because
+    `tan bootstrap` *moves* the checkout (#185); `~/.alp/sdk-default` is saved
+    beforehand and restored on exit.
+  - **`--strict` makes "green" falsifiable.** By default a `SKIP` (no
+    bootstrapped workspace, no `renode` on `PATH`, …) does not fail the run but
+    is always counted and reported; `--strict` additionally requires zero, so
+    green means "the whole surface ran" rather than "nothing that ran failed".
+  - **`check_command_surface` proves the case list against the binary's own
+    `--help` every run**, in both directions, so command 33 landing uncovered
+    is a loud `FAIL` rather than silent drift — the shell-side equivalent of
+    `tan/cli.py`'s `_SUBCOMMAND_NAMES` derivation.
+  - **`.github/workflows/getting-started.yml` gained a
+    `shellcheck -S warning scripts/tan-surface/*.sh` step**, closing the same
+    "nothing lints this" gap `install.sh` had. The walk itself is not driven in
+    CI: it needs a real alp-sdk checkout, an optionally-bootstrapped west
+    workspace and a real build.
+
 ### Changed
 
 - **`tan debug-config --core <id>` now refuses a `--core` matching no build
@@ -139,6 +194,58 @@ All notable changes to `tan` are documented here. Format follows
   list, so the one command whose whole purpose is explaining a broken
   machine stayed silent on exactly the runs where something had already
   gone wrong. (#478)
+- **A lone surrogate anywhere in the payload killed stdout AFTER serialisation
+  had already succeeded.** `emit()` writes the envelope with a bare
+  `print(text)`, and under `ensure_ascii=False` a lone surrogate -- what
+  `os.fsdecode`/`surrogateescape` turns every un-decodable filesystem byte
+  into -- passes straight through `json.dumps` into that string, so the encode
+  failed at the PRINT, one call after `_serialise()`'s own "no payload may ever
+  crash stdout" guard could still do anything about it. `tan inspect --format
+  json` from a directory created as `proj\xffx` exited 1 with ZERO bytes on
+  stdout and a Rich `UnicodeEncodeError` traceback on stderr, and `tan scaffold
+  --format json --name 'bad\xffname'` WROTE all three files and then said
+  nothing at all -- the extension's only channel is that envelope. Every
+  surrogate is now replaced with U+FFFD on the finished document, which is
+  precisely what the frozen v0.4.1 oracle puts on the wire for the same
+  directory (`Path::to_string_lossy`): the two `clean --format json` envelopes
+  are now byte-for-byte identical, measured. Not `ensure_ascii=True` as a
+  fallback re-serialisation -- that escapes every OTHER non-ASCII character in
+  the same document too, so one bad byte in a path would have turned a good
+  `Sensör Ölçüm` elsewhere in `data` into the escaped
+  `Sens\u00f6r \u00d6l\u00e7\u00fcm`. (#491)
+- **A `--format json` that was not tan's own flag flipped the whole run into
+  JSON mode.** `_wants_json` is an adjacent-pair textual scan of argv, and
+  `main()` used its answer as the gate for the ENTIRE run. In Rust that same
+  scan is consulted ONLY inside the `Cli::try_parse()` `Err` arm, so it can
+  never affect a run that parsed; the port promoted it to a process-wide mode
+  switch. So `tan quality -- --format json` -- which forwards the pair to `west
+  alp-quality` and leaves tan's own `--format` at `text` -- answered
+  `{"command":"cli",...,"cli.parse-error"}` on stdout in place of the real
+  coded refusal, and `tan lock -- --format json` reported a west child's
+  non-zero exit as a parse error it never was. Fixed by recording the PARSE
+  OUTCOME (`_DispatchedCommand`) rather than by making the scan cleverer:
+  `_wants_json` is unchanged. Two earlier attempts rewrote the scan and each
+  reopened the defect a different way, and a third textual shape is ruled out
+  by measurement -- the oracle answers `quality -- --format json` in TEXT and
+  `build -- --format json` in JSON, and the only thing separating them is
+  whether the parser accepted the argv. This also settles the same defect's
+  second vector, `tan --format json build --format text`, which now runs in
+  text mode exactly as the oracle does. (#546, #491)
+- **Ctrl-C during a `--format json` run was reported as an invalid command
+  line.** `KeyboardInterrupt` never reaches `tan.cli.main` raw -- Typer
+  re-raises it as `Exit(130)`, which Click turns into `sys.exit(130)` -- so an
+  interrupted run was indistinguishable from any other non-zero exit with no
+  envelope and fell into the `cli.parse-error` fallback: an envelope asserting
+  the COMMAND LINE was invalid for a run that was already spawning, at an
+  `exitCode` of 130, outside the contract's fixed 0-5 set. An interrupted flash
+  lost its whole `data.entries[]` this way, so the slices already programmed
+  went unreported. Now answered by the new `cli.interrupted` at
+  `RuntimeFailure` (1), with the process exiting 1 to match (the wire invariant
+  is `process exit code == envelope.exitCode`). Fixed in `tan/cli.py`, not in
+  any one command: every command lands in that same handler. TEXT mode is
+  untouched and still exits 130 through Click's own machinery. A deliberate
+  divergence from the oracle, which has no SIGINT handler at all and simply
+  dies from the signal with zero bytes on stdout. (#491)
 - **`tan debug-config --project <path>` created the directory tree when
   `<path>` did not exist, and wrote a `native-host` launch.json into it at
   exit 0 with `issues: []`.** `--project` names a project that already

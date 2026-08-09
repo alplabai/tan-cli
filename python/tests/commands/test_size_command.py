@@ -494,3 +494,225 @@ def test_no_color_env_var_suppresses_color_without_crashing(monkeypatch, value):
     monkeypatch.setattr("sys.stderr.isatty", lambda: True)
     monkeypatch.setenv("NO_COLOR", value)
     assert _use_color(no_color=False, ci=False) is False
+
+
+# --------------------------------------------------------------------------
+# tan-cli#499 defect 2 -- a stale measurement is never reported as current
+# tan-cli#497 defect 5 -- the SDK-resolution warnings reach TEXT mode too
+# --------------------------------------------------------------------------
+
+
+def _broken_pin_workspace(tmp_path: Path) -> Path:
+    """A project whose `.alp/sdk-path` names a checkout that does not resolve,
+    beside a sibling checkout discovery DOES find -- the exact shape
+    tan-cli#263/#464/#497 are about. `conftest.py`'s autouse fixture has
+    already repointed HOME, so `~/.alp/sdk-default` cannot interfere."""
+    fake_sdk(tmp_path / "alp-sdk", "E1M-TEST", SOC_5M5)
+    project = tmp_path / "proj"
+    write(project / "board.yaml", "som:\n  sku: E1M-TEST\n")
+    write(
+        project / ".alp" / "sdk-path",
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}),
+    )
+    return project
+
+
+def test_a_slice_the_manifest_says_failed_is_never_measured_from_a_stale_elf(tmp_path):
+    """tan-cli#499 defect 2. Run 1 built `m55_hp` and left a `zephyr.elf` on
+    disk; run 2 failed it, so `overlay_run_results_raw` records `status:
+    failed` while run 1's ELF is still there. `size` branched only on `os !=
+    "zephyr"` and measured it anyway -- a full row, `source: "size-tool"`,
+    exit 0, `issues: []`, and `--fail-over-budget` computing its verdict from
+    those stale bytes.
+
+    Fails against dev: there the row is a measured one (`flash.used` is an
+    int and `source` names a real tool)."""
+    from tests.core.test_size_model import make_elf
+
+    fake_sdk(tmp_path / "sdk", "E1M-TEST", SOC_5M5)
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info:\n  sku: E1M-TEST\nslices:\n"
+        "- core_id: m55_hp\n  os: zephyr\n  build_dir: m55_hp-zephyr\n"
+        "  status: failed\n",
+    )
+    elf = tmp_path / "br" / "m55_hp-zephyr" / "zephyr" / "zephyr.elf"
+    elf.parent.mkdir(parents=True, exist_ok=True)
+    elf.write_bytes(make_elf())
+
+    doc = envelope(
+        run_cli(
+            tmp_path,
+            "--format",
+            "json",
+            "--build-root",
+            "br",
+            "--sdk-root",
+            "sdk",
+            "--fail-over-budget",
+        )
+    )
+    row = doc["data"]["slices"][0]
+    assert row["status"] == "not-built"
+    assert row["flash"]["used"] is None
+    assert row["ram"]["used"] is None
+    assert row["source"] is None
+    assert len(row["notes"]) == 1
+    assert row["notes"][0].startswith(
+        "slice did not build (manifest status: failed); refusing to report a "
+        "stale measurement from "
+    )
+    assert row["notes"][0].endswith("zephyr.elf")
+
+
+def test_a_slice_with_no_declared_status_is_still_measured(tmp_path):
+    """The narrowing, pinned. A manifest that OMITS `status` says nothing
+    about whether the slice built, so it must still be measured -- refusing
+    there would break oracle parity on every no-status case in
+    `tests/parity/test_image_size_oracle.py`. Passes on dev too, by
+    construction: this guards the FIX from over-reaching, not the defect."""
+    from tests.core.test_size_model import make_elf
+
+    fake_sdk(tmp_path / "sdk", "E1M-TEST", SOC_5M5)
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info:\n  sku: E1M-TEST\nslices:\n"
+        "- core_id: m55_hp\n  os: zephyr\n  build_dir: m55_hp-zephyr\n",
+    )
+    elf = tmp_path / "br" / "m55_hp-zephyr" / "zephyr" / "zephyr.elf"
+    elf.parent.mkdir(parents=True, exist_ok=True)
+    elf.write_bytes(make_elf())
+
+    row = envelope(
+        run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    )["data"]["slices"][0]
+    assert row["source"] is not None
+    assert isinstance(row["flash"]["used"], int)
+
+
+def test_a_failed_slice_with_no_artefact_keeps_the_oracles_own_not_built_note(tmp_path):
+    """The other half of the narrowing: when the probe found nothing anyway,
+    the row stays `not-built` for the ORACLE's reason and in the oracle's own
+    words. That is what keeps every frozen parity case carrying a non-ok
+    status but no artefact byte-identical -- the divergence materialises
+    exactly where the defect does, and nowhere else."""
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info:\n  sku: E1M-TEST\nslices:\n"
+        "- core_id: m55_hp\n  os: zephyr\n  build_dir: nowhere\n  status: failed\n",
+    )
+    row = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "br"))["data"][
+        "slices"
+    ][0]
+    assert row["status"] == "not-built"
+    assert row["notes"][0].startswith("no footprint source at ")
+
+
+def test_the_sdk_pin_warning_reaches_size_text_mode_not_only_json(tmp_path):
+    """tan-cli#497 defect 5, the `size` sibling the issue names alongside
+    `image`. The pair went into `issues` and nowhere else, so the DEFAULT
+    mode dropped both warnings while `--format json` reported them.
+
+    Fails against dev: there stderr carries the table and nothing else."""
+    project = _broken_pin_workspace(tmp_path)
+    write(
+        project / "build" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info:\n  sku: E1M-TEST\nslices: []\n",
+    )
+    result = run_cli(project)
+    assert result.returncode == 0
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "gone-checkout" in result.stderr
+    # And still in JSON, unchanged -- the two channels agree.
+    doc = envelope(run_cli(project, "--format", "json"))
+    assert [i["code"] for i in doc["issues"]] == ["sdk.project-pin-unresolved"]
+
+
+def test_the_sdk_pin_warning_reaches_size_text_mode_on_the_manifest_gate_too(tmp_path):
+    """The `_error_outcome` half of the same defect: the manifest gate is the
+    dominant refusal path and built `text` without the pair."""
+    project = _broken_pin_workspace(tmp_path)
+    result = run_cli(project)
+    assert result.returncode == 1
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "no system-manifest.yaml at" in result.stderr
+
+
+def _invoke_in_process(monkeypatch, project: Path, *argv):
+    """`size` mounted on a throwaway `typer.Typer()` and driven in-process --
+    see the twin helper in `test_image_command.py` for why the subprocess
+    `run_cli` above cannot reach this command's outer catch-all."""
+    import typer
+    from typer.testing import CliRunner
+
+    from tan.commands import size_cmd
+
+    monkeypatch.chdir(project)
+    app = typer.Typer()
+    app.command("size")(size_cmd.size)
+    return CliRunner().invoke(app, list(argv))
+
+
+def test_the_internal_failure_catch_all_reports_the_pin_warning_too(
+    tmp_path, monkeypatch
+):
+    """tan-cli#497 defect 5, the site the first pass missed. `_error_outcome`
+    and the happy path both report the SDK-resolution pair; `size`'s outer
+    `size.internal-failure` handler -- which runs strictly AFTER
+    `resolve_project_context` has already answered -- reported only the crash,
+    in JSON and text alike.
+
+    Fails against the pre-fix branch: there `issues` is
+    `[size.internal-failure]` alone and `sdk` is absent."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.size_cmd.load_manifest", boom)
+    result = _invoke_in_process(monkeypatch, project, "--format", "json")
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "size.internal-failure",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    assert doc["sdk"]["sourceTier"] == "discovery"
+
+
+def test_the_internal_failure_catch_all_reaches_size_text_mode_too(
+    tmp_path, monkeypatch
+):
+    """The DEFAULT mode, same site.
+
+    Fails against the pre-fix branch: stderr carries only `size: internal
+    failure`."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.size_cmd.load_manifest", boom)
+    result = _invoke_in_process(monkeypatch, project)
+    assert result.exit_code == 5
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "size: internal failure" in result.stderr
+
+
+def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
+    tmp_path, monkeypatch
+):
+    """The negative control. `SdkDisclosure` starts empty, so a raise BEFORE
+    `resolve_project_context` answers must report the crash alone."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr("tan.commands.size_cmd.resolve_project_context", boom)
+    result = _invoke_in_process(monkeypatch, project, "--format", "json")
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == ["size.internal-failure"]
+    assert "sdk" not in doc

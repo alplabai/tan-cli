@@ -500,3 +500,153 @@ def test_board_and_board_yaml_are_the_same_option(tmp_path):
     via_board_yaml = runner.invoke(app, ["build", "--board-yaml", str(other_board), *common])
     assert via_board.exit_code == via_board_yaml.exit_code == 0
     assert envelope(via_board) == envelope(via_board_yaml)
+
+
+# --------------------------------------------------------------------------
+# tan-cli#497 defect 3 -- the SDK-resolution warnings are no longer dropped
+# --------------------------------------------------------------------------
+
+
+def _broken_pin_project(tmp_path: Path) -> Path:
+    """A project whose `.alp/sdk-path` names a checkout that does not resolve,
+    beside a sibling `alp-sdk` that discovery DOES find -- so resolution
+    answers with a DIFFERENT checkout than the pin names. `conftest.py`'s
+    autouse fixture has already repointed HOME, so `~/.alp/sdk-default`
+    cannot interfere."""
+    make_sdk(tmp_path / "alp-sdk")
+    project = tmp_path / "proj"
+    board_yaml(project)
+    write(
+        project / ".alp" / "sdk-path",
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}),
+    )
+    return project
+
+
+def test_a_broken_project_pin_is_reported_on_a_model_build(tmp_path, monkeypatch):
+    """tan-cli#497 defect 3. `model build` was the only
+    `resolve_project_context` caller that read `.workspace_root`/`.board_yaml`
+    /`.project()`/`.sdk` off the returned context and NONE of the three
+    resolution facts, so it alone dropped BOTH `sdk.project-pin-unresolved`
+    and `sdk.global-default-foreign-project` -- while `tan size` and `tan
+    image`, on the identical resolver, reported them from the same directory.
+
+    It matters most here: the `.alpmodel` packages are compiled against
+    `<resolved checkout>/metadata`, i.e. against THAT checkout's
+    target/backend table for `som.sku`.
+
+    Fails against dev: there `issues` is `[]` at `ok: true`."""
+    project = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(project)
+    result = runner.invoke(app, ["build", "--format", "json"])
+    assert result.exit_code == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    assert [i["code"] for i in doc["issues"]] == ["sdk.project-pin-unresolved"]
+    assert doc["issues"][0]["severity"] == "warning"
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    assert doc["sdk"]["sourceTier"] == "discovery"
+
+
+def test_a_broken_project_pin_reaches_model_text_mode_too(tmp_path, monkeypatch):
+    """The DEFAULT mode, which `finish()` renders from `data.built` plus
+    `issues`. Warnings LEAD, ahead of the result lines: which checkout
+    answered is a fact about the whole run, not a per-model outcome.
+
+    Fails against dev: stderr carries only the no-models line."""
+    project = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(project)
+    result = runner.invoke(app, ["build"])
+    assert result.exit_code == 0
+    lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    assert lines[0].startswith("warning: .alp/sdk-path names")
+    assert "gone-checkout" in lines[0]
+    # ...and the run's own line is NOT swallowed by the new warning: the
+    # "nothing to build" branch used to key on `not issues`.
+    assert any("no `models:` declared in board.yaml" in ln for ln in lines)
+
+
+def test_a_broken_project_pin_survives_a_model_error_refusal(tmp_path, monkeypatch):
+    """The `except ModelError` path. `resolve_project_context` used to be the
+    first statement INSIDE `_run_build`, so its resolution facts were
+    unreachable from the handler and the pin warning was dropped on every
+    refusal too. Resolved by the caller now, so the ONE resolution feeds
+    every exit.
+
+    Fails against dev: `issues` is `[model.board-yaml-invalid]` alone."""
+    make_sdk(tmp_path / "alp-sdk")
+    project = tmp_path / "proj"
+    write(project / "board.yaml", "models: []\n")  # no som.sku -> ModelError
+    write(
+        project / ".alp" / "sdk-path",
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}),
+    )
+    monkeypatch.chdir(project)
+    result = runner.invoke(app, ["build", "--format", "json"])
+    assert result.exit_code == 2
+    doc = envelope(result)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "model.board-yaml-invalid",
+    ]
+
+
+def test_a_clean_workspace_model_build_still_reports_no_issues(tmp_path):
+    """The negative control: with no pin and no foreign global default the
+    envelope must stay `issues: []`, or a fix that appended unconditionally
+    would look identical to the cases above."""
+    sdk = make_sdk(tmp_path / "sdk")
+    board_yaml(tmp_path)
+    result = runner.invoke(
+        app,
+        ["build", "--project", str(tmp_path), "--sdk-root", str(sdk), "--format", "json"],
+    )
+    assert result.exit_code == 0
+    assert envelope(result)["issues"] == []
+
+
+def test_the_internal_failure_catch_all_reports_the_pin_warning_too(
+    tmp_path, monkeypatch
+):
+    """The outer `except Exception` -- the site that was left open in
+    `kconfig`/`image`/`size` and is already closed here, pinned so it stays
+    that way. `model` resolves in the OUTER function (`sdk_issues` is assigned
+    between the `try:` and `_run_build`), so its handler can read the pair
+    directly; no `SdkDisclosure` carrier is needed.
+
+    Passes on the pre-fix branch too: this guards a property that is already
+    true against a regression, it does not report a defect."""
+    project = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(project)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.model_cmd._run_build", boom)
+    result = runner.invoke(app, ["build", "--format", "json"])
+    assert result.exit_code == 5
+    doc = envelope(result)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "model.internal-failure",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+
+
+def test_the_internal_failure_catch_all_reaches_model_text_mode_too(
+    tmp_path, monkeypatch
+):
+    """The DEFAULT mode, same site -- `finish`'s text branch prints warnings
+    first, so the pair leads the crash line."""
+    project = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(project)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.model_cmd._run_build", boom)
+    result = runner.invoke(app, ["build"])
+    assert result.exit_code == 5
+    lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    assert lines[0].startswith("warning: .alp/sdk-path names")
+    assert any("model build failed unexpectedly" in ln for ln in lines)
