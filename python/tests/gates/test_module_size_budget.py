@@ -781,7 +781,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # correction from alp-sdk#1228. Raised rather than extracted: this file
     # mirrors an upstream module line for line, so a split here would make the
     # next port a hand-merge instead of a diff. Measured, not computed.
-    "tan/planner/kconfig.py": 1679,
+    # 2014, not 1679, as of the alp-sdk#1348 re-sync (tan-cli#557/#558/#559):
+    # `_split_server_url` + `_hawkbit_server_lines` + `_hawkbit_poll_line`
+    # (the OTA URI split and the seconds->minutes conversion), the `_LOG_
+    # MODULES` guard table with its transcription of the pinned Zephyr v4.4.1
+    # log_config `if` chains, `_enabled_symbols`, and the rewritten
+    # `_emit_diagnostics` that emits the choice-symbol form. +335 -- upstream's
+    # own delta to the byte (its `scripts/alp_orchestrate/kconfig.py` went
+    # 1684 -> 2019 across the same range). Raised, not extracted, for the
+    # reason above: this file mirrors an upstream module line for line.
+    # Measured with the gate's own reader on this branch's tree, not computed.
+    "tan/planner/kconfig.py": 2014,
 
     # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
     # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
@@ -890,7 +900,20 @@ _MODULE_BUDGET: dict[str, int] = {
     # `_text_recap` gained the resolved-tool note it now composes for a
     # failed/cancelled slice (never folded into `reason` -- see both
     # functions' own docstrings).
-    "tan/commands/build_cmd.py": 1908,
+    # 2043, not 1908, as of tan-cli#566 + tan-cli#565: two pre-materialise
+    # guards in `_build` plus their helpers. `_build_root_is_consumer_default`
+    # (27 lines) carries the ten-spelling accept/refuse matrix measured off
+    # `target/debug/tan`, which is the only thing that says why the comparison
+    # is on `Path.parts` and not `!= "build"` -- `build/` and `./build` are
+    # ACCEPTED by the oracle. `_demoted_artefact_issues` (49) carries the two
+    # measured shapes `executionPolicy.missingTool` takes in materialise mode
+    # and why it does NOT filter on backend/command the way `_dispatch`'s
+    # `held` does. The rest is the comment block in `_build` recording why
+    # both guards sit ABOVE `materialise_plan` (which runs before the mode
+    # check, so a guard inside the materialise branch would refuse only after
+    # the other slices' files had landed) and why the build-root one is scoped
+    # to `_MODE_NATIVE`. Measured `wc -l`, not arithmetic.
+    "tan/commands/build_cmd.py": 2043,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
@@ -1005,7 +1028,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # `_require_complete_tree` with its derived expectation, and the
     # file-naming `OSError`. Each carries the docstring recording what it was
     # measured against, which is most of the growth.
-    "tan/core/scaffold.py": 1341,
+    # 1452, not 1341, as of tan-cli#579: `_SOM_FAMILIES`/`_DEFAULT_FAMILY`/
+    # `_som_family` (the ONE table `app_core_for_sku` and `_family_bucket` now
+    # both read, so they cannot disagree again), the `UnsupportedSomError`
+    # class whose docstring records why refusing beats vendoring an NXP tree or
+    # warning-and-writing one, and `_vendored_family` -- extracted so
+    # `_vendored_files` stays under 50 lines and the FUNCTION ratchet holds at
+    # 237 rather than being raised for a 4-line guard. Re-measured: exactly
+    # `wc -l` on this branch.
+    "tan/core/scaffold.py": 1452,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one
@@ -1171,7 +1202,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # 1042, not 1023, as of tan-cli#494 defect 10: `_cwd_or_dot` and the
     # docstring recording that the frozen oracle exits 0 on the identical
     # removed cwd where this port raised `init.internal-failure` / exit 5.
-    "tan/commands/init_cmd.py": 1042,
+    # 1057, not 1042, as of tan-cli#579: the `UnsupportedSomError` ->
+    # `init.som-unsupported` arm in `_plan_from_template`, plus the comment
+    # separating it from the neighbouring `init.invalid-som` (which means
+    # something else: "this TEMPLATE supports one SKU", not "tan has no
+    # scaffold for this SoM family"). Re-measured: exactly `wc -l` on this
+    # branch.
+    "tan/commands/init_cmd.py": 1057,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
@@ -1822,6 +1859,31 @@ _MIRRORED = ("tan/planner/",)
 # MERGED VALUE, #581 rebased onto dev carrying #575: re-walked on the rebased
 # tree, 236. Not either side's number -- the crossing sets are disjoint.
 # MERGED VALUE, #581 rebased onto dev carrying #575/#577: re-walked, 237.
+# 242, not 237, after the alp-sdk#1345/#1347/#1348 planner re-sync. Re-walked
+# with the gate's own `ast.walk` span>50 over ALL of `tan/` (planner included)
+# on this branch's tree and diffed against the same walk on `origin/dev`: the
+# crossing set gained exactly five entries and lost none, 237 + 5 = 242.
+#   * `carveout.py:_place_pinned` 62 (new) and `partition.py:_place` 61 (new)
+#     -- the two-pass placement both fixes need. The pinned pass and the bump
+#     pass are one body each; splitting them would put the bounds check in a
+#     different function from the overlap check it feeds.
+#   * `kconfig.py:_split_server_url` 70 (new) -- the `ota.server.url` ->
+#     (host, port, scheme) decomposition, hand-parsed because `urlsplit`
+#     lowercases `.hostname` and a `${VAR}` placeholder is case-sensitive.
+#     Most of the span is the five refusal messages.
+#   * `kconfig.py:_emit_diagnostics` 66 -- a CROSSING, not a new function: it
+#     went from an int-form one-liner per module to the choice-symbol form
+#     with the per-module guard/log-gate checks and the three comment branches
+#     that explain each downgrade.
+#   * `sdk_compat.py:load_family_table` 62 -- also a crossing (it is the
+#     renamed `_load_family_table`, ~12 lines before): the fail-open read
+#     became four distinct refusals, and the docstring carries the
+#     ABSENT-vs-UNUSABLE distinction the whole fix turns on.
+# All five are mirror-file functions that exist upstream at the same shape, so
+# extracting here would make the next re-sync a hand-merge instead of a diff.
+# `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
+# `bootstrap_cmd.py:_run` at 704, which none of this goes near. Of the 242,
+# `tan/planner/` contributes 54 (was 49) -- and is NOT excluded from the walk.
 # 238, not 237, as of tan-cli#567 -- re-walked on THIS tree with the gate's own
 # `ast.walk` span>50 over all of `tan/` including `tan/planner/`. The spans
 # below are the RE-WALK's own numbers: an earlier version of this comment
@@ -1843,7 +1905,14 @@ _MIRRORED = ("tan/planner/",)
 #     the cap deliberately rather than moving this budget for a comment.
 # `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
 # `bootstrap_cmd.py:_run`, measured at 704 here, and nothing above goes near it.
-_FUNCTION_COUNT_BUDGET = 238
+# MERGED VALUE, #567 merged with dev carrying the planner re-sync: 243, and
+# MEASURED with the gate's own `_long_functions` on the merged tree -- not
+# 238 + 5 nor 242 + 1 by arithmetic. The two paragraphs above describe
+# DISJOINT crossing sets (one `flash_cmd.py` function; five mirror-file
+# functions), so both survive the merge intact and neither side's total does.
+# That the walk agrees with 237 + 1 + 5 is a check on the two paragraphs, not
+# how the number was obtained.
+_FUNCTION_COUNT_BUDGET = 243
 _FUNCTION_WORST_BUDGET = 707
 
 

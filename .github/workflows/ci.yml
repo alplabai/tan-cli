@@ -260,11 +260,31 @@ jobs:
       #
       # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
       # PREDATES the six contract-surface commits this bump exists to pick up.
+      #
+      # `f30f4d4b` -> `ccd34f06` for tan-cli#552/#553/#554/#555/#557/#558/#559/
+      # #562/#563, moved in the SAME change as `parity.yml`'s `PINNED_SDK_TAG`
+      # and `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` /
+      # `HAND_PORT_PINNED_SDK_COMMIT` -- the "MUST be bumped together" rule
+      # above, applied to all four pin sites at once. That change carries the
+      # `tan/planner/` port these refs exist to measure: alp-sdk#1345's
+      # two-pass carve-out/partition placement + `access_windows:`, #1347's
+      # refusing family-table reader + per-family `boot.method:` default, and
+      # #1348's Hawkbit URI/units split, log-level choice-symbol form and
+      # core-scoped library layer. Bound to the OLD `f30f4d4b` after that port
+      # lands, `test_relocated_planner_modules_match_the_pinned_sdk_audit`
+      # fails on the hash of six upstream files (and the hand-port test on
+      # `scripts/alp_project_loader.py`), and the emit-parity cases diff the
+      # ported planner against the pre-fix `scripts/alp_orchestrate/`.
+      #
+      # alp-sdk#1344 is deliberately NOT picked up: still OPEN and CONFLICTING
+      # upstream, so tan-cli#550/#551 stay open.
+      #
+      # Still not a tag, for the same reason as above.
       - uses: actions/checkout@v4
         if: ${{ inputs.sdk_parity }}
         with:
           repository: alplabai/alp-sdk
-          ref: f30f4d4ba76c235cbb2b2cc713666cb858677e03
+          ref: ccd34f0648cc4f26a3230f337935050cd999d8a0
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
