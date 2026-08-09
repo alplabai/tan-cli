@@ -123,12 +123,23 @@ def _read_verbatim(path: Path) -> str:
     `io::Error` (kind `InvalidData`) for invalid UTF-8 rather than a distinct
     error type (the same equivalence `kconfig_cmd.py`'s `_resolve_core`
     documents for the identical reason).
+
+    The synthesised `OSError` NAMES THE FILE (tan-cli#494 defect 4). Python's
+    own `open()` interpolates the filename into every `OSError` it raises, so
+    the permission-denied branch always reported a path; the codec branch --
+    the one a stray binary actually trips -- raised a bare
+    `UnicodeDecodeError` whose `str()` is only `'utf-8' codec can't decode
+    byte 0xff in position 88: invalid start byte`. The caller wraps that
+    verbatim into `init.example-unreadable`, leaving the customer with a
+    600-file tree and nothing to act on. The oracle's own message
+    (`read_to_string` -> `io::Error`) names the path, so this restores parity
+    as well as sense.
     """
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             return handle.read()
     except UnicodeDecodeError as err:
-        raise OSError(str(err)) from err
+        raise OSError(f"{path}: {err}") from err
 
 
 def _write_verbatim(path: Path, content: str) -> None:
@@ -370,6 +381,110 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
                 continue
         out.append(line)
     return "\n".join(out)
+
+
+def _indent_of(body: str) -> int:
+    return len(body) - len(body.lstrip(" \t"))
+
+
+def _cores_block_span(lines: list[str]) -> tuple[int, int] | None:
+    """`(start, end)` half-open line indices of the top-level `cores:` block's
+    CHILDREN, or `None` when there is no such block. `start` is the line after
+    `cores:`; `end` is the next column-0 key (or EOF)."""
+    start: int | None = None
+    for index, line in enumerate(lines):
+        body, _ = _split_cr(line)
+        if not body or body[0] in " \t":
+            continue
+        if start is not None:
+            return (start, index)
+        if body.lstrip(" \t").startswith("cores:"):
+            start = index + 1
+    return None if start is None else (start, len(lines))
+
+
+def retarget_board_yaml_cores(content: str, sku: str, source_sku: str) -> str:
+    """Re-derive a vendored `cores:` block for `sku` (tan-cli#494 defect 2).
+
+    `tan init` picks a vendored tree by FAMILY (`_family_bucket`) and then
+    retargeted only the `som: sku:` line, so every SKU outside the two
+    representative ones (`E1M-AEN801` / `E1M-V2N101`) inherited that tree's
+    core ids verbatim. `tan init --template edge-ai-starter --som E1M-AEN301`
+    wrote `cores: a32_cluster:` for an Ensemble E3, which has no Cortex-A32 --
+    reported `ok:true` / `exitCode 0` / `issues:[]`, and `tan validate` then
+    hard-errored (exit 2) on the very next command. `--som E1M-NX9101` landed
+    on the Alif tree and got `m55_hp` against a topology of
+    `a55_cluster`/`m33`, contradicting this same module's `app_core_for_sku`.
+
+    Two edits, both of which can only REMOVE wrong facts, never invent new
+    ones -- `tan init` is SDK-free and has no SoM topology to consult:
+
+    * the APP core (the one entry declaring `app:`) is renamed to
+      `app_core_for_sku(sku)`, tan's own family mapping, the same one
+      `minimal-app` already renders and `tan validate` re-checks against the
+      real catalogue;
+    * every OTHER entry is DROPPED. Those are the `os: "off"` secondary
+      cluster declarations (`a32_cluster` on the E8, `a55_cluster` on the
+      V2N/i.MX 93) which exist only on the tree's own representative SKU. A
+      core absent from `cores:` is simply not built, so dropping is always
+      sound; keeping a made-up id, or guessing the target's cluster id from a
+      table tan cannot verify, is not.
+
+    NO-OP by construction when `sku == source_sku` (the tree's own SKU, which
+    is what `E1M-AEN801`/`E1M-V2N101` always hit) -- byte-exact passthrough,
+    so the parity and vendored-capture fixtures are untouched. Also a no-op
+    when the block has no unambiguous single `app:` entry: an unrecognised
+    shape is left verbatim rather than half-rewritten.
+    """
+    if sku == source_sku:
+        return content
+    lines = content.split("\n")
+    span = _cores_block_span(lines)
+    if span is None:
+        return content
+    start, end = span
+    entry_indent: int | None = None
+    entries: list[tuple[int, int]] = []  # (key line index, entry end index)
+    for index in range(start, end):
+        body, _ = _split_cr(lines[index])
+        if not body.strip():
+            continue
+        indent = _indent_of(body)
+        if entry_indent is None:
+            entry_indent = indent
+        if indent == entry_indent:
+            if entries:
+                entries[-1] = (entries[-1][0], index)
+            entries.append((index, end))
+    if not entries:
+        return content
+    entries[-1] = (entries[-1][0], end)
+
+    def declares_app(entry: tuple[int, int]) -> bool:
+        key, stop = entry
+        return any(
+            _split_cr(lines[i])[0].lstrip(" \t").startswith("app:")
+            for i in range(key + 1, stop)
+        )
+
+    app_entries = [e for e in entries if declares_app(e)]
+    if len(app_entries) != 1:
+        return content
+    app_key, app_stop = app_entries[0]
+    key_body, key_cr = _split_cr(lines[app_key])
+    trimmed = key_body.lstrip(" \t")
+    if ":" not in trimmed:
+        return content
+    indent = key_body[: len(key_body) - len(trimmed)]
+    tail = trimmed[trimmed.index(":") :]
+    kept = [f"{indent}{app_core_for_sku(sku)}{tail}{key_cr}"]
+    kept.extend(lines[app_key + 1 : app_stop])
+    # The block's own trailing blank line separates `cores:` from the next
+    # top-level key. It rides along with whichever entry came last, so it is
+    # re-appended by hand when that entry was one of the dropped ones.
+    if end > start and not lines[end - 1].strip() and kept[-1].strip():
+        kept.append(lines[end - 1])
+    return "\n".join([*lines[:start], *kept, *lines[end:]])
 
 
 # ---------------------------------------------------------------------------
@@ -620,10 +735,7 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     family = IOT_STARTER_SUPPORTED_SKU if template_id == "iot-starter" else _family_bucket(sku)
     root = VENDORED_ROOT / tree / family
     try:
-        paths = sorted(
-            (p for p in root.rglob("*") if p.is_file()),
-            key=lambda p: p.relative_to(root).as_posix(),
-        )
+        paths = _example_source_files(root) if root.is_dir() else []
         if not paths:
             raise TemplateDataError(
                 f"tan's vendored template tree for '{template_id}' is empty at "
@@ -637,13 +749,65 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
             content = _read_verbatim(path)
             if relative == "board.yaml":
                 content = retarget_board_yaml_som(content, sku)
+                # tan-cli#494 defect 2: the SoM line was the ONLY thing
+                # retargeted, so a `--som` outside the tree's own SKU kept its
+                # core ids. No-op when `sku == family` (see the function).
+                content = retarget_board_yaml_cores(content, sku, family)
             files.append(PlannedFile(relative, content))
+        _require_complete_tree(template_id, root, files)
     except OSError as err:
         raise TemplateDataError(
             f"tan's vendored template tree for '{template_id}' could not be read at "
             f"'{root}': {err}"
         ) from err
     return files
+
+
+#: Files every vendored scaffold tree must carry, whatever the template: the
+#: build script, the SoM declaration, and the Zephyr config. A tree missing any
+#: of them is not a scaffold.
+_VENDORED_BASELINE_FILES = ("CMakeLists.txt", "board.yaml", "prj.conf")
+
+#: `target_sources(app PRIVATE <path> ...)`, across line breaks -- `edge-ai`
+#: spells it over three lines, every other template on one.
+_TARGET_SOURCES_RE = re.compile(r"target_sources\s*\(\s*app\s+PRIVATE\s+(.*?)\)", re.DOTALL)
+
+
+def _require_complete_tree(template_id: str, root: Path, files: list[PlannedFile]) -> None:
+    """Refuse a PARTIALLY delivered vendored tree (tan-cli#494 defect 3).
+
+    The `if not paths:` guard above is all-or-nothing: it fires only when the
+    tree yields ZERO files, so any non-empty SUBSET read as complete. With
+    `src/main.c` absent -- a mis-scoped PyInstaller `--add-data`, a partial
+    copy, an extracted onedir whose `src/` lost `+x` -- `tan init` wrote five
+    files, reported `ok:true` / `issues:[]`, and the `CMakeLists.txt` it DID
+    write still said `target_sources(app PRIVATE src/main.c)`. The customer's
+    first `tan build` then died inside CMake with "Cannot find source file",
+    reported to them as their project's problem. `TemplateDataError` /
+    `init.template-unreadable` is exactly the coded outcome that broken-
+    installation population is owed.
+
+    The expected set is DERIVED, never a hand-kept list that would drift out
+    of step with the trees: a baseline every scaffold has by definition
+    (`_VENDORED_BASELINE_FILES`) plus every relative path the tree's own
+    `CMakeLists.txt` hands to `target_sources(app PRIVATE ...)`. That second
+    half is what makes the check track a template that gains a `.c` file with
+    no edit here -- and it is the precise set whose absence breaks the build.
+    """
+    present = {f.relative_path for f in files}
+    expected = set(_VENDORED_BASELINE_FILES)
+    cmake = next((f.content for f in files if f.relative_path == "CMakeLists.txt"), None)
+    if cmake is not None:
+        for block in _TARGET_SOURCES_RE.findall(cmake):
+            expected.update(tok for tok in block.split() if not tok.startswith("$"))
+    missing = sorted(expected - present)
+    if missing:
+        raise TemplateDataError(
+            f"tan's vendored template tree for '{template_id}' at '{root}' is "
+            f"incomplete -- missing {', '.join(missing)}. This is a broken tan "
+            f"installation, not a project problem -- reinstall tan, or rebuild the "
+            f"binary with the template data (scripts/build_binary.sh)."
+        )
 
 
 def vendored_library_names_for(template_id: str) -> list[str] | None:
@@ -968,23 +1132,94 @@ def _feature_file(unit_name: str, todo_line: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Directory names under an SDK example that hold BUILD OUTPUT, never example
+#: source -- pruned by [`read_example_tree`] (tan-cli#494 defect 1).
+#:
+#: Transcribed from alp-sdk's OWN `.gitignore` (`build/`, `build_*/`,
+#: `cmake-build-*/`, `twister-out*/`), which is the authority on what is
+#: untracked artifact in that repo: `tan init --from-example` copies an
+#: example into a NEW project, and a `west build` run in place turns a 6-file
+#: example into 613 files of `CMakeCache.txt`/`.ninja_deps`/`libapp.a`. Those
+#: are not the customer's project, and the first binary among them aborts the
+#: whole command with `init.example-unreadable`.
+#:
+#: DELIBERATE DIVERGENCE from the frozen oracle, which has the same missing
+#: exclusion (`crates/tan-core/src/wizard/filesystem.rs::collect_example_files`)
+#: and fails identically -- the oracle is a fixed point for BEHAVIOUR THAT IS
+#: RIGHT, and copying a build tree into a new project is not. No parity fixture
+#: pins `--from-example` content (`oracle_fixtures/PARITY-COVERAGE.txt` covers
+#: `scaffold` refusals only), so nothing frozen moves for this.
+#:
+#: The set is EXACTLY the five `.gitignore` patterns and no more. An earlier
+#: cut also pruned `build-`, which appears in no pattern there -- an invented
+#: rule that would silently drop a hand-written `build-utils/` from a
+#: customer's new project, which is the same class of damage as copying the
+#: build tree in. What the SDK declares untracked is the whole authority here.
+_EXAMPLE_BUILD_OUTPUT_DIRS = ("build", "twister-out")
+_EXAMPLE_BUILD_OUTPUT_PREFIXES = ("build_", "cmake-build-", "twister-out.")
+
+
+def _is_build_output_dir(name: str) -> bool:
+    """Whether a directory NAME under an example is untracked build output."""
+    return name in _EXAMPLE_BUILD_OUTPUT_DIRS or name.startswith(
+        _EXAMPLE_BUILD_OUTPUT_PREFIXES
+    )
+
+
+def _example_source_files(source_dir: Path) -> list[Path]:
+    """Every regular file under `source_dir` that is example SOURCE: build-output
+    directories pruned, symlinks skipped on BOTH the file and the directory side.
+
+    `os.walk`, not `Path.rglob("*")`, for two reasons the walk needs and the
+    glob cannot give: `dirnames` is mutable, which is what makes pruning a
+    build tree cost nothing instead of stat-ing all 607 files inside it; and
+    `onerror` surfaces a directory that could not be listed instead of
+    `rglob`'s silent skip (`_vendored_files` needs the same guarantee -- see
+    tan-cli#494 defect 3).
+
+    Symlinks are skipped, matching the oracle's `DirEntry::file_type()`, whose
+    own doc comment says "Symlinks and other non-regular entries are skipped":
+    `Path.is_file()` FOLLOWS a symlinked file, so a link pointing outside the
+    example would inline that outside file's content into the customer's new
+    project. `followlinks` stays at its `False` default for the directory side.
+    """
+
+    def _raise(err: OSError) -> None:
+        raise err
+
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(source_dir, onerror=_raise):
+        dirnames[:] = [d for d in dirnames if not _is_build_output_dir(d)]
+        here = Path(dirpath)
+        for name in filenames:
+            candidate = here / name
+            # `is_symlink()` FIRST: a dangling link is not `is_file()` either,
+            # and the two must not be distinguishable here.
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            found.append(candidate)
+    return sorted(found, key=lambda p: p.relative_to(source_dir).as_posix())
+
+
 def read_example_tree(source_dir: Path) -> list[PlannedFile]:
     """Read every regular file under `source_dir` verbatim as UTF-8 text, paths
     forward-slash normalised and sorted by that relative path (NOT by `Path` --
     see `_vendored_files` for why that ordering is platform-dependent).
 
+    Build output is NOT example source and never reaches the new project --
+    see `_example_source_files`, which also does the sorting and the
+    symlink/unlistable-directory handling.
+
     UTF-8 only, like the Rust: a binary-carrying example surfaces as an
     `ExampleReadError` instead of being copied corrupt. All shipped examples are
-    text today.
+    text today -- and with build output pruned, that is true of a built-in-place
+    checkout too.
     """
     if not source_dir.is_dir():
         raise ExampleReadError(f"'{source_dir}' is not a directory.", not_found=True)
     files: list[PlannedFile] = []
     try:
-        for path in sorted(
-            (p for p in source_dir.rglob("*") if p.is_file()),
-            key=lambda p: p.relative_to(source_dir).as_posix(),
-        ):
+        for path in _example_source_files(source_dir):
             files.append(
                 PlannedFile(path.relative_to(source_dir).as_posix(), _read_verbatim(path))
             )
