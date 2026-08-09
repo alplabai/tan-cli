@@ -747,8 +747,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # what runs. Most of the +142 is that reasoning: `CreateProcess` searching
     # the customer's project directory ahead of `%PATH%` is not self-evident
     # from the diff, and the ORDER of the venv rewrite and the PATH resolution
-    # is load-bearing in a way a future reader would otherwise "simplify".
-    "tan/commands/flash_cmd.py": 3348,
+    # is load-bearing in a way a future reader would otherwise "simplify". The
+    # last +45 is the `executable=` correction the frozen oracle envelope forced
+    # (`_execute`'s own docstring records it): an `argv[0]` rewrite, which is
+    # what #510 used for the build spawn, made `dd`'s own diagnostic read
+    # `/usr/bin/dd: failed to open ...` in `data.entries[].message` where the
+    # oracle says `dd: ...`, so the parameter is threaded through all four
+    # spawn helpers instead.
+    "tan/commands/flash_cmd.py": 3393,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks

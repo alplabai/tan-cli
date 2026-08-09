@@ -32,12 +32,19 @@ from tan.core.flash_plan import FlashInputs, FlashPlan
 from tan.core.tool_lookup import ToolResolution
 
 
-def createprocess_would_load(argv0: str, cwd: str, path: str) -> str:
-    """Which file Windows' `CreateProcess` would load for `argv0`, per its
-    documented search order -- the parent process's CURRENT DIRECTORY ahead of
-    every `PATH` entry. Pure, so it states the hazard on every platform; POSIX
-    `execvp` never searches cwd, which is why the hijack itself is Windows-only
-    and why this emulation, not the OS, is what shows it here."""
+def createprocess_would_load(argv0: str, executable: str | None, cwd: str, path: str) -> str:
+    """Which file Windows' `CreateProcess` would load, per its documented rules.
+
+    A non-`None` `executable` is `lpApplicationName`, and with that set
+    `CreateProcess` performs NO SEARCH AT ALL -- it loads exactly that file.
+    With it `NULL`, the search order applies and it puts the parent process's
+    CURRENT DIRECTORY ahead of every `PATH` entry.
+
+    Pure, so it states the hazard on every platform; POSIX `execvp` never
+    searches cwd, which is why the hijack itself is Windows-only and why this
+    emulation, not the OS, is what shows it here."""
+    if executable is not None:
+        return executable
     if os.path.isabs(argv0):
         return argv0
     for directory in [cwd, *[d for d in path.split(os.pathsep) if d]]:
@@ -79,19 +86,35 @@ def hostile(tmp_path, monkeypatch):
 
 
 class _SpawnSpy:
-    """Records every argv handed to `subprocess.run`/`Popen` and returns a
-    stand-in process, so no test here starts a real one."""
+    """Records every `(argv, executable)` handed to `subprocess.run`/`Popen`
+    and returns a stand-in process, so no test here starts a real one.
+
+    BOTH halves are recorded because both matter and they say different things:
+    `argv` is what the child sees as its own `argv[0]` (and therefore what the
+    tool prints in its own diagnostics -- the frozen oracle envelope pins that),
+    while `executable` is what the OS actually loads."""
 
     def __init__(self) -> None:
         self.argvs: list[list[str]] = []
+        self.executables: list[str | None] = []
 
-    def run(self, argv, *_a, **_kw):
+    def _record(self, argv, kwargs) -> None:
         self.argvs.append(list(argv))
+        self.executables.append(kwargs.get("executable"))
+
+    def run(self, argv, *_a, **kwargs):
+        self._record(argv, kwargs)
         return subprocess.CompletedProcess(list(argv), 0, "", "")
 
-    def popen(self, argv, *_a, **_kw):
-        self.argvs.append(list(argv))
+    def popen(self, argv, *_a, **kwargs):
+        self._record(argv, kwargs)
         return _FakeProc()
+
+    def loaded(self, index: int, cwd: str) -> str:
+        """What `CreateProcess` would load for spawn `index`."""
+        return createprocess_would_load(
+            self.argvs[index][0], self.executables[index], cwd, os.environ["PATH"]
+        )
 
 
 class _FakeProc:
@@ -140,21 +163,34 @@ def spy(monkeypatch):
 def test_flash_spawns_the_path_copy_not_the_one_in_the_project(hostile, spy, capture):
     """The headline defect. `--format json` (`capture=True`) and text mode take
     two different branches of `_spawn` -- `subprocess.run` and `Popen` -- and
-    BOTH handed the platform the bare `dd`.
+    BOTH handed the platform the bare `dd` with no `executable=`.
 
-    Fails before the fix on every platform: `argv[0]` is `'dd'`, so the
-    `CreateProcess` emulation loads the project's decoy."""
+    Fails before the fix on every platform: `executable` is `None`, so the
+    `CreateProcess` emulation falls back to its search order and loads the
+    project's decoy.
+
+    The child's own `argv[0]` must STAY `'dd'`. That is not incidental: `dd`
+    prints its `argv[0]` in its own failure text, which lands verbatim in
+    `data.entries[].message`, and the frozen oracle envelope
+    (`test_a_real_spawn_diffs_including_the_captured_failure_tail`) says
+    `dd: failed to open ...`. Rewriting `argv[0]` to the resolved path -- the
+    shape tan-cli#510 used for the build spawn -- makes that read
+    `/usr/bin/dd: failed to open ...`, which is both an envelope regression and
+    an absolute-host-path leak."""
     project, realbin = hostile
     flash_cmd._execute(FlashPlan(argv=("dd", "if=x", "of=/dev/null"), ok_message="ok"), capture)
 
-    argv0 = spy.argvs[-1][0]
-    loaded = createprocess_would_load(argv0, str(project), os.environ["PATH"])
-    assert os.path.isabs(argv0), f"argv[0] is the bare identity {argv0!r}"
+    argv0, executable = spy.argvs[-1][0], spy.executables[-1]
+    loaded = spy.loaded(-1, str(project))
+    assert executable is not None, "the spawn pinned no executable -- argv[0] is bare"
+    assert Path(executable).parent == realbin
     assert not loaded.startswith(str(project)), (
-        f"CreateProcess would load the project's own decoy ({loaded}) -- "
-        f"argv[0] was {argv0!r}"
+        f"CreateProcess would load the project's own decoy ({loaded})"
     )
-    assert Path(argv0).parent == realbin
+    assert argv0 == "dd", (
+        f"the child's own argv[0] became {argv0!r} -- the tool prints that in "
+        "its diagnostics and the frozen oracle envelope pins the bare name"
+    )
 
 
 def test_flash_pipeline_resolves_BOTH_halves(hostile, spy):
@@ -167,10 +203,12 @@ def test_flash_pipeline_resolves_BOTH_halves(hostile, spy):
     )
 
     assert len(spy.argvs) == 2, spy.argvs
-    for argv in spy.argvs:
-        loaded = createprocess_would_load(argv[0], str(project), os.environ["PATH"])
-        assert Path(argv[0]).parent == realbin, f"pipeline half spawned {argv[0]!r}"
-        assert not loaded.startswith(str(project)), loaded
+    assert [argv[0] for argv in spy.argvs] == ["gunzip", "dd"], spy.argvs
+    for index, half in enumerate(("gunzip", "dd")):
+        executable = spy.executables[index]
+        assert executable is not None, f"the {half} half pinned no executable"
+        assert Path(executable).parent == realbin, f"{half} half loaded {executable!r}"
+        assert not spy.loaded(index, str(project)).startswith(str(project))
 
 
 def test_flash_refuses_a_program_that_is_on_neither_path_nor_the_venv(hostile, spy):
@@ -211,7 +249,10 @@ def test_flash_resolves_against_the_env_the_child_will_get(tmp_path, monkeypatch
     )
 
     assert outcome.success is True, outcome.stderr
+    # The venv rewrite already put the absolute path in `argv[0]` (that is the
+    # oracle's own behaviour, unchanged here), and the resolution agrees.
     assert spy.argvs[-1][0] == str(tool)
+    assert spy.executables[-1] == str(tool)
 
 
 def test_flash_leaves_an_absolute_program_alone(hostile, spy):
@@ -227,6 +268,7 @@ def test_flash_leaves_an_absolute_program_alone(hostile, spy):
 
     assert outcome.success is True, outcome.stderr
     assert spy.argvs[-1][0] == absolute
+    assert spy.executables[-1] == absolute
 
 
 def test_flash_dpidr_preflight_spawns_the_resolved_jlink(hostile, monkeypatch):
@@ -236,8 +278,10 @@ def test_flash_dpidr_preflight_spawns_the_resolved_jlink(hostile, monkeypatch):
     _project, realbin = hostile
     seen: list[list[str]] = []
 
-    def _fake_spawn_jlink(argv, script, capture, timeout, venv_bin=None, workspace=None):
-        seen.append(list(argv))
+    def _fake_spawn_jlink(
+        argv, script, capture, timeout, venv_bin=None, workspace=None, executable=None
+    ):
+        seen.append([executable, *argv])
         # A banner carrying the expected ID, so the preflight answers "proceed"
         # and the test is measuring the spawn, not the mismatch reporting.
         return flash_cmd._Outcome(success=True, stdout="Found SW-DP with ID 0x6BA02477")
@@ -252,7 +296,10 @@ def test_flash_dpidr_preflight_spawns_the_resolved_jlink(hostile, monkeypatch):
     )
     assert flash_cmd._flow_d_preflight(inputs) is None
     assert seen, "the preflight never spawned"
-    assert Path(seen[-1][0]).parent == realbin, f"preflight spawned {seen[-1][0]!r}"
+    executable, argv0 = seen[-1][0], seen[-1][1]
+    assert executable is not None, "the preflight pinned no executable"
+    assert Path(executable).parent == realbin, f"preflight loaded {executable!r}"
+    assert argv0 == "JLinkExe", f"the preflight child's argv[0] became {argv0!r}"
 
 
 def test_flash_tool_available_is_still_a_gate_the_project_dir_cannot_satisfy(hostile):
@@ -326,9 +373,12 @@ def test_size_spawns_the_path_copy_not_the_one_in_the_project(hostile, spy):
     size_cmd._sizes_from_size_tool(size_bin, "app.elf")
 
     argv0 = spy.argvs[-1][0]
-    loaded = createprocess_would_load(argv0, str(project), os.environ["PATH"])
+    # `tan size` keeps tan-cli#510's own shape -- the resolved path IS `argv[0]`
+    # -- because nothing here echoes the size tool's own `argv[0]` anywhere: its
+    # stdout is parsed for Berkeley columns on rc 0 and discarded otherwise, so
+    # there is no envelope string for an absolute path to leak into.
     assert Path(argv0).parent == realbin
-    assert not loaded.startswith(str(project)), loaded
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
 
 
 def test_size_refuses_a_bare_size_bin_rather_than_spawning_it(hostile, spy):

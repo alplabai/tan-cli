@@ -47,12 +47,16 @@ below used to hand `subprocess` the bare identity, which on Windows is resolved
 by `CreateProcess` (`lpApplicationName=NULL`), whose documented search order
 puts *the current directory for the parent process* ahead of `%PATH%`. tan's
 cwd for a flash is the customer's project. [`_execute`] now resolves every
-program position -- `argv[0]` AND the token after a `"|"` -- to an absolute
-path first, through the same `tan.core.tool_lookup` the build path has used
-since tan-cli#510, and refuses the entry outright rather than spawning a name
-the current directory could satisfy ([`_unresolved_program_outcome`]). The
-read-only DPIDR preflight gets the same treatment, for the stronger reason that
-it is what decides which board the write is about to go to.
+program position -- `argv[0]` AND the token after a `"|"` -- through the same
+`tan.core.tool_lookup` the build path has used since tan-cli#510, hands the
+result to `subprocess` as **`executable=`** (`lpApplicationName` on Windows,
+where a non-NULL value means no search happens at all; `execv` on POSIX, which
+leaves the child's own `argv[0]` alone so a tool's diagnostics still read
+`dd: ...` and not `/usr/bin/dd: ...`), and refuses the entry outright rather
+than spawning a name the current directory could satisfy
+([`_unresolved_program_outcome`]). The read-only DPIDR preflight gets the same
+treatment, for the stronger reason that it is what decides which board the
+write is about to go to.
 """
 from __future__ import annotations
 
@@ -556,6 +560,7 @@ def _spawn(
     timeout: float,
     venv_bin: Path | None = None,
     workspace: str | None = None,
+    executable: str | None = None,
 ) -> _Outcome:
     """One process. Captured in JSON mode (the output is kept for the failure
     message and never re-spawned), TEED to stderr in text mode -- streamed live
@@ -620,6 +625,7 @@ def _spawn(
         if capture:
             proc = subprocess.run(
                 list(argv),
+                executable=executable,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -643,6 +649,7 @@ def _spawn(
             # stream live.
             proc = subprocess.run(
                 list(argv),
+                executable=executable,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -684,6 +691,7 @@ def _spawn(
             # asks only about the OUTPUT streams.
             proc = subprocess.Popen(  # noqa: S603 -- argv comes from the pure planner
                 list(argv),
+                executable=executable,
                 stdout=slave_fd if slave_fd is not None else subprocess.PIPE,
                 stderr=slave_fd if slave_fd is not None else subprocess.PIPE,
                 env=env,
@@ -1093,6 +1101,8 @@ def _spawn_pipeline(
     timeout: float,
     venv_bin: Path | None = None,
     workspace: str | None = None,
+    left_executable: str | None = None,
+    right_executable: str | None = None,
 ) -> _Outcome:
     """A decompress -> dd pipeline: wire the decompressor's stdout into dd's
     stdin. Fails when EITHER process fails, and reports the first non-zero of
@@ -1118,6 +1128,7 @@ def _spawn_pipeline(
     try:
         first = subprocess.Popen(  # noqa: S603 -- argv comes from the pure planner
             list(left),
+            executable=left_executable,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE if capture else None,
             env=env,
@@ -1132,6 +1143,7 @@ def _spawn_pipeline(
         try:
             second = subprocess.Popen(  # noqa: S603 -- as above
                 list(right),
+                executable=right_executable,
                 stdin=first.stdout,
                 stdout=subprocess.PIPE if capture else _stderr_sink(),
                 stderr=subprocess.PIPE if capture else None,
@@ -1223,6 +1235,7 @@ def _spawn_jlink(
     timeout: float,
     venv_bin: Path | None = None,
     workspace: str | None = None,
+    executable: str | None = None,
 ) -> _Outcome:
     """Materialise the Commander script to a temp file, append its path as the
     final `-CommanderScript` argument, spawn, and remove the temp file.
@@ -1248,7 +1261,7 @@ def _spawn_jlink(
             captured=capture,
         )
     try:
-        return _spawn([*argv, path], capture, timeout, venv_bin, workspace)
+        return _spawn([*argv, path], capture, timeout, venv_bin, workspace, executable)
     finally:
         _unlink(path)
 
@@ -1371,20 +1384,37 @@ def _execute(
     venv_bin }`) -- a plan naming only absolute/non-venv tools must not have
     its PATH silently rewritten for no reason.
 
-    **tan-cli#567: every remaining PROGRAM position is then resolved to an
-    absolute path, and a plan whose program does not resolve is REFUSED rather
-    than spawned.** The venv rewrite above only ever covered tools the venv
-    itself provides, so `west`, a host-PATH `openocd`/`pyocd`/`JLinkExe`, and
-    both halves of the `gunzip | dd` image pipeline all reached
-    `subprocess.run`/`Popen` as bare names -- and a bare `argv[0]` on Windows is
-    resolved by `CreateProcess` (`lpApplicationName=NULL`), whose documented
-    search order consults *the current directory for the parent process* BEFORE
-    `%PATH%`. tan's cwd for a flash is the customer's project. So a project
-    carrying its own `openocd.exe`/`dd.exe` at its root got that binary spawned
-    against attached silicon, having passed a tool gate that had carefully
-    looked at `%PATH%` and nowhere else. #510 closed exactly this on the build
-    path; this is the write path, where the consequence is a wrong image on a
-    customer's board.
+    **tan-cli#567: every remaining PROGRAM position is then pinned to an
+    absolute path via `executable=`, and a plan whose program does not resolve
+    is REFUSED rather than spawned.** The venv rewrite above only ever covered
+    tools the venv itself provides, so `west`, a host-PATH
+    `openocd`/`pyocd`/`JLinkExe`, and both halves of the `gunzip | dd` image
+    pipeline all reached `subprocess.run`/`Popen` as bare names -- and a bare
+    `argv[0]` on Windows is resolved by `CreateProcess`
+    (`lpApplicationName=NULL`), whose documented search order consults *the
+    current directory for the parent process* BEFORE `%PATH%`. tan's cwd for a
+    flash is the customer's project. So a project carrying its own
+    `openocd.exe`/`dd.exe` at its root got that binary spawned against attached
+    silicon, having passed a tool gate that had carefully looked at `%PATH%`
+    and nowhere else. #510 closed exactly this on the build path; this is the
+    write path, where the consequence is a wrong image on a customer's board.
+
+    **`executable=`, NOT an `argv[0]` rewrite -- and the oracle is why.** #510
+    fixed the build spawn by replacing `argv[0]` with the resolved path
+    (`[resolved_tool, *spawn_args]`). Doing the same here is measurably wrong:
+    a spawned tool prints ITS OWN `argv[0]` in its diagnostics, so
+    `test_a_real_spawn_diffs_including_the_captured_failure_tail` went red with
+    `data.entries[].message` reading `yocto_wic[c1]: /usr/bin/dd: failed to
+    open ...` where the frozen oracle envelope says `dd: failed to open ...`.
+    That is a customer-visible envelope regression AND an absolute-host-path
+    leak into a message the VS Code extension renders. `executable=` is the
+    mechanism that was wanted all along: on POSIX it is `execv(resolved,
+    args)`, so the child keeps the `argv[0]` the plan named; on Windows it
+    fills `lpApplicationName`, and a non-NULL `lpApplicationName` means
+    `CreateProcess` performs NO SEARCH AT ALL -- strictly stronger than handing
+    it a resolved name it would still have parsed. `args` therefore stays
+    byte-identical to what the oracle spawns, and `_program_label`'s basename
+    for a pipeline half is unchanged.
 
     The ORDER matters and is not interchangeable: `on_path_bin` is decided by
     the VENV rewrite alone, before the PATH resolution runs. Deciding it after
@@ -1398,23 +1428,35 @@ def _execute(
     call up.
     """
     argv = list(plan.argv)
-    venv_resolved = _programs_resolved_in_venv(argv, venv_bin)
-    on_path_bin = venv_bin if venv_resolved != argv else None
+    # `spawned` is what the child's own `argv` will be -- the oracle's argv,
+    # venv rewrite included. `resolved` is the same list with each PROGRAM
+    # position replaced by its absolute location; only its program entries are
+    # ever read, and only as `executable=`.
+    spawned = _programs_resolved_in_venv(argv, venv_bin)
+    on_path_bin = venv_bin if spawned != argv else None
     resolved, unresolved = resolve_program_positions(
-        venv_resolved, _resolution_env(on_path_bin), PIPE
+        spawned, _resolution_env(on_path_bin), PIPE
     )
     if unresolved is not None:
         return _unresolved_program_outcome(unresolved, on_path_bin, capture)
-    if PIPE in resolved:
-        cut = resolved.index(PIPE)
+    if PIPE in spawned:
+        cut = spawned.index(PIPE)
         return _spawn_pipeline(
-            resolved[:cut], resolved[cut + 1 :], capture, _FLASH_TIMEOUT_S, on_path_bin, workspace
+            spawned[:cut],
+            spawned[cut + 1 :],
+            capture,
+            _FLASH_TIMEOUT_S,
+            on_path_bin,
+            workspace,
+            resolved[0],
+            resolved[cut + 1],
         )
     if plan.jlink_script is not None:
         return _spawn_jlink(
-            resolved, plan.jlink_script, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace
+            spawned, plan.jlink_script, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace,
+            resolved[0],
         )
-    return _spawn(resolved, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace)
+    return _spawn(spawned, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace, resolved[0])
 
 
 #: Terminal control sequences a tool emits ONLY because it can see a tty:
@@ -2630,18 +2672,21 @@ def _flow_d_preflight(
         # refusal here would be proceeding to the WRITE with the identity
         # unconfirmed.
         return f"{method}: no J-Link binary on PATH or in the workspace venv for the DPIDR preflight."
-    venv_resolved = _programs_resolved_in_venv([binary], venv_bin)
-    on_path_bin = venv_bin if venv_resolved != [binary] else None
-    # tan-cli#567: and then to an absolute PATH location, exactly as `_execute`
-    # does for the write itself -- this probe is the step that decides WHICH
-    # BOARD is about to be written, so a project-supplied `JLinkExe.exe` here
-    # would be answering the identity question with a value of its own choosing
-    # and then handing tan a green light. `unresolved` is not reachable via
-    # `_flash_entry` (the `binary is None` gate above already required
-    # PATH-or-venv availability through the same lookup) but is answered rather
-    # than asserted: an `assert` is stripped by `-O`, and the fallback must
-    # never be "spawn it bare anyway".
-    resolved, unresolved = resolve_program_positions(venv_resolved, _resolution_env(on_path_bin))
+    spawned = _programs_resolved_in_venv([binary], venv_bin)
+    on_path_bin = venv_bin if spawned != [binary] else None
+    # tan-cli#567: and the program is then PINNED to an absolute location via
+    # `executable=`, exactly as `_execute` does for the write itself -- this
+    # probe is the step that decides WHICH BOARD is about to be written, so a
+    # project-supplied `JLinkExe.exe` here would answer the identity question
+    # with a value of its own choosing and then hand tan a green light. The
+    # child's own `argv[0]` is left as `spawned[0]` for the same reason as in
+    # `_execute`: it is what the tool prints in its own banner, which this
+    # function then READS. `unresolved` is not reachable via `_flash_entry`
+    # (the `binary is None` gate above already required PATH-or-venv
+    # availability through the same lookup) but is answered rather than
+    # asserted: an `assert` is stripped by `-O`, and the fallback must never be
+    # "spawn it bare anyway".
+    resolved, unresolved = resolve_program_positions(spawned, _resolution_env(on_path_bin))
     if unresolved is not None:
         return (
             f"{method}: the J-Link binary `{unresolved}` for the DPIDR preflight could "
@@ -2650,8 +2695,8 @@ def _flow_d_preflight(
         )
     # No `-ExitOnError`: a failed connect is the SIGNAL being read here, not an
     # error to abort the probe on.
-    outcome = _spawn_jlink([resolved[0], "-NoGui", "1", "-CommanderScript"], script, True,
-                           _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace)
+    outcome = _spawn_jlink([spawned[0], "-NoGui", "1", "-CommanderScript"], script, True,
+                           _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0])
     banner = f"{outcome.stdout}\n{outcome.stderr}"
     if _hex_in(expected, banner):
         return None

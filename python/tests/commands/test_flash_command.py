@@ -2261,7 +2261,12 @@ boot_order: []
 
     calls: list[str] = []
 
-    def _fake_spawn_jlink(argv, script, capture, timeout, venv_bin=None, workspace=None):
+    # `executable` (tan-cli#567): the absolute path `_flow_d_preflight` pins
+    # the spawn to, alongside the `argv` the child itself sees. Accepted and
+    # ignored -- this test's subject is the Commander SCRIPT.
+    def _fake_spawn_jlink(
+        argv, script, capture, timeout, venv_bin=None, workspace=None, executable=None
+    ):
         calls.append(script)
         return flash_cmd._Outcome(
             success=False,
