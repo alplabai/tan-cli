@@ -12,13 +12,12 @@
 #                the string the shipped binary prints — with pyproject.toml
 #                (PEP 440 rendering) and npm-shim/package.json reconciled
 #                against it. The verify-version job below fails the release if
-#                they disagree. The workspace Cargo.toml is deliberately NOT
-#                read: it versions the frozen Rust crates, which no longer
-#                produce any asset here. An earlier revision of this header
-#                said the tag had to equal that Cargo.toml version — it was
-#                true until the port and is exactly the kind of stale
-#                opposite-of-the-code comment tan-cli#259 warns about; the
-#                consequence was an operator bumping a version no gate reads.
+#                they disagree. There is no longer a workspace Cargo.toml to
+#                read at all — tan-cli#269 deleted `crates/` — but this note
+#                stays because an earlier revision of this header said the tag
+#                had to equal that Cargo.toml's version, and an operator
+#                acting on it bumped a version no gate reads. Exactly the
+#                stale opposite-of-the-code comment tan-cli#259 warns about.
 #
 #   Assets     : one ARCHIVE per target triple (tan-cli#349 — was one raw
 #                uncompressed binary; see below), named
@@ -523,11 +522,18 @@ jobs:
       #
       # Pure re-packaging of committed `contract/envelopes/*` files -- but
       # "committed" is not "matches what ships". Every case is gated by
-      # `cargo test -p alp-tan-cli --test contract` (the frozen Rust v0.4.1
-      # oracle) and, for every case EXCEPT the five `debug-config-preview-*`
-      # goldens, also by `python -m pytest tests/conformance` against the
-      # actual shipping Python CLI. Those five are `pytest.mark.xfail(strict=True)`
-      # there on a documented, permanent divergence (see contract/README.md,
+      # `python -m pytest tests/conformance` against the actual shipping Python
+      # CLI, which AUTO-DISCOVERS every directory under `contract/envelopes/`
+      # (`test_contract_envelopes.py`'s `CONTRACT.iterdir()`) rather than
+      # listing them -- so adding a case gates it, with nothing to remember to
+      # update. Until tan-cli#269 a second gate, `cargo test -p alp-tan-cli
+      # --test contract`, listed the same 17 cases by hand against the frozen
+      # Rust v0.4.1 oracle; deleting it left the discovery gate covering
+      # exactly the same set.
+      #
+      # The five `debug-config-preview-*` goldens are the one gap, and were
+      # already: they are `pytest.mark.xfail(strict=True)` in the conformance
+      # suite on a documented, permanent divergence (see contract/README.md,
       # "Known divergence: debug-config-preview-*", tan-cli#502) -- this step
       # re-packages their frozen-oracle `expected.json` verbatim, so this
       # asset's five `envelopes["debug-config-preview-*"]` entries do NOT

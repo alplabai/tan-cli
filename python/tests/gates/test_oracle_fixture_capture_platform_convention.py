@@ -20,6 +20,20 @@ downstream, the hard way: `3 failed` against live win32 `\\` output. This
 module is the guard against a third instance landing the same way, checkable
 with no live oracle and no Windows runner.
 
+## After tan-cli#269 this gate matters MORE, not less
+
+`crates/` is deleted and the replay/capture machinery named above
+(`oracle_fixtures.py`, `normalise_scrubbed_path_separators`,
+`REPLAY_IS_CAPTURE_PLATFORM`) went with the parity suite that used it -- kept
+in the account above because they are how the `aaf452e` mutation stayed
+invisible, not because they still exist. The store itself survives, moved to
+`tests/fixtures/oracle_captures/` and read through `tests.oracle_captures`.
+What changed is the cost of a bad edit: while a binary existed, a doctored
+recording could be caught downstream by a live win32 run or simply
+re-captured. Neither is possible now. A hand-edited value is unrecoverable and
+indistinguishable from a real one, so this file is the only thing standing
+between the store and a fabricated oracle answer.
+
 ## Why this checks ONLY `test_flash_oracle_parity.json`
 
 The obvious generalisation -- walk every `*.json` under `oracle_fixtures/`
@@ -83,19 +97,19 @@ import json
 import re
 from pathlib import Path
 
-from tests.parity import oracle_fixtures
+from tests import oracle_captures
 
-_FIXTURE_PATH = oracle_fixtures.FIXTURES_DIR / "test_flash_oracle_parity.json"
+_FIXTURE_PATH = oracle_captures.CAPTURES_DIR / "test_flash_oracle_parity.json"
 
 #: The character immediately following a scrub token, captured but not
 #: required to be anything in particular by the regex itself -- absence (the
 #: token is the last thing in the string) is not a match and is not policed.
 _TOKEN_NEXT_CHAR_RE = re.compile(r"<(?:ORACLE-ROOT-\d+|ROOT)>(.)")
 
-#: `oracle_fixtures.CAPTURE_PLATFORM` restated as the literal separator this
+#: `oracle_captures.CAPTURE_PLATFORM` restated as the literal separator this
 #: file's joins must produce -- imported as a value, not hardcoded, so this
 #: gate cannot silently drift from the constant it is actually checking.
-_EXPECTED_NEXT_CHAR = "\\" if oracle_fixtures.CAPTURE_PLATFORM == "win32" else "/"
+_EXPECTED_NEXT_CHAR = "\\" if oracle_captures.CAPTURE_PLATFORM == "win32" else "/"
 
 
 def _iter_token_next_chars(payload: object):

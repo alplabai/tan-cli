@@ -8,8 +8,7 @@
 `tan` is the standalone build CLI for Alp Lab E1M and E1M-X projects. It reads
 hardware metadata from an [alp-sdk](https://github.com/alplabai/alp-sdk)
 checkout, creates build plans, and runs the tools needed to build, inspect,
-flash, and debug firmware. VS Code is optional. The implementation is Python;
-see [Development](#development) for the frozen Rust reference under `crates/`.
+flash, and debug firmware. VS Code is optional. The implementation is Python.
 
 ## Install
 
@@ -63,8 +62,9 @@ python3 -m pip install "./python[monitor]"
 ```
 
 `tan` is not published on PyPI, and `@alplabai/tan` is not currently published
-on npm. The old `alp-tan-cli` crate installs the frozen v0.4-era Rust CLI, not
-the current program. Use a GitHub release or a source checkout.
+on npm. The `alp-tan-cli` crate on crates.io is a stale v0.4-era Rust CLI, no
+longer built from this repository and not the current program. Use a GitHub
+release or a source checkout.
 
 ## Quickstart
 
@@ -217,11 +217,12 @@ python/tan/core/       domain logic and wire models
 python/tan/planner/    in-process planner, mirrored from alp-sdk
 python/tan/templates/  project templates included in the package
 python/tests/          unit, conformance, parity, and repository gates
-crates/                frozen v0.4 compatibility oracle
+contract/              the JSON envelope goldens shared with alp-sdk-vscode
 ```
 
-The Rust reference still has CI coverage, but current release assets are built
-from `python/`.
+Release assets are PyInstaller freezes of `python/`. The Rust implementation
+this program was ported from is deleted; the behaviour it was measured against
+survives as the frozen captures under `python/tests/fixtures/oracle_captures/`.
 
 ## More documentation
 

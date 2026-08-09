@@ -1,4 +1,7 @@
-# Rust build output
+# Rust build output. `crates/` is gone (tan-cli#269) and nothing here produces
+# a `target/` any more, but the entry stays: a stale `target/` from a checkout
+# that predates the deletion is exactly the tree an accidental `git add -A`
+# would commit, and it is 3.6 MB of sources' worth of build products.
 /target
 # Editor / OS cruft
 *.swp

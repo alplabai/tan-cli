@@ -62,6 +62,50 @@ All notable changes to `tan` are documented here. Format follows
     CI: it needs a real alp-sdk checkout, an optionally-bootstrapped west
     workspace and a real build.
 
+### Removed
+
+- **The Rust oracle is retired: `crates/tan-core`, `crates/tan-cli`,
+  `Cargo.toml` and `Cargo.lock` are deleted, and with them the
+  Rust-oracle parity suite and the five cargo CI jobs.** Command-surface
+  parity is reached, so the port IS the definition and a second
+  implementation to measure against is no longer worth its cost. 193 tracked
+  files of Rust, 29 parity modules under `python/tests/parity/`, and the
+  `lint` / `test (ubuntu|windows|macos-latest)` / `msrv` jobs in `ci.yml`.
+  `parity.yml`'s `seam2` and `first blink` jobs now install the Python package
+  and drive the `tan` console script where they used to
+  `cargo build --locked --bin tan`; nothing else about what they assert
+  changed. (#269)
+  - **`contract/` is unaffected and still enforced.** `crates/tan-cli/tests/
+    contract.rs` was one of its two gates, listing 17 cases in 17 hand-written
+    `contract_case!` lines. The other,
+    `python/tests/conformance/test_contract_envelopes.py`, AUTO-DISCOVERS the
+    same 17 by walking `CONTRACT.iterdir()` -- so the deletion removes a
+    duplicate, not the enforcement, and a new case is gated with nothing to
+    remember to add. Verified by running the conformance suite after the
+    deletion.
+  - **The frozen captures survive the binary, relocated.**
+    `python/tests/parity/oracle_fixtures/` is now
+    `python/tests/fixtures/oracle_captures/`, read through the new
+    `tests.oracle_captures` module. Every byte in it was written by a real run
+    of `tan 0.4.1` and stays a valid record of what that binary printed; what
+    is gone is any way to write a new one, which is why
+    `test_oracle_fixture_capture_platform_convention.py` -- the guard against a
+    recorded value being hand-edited -- matters more now than it did.
+    `.github/workflows/capture-platform-fixtures.yml`, whose whole job was
+    re-capturing on three runners, is deleted.
+  - **`python/tests/parity/test_planner_emit_parity.py` is NOT part of this.**
+    It measures tan's relocated planner against alp-sdk's
+    `scripts/alp_orchestrate/`, an axis the Rust oracle was never on, and it
+    stays exactly where it is. It also already covers everything the deleted
+    `crates/tan-cli/tests/live_run_generate.rs` did, and more: a real
+    `tan generate --output` per `board.yaml` across all twelve relocated emit
+    targets, byte-compared against `alp_project.py`'s own front door.
+  - **Branch protection must be repointed before anything can merge.** `main`
+    and `dev` require six contexts and five of them (`lint`, the three
+    `test (*)` legs, `msrv`) no longer exist. A required context that never
+    reports does not fail -- it stays pending and blocks the merge. The exact
+    strings to require instead are in `.github/workflows/ci.yml`'s header.
+
 ### Changed
 
 - **`tan debug-config --core <id>` now refuses a `--core` matching no build

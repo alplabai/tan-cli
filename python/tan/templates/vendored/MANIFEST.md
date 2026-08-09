@@ -74,11 +74,11 @@ from an un-revendored SDK change.
     same throwaway-driver shape as the v0.14.0 bump below, run on Windows
     (Python 3.12.10; the "needs WSL" note two bumps below was already
     superseded — see that entry).
-  - **Diverges from `crates/tan-core/src/wizard/vendored/` on purpose.**
-    `crates/` is frozen (`docs/ROADMAP.md`'s Standing Rules — the Rust `tan` is
-    the retired oracle, not touched again) and stays pinned at `v0.14.0`
-    (`ef79eab0`); this tree is the one a Python `tan` binary actually reads, so
-    it tracks `PINNED_SDK_TAG` and the Rust tree does not. The obsolete
+  - **Diverged from `crates/tan-core/src/wizard/vendored/` on purpose.**
+    That tree was frozen at `v0.14.0` (`ef79eab0`) and never re-vendored; this
+    one is what a Python `tan` actually reads, so it tracks `PINNED_SDK_TAG`.
+    tan-cli#269 has since deleted `crates/` outright, which makes this the only
+    vendored scaffold tree in the repo. The obsolete
     Python-vs-Rust byte-identity test was retired; the shipping tree is guarded
     by its LF-only unit test and by `tests/parity/scaffold_byte_parity.py`
     against the live pinned SDK instead.
@@ -174,9 +174,10 @@ against THAT — so an unrelated change in the same file still fails the gate,
 and a declared edit that finds nothing to undo (this tree re-vendored, or
 alp-sdk fixing its emit) ALSO fails, forcing the entry out instead of leaving
 a dead excuse behind. That is the same `xfail(strict=True)` discipline
-`python/tests/parity/test_scaffold_content_oracle_parity.py` uses on the
-port-vs-oracle axis. Editing this section without editing that table (or the
-reverse) is what the strictness exists to catch.
+`python/tests/parity/test_scaffold_content_oracle_parity.py` used on the
+port-vs-oracle axis, before tan-cli#269 deleted that axis with the oracle.
+Editing this section without editing that table (or the reverse) is what the
+strictness exists to catch.
 
 1. **Doc-link ref, all seven `README.md` files (tan-cli#384).** The emit
    renders cross-directory links as `github.com/alplabai/alp-sdk/blob/v<SDK
@@ -366,9 +367,9 @@ a full build compiles `src/features/app_bootstrap.c` into `app/libapp.a`
 alongside `src/main.c`, which Zephyr's own link step pulls in whole
 (`-Wl,--whole-archive app/libapp.a`) on the way to a real `zephyr.elf`.
 
-**`crates/tan-core/src/wizard/service/c_project.rs` still emits the pre-#309
-broken shape (both bugs)** — `crates/` is frozen (`docs/ROADMAP.md`'s Standing
-Rules) and is not re-fixed here; its own `wizard/vendored/MANIFEST.md` had
+**`crates/tan-core/src/wizard/service/c_project.rs` shipped the pre-#309
+broken shape (both bugs) and was never fixed** — it was frozen, and tan-cli#269
+deleted it; its own `wizard/vendored/MANIFEST.md` had
 already flagged the CMake half of this ("a `board.yaml` declaring `os:
 zephyr` over a plain-CMake tree is exactly the silent host-binary build that
 issue [#14] reports") as "deliberately deferred, not a permanent gap" before

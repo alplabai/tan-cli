@@ -1,3 +1,16 @@
+CLOSED RECORD (tan-cli#269). `crates/` is deleted; the binary described below
+cannot be rebuilt from this repository, the modules named in the recipe are
+gone, and TAN_PARITY_LIVE / TAN_PARITY_CAPTURE no longer exist. Nothing here
+is a runnable instruction any more -- the recipe and the two machine-read
+lines are kept VERBATIM because they are the record of how these answers were
+obtained and which `crates/` tree produced them. Read this file; do not try to
+follow it, and do not hand-edit a recorded value to make something pass. The
+store moved from `tests/parity/oracle_fixtures/` to
+`tests/fixtures/oracle_captures/` in the same change; every path below is
+written as it stood at capture time.
+
+--------------------------------------------------------------------------
+
 Every *.json fixture in this directory was captured from an actual run of the
 Rust oracle -- never inferred from crates/ or a docstring (docs/ROADMAP.md's
 Standing Rules) -- via:
