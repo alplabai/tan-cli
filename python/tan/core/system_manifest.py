@@ -108,7 +108,21 @@ def _serde_type_name(value: Any) -> str:
 #:                                          made `tan image` exit 3 where the
 #:                                          oracle exits 0)
 #:   `0o17`                 1.1 string    -> 1.2 int 15
-#: `0x…` is an int in both. The regexes are the core schema's own.
+#: `0x…` is an int in both.
+#:
+#: The INT row is serde_yaml's `parse_signed_int`, NOT the YAML 1.2 spec's core
+#: schema regex, which is what it used to transcribe (tan-cli#499 defect 10).
+#: serde_yaml strips a leading `+`/`-` BEFORE it tests the radix prefixes, and it
+#: also accepts `0b`, so two more shapes are integers on the oracle and were
+#: staying strings here -- measured against `tan 0.4.1`:
+#:   `0b1010` -> 10   `0b11` -> 3    `-0b11` -> -3   `+0b11` -> 3
+#:   `-0x1E`  -> -30  `+0x1E` -> 30  `-0o17` -> -15  `+0o17` -> 15
+#: and, unchanged, these stay STRINGS (also measured, and the reason the regex
+#: has to stay the gate rather than deferring to PyYAML's `construct_yaml_int`,
+#: which strips `_` and would resolve most of them):
+#:   `0B11` `0XA5` `0O17` `-0B11` `0x1_F` `0b1_0` `0o1_7` `1_000` `0_1`
+#:   `0x` `0b` `0o` `-0x` `0o8` `0xG` `0b2` `007` `+007` `++5`
+#: The float regex is still the core schema's own.
 _CORE_RESOLVERS = (
     ("tag:yaml.org,2002:null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
     (
@@ -118,7 +132,7 @@ _CORE_RESOLVERS = (
     ),
     (
         "tag:yaml.org,2002:int",
-        r"^(?:[-+]?(?:0|[1-9][0-9]*)|0o[0-7]+|0x[0-9a-fA-F]+)$",
+        r"^[-+]?(?:0|[1-9][0-9]*|0b[01]+|0o[0-7]+|0x[0-9a-fA-F]+)$",
         list("-+0123456789"),
     ),
     (

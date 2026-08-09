@@ -13,6 +13,8 @@ from tan.core.size import (
     WARN_FRACTION,
     MemoryBudget,
     SliceSize,
+    _kib_to_bytes,
+    _mb_to_bytes,
     build_size_report,
     classify,
     core_token,
@@ -265,10 +267,60 @@ def test_resolve_budget_saturates_a_nonsense_size_to_zero_not_a_guess():
     assert resolve_budget("c", float("nan"), None, [], []).flash_total == 0
 
 
+def test_a_non_finite_size_resolves_to_no_budget_instead_of_raising():
+    """tan-cli#499 defect 8. `int()` sat OUTSIDE the `try`, so `+inf` raised
+    `OverflowError: cannot convert float infinity to integer` -- reachable from
+    an `Infinity` or `1e400` literal in a SoC JSON, which `json.loads` resolves
+    to `float('inf')`. That took the whole `tan size` run to
+    `size.internal-failure`, exit 5, `data.slices` EMPTY.
+
+    **0, not `u64::MAX` (REVIEW round).** The first version of this fix
+    saturated `+inf` too, on a continuity argument. Measured end to end, that
+    put a 16 EiB flash budget in the envelope at `ok:true` -- exactly the
+    silent-wrong-number class the issue exists to close -- where the oracle
+    answers `flash.total null` + `budget_note "unreadable SoM preset for
+    E1M-AEN801"`, because serde_json refuses the `1e400` literal outright and
+    the cast is never reached. There is no oracle answer for a non-finite to be
+    continuous WITH, so it joins the NaN/negative arm at 0, this module's own
+    unresolved value.
+
+    The FINITE saturation is where the oracle really was measured, and is
+    untouched: `"mram_mb": 1e300` gives `"flash":{"total":18446744073709551615}`
+    at exit 0 on BOTH binaries."""
+    u64_max = 2**64 - 1
+    assert _mb_to_bytes(float("inf")) == 0
+    assert _kib_to_bytes(float("inf")) == 0
+    assert resolve_budget("c", float("inf"), None, [], []).flash_total == 0
+    assert resolve_budget("c", None, None, [], [("c", float("inf"))]).ram_total == 0
+    # The other two non-finite inputs answer "no budget" the same way.
+    assert _mb_to_bytes(float("-inf")) == 0
+    assert _kib_to_bytes(float("-inf")) == 0
+    assert _mb_to_bytes(float("nan")) == 0
+    assert _kib_to_bytes(float("nan")) == 0
+    # Finite-and-huge still saturates -- measured byte-identical to the oracle.
+    assert _mb_to_bytes(1e300) == u64_max
+    assert _kib_to_bytes(1e300) == u64_max
+
+
 def test_sram_banks_keeps_order_and_drops_non_numeric_entries():
     variant = {"sram_banks_kb": {"A": 1, "B": "x", "C": True, "D": 2.5}}
     assert sram_banks(variant) == [("A", 1.0), ("D", 2.5)]
     assert sram_banks({}) == []
+
+
+def test_sram_banks_drops_an_integer_too_large_for_an_f64():
+    """tan-cli#499 defect 8, second arm: guarding only `int()` is an incomplete
+    fix. A 400-digit JSON integer makes the bare `float(value)` raise
+    `OverflowError: int too large to convert to float`, and `sram_banks` runs
+    BEFORE `resolve_budget`, so the same exit-5 collapse happened with every
+    slice discarded. Dropped, not saturated, to match `_mb_to_bytes` -- its own
+    `float()` raises inside a `try` and returns the unresolved 0 for the very
+    same value."""
+    variant = {"sram_banks_kb": {"A": 1, "HUGE": 10**400, "D": 2.5}}
+    assert sram_banks(variant) == [("A", 1.0), ("D", 2.5)]
+    # A non-finite FLOAT is a different input: passed through here, and resolved
+    # to the unresolved 0 one level down in `_saturating_u64`.
+    assert sram_banks({"sram_banks_kb": {"A": float("inf")}}) == [("A", float("inf"))]
 
 
 def test_resolve_variant_forward_then_reverse_then_nothing():
