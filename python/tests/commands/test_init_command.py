@@ -971,3 +971,89 @@ def test_a_preview_still_answers_from_a_cwd_that_has_been_removed(tmp_path):
     assert body["data"]["preview"] is True
     assert [c["relativePath"] for c in body["data"]["fileChanges"]], body["data"]
     assert not gone.exists()
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#579 -- a SoM family with no vendored scaffold tree
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
+)
+def test_an_nxp_som_is_refused_instead_of_getting_the_alif_tree(template_id, tmp_path):
+    """**tan-cli#579.** Measured on `dev` before this fix, for every one of
+    these four templates::
+
+        tan init --som E1M-NX9101 --template sensor-starter --format json
+        -> exit 0, ok true, issues []
+        -> board.yaml is the Alif tree verbatim (preset: e1m-evk,
+           chips: [tmp112], "Reads the TMP112 temperature sensor on BRD_I2C"),
+           with only `sku:`/`cores:` retargeted
+
+    tan-cli#583 had already fixed the CORE id (it emits `m33` for NXP), which
+    made the artefact MORE plausible, not less: the remaining files -- README,
+    `src/main.c`, `prj.conf`, `CMakeLists.txt` -- stayed byte-identical to the
+    Alif render, and `CMakeLists.txt` still passes `--core m55_hp` to the SDK
+    loader, contradicting the `m33` in the board.yaml beside it.
+    """
+    proc = run_tan(
+        "init", "--som", "E1M-NX9101", "--template", template_id, "--format", "json",
+        cwd=tmp_path,
+    )
+    body = envelope(proc)
+
+    assert proc.returncode == 2, body
+    assert body["ok"] is False
+    assert [i["code"] for i in body["issues"]] == ["init.som-unsupported"]
+    assert "E1M-NX9101" in body["issues"][0]["message"]
+    # The refusal must write NOTHING -- not a half-Alif project, not `.alp/`.
+    assert list(tmp_path.iterdir()) == [], "a refused init must not touch disk"
+
+
+def test_the_nxp_refusal_names_a_template_that_does_work(tmp_path):
+    """The escape hatch is real, not just named: `minimal-app` is tan's own
+    vendor-neutral template and scaffolds this SoM correctly."""
+    refused = envelope(
+        run_tan("init", "--som", "E1M-NX9101", "--template", "sensor-starter",
+                "--format", "json", cwd=tmp_path)
+    )
+    assert "minimal-app" in refused["issues"][0]["message"]
+
+    proc = run_tan(
+        "init", "--som", "E1M-NX9101", "--template", "minimal-app", "--format", "json",
+        cwd=tmp_path,
+    )
+    body = envelope(proc)
+
+    assert proc.returncode == 0, body["issues"]
+    board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert "sku: E1M-NX9101" in board
+    assert "  m33:\n" in board
+
+
+def test_the_refusal_is_a_coded_issue_in_text_mode_too(tmp_path):
+    """Text mode still gets the message on stderr and the same exit code -- no
+    traceback, no empty stdout."""
+    proc = run_tan(
+        "init", "--som", "E1M-NX9101", "--template", "sensor-starter", cwd=tmp_path
+    )
+
+    assert proc.returncode == 2
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "E1M-NX9101" in proc.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_alif_family_sku_that_is_not_the_tree_sku_still_scaffolds(tmp_path):
+    """Scope guard on the refusal: it is per-FAMILY, not per-SKU. E1M-AEN301
+    is a different Ensemble part from the tree's own E1M-AEN801, and the Alif
+    tree is genuinely its family's scaffold -- it must keep working."""
+    proc = run_tan(
+        "init", "--som", "E1M-AEN301", "--template", "sensor-starter", "--format", "json",
+        cwd=tmp_path,
+    )
+    body = envelope(proc)
+
+    assert proc.returncode == 0, body["issues"]
+    assert "sku: E1M-AEN301" in (tmp_path / "board.yaml").read_text(encoding="utf-8")

@@ -24,6 +24,7 @@ from tan.core.scaffold import (
     PlannedFile,
     ScaffoldWriteError,
     TemplateDataError,
+    UnsupportedSomError,
     app_core_for_sku,
     infer_runtime_for_core_id,
     is_plain_relative,
@@ -758,7 +759,13 @@ def test_a_vendored_tree_keeps_its_own_sku_s_cores_byte_for_byte():
     ("sku", "app_core", "dropped"),
     [
         ("E1M-AEN301", "m55_hp", "a32_cluster"),
-        ("E1M-NX9101", "m33", "a32_cluster"),
+        # `E1M-NX9101` used to be a second row here. tan-cli#579 refuses it at
+        # `_vendored_files` -- an NXP SoM no longer reaches the Alif tree at all
+        # -- so this end-to-end shape cannot cover it any more. The transform
+        # itself is still exercised for that SKU, directly, in
+        # `test_cores_retargeting_still_handles_a_family_with_no_tree` below;
+        # dropping the row without moving the coverage would have quietly
+        # retired half of tan-cli#494 defect 2's regression guard.
     ],
 )
 def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
@@ -773,7 +780,9 @@ def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
     -- and `tan validate` then hard-errored `unknown core id ['a32_cluster']`
     on the very next command. `--som E1M-NX9101` landed on the Alif tree and
     kept `m55_hp` against a topology of `a55_cluster`/`m33`, contradicting
-    `app_core_for_sku` in this same module.
+    `app_core_for_sku` in this same module. (That second SKU is now refused
+    outright -- tan-cli#579 -- because fixing its CORE id left the rest of the
+    Alif tree in place and only made the artefact look more plausible.)
 
     Both edits only ever REMOVE wrong facts: the app entry is renamed to tan's
     own `app_core_for_sku`, and the companion cluster -- true only of the
@@ -790,6 +799,30 @@ def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
     assert "default_arena_kib: 64" in content
     # And the SoM line was retargeted too, as it always was.
     assert f"sku: {sku}" in content
+
+
+def test_cores_retargeting_still_handles_a_family_with_no_tree():
+    """tan-cli#494 defect 2's NXP coverage, moved off the `_vendored_files`
+    path that tan-cli#579 now refuses. The TRANSFORM is unchanged and still
+    correct for an NXP SKU -- it is reached through `--board-yaml` and
+    `--from-example`, neither of which goes near `_family_bucket` -- so the
+    refusal must not be read as retiring it."""
+    content = _board_yaml_of("edge-ai", "edge-ai-starter", "E1M-AEN801")
+
+    retargeted = retarget_board_yaml_cores(content, "E1M-NX9101", "E1M-AEN801")
+
+    assert "  m33:" in retargeted
+    assert "  m55_hp:" not in retargeted
+    assert "  a32_cluster:" not in retargeted
+    assert "app: ./src" in retargeted
+    # Not asserted as absent, deliberately: this tree's `libraries:` entry is
+    # core-SCOPED (`cores: [m55_hp]`) and `retarget_board_yaml_cores` only
+    # rewrites the `cores:` block, so that scope still names a core the
+    # retargeted file no longer declares. Out of tan-cli#579's scope -- the
+    # vendored path that produced it is now refused outright, and the residue
+    # is only reachable via `--from-example`/`--board-yaml`, which are
+    # tan-cli#494 defect 2's territory, not this fix's.
+    assert "cores: [m55_hp]" in retargeted
 
 
 def test_cores_retargeting_leaves_an_unrecognised_block_alone():
@@ -889,3 +922,85 @@ def _board_yaml_of(tree: str, template_id: str, sku: str) -> str:
     `tan init` does, rather than calling the transform in isolation."""
     files = scaffold_module._vendored_files(tree, template_id, sku)
     return next(f.content for f in files if f.relative_path == "board.yaml")
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#579 -- an NXP SKU used to render the Alif tree's content
+# ---------------------------------------------------------------------------
+
+
+def test_a_som_family_with_no_vendored_tree_is_refused_not_rendered():
+    """**tan-cli#579.** `_family_bucket` was
+    `_FAMILY_TREES[1] if sku.startswith(("E1M-V2N","E1M-V2M")) else _FAMILY_TREES[0]`,
+    so E1M-NX9* -- a family `app_core_for_sku` in this same module already
+    knows (`E1M-NX9` -> `m33`) -- fell down the `else` arm onto the Alif tree.
+    Measured on `dev` before this fix: `plan_template_files("sensor-starter",
+    "E1M-NX9101")` returned the E1M-AEN801 tree with every file except
+    `board.yaml` BYTE-IDENTICAL to the Alif render -- `preset: e1m-evk`,
+    `chips: [tmp112]`, a README whose build line is `west build -b
+    alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .`, and a `CMakeLists.txt`
+    that asks the SDK loader for `--emit zephyr-conf --core m55_hp` while
+    tan-cli#494's own `retarget_board_yaml_cores` had already rewritten the
+    same scaffold's `cores:` key to `m33`. `tan init` reported `ok: true` /
+    exit 0 / `issues: []` for all of it.
+    """
+    for template_id in ("zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"):
+        with pytest.raises(UnsupportedSomError) as excinfo:
+            plan_template_files(template_id, "E1M-NX9101")
+        assert "E1M-NX9101" in str(excinfo.value)
+        assert template_id in str(excinfo.value)
+
+
+def test_the_refusal_names_the_two_paths_that_still_work():
+    """A refusal that leaves the customer with nothing is a worse defect than
+    the one it fixes. `minimal-app` is tan's OWN hand-generated, vendor-neutral
+    template (no vendored tree, so `_family_bucket` never runs for it) and
+    `--from-example` copies a real SDK example -- both are named."""
+    with pytest.raises(UnsupportedSomError) as excinfo:
+        plan_template_files("sensor-starter", "E1M-NX9101")
+
+    message = str(excinfo.value)
+    assert "minimal-app" in message
+    assert "--from-example" in message
+
+
+def test_minimal_app_still_renders_for_a_family_with_no_vendored_tree():
+    """The refusal is scoped to the VENDORED trees. `minimal-app` is
+    hand-generated here and carries no vendor content at all, so it is correct
+    for an NXP SoM -- and it is the escape hatch the refusal names."""
+    files = {f.relative_path: f.content for f in plan_template_files("minimal-app", "E1M-NX9101")}
+
+    assert "sku: E1M-NX9101" in files["board.yaml"]
+    assert "  m33:\n" in files["board.yaml"]
+    assert "m55_hp" not in files["board.yaml"]
+
+
+def test_the_two_family_derivations_read_one_table():
+    """The invariant this module's docstring asserts -- "the two derivations
+    can never disagree" -- restored by CONSTRUCTION rather than by two
+    hand-synced prefix tests. Every family `app_core_for_sku` recognises
+    resolves to a tree, or to an explicit refusal; none of them can fall
+    through to Alif by accident again."""
+    for sku, core, tree in (
+        ("E1M-AEN801", "m55_hp", "E1M-AEN801"),
+        ("E1M-AEN301", "m55_hp", "E1M-AEN801"),
+        ("E1M-V2N101", "m33_sm", "E1M-V2N101"),
+        ("E1M-V2N102", "m33_sm", "E1M-V2N101"),
+        ("E1M-V2M101", "m33_sm", "E1M-V2N101"),
+        ("E1M-NX9101", "m33", None),
+    ):
+        assert app_core_for_sku(sku) == core, sku
+        assert scaffold_module._family_bucket(sku) == tree, sku
+
+
+def test_an_unrecognised_prefix_still_takes_the_alif_default_in_both_derivations():
+    """Deliberately NOT refused. `tan init` is SDK-free and cannot tell a
+    future SKU from a typo, so an unrecognised prefix keeps the pre-existing
+    Alif fallback -- and takes it in BOTH derivations at once, which is what
+    stops an unknown SKU getting a `board.yaml` whose core contradicts its own
+    `CMakeLists.txt`. `tan validate` re-checks the guess once an SDK
+    resolves."""
+    assert app_core_for_sku("E1M-ZZZ999") == "m55_hp"
+    assert scaffold_module._family_bucket("E1M-ZZZ999") == "E1M-AEN801"
+    planned = plan_template_files("sensor-starter", "E1M-ZZZ999")
+    assert any(f.relative_path == "board.yaml" for f in planned)

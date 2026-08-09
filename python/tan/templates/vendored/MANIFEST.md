@@ -9,9 +9,21 @@ from an un-revendored SDK change.
 
 ## Source
 
+- **`PINNED_SDK_TAG` has since moved past this vendor point, deliberately.**
+  The tan-cli#552…#563 planner re-sync bumped `parity.yml`'s `PINNED_SDK_TAG`
+  (and `ci.yml`'s `sdk_parity` checkout `ref:`) from `f30f4d4b` to `ccd34f06`,
+  and **no re-vendoring was needed**: nothing under `examples/`, the scaffold
+  catalog or the templates themselves changed in that range — the whole
+  alp-sdk diff is `scripts/`, `metadata/schemas|socs`, `docs/`, `tests/` and
+  `CHANGELOG.md`. Verified, not assumed: `scaffold_byte_parity.py --sdk
+  <ccd34f06>` is rc 0, **9/9** (template, sku) pairs PASS against this tree
+  unchanged. So the vendor point below stays where it is, and the two refs are
+  allowed to differ for exactly this reason.
+
 - **Current vendor point (all templates):** **`f30f4d4b`** (alp-sdk `dev`,
-  the same commit `parity.yml`'s `PINNED_SDK_TAG` now names) — re-vendored by
-  the tan-cli#543/#544/#545 planner re-sync. **Eleven** files moved:
+  the commit `parity.yml`'s `PINNED_SDK_TAG` named when this was captured) —
+  re-vendored by the tan-cli#543/#544/#545 planner re-sync. **Eleven** files
+  moved:
   - The **seven** `README.md` doc-link files (`diagnostics`, `minimal` and
     `sensor` for both SKUs, plus `iot`/E1M-AEN801) change only
     `blob|tree/v0.15.0-rc1/` → `blob|tree/v0.15.0/`. Those bytes are now the
@@ -397,14 +409,34 @@ The SDK catalog's `supported.som_skus` for every mapped template EXCEPT `iot`
 is exactly `["E1M-AEN801", "E1M-V2N101"]` — no `E1M-NX9*` SKU is covered by
 anything in the catalog (`iot` narrows further still, to `["E1M-AEN801"]`
 only — see "`iot-starter` is AEN-only" above). `app_core_for_sku` gives NX9
-its own core id (`m33`, distinct
-from both vendored trees' `m55_hp`). The vendored lookup defaults an
-unrecognized family (NX9 included) to the `E1M-AEN801` tree rather than
-inventing NX9-specific content or erroring — consistent with the existing
-`tan init` philosophy that init-time output for a SoM the SDK hasn't resolved
-yet is best-effort and re-checked by `tan validate` once an SDK is available.
-Whether tan should keep a permanent non-vendored fallback generator for NX9,
-or whether the SDK catalog should grow NX9 coverage, is a maintainer call.
+its own core id (`m33`, distinct from both vendored trees' `m55_hp`).
+
+**tan-cli#579 settled the maintainer call this section used to leave open:
+an NX9 `--som` is now REFUSED, not defaulted onto the Alif tree.** The
+vendored lookup used to fall through to `E1M-AEN801` on the theory that
+init-time output is best-effort and `tan validate` re-checks it. Measured,
+that theory did not survive contact: `tan init --som E1M-NX9101 --template
+sensor-starter` exited 0 with `issues: []` and wrote **five of six files
+byte-identical to the Alif render** — a `CMakeLists.txt` still pinned to
+`--emit zephyr-conf --core m55_hp` (contradicting the `m33` that
+tan-cli#494's `retarget_board_yaml_cores` had just written into the
+`board.yaml` beside it), a README telling an NXP customer to run `west build
+-b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .`, and `preset:
+e1m-evk` / `chips: [tmp112]` describing another module's BOM. `tan validate`
+cannot re-check content it has no opinion about, and the artefact is
+committed by then.
+
+So `tan/core/scaffold.py`'s `_SOM_FAMILIES` now carries `("E1M-NX9", "m33",
+None)` and `_vendored_family` raises `UnsupportedSomError` →
+`init.som-unsupported` (exit 2). `--template minimal-app` — tan's own
+hand-generated, vendor-neutral tree, which reads nothing from here — still
+scaffolds every SKU, and `--from-example` still copies a real SDK example, so
+the refusal is not a dead end. **This retires the moment the SDK catalog
+grows NX9 coverage: re-vendor the tree here and replace that `None` with its
+directory name.** Vendoring one by hand instead is not an option —
+everything under this directory is `--emit scaffold` output captured
+byte-for-byte, and `tests/parity/scaffold_byte_parity.py` re-runs the live
+emit against a reachable checkout and fails on drift.
 
 ## Per-SKU substitution (alp-sdk#864/#877) — not a two-line patch
 
