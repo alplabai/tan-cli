@@ -252,7 +252,47 @@ env:
   # MUST agree (see that file's comment) -- and the CI-wired byte-parity gate
   # SCRIPTS (kconfig-fixture, toolchain-lock, scaffold) were re-verified PASS
   # against `53557a60` locally before this bump too.
-  PINNED_SDK_TAG: 53557a6030c4f90a5525d29c142190e7e91f2bbb
+  #
+  # 53557a60 -> f30f4d4b (tan-cli#425, closing out the "held by inaction"
+  # state that issue names). THIS pin is a THIRD, separate audit from the two
+  # in `python/tests/gates/test_planner_relocation_freshness.py` -- it is the
+  # SDK checkout the SHIPPED Python surface is measured against (the four
+  # byte-parity gate scripts + the emit-parity breadth layer), not a hash of
+  # upstream sources. All three move together in tan-cli#543's PR because a
+  # port without the bump, or a bump without the port, reds a seam either way.
+  #
+  # #425's body is STALE and is corrected here rather than inherited: it
+  # reports the pin as `f4d87a1f` (tan-cli#485 moved it to `53557a60` since),
+  # and reports `seam1_field_diff.py` failing with `FAIL multicore_rpmsg-imx93:
+  # alp-sdk refuses but tan does not`. RE-MEASURED against alp-sdk `f30f4d4b`
+  # with this change's tree: that case now reports `PASS multicore_rpmsg-imx93
+  # (alp-sdk and tan both refuse this board)`, both sides quoting the same
+  # `SoM E1M-NX9101 hw_rev 'r1' exists but is not buildable (status: 'tbd').`
+  # tan-cli#485 had already forward-ported alp-sdk#1025's status half into
+  # `project_loader.py:196`, which is what closed it; the whole script is rc 0,
+  # every other case PASS (several with the already-allowed `debug.probe`
+  # delta). So option 1 of #425's three ("bump and fix the divergence") is
+  # taken, and there was no divergence left to fix.
+  #
+  # The `2bc6b400` precedent above still stands as the warning it was written
+  # to be, and was re-checked rather than assumed: the breadth-layer artefact
+  # floor is NOT tripped by this bump.
+  #
+  # The bump is ATOMIC across the vendored artefacts, as #425 warns and this
+  # file's history repeats. Re-measured against `f30f4d4b` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, but ONLY after
+  #     re-vendoring `python/tan/templates/vendored/` (11 files) and RETIRING
+  #     tan-cli#384's seven `DELIBERATE_EDITS` entries in
+  #     `tests/parity/scaffold_byte_parity.py` -- alp-sdk has since cut the
+  #     real `v0.15.0` tag (`e2928b9f`), so the emit's own doc links resolve
+  #     and that divergence is healed. See that tree's `MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0 (above)
+  # `bootstrap_manifest_parity.py` is NOT driven by this pin and is not run in
+  # CI -- `contract/` stays frozen at its own v0.14.0 vendor point, so its
+  # `DIFFERS` against any newer ref is the expected, documented answer.
+  PINNED_SDK_TAG: f30f4d4ba76c235cbb2b2cc713666cb858677e03
 
 jobs:
   seam1-plan-shape:

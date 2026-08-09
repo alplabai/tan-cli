@@ -242,11 +242,29 @@ jobs:
       # the #320 port; re-pin to a real tag once alp-sdk cuts one at or after
       # this SHA, the same deferred-tag pattern `parity.yml`'s own
       # `PINNED_SDK_TAG` history used while waiting on v0.14.0.
+      #
+      # `53557a60` -> `f30f4d4b` for tan-cli#543/#425, moved in the SAME change
+      # as `parity.yml`'s `PINNED_SDK_TAG`, which is the whole point of the
+      # "MUST be bumped together" rule above -- the mid-review divergence that
+      # rule was written after (31 red tests, both repos correct) is exactly
+      # what a one-sided bump reproduces. That change also carries the
+      # `tan/planner/` port these refs exist to measure: alp-sdk#1241's
+      # `_chip_has_driver` filter (the `CONFIG_ALP_SDK_CHIP_DP83825=y` divergence
+      # that reddened `parity` on eight consecutive dispatch runs), #1331's
+      # storage-region bounds check, #1289's SE-owned ATOC reservation, #1278's
+      # dead-`cmake-args.txt` removal, and the `template.py`/`hw_info.py`
+      # hand-port deltas. Bound to the OLD `53557a60` after that port lands,
+      # `test_relocated_planner_modules_match_the_pinned_sdk_audit` fails on the
+      # hash of six upstream files, and the emit-parity cases diff the ported
+      # planner against the pre-fix `scripts/alp_orchestrate/`.
+      #
+      # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
+      # PREDATES the six contract-surface commits this bump exists to pick up.
       - uses: actions/checkout@v4
         if: ${{ inputs.sdk_parity }}
         with:
           repository: alplabai/alp-sdk
-          ref: 53557a6030c4f90a5525d29c142190e7e91f2bbb
+          ref: f30f4d4ba76c235cbb2b2cc713666cb858677e03
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a

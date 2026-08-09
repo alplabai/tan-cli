@@ -44,8 +44,8 @@ CC,768.0,CONDENSATION_RISK,5.0,95.0,4.3,5.0,0.0
 ## Build
 
 ```
-west build -b ensemble_e8_dk/ae402fa0e5597le0/rtss_hp .
-west flash
+west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 .
+west flash --host <board-ip>
 ```
 
 Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path.

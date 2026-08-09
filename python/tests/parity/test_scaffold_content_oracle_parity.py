@@ -77,6 +77,35 @@ RUST = rust_binary()
 #: `xfail(strict=True)` discipline as `test_contract_envelopes.py`'s dict of
 #: the same name. Every reason states which side is authoritative.
 DELIBERATE_DIVERGENCE: dict[tuple[str, str], str] = {
+    # alp-sdk#1266, carried in by the tan-cli#543/#544 re-vendor of
+    # `python/tan/templates/vendored/` at alp-sdk `f30f4d4b`. The edge-ai
+    # example's Build section and its twister `platform_allow:` both named the
+    # upstream `ensemble_e8_dk` board with `ae402fa0e5597le0` -- the E4
+    # (E1M-AEN401) SoC id -- on an E8 example. That target BUILDS: upstream
+    # `ensemble_e8_dk/board.yml` declares three SoC variants
+    # (`ae402fa0e5597le0`, `ae612fa0e5597ls0`, `ae822fa0e5597ls0`), each with
+    # its own .dts/.yaml/_defconfig. Which is what made it dangerous -- a
+    # customer copy-pasting it onto real E8 hardware got an E4 die
+    # configuration with no error to notice. alp-sdk retagged every instance
+    # to the SoM's own `alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp`.
+    # PYTHON IS AUTHORITATIVE; the oracle is frozen at v0.14.0 and cannot
+    # follow. Content, not file-set: both files are still emitted and still
+    # vendored -- edge-ai's catalog record carries
+    # `testcase_yaml: ["examples/ai/cold-chain-monitor/testcase.yaml"]`, so
+    # dropping either would lose a file the SDK still ships.
+    ("edge-ai-starter", "README.md"): (
+        "alp-sdk#1266: the Build section's `west build -b "
+        "alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp` (Python, fixed) vs "
+        "`ensemble_e8_dk/ae402fa0e5597le0/rtss_hp` (the frozen v0.14.0 "
+        "oracle) -- an E4 SoC id on an E8 example, which builds silently "
+        "wrong. Python is authoritative; the oracle is frozen."
+    ),
+    ("edge-ai-starter", "testcase.yaml"): (
+        "alp-sdk#1266, same retag on the twister side: `platform_allow: "
+        "[alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp]` (Python, fixed) vs "
+        "`[ensemble_e8_dk/ae402fa0e5597le0/rtss_hp]` (the frozen v0.14.0 "
+        "oracle). Python is authoritative; the oracle is frozen."
+    ),
     # tan-cli#309: `minimal-app`'s pre-fix shape sent `west build` at a plain
     # `add_executable` with no `find_package(Zephyr ...)` -- a silent host
     # binary for a core declared `os: zephyr` (see `tan.core.scaffold`'s
