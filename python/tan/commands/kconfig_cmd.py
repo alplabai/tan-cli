@@ -74,7 +74,7 @@ from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_workspace_dir
-from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
+from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
@@ -384,6 +384,7 @@ def _run_kconfig(
     sdk_root: str | None,
     verbose: bool,
     json_mode: bool,
+    disclosure: SdkDisclosure,
 ) -> None:
     """The whole setup-class ladder plus the emit, split out of `kconfig`
     below so that command can wrap it in ONE catch-all (tan-cli#396) without
@@ -392,6 +393,11 @@ def _run_kconfig(
     Every failure exits through `_fail`, which raises `typer.Exit` after
     writing the envelope -- so this function's only control-flow exception is
     `typer.Exit`, which is exactly what the caller re-raises untouched.
+
+    `disclosure` is the caller's, by reference: the resolution facts are
+    computed HERE and the caller's `kconfig.internal-failure` handler is the
+    tenth `_fail` site, so it needs a name to read them from after this
+    function has already raised. See `SdkDisclosure`.
     """
     # Setup-class check #1: no SDK checkout resolved -- checked before core
     # resolution so every setup-class failure here is uniformly one shape,
@@ -429,8 +435,11 @@ def _run_kconfig(
     # `resolve_sdk` and none of the issue helpers, so a workspace whose
     # `.alp/sdk-path` pin misses answered `ok: true, issues: []` with a full
     # symbol menu solved out of a checkout the pin does not name. Computed
-    # ONCE here, threaded into every `_fail` below and into the success emit,
-    # so no future early return can drop it.
+    # ONCE here, threaded into all seven `_fail` sites below and into the
+    # success emit -- and, via `disclosure` just below, into the eighth site
+    # this function cannot reach: `kconfig`'s own `kconfig.internal-failure`
+    # catch-all. Ten `_fail` calls exist; the tenth is the `sdk is None` branch
+    # above, which by construction has nothing to report.
     #
     # NOT fixed here: the `sdk is None` branch above. `resolve_sdk` returns a
     # bare `None` when nothing resolves, discarding both facts before this
@@ -446,6 +455,10 @@ def _run_kconfig(
     sdk_issues = sdk_resolution_issues(
         sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for
     )
+    # Handed to the caller's `kconfig.internal-failure` handler the instant
+    # both facts exist -- that handler is the one `_fail` site this function
+    # cannot reach, and every line below it can raise something unenumerated.
+    disclosure.record(sdk_info, sdk_issues)
 
     try:
         resolved_core = _resolve_core(core, board_path)
@@ -644,6 +657,23 @@ def kconfig(
     # paths` is itself inside the guard, so the failing envelope needs a
     # `project` block even when resolution is what blew up.
     root, board_path = ".", "./board.yaml"
+    # tan-cli#497 defect 2, the tenth `_fail` site. The first pass threaded the
+    # resolution pair into the seven sites inside `_run_kconfig` and left THIS
+    # one -- the catch-all, which runs strictly AFTER `resolve_sdk` has already
+    # produced both facts -- hardcoding a single-element issue list. Measured
+    # against a broken-`.alp/sdk-path` workspace with a discoverable sibling and
+    # `_resolve_zephyr_base` (outside every `try` in `_run_kconfig`) raising
+    # `OSError: [Errno 24] Too many open files`: exit 5,
+    # `issues: [kconfig.internal-failure]`, `sdk.project-pin-unresolved`
+    # dropped -- the same drop the issue is about, on a path the fix was
+    # believed to cover.
+    #
+    # The facts cannot simply be recomputed here: `resolve_sdk` is itself one
+    # of the things that can raise, and re-running the ladder in an exception
+    # handler risks a second raise out of the one place that must not throw.
+    # They are RECORDED by `_run_kconfig` instead, into a carrier this function
+    # owns, so the handler only ever reads two fields.
+    disclosure = SdkDisclosure()
     try:
         root, board_path = resolve_project_paths(project, board_yaml)
         _run_kconfig(
@@ -653,6 +683,7 @@ def kconfig(
             sdk_root=sdk_root,
             verbose=verbose,
             json_mode=json_mode,
+            disclosure=disclosure,
         )
     except typer.Exit:
         raise
@@ -665,6 +696,8 @@ def kconfig(
             message=f"kconfig failed unexpectedly: {type(err).__name__}: {err}",
             core=core,
             json_mode=json_mode,
+            sdk=disclosure.sdk,
+            sdk_issues=disclosure.issues,
         )
 
 

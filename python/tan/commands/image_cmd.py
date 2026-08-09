@@ -91,7 +91,7 @@ from tan.core.system_manifest import (
     raw_passthrough,
     slice_build_dir,
 )
-from tan.envelope import Envelope, Issue, Project, SdkInfo, emit, json_safe_floats
+from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit, json_safe_floats
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
@@ -513,11 +513,26 @@ def _run(
     project_arg: str | None,
     board_yaml_arg: str | None,
     sdk_root_arg: str | None,
+    disclosure: SdkDisclosure,
 ) -> _Outcome:
+    """`disclosure` is the caller's, by reference -- the resolution facts are
+    computed HERE and `image`'s `image.internal-failure` catch-all needs a name
+    to read them from once this function has already raised. See
+    `SdkDisclosure`."""
     context: ProjectContext = resolve_project_context(
         project_arg, board_yaml_arg, sdk_root_arg
     )
     project = context.project()
+    # Recorded the instant the ladder answers, ahead of every other step this
+    # function performs -- all of which can raise something unenumerated.
+    disclosure.record(
+        context.sdk,
+        sdk_resolution_issues(
+            context.broken_project_pin,
+            context.sdk_source_tier,
+            context.foreign_global_default_for,
+        ),
+    )
     app_base = resolve_app_base(app_path, context.workspace_root)
     build_root = resolve_build_root(build_root_arg, app_base)
 
@@ -568,10 +583,10 @@ def _run(
     )
     issues = [Issue(n.code, n.severity, n.message) for n in notices]
     # The same pair `_error_outcome` above computes for a manifest/bundle-write
-    # refusal, from the same shared `sdk_resolution_issues`.
-    sdk_issues = sdk_resolution_issues(
-        context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
-    )
+    # refusal, from the same shared `sdk_resolution_issues` -- read back off
+    # the disclosure rather than computed a second time, so the happy path, the
+    # refusals and the catch-all cannot disagree.
+    sdk_issues = list(disclosure.issues)
     issues.extend(sdk_issues)
     return _Outcome(
         exit_code,
@@ -619,6 +634,14 @@ def image(
     resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
+    # tan-cli#497 defect 5, the site the first pass missed. `_error_outcome` and
+    # the happy path both report the SDK-resolution pair; this handler -- which
+    # runs strictly after `resolve_project_context` has already answered --
+    # reported only the crash, so a `.alp/sdk-path` the run ignored stayed
+    # silent on exactly the path where a reader most needs to know which
+    # checkout was in play. Recorded rather than recomputed here: the resolver
+    # is itself one of the things that can raise, and this handler must not.
+    disclosure = SdkDisclosure()
     try:
         outcome = _run(
             app_path=app_path,
@@ -626,25 +649,29 @@ def image(
             project_arg=project,
             board_yaml_arg=board_yaml,
             sdk_root_arg=sdk_root,
+            disclosure=disclosure,
         )
     except Exception as err:  # noqa: BLE001
         # The port's most-repeated defect class: a traceback puts nothing
         # parseable on stdout and the extension renders an empty panel with no
         # error. Anything reaching here is a tan bug, reported as one. Nothing in
         # this handler can itself throw -- `_empty_bundle()` and
-        # `Project(None, None)` are both total, and no path helper is called.
+        # `Project(None, None)` are both total, `_sdk_warning_lines` only
+        # formats, and no path helper is called.
         outcome = _Outcome(
             ExitCode.INTERNAL_FAILURE,
             _empty_bundle(),
             Project(root=None, board_yaml=None),
             [
+                *disclosure.issues,
                 Issue(
                     "image.internal-failure",
                     "error",
                     f"image failed unexpectedly: {type(err).__name__}: {err}",
-                )
+                ),
             ],
-            ["image: internal failure"],
+            [*_sdk_warning_lines(disclosure.issues), "image: internal failure"],
+            disclosure.sdk,
         )
 
     if json_mode:

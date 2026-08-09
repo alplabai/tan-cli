@@ -857,3 +857,88 @@ def test_a_clean_workspace_success_emit_still_reports_no_issues(
     )
     assert result.exit_code == 0
     assert json.loads(result.stdout)["issues"] == []
+
+
+def test_the_internal_failure_catch_all_reports_the_pin_warning_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tan-cli#497 defect 2, the tenth `_fail` site -- and the one the first
+    pass at this issue left open while claiming every site was covered.
+
+    `kconfig.internal-failure` is raised by `kconfig`'s own outer catch-all,
+    which sits OUTSIDE `_run_kconfig` and so had no name to read the already-
+    computed `sdk`/`sdk_issues` from. It runs strictly after `resolve_sdk` has
+    produced both facts, so there is nothing legitimate to drop.
+
+    Driven through `_resolve_zephyr_base`, which sits outside every `try:`
+    inside `_run_kconfig` -- the same site the reviewer reproduced against a
+    real workspace -- with the exception it raises there taken verbatim from
+    that run.
+
+    Fails against the pre-fix branch: there `issues` is
+    `[kconfig.internal-failure]` alone and `sdk` is absent."""
+    proj = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(proj)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.kconfig_cmd._resolve_zephyr_base", boom)
+    result = runner.invoke(app, ["--format", "json"])
+    assert result.exit_code == 5
+    envelope = json.loads(result.stdout)
+    assert [i["code"] for i in envelope["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "kconfig.internal-failure",
+    ]
+    assert "gone-checkout" in envelope["issues"][0]["message"]
+    assert "OSError: [Errno 24] Too many open files" in envelope["issues"][1]["message"]
+    # The checkout that DID answer is named too -- a warning that says the pin
+    # was ignored is only half a disclosure without it.
+    assert envelope["sdk"]["sourceTier"] == "discovery"
+
+
+def test_the_internal_failure_catch_all_reaches_kconfig_text_mode_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The DEFAULT mode, same site.
+
+    Fails against the pre-fix branch: stderr carries only the `kconfig:`
+    crash line."""
+    proj = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(proj)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.kconfig_cmd._resolve_zephyr_base", boom)
+    result = runner.invoke(app, [])
+    assert result.exit_code == 5
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "gone-checkout" in result.stderr
+    assert "kconfig: kconfig failed unexpectedly" in result.stderr
+
+
+def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative control for the two above. `SdkDisclosure` starts empty,
+    so a raise BEFORE `resolve_sdk` answers must report the crash alone --
+    without this, a fix that appended something unconditionally would be
+    indistinguishable from one that reports what was really resolved.
+
+    This is the same shape `test_an_unexpected_failure_is_a_coded_envelope_
+    not_a_traceback` already drives, asserted here for the issue list rather
+    than the code."""
+    proj = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(proj)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr("tan.commands.kconfig_cmd.resolve_sdk", boom)
+    result = runner.invoke(app, ["--format", "json"])
+    assert result.exit_code == 5
+    envelope = json.loads(result.stdout)
+    assert [i["code"] for i in envelope["issues"]] == ["kconfig.internal-failure"]
+    assert "sdk" not in envelope

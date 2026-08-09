@@ -603,3 +603,50 @@ def test_a_clean_workspace_model_build_still_reports_no_issues(tmp_path):
     )
     assert result.exit_code == 0
     assert envelope(result)["issues"] == []
+
+
+def test_the_internal_failure_catch_all_reports_the_pin_warning_too(
+    tmp_path, monkeypatch
+):
+    """The outer `except Exception` -- the site that was left open in
+    `kconfig`/`image`/`size` and is already closed here, pinned so it stays
+    that way. `model` resolves in the OUTER function (`sdk_issues` is assigned
+    between the `try:` and `_run_build`), so its handler can read the pair
+    directly; no `SdkDisclosure` carrier is needed.
+
+    Passes on the pre-fix branch too: this guards a property that is already
+    true against a regression, it does not report a defect."""
+    project = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(project)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.model_cmd._run_build", boom)
+    result = runner.invoke(app, ["build", "--format", "json"])
+    assert result.exit_code == 5
+    doc = envelope(result)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "model.internal-failure",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+
+
+def test_the_internal_failure_catch_all_reaches_model_text_mode_too(
+    tmp_path, monkeypatch
+):
+    """The DEFAULT mode, same site -- `finish`'s text branch prints warnings
+    first, so the pair leads the crash line."""
+    project = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(project)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.model_cmd._run_build", boom)
+    result = runner.invoke(app, ["build"])
+    assert result.exit_code == 5
+    lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    assert lines[0].startswith("warning: .alp/sdk-path names")
+    assert any("model build failed unexpectedly" in ln for ln in lines)

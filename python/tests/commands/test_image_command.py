@@ -746,3 +746,89 @@ def test_the_sdk_pin_warning_reaches_image_text_mode_on_the_happy_path_too(tmp_p
     assert "image: bundle ready at" in result.stderr
     doc = envelope(run_cli(project, "--format", "json"))
     assert [i["code"] for i in doc["issues"]] == ["sdk.project-pin-unresolved"]
+
+
+def _invoke_in_process(monkeypatch, project: Path, *argv):
+    """`image` mounted on a throwaway `typer.Typer()` and driven in-process.
+
+    The subprocess `run_cli` above cannot reach `image`'s outer catch-all: every
+    enumerated failure below it is already coded, so provoking the handler needs
+    a monkeypatched raise, and a monkeypatch does not cross a `subprocess.run`
+    boundary. Same shape `test_build_command.py` uses for `build`'s own
+    identical guard."""
+    import typer
+    from typer.testing import CliRunner
+
+    from tan.commands import image_cmd
+
+    monkeypatch.chdir(project)
+    app = typer.Typer()
+    app.command("image")(image_cmd.image)
+    return CliRunner().invoke(app, list(argv))
+
+
+def test_the_internal_failure_catch_all_reports_the_pin_warning_too(
+    tmp_path, monkeypatch
+):
+    """tan-cli#497 defect 5, the site the first pass missed. `_error_outcome`
+    and the happy path both report the SDK-resolution pair; `image`'s outer
+    `image.internal-failure` handler -- which runs strictly AFTER
+    `resolve_project_context` has already answered -- reported only the crash,
+    in JSON and text alike.
+
+    Fails against the pre-fix branch: there `issues` is
+    `[image.internal-failure]` alone and `sdk` is absent."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.image_cmd.load_manifest", boom)
+    result = _invoke_in_process(monkeypatch, project, "--format", "json")
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "image.internal-failure",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    assert doc["sdk"]["sourceTier"] == "discovery"
+
+
+def test_the_internal_failure_catch_all_reaches_image_text_mode_too(
+    tmp_path, monkeypatch
+):
+    """The DEFAULT mode, same site.
+
+    Fails against the pre-fix branch: stderr carries only `image: internal
+    failure`."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.image_cmd.load_manifest", boom)
+    result = _invoke_in_process(monkeypatch, project)
+    assert result.exit_code == 5
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "image: internal failure" in result.stderr
+
+
+def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
+    tmp_path, monkeypatch
+):
+    """The negative control. `SdkDisclosure` starts empty, so a raise BEFORE
+    `resolve_project_context` answers must report the crash alone -- without
+    this, a fix that appended something unconditionally would be
+    indistinguishable from one that reports what was really resolved."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr("tan.commands.image_cmd.resolve_project_context", boom)
+    result = _invoke_in_process(monkeypatch, project, "--format", "json")
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == ["image.internal-failure"]
+    assert "sdk" not in doc

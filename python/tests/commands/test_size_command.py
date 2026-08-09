@@ -636,3 +636,83 @@ def test_the_sdk_pin_warning_reaches_size_text_mode_on_the_manifest_gate_too(tmp
     assert result.returncode == 1
     assert "warning: .alp/sdk-path names" in result.stderr
     assert "no system-manifest.yaml at" in result.stderr
+
+
+def _invoke_in_process(monkeypatch, project: Path, *argv):
+    """`size` mounted on a throwaway `typer.Typer()` and driven in-process --
+    see the twin helper in `test_image_command.py` for why the subprocess
+    `run_cli` above cannot reach this command's outer catch-all."""
+    import typer
+    from typer.testing import CliRunner
+
+    from tan.commands import size_cmd
+
+    monkeypatch.chdir(project)
+    app = typer.Typer()
+    app.command("size")(size_cmd.size)
+    return CliRunner().invoke(app, list(argv))
+
+
+def test_the_internal_failure_catch_all_reports_the_pin_warning_too(
+    tmp_path, monkeypatch
+):
+    """tan-cli#497 defect 5, the site the first pass missed. `_error_outcome`
+    and the happy path both report the SDK-resolution pair; `size`'s outer
+    `size.internal-failure` handler -- which runs strictly AFTER
+    `resolve_project_context` has already answered -- reported only the crash,
+    in JSON and text alike.
+
+    Fails against the pre-fix branch: there `issues` is
+    `[size.internal-failure]` alone and `sdk` is absent."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.size_cmd.load_manifest", boom)
+    result = _invoke_in_process(monkeypatch, project, "--format", "json")
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "size.internal-failure",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    assert doc["sdk"]["sourceTier"] == "discovery"
+
+
+def test_the_internal_failure_catch_all_reaches_size_text_mode_too(
+    tmp_path, monkeypatch
+):
+    """The DEFAULT mode, same site.
+
+    Fails against the pre-fix branch: stderr carries only `size: internal
+    failure`."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.size_cmd.load_manifest", boom)
+    result = _invoke_in_process(monkeypatch, project)
+    assert result.exit_code == 5
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "size: internal failure" in result.stderr
+
+
+def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
+    tmp_path, monkeypatch
+):
+    """The negative control. `SdkDisclosure` starts empty, so a raise BEFORE
+    `resolve_project_context` answers must report the crash alone."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr("tan.commands.size_cmd.resolve_project_context", boom)
+    result = _invoke_in_process(monkeypatch, project, "--format", "json")
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == ["size.internal-failure"]
+    assert "sdk" not in doc

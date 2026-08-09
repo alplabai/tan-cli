@@ -507,3 +507,36 @@ def test_a_clean_workspace_prints_no_run_resolution_warning(tmp_path, monkeypatc
     monkeypatch.chdir(project)
     result = CliRunner().invoke(_app(), ["run"])
     assert "warning: .alp/sdk-path names" not in result.stderr
+
+
+def test_the_internal_failure_catch_all_reports_the_pin_warning_too(
+    tmp_path, monkeypatch
+):
+    """The outer `except Exception` -- the site that was left open in
+    `kconfig`/`image`/`size` and is already closed here, pinned so it stays
+    that way. `run` resolves the ladder in the OUTER function and prepends the
+    pair AFTER the handler has built `issues`/`text_lines`, so the crash path
+    and the ordinary paths share one composition; no `SdkDisclosure` carrier
+    is needed.
+
+    Passes on the pre-fix branch too: this guards a property that is already
+    true against a regression, it does not report a defect."""
+    project = _broken_pin_project(tmp_path)
+    monkeypatch.chdir(project)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.run_cmd._run", boom)
+    result = CliRunner().invoke(_app(), ["run", "--format", "json"])
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "run.internal-failure",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    # And the DEFAULT mode, from the same list.
+    text = CliRunner().invoke(_app(), ["run"]).stderr
+    assert "warning: .alp/sdk-path names" in text
+    assert "run: internal failure" in text

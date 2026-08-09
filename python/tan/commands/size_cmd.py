@@ -82,7 +82,7 @@ from tan.core.system_manifest import (
     slice_footprint_dirs,
 )
 from tan.env import use_color
-from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
+from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
@@ -543,11 +543,26 @@ def _run(
     json_mode: bool,
     no_color: bool,
     ci: bool,
+    disclosure: SdkDisclosure,
 ) -> _Outcome:
+    """`disclosure` is the caller's, by reference -- the resolution facts are
+    computed HERE and `size`'s `size.internal-failure` catch-all needs a name
+    to read them from once this function has already raised. See
+    `SdkDisclosure`."""
     context: ProjectContext = resolve_project_context(
         project_arg, board_yaml_arg, sdk_root_arg
     )
     project = context.project()
+    # Recorded the instant the ladder answers, ahead of every other step this
+    # function performs -- all of which can raise something unenumerated.
+    disclosure.record(
+        context.sdk,
+        sdk_resolution_issues(
+            context.broken_project_pin,
+            context.sdk_source_tier,
+            context.foreign_global_default_for,
+        ),
+    )
 
     app_base = resolve_app_base(app_path, context.workspace_root)
     build_root = resolve_build_root(build_root_arg, app_base)
@@ -580,12 +595,10 @@ def _run(
 
     text: list[str] = []
     # The same pair `_error_outcome` above computes for a manifest-gate
-    # refusal, from the same shared `sdk_resolution_issues` -- one source, so
-    # this path and that one can never disagree about whether either warning
-    # applies.
-    issues: list[Issue] = sdk_resolution_issues(
-        context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
-    )
+    # refusal, from the same shared `sdk_resolution_issues` -- read back off
+    # the disclosure rather than computed a second time, so this path, that one
+    # and the catch-all can never disagree about whether either warning applies.
+    issues: list[Issue] = list(disclosure.issues)
     exit_code = ExitCode.SUCCESS
 
     if not json_mode:
@@ -670,6 +683,13 @@ def size(
     resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
+    # tan-cli#497 defect 5, the site the first pass missed -- see the twin
+    # comment in `image_cmd.image`. `_error_outcome` and the happy path both
+    # report the SDK-resolution pair; this handler, which runs strictly after
+    # `resolve_project_context` has already answered, reported only the crash.
+    # Recorded rather than recomputed here: the resolver is itself one of the
+    # things that can raise, and this handler must not.
+    disclosure = SdkDisclosure()
     try:
         outcome = _run(
             app_path=app_path,
@@ -682,26 +702,30 @@ def size(
             json_mode=json_mode,
             no_color=no_color,
             ci=ci,
+            disclosure=disclosure,
         )
     except Exception as err:  # noqa: BLE001
         # The port's most-repeated defect class: an uncaught exception escapes as
         # a raw traceback, stdout stays EMPTY, and the extension renders nothing
         # at all with no error on either side. Anything reaching here is a tan
         # bug and is reported as one -- with an envelope. Nothing in this handler
-        # may itself throw: it only formats `err`, and `Project(None, None)` and
-        # `build_size_report([])` are both total.
+        # may itself throw: it only formats `err`, `_sdk_warning_lines` only
+        # formats, and `Project(None, None)` and `build_size_report([])` are
+        # both total.
         outcome = _Outcome(
             ExitCode.INTERNAL_FAILURE,
             build_size_report([]),
             Project(root=None, board_yaml=None),
             [
+                *disclosure.issues,
                 Issue(
                     "size.internal-failure",
                     "error",
                     f"size failed unexpectedly: {type(err).__name__}: {err}",
-                )
+                ),
             ],
-            ["size: internal failure"],
+            [*_sdk_warning_lines(disclosure.issues), "size: internal failure"],
+            disclosure.sdk,
         )
 
     if json_mode:
