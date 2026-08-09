@@ -977,7 +977,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # `_require_complete_tree` with its derived expectation, and the
     # file-naming `OSError`. Each carries the docstring recording what it was
     # measured against, which is most of the growth.
-    "tan/core/scaffold.py": 1341,
+    # 1452, not 1341, as of tan-cli#579: `_SOM_FAMILIES`/`_DEFAULT_FAMILY`/
+    # `_som_family` (the ONE table `app_core_for_sku` and `_family_bucket` now
+    # both read, so they cannot disagree again), the `UnsupportedSomError`
+    # class whose docstring records why refusing beats vendoring an NXP tree or
+    # warning-and-writing one, and `_vendored_family` -- extracted so
+    # `_vendored_files` stays under 50 lines and the FUNCTION ratchet holds at
+    # 237 rather than being raised for a 4-line guard. Re-measured: exactly
+    # `wc -l` on this branch.
+    "tan/core/scaffold.py": 1452,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one
@@ -1143,7 +1151,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # 1042, not 1023, as of tan-cli#494 defect 10: `_cwd_or_dot` and the
     # docstring recording that the frozen oracle exits 0 on the identical
     # removed cwd where this port raised `init.internal-failure` / exit 5.
-    "tan/commands/init_cmd.py": 1042,
+    # 1057, not 1042, as of tan-cli#579: the `UnsupportedSomError` ->
+    # `init.som-unsupported` arm in `_plan_from_template`, plus the comment
+    # separating it from the neighbouring `init.invalid-som` (which means
+    # something else: "this TEMPLATE supports one SKU", not "tan has no
+    # scaffold for this SoM family"). Re-measured: exactly `wc -l` on this
+    # branch.
+    "tan/commands/init_cmd.py": 1057,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
