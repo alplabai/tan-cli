@@ -1547,7 +1547,13 @@ _MIRRORED = ("tan/planner/",)
 # measured 704 here (701 at `origin/dev` -- +3 for defect 2's
 # `_zephyr_base_will_adopt` gate and defect 3's occupied-target call), still
 # under the 707 ceiling.
-_FUNCTION_COUNT_BUDGET = 225
+# MERGED VALUE, tan-cli#498 on top of dev carrying #494/#495 (#583): re-walked
+# with the gate's own AST walk on the MERGED tree, 230 -- not 226 + 4 and not
+# 225 + 5. The two comment blocks above each describe their own side's
+# crossings; the sets are disjoint, which is why neither side's number is the
+# answer and only a walk of the union is. `_FUNCTION_WORST_BUDGET` stays 707:
+# worst measured 704 here (`bootstrap_cmd.py:_run`, +3 from #583), not 701.
+_FUNCTION_COUNT_BUDGET = 230
 _FUNCTION_WORST_BUDGET = 707
 
 
