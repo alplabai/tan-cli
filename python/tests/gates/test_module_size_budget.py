@@ -801,16 +801,6 @@ _MODULE_BUDGET: dict[str, int] = {
     # function-length ratchet's 50-line cap (49 lines) rather than paying
     # that ratchet too, matching this file's own established precedent
     # (`doctor_render.py:render_doctor_footer`, above).
-    # 1706, not 1703, as of tan-cli#510: `_missing_tool_issues`'s match
-    # dropped its `endswith("` not found")` half (the message now carries a
-    # `-- searched ...` tail) and gained its own two-line explanation of why.
-    # 1732, not 1706, as of the tan-cli#510 REVIEW round: `_slice_result`
-    # gained the new, always-present `resolvedTool` field plus the docstring
-    # explaining why it is the one exception to "omitted when absent", and
-    # `_text_recap` gained the resolved-tool note it now composes for a
-    # failed/cancelled slice (never folded into `reason` -- see both
-    # functions' own docstrings).
-    "tan/commands/build_cmd.py": 1732,
     # 1720, not 1703, as of tan-cli#488 defect 8: `build()`'s resolution
     # prologue (`Path.cwd()` through `Project.resolved(...)`) moved inside a
     # `try`, with pre-try safe defaults for every name the exception handler
@@ -866,6 +856,22 @@ _MODULE_BUDGET: dict[str, int] = {
     # entries take it), why the severity is `info` and not `warning`, and why
     # the probe mirrors `_zephyr_app_dir`'s condition instead of reading the
     # substituted path back out of `command.args`.
+    # NOTE: the two paragraphs below were rescued from a DUPLICATE
+    # `"tan/commands/build_cmd.py"` key that sat ~55 lines above this one
+    # (tan-cli#586). Python keeps the LAST key in a dict literal, so that
+    # entry's 1732 was never enforced and its rationale was invisible to the
+    # gate and misleading to anyone re-deriving the pin. The #510 history is
+    # real and belongs to this file, so it is kept here rather than deleted
+    # with the dead key.
+    # 1706, not 1703, as of tan-cli#510: `_missing_tool_issues`'s match
+    # dropped its `endswith("` not found")` half (the message now carries a
+    # `-- searched ...` tail) and gained its own two-line explanation of why.
+    # 1732, not 1706, as of the tan-cli#510 REVIEW round: `_slice_result`
+    # gained the new, always-present `resolvedTool` field plus the docstring
+    # explaining why it is the one exception to "omitted when absent", and
+    # `_text_recap` gained the resolved-tool note it now composes for a
+    # failed/cancelled slice (never folded into `reason` -- see both
+    # functions' own docstrings).
     "tan/commands/build_cmd.py": 1908,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
@@ -1919,3 +1925,46 @@ def test_the_mirrored_planner_is_named_as_out_of_scope():
     assert mirrored, "no mirrored planner module is budgeted -- has the mirror moved?"
     for rel in mirrored:
         assert (_PACKAGE.parent / rel).exists(), f"{rel} is budgeted but missing"
+
+
+def test_the_budget_tables_declare_no_key_twice():
+    """A duplicate key in `_MODULE_BUDGET` is invisible to every other test in
+    this file, because Python has already collapsed the dict literal by the
+    time they read it -- the LAST spelling wins and the earlier one, plus the
+    comment paragraphs justifying its number, is dead text that still reads as
+    authoritative.
+
+    That is not hypothetical: `tan/commands/build_cmd.py` was declared twice on
+    `dev` (1732 and 1908, ~55 lines apart), so the 1732 pin had never been
+    enforced and its rationale was misleading anyone re-deriving the budget --
+    exactly the reader this file's dense comment history exists to serve
+    (tan-cli#586). Six PRs re-resolved a conflict in this file in one evening;
+    a silently-dropped key is a realistic outcome of that, not an oddity.
+
+    So this has to parse THIS FILE'S OWN SOURCE rather than inspect the dict:
+    the defect is unobservable at runtime by construction."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    tables = {}
+    for node in ast.walk(tree):
+        target = ""
+        if isinstance(node, ast.AnnAssign):
+            target = getattr(node.target, "id", "")
+        elif isinstance(node, ast.Assign) and node.targets:
+            target = getattr(node.targets[0], "id", "")
+        if target.endswith("_BUDGET") and isinstance(getattr(node, "value", None), ast.Dict):
+            keys = [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
+            tables[target] = keys
+
+    assert "_MODULE_BUDGET" in tables, (
+        "_MODULE_BUDGET is no longer a dict literal in this file -- this check "
+        "reads the source, so it cannot follow the table if it moves or is built "
+        "dynamically. Point it at the new shape rather than deleting it."
+    )
+    for name, keys in sorted(tables.items()):
+        duplicated = sorted({k for k in keys if keys.count(k) > 1})
+        assert not duplicated, (
+            f"{name} declares these keys more than once: {duplicated}. Python keeps "
+            f"the LAST one, so every earlier spelling -- and the comment history "
+            f"justifying its number -- is silently dead. Merge the histories into "
+            f"the surviving entry and delete the duplicate (tan-cli#586)."
+        )
