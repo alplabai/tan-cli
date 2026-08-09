@@ -232,35 +232,53 @@ def budget_note_only(note: str) -> MemoryBudget:
 
 
 def _saturating_u64(value: float) -> int:
-    """Rust's `as u64` cast: truncate toward zero, saturate at both ends.
+    """Rust's `as u64` cast for a FINITE input -- truncate toward zero, 0 at or
+    below zero, `u64::MAX` above it -- and 0, never a number, for a NON-FINITE
+    one.
 
-    `+inf` saturates to `u64::MAX`, and this must be handled EXPLICITLY: Python's
-    `int()` refuses it (`OverflowError: cannot convert float infinity to
-    integer`) where Rust's cast does not. `-inf` and NaN join every non-positive
-    input at 0.
-
-    That `int()` used to sit outside its caller's `try` (tan-cli#499 defect 8),
-    so an infinite `mram_mb` / `soc_flash_mb` / `tcm_kb` / `sram_banks_kb` entry
-    -- which `json.loads` produces for an `Infinity` literal or an overflowing
+    That cast used to sit outside its caller's `try` (tan-cli#499 defect 8), so
+    an infinite `mram_mb` / `soc_flash_mb` / `tcm_kb` / `sram_banks_kb` entry --
+    which `json.loads` produces for an `Infinity` literal or an overflowing
     `1e400` in a SoC JSON -- collapsed the whole `tan size` run into
     `size.internal-failure` at exit 5, with `data.slices` EMPTY (every other
-    slice's measurement discarded) and `project` null.
+    slice's measurement discarded) and `project` null. Python's `int()` refuses
+    `inf` (`OverflowError: cannot convert float infinity to integer`) where
+    Rust's cast does not, so the two cases have to be separated by hand.
 
-    `u64::MAX` and not 0 because that is what the oracle emits for the nearest
-    input it can actually read: measured, `"mram_mb": 1e300` gives
-    `tan 0.4.1` `"flash":{"total":18446744073709551615}` at exit 0, so
-    saturating keeps this function continuous across the f64 range instead of
-    discontinuously reporting "no budget" one representable step past 1e300.
-    The oracle never reaches its own cast for `1e400`/`Infinity` -- serde_json
-    refuses the literal and the slice comes back with
-    `budget_note: "unreadable SoM preset for <SKU>"`, totals null, exit 0. That
-    remaining divergence is upstream of this file, in `size_cmd._as_f64`'s
-    unguarded `float()`, and is NOT fixed here.
+    **Where the boundary sits, and why it is NOT "saturate everything"
+    (tan-cli#499 REVIEW).** The first version of this fix answered `+inf` with
+    `u64::MAX`, arguing continuity across the f64 range. Measured, that
+    manufactures a confidently WRONG budget at `ok:true`, which is the exact
+    failure class this issue exists to close:
+
+        # SoC JSON with "mram_mb": 1e400
+        this branch, before:  exit 0 ok:true  flash.total 18446744073709551615
+        tan 0.4.1:            exit 0 ok:true  flash.total null,
+                              budget_note "unreadable SoM preset for E1M-AEN801"
+
+    16 EiB of flash, stated as fact, on a manifest a customer could then read as
+    "plenty of room". So the saturation is BOUNDED to the inputs where the
+    oracle demonstrably saturates -- the finite ones:
+
+        # SoC JSON with "mram_mb": 1e300   (finite; serde_json reads it)
+        this branch:  exit 0  flash.total 18446744073709551615
+        tan 0.4.1:    exit 0  flash.total 18446744073709551615   <- byte-identical
+
+    A NON-finite value is not a point on that curve: serde_json refuses `1e400`
+    / `Infinity` / `NaN` outright, so there is no oracle answer to be continuous
+    WITH. Those join the negative/NaN arm at 0 -- this module's own "unresolved"
+    value (`_region_resolved` treats 0 as unresolved, `classify` skips it,
+    `budget_fully_known()` is False for it), so the envelope reports `pct: null`
+    and no budget rather than a fabricated maximum. A residual divergence from
+    the oracle stays (`total: 0` vs `total: null` plus a note); it is upstream
+    of this file and NOT fixed here -- see the PR's "Not fixed" section.
     """
     if value != value or value <= 0:  # NaN, -inf, and every non-positive
         return 0
     if value == float("inf"):
-        return _U64_MAX
+        # NOT `_U64_MAX`: see the docstring. An input the oracle's own reader
+        # refuses is answered "no budget", not "the largest budget there is".
+        return 0
     return min(int(value), _U64_MAX)
 
 
@@ -297,8 +315,8 @@ def sram_banks(variant: dict) -> list[tuple[str, float]]:
     already does with the identical value -- its own `float()` raises inside a
     `try` and it returns the unresolved 0 -- so both regions answer "no budget"
     for an unrepresentable integer rather than one crashing and one not. A
-    non-finite FLOAT is a different input and is passed through, to saturate in
-    [`_saturating_u64`]."""
+    non-finite FLOAT is passed through and reaches the same answer one level
+    down: [`_saturating_u64`] resolves it to 0, not to `u64::MAX`."""
     raw = variant.get("sram_banks_kb")
     if not isinstance(raw, dict):
         return []

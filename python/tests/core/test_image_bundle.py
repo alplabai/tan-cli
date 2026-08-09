@@ -74,6 +74,26 @@ def test_archive_name_rejects_a_nested_relative_that_is_not_one_filename(core_id
     assert is_plain_relative("a/./b")
 
 
+@pytest.mark.parametrize("core_id", ["C:foo", "C:", "c:x", "Z:"])
+def test_archive_name_rejects_a_drive_prefix_on_every_platform(core_id):
+    """tan-cli#499 defect 9, REVIEW round. `is_plain_filename`'s stated rule is
+    that a value bound for `bundle-manifest.json` is judged the same way on
+    every host, because the bundle is read on whatever OS consumes it. The first
+    version applied that to the separators and then guarded the drive check
+    behind `os.name == "nt"` -- so on POSIX, `os.path.splitdrive` is
+    `posixpath`'s, finds nothing, and `C:foo` was accepted and written out as
+    `C:foo-zephyr.tar.gz`: a drive-RELATIVE path to the Windows consumer, which
+    is the hazard the separator rule is stated to prevent. `ntpath.splitdrive`
+    now runs unconditionally.
+
+    Not skipped on POSIX, deliberately: the point is that the answer does NOT
+    depend on the host."""
+    assert slice_archive_name(core_id, "zephyr") is None
+    assert slice_artefact_rel(core_id, "zephyr") is None
+    assert slice_archive_name("m55_hp", core_id) is None
+    assert slice_artefact_rel("m55_hp", core_id) is None
+
+
 def test_the_narrower_filename_guard_still_accepts_every_real_core_id():
     """The fix must not start refusing the shapes a tan-generated manifest
     actually carries -- `core_id` comes from the SoC spec's `cores[].id` and

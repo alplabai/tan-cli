@@ -17,6 +17,7 @@ Two deliberate contract fixes carried over from the Rust:
 
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 from typing import Any
@@ -90,18 +91,29 @@ def is_plain_filename(name: str) -> bool:
     separator at all -- `a/b` there means a `slices/a/` subdirectory that was
     never created, not a filename.
 
-    Both separators are rejected on BOTH platforms, unlike `is_plain_relative`'s
-    deliberately platform-dependent component scan. The resulting string is not
-    only a local filename: [`slice_artefact_rel`] folds it into the machine
-    contract in `bundle-manifest.json`, which is read on whatever OS consumes
-    the bundle, and a `\\` a Linux `tan image` treated as an ordinary character
-    is a separator to the Windows consumer that reads it back.
+    Both separators AND a Windows drive prefix are rejected on BOTH platforms,
+    unlike `is_plain_relative`'s deliberately platform-dependent component scan.
+    The resulting string is not only a local filename: [`slice_artefact_rel`]
+    folds it into the machine contract in `bundle-manifest.json`, which is read
+    on whatever OS consumes the bundle, and a `\\` a Linux `tan image` treated
+    as an ordinary character is a separator to the Windows consumer that reads
+    it back.
+
+    The drive check is `ntpath.splitdrive`, run unconditionally, NOT
+    `os.path.splitdrive` behind an `os.name == "nt"` guard (tan-cli#499 defect 9
+    REVIEW). The guarded version applied the cross-OS rule above to the
+    separators and then abandoned it one line later: on POSIX,
+    `os.path.splitdrive` is `posixpath`'s, which never finds a drive, so a
+    `core_id` of `C:foo` was accepted and written to `bundle-manifest.json` as
+    `C:foo-zephyr.tar.gz` -- a drive-RELATIVE path to the Windows consumer that
+    reads the bundle back, which is precisely the hazard the separator rule is
+    stated to prevent. One rule, applied to every component of it.
     """
     if not name or name in (".", ".."):
         return False
     if _SEPARATORS.search(name):
         return False
-    if os.name == "nt" and os.path.splitdrive(name)[0]:
+    if ntpath.splitdrive(name)[0]:
         return False  # `C:` / `C:foo` -- a drive prefix, not a name
     return True
 
