@@ -16,17 +16,21 @@ from pathlib import Path
 
 import pytest
 
+from tan.core import scaffold as scaffold_module
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     TEMPLATE_IDS,
     CoresError,
     PlannedFile,
     ScaffoldWriteError,
+    TemplateDataError,
     app_core_for_sku,
     infer_runtime_for_core_id,
     is_plain_relative,
     parse_cores,
     plan_template_files,
+    read_example_tree,
+    retarget_board_yaml_cores,
     retarget_board_yaml_som,
     scaffold_tree_preview,
     splice_companion_cores,
@@ -632,3 +636,256 @@ def test_write_files_still_works_through_a_symlinked_project_root(tmp_path):
     assert (real_project / "board.yaml").read_text(encoding="utf-8") == (
         "som:\n  sku: E1M-AEN801\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#494 defects 1-4: what `tan init` reads off disk, and what it refuses
+# to read. Every one of these shipped as `ok:true` or as an unactionable
+# message, which is why each test pins the REPORT as well as the file set.
+# ---------------------------------------------------------------------------
+
+
+def _example(root: Path, files: dict[str, str]) -> Path:
+    for rel, content in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return root
+
+
+def test_from_example_leaves_a_built_in_place_example_s_build_tree_behind(tmp_path):
+    """**tan-cli#494 defect 1.** `read_example_tree` globbed every regular file,
+    so an example someone had run `west build` in came across as the customer's
+    new project: `CMakeCache.txt` with absolute host paths, `.ninja_deps`,
+    `libapp.a`.
+
+    Measured on the real tree at `examples/v2n/v2n-brd-i2c-bringup` in the
+    alp-sdk checkout beside this repo: **613** files on disk, **607** of them
+    under `build/`, **6** tracked by git. The first binary among the 607 also
+    aborted the whole command with `init.example-unreadable`, so the visible
+    symptom was a hard failure and the silent one was a 613-file project.
+    """
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+            "board.yaml": "som:\n  sku: E1M-AEN801\n",
+            "build/CMakeCache.txt": "CMAKE_HOME_DIRECTORY:INTERNAL=/srv/alp-sdk\n",
+            "build/zephyr/libapp.a": "!<arch>\n",
+            "build_debug/x.o": "obj\n",
+            "cmake-build-release/y.o": "obj\n",
+            "twister-out/handler.log": "log\n",
+            "twister-out.1/handler.log": "log\n",
+        },
+    )
+
+    planned = sorted(f.relative_path for f in read_example_tree(source))
+
+    assert planned == ["CMakeLists.txt", "board.yaml", "src/main.c"]
+
+
+def test_from_example_keeps_a_hand_written_directory_that_merely_starts_with_build(
+    tmp_path,
+):
+    """The pruning list is EXACTLY alp-sdk's five `.gitignore` patterns
+    (`build/`, `build_*/`, `cmake-build-*/`, `twister-out/`, `twister-out.*/`)
+    and nothing more. An earlier cut of this fix also pruned `build-`, which
+    appears in no pattern there -- an invented rule that silently drops a
+    hand-written `build-utils/` from the customer's project, which is the same
+    damage as copying the build tree in, just in the other direction.
+    """
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+            "build-utils/gen.py": "print('hi')\n",
+            "buildings.md": "not a build dir\n",
+        },
+    )
+
+    planned = sorted(f.relative_path for f in read_example_tree(source))
+
+    assert planned == [
+        "CMakeLists.txt",
+        "build-utils/gen.py",
+        "buildings.md",
+        "src/main.c",
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_from_example_does_not_inline_a_symlink_pointing_outside_the_example(tmp_path):
+    """Skipping symlinks matches the oracle's `DirEntry::file_type()`, whose own
+    doc comment says non-regular entries are skipped. `Path.is_file()` FOLLOWS a
+    symlinked file, so a link out of the example would have copied that outside
+    file's CONTENT into the customer's new project under an innocuous name --
+    here a private key, which is the version of this that matters."""
+    secret = tmp_path / "outside" / "id_ed25519"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("PRIVATE KEY MATERIAL\n", encoding="utf-8")
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+        },
+    )
+    (source / "keys.txt").symlink_to(secret)
+    (source / "dangling.txt").symlink_to(tmp_path / "nope")
+
+    planned = read_example_tree(source)
+
+    assert sorted(f.relative_path for f in planned) == ["CMakeLists.txt", "src/main.c"]
+    assert all("PRIVATE KEY MATERIAL" not in f.content for f in planned)
+
+
+def test_a_vendored_tree_keeps_its_own_sku_s_cores_byte_for_byte():
+    """**tan-cli#494 defect 2's** no-op half, first because it is what protects
+    every existing fixture: the two representative SKUs are the trees' own, so
+    `retarget_board_yaml_cores` must be byte-exact passthrough for them. The
+    `os: "off"` companion cluster each tree declares (`a32_cluster` on the E8,
+    `a55_cluster` on the V2N) is REAL for that SKU and must survive."""
+    aen = _board_yaml_of("edge-ai", "edge-ai-starter", "E1M-AEN801")
+    v2n = _board_yaml_of("edge-ai", "edge-ai-starter", "E1M-V2N101")
+
+    assert "a32_cluster:" in aen and "m55_hp:" in aen
+    assert "a55_cluster:" in v2n and "m33_sm:" in v2n
+
+
+@pytest.mark.parametrize(
+    ("sku", "app_core", "dropped"),
+    [
+        ("E1M-AEN301", "m55_hp", "a32_cluster"),
+        ("E1M-NX9101", "m33", "a32_cluster"),
+    ],
+)
+def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
+    sku, app_core, dropped
+):
+    """**tan-cli#494 defect 2.** `tan init` picks a vendored tree by FAMILY and
+    used to retarget only the `som: sku:` line, so every SKU but the two
+    representative ones inherited that tree's core ids verbatim.
+
+    `--template edge-ai-starter --som E1M-AEN301` wrote `a32_cluster` for an
+    Ensemble E3 that has no Cortex-A32 -- `ok:true`, `exitCode 0`, `issues:[]`
+    -- and `tan validate` then hard-errored `unknown core id ['a32_cluster']`
+    on the very next command. `--som E1M-NX9101` landed on the Alif tree and
+    kept `m55_hp` against a topology of `a55_cluster`/`m33`, contradicting
+    `app_core_for_sku` in this same module.
+
+    Both edits only ever REMOVE wrong facts: the app entry is renamed to tan's
+    own `app_core_for_sku`, and the companion cluster -- true only of the
+    tree's own SKU -- is dropped, since a core absent from `cores:` is simply
+    not built.
+    """
+    content = _board_yaml_of("edge-ai", "edge-ai-starter", sku)
+
+    assert f"  {app_core}:" in content
+    assert app_core_for_sku(sku) == app_core
+    assert dropped not in content
+    # The app entry keeps its body -- this is a rename, not a rebuild.
+    assert "app: ./src" in content
+    assert "default_arena_kib: 64" in content
+    # And the SoM line was retargeted too, as it always was.
+    assert f"sku: {sku}" in content
+
+
+def test_cores_retargeting_leaves_an_unrecognised_block_alone():
+    """A block with no single unambiguous `app:` entry is left verbatim rather
+    than half-rewritten -- the transform never guesses. Same rule as
+    `retarget_board_yaml_som`'s own untouched-on-no-match behaviour."""
+    two_apps = "cores:\n  m55_hp:\n    app: ./a\n  m33:\n    app: ./b\n\nsom:\n  sku: X\n"
+    assert retarget_board_yaml_cores(two_apps, "E1M-NX9101", "E1M-AEN801") == two_apps
+
+    no_block = "som:\n  sku: E1M-AEN801\n"
+    assert retarget_board_yaml_cores(no_block, "E1M-NX9101", "E1M-AEN801") == no_block
+
+
+def test_a_partially_delivered_vendored_tree_is_refused_not_half_written(tmp_path, monkeypatch):
+    """**tan-cli#494 defect 3.** The emptiness guard was all-or-nothing -- it
+    fired only at ZERO files, so any non-empty SUBSET read as a complete tree.
+
+    With `src/main.c` missing (a mis-scoped PyInstaller `--add-data`, a partial
+    copy, an extracted onedir whose `src/` lost `+x`), `tan init` wrote the
+    other files, reported `ok:true` / `issues:[]`, and the `CMakeLists.txt` it
+    DID write still said `target_sources(app PRIVATE src/main.c)`. The
+    customer's first `tan build` died inside CMake with "Cannot find source
+    file", reported to them as their project's problem.
+
+    The expected set is DERIVED from the tree's own `CMakeLists.txt`, so it
+    tracks a template that gains a source file with no edit here.
+    """
+    tree = tmp_path / "vendored" / "edge-ai" / "E1M-AEN801"
+    tree.mkdir(parents=True)
+    (tree / "CMakeLists.txt").write_text(
+        "target_sources(app PRIVATE\n  src/main.c\n  src/extra.c\n)\n", encoding="utf-8"
+    )
+    (tree / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    (tree / "prj.conf").write_text("CONFIG_LOG=y\n", encoding="utf-8")
+    monkeypatch.setattr(scaffold_module, "VENDORED_ROOT", tmp_path / "vendored")
+
+    with pytest.raises(TemplateDataError) as excinfo:
+        scaffold_module._vendored_files("edge-ai", "edge-ai-starter", "E1M-AEN801")
+
+    message = str(excinfo.value)
+    # Names BOTH missing sources, and says whose problem it is.
+    assert "src/extra.c" in message and "src/main.c" in message
+    assert "broken tan installation, not a project problem" in message
+
+
+def test_a_complete_vendored_tree_passes_the_completeness_check(tmp_path, monkeypatch):
+    """Defect 3's control: the check must not fire on a whole tree. Pins that
+    the derived expectation really is satisfiable -- a regex that matched
+    nothing, or one that swept up a `${VAR}`, would make every scaffold
+    unbuildable, which is a far worse failure than the one being fixed."""
+    tree = tmp_path / "vendored" / "edge-ai" / "E1M-AEN801"
+    (tree / "src").mkdir(parents=True)
+    (tree / "CMakeLists.txt").write_text(
+        "target_sources(app PRIVATE\n  src/main.c\n  ${EXTRA_SOURCES}\n)\n", encoding="utf-8"
+    )
+    (tree / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    (tree / "prj.conf").write_text("CONFIG_LOG=y\n", encoding="utf-8")
+    (tree / "src" / "main.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    monkeypatch.setattr(scaffold_module, "VENDORED_ROOT", tmp_path / "vendored")
+
+    planned = scaffold_module._vendored_files("edge-ai", "edge-ai-starter", "E1M-AEN801")
+
+    assert sorted(f.relative_path for f in planned) == [
+        "CMakeLists.txt",
+        "board.yaml",
+        "prj.conf",
+        "src/main.c",
+    ]
+
+
+def test_an_undecodable_example_file_is_named_in_the_error(tmp_path):
+    """**tan-cli#494 defect 4.** `_read_verbatim` re-raised a bare
+    `UnicodeDecodeError`, whose `str()` is only `'utf-8' codec can't decode
+    byte 0xff in position 88: invalid start byte` -- no path. The caller wraps
+    that verbatim into `init.example-unreadable`, so a customer with a stray
+    binary in a large example tree got a byte offset and nothing to act on.
+    Python's own `open()` names the file in every OSError it raises, so only
+    the codec branch -- the one a binary actually trips -- was silent.
+    """
+    source = _example(
+        tmp_path / "ex", {"CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n"}
+    )
+    (source / "blob.bin").write_bytes(b"\xff\xfe\x00\x01binary")
+
+    with pytest.raises(Exception) as excinfo:
+        read_example_tree(source)
+
+    message = str(excinfo.value)
+    assert "blob.bin" in message
+    # The codec detail is kept, not replaced -- it says WHY the file is not text.
+    assert "utf-8" in message
+
+
+def _board_yaml_of(tree: str, template_id: str, sku: str) -> str:
+    """The `board.yaml` a real vendored-tree plan produces for `sku` -- read
+    through `_vendored_files` so the test exercises the same retargeting chain
+    `tan init` does, rather than calling the transform in isolation."""
+    files = scaffold_module._vendored_files(tree, template_id, sku)
+    return next(f.content for f in files if f.relative_path == "board.yaml")

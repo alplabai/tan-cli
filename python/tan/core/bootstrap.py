@@ -35,6 +35,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from tan.core.timestamp import generated_at_iso
@@ -384,6 +385,15 @@ class BootstrapFacts:
     hint_macos: NativeLibHint
     hint_windows: NativeLibHint
     manual_install_windows: tuple[str, ...]
+    #: `manualInstallHints.posix.note` -- EMPTY when the manifest declares no
+    #: `posix` key at all (tan-cli#495 defect 6). Optional on the wire, unlike
+    #: `windows`: every SDK before alp-sdk v0.14.0 declares `windows` alone,
+    #: and requiring it here would turn each of those into a hard
+    #: `BootstrapManifestError` that `tan build` inherits through
+    #: auto-bootstrap -- the same trap `prerequisites.install` and
+    #: `prerequisites.windows` above already document. Empty renders nothing,
+    #: which is exactly what those SDKs did before the field existed.
+    manual_install_posix: tuple[str, ...]
     from_manifest: bool
 
     def venv_bin_dir(self, is_windows: bool) -> str:
@@ -568,6 +578,7 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
             f"{BOOTSTRAP_MANIFEST_REL_PATH} could not be read: missing or mistyped `env`"
         )
     manual_node = manual.get("windows") if isinstance(manual, dict) else None
+    posix_node = manual.get("posix") if isinstance(manual, dict) else None
     if not isinstance(manual_node, dict):
         raise BootstrapManifestError(
             f"{BOOTSTRAP_MANIFEST_REL_PATH} could not be read: missing or mistyped "
@@ -612,6 +623,14 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
         hint_windows=_hint(hints, WINDOWS),
         manual_install_windows=_str_list(
             manual_node.get("note"), "manualInstallHints.windows.note"
+        ),
+        # OPTIONAL on the wire, unlike `windows` just above: a missing or
+        # non-dict `posix` is an empty list, never an error (see the field's
+        # own comment on `BootstrapFacts`).
+        manual_install_posix=(
+            _str_list(posix_node.get("note"), "manualInstallHints.posix.note")
+            if isinstance(posix_node, dict)
+            else ()
         ),
         from_manifest=True,
     )
@@ -788,6 +807,44 @@ def fallback_facts(min_python: tuple[int, int]) -> BootstrapFacts:
             "https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads (tick "
             "'Add path to environment variable' during install).",
             "native_sim / Yocto need WSL2 (docs/cross-platform-setup.md section 5).",
+        ),
+        # Transcribed from `contract/fixtures/bootstrap/manifest.json`, the
+        # vendored producer output every other fallback field is held against by
+        # `test_the_fallback_constants_match_the_real_manifest_field_for_field`.
+        #
+        # ONE deliberate departure, in the first element's closing clause. The
+        # fixture sends the reader to `tan sdk switch`, which is in
+        # `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` -- this build REFUSES it, so
+        # copying that sentence would end a manual-install hint on a dead
+        # command, and `tests/commands/test_sdk_onboarding_dead_end.py` fails the
+        # build for exactly that (it is what caught this transcription). The
+        # replacement is the LIVE alp-sdk manifest's own current wording for the
+        # same sentence -- the SDK has already corrected it, so the vendored
+        # fixture is simply the stale copy. Held to a one-clause difference by
+        # `test_the_posix_fallback_matches_the_manifest_except_for_the_refused_
+        # subcommand`, which retires when that fixture is refreshed.
+        manual_install_posix=(
+            "The Zephyr SDK (`west sdk install`) is a separate, manual, one-time install on "
+            "Linux/macOS -- not auto-installed by bootstrap.sh. It is the one every Zephyr-on-M "
+            "customer needs: it provides the `arm-zephyr-eabi` cross toolchain the real-silicon "
+            "build (`west build` / `west flash`) actually uses. Run it from your west workspace's "
+            "top-level directory -- the alp-sdk checkout's parent directory -- after this script "
+            "completes, e.g. `west sdk install --gnu-toolchains arm-zephyr-eabi --no-hosttools "
+            "--install-dir \"$PWD/zephyr-sdk\"`; see docs/getting-started.md for the full one-liner "
+            "and select the checkout with `tan build --sdk-root <path>` or `.alp/sdk-path`.",
+            "The Arm GNU Toolchain (`arm-none-eabi-gcc`) is a SEPARATE manual install, needed by "
+            "three opt-in paths -- rebuilding the GD32 bridge firmware (custom-carrier bring-up or"
+            " bridge recovery), building the CC3501E bridge firmware's silicon-free stub target "
+            "(its production image builds with TI ticlang, not this toolchain), or hand-writing "
+            "bare-metal firmware for a real M-class core -- most customers never touch any of "
+            "them, since the GD32G553 ships pre-flashed by Alp Lab (rebuilding it is optional and "
+            "fully open, see docs/gd32-bridge.md). See docs/cross-platform-setup.md section 2.3 "
+            "(Linux) / 3.4 (macOS) for the apt/brew/curl install.",
+            "`west sdk install` may print \"could not find a 'file' executable, falling back to "
+            "guess mime type by file extension\" -- patool's extension-based fallback works fine "
+            "without it; this is WARN-only, not a bootstrap.sh prerequisite. Install `file` "
+            "(`apt-get install -y file` / it ships by default on macOS) only to silence the "
+            "message.",
         ),
         from_manifest=False,
     )
@@ -1432,6 +1489,8 @@ def resolve_workspace_target(raw: str, cwd: str) -> str:
     trimmed = raw.strip()
     if not trimmed:
         raise ValueError("--workspace requires a non-empty path")
+    if _is_drive_relative(trimmed):
+        raise ValueError(_drive_relative(trimmed))
     if os.path.isabs(trimmed) or ntpath_isabs(trimmed):
         # `\x` on Windows has a root but no drive: rooted-but-driveless is
         # rejected just below, so only a fully absolute path passes here.
@@ -1441,6 +1500,33 @@ def resolve_workspace_target(raw: str, cwd: str) -> str:
     if trimmed.startswith(("/", "\\")):
         raise ValueError(_rooted_no_drive(trimmed))
     return os.path.normpath(os.path.join(cwd, trimmed))
+
+
+def _is_drive_relative(raw: str) -> bool:
+    """`C:ws` -- a drive letter with NO separator after it (tan-cli#495 defect 8).
+
+    Windows keeps a separate current directory PER DRIVE, so `C:ws` means "`ws`
+    under whatever the process's current directory on C: happens to be" -- the
+    same class of ambiguity `--workspace /e/foo` is already refused for, and
+    the caller is about to RELOCATE a customer's checkout into it.
+
+    Fixed here at the call site rather than in `ntpath_isabs`, which has two
+    callers and wants the opposite answers from them. `ntpath.isabs("C:ws")`
+    is False while `ntpath_isabs`'s own `^[A-Za-z]:` regex is True, and that
+    disagreement is CORRECT for the other caller: `is_plain_relative` must
+    reject `C:ws` as a manifest-supplied directory name, which is exactly what
+    the regex buys it. Narrowing the predicate would have let `C:ws` through
+    there as a "plain relative" name to be joined onto the workspace.
+    """
+    return bool(re.match(r"^[A-Za-z]:(?![\\/])", raw))
+
+
+def _drive_relative(trimmed: str) -> str:
+    return (
+        f"--workspace '{trimmed}' is drive-relative, which is ambiguous (it would "
+        f"resolve against the current directory on that drive, not the drive root); "
+        f"pass a full absolute path such as '{trimmed[:2]}\\{trimmed[2:]}' instead"
+    )
 
 
 def _rooted_no_drive(trimmed: str) -> str:
@@ -1488,6 +1574,56 @@ def get_manifest_path(config: str) -> str | None:
         if pair is not None and pair[0].lower() == "path":
             return pair[1]
     return None
+
+
+def same_directory(a: Path, b: Path) -> bool:
+    """True when `a` and `b` name the same directory. `realpath` when both exist
+    (the reliable answer); a lexical `normpath`+`normcase` comparison when either
+    does not -- e.g. a stale config's target SDK version since pruned.
+
+    Moved down from `bootstrap_cmd._same_directory` with `manifest_points_at`
+    (tan-cli#495): it is pure path logic with no IO policy of its own, and
+    leaving it in the command module was half of what forced the deferred
+    imports described on `manifest_points_at`.
+    """
+    try:
+        if a.exists() and b.exists():
+            return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:
+        pass
+    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(
+        os.path.normpath(str(b))
+    )
+
+
+def manifest_points_at(topdir: Path, repo_root: Path) -> bool:
+    """Whether `<topdir>/.west/config`'s `[manifest] path` resolves to
+    `repo_root`. west and the venv are not necessarily set up when this is
+    asked, so the config is read directly rather than shelling
+    `west config manifest.path`.
+
+    **Lives in `tan.core` because `tan.core.venv` is its heaviest caller**
+    (tan-cli#495). It was defined in `tan.commands.bootstrap_cmd`, so
+    `venv.py` -- a `tan.core` module -- reached UP into the command layer four
+    separate times, each behind a deferred `# noqa: PLC0415` import whose only
+    job was to dodge the resulting import cycle. That inverts this repo's
+    layering (pure logic in `tan/core` or `tan/planner`, never the command/IO
+    file), and a cycle-dodging import is a symptom to fix rather than
+    annotate. `bootstrap_cmd` now imports it from here like every other
+    consumer.
+
+    Reads leniently (`errors="replace"`), matching the reader this used to be
+    handed: a `.west/config` with a mojibake byte is a config whose `path` key
+    should still be found, not an exception out of a predicate.
+    """
+    try:
+        config = (topdir / ".west" / "config").read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return False
+    rel = get_manifest_path(config)
+    if rel is None:
+        return False
+    return same_directory(topdir / rel.strip(), repo_root)
 
 
 def set_manifest_path(config: str, new_rel: str) -> str | None:
@@ -1705,13 +1841,36 @@ def optional_libs_block(facts: BootstrapFacts, host: str) -> list[str]:
     lines = ["", "bootstrap: Optional native libraries unlock the Yocto-side backends:"]
     hint = facts.native_lib_hint(host)
     if hint is None:
+        # Structured as the oracle's `match` is (`blocks.rs:191-202`): this arm
+        # pushes its line and FALLS THROUGH to the manual-install block below
+        # rather than returning. Equivalent today -- `native_lib_hint` is None
+        # only for `OTHER`, which that block already excludes -- but the shape
+        # is kept identical so that adding an OS, or making a per-OS hint
+        # optional at parse, cannot silently re-drop the POSIX note the way
+        # tan-cli#495 defect 6 did.
         lines.append("  (OS not auto-detected; see docs/testing.md)")
-        return lines
-    lines.append("")
-    lines.extend(f"  {line}" for line in hint.note)
-    if hint.command:
+    else:
         lines.append("")
-        lines.append(f"  {hint.command}")
+        lines.extend(f"  {line}" for line in hint.note)
+        if hint.command:
+            lines.append("")
+            lines.append(f"  {hint.command}")
+    # tan-cli#495 defect 6: `manualInstallHints.posix.note`, which the port
+    # dropped at parse, at render AND in the fallback -- so Linux/macOS
+    # customers were never told that `west sdk install` is a separate manual
+    # step, the one every Zephyr-on-M customer needs. Lands AFTER the
+    # optional-native-libs section because the oracle prints it after
+    # (`blocks.rs:229-245`, `bootstrap.sh:594` vs `:638`), under the same
+    # heading the Windows arm uses.
+    #
+    # `LINUX`/`MACOS` ONLY, matching the oracle's `matches!(host, Linux |
+    # MacOs)` and the shell `case` behind it -- never `OTHER`, which must not
+    # start rendering a POSIX-specific fact by accident. The Windows arm
+    # returned early above, so this is unreachable there regardless.
+    if host in (LINUX, MACOS) and facts.manual_install_posix:
+        lines.append("")
+        lines.append("bootstrap: NOT auto-installed (manual, one-time):")
+        lines.extend(f"  {line}" for line in facts.manual_install_posix)
     return lines
 
 
