@@ -916,6 +916,14 @@
       "note": "Every slice was skipped rather than any slice failing outright -- a distinct code from the `build.slice-failed` sibling beside it. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "build.unsupported-build-root",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "tan-cli#566: the plan's top-level `buildRoot` names a tree other than `build`, so the run would materialise, dispatch and write `system-manifest.yaml` somewhere `tan flash`/`size`/`image`/`renode` never look -- all four anchor on `<project>/build/system-manifest.yaml`. Measured on `dev` before the fix: a valid plan with `buildRoot: \"out\"` was ACCEPTED, wrote `out/system-manifest.yaml`, and left `build/system-manifest.yaml` byte-identical to the previous run's (md5-verified), so a following `tan flash` would program the PREVIOUS run's artefact onto silicon. The oracle (`tan 0.4.1`) already refused this at RuntimeFailure; neither the check nor the code was ported. Accepted spellings are a PATH-COMPONENT match, measured ten ways against the oracle's live-emit native path: `build`, `build/` and `./build` pass; `out`, `build/sub`, `BUILD` (case-sensitive), the empty string, `..`, `../build` and an absolute path are refused -- so `build_cmd._build_root_is_consumer_default` compares `Path(...).parts`, not strings. NATIVE mode only, also measured: the oracle accepts a non-`build` root under `--materialise` and `--plan`, which write no manifest and so carry none of the hazard. Escaping shapes were already caught downstream by `materialise.confine_to_build_root`; the gap this closes is exactly the plain-relative non-`build` name. Registered per tan-cli#224's Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "build.app-dir-missing",
       "status": "reserved",
       "severity": "error",
