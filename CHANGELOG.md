@@ -227,6 +227,68 @@ All notable changes to `tan` are documented here. Format follows
     serialises first still goes red. Verified green bound to BOTH `f30f4d4b`
     (one value) and `ccd34f06` (two).
 
+- **`tan debug-config` wrote a launch configuration for a project it had no
+  evidence of, and accepted a `--core` no such project has.** The two
+  survivors their merging PRs recorded as `Refs`, not `Closes`.
+  - **An omitted `--target-kind` on a directory with no signal at all now
+    refuses instead of defaulting to `native-host`.** With no
+    `build/system-manifest.yaml` and no `board.yaml` declaring `som.sku`,
+    `parse_target_kind(None)`'s `native-host` default wrote an `Alp: Native
+    Sim Debug` entry into `.vscode/launch.json` and reported `exitCode 0`
+    with `issues: []` — the "ran it from the wrong cwd" case #476 names in
+    its own words. #508 fixed only the half where `--project` did not exist
+    (the directory was CREATED); a directory that already exists still got
+    the file. Now `debug-config.target-kind-unresolved` at
+    `ValidationFailure` (2), naming the four kinds to pass instead, checked
+    before anything can write. `native-host` is unchanged where the project
+    says so — `infer_target_kind` still answers it outright when every slice
+    a build produced is `native_sim` — and `--target-kind native-host` still
+    asks for that draft on purpose. A deliberate divergence from the Rust
+    oracle, which exits 0 with the native-host draft (measured); no frozen
+    parity case or conformance golden pins it, since all five frozen
+    `debug-config` argvs pass `--target-kind` explicitly. Closes #476.
+  - **A `--core` naming a core the SoM does not have is refused pre-build,
+    not silently ignored.** #489 gave the explicit-`--target-kind` path its
+    own `--core`-vs-manifest guard, but only where a manifest EXISTS. With no
+    build yet, `--target-kind zephyr-mcu --server jlink --core no_such_core`
+    exited 0 and left `device` as the literal `<resolved-device>` — a
+    launch.json that looks valid and fails later in the debugger with nothing
+    connecting the failure back to this command. Worse off the J-Link path,
+    measured: `--server openocd` reported only
+    `debug-config.sdk-identity-key-absent` (silent about the core) and
+    `--server pyocd` reported `issues: []`. #508 left this half open because
+    `--core` pre-build also selects which core's SDK-published debug-probe
+    identity to resolve (alp-sdk#1026), which "a guard keyed only on 'does a
+    manifest exist' cannot tell apart from a typo without also consulting the
+    SDK's own published core list". It now consults it: the SoC JSON's
+    `cores[].id`, unioned with the `variants[].debug.jlink_device` keys. Same
+    `debug-config.core-unknown` code and exit 2 as the with-manifest arm,
+    naming the cores it could have meant — and naming the alp-sdk checkout the
+    core list came from, plus the tier that chose it, since `debug-config`
+    publishes no `sdk` envelope block to look it up in. Two ordered
+    authorities, never merged: a real build decides whenever a manifest
+    exists, and both arms refuse only what they can PROVE unknown — no slices
+    and no resolvable SDK core list means "cannot be asked", which stays
+    silent, so a legitimate pre-build `--core m55_hp` still resolves exactly
+    as before. That same rule decides WHICH checkout may refuse: with no
+    `--sdk-root` and no project pin, tan falls through to the machine-global
+    default, which `tan bootstrap` may have last pointed at an unrelated
+    project — measured, one project and one `--core m55_hp` flipped between
+    exit 0 and exit 2 on two checkouts differing only in `e8.json`'s
+    `cores[]`. A global default another project's bootstrap set cannot prove
+    anything about this project's SoM, so it does not refuse; every other tier
+    does. Closes #477.
+  - Two tests were INVERTED rather than deleted, since each pinned one of
+    these defects as intended behaviour:
+    `test_an_omitted_target_kind_still_defaults_to_native_host_with_no_project_signal`
+    and `test_an_unknown_core_with_no_manifest_at_all_is_a_known_open_gap`. A
+    third,
+    `test_jlink_device_names_the_known_cores_for_a_core_the_map_has_no_entry_for`,
+    now drives the `sdk-identity-core-unresolved` arm with `a32_cluster` —
+    a core alp-sdk's own `e8.json` really has and publishes no
+    `jlink_device` entry for — instead of the `m55_typo` that is now refused
+    outright.
+
 - **`tan flash` no longer claims `swd_probe`'s J-Link write landed when
   JLinkExe's own transcript shows it did not -- and no longer doubts one it
   shows DID.** `plan_swd_probe` composes `{device} flashed via J-Link @
@@ -527,7 +589,9 @@ All notable changes to `tan` are documented here. Format follows
   open; `test_an_omitted_target_kind_still_defaults_to_native_host_with_no_
   project_signal` protects that default on purpose, and tan-cli#456 scoped
   its own inference fix to projects whose `board.yaml` DECLARES hardware.
-  (#476)
+  (#476) **Superseded later in this same release:** that half is now
+  `debug-config.target-kind-unresolved` and the test named here was inverted
+  — see the first entry in this section.
 
 - **`tan debug-config` reported a bad flag VALUE as a tan crash.**
   `--target-kind`, `--server`, an unsupported target+server pairing, `--svd`
@@ -553,7 +617,9 @@ All notable changes to `tan` are documented here. Format follows
   second, legitimate pre-build job here -- selecting which core's
   SDK-published debug-probe identity to resolve (alp-sdk#1026) -- that a
   manifest-existence guard alone cannot tell apart from a typo. That half
-  stays open; tracked in the linked issue. (#477)
+  stays open; tracked in the linked issue. (#477) **Superseded later in this
+  same release:** it is refused now, against the SDK's published core list —
+  see the first entry in this section.
 
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge

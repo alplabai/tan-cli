@@ -16,6 +16,7 @@ import typer
 
 from tan.commands.debug_config_cmd import (
     _resolve_from_build,
+    _sdk_core_refusal_authority,
     _select_slice,
 )
 from tan.core.debug_launch import (
@@ -887,9 +888,19 @@ def test_fill_debug_probe_identity_gaps_never_guesses_a_device_without_a_matchin
 
 #: The E1M-AEN801 SoM preset + Alif Ensemble E8 SoC JSON fixture the
 #: alp-sdk#1026 debug-config tests write under `<root>/sdk/metadata/**` --
-#: identical to `contract/envelopes/debug-config-preview-zephyr-mcu-sdk-identity`'s
+#: the same SoM preset + SoC walk as
+#: `contract/envelopes/debug-config-preview-zephyr-mcu-sdk-identity`'s
 #: fixture, reused here for the write-path/no-core cases that fixture doesn't
 #: reach (a hermetic conformance golden never writes to a customer's file).
+#:
+#: tan-cli#477 major 2 adds the `cores` array, which that frozen fixture (a
+#: contract golden, uneditable) omits. It is not decoration: `cores[].id` is
+#: what the pre-build `--core` guard validates against, and the values here
+#: are alp-sdk `metadata/socs/alif/ensemble/e8.json`'s own, verbatim --
+#: `a32_cluster`, `m55_hp`, `m55_he`. Note `a32_cluster` is a REAL core with
+#: no `jlink_device` entry, which is the shape that keeps
+#: `debug-config.sdk-identity-core-unresolved`'s core-mismatch arm reachable
+#: now that a core outside this list is refused outright.
 def write_sdk_fixture(root):
     sdk = Path(root, "sdk")
     (sdk / "scripts").mkdir(parents=True)
@@ -910,6 +921,7 @@ def write_sdk_fixture(root):
             "vendor": "Alif Semiconductor",
             "family": "Ensemble",
             "part": "E8",
+            "cores": [{"id": "a32_cluster"}, {"id": "m55_hp"}, {"id": "m55_he"}],
             "variants": [
                 {
                     "order_code": "AE822FA0E5597LS0",
@@ -965,7 +977,16 @@ def test_jlink_device_names_the_known_cores_for_a_core_the_map_has_no_entry_for(
     """tan-cli#489 (4) refinement: an EXPLICIT `--core` the SDK's published map
     has no entry for is the same underlying cause (no usable lookup key) as
     the no-core case above, sharing the same code -- but the message can, and
-    must, name the cores the SDK DOES publish, since a core WAS given here."""
+    must, name the cores the SDK DOES publish, since a core WAS given here.
+
+    tan-cli#477 major 2 changed the core this drives with, not the assertion:
+    it used to pass `m55_typo`, which is now REFUSED outright (exit 2,
+    `debug-config.core-unknown`) because it names no core the SoM publishes.
+    `a32_cluster` is the honest shape for this arm and the one real metadata
+    actually has -- a core the SoC genuinely HAS (`cores[].id` in alp-sdk's
+    own `e8.json`) for which `variants[].debug.jlink_device` publishes no
+    entry. The lookup still has no usable key, so the code and the "name the
+    cores the SDK does publish" requirement are unchanged."""
     pytest.importorskip("yaml")
     Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
     write_sdk_fixture(tmp_path)
@@ -973,7 +994,7 @@ def test_jlink_device_names_the_known_cores_for_a_core_the_map_has_no_entry_for(
     env = envelope(
         run_cli(
             tmp_path,
-            "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "m55_typo",
+            "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "a32_cluster",
             "--sdk-root", "./sdk", "--preview", "--format", "json",
         )
     )
@@ -986,7 +1007,7 @@ def test_jlink_device_names_the_known_cores_for_a_core_the_map_has_no_entry_for(
         None,
     )
     assert issue is not None, env["issues"]
-    assert "m55_typo" in issue["message"]
+    assert "a32_cluster" in issue["message"]
     assert "m55_hp" in issue["message"] and "m55_he" in issue["message"]
 
 
@@ -2025,37 +2046,187 @@ def test_an_unknown_core_with_an_explicit_target_kind_refuses(tmp_path):
     assert good["exitCode"] == 0, good
 
 
-def test_an_unknown_core_with_no_manifest_at_all_is_a_known_open_gap(tmp_path):
-    """tan-cli#477 review, Major 2: pins a REMAINING, deliberately-open gap --
-    not a defect this branch claims to fix.
+def test_an_unknown_core_with_no_manifest_is_refused_against_the_sdks_core_list(tmp_path):
+    """tan-cli#477 major 2: INVERTS the assertion this test used to carry.
 
-    `test_an_unknown_core_with_an_explicit_target_kind_refuses` above only
-    measures the WITH-manifest half of this guard. With NO
-    `build/system-manifest.yaml` at all, on a real hardware project
-    (`som.sku` set), an unknown `--core` still sails through at exit 0 --
-    the omitted-`--target-kind` sibling of this precondition DOES refuse
-    that shape (`test_an_omitted_target_kind_refuses_rather_than_guess_
-    pre_build`), but this one cannot simply mirror it: `--core` pre-build
-    also has a second, legitimate job this call site cannot see -- selecting
-    which core's SDK-published debug-probe identity to resolve
-    (alp-sdk#1026) -- exercised by
-    `test_a_valid_core_with_no_published_jlink_device_map_keeps_the_key_
-    absent_code` and `test_write_discloses_when_sdk_identity_overwrites_a_
-    hand_filled_device`, both of which pass `--core m55_hp` with no build
-    manifest at all and expect it to resolve. A guard keyed only on
-    "does a manifest exist" cannot tell a typo apart from that legitimate
-    case without also consulting the SDK's own published core list, which
-    happens later in this command, not at this guard's call site. See
-    CHANGELOG for the `Refs #477` note this is pinned against."""
+    It used to be `test_an_unknown_core_with_no_manifest_at_all_is_a_known_
+    open_gap`, pinning `exitCode == 0` / `issues == []` and citing #508's
+    "deliberately left" note. The reason recorded there was that a guard
+    keyed on "does a build manifest exist" cannot tell a typo apart from
+    `--core`'s SECOND, legitimate pre-build job -- selecting which core's
+    SDK-published debug-probe identity to resolve (alp-sdk#1026) -- "without
+    also consulting the SDK's own published core list". That is precisely
+    what the fix does: the SoC JSON's own `cores[].id` (union the
+    `variants[].debug.jlink_device` keys) IS a published core list, and it is
+    already resolvable at this call site from the same `--sdk-root` the
+    identity fallback reads.
+
+    Measured against the real metadata this validates against
+    (alp-sdk `metadata/socs/alif/ensemble/e8.json`): `cores` is
+    `a32_cluster`, `m55_hp`, `m55_he`, and `jlink_device` keys `m55_hp`/
+    `m55_he` -- so the union is the SoC's whole core vocabulary and
+    `jlink_device` never widens it. The same ids are what a
+    `build/system-manifest.yaml` slice spells as `core_id`.
+
+    Without the refusal this writes `"device": "<resolved-device>"` into
+    `.vscode/launch.json` at exit 0: a file that looks valid, that the
+    debugger then fails on, with nothing connecting the failure back to this
+    command."""
+    pytest.importorskip("yaml")
     Path(tmp_path, "board.yaml").write_text(
         "som:\n  sku: E1M-AEN801\n", encoding="utf-8"
     )
+    write_sdk_fixture(tmp_path)
 
     env = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
-                           "--core", "no_such_core", "--preview", "--format", "json"))
+                           "--core", "no_such_core", "--sdk-root", "./sdk",
+                           "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 2, env
+    assert "debug-config.core-unknown" in [i["code"] for i in env["issues"]], env
+    message = next(i["message"] for i in env["issues"]
+                   if i["code"] == "debug-config.core-unknown")
+    # Names the typo AND the cores it could have meant -- the same standard
+    # `explicit_core_unknown_message` holds for the with-manifest half.
+    assert "no_such_core" in message, message
+    for core in ("a32_cluster", "m55_hp", "m55_he"):
+        assert core in message, message
+
+
+@pytest.mark.parametrize("server", [JLINK, "openocd", "pyocd"])
+def test_an_unknown_core_is_refused_for_every_server_not_just_jlink(tmp_path, server):
+    """tan-cli#477 major 2, the rest of the surface. The `device` placeholder
+    that made the jlink case visible at all is a J-Link field; measured
+    before the fix, `--server openocd` reported only
+    `debug-config.sdk-identity-key-absent` (which says nothing about the
+    core) and `--server pyocd` reported `issues: []` -- strictly more silent
+    than the case the issue quotes. `--core` is not a per-server flag, so a
+    core the SoM does not have is refused the same way whatever server was
+    asked for."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    write_sdk_fixture(tmp_path)
+
+    env = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", server,
+                           "--core", "no_such_core", "--sdk-root", "./sdk",
+                           "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 2, env
+    assert "debug-config.core-unknown" in [i["code"] for i in env["issues"]], env
+
+
+def test_an_unknown_core_refusal_reports_the_resolved_target_and_server(tmp_path):
+    """The same standard `test_a_refusal_reports_the_target_and_server_it_
+    actually_knows` holds for the sibling refusals: both are already parsed
+    by the time this guard runs, so the `zephyr-mcu`/`none` placeholder pair
+    would misdescribe what the caller asked for."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    write_sdk_fixture(tmp_path)
+
+    env = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "pyocd",
+                           "--core", "no_such_core", "--sdk-root", "./sdk",
+                           "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 2, env
+    assert env["data"]["targetKind"] == ZEPHYR_MCU, env["data"]
+    assert env["data"]["server"] == "pyocd", env["data"]
+
+
+def test_an_unknown_core_with_no_manifest_is_refused_before_the_write(tmp_path):
+    """The write half of the same defect -- and the one the issue's own
+    wording is about: a typo'd `--core` "writes a launch.json pointed at the
+    wrong ELF and reports success". Pre-build there is no ELF yet, so what
+    lands on disk is `"device": "<resolved-device>"`. Either way the file
+    must not be created."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    write_sdk_fixture(tmp_path)
+
+    env = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                           "--core", "no_such_core", "--sdk-root", "./sdk", "--format", "json"))
+
+    assert env["exitCode"] == 2, env
+    assert not launch_json(tmp_path).exists(), "wrote a launch.json it had just refused"
+
+
+def test_only_an_sdk_this_project_is_entitled_to_may_refuse_a_core():
+    """tan-cli#477 major 2, REVIEW round: WHICH checkout gets to refuse.
+
+    The refusal above is decided by an alp-sdk checkout, and with no
+    `--sdk-root` and no project pin that can be the machine-global default --
+    which `tan bootstrap` may have last pointed at an unrelated project.
+    Measured on a project directory naming no SDK at all:
+
+        resolve_project_context('.', None, None).sdk
+        -> SdkInfo(root='.../sdk-triage', source_tier='globalDefault',
+                   foreign_global_default_for='.../t477/p')
+
+    and the verdict flips purely on who answers -- measured, one project, one
+    `--core m55_hp`, two checkouts differing only in `e8.json`'s `cores[]`:
+    `--sdk-root A` exit 0, `--sdk-root B` exit 2 `debug-config.core-unknown`.
+    `debug-config` publishes no `sdk` envelope block and does not emit the
+    `sdk.global-default-foreign-project` warning `size`/`image` emit, so that
+    verdict would arrive unattributable.
+
+    A checkout another project pinned cannot PROVE anything about this
+    project's SoM, so it declines and the run stays on the "cannot be asked"
+    floor. Every other tier still refuses."""
+    assert _sdk_core_refusal_authority("/sdk", "sdkRootFlag", None) == "/sdk"
+    assert _sdk_core_refusal_authority("/sdk", "projectPin", None) == "/sdk"
+    # This project's OWN bootstrap set the global default -- still entitled.
+    assert _sdk_core_refusal_authority("/sdk", "globalDefault", None) == "/sdk"
+    # Another project's bootstrap set it. Declines.
+    assert _sdk_core_refusal_authority("/sdk", "globalDefault", "/elsewhere") is None
+    # Nothing resolved at all.
+    assert _sdk_core_refusal_authority(None, "none", None) is None
+
+
+def test_the_sdk_core_refusal_names_the_checkout_that_decided_it(tmp_path):
+    """tan-cli#477 major 2, REVIEW round. The with-manifest arm needs no such
+    line -- the manifest is inside the project the user pointed at -- but this
+    arm's authority may be a checkout the argv never mentions, and the envelope
+    carries no `sdk` block to look it up in. So the message names the path and
+    the tier that chose it, which is what makes `--sdk-root <the right one>`
+    the obvious next move rather than a support ticket."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    write_sdk_fixture(tmp_path)
+
+    env = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                           "--core", "no_such_core", "--sdk-root", "./sdk",
+                           "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 2, env
+    message = next(i["message"] for i in env["issues"]
+                   if i["code"] == "debug-config.core-unknown")
+    assert "sdk" in message, message
+    assert "--sdk-root" in message, message
+    assert "sdkRootFlag" in message, message
+
+
+def test_a_core_the_sdk_cannot_be_asked_about_is_still_not_refused(tmp_path):
+    """The floor under the refusal above: it fires only where tan can PROVE
+    the core is unknown. With no resolvable SDK checkout there is no
+    published core list and no build manifest either, so nothing can tell a
+    typo from a real core id -- staying silent there is the same standard the
+    with-manifest guard already holds (`if all_slices and not any(...)`), and
+    a refusal on an unprovable case would be a false negative on a legitimate
+    `--core`.
+
+    `--sdk-root` names a directory that is not an SDK checkout (no
+    `scripts/alp_project.py`), which is how this test guarantees no ambient
+    checkout on the developer's box resolves instead."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    Path(tmp_path, "not-an-sdk").mkdir()
+
+    env = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                           "--core", "no_such_core", "--sdk-root", "./not-an-sdk",
+                           "--preview", "--format", "json"))
 
     assert env["exitCode"] == 0, env
-    assert env["issues"] == [], env["issues"]
+    assert env["data"]["configuration"]["device"] == "<resolved-device>", env["data"]
 
 
 def test_a_malformed_existing_launch_json_stays_an_internal_failure(tmp_path):
@@ -2076,15 +2247,50 @@ def test_a_malformed_existing_launch_json_stays_an_internal_failure(tmp_path):
     assert "debug-config.internal-failure" in [i["code"] for i in env["issues"]]
 
 
-def test_an_omitted_target_kind_still_defaults_to_native_host_with_no_project_signal(tmp_path):
-    """The regression-safety pairing: an empty scratch directory (no
-    board.yaml, no build) carries no evidence at all, so the historical
-    native-host default must survive untouched."""
+def test_an_omitted_target_kind_with_no_project_signal_refuses_rather_than_guessing(tmp_path):
+    """tan-cli#476 half (b): INVERTS the assertion this test used to carry.
+
+    It used to read "the historical native-host default must survive
+    untouched" and pin `exitCode == 0` / `targetKind == native-host` on an
+    empty scratch directory. That default IS the defect #476 half (b)
+    reports: a directory carrying no evidence at all -- no
+    `build/system-manifest.yaml`, no `board.yaml` `som.sku` -- got a
+    `native_sim` launch configuration written into it and a clean envelope
+    saying so. Half (a) (a `--project` that does not exist) was fixed by
+    tan-cli#508; #508's own body records half (b) as "deliberately left".
+
+    `native-host` is still perfectly reachable -- it just has to be ASKED
+    for now, which is exactly what the issue requests ("instead of refusing
+    or requiring an explicit `--target-kind`")."""
     env = envelope(run_cli(tmp_path, "--preview", "--format", "json"))
 
-    assert env["exitCode"] == 0
-    assert env["data"]["targetKind"] == NATIVE_HOST
-    assert env["data"]["server"] == "none"
+    assert env["exitCode"] == 2, env
+    assert "debug-config.target-kind-unresolved" in [i["code"] for i in env["issues"]], env
+
+    # …and an explicit --target-kind still produces the native-host draft.
+    ok = envelope(
+        run_cli(tmp_path, "--target-kind", NATIVE_HOST, "--preview", "--format", "json")
+    )
+    assert ok["exitCode"] == 0, ok
+    assert ok["data"]["targetKind"] == NATIVE_HOST
+    assert ok["data"]["server"] == "none"
+
+
+def test_a_no_signal_project_is_refused_before_a_launch_json_is_written(tmp_path):
+    """tan-cli#476 half (b), the WRITE half -- the part a customer actually
+    trips over. The refusal above is worth nothing if the file is created
+    anyway: `.vscode/launch.json` must not exist afterwards, because the
+    whole complaint is a stray `native_sim` launch configuration
+    materialising in a directory that is not a project.
+
+    Distinct from `test_a_project_that_does_not_exist_is_refused_not_created`
+    (half (a), tan-cli#508): this directory DOES exist -- it is the "ran it
+    from the wrong cwd" case the issue names in its own words."""
+    env = envelope(run_cli(tmp_path, "--format", "json"))
+
+    assert env["exitCode"] == 2, env
+    assert "debug-config.target-kind-unresolved" in [i["code"] for i in env["issues"]], env
+    assert not launch_json(tmp_path).exists(), "wrote a launch.json it had just refused"
 
 
 def test_an_omitted_target_kind_refuses_rather_than_guess_pre_build(tmp_path):
