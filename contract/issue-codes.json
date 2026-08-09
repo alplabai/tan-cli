@@ -1716,6 +1716,14 @@
       "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "init.som-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "note": "tan-cli#579. `--som` names a SoM family tan vendors no scaffold tree for (E1M-NX9* today), so a family-split template cannot be rendered for it. Before this code existed, `_family_bucket`'s `else` arm sent every such SKU onto the ALIF tree and `tan init --som E1M-NX9101 --template sensor-starter` wrote Alif content -- `preset: e1m-evk`, `chips: [tmp112]`, an `alp_e1m_aen801_m55_hp/...` README build line, and a CMakeLists.txt pinned to `--core m55_hp` next to a board.yaml declaring `m33` -- at ok:true/exit 0/issues:[]. Distinct from `init.invalid-som`, which means \"this TEMPLATE supports one SKU\" (iot-starter); this one means \"tan has no scaffold for this SoM family in ANY family-split template\". Constructed as the whole literal at an `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it. RETIRES when alp-sdk's scaffold catalog gains an NXP entry and the tree is vendored: fill in the `None` in `tan/core/scaffold.py`'s `_SOM_FAMILIES` and this stops firing."
+    },
+    {
       "code": "init.template-unreadable",
       "status": "reserved",
       "severity": "error",
