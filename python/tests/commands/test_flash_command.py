@@ -5588,11 +5588,19 @@ def test_a_hex_artefact_is_refused_even_with_a_sibling_bin(tmp_path):
 # ── tan-cli#540: swd_probe's J-Link arm must not claim a flash it never saw ──
 
 
-def _swd_probe_run(tmp_path, monkeypatch, *, stdout: str = "", stderr: str = ""):
+def _swd_probe_run(
+    tmp_path, monkeypatch, *, stdout: str = "", stderr: str = "", firmware: str = "zephyr.bin"
+):
     """A confirmed, real `swd_probe` J-Link write whose spawn reports success
     and whatever transcript the caller wants -- the shape tan-cli#540 is
     about. Same manifest/PATH scaffolding the `expect_dpidr` unarmed pair
-    above uses; only `_spawn`'s stdout/stderr differ."""
+    above uses; only `_spawn`'s stdout/stderr differ.
+
+    `firmware` selects which of the two arms of `jlink_commander_script` the
+    write takes, and that is the whole axis tan-cli#540's real fix turns on: a
+    raw `.bin` takes `loadbin`+`verifybin` and CAN be verified, an ELF/HEX
+    takes `loadfile` and (J-Link Commander having no `verifybin` that works
+    without an address) cannot."""
     (tmp_path / "build").mkdir()
     (tmp_path / "sdk" / "scripts").mkdir(parents=True)
     (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
@@ -5601,10 +5609,10 @@ def _swd_probe_run(tmp_path, monkeypatch, *, stdout: str = "", stderr: str = "")
 hw_info: {sku: S}
 slices: []
 helper_mcus:
-- {name: gd32_bridge, chip: gd32g553, firmware_path: zephyr.bin,
+- {name: gd32_bridge, chip: gd32g553, firmware_path: FIRMWARE,
    flash_method: swd_probe, flash_args: {base: "0x08000000"}}
 boot_order: []
-"""
+""".replace("FIRMWARE", firmware)
     (tmp_path / "build" / "system-manifest.yaml").write_text(
         manifest, encoding="utf-8", newline=""
     )
@@ -5643,22 +5651,126 @@ _HALT_FAILURE_TRANSCRIPT = (
 )
 
 
+def test_swd_probe_bin_write_reads_back_the_bytes_it_wrote(tmp_path):
+    """tan-cli#540 defect 2, the REAL fix. `jlink_commander_script` gave this
+    arm `r`/`halt`, the load, optionally `r`/`g` and `qc` -- and no
+    `verifybin` anywhere, so a successful flash was inferred from JLinkExe's
+    exit code alone. #522 measured on real E1M-AEN801 silicon that a halt
+    failure does NOT make JLinkExe exit non-zero even with `-ExitOnError 1`
+    (this arm carries it), so the exit code cannot tell a landed write from
+    one that wrote nothing at all.
+
+    The read-back is `verifybin`, in the same line shape Flow D
+    (`plan_alif_mram_jlink`) has always emitted -- `verifybin <path> <addr>`,
+    the form this repo has actually run on silicon -- and in the same place:
+    AFTER the load, BEFORE the optional reset-and-go, because once `g` runs
+    the core is executing and the memory being compared is no longer quiescent.
+
+    Fails against `fix/540-541-flash-verify-and-tee` (measured: the script is
+    `r` / `halt` / `loadbin ...` / `r` / `g` / `qc`, with no verify line)."""
+    script = flash_plan.jlink_commander_script("/build/zephyr.bin", "0x08000000", True)
+    lines = script.splitlines()
+
+    assert "verifybin /build/zephyr.bin 0x08000000" in lines, script
+    assert lines.index("loadbin /build/zephyr.bin, 0x08000000") < lines.index(
+        "verifybin /build/zephyr.bin 0x08000000"
+    ), script
+    # ... and the verify is the LAST thing before the reset-and-go pair.
+    assert lines[lines.index("verifybin /build/zephyr.bin 0x08000000") + 1 :] == [
+        "r",
+        "g",
+        "qc",
+    ], script
+
+
+def test_swd_probe_verify_survives_a_spaced_path_and_reset_being_off(tmp_path):
+    """The verify line goes through the same `commander_path` conditional
+    quoting the load line does (tan-cli#369: an unquoted `C:\\Program
+    Files\\...` truncates at `C:\\Program`), and it is emitted whether or not
+    the manifest asked for the post-write reset -- `reset: false` turns off
+    `r`/`g`, not the read-back."""
+    script = flash_plan.jlink_commander_script(
+        "C:\\Program Files\\alp\\build\\zephyr.bin", "0x08000000", False
+    )
+
+    assert 'verifybin "C:\\Program Files\\alp\\build\\zephyr.bin" 0x08000000' in script
+    assert script.splitlines()[-1] == "qc"
+    assert "\ng\n" not in script
+
+
+def test_an_elf_load_gets_no_verify_line_because_none_can_be_emitted(tmp_path):
+    """GUARD -- passes before and after, and says why. The `loadfile` arm takes
+    NO address (`base` is a load offset, meaningful only for a raw binary --
+    tan-cli#487), and `verifybin` is defined as `<file>, <addr>`: there is no
+    address to give it. J-Link Commander's own `verifyfile` is NOT emitted
+    here on purpose -- no call site in this repo has ever issued it, so
+    nothing has measured that this DLL/Commander version accepts it, and with
+    `-ExitOnError 1` on the argv an unrecognised command would turn every
+    working ELF flash into a hard failure. Inventing tool behaviour is exactly
+    what the SDK's own I-26 rule forbids. The ELF/HEX arm therefore stays
+    genuinely unverifiable, which is why the `flash.swd-probe-write-
+    unconfirmed` advisory below still exists for it."""
+    script = flash_plan.jlink_commander_script("/build/zephyr.elf", "0x08000000", True)
+
+    assert "loadfile /build/zephyr.elf" in script
+    assert "verify" not in script
+
+
+def test_a_verified_bin_write_says_verified_even_when_the_core_did_not_halt(
+    tmp_path, monkeypatch
+):
+    """The claim `verifybin` buys. With the read-back in the script, a `.bin`
+    write that exits 0 has had its bytes COMPARED against the artefact, so
+    `flashed and verified` is an observation -- and the `flash.swd-probe-
+    write-unconfirmed` advisory, whose text says outright that "this backend
+    runs no verifybin", is now false here and must not fire.
+
+    What the halt failure still costs is the RESET half, exactly as on Flow D
+    (tan-cli#522): the bytes are on the part, but the core was never taken
+    through `r`/`g`, so the target may still be running the OLD firmware. That
+    is what the message now says.
+
+    Fails against `fix/540-541-flash-verify-and-tee` (measured: the message
+    reads `... write attempted via J-Link @ 0x08000000; the core did not halt
+    ... and this backend runs no verifybin ...`, and the advisory fires)."""
+    exit_code, data, issues, lines, _sdk = _swd_probe_run(
+        tmp_path, monkeypatch, stdout=_HALT_FAILURE_TRANSCRIPT
+    )
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    assert "flashed and verified via J-Link" in entry["message"], entry
+    assert "write attempted" not in entry["message"], entry
+    # The observation is still quoted, not paraphrased -- and it is scoped to
+    # what the halt failure actually put in doubt.
+    assert "Failed to halt CPU" in entry["message"], entry
+    assert "may still be running the firmware it had" in entry["message"], entry
+    # #402's device and #487's address halves both survive the rewording.
+    assert "GD32G553MEY7TR" in entry["message"], entry
+    assert "0x08000000" in entry["message"], entry
+    # The write IS confirmed now, so the unconfirmed advisory must be silent.
+    assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues)
+    assert not any("UNCONFIRMED" in line for line in lines), lines
+
+
 def test_swd_probe_write_into_a_core_that_never_halted_is_not_claimed_as_flashed(
     tmp_path, monkeypatch
 ):
-    """tan-cli#540's headline. `plan_swd_probe` composes `{device} flashed via
-    J-Link @ {base}` at PLAN time and `_flash_entry` asserted it on JLinkExe's
-    exit code alone -- and `jlink_commander_script` gives this arm no
-    `verifybin` at all, so nothing else could have checked. #522 measured on
-    real silicon that a halt failure leaves the exit code at 0 even with
-    `-ExitOnError 1` (which this arm carries), so the transcript is the only
-    evidence there is.
+    """tan-cli#540's headline, on the arm that still cannot verify. An ELF/HEX
+    load takes `loadfile`, which this backend has no read-back for (see
+    `test_an_elf_load_gets_no_verify_line_because_none_can_be_emitted`), so
+    the `flashed` claim there rests on the exit code alone -- and #522 proved
+    the exit code does not reflect the halt. The qualification is what keeps
+    that honest.
 
-    Fails against current `dev` (measured: the message is exactly
-    `swd_probe[gd32_bridge]: GD32G553MEY7TR flashed via J-Link @ 0x08000000`,
-    identical to a run whose core halted cleanly)."""
+    GUARD for this change (the wording was landed by
+    `fix/540-541-flash-verify-and-tee`); retargeted from the `.bin` arm, which
+    now genuinely verifies. No address assertion: `loadfile` never received
+    one, and tan-cli#487 defect 6 is precisely about not naming an address the
+    tool never got."""
     exit_code, data, _issues, _lines, _sdk = _swd_probe_run(
-        tmp_path, monkeypatch, stdout=_HALT_FAILURE_TRANSCRIPT
+        tmp_path, monkeypatch, stdout=_HALT_FAILURE_TRANSCRIPT, firmware="zephyr.elf"
     )
 
     assert exit_code == 0
@@ -5669,10 +5781,9 @@ def test_swd_probe_write_into_a_core_that_never_halted_is_not_claimed_as_flashed
     assert "write attempted via J-Link" in entry["message"], entry
     assert "Failed to halt CPU" in entry["message"], entry
     assert "no verifybin" in entry["message"], entry
-    # The resolved device and the address survive the swap: #402 and #487
-    # fixed those two halves of this same string and neither may regress.
+    # The resolved device survives the swap: #402 fixed that half of this same
+    # string and it may not regress.
     assert "GD32G553MEY7TR" in entry["message"], entry
-    assert "0x08000000" in entry["message"], entry
 
 
 def test_swd_probe_unconfirmed_write_warns_in_json_and_in_default_text(tmp_path, monkeypatch):
@@ -5682,10 +5793,11 @@ def test_swd_probe_unconfirmed_write_warns_in_json_and_in_default_text(tmp_path,
     `--format json` at all -- `_run`'s caller prints only `text_lines` in the
     DEFAULT mode.
 
-    Fails against current `dev` (measured: no such code exists there, and no
-    line of `text_lines` mentions the write being unconfirmed)."""
+    GUARD for this change, retargeted to the ELF arm: the advisory is NOT
+    deleted by the verify, it is narrowed to the path that genuinely cannot
+    verify. A path that cannot check its own write still needs to say so."""
     _exit_code, _data, issues, lines, _sdk = _swd_probe_run(
-        tmp_path, monkeypatch, stderr=_HALT_FAILURE_TRANSCRIPT
+        tmp_path, monkeypatch, stderr=_HALT_FAILURE_TRANSCRIPT, firmware="zephyr.elf"
     )
 
     warnings = [i for i in issues if i.code == "flash.swd-probe-write-unconfirmed"]
@@ -5699,19 +5811,38 @@ def test_swd_probe_unconfirmed_write_warns_in_json_and_in_default_text(tmp_path,
 
 def test_swd_probe_clean_write_is_untouched_by_the_qualification(tmp_path, monkeypatch):
     """The negative control. A `swd_probe` J-Link write whose transcript names
-    no halt failure keeps the byte-for-byte original claim and raises no
-    warning -- the qualification is a targeted substring swap driven by an
-    observed marker, not a blanket downgrade of every swd_probe success."""
+    no halt failure carries the plain claim and raises no warning -- the
+    qualification is a targeted substring swap driven by an observed marker,
+    not a blanket downgrade of every swd_probe success.
+
+    The claim itself moved with the fix: a `.bin` write now runs `verifybin`,
+    so `flashed and verified` is what the run actually did. Fails against
+    `fix/540-541-flash-verify-and-tee`, which says only `flashed`."""
     _exit_code, data, issues, lines, _sdk = _swd_probe_run(
         tmp_path, monkeypatch, stdout="Downloading file [zephyr.bin]...\nO.K.\n"
     )
 
     entry = data["entries"][0]
     assert entry["message"] == (
-        "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed via J-Link @ 0x08000000"
+        "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed and verified via J-Link @ 0x08000000"
     )
     assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues)
     assert not any("UNCONFIRMED" in line for line in lines), lines
+
+
+def test_an_unverifiable_elf_write_keeps_its_plain_claim_when_nothing_went_wrong(
+    tmp_path, monkeypatch
+):
+    """GUARD. The ELF/HEX arm's claim is unchanged byte-for-byte by this fix
+    -- no verify line was added there, so nothing new can be claimed. Pins
+    that the `.bin` arm's new `and verified` did NOT leak across the split."""
+    _exit_code, data, _issues, _lines, _sdk = _swd_probe_run(
+        tmp_path, monkeypatch, stdout="O.K.\n", firmware="zephyr.elf"
+    )
+
+    assert data["entries"][0]["message"] == (
+        "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed via J-Link"
+    )
 
 
 def test_the_halt_qualification_does_not_reach_the_openocd_arm(tmp_path, monkeypatch):
@@ -5767,16 +5898,21 @@ boot_order: []
 
 
 def test_flow_d_keeps_its_own_wording_and_never_takes_the_swd_probe_swap():
-    """Flow D DOES have a `verifybin`, so its own halt-failure sentence
-    (tan-cli#522) says `verified; reset requested, core was busy and did not
-    halt` -- a materially different claim from `swd_probe`'s, which cannot say
-    `verified` at all. The two qualifications match different tails and must
-    not bleed into each other."""
+    """Flow D's halt-failure sentence (tan-cli#522) says `verified; reset
+    requested, core was busy and did not halt`; `swd_probe`'s two arms say
+    something different again. The three qualifications match different tails
+    and must not bleed into each other.
+
+    Tightened by this change: `_swd_probe_qualified_message` now returns
+    Flow D's message BYTE-FOR-BYTE unchanged (and `write_unconfirmed=False`)
+    rather than appending its own tail to it -- previously it recognised
+    neither of its two claims in that string and appended anyway, which the
+    old `startswith` assertion accepted."""
     from tan.commands.flash_cmd import (
         _Outcome,
         _flow_d_reset_qualified_message,
         _swd_probe_halt_markers,
-        _swd_probe_unconfirmed_message,
+        _swd_probe_qualified_message,
     )
 
     outcome = _Outcome(success=True, stdout=_HALT_FAILURE_TRANSCRIPT, captured=True)
@@ -5784,13 +5920,19 @@ def test_flow_d_keeps_its_own_wording_and_never_takes_the_swd_probe_swap():
     qualified = _flow_d_reset_qualified_message(flow_d, outcome)
     assert qualified.endswith("; verified; reset requested, core was busy and did not halt")
     # swd_probe's swap finds nothing to replace in Flow D's message, and Flow
-    # D's finds nothing in swd_probe's.
+    # D's finds nothing in either of swd_probe's.
     markers = _swd_probe_halt_markers(outcome)
     assert markers == ["Failed to halt CPU", "CPU is not halted"]
-    assert _swd_probe_unconfirmed_message(flow_d, markers).startswith(flow_d)
+    assert _swd_probe_qualified_message(flow_d, markers) == (flow_d, False)
     assert (
         _flow_d_reset_qualified_message("swd_probe[b]: X flashed via J-Link @ 0x0", outcome)
         == "swd_probe[b]: X flashed via J-Link @ 0x0"
+    )
+    assert (
+        _flow_d_reset_qualified_message(
+            "swd_probe[b]: X flashed and verified via J-Link @ 0x0", outcome
+        )
+        == "swd_probe[b]: X flashed and verified via J-Link @ 0x0"
     )
 
 
@@ -6136,14 +6278,20 @@ def test_a_halt_failure_after_an_observed_load_does_not_doubt_the_write(
     its reset sentence for exactly that reason.
 
     Fails against this branch's own first cut (measured: `write attempted via
-    J-Link`, plus the warning)."""
+    J-Link`, plus the warning).
+
+    The claim carries `and verified` because this is the `.bin` arm and
+    tan-cli#540 defect 2 gave it a `verifybin` read-back; the point being
+    pinned here is the POSITION rule, which is what keeps the advisory silent
+    on the ELF/HEX arm too (see
+    `test_the_elf_arm_gets_the_same_positional_reading_as_the_bin_arm`)."""
     _exit_code, data, issues, lines, _sdk = _swd_probe_run(
         tmp_path, monkeypatch, stdout=_LOAD_THEN_RESET_FAILURE_TRANSCRIPT
     )
 
     entry = data["entries"][0]
     assert entry["message"] == (
-        "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed via J-Link @ 0x08000000"
+        "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed and verified via J-Link @ 0x08000000"
     ), entry
     assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues), issues
     assert not any("UNCONFIRMED" in line for line in lines), lines
@@ -6152,13 +6300,24 @@ def test_a_halt_failure_after_an_observed_load_does_not_doubt_the_write(
 def test_a_halt_failure_before_the_load_still_doubts_the_write(tmp_path, monkeypatch):
     """The other half of the positional split, and the case tan-cli#540 is
     really about: the PRE-load `r`/`halt` could not stop the core, so the
-    `loadbin` that follows never had a halted target to write into. The
+    `loadfile` that follows never had a halted target to write into. The
     transcript records no completed download at all, so there is nothing that
-    could confirm the bytes landed -- and this backend runs no `verifybin`.
-    The claim must still be downgraded here."""
+    could confirm the bytes landed -- and this arm runs no `verifybin`. The
+    claim must still be downgraded here.
+
+    On the ELF/HEX arm, deliberately. #575 wrote this against the `.bin` arm,
+    which at the time had no read-back either; tan-cli#540 defect 2 gave that
+    arm one, so a `.bin` write reaching the `ok` path has had its bytes
+    COMPARED whatever the halt markers say (`verifybin` + `-ExitOnError 1`
+    makes a mismatch a non-zero exit). The arm that is still living on the
+    transcript alone is this one, so this is where the downgrade has to be
+    measured -- see
+    `test_a_verified_bin_write_says_verified_even_when_the_core_did_not_halt`
+    for the same transcript position on the arm that can verify."""
     _exit_code, data, issues, lines, _sdk = _swd_probe_run(
         tmp_path,
         monkeypatch,
+        firmware="zephyr.elf",
         stdout=(
             "SEGGER J-Link Commander V7.94\n"
             "Reset: Halt core after reset via DEMCR.VC_CORERESET.\n"
@@ -6175,6 +6334,43 @@ def test_a_halt_failure_before_the_load_still_doubts_the_write(tmp_path, monkeyp
     assert any("UNCONFIRMED" in line for line in lines), lines
 
 
+def test_a_halt_failure_before_the_load_is_carried_by_the_verify_on_the_bin_arm(
+    tmp_path, monkeypatch
+):
+    """The `.bin` half of the case above, and the one place the two fixes have
+    to be read TOGETHER. The pre-load halt failed, so #575's positional rule
+    keeps every marker counting and the write is in doubt on the transcript
+    alone -- but this arm no longer lives on the transcript alone. `verifybin`
+    + `-ExitOnError 1` means a run that reaches the `ok` path at all has had
+    its bytes compared against the artefact, so the position of the marker
+    changes the WORDING (what the halt cost) and not the VERDICT (the bytes
+    landed).
+
+    Fails against `fix/540-541-flash-verify-and-tee` (measured: `write
+    attempted via J-Link ... this backend runs no verifybin`, plus the
+    advisory)."""
+    _exit_code, data, issues, lines, _sdk = _swd_probe_run(
+        tmp_path,
+        monkeypatch,
+        stdout=(
+            "SEGGER J-Link Commander V7.94\n"
+            "Reset: Halt core after reset via DEMCR.VC_CORERESET.\n"
+            "VC_CORERESET did not halt CPU\n"
+            "****** Error: Failed to halt CPU\n"
+            "CPU is not halted\n"
+        ),
+    )
+
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    assert "flashed and verified via J-Link" in entry["message"], entry
+    assert "write attempted" not in entry["message"], entry
+    assert "Failed to halt CPU" in entry["message"], entry
+    assert "may still be running the firmware it had" in entry["message"], entry
+    assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues), issues
+    assert not any("UNCONFIRMED" in line for line in lines), lines
+
+
 def test_a_download_that_never_reports_completing_is_not_treated_as_observed(
     tmp_path, monkeypatch
 ):
@@ -6182,12 +6378,18 @@ def test_a_download_that_never_reports_completing_is_not_treated_as_observed(
     transcript that opens a download and then reports a halt failure without
     ever printing the completion token has observed nothing about the bytes,
     so the conservative verdict has to survive -- the positional rule must not
-    become 'the word Downloading appeared, therefore it worked'."""
+    become 'the word Downloading appeared, therefore it worked'.
+
+    Measured on the ELF/HEX arm, for the same reason as the test above: after
+    tan-cli#540 defect 2 the `.bin` arm's verdict comes from `verifybin`, not
+    from the transcript, so the arm that can still be moved by a truncated
+    transcript is this one."""
     _exit_code, data, issues, _lines, _sdk = _swd_probe_run(
         tmp_path,
         monkeypatch,
+        firmware="zephyr.elf",
         stdout=(
-            "Downloading file [/w/build/zephyr.bin]...\n"
+            "Downloading file [/w/build/zephyr.elf]...\n"
             "****** Error: Failed to halt CPU\n"
             "CPU is not halted\n"
         ),
@@ -6199,13 +6401,30 @@ def test_a_download_that_never_reports_completing_is_not_treated_as_observed(
 
 def test_the_elf_arm_gets_the_same_positional_reading_as_the_bin_arm(tmp_path, monkeypatch):
     """`loadfile` (the ELF/HEX arm) prints the same `Downloading file [...]`
-    /`O.K.` pair `loadbin` does, and it is the arm tan-cli#581 does NOT reach
-    -- #581 narrows this advisory to ELF/HEX once `verifybin` lands on the
-    `.bin` side, so ELF/HEX keeps living on the transcript alone. The
-    positional reading therefore has to stand on its own here."""
-    _exit_code, data, issues, _lines, _sdk = _swd_probe_run(
+    /`O.K.` pair `loadbin` does, and it is the arm tan-cli#540 defect 2 does
+    NOT reach -- the `verifybin` read-back lands on the `.bin` side only, so
+    ELF/HEX keeps living on the transcript alone. The positional reading
+    therefore has to stand on its own here, and this is the case the review of
+    #575 named directly: *"It does not remove it for ELF/HEX, where there is
+    still no verify and the marker search is still positionless. Fix the
+    detector, or scope it to markers emitted before the load completes."*
+
+    So a post-load halt failure must NOT raise the advisory on this arm
+    either. The advisory says `nothing confirms the bytes landed`; a marker
+    printed AFTER the tool itself reported `Downloading file [...] ... O.K.`
+    is evidence about the RESET, and using it to doubt the write is the exact
+    false alarm #575 removed -- narrowing it to one arm would not have made it
+    true there. What this arm's inability to verify costs is the PRE-load
+    case, which still downgrades (see
+    `test_a_halt_failure_before_the_load_still_doubts_the_write`).
+
+    Now actually driven through `loadfile`: #575 wrote this against a
+    `zephyr.elf` TRANSCRIPT but left the fixture's default `zephyr.bin`
+    artefact in place, so it measured the `.bin` arm."""
+    _exit_code, data, issues, lines, _sdk = _swd_probe_run(
         tmp_path,
         monkeypatch,
+        firmware="zephyr.elf",
         stdout=(
             "Downloading file [/w/build/zephyr.elf]...\n"
             "O.K.\n"
@@ -6215,8 +6434,13 @@ def test_the_elf_arm_gets_the_same_positional_reading_as_the_bin_arm(tmp_path, m
         ),
     )
 
-    assert "flashed via J-Link" in data["entries"][0]["message"]
+    # The unverifiable arm's plain claim, byte-for-byte -- no address, because
+    # `loadfile` never received one (tan-cli#487 defect 6).
+    assert data["entries"][0]["message"] == (
+        "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed via J-Link"
+    ), data["entries"][0]
     assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues), issues
+    assert not any("UNCONFIRMED" in line for line in lines), lines
 
 
 def test_flow_d_still_reads_its_markers_positionlessly(tmp_path):

@@ -1086,7 +1086,58 @@ def jlink_commander_script(
     artefact: str, base: str, do_reset: bool, serial: str | None = None
 ) -> str:
     """The J-Link Commander script: reset/halt, load (`loadbin`+base for `.bin`,
-    else `loadfile`), optional reset-and-go, quit-close.
+    else `loadfile`), a `verifybin` read-back for the `.bin` arm, optional
+    reset-and-go, quit-close.
+
+    **tan-cli#540 defect 2.** This script used to have no verify step of any
+    kind, so `swd_probe`'s success was inferred from JLinkExe's exit code
+    alone -- and tan-cli#522 measured, on real silicon, that a
+    failure to halt the core does NOT make JLinkExe exit non-zero even with
+    `-ExitOnError 1` on the argv (this backend carries that flag). A load into
+    a core that never halted therefore reported byte-for-byte the same as a
+    clean one. `verifybin` is the second signal that makes the claim an
+    observation: JLinkExe reads the region back and compares it to the file,
+    and a mismatch is an error, which `-ExitOnError 1` turns into a non-zero
+    exit -- so a write that did not land now FAILS the run instead of being
+    reported `ok`. That last link is the same one Flow D has staked since it
+    was written (`plan_alif_mram_jlink` claims `verified` on exactly this
+    basis); it is worth confirming once on the bench with a deliberately
+    wrong artefact.
+
+    **Placement and shape are Flow D's, not new ones.** The line is
+    `verifybin <path> <addr>` -- the form `plan_alif_mram_jlink` emits and the
+    only `verifybin` spelling this repo has actually run on silicon (SEGGER's
+    Commander accepts the comma form too; the load line above keeps its own
+    comma because that line is oracle-measured byte-for-byte). It sits AFTER
+    the load and BEFORE the optional `r`/`g`, for the reason Flow D orders it
+    the same way: once `g` runs, the core is executing and the memory being
+    compared is no longer quiescent.
+
+    **Only the `.bin` arm gets it, and that asymmetry is deliberate.**
+    `verifybin` takes an ADDRESS, and the `loadfile` arm has none to give it
+    -- `base` is a load offset, meaningful only for a raw binary (tan-cli#487
+    defect 6 is precisely about not naming an address the tool never
+    received). J-Link Commander's own `verifyfile` is NOT emitted here: no
+    call site in this repo has ever issued it, so nothing has measured that
+    the shipped Commander/DLL accepts it, and with `-ExitOnError 1` armed an
+    unrecognised command would turn every working ELF/HEX flash into a hard
+    failure. Guessing tool behaviour is the same class of invention the
+    device-profile refusal in `_resolve_jlink_device` already refuses to make.
+    The ELF/HEX arm is therefore still genuinely unverifiable, and
+    `tan.commands.flash_cmd` keeps the `flash.swd-probe-write-unconfirmed`
+    advisory alive for exactly that arm.
+
+    **DIVERGES from the shipped Rust oracle**, deliberately. Measured, not
+    inferred: `target/debug/tan` (`tan 0.4.1`) driven through a real
+    `swd_probe` write with a capturing stub on PATH emits `r` / `halt` /
+    `loadbin <artefact>, <base>` / `r` / `g` / `qc` and no verify line at all.
+    Bug-for-bug parity would mean shipping a flash command that reports
+    success for a write it never checked, on the backend that programs the
+    GD32 bridge; a silicon-safety fix outranks that. Out of reach of
+    `tests/parity/test_flash_oracle_parity.py` in any case -- the Commander
+    script is written to a temp file and never appears in the envelope, whose
+    `--dry-run` message names only the argv (`... -CommanderScript
+    <generated.jlink>`).
 
     `serial` (tan-cli#513) is the ONLY disambiguator when a bench carries more
     than one J-Link -- `JLinkExe` selects a probe by serial alone, with no
@@ -1124,6 +1175,12 @@ def jlink_commander_script(
     artefact = commander_path(artefact)
     if is_bin:
         lines.append(f"loadbin {artefact}, {base}")
+        # tan-cli#540: the read-back that makes the success claim an
+        # observation. Emitted whether or not `do_reset` is set -- `reset`
+        # governs the post-write `r`/`g` below, not whether the bytes are
+        # checked -- and always before that pair. See this function's
+        # docstring for the shape, the placement and the oracle divergence.
+        lines.append(f"verifybin {artefact} {base}")
     else:
         lines.append(f"loadfile {artefact}")
     if do_reset:
@@ -1486,8 +1543,21 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
             # named an address the tool never received on every non-`.bin`
             # write -- either the compiled-in `_DEFAULT_BASE` or whatever the
             # manifest's `base` happened to be, neither of which this run used.
+            #
+            # `and verified` only on the SAME arm, and for the same discipline
+            # (tan-cli#540 defect 2): that arm's script now ends its load with
+            # a `verifybin` read-back, so on a run that exits 0 the bytes have
+            # genuinely been compared against the artefact. The ELF/HEX arm
+            # gets no verify line -- `verifybin` needs an address and
+            # `loadfile` has none -- so it keeps the plain claim, and
+            # `tan.commands.flash_cmd` keeps qualifying THAT one from the
+            # transcript. The two claims are deliberately lexically DISJOINT
+            # (`flashed via J-Link` is not a substring of `flashed and
+            # verified via J-Link`): flash_cmd's qualification is a targeted
+            # substring swap, and an overlapping pair would let the
+            # unverifiable arm's wording land on a verified write.
             ok_message=(
-                f"swd_probe[{core}]: {device} flashed via J-Link @ {base}"
+                f"swd_probe[{core}]: {device} flashed and verified via J-Link @ {base}"
                 if is_bin
                 else f"swd_probe[{core}]: {device} flashed via J-Link"
             ),
