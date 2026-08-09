@@ -311,6 +311,50 @@ def test_flash_dpidr_preflight_spawns_the_resolved_jlink(hostile, monkeypatch):
     assert argv0 == "JLinkExe", f"the preflight child's argv[0] became {argv0!r}"
 
 
+def test_flash_dpidr_preflight_refuses_rather_than_spawning_an_unresolved_jlink(
+    tmp_path, monkeypatch
+):
+    """The other half of the preflight fix, and the one with the hardware
+    consequence: when the go/no-go gate says "JLinkExe is available" but the
+    resolution finds nothing, the preflight REFUSES the write instead of
+    handing `CreateProcess` the bare name -- where the customer's project
+    directory is the only remaining supplier of a binary whose output tan is
+    about to trust as the answer to "which board is attached".
+
+    The gate/resolution disagreement is forced here rather than waited for
+    (in production it is the window between the two: a tool removed, a `PATH`
+    rewritten, a venv torn down). It is deliberately the SAME shape that
+    `test_flash_command.py::_stub_flow_d_probe` used to set up by accident --
+    a patched `_tool_available` over an empty PATH -- so the arm those seven
+    banner tests were incidentally exercising keeps a pin that asserts the
+    refusal ON PURPOSE. `tan-cli#520`'s "refusing to write MRAM without
+    confirming which board is attached" is the string a loosening of the
+    resolution would have to delete, and this is what would go red.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(flash_cmd, "_tool_available", lambda *_a, **_k: True)
+    spawned: list[object] = []
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", lambda *a, **k: spawned.append(a))
+
+    message = flash_cmd._flow_d_preflight(
+        FlashInputs(
+            artefact="app.bin",
+            flash_args={"expect_dpidr": "0x6BA02477", "jlink_device": "AE822F80F55D5XX"},
+            core_id="app",
+            sku="E1M-AEN801",
+        )
+    )
+
+    assert message is not None, "an unresolvable J-Link produced no refusal"
+    assert "JLinkExe" in message
+    assert "could not be resolved" in message, message
+    assert "refusing to write MRAM without confirming which board is attached" in message, message
+    assert spawned == [], "the preflight spawned a program it could not resolve"
+
+
 def test_flash_tool_available_is_still_a_gate_the_project_dir_cannot_satisfy(hostile):
     """A standing pin, NOT a fix: the go/no-go gate was already hardened, and
     passes before and after. It is here because #567 is precisely the case of a
