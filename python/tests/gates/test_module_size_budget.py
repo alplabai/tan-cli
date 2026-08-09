@@ -884,7 +884,21 @@ _MODULE_BUDGET: dict[str, int] = {
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command WRITES `build/generated/alp.conf` and the DTS overlays
     # out of whichever checkout resolved.
-    "tan/commands/generate_cmd.py": 1186,
+    # 1303, not 1186, as of tan-cli#498 defects 4 and 5. Defect 4:
+    # `_missing_emit_output` treated a zero-byte artefact as proof of failure,
+    # which is wrong -- `alp_project.py`'s unscoped per-core emits legitimately
+    # write 0 bytes and exit 0 when no core matches the mode's OS class, so the
+    # subprocess engine reported `generate.emit-failed`/exit 3 for emits that
+    # succeeded (and, under `--output`, then UNLINKED the artefact). The check
+    # is existence-based now, which took the probe cleanup into
+    # `_ensure_writable` (it unlinks the file it created, closing the ambiguity
+    # at its source) and added `_output_stamp` so an untouched pre-existing
+    # destination is still refused -- tan-cli#397's guarantee, kept. Defect 5:
+    # `resolve_targets` gained the `--all` + explicit `--target` refusal that
+    # closes the silent target discard AND the `--core` hole it opened. Most of
+    # the growth is the measured rationale each carries, per this file's own
+    # "needs a reason in the diff" rule.
+    "tan/commands/generate_cmd.py": 1303,
     # 1215, not 1096, as of tan-cli#464 (measured majors, then an independent
     # design review): the `globalDefault` tier gained a `writtenFor`-vs-caller
     # check (`_workspace_under`, `global_default_foreign_project_issue`) and a
@@ -929,7 +943,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # alone was enough) and printed in both text branches. A brand-new
     # module in this ledger, not a raised number: this is the first time
     # `diff_cmd.py` crossed the 800-line cap.
-    "tan/commands/diff_cmd.py": 812,
+    # 812 -> 822, tan-cli#498 defect 2 reaching this module: `diff` reuses
+    # `validate_cmd`'s validator parser wholesale, so when findings became a
+    # `_Finding` record instead of a `(severity, message)` tuple, the import,
+    # the `_spawn_validator` return annotation and the one-sentence fold in
+    # `_reject_if_sdk_validator_disagrees` all followed the shape. MEASURED on
+    # the rebased tree, not 812 + this branch's pre-rebase delta.
+    "tan/commands/diff_cmd.py": 822,
     "tan/commands/sdk_cmd.py": 1274,
     # 1093 -> 1108: tan-cli#478 wired `sdk_resolution_issues` through the
     # spawn path, so a `globalDefault` written for ANOTHER project stops
@@ -955,7 +975,31 @@ _MODULE_BUDGET: dict[str, int] = {
     # advisories `findings` filters OUT of `issueCount`/sarif/diagnostic-v1
     # -- the other two text branches already show them because they loop
     # over the unfiltered `issues`.
-    "tan/commands/validate_cmd.py": 1166,
+    #
+    # (The #488-defect-8 `try`/`except` wrap is recorded above as the
+    # 1127 -> 1157 step; it reached `dev` before this branch rebased onto it.)
+    #
+    # 1166 -> RE-MEASURED BELOW, as of tan-cli#498 defects 1, 2 and 3 -- three behaviour
+    # changes in one command, each with its own measured argument for diverging
+    # from the frozen oracle, which is where the bulk of the 295 lines went.
+    # Defect 1: the two v2 structural checks are UNGATED (`schemaVersion >= 2`
+    # was unreachable -- alp-sdk pins `LATEST = 1` -- while `board.schema.json`
+    # conditions nothing on the key), so `--offline` stops calling boards clean
+    # that the SDK rejects. Defect 2: findings became a `_Finding` record
+    # instead of a `(severity, message)` tuple, so a rich `error[ALP-Bxxx]`
+    # block's code, `= hint:`, `= see:` page and `line:col`+caret span survive
+    # into `issues[].message` and into the diagnostic-v1/SARIF documents
+    # (`_lsp_range`, `_sarif_region`, `_diagnostic_code`, `_issue_message` are
+    # the new helpers). Defect 3: an unreadable board.yaml is
+    # `validate.board-yaml-unreadable` at exit 2, not `internal-failure` at 5.
+    #
+    # The number below accounts for BOTH #478's `_emit` split (already on
+    # `dev`) and #498's three defects, and is a `wc -l` of the rebased file --
+    # NOT 1166 + (1417 - 1122) arithmetic across the two branches. The two
+    # overlap inside `_emit`: #478's `sdk.*` filter and #498's `_Finding`
+    # pairing collapse into one `reportable`/`reported` pair rather than
+    # stacking, so the union is smaller than either side's sum implies.
+    "tan/commands/validate_cmd.py": 1478,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
@@ -1487,6 +1531,20 @@ _MIRRORED = ("tan/planner/",)
 # adds NONE: `resolve_toolchain_root` is 29 lines, `_candidates` 38,
 # `_scan_roots` 22, `build_cmd._toolchain_for_plan` 26 -- the reasoning that
 # would have pushed them over lives in the module docstring instead.
+# 225 as of tan-cli#498, RE-WALKED with the gate's own AST walk over all of
+# `tan/` INCLUDING `tan/planner/` (49 of the 225 crossings live there) after
+# this branch was rebased onto dev's 221 -- never carried over from the
+# pre-rebase figure and never 221 + 4 arithmetic. Set-differenced against dev
+# the four new crossings are all in this change and all in `generate_cmd.py`/
+# `validate_cmd.py`, each because its RATIONALE grew, not its branching:
+# `validate_board_text` 89 (the argument for ungating two dead structural
+# checks, and for the one conformance case that costs), `resolve_targets` 75
+# (why `--all` + an explicit `--target` is refused rather than silently
+# resolved one way), `_missing_emit_output` 75 (why a zero-byte artefact is a
+# real emit, and how tan-cli#397's guarantee survives the widening) and
+# `_ensure_writable` 60 (why the writability probe now removes the file it
+# created). Nothing dropped below the cap. The worst function is untouched at
+# `bootstrap_cmd.py:_run` 701 <= 707.
 # 226, not 221, as of tan-cli#494/#495, RE-WALKED after the rebase onto
 # tan-cli#582's dev with the gate's own AST walk over all of `tan/` INCLUDING
 # `tan/planner/` (49 of the 226 crossings live there) -- never 221 + 5
@@ -1521,6 +1579,12 @@ _MIRRORED = ("tan/planner/",)
 # re-walked with the gate's own AST walk on the MERGED tree, 227 -- the two
 # comment blocks above describe disjoint crossing sets, so neither side's
 # number is the answer and only a walk of the union is.
+# MERGED VALUE, tan-cli#498 on top of dev carrying #494/#495 (#583): re-walked
+# with the gate's own AST walk on the MERGED tree, 230 -- not 226 + 4 and not
+# 225 + 5. The two comment blocks above each describe their own side's
+# crossings; the sets are disjoint, which is why neither side's number is the
+# answer and only a walk of the union is. `_FUNCTION_WORST_BUDGET` stays 707:
+# worst measured 704 here (`bootstrap_cmd.py:_run`, +3 from #583), not 701.
 _FUNCTION_COUNT_BUDGET = 227
 _FUNCTION_WORST_BUDGET = 707
 

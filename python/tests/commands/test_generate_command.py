@@ -126,16 +126,39 @@ def test_core_is_accepted_for_the_scopable_targets(target):
         ("native-sim-overlay", False),
         # ...one that accepts and then ignores it...
         ("os-topology", False),
-        # ...and the default/--all sets, which mix core-scoped and core-blind
+        # ...and the default set, which mixes core-scoped and core-blind
         # targets in one run.
         (None, False),
-        ("cmake-args", True),
     ],
 )
 def test_core_is_refused_where_it_would_do_nothing(target, all_targets):
     with pytest.raises(GenerateError) as err:
         resolve_targets(target, all_targets, "m55_hp")
     assert "--core" in err.value.message
+
+
+@pytest.mark.parametrize("target", ["cmake-args", ZEPHYR_BOARD])
+def test_all_together_with_an_explicit_target_is_refused(target):
+    """tan-cli#498 defect 5. `--all` and `--target` name different target sets,
+    and `--all` used to win SILENTLY: `--all --target zephyr-board --core
+    m55_hp` returned `ALL_EMIT_MODES` (which does not contain `zephyr-board`),
+    so `build/boards/` was never created, no envelope field said the named
+    target had been dropped, and the `--core` guard -- whose `ZEPHYR_BOARD`
+    arm carried no `not all_targets` qualifier -- let the core through to
+    narrow six of the nine defaults.
+
+    Both are refused now, `--core` or not: the pair is the mistake."""
+    with pytest.raises(GenerateError) as err:
+        resolve_targets(target, True, None)
+    assert err.value.code == "generate.invalid-target"
+    assert err.value.exit_code == ExitCode.VALIDATION_FAILURE
+    assert "--all" in err.value.message and f"--target {target}" in err.value.message
+
+    # ...and with `--core`, the shape #498 measured: `--all --target
+    # zephyr-board --core m55_hp` used to be ACCEPTED.
+    with pytest.raises(GenerateError) as with_core:
+        resolve_targets(target, True, "m55_hp")
+    assert with_core.value.code == "generate.invalid-target"
 
 
 # --------------------------------------------------------------------------
@@ -1394,6 +1417,143 @@ def test_a_pinned_subprocess_emit_that_wrote_nothing_is_a_failed_target(
     assert not (project / "build" / "generated" / "alp.conf").exists()
 
 
+def _project_with_zero_byte_sdk(tmp_path):
+    """A project plus a stand-in `alp_project.py` that writes a ZERO-BYTE file
+    and exits 0 -- what the real `alp_project.py` does for an unscoped
+    per-core emit when no core matches the mode's OS class.
+
+    Not hypothetical: measured against alp-sdk `99e47476` on the shipped
+    `examples/display/lvgl-dashboard-x-evk` (a Linux-only E1M-V2N101 board),
+    where `--emit zephyr-conf` prints `alp_project: wrote ref/alp.conf (0
+    bytes)` and exits 0, as does `--emit cmake-args`. An empty `alp.conf` is
+    the CORRECT answer for a board with no Zephyr core.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_bytes(b'')\n",
+        encoding="utf-8",
+    )
+    return project, sdk
+
+
+def test_a_legitimately_empty_emit_is_a_success_not_a_failure(
+    tmp_path, monkeypatch, capsys
+):
+    """tan-cli#498 defect 4. `_missing_emit_output` demanded a NON-EMPTY file,
+    on a premise its own docstring stated -- "No real emit is empty" -- that is
+    false. The spawned engine therefore reported `generate.emit-failed` and
+    exit 3 for emits that succeeded, disagreeing with the in-process engine on
+    the same board.yaml and with the frozen oracle (measured: exit 0, the
+    0-byte `alp.conf` in `written[]`).
+
+    The artefact must survive AND be reported."""
+    project, sdk = _project_with_zero_byte_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(target="zephyr-conf", sdk_root=str(sdk), output_format="json")
+
+    assert code == 0
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["ok"] is True
+    assert env["data"]["failed"] == []
+    assert env["data"]["written"] == [os.path.join("build", "generated", "alp.conf")]
+    assert env["issues"] == []
+    written = project / "build" / "generated" / "alp.conf"
+    assert written.is_file() and written.stat().st_size == 0
+
+
+def test_an_empty_emit_under_output_is_not_unlinked_by_the_probe_cleanup(
+    tmp_path, monkeypatch, capsys
+):
+    """The `--output` half of tan-cli#498 defect 4, and the worse one: the
+    writability probe had created the destination, so `probe_created_output`
+    was True, so the false `emit-failed` sent `_discard_probe_file` to UNLINK
+    the zero-byte file the SDK emitter had genuinely produced -- leaving
+    `cmakebuild/generated/` empty. This is the shape `cmake/alp.cmake` drives.
+    """
+    project, sdk = _project_with_zero_byte_sdk(tmp_path)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target="zephyr-conf",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == 0
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["failed"] == []
+    assert env["data"]["written"] == [str(destination)]
+    assert destination.is_file(), "the emitter's own 0-byte artefact was deleted"
+
+
+def test_the_writability_probe_leaves_nothing_behind(tmp_path):
+    """The structural half of the #498 defect-4 fix: `_ensure_writable` still
+    proves the destination writable, and still reports that it was the one to
+    create it, but no longer LEAVES the file it created. That is what makes
+    "the file exists" honest evidence of an emit again, whatever its size."""
+    destination = tmp_path / "generated" / "alp.conf"
+
+    assert _ensure_writable(destination, "zephyr-conf") is True
+    assert destination.parent.is_dir()
+    assert not destination.exists()
+
+    # ...and a destination the caller already had is untouched, contents and
+    # all: `existed` is read before the probe opens it, and the open is `"ab"`.
+    destination.write_text("keep me\n", encoding="utf-8")
+    assert _ensure_writable(destination, "zephyr-conf") is False
+    assert destination.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_a_stale_destination_the_emitter_never_touched_is_still_refused(
+    tmp_path, monkeypatch, capsys
+):
+    """tan-cli#397's guarantee, preserved through #498's widening. Accepting a
+    zero-byte artefact must NOT become "accept whatever is at the path": a
+    stale `alp.conf` from a previous board, plus an emitter that exits 0
+    without writing, would otherwise be reported as freshly written and handed
+    to the next `tan build`.
+
+    The destination is non-empty here precisely so the refusal cannot be
+    credited to a size check -- it rests on the file coming out of the emit
+    exactly as it went in."""
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+    destination.parent.mkdir(parents=True)
+    destination.write_text("CONFIG_FROM_A_PREVIOUS_BOARD=y\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target="zephyr-conf",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["written"] == []
+    assert env["data"]["failed"] == ["zephyr-conf"]
+    assert env["issues"][0]["code"] == "generate.emit-failed"
+    assert "exactly as it found it" in env["issues"][0]["message"]
+    # Not deleted: it was never this run's file to remove.
+    assert destination.read_text(encoding="utf-8") == "CONFIG_FROM_A_PREVIOUS_BOARD=y\n"
+
+
 def test_the_auto_fallback_to_spawning_gets_the_same_did_it_land_check(
     tmp_path, monkeypatch, capsys
 ):
@@ -1429,14 +1589,18 @@ def test_the_auto_fallback_to_spawning_gets_the_same_did_it_land_check(
 def test_an_output_override_the_emitter_never_filled_is_not_reported_written(
     tmp_path, monkeypatch, capsys
 ):
-    """The `cmake/alp.cmake` shape, and the reason mere existence is not the
-    test: `_ensure_writable` opens the destination for APPEND before the spawn
-    to prove it is writable, which CREATES a zero-byte file. An existence-only
-    check would report tan's own probe as the emitter's artefact.
+    """The `cmake/alp.cmake` shape: an emitter that exits 0 having written
+    nothing must not have tan's own doing reported as its artefact.
 
-    Also asserts the probe file is taken back off disk (tan-cli#420) -- the
-    zero-byte-survives assertion this used to carry is flipped on purpose, see
-    the comment on that assertion.
+    `_ensure_writable` opens the destination for APPEND before the spawn to
+    prove it is writable, which CREATES a zero-byte file -- and, since
+    tan-cli#498 defect 4, removes it again on the spot. That is what lets the
+    check below be a plain existence test (a legitimately empty emit is a real
+    emit) instead of the non-empty demand that used to fail those.
+
+    Also asserts nothing is left on disk (tan-cli#420) -- the zero-byte-
+    survives assertion this used to carry is flipped on purpose, see the
+    comment on that assertion.
     """
     project, sdk = _project_with_silent_sdk(tmp_path)
     destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"

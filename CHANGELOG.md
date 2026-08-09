@@ -207,6 +207,50 @@ All notable changes to `tan` are documented here. Format follows
   `build.app-dir-missing` (#483) or held by a `${TOOLCHAIN_ROOT}` demotion
   does not also collect one. `zephyr` only -- the `baremetal` arm has no
   fallback to announce. (#517)
+- **`tan validate --offline` called board.yaml files clean that the SDK
+  rejects.** Its two structural checks -- no top-level `os:`, a `cores:` block
+  is required -- sat behind a `schemaVersion >= 2` gate no conforming project
+  can satisfy (alp-sdk pins `LATEST = 1` with an empty migration registry, and
+  none of the 100 board.yaml files it ships declares the key), so neither ever
+  ran. Meanwhile `metadata/schemas/board.schema.json` conditions nothing on
+  `schemaVersion`: its root carries `required: [som, cores]` and
+  `not: {required: [os]}` outright. Both checks are unconditional now, so the
+  offline path -- the one `validate.sdk-root-unresolved` recommends to a user
+  with no checkout -- stops answering `clean`/exit 0 on a board the real
+  validator refuses. (#498)
+- **`tan validate` threw away the `ALP-Bxxx` code, the `hint:` and the
+  `see:` page of every rich diagnostic the SDK validator produced.** A bad SoM
+  SKU reported the message and neither the suggested SKU nor a code to look
+  `docs/diagnostics/ALP-B005.md` up by, and `--format diagnostic-v1` labelled
+  every entry `validate-schema-violation` with a zeroed range even though the
+  SDK had supplied `2:8`. The block's code, hint, documentation URI and
+  `line:col`+caret span now reach `issues[].message`, and reach
+  `diagnostic-v1`/SARIF as the structured `code`, `hint`, `documentationUri`,
+  `range`/`region` and rule `helpUri` fields alp-sdk's own exporter emits.
+  (#498)
+- **A board.yaml `tan validate --offline` could not read was reported as a tan
+  crash.** A cp1252/latin-1 file, or a directory named `board.yaml`, exited 5
+  `validate.internal-failure` -- for an error the guard's own comment called
+  the user's to fix, while the same file WITHOUT `--offline` exited 2. It is
+  now `validate.board-yaml-unreadable` at exit 2, with its own text-mode
+  verdict line (`validate: board.yaml could not be read`) rather than
+  "validation failure": nothing was validated. (#498)
+- **`tan generate` reported a legitimate zero-byte emit as a failure, and with
+  `--output` then deleted the artefact.** `alp_project.py`'s unscoped per-core
+  emits write 0 bytes and exit 0 when no core matches the mode's OS class --
+  the correct answer for, say, a Linux-only V2N board's `zephyr-conf`. The
+  spawned engine treated an empty file as proof of failure and answered exit 3
+  with two `generate.emit-failed` issues about files that were on disk,
+  disagreeing with the in-process engine on the same board.yaml. The
+  writability probe now removes the file it creates, so plain existence is
+  honest evidence again; an emitter that leaves an already-present destination
+  untouched is still refused. (#498)
+- **`tan generate --all --target <mode>` silently dropped the named target**,
+  and with `--target zephyr-board` also let a `--core` through that narrowed
+  six of the nine default emits (`build/generated/alp.conf` 3799 -> 1867 bytes
+  on `examples/bringup/board-selftest`) while the run failed blaming an emit
+  rather than the flag combination. The contradictory pair is refused up front
+  with `generate.invalid-target` at exit 2. (#498)
 - **`tan debug-config --project <path>` created the directory tree when
   `<path>` did not exist, and wrote a `native-host` launch.json into it at
   exit 0 with `issues: []`.** `--project` names a project that already
