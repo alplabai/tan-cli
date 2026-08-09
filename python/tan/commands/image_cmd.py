@@ -91,7 +91,7 @@ from tan.core.system_manifest import (
     raw_passthrough,
     slice_build_dir,
 )
-from tan.envelope import Envelope, Issue, Project, SdkInfo, emit, json_safe_floats
+from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit, json_safe_floats
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
@@ -209,14 +209,47 @@ def _bundle_slice(
     return slice_entry(core_id, os_name, artefact, sha256, size)
 
 
+def _unresolved_sdk_clause(sdk_root_arg: str | None) -> str:
+    """The trailing "why was there no sdk_root" clause of an
+    `image.helper-missing` message.
+
+    tan-cli#497 defect 6: the message hardcoded "no --sdk-root and no
+    discoverable checkout" whenever nothing resolved -- including when
+    `--sdk-root` WAS supplied and failed the loader-marker check, because
+    `resolve_project_context` returns `None` for a supplied-but-invalid flag
+    exactly as it does for an absent one. So `tan image --sdk-root
+    /definitely/not/a/checkout` told the reporter to pass the flag they had
+    just typed, on a hard-error path (exit 1) that refuses to produce the
+    bundle -- sending them to look for a missing flag instead of at the typo
+    in the path they gave.
+
+    Entirely inside the `(tried ...)` clause `tests/parity/
+    test_image_size_oracle.py` already strips from BOTH modes as a declared
+    alp-sdk#330 divergence (the frozen oracle has no `sdk_root` fallback and
+    so no such clause at all), so the wording is free to be correct here.
+    """
+    if sdk_root_arg is None:
+        return "sdk root not resolved (no --sdk-root and no discoverable checkout)"
+    return (
+        f'sdk root not resolved (--sdk-root "{sdk_root_arg}" is not an alp-sdk '
+        f"checkout)"
+    )
+
+
 def _bundle_helper(
     helper: dict,
     build_root: str,
     sdk_root: str | None,
     helpers_dir: str,
     used_names: set[str],
+    sdk_root_arg: str | None = None,
 ) -> dict[str, Any] | _Notice | None:
     """Copy one helper's firmware, or a notice, or `None` for an absent one.
+
+    `sdk_root_arg` is the RAW `--sdk-root` the caller typed, carried only so
+    the unresolved-sdk clause can tell "you passed nothing" apart from "what
+    you passed is not a checkout" (tan-cli#497 defect 6); `sdk_root` remains
+    the RESOLVED root, and is the only one any path operation uses.
 
     `used_names` tracks every destination basename already claimed this run:
     Zephyr's default layout puts EVERY helper's firmware at the same basename
@@ -243,7 +276,7 @@ def _bundle_helper(
     if firmware is None:
         tried = "; ".join(f"{label} {path}" for label, path in candidates)
         if sdk_root is None and not os.path.isabs(raw):
-            tried += "; sdk root not resolved (no --sdk-root and no discoverable checkout)"
+            tried += f"; {_unresolved_sdk_clause(sdk_root_arg)}"
         return _Notice(
             "image.helper-missing",
             "error",
@@ -305,7 +338,11 @@ def _is_file(path: str) -> bool:
 
 
 def _assemble_bundle(
-    build_root: str, sdk_root: str | None, manifest: SystemManifest, yaml_text: str
+    build_root: str,
+    sdk_root: str | None,
+    manifest: SystemManifest,
+    yaml_text: str,
+    sdk_root_arg: str | None = None,
 ) -> tuple[list[_Notice], dict[str, Any], str]:
     """Do the filesystem work: mkdir the bundle tree, tar each ok slice, copy each
     present helper firmware, write `bundle-manifest.json`."""
@@ -321,7 +358,46 @@ def _assemble_bundle(
     notices: list[_Notice] = []
     slice_entries: list[dict[str, Any]] = []
     for slice_ in manifest.slices:
-        if not slice_should_bundle(slice_.get("status")):
+        status = slice_.get("status")
+        if not slice_should_bundle(status):
+            # tan-cli#499 defect 1: a bare `continue` here -- the ONE exclusion
+            # in this function that reported nothing, while `build_dir`-missing,
+            # unsafe-name and the `TBD` helper all emit a notice. Reachable
+            # from a GREEN `tan build`: a slice skipped under executionPolicy
+            # (no `west`/`bitbake`) is written as `status: skipped` and
+            # `build_cmd` keeps a PARTIAL build at ok:true/exit 0, so `tan
+            # image` answered `ok:true`, `exitCode:0`, `issues:[]` and wrote a
+            # `bundle-manifest.json` whose `boot_order` still named a core
+            # `slices[]` carried no artefact for -- a release/OTA consumer
+            # keying on `ok`/`issues[]` ships a bundle missing a core's
+            # firmware.
+            #
+            # A DELIBERATE oracle divergence, measured before diverging:
+            #
+            #   $ target/debug/tan image --format json --build-root build  # tan 0.4.1
+            #   ...,"slices":[{"core_id":"m55_hp",...}],
+            #      "boot_order":[{"core":"m55_hp"},{"core":"a55_0"}]},"issues":[]}
+            #
+            # i.e. the frozen oracle drops it silently too (`image.rs`'s bare
+            # `continue`). Warning severity, not an exit-code flip: this is
+            # the same "already-accounted-for gap" class `_Notice` documents,
+            # and a `failed` status has already exited non-zero at `tan build`.
+            #
+            # Only a DECLARED status reports -- the same narrowing `size`'s
+            # twin guard applies, for the same reason: a manifest that omits
+            # `status` says nothing about whether the slice built, and this
+            # module's reader is "deliberately tolerant, not a validator". It
+            # also confines the divergence to the shape the defect actually
+            # has (`tan build` always writes a `status`) instead of every
+            # hand-written manifest in the parity corpus.
+            if isinstance(status, str):
+                notices.append(
+                    _Notice(
+                        "image.slice-skipped",
+                        "warning",
+                        f"image: skipping {slice_.get('core_id')} (status: {status})",
+                    )
+                )
             continue
         result = _bundle_slice(slice_, build_root, slices_dir)
         if isinstance(result, _Notice):
@@ -332,7 +408,9 @@ def _assemble_bundle(
     helper_entries: list[dict[str, Any]] = []
     used_names: set[str] = set()
     for helper in manifest.helper_mcus:
-        result = _bundle_helper(helper, build_root, sdk_root, helpers_dir, used_names)
+        result = _bundle_helper(
+            helper, build_root, sdk_root, helpers_dir, used_names, sdk_root_arg
+        )
         if result is None:
             continue
         if isinstance(result, _Notice):
@@ -380,6 +458,19 @@ def _empty_bundle() -> dict[str, Any]:
     return assemble_bundle_manifest({}, [], [], [])
 
 
+def _sdk_warning_lines(issues: list[Issue]) -> list[str]:
+    """The text-mode rendering of the `sdk_resolution_issues` pair
+    (tan-cli#497 defect 5). `{severity}: {message}` -- the shape `tan build`
+    and `tan run` already print a resolution warning with, so the same
+    workspace reads the same way whichever command a developer runs.
+
+    Nothing pins the previous silence: `test_text_mode_writes_nothing_to_
+    stdout_and_always_names_the_bundle` asserts only containment, and the
+    oracle text-parity cases redirect HOME and set no `.alp/sdk-path`, so
+    neither warning can fire there."""
+    return [f"{issue.severity}: {issue.message}" for issue in issues]
+
+
 def _error_outcome(
     project: Project,
     context: ProjectContext,
@@ -394,17 +485,23 @@ def _error_outcome(
     `sdk.global-default-foreign-project`, even with `sdk.sourceTier` naming a
     tier that should have triggered one. Takes the whole `context` so every
     caller -- including a bundle-write failure, past the manifest gate -- gets
-    the same pair from the one shared `sdk_resolution_issues`."""
+    the same pair from the one shared `sdk_resolution_issues`.
+
+    tan-cli#497 defect 5: that fix reached `issues` and stopped there -- `text`
+    was built without the pair, so the DEFAULT mode dropped both warnings
+    while `--format json` reported them. Composed from the SAME list now, so
+    the two channels cannot disagree."""
     issues = sdk_resolution_issues(
         context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
     )
+    text = _sdk_warning_lines(issues)
     issues.append(Issue(code, "error", message))
     return _Outcome(
         exit_code,
         _empty_bundle(),
         project,
         issues,
-        [f"image: {message}"],
+        [*text, f"image: {message}"],
         context.sdk,
     )
 
@@ -416,11 +513,26 @@ def _run(
     project_arg: str | None,
     board_yaml_arg: str | None,
     sdk_root_arg: str | None,
+    disclosure: SdkDisclosure,
 ) -> _Outcome:
+    """`disclosure` is the caller's, by reference -- the resolution facts are
+    computed HERE and `image`'s `image.internal-failure` catch-all needs a name
+    to read them from once this function has already raised. See
+    `SdkDisclosure`."""
     context: ProjectContext = resolve_project_context(
         project_arg, board_yaml_arg, sdk_root_arg
     )
     project = context.project()
+    # Recorded the instant the ladder answers, ahead of every other step this
+    # function performs -- all of which can raise something unenumerated.
+    disclosure.record(
+        context.sdk,
+        sdk_resolution_issues(
+            context.broken_project_pin,
+            context.sdk_source_tier,
+            context.foreign_global_default_for,
+        ),
+    )
     app_base = resolve_app_base(app_path, context.workspace_root)
     build_root = resolve_build_root(build_root_arg, app_base)
 
@@ -448,7 +560,9 @@ def _run(
 
     sdk_root = context.sdk.root if context.sdk is not None else None
     try:
-        notices, bundle, bundle_dir = _assemble_bundle(build_root, sdk_root, manifest, yaml_text)
+        notices, bundle, bundle_dir = _assemble_bundle(
+            build_root, sdk_root, manifest, yaml_text, sdk_root_arg
+        )
     except BundleWriteError as err:
         return _error_outcome(
             project,
@@ -469,18 +583,23 @@ def _run(
     )
     issues = [Issue(n.code, n.severity, n.message) for n in notices]
     # The same pair `_error_outcome` above computes for a manifest/bundle-write
-    # refusal, from the same shared `sdk_resolution_issues`.
-    issues.extend(
-        sdk_resolution_issues(
-            context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
-        )
-    )
+    # refusal, from the same shared `sdk_resolution_issues` -- read back off
+    # the disclosure rather than computed a second time, so the happy path, the
+    # refusals and the catch-all cannot disagree.
+    sdk_issues = list(disclosure.issues)
+    issues.extend(sdk_issues)
     return _Outcome(
         exit_code,
         bundle,
         project,
         issues,
-        [n.message for n in notices] + [f"image: bundle ready at {bundle_dir}"],
+        # tan-cli#497 defect 5, happy-path half: a bundle whose helper
+        # firmwares came out of a FALLBACK checkout used to be reported as a
+        # plain `image: bundle ready at ...` with no mention that the project
+        # pin had been ignored.
+        _sdk_warning_lines(sdk_issues)
+        + [n.message for n in notices]
+        + [f"image: bundle ready at {bundle_dir}"],
         context.sdk,
     )
 
@@ -515,6 +634,14 @@ def image(
     resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
+    # tan-cli#497 defect 5, the site the first pass missed. `_error_outcome` and
+    # the happy path both report the SDK-resolution pair; this handler -- which
+    # runs strictly after `resolve_project_context` has already answered --
+    # reported only the crash, so a `.alp/sdk-path` the run ignored stayed
+    # silent on exactly the path where a reader most needs to know which
+    # checkout was in play. Recorded rather than recomputed here: the resolver
+    # is itself one of the things that can raise, and this handler must not.
+    disclosure = SdkDisclosure()
     try:
         outcome = _run(
             app_path=app_path,
@@ -522,25 +649,29 @@ def image(
             project_arg=project,
             board_yaml_arg=board_yaml,
             sdk_root_arg=sdk_root,
+            disclosure=disclosure,
         )
     except Exception as err:  # noqa: BLE001
         # The port's most-repeated defect class: a traceback puts nothing
         # parseable on stdout and the extension renders an empty panel with no
         # error. Anything reaching here is a tan bug, reported as one. Nothing in
         # this handler can itself throw -- `_empty_bundle()` and
-        # `Project(None, None)` are both total, and no path helper is called.
+        # `Project(None, None)` are both total, `_sdk_warning_lines` only
+        # formats, and no path helper is called.
         outcome = _Outcome(
             ExitCode.INTERNAL_FAILURE,
             _empty_bundle(),
             Project(root=None, board_yaml=None),
             [
+                *disclosure.issues,
                 Issue(
                     "image.internal-failure",
                     "error",
                     f"image failed unexpectedly: {type(err).__name__}: {err}",
-                )
+                ),
             ],
-            ["image: internal failure"],
+            [*_sdk_warning_lines(disclosure.issues), "image: internal failure"],
+            disclosure.sdk,
         )
 
     if json_mode:

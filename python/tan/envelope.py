@@ -5,11 +5,58 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from tan.exit_codes import ExitCode
+
+#: Every code point in the UTF-16 surrogate range. A Python `str` may hold one
+#: UNPAIRED -- `os.fsdecode`/`surrogateescape` turns each byte of an
+#: un-decodable filesystem name into exactly one of these (`proj\xffx` ->
+#: `proj\udcffx`) and carries it verbatim into `project.root`, an argv token, a
+#: scanned path in `data`. It is a perfectly ordinary character to `json.dumps`,
+#: which writes it straight through under `ensure_ascii=False` -- but it is NOT
+#: valid UTF-8, so the failure used to land one call later, at `emit()`'s
+#: `print(text)`, as an uncaught `UnicodeEncodeError` AFTER `_serialise()` had
+#: already reported success (tan-cli#491). See `_scrub_lone_surrogates`.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+#: What each one becomes: U+FFFD REPLACEMENT CHARACTER, which is precisely what
+#: the frozen v0.4.1 oracle puts on the wire for the same directory. Measured,
+#: not assumed -- `target/debug/tan inspect --format json` run from a directory
+#: created as `os.fsdecode(b"proj\xffx")` answers
+#: `"root":"...\/proj\xef\xbf\xbdx"` at exit 0 (`\xef\xbf\xbd` is U+FFFD's UTF-8
+#: encoding), because every path Rust puts in the envelope goes through
+#: `Path::to_string_lossy`, whose lossy step is this same substitution, one
+#: replacement character per un-decodable byte. `surrogateescape` is also one
+#: surrogate per un-decodable byte, so the two agree character for character.
+_REPLACEMENT_CHARACTER = "\ufffd"
+
+
+def _scrub_lone_surrogates(text: str) -> str:
+    """`text` with every surrogate code point replaced by U+FFFD.
+
+    Applied to the SERIALISED JSON rather than walked over the payload: a
+    surrogate can arrive in a `data` value, in a `project.root`, in an issue
+    MESSAGE, or in a dict KEY, and one pass over the finished document catches
+    all four for the cost of one regex scan instead of a second full recursive
+    walk beside `json_safe_floats`. Nothing else in the document can be a
+    surrogate -- an astral character is a single non-surrogate code point in a
+    Python `str`, and `json.dumps` escapes the only characters it rewrites
+    (`"`, `\\`, controls) into ASCII -- so every match came from the payload.
+
+    Deliberately NOT `ensure_ascii=True` as a fallback re-serialisation (the
+    first shape tried for tan-cli#491, and rejected against the oracle):
+    that escapes the surrogate as `\\udcff`, which is parseable JSON but is not
+    what the oracle emits, and it also escapes every OTHER non-ASCII character
+    in the same document -- so one bad byte in a path would have turned a
+    perfectly good `Sensör Ölçüm` elsewhere in `data` into `Sens\\u00f6r`,
+    re-opening the byte-for-byte divergence `ensure_ascii=False` exists to
+    close. This substitution touches only the offending characters.
+    """
+    return _LONE_SURROGATE.sub(_REPLACEMENT_CHARACTER, text)
 
 
 def json_safe_floats(value: Any) -> Any:
@@ -153,6 +200,40 @@ class SdkInfo:
         # from every committed golden, because none of them resolves a checkout.
         # `data.sdkPath` stays raw/native on both sides; only this key is posix.
         return {"root": self.root.replace("\\", "/"), "sourceTier": self.source_tier}
+
+
+@dataclass
+class SdkDisclosure:
+    """What a command already knew about its SDK resolution at the moment it
+    blew up, so its OUTER `<command>.internal-failure` catch-all can report it
+    (tan-cli#497 defect 2, the site the first pass missed).
+
+    Every command here splits into a `_run`-style inner function that resolves
+    the SDK and an outer wrapper that guards the whole thing with a bare
+    `except Exception`. The facts -- which checkout answered, and the
+    `sdk.project-pin-unresolved` / `sdk.global-default-foreign-project` pair
+    that says the pin was ignored -- are computed INSIDE the inner function, so
+    the handler in the outer one had no name to read them from and reported the
+    crash alone. `model`/`run` avoided that by resolving in the outer function;
+    the three that could not (their resolution needs paths the inner function
+    resolves) pass one of these down and `record()` into it the instant the
+    pair is known.
+
+    MUTABLE and shared by reference on purpose: the handler must see what the
+    inner call recorded before it raised. Reading an unrecorded disclosure is
+    the honest "nothing was resolved yet" -- `None` and `[]`, exactly what a
+    crash before the ladder ran should report.
+    """
+
+    sdk: SdkInfo | None = None
+    issues: list[Issue] = field(default_factory=list)
+
+    def record(self, sdk: SdkInfo | None, issues: list[Issue]) -> None:
+        """Copies `issues` rather than aliasing it: the caller goes on to
+        `append` command-specific issues onto its own list, and those are not
+        resolution facts -- a crash after them must not report them twice."""
+        self.sdk = sdk
+        self.issues = list(issues)
 
 
 #: The four commands resolving the SDK through `resolve_sdk_root_wide` rather
@@ -314,11 +395,24 @@ class Envelope:
             # `json_safe_floats`: `Infinity`/`-Infinity`/`NaN` are Python's
             # non-standard extension literals, not JSON (tan-cli#387). See that
             # function for why this is a projection and not `allow_nan=False`.
+            #
+            # `_scrub_lone_surrogates`: `ensure_ascii=False` writes a lone
+            # surrogate straight through into the `str` this returns, and
+            # nothing downstream could recover from that -- the encode fails at
+            # `emit()`'s `print(text)`, one call AFTER this function has already
+            # reported success, so the `except` below (whose own comment says
+            # "no payload may ever crash stdout") never sees it and the process
+            # dies with ZERO bytes on stdout (tan-cli#491). Scrubbed HERE, on
+            # the finished document, so `to_json()` -- and therefore
+            # `tan.cli._usage_error_envelope`'s own `print` -- is covered by the
+            # same call.
             return (
-                json.dumps(
-                    json_safe_floats(self._as_dict()),
-                    separators=(",", ":"),
-                    ensure_ascii=False,
+                _scrub_lone_surrogates(
+                    json.dumps(
+                        json_safe_floats(self._as_dict()),
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
                 ),
                 self.exit_code,
             )
@@ -340,8 +434,15 @@ class Envelope:
                     f"failed to serialize command output: {err}",
                 ).as_dict()
             ]
+            # Scrubbed on this arm too: `self.project.as_dict()` is carried into
+            # the fallback verbatim, and `err` itself stringifies whatever the
+            # failed payload held -- either can carry the same lone surrogate,
+            # so the fallback that exists to keep stdout alive must not be the
+            # thing that kills it.
             return (
-                json.dumps(fallback, separators=(",", ":"), ensure_ascii=False),
+                _scrub_lone_surrogates(
+                    json.dumps(fallback, separators=(",", ":"), ensure_ascii=False)
+                ),
                 fallback_code,
             )
 

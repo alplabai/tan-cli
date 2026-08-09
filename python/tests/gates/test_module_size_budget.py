@@ -1136,7 +1136,27 @@ _MODULE_BUDGET: dict[str, int] = {
     # three-sentence message naming `tan doctor`/`tan init`/`tan build` and
     # `tan --help`, since exiting 2 at a user who typed the binary's own name
     # with nowhere to go next is the most-hit dead end in the CLI.
-    "tan/cli.py": 856,
+    # 1008, not 856, MEASURED with `wc -l`, as of tan-cli#546 (= #491 defect 3)
+    # plus #491 defect 4. Three additions, and the growth is overwhelmingly the
+    # RATIONALE, which is the point -- two earlier attempts at #546 each closed
+    # the named defect and reopened it a different way, and a third textual
+    # shape was proposed that the oracle also refutes, so the measurements
+    # ruling all three out live beside the code that replaced them:
+    #  * `_DispatchedCommand` (+ the `_dispatched_json_mode` module state and
+    #    the loop that assigns `cls` across the registration table): records
+    #    whether a subcommand BODY ever ran and what its own `--format`
+    #    resolved to. That is the half of Rust's `match Cli::try_parse()` the
+    #    port never had -- `_wants_json`'s own BEHAVIOUR is unchanged (it is
+    #    Rust's `Err`-arm scan); only its docstring grew, to record the
+    #    narrowed role and the measurement that rules out a third rewrite.
+    #  * `_SIGINT_EXIT_CODE`/`_INTERRUPTED_MESSAGE`/`_interrupted_envelope`:
+    #    the `cli.interrupted` arm, so Ctrl-C stops being reported as
+    #    `cli.parse-error` at an out-of-contract exit 130.
+    #  * `main()`'s handler grew the `ran_in_text_mode` gate both arms read.
+    # Raised rather than extracted: every one of these is about what `main()`
+    # does at the process boundary, and the two constants and the one class
+    # are read only there.
+    "tan/cli.py": 1008,
 }
 
 #: Some of these are `tan/planner/**`, which is a hash-audited MIRROR of

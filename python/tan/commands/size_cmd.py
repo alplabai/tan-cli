@@ -57,6 +57,7 @@ from tan.commands.build_output import (
     resolve_project_context,
 )
 from tan.commands.sdk_cmd import sdk_resolution_issues
+from tan.core.flash_plan import slice_should_flash
 from tan.core.global_flags import accept_global_flags
 from tan.core.pending import is_pending_placeholder
 from tan.core.size import (
@@ -81,7 +82,7 @@ from tan.core.system_manifest import (
     slice_footprint_dirs,
 )
 from tan.env import use_color
-from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
+from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
@@ -375,6 +376,53 @@ def _measure_slice(
     )
     budget = _resolve_slice_budget(sku, core_id, metadata_root)
 
+    # tan-cli#499 defect 2: `size` never consulted the manifest `status`, so a
+    # slice recorded `failed`/`skipped` was still measured from whatever
+    # `zephyr.elf` was left on disk -- RUN 1's artefact -- and emitted as an
+    # ordinary measured row (`source: "size-tool"`, exit 0, `issues: []`).
+    # `overlay_run_results_raw` deliberately PRESERVES the previous
+    # `output_artefact` when a run carries none, and an empty one falls
+    # through to the preserved `build_dir` probe, so the compensation
+    # `build_cmd` applies on the WRITE side does not help. Worse under
+    # `--fail-over-budget`, which then computes its verdict from stale bytes.
+    # This is the same stale-artefact class `flash_plan.slice_should_flash`
+    # and `image_bundle.slice_should_bundle` both guard -- whose own docstring
+    # claims the predicate is "shared on purpose so `flash` and `image` can
+    # never disagree about which artefacts are real"; `size` consulted
+    # neither.
+    #
+    # Only a DECLARED, non-ok status refuses. An ABSENT `status` still
+    # measures, unchanged: a manifest that omits the key says nothing about
+    # whether the slice built, and refusing there would break the oracle
+    # parity every no-status case has today (the whole `test_field_type_
+    # leniency_parity` family, and `test_size_measured_slice_and_the_sdk_
+    # envelope_key`, all write slices with no `status`).
+    #
+    # And only when a measurement was actually SUPPRESSED. When the probe
+    # found nothing anyway the row is already `not-built` for the honest
+    # reason, and saying so in the oracle's own words keeps byte parity on
+    # every frozen case that carries a non-ok status with no artefact behind
+    # it -- so this divergence materialises exactly where the defect does.
+    declared_status = slice_.get("status")
+    stale = (
+        sizes is not None
+        and isinstance(declared_status, str)
+        and not slice_should_flash(declared_status)
+    )
+    if stale:
+        return SliceSize(
+            core_id=core_id,
+            os=os_name,
+            status="not-built",
+            flash_total=budget.flash_total,
+            ram_total=budget.ram_total,
+            note=budget.note,
+            notes=[
+                f"slice did not build (manifest status: {declared_status}); "
+                f"refusing to report a stale measurement from {probed_elf}"
+            ],
+        )
+
     if sizes is None:
         return SliceSize(
             core_id=core_id,
@@ -436,6 +484,14 @@ class _Outcome:
     sdk: SdkInfo | None = None
 
 
+def _sdk_warning_lines(issues: list[Issue]) -> list[str]:
+    """The text-mode rendering of the `sdk_resolution_issues` pair
+    (tan-cli#497 defect 5). `{severity}: {message}` -- the shape `tan build`
+    and `tan run` already print a resolution warning with, so the same
+    workspace reads the same way whichever command a developer runs."""
+    return [f"{issue.severity}: {issue.message}" for issue in issues]
+
+
 def _error_outcome(
     project: Project,
     context: ProjectContext,
@@ -454,17 +510,23 @@ def _error_outcome(
     field so it can compute the same pair `_run` computes on the happy path,
     from the one shared `sdk_resolution_issues` -- no future early return
     through here can drop them again.
+
+    tan-cli#497 defect 5 (the `size` sibling the issue names alongside
+    `image`): that fix reached `issues` and stopped there -- `text` was built
+    without the pair, so the DEFAULT mode dropped both warnings while
+    `--format json` reported them. Composed from the SAME list now.
     """
     issues = sdk_resolution_issues(
         context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
     )
+    text = _sdk_warning_lines(issues)
     issues.append(Issue(code, "error", message))
     return _Outcome(
         ExitCode.RUNTIME_FAILURE,
         build_size_report([]),
         project,
         issues,
-        [f"size: {message}"],
+        [*text, f"size: {message}"],
         context.sdk,
     )
 
@@ -481,11 +543,26 @@ def _run(
     json_mode: bool,
     no_color: bool,
     ci: bool,
+    disclosure: SdkDisclosure,
 ) -> _Outcome:
+    """`disclosure` is the caller's, by reference -- the resolution facts are
+    computed HERE and `size`'s `size.internal-failure` catch-all needs a name
+    to read them from once this function has already raised. See
+    `SdkDisclosure`."""
     context: ProjectContext = resolve_project_context(
         project_arg, board_yaml_arg, sdk_root_arg
     )
     project = context.project()
+    # Recorded the instant the ladder answers, ahead of every other step this
+    # function performs -- all of which can raise something unenumerated.
+    disclosure.record(
+        context.sdk,
+        sdk_resolution_issues(
+            context.broken_project_pin,
+            context.sdk_source_tier,
+            context.foreign_global_default_for,
+        ),
+    )
 
     app_base = resolve_app_base(app_path, context.workspace_root)
     build_root = resolve_build_root(build_root_arg, app_base)
@@ -518,15 +595,19 @@ def _run(
 
     text: list[str] = []
     # The same pair `_error_outcome` above computes for a manifest-gate
-    # refusal, from the same shared `sdk_resolution_issues` -- one source, so
-    # this path and that one can never disagree about whether either warning
-    # applies.
-    issues: list[Issue] = sdk_resolution_issues(
-        context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
-    )
+    # refusal, from the same shared `sdk_resolution_issues` -- read back off
+    # the disclosure rather than computed a second time, so this path, that one
+    # and the catch-all can never disagree about whether either warning applies.
+    issues: list[Issue] = list(disclosure.issues)
     exit_code = ExitCode.SUCCESS
 
     if not json_mode:
+        # tan-cli#497 defect 5, happy-path half: the pair above went into
+        # `issues` and nowhere else, so a measured report solved out of a
+        # FALLBACK checkout printed its table with no mention that the
+        # project pin had been ignored. Ahead of the table so it is not lost
+        # below a long slice list.
+        text.extend(_sdk_warning_lines(issues))
         text.extend(render_table_lines(rows, _use_color(no_color, ci)))
         if size_bin is None:
             text.append(
@@ -602,6 +683,13 @@ def size(
     resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
+    # tan-cli#497 defect 5, the site the first pass missed -- see the twin
+    # comment in `image_cmd.image`. `_error_outcome` and the happy path both
+    # report the SDK-resolution pair; this handler, which runs strictly after
+    # `resolve_project_context` has already answered, reported only the crash.
+    # Recorded rather than recomputed here: the resolver is itself one of the
+    # things that can raise, and this handler must not.
+    disclosure = SdkDisclosure()
     try:
         outcome = _run(
             app_path=app_path,
@@ -614,26 +702,30 @@ def size(
             json_mode=json_mode,
             no_color=no_color,
             ci=ci,
+            disclosure=disclosure,
         )
     except Exception as err:  # noqa: BLE001
         # The port's most-repeated defect class: an uncaught exception escapes as
         # a raw traceback, stdout stays EMPTY, and the extension renders nothing
         # at all with no error on either side. Anything reaching here is a tan
         # bug and is reported as one -- with an envelope. Nothing in this handler
-        # may itself throw: it only formats `err`, and `Project(None, None)` and
-        # `build_size_report([])` are both total.
+        # may itself throw: it only formats `err`, `_sdk_warning_lines` only
+        # formats, and `Project(None, None)` and `build_size_report([])` are
+        # both total.
         outcome = _Outcome(
             ExitCode.INTERNAL_FAILURE,
             build_size_report([]),
             Project(root=None, board_yaml=None),
             [
+                *disclosure.issues,
                 Issue(
                     "size.internal-failure",
                     "error",
                     f"size failed unexpectedly: {type(err).__name__}: {err}",
-                )
+                ),
             ],
-            ["size: internal failure"],
+            [*_sdk_warning_lines(disclosure.issues), "size: internal failure"],
+            disclosure.sdk,
         )
 
     if json_mode:
