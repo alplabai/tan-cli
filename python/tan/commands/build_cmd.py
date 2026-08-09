@@ -143,6 +143,17 @@ _MODE_PLAN = "plan"
 _MODE_MATERIALISE = "materialise"
 _MODE_NATIVE = "native"
 
+#: The ONE top-level directory name a plan's `buildRoot` may name (tan-cli#566),
+#: `tan_core::build_plan::CONSUMER_BUILD_ROOT` in the oracle. Duplicated from
+#: `tan.commands.build.execute._CONSUMER_BUILD_ROOT` rather than imported, for
+#: the reason that module's own copy already records: it is the SDK build-plan
+#: schema's constant, not a value derived from anything in either module, and
+#: the two uses are unrelated (that one gates the sdk-switch-pristine wipe on a
+#: slice's plan-supplied `cwd`; this one refuses the whole plan). Importing a
+#: neighbour's underscore-private name to save four characters would couple
+#: this refusal to that guard's internals.
+CONSUMER_BUILD_ROOT = "build"
+
 #: Flags the oracle's `tan build` declares and this port does not implement,
 #: in the order a run naming several of them is refused. Declaring them is the
 #: whole point: an undeclared flag is a Click `UsageError` -- exit 2,
@@ -1309,6 +1320,86 @@ def _toolchain_for_plan(plan_text: str) -> ToolchainResolution:
     return resolve_toolchain_root()
 
 
+def _build_root_is_consumer_default(build_root: str) -> bool:
+    """Whether a plan's `buildRoot` names the ONE tree this consumer reads
+    back (tan-cli#566) -- `BuildPlan::build_root_is_consumer_default` in the
+    oracle.
+
+    A PATH-COMPONENT comparison, not a string equality, and that distinction
+    is load-bearing in both directions. MEASURED against `target/debug/tan`
+    (`tan 0.4.1`), driving its live-emit native path through a stub planner
+    so an arbitrary `buildRoot` could be handed to it, ten spellings, only
+    that field varying:
+
+        build            rc 0    accepted
+        build/           rc 0    accepted   <- a naive `!= "build"` refuses this
+        ./build          rc 0    accepted   <- and this
+        out              rc 1    build.unsupported-build-root
+        build/sub        rc 1    build.unsupported-build-root
+        BUILD            rc 1    build.unsupported-build-root  (case SENSITIVE)
+        (empty)          rc 1    build.unsupported-build-root
+        ..               rc 1    build.unsupported-build-root
+        ../build         rc 1    build.unsupported-build-root
+        /tmp/abs/build   rc 1    build.unsupported-build-root
+
+    `Path.parts` reproduces all ten: it drops a trailing separator and a
+    leading `./` (so the two accepted aliases stay accepted), keeps `..` and
+    a leading root as components of their own, and is empty for `""`.
+    """
+    return Path(build_root).parts == (CONSUMER_BUILD_ROOT,)
+
+
+def _demoted_artefact_issues(plan: BuildPlan, demotions) -> list[Issue]:
+    """`executionPolicy.missingTool`, applied to a MATERIALISE run's token
+    demotions (tan-cli#565) -- RAISES on `fail`, returns one warning per
+    demoted slice on `skip`.
+
+    `substitute_plan_tokens` STRIPS a demoted slice's `configArtefacts`, so
+    without this the files that slice's core needs are simply absent from
+    both `written` and the disk, at exit 0 with `issues: []` -- a CI step
+    that materialises and then runs `west build` for that core gets DEFAULT
+    Kconfig instead of the project's, with no signal on either side. Routed
+    to `missingTool` because a demotion is a host-provisioning fact, the same
+    seam `_dispatch` routes it to for a run that goes on to dispatch.
+
+    NOT filtered the way `_dispatch`'s `held` is. There, a demoted slice
+    whose backend is unknown or whose `command` is null is left alone because
+    something else already outranks a provisioning fact AT DISPATCH. Nothing
+    is being dispatched here -- the question is only whether a file was
+    written -- so every demotion counts. MEASURED against the oracle with a
+    four-slice plan (demoted + `command: null`; demoted + unknown backend;
+    demoted + ordinary; undemoted): all three demoted slices were reported,
+    under both actions, and only the undemoted slice's artefact was written.
+
+    The two shapes are the oracle's own, verbatim:
+
+      * `skip` -> exit 0, one `warning` PER slice, "slice `x`:
+        configArtefacts not materialised — <reason>".
+      * `fail` -> exit 1, `data: null`, ONE `error` whose message is every
+        slice's "slice `x`: <reason>" sentence joined by newlines.
+
+    `reason` is threaded through verbatim from the demotion rather than
+    re-derived, exactly as `_dispatch` does -- it is the second half of one
+    toolchain resolution (`ToolchainResolution.advice`), and re-deriving it
+    here would let the sentence drift from the value it explains.
+    """
+    action = resolve_action(plan.execution_policy, "missing_tool", PolicyAction.SKIP)
+    if action is PolicyAction.FAIL:
+        raise BuildError(
+            "build.toolchain-root-unresolved",
+            "\n".join(f"slice `{d.core_id}`: {d.reason}" for d in demotions),
+            ExitCode.RUNTIME_FAILURE,
+        )
+    return [
+        Issue(
+            "build.toolchain-root-unresolved",
+            "warning",
+            f"slice `{d.core_id}`: configArtefacts not materialised — {d.reason}",
+        )
+        for d in demotions
+    ]
+
+
 def _build(
     *,
     # Defaulted so `mode` stays optional for the OTHER caller of this engine:
@@ -1359,6 +1450,50 @@ def _build(
         # mean two different exits depending on which module raised it.
         raise BuildError(err.code, err.message, ExitCode.RUNTIME_FAILURE) from err
 
+    # tan-cli#566, and tan-cli#565's `fail` arm: BOTH sit here, between
+    # substitution and `materialise_plan` below, because both must leave a
+    # refused run with NOTHING on disk. `materialise_plan` runs unconditionally
+    # and above the mode check, so a guard placed inside the `_MODE_MATERIALISE`
+    # block below would refuse only AFTER the other slices' files had landed --
+    # measured, the oracle's own refusals leave the tree empty in both cases.
+    #
+    # After substitution, not before, also measured: a plan that is BOTH
+    # `planPathMode: legacy` and `buildRoot: out` is refused by the oracle with
+    # `build.plan-invalid`, not `build.unsupported-build-root`, so the
+    # substitution pass keeps its precedence.
+    #
+    # NATIVE only for the build root (tan-cli#566). The oracle accepts
+    # `buildRoot: out` under `--materialise` AND `--plan` and refuses it only on
+    # the path that goes on to DISPATCH -- measured, all three modes -- and that
+    # split is the right one rather than an inconsistency to iron out: the
+    # hazard is `system-manifest.yaml`, which only a dispatching run writes.
+    # `_MODE_NATIVE` is also what `--execute` and `run_cmd._run` select, so both
+    # of those are covered by the same one check. Nothing narrows to
+    # `--plan-from`: every live plan the in-process planner emits has
+    # `buildRoot: build` (`tan.planner.cli`/`planner_root.emit` default it to
+    # `Path("build")` and `_emit_plan` never overrides), so this can only ever
+    # fire on a plan file, which is exactly the shape the issue reports.
+    if mode == _MODE_NATIVE and not _build_root_is_consumer_default(plan.build_root):
+        raise BuildError(
+            "build.unsupported-build-root",
+            f"plan buildRoot `{plan.build_root}` is not `{CONSUMER_BUILD_ROOT}`; "
+            "tan's flash/size/image/renode read "
+            "`<project>/build/system-manifest.yaml`, so building elsewhere "
+            "would leave them reading a stale or missing manifest",
+            ExitCode.RUNTIME_FAILURE,
+        )
+
+    # MATERIALISE only for the demotions (tan-cli#565): `_MODE_NATIVE` already
+    # routes them, per slice, through `_dispatch`'s own `missing_tool` seam, and
+    # `_MODE_PLAN` returned above without substituting at all. Raises on `fail`,
+    # so nothing below runs; returns the per-slice warnings on `skip`, carried
+    # to the return statement rather than emitted here.
+    demotion_issues = (
+        _demoted_artefact_issues(plan, demotions)
+        if mode == _MODE_MATERIALISE and demotions
+        else []
+    )
+
     # I-20. ALL of them, then dispatch -- never interleaved.
     try:
         materialise_plan(plan, Path(build_root))
@@ -1381,7 +1516,7 @@ def _build(
         return (
             ExitCode.SUCCESS,
             {"schemaVersion": "1", "baseDir": build_root, "written": written},
-            [],
+            demotion_issues,
         )
 
     # Cleared before dispatch, mirroring `run_cmd.py`'s own pattern, so a

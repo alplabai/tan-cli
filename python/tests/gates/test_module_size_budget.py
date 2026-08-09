@@ -872,7 +872,20 @@ _MODULE_BUDGET: dict[str, int] = {
     # `_text_recap` gained the resolved-tool note it now composes for a
     # failed/cancelled slice (never folded into `reason` -- see both
     # functions' own docstrings).
-    "tan/commands/build_cmd.py": 1908,
+    # 2043, not 1908, as of tan-cli#566 + tan-cli#565: two pre-materialise
+    # guards in `_build` plus their helpers. `_build_root_is_consumer_default`
+    # (27 lines) carries the ten-spelling accept/refuse matrix measured off
+    # `target/debug/tan`, which is the only thing that says why the comparison
+    # is on `Path.parts` and not `!= "build"` -- `build/` and `./build` are
+    # ACCEPTED by the oracle. `_demoted_artefact_issues` (49) carries the two
+    # measured shapes `executionPolicy.missingTool` takes in materialise mode
+    # and why it does NOT filter on backend/command the way `_dispatch`'s
+    # `held` does. The rest is the comment block in `_build` recording why
+    # both guards sit ABOVE `materialise_plan` (which runs before the mode
+    # check, so a guard inside the materialise branch would refuse only after
+    # the other slices' files had landed) and why the build-root one is scoped
+    # to `_MODE_NATIVE`. Measured `wc -l`, not arithmetic.
+    "tan/commands/build_cmd.py": 2043,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
