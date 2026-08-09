@@ -80,6 +80,153 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan/planner/` re-synced against alp-sdk `ccd34f06`, closing nine planner
+  defects that were already fixed upstream.** `tan/planner/` is a hash-audited
+  verbatim mirror of alp-sdk's `scripts/alp_orchestrate/`; three upstream PRs
+  (alp-sdk#1345 `f6dcad09`, #1347 `cf4ba601`, #1348 `f01a2b94`) had merged
+  while the mirror still carried the pre-fix shape, so every one of these
+  reproduced on `dev` verbatim. All four SDK pin sites move together —
+  `PINNED_SDK_COMMIT` and `HAND_PORT_PINNED_SDK_COMMIT` in
+  `python/tests/gates/test_planner_relocation_freshness.py`, `PINNED_SDK_TAG`
+  in `.github/workflows/parity.yml`, and `ci.yml`'s `sdk_parity` checkout
+  `ref:` — because a port without the bump, or a bump without the port, reds a
+  seam either way. `STRICT_LOADERS_PINNED_SDK_COMMIT` deliberately does NOT
+  move: `scripts/strict_loaders.py` is byte-identical between `26b0040e` and
+  `ccd34f06` (re-hashed, not assumed). alp-sdk#1344 is still OPEN and
+  CONFLICTING upstream, so #550 and #551 are NOT claimed here.
+  - **Two IPC carve-outs could resolve onto one physical address, both
+    reporting `ok`.** `resolve_carve_outs` honoured an explicit
+    `ipc[].address:` after checking 4 KiB page alignment and nothing else — no
+    overlap check against carve-outs already placed, and no bounds check that
+    the pinned range lay inside the region it was then LABELLED with.
+    Placement now runs in two passes (pins first, then the bump allocator
+    around them, tracked in `placed_spans`), keyed by INDEX rather than name
+    because `board.schema.json` does not require `ipc[].name` to be unique.
+    Measured on `E1M-V2N101` with the issue's own board.yaml: `a_chan` and
+    `b_chan` both came back `ok` at `0x80000`, and `wild_chan`'s
+    `address: 0xDEADB000` — inside no declared region at all — came back `ok`
+    tagged `region: ocram_low`. After: `a_chan` `0x70000`, `b_chan` `0x80000`,
+    and `wild_chan` `blocked` naming every window its endpoints can reach.
+    (#552)
+  - **A DDR carve-out landed where the Cortex-M33 cannot reach it.** The
+    top-down allocator only ever bounds-checked downward, so a `cacheable:
+    true` entry ranking into `ddr_main` (base `0x48000000`, 4 GiB) was placed
+    at the very top of it and `<alp/system_ipc.h>` carried
+    `0x147f80000` — a 33-bit address that truncates to `0x47f80000`, BELOW the
+    DDR base, when cast to a pointer on the M33. `memory_map:` regions may now
+    declare per-core `access_windows:`, and `_endpoint_window` intersects them
+    across every endpoint before allocating; the RZ/V2N CM33's window is
+    256 MiB per Renesas FSP `bsp_slave_address.h`, not the region's whole
+    4 GiB. Same board.yaml, after: `0x4ff80000`. (#553)
+  - **A pinned `storage[].offset_kib:` was silently dropped from
+    `dts-partitions.dtsi`.** Storage entries are name-sorted and the bump
+    allocator only ever saw siblings placed BEFORE the entry it was placing, so
+    a pin that sorts late collided with a sibling already put on top of it and
+    was refused — `status: blocked` inside `system-manifest.yaml`, absent from
+    the generated dtsi, `CONFIG_FILE_SYSTEM_LITTLEFS` never emitted, and the
+    build reporting success. Placement is now two-pass here too, and
+    `high_water_bytes` advances to `base_bytes + size_aligned` rather than
+    being left where a skipped pin found it. Measured on alp-sdk
+    `docs/board-config-features.md`'s own `storage:` example (E1M-AEN301):
+    `pinned_low` was `blocked`, `app_data` sat at 0; after, all four are `ok`
+    and disjoint, `pinned_low` honoured at 0. (#554)
+  - **A core-scoped `libraries:` entry bypassed the ADR-0018 library layer and
+    emitted a fabricated `lib-<name>` recipe.** `resolve_selection` read only
+    `project.libraries`, so an entry carrying `cores:` got no unknown-name
+    refusal, no `requires:` check and no read of
+    `integration.yocto.image_install` — and `_slice_local_conf` invented the
+    package name from the library name. `bitbake alp-image-edge` then died on
+    `Nothing RPROVIDES 'lib-mbedtls'`. `scoped_names` now feeds BOTH
+    declaration channels through the same layer, a core-scoped entry
+    additionally goes through `_check_slice_requires` against that one slice,
+    and every recipe name comes from the manifest. Measured on alp-sdk's own
+    unmodified `examples/multicore/rpmsg-v2n`: `IMAGE_INSTALL:append = "
+    lib-mbedtls lib-nlohmann-json"`; after, two explanatory comments naming
+    that neither manifest declares an `integration.yocto:` section at all —
+    the honest emit for those two is nothing. (#555)
+  - **`ota.poll_interval_s` (SECONDS) was written verbatim into
+    `CONFIG_HAWKBIT_POLL_INTERVAL` (MINUTES), a 60x dilation.** Zephyr declares
+    the symbol in whole minutes with `range 1 43200`
+    (`subsys/mgmt/hawkbit/Kconfig:29-33`) and multiplies by `SEC_PER_MIN` at
+    runtime (`hawkbit.c:57`), so the board schema's own 1800 s default became
+    1800 minutes = **30 hours**. `_hawkbit_poll_line` converts, and refuses a
+    value that cannot be expressed in whole minutes or that falls outside
+    Zephyr's declared range instead of emitting one the configure aborts on.
+    Measured: `poll_interval_s: 1800` emitted `CONFIG_HAWKBIT_POLL_INTERVAL=1800`;
+    after, `CONFIG_HAWKBIT_POLL_INTERVAL=30`. (#557)
+  - **`ota.server.url` was written verbatim into `CONFIG_HAWKBIT_SERVER`, where
+    Zephyr needs a bare host.** That string is fed to `zsock_getaddrinfo()`,
+    used as the TLS hostname and as the HTTP `Host:` header, so
+    `https://hosted.mender.io` was a DNS lookup that can never resolve — and
+    the scheme was dropped semantically, with no `CONFIG_HAWKBIT_PORT` and no
+    `CONFIG_HAWKBIT_USE_TLS` emitted. `_split_server_url` decomposes the URI by
+    hand (not `urlsplit`, whose `.hostname` lowercases and would mangle a
+    `${VAR}` placeholder) and refuses a base path, userinfo, a non-HTTP scheme
+    or an invalid port rather than emitting something the client cannot use.
+    Measured: `CONFIG_HAWKBIT_SERVER="https://hosted.mender.io"` alone; after,
+    `CONFIG_HAWKBIT_SERVER="hosted.mender.io"` + `CONFIG_HAWKBIT_PORT=443` +
+    `CONFIG_NET_SOCKETS_SOCKOPT_TLS=y` + `CONFIG_HAWKBIT_USE_TLS=y`. (#558)
+  - **`diagnostics.modules:` emitted `CONFIG_<MOD>_LOG_LEVEL=<n>`, a form that
+    could not build for ANY key.** Zephyr's per-module int is PROMPTLESS and
+    derived from the `<MOD>_LOG_LEVEL_{OFF,ERR,WRN,INF,DBG}` choice, so a
+    legitimate key aborted the configure with `I2C_LOG_LEVEL ... is not
+    directly user-configurable (has no prompt)` and a typo aborted it as an
+    undefined symbol — while `board.schema.json` documented the choice-symbol
+    form all along. The emit is now `CONFIG_<MODULE>_LOG_LEVEL_<LEVEL>=y`,
+    gated on a `_LOG_MODULES` table transcribed from the pinned Zephyr v4.4.1
+    tree: a live line requires EVERY guard symbol AND the module's logging gate
+    (`LOG`, or `NET_LOG` for the networking modules) to be `=y` in this very
+    fragment, because assigning a defined-but-undeclared choice symbol is
+    SILENT — exit 0, override discarded. Two entries need more than one guard
+    (`mbedtls` needs `MBEDTLS` **and** `MBEDTLS_DEBUG`; `net_ipv4` needs
+    `NET_IPV4` **and** `NET_NATIVE`). Measured on `{i2c: warn, my_typo_module:
+    debug}`: `CONFIG_I2C_LOG_LEVEL=2` + `CONFIG_MY_TYPO_MODULE_LOG_LEVEL=4`;
+    after, `CONFIG_I2C_LOG_LEVEL_WRN=y` plus a comment naming the unknown
+    module. (#559)
+  - **A Yocto-only V2N project with `boot.signing.algorithm: rsa3072` failed
+    its ENTIRE build-plan emit with MCUboot advice.** `emit_sysbuild_conf`
+    hard-defaulted `boot.method:` to `mcuboot` for every SoM family and then
+    raised on `rsa3072` — the value `validate.py` PERMITS for `renesas-rzv2n`
+    precisely because its boot chain is the U-Boot/FIT stack, not sysbuild.
+    `_FAMILY_BOOT_METHOD_DEFAULTS` implements the per-family default
+    `board.schema.json` has always documented (AEN/N93 -> `mcuboot`,
+    V2N/V2N-M1 -> `none`), an unrecognised `family:` token keeps the historical
+    `mcuboot`, and a project with no Zephyr slice at all now gets no sysbuild
+    overlay rather than a refusal. Measured on the issue's board.yaml:
+    `OrchestratorError` out of `emit_build_plan`; after, the plan emits and
+    `emit_sysbuild_conf` returns `''`. (#562)
+  - **The three hw_rev safety gates failed open on an unreadable family
+    `hw-revisions.yaml`.** `_load_family_table` swallowed `OSError` and
+    `yaml.YAMLError` and answered `{}`, which the unknown-revision, the
+    not-buildable and the SDK-version-range gate all read as "nothing to
+    judge" — so one tab-indented line disabled all three at once and shipped a
+    wrong-hardware artefact at exit 0. It is now the PUBLIC
+    `load_family_table` and refuses four distinct present-but-unusable shapes
+    (unreadable, unparseable, not a mapping, no `hw_revisions:` block) with one
+    `OrchestratorError` naming the file; an ABSENT table still returns `{}` and
+    stays benign, because a family that ships no table genuinely has nothing to
+    check against. `project_loader._hwrev_pad_route_overrides` — which carried
+    its own copy of these gates for the `--emit composed-route-table` /
+    `carrier-netlist` path and its own `yaml.safe_load(...) or {}` — reads
+    through the same function now, so the two readers cannot disagree about
+    whether a damaged table is fatal. Measured with an EMPTY, a TRUNCATED and a
+    tab-indented `metadata/e1m_modules/aen/hw-revisions.yaml`: an unknown
+    `hw_rev` was accepted on all three (and the sibling reader escaped a raw
+    `yaml.ScannerError` on the third); after, all six paths refuse with the
+    same coded message. (#563)
+  - **`tests/gates/test_jlink_aen_device_freshness.py` no longer reds on a
+    deliberate upstream fact.** alp-sdk#1300 — which IS `ccd34f06` — populated
+    the BS0 package variant's `debug.jlink_flash_device`, so `e8.json` now
+    declares TWO distinct values and `doctor_cmd.jlink_flash_device` correctly
+    takes its documented ambiguity fallback instead of picking one. The gate
+    now asserts the property that survives that (`JLINK_AEN_DEVICE` must still
+    be ONE OF the values the bound `e8.json` declares) and keeps the stricter
+    "came from the metadata-resolved branch" assertion for the unambiguous
+    case it was written for; the ambiguous branch is asserted to be the branch
+    that answered, so a regression that silently picks whichever variant
+    serialises first still goes red. Verified green bound to BOTH `f30f4d4b`
+    (one value) and `ccd34f06` (two).
+
 - **`tan debug-config` wrote a launch configuration for a project it had no
   evidence of, and accepted a `--core` no such project has.** The two
   survivors their merging PRs recorded as `Refs`, not `Closes`.

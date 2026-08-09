@@ -53,8 +53,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from . import sdk_compat
 from .loader import _load_yaml
 from .models import OrchestratorError, SdkRevisionNotBuildable, SdkRevisionUnknown
@@ -186,6 +184,21 @@ def _hwrev_pad_route_overrides(
     imported, so a caller does not see two different shapes of the same
     problem depending on which path resolved it; keep the two in sync by
     hand if either one's message wording changes.
+
+    Reads the table through ``sdk_compat.load_family_table()`` rather than
+    its own ``yaml.safe_load``, so both independent readers of this file
+    agree about what a damaged one means (#563).  This site used to do
+    ``yaml.safe_load(...) or {}``, and that ``or {}`` FAILED OPEN on the
+    two shapes that parse without raising: an EMPTY file and a file
+    TRUNCATED above its ``hw_revisions:`` block both yielded ``{}``, both
+    gates above then read "nothing to judge", and ``--emit
+    composed-route-table`` shipped a wrong-hardware artefact at exit 0 for
+    an hw_rev that does not exist -- the exact outcome the two gates below
+    exist to prevent.  An unparseable table escaped as a raw
+    ``yaml.ScannerError`` traceback: a refusal, but not a diagnosable one.
+    The shared reader turns all of those into one coded
+    ``OrchestratorError`` naming the file.  An ABSENT table still returns
+    ``{}`` there and stays benign here.
     """
     if not hw_rev:
         return []
@@ -193,10 +206,12 @@ def _hwrev_pad_route_overrides(
         family = _sku_family(sku)
     except ValueError:
         return []
-    path = metadata_root / "e1m_modules" / family / "hw-revisions.yaml"
-    if not path.is_file():
+    data = sdk_compat.load_family_table(metadata_root, family)
+    if not data:
+        # Absent table only: `load_family_table` raises on every
+        # present-but-unusable shape, so reaching here with a falsy
+        # `data` means the family genuinely ships no table.
         return []
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if sdk_compat.revision_known(data, hw_rev) is False:
         available = sorted((data.get("hw_revisions") or {}).keys())
         raise SdkRevisionUnknown(

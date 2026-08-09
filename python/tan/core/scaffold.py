@@ -25,11 +25,17 @@ the next SDK CMake change. It ran ONCE, at vendor time, and its output is what
 `vendored/` holds.
 
 **Hardware facts (the one documented exception).** `app_core_for_sku` maps a SKU
-prefix to a core id, and `_family_bucket` maps one to a vendored tree. Both are
-ported verbatim from the Rust, both are the *only* hardware knowledge in the
-port, and both exist because a scaffold has to name a core before any SDK is
-reachable -- `tan validate` re-checks the guess once one is. Do not grow this:
-no SKU list, no addresses, no pin names. Note what is NOT here as a result: the
+prefix to a core id, and `_family_bucket` maps one to a vendored tree. Both
+descend from the Rust, both are the *only* hardware knowledge in the port, and
+both exist because a scaffold has to name a core before any SDK is reachable --
+`tan validate` re-checks the guess once one is. They now read ONE table
+(`_SOM_FAMILIES`), which is what makes "the two derivations can never disagree"
+true rather than aspirational: tan-cli#579 is exactly the bug where they did,
+`app_core_for_sku` having grown an `E1M-NX9` arm that `_family_bucket` never
+got, so an NXP `--som` silently rendered the ALIF tree's content. A family the
+table knows has no vendored tree is now REFUSED (`UnsupportedSomError` ->
+`init.som-unsupported`), never rendered against another vendor's. Do not grow
+this: no SKU list, no addresses, no pin names. Note what is NOT here as a result: the
 OS is never selected (I-01/I-02) -- every generated core entry is `os: zephyr`
 because the app source this scaffold writes is Zephyr source, and a scaffolded
 `board.yaml` carries no top-level `os:` key at all.
@@ -99,6 +105,39 @@ IOT_STARTER_SUPPORTED_SKU = "E1M-AEN801"
 #: the two representative SKUs the SDK catalog declares.
 _FAMILY_TREES = ("E1M-AEN801", "E1M-V2N101")
 
+#: SoM family table: `(SKU prefix, app-core id, vendored tree)`, consulted in
+#: order. A `None` tree means tan vendors NO scaffold for that family.
+#:
+#: ONE table, read by BOTH `app_core_for_sku` and `_family_bucket`, which is
+#: what makes this module's docstring claim -- "the two derivations can never
+#: disagree" -- true by construction instead of by two hand-synced prefix
+#: tests. tan-cli#579: they DID disagree. `app_core_for_sku` grew an
+#: `E1M-NX9` -> `m33` arm and `_family_bucket` did not, so every NXP SKU took
+#: the latter's `else` arm onto the Alif tree.
+_SOM_FAMILIES: tuple[tuple[str, str, str | None], ...] = (
+    ("E1M-V2N", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2N
+    ("E1M-V2M", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2M -- shares the V2N tree
+    ("E1M-NX9", "m33", None),                  # NXP -- alp-sdk's catalog ships no tree
+)
+
+#: `(app core, tree)` for E1M-AEN* AND for any prefix `_SOM_FAMILIES` does not
+#: recognise. Deliberately still a guess rather than a refusal: `tan init` is
+#: SDK-free and cannot tell a future SKU from a typo, and guessing Alif is
+#: what every version of this module has done. What matters is that BOTH
+#: derivations take this arm together, so an unrecognised SKU still gets a
+#: self-consistent scaffold; `tan validate` re-checks the guess once an SDK
+#: resolves.
+_DEFAULT_FAMILY: tuple[str, str] = ("m55_hp", _FAMILY_TREES[0])
+
+
+def _som_family(sku: str) -> tuple[str, str | None]:
+    """`(app-core id, vendored tree)` for `sku` -- the single lookup both
+    hardware-adjacent derivations below are built on."""
+    for prefix, core, tree in _SOM_FAMILIES:
+        if sku.startswith(prefix):
+            return core, tree
+    return _DEFAULT_FAMILY
+
 
 def _read_verbatim(path: Path) -> str:
     """Read `path` as UTF-8 text with newlines UNTRANSLATED.
@@ -156,6 +195,55 @@ class TemplateDataError(Exception):
     `--add-data` that carries it, which is why this is an exception with its own
     issue code instead of an `IOError` escaping as a traceback.
     """
+
+
+class UnsupportedSomError(Exception):
+    """`--som` names a SoM family tan vendors no scaffold tree for, so the
+    requested template cannot be rendered for it (tan-cli#579).
+
+    A USER error (exit 2), not a broken installation: the tree is not missing,
+    it was never captured, because alp-sdk's own scaffold catalog declares no
+    entry for that family. `init_cmd` reports it as `init.som-unsupported`.
+
+    Refusing is the whole point, and it is a DELIBERATE divergence from the
+    frozen v0.4.1 oracle -- measured, `target/debug/tan init --som E1M-NX9101
+    --template sensor-starter` exits 0 with `issues: []` and writes the Alif
+    tree. The two alternatives were weighed and rejected:
+
+    * **Vendor an NXP tree.** Not tan's to write. `templates/vendored/` is a
+      byte-for-byte capture of alp-sdk's `--emit scaffold` output (see its
+      `MANIFEST.md`), and `tests/parity/scaffold_byte_parity.py` re-runs the
+      live emit against a reachable checkout and fails on drift. A tree
+      hand-authored here would be tan inventing hardware facts (I-26) AND
+      would fail that gate the moment an SDK is reachable. When alp-sdk adds
+      the catalog entry, this refusal retires by filling in one table row in
+      `_SOM_FAMILIES`.
+    * **Fall back with a loud advisory.** The wrong-vendor project still
+      lands on disk, gets committed, and stays wrong: its `CMakeLists.txt`
+      asks the SDK loader for the tree family's core while the `board.yaml`
+      beside it declares the target's, its README's `west build -b ...` line
+      names another vendor's board target, and its `chips:`/`preset:` describe
+      another module's BOM. A one-line warning on one terminal, once, does not
+      undo that.
+
+    Scoped to the VENDORED templates: `minimal-app` is tan's own
+    hand-generated, vendor-neutral stub and stays available for every SKU --
+    which is what makes refusing cheap rather than a dead end.
+    """
+
+    def __init__(self, template_id: str, sku: str) -> None:
+        super().__init__(
+            f"Template '{template_id}' has no vendored scaffold for SoM '{sku}'. "
+            f"tan ships scaffold trees for the E1M-AEN* and E1M-V2N*/E1M-V2M* "
+            f"families only; rendering one of those for this SoM would write "
+            f"another vendor's content under your SKU -- its board.yaml "
+            f"`preset:`/`chips:`, its README's `west build -b ...` target, and a "
+            f"CMakeLists.txt pinned to that family's core. Use `--template "
+            f"minimal-app`, which is vendor-neutral and scaffolds any SoM, or "
+            f"`--from-example <example>` with an alp-sdk checkout."
+        )
+        self.template_id = template_id
+        self.sku = sku
 
 
 class ExampleReadError(Exception):
@@ -242,24 +330,27 @@ def is_plain_relative(raw: str) -> bool:
 
 def app_core_for_sku(sku: str) -> str:
     """Canonical Zephyr app-core id for a SoM family. `tan init` is SDK-free,
-    so this maps by SKU prefix; `tan validate` re-checks it against the real SoM
-    catalogue once an SDK resolves. Used ONLY by the hand-generated
-    `minimal-app` template -- every vendored template's core id comes from its
-    own vendored `board.yaml`, so the two derivations can never disagree."""
-    if sku.startswith(("E1M-V2N", "E1M-V2M")):
-        return "m33_sm"  # Renesas RZ/V2N, RZ/V2M
-    if sku.startswith("E1M-NX9"):
-        return "m33"  # NXP
-    return "m55_hp"  # Alif Ensemble (E1M-AEN*) + default
+    so this maps by SKU prefix (`_SOM_FAMILIES`); `tan validate` re-checks it
+    against the real SoM catalogue once an SDK resolves. Read by the
+    hand-generated `minimal-app` template and by `retarget_board_yaml_cores`,
+    and derived from the SAME table `_family_bucket` reads, so the two
+    derivations cannot disagree (tan-cli#579)."""
+    return _som_family(sku)[0]
 
 
-def _family_bucket(sku: str) -> str:
-    """The vendored tree directory for `sku`, mirroring `app_core_for_sku`'s own
-    family split. An unrecognised family (E1M-NX9* included -- the SDK catalog
-    ships no NXP scaffold) defaults to the Alif tree rather than inventing
-    content or erroring; `retarget_board_yaml_som` still puts the caller's real
-    SKU in the rendered `board.yaml`."""
-    return _FAMILY_TREES[1] if sku.startswith(("E1M-V2N", "E1M-V2M")) else _FAMILY_TREES[0]
+def _family_bucket(sku: str) -> str | None:
+    """The vendored tree directory for `sku`, or `None` when tan vendors no
+    scaffold for that SoM family -- `_vendored_files` turns that into an
+    `UnsupportedSomError`.
+
+    tan-cli#579: this used to be
+    `_FAMILY_TREES[1] if sku.startswith(("E1M-V2N","E1M-V2M")) else
+    _FAMILY_TREES[0]`, so E1M-NX9* -- a family `app_core_for_sku` right above
+    already knows -- fell down the `else` arm and got the ALIF tree's content,
+    at `ok: true` / exit 0 / `issues: []`. An unrecognised prefix still takes
+    the Alif default, in both derivations at once (see `_DEFAULT_FAMILY`);
+    only a family tan positively knows it has no tree for is refused."""
+    return _som_family(sku)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -702,13 +793,35 @@ def splice_companion_cores(board_yaml: str, cores: list[tuple[str, str]]) -> str
 def plan_template_files(template_id: str, sku: str) -> list[PlannedFile]:
     """The files `template_id` lays down for `sku`.
 
-    Raises `TemplateDataError` when a vendored tree cannot be read, and
-    `KeyError`-free otherwise: the caller has already validated `template_id`
-    against `TEMPLATE_IDS`.
+    Raises `TemplateDataError` when a vendored tree cannot be read,
+    `UnsupportedSomError` when tan vendors no tree for `sku`'s SoM family
+    (tan-cli#579), and is `KeyError`-free otherwise: the caller has already
+    validated `template_id` against `TEMPLATE_IDS`.
+
+    `minimal-app` can never raise the second: it is hand-generated here and
+    vendor-neutral, so it scaffolds every SKU -- see `UnsupportedSomError`.
     """
     if template_id == "minimal-app":
         return _minimal_app_files(sku)
     return _vendored_files(_VENDORED_TEMPLATE_DIR[template_id], template_id, sku)
+
+
+def _vendored_family(template_id: str, sku: str) -> str:
+    """Which family subdirectory `template_id` reads for `sku` -- and the one
+    place that refuses a SoM family tan vendors no tree for (tan-cli#579).
+
+    Split out of `_vendored_files` (which does the IO) so the family choice --
+    the decision tan-cli#579 got wrong -- is one small pure lookup with its
+    refusal beside it. Raising HERE means the caller's run fails before a
+    single byte of another vendor's tree is read, so no half-planned project
+    can escape.
+    """
+    # `iot` has exactly one vendored tree, no family split (its caller rejects
+    # any other SKU first); every other template has two.
+    family = IOT_STARTER_SUPPORTED_SKU if template_id == "iot-starter" else _family_bucket(sku)
+    if family is None:
+        raise UnsupportedSomError(template_id, sku)
+    return family
 
 
 def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
@@ -730,9 +843,7 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     `CMakeLists.txt` there and after it on Linux -- the same command emitting a
     different `fileChanges[]` order per platform.
     """
-    # `iot` has exactly one vendored tree, no family split (its caller rejects
-    # any other SKU first); every other template has two.
-    family = IOT_STARTER_SUPPORTED_SKU if template_id == "iot-starter" else _family_bucket(sku)
+    family = _vendored_family(template_id, sku)
     root = VENDORED_ROOT / tree / family
     try:
         paths = _example_source_files(root) if root.is_dir() else []

@@ -292,7 +292,41 @@ env:
   # `bootstrap_manifest_parity.py` is NOT driven by this pin and is not run in
   # CI -- `contract/` stays frozen at its own v0.14.0 vendor point, so its
   # `DIFFERS` against any newer ref is the expected, documented answer.
-  PINNED_SDK_TAG: f30f4d4ba76c235cbb2b2cc713666cb858677e03
+  #
+  # `f30f4d4b` -> `ccd34f06` (tan-cli#552/#553/#554/#555/#557/#558/#559/#562/
+  # #563). Three upstream commits touch `scripts/alp_orchestrate/` in this
+  # range -- alp-sdk#1345 (two-pass carve-out/partition placement +
+  # `access_windows:`), #1347 (the family-table reader stops failing open; the
+  # per-family `boot.method:` default) and #1348 (Hawkbit URI/units, the
+  # log-level choice-symbol form, the core-scoped library layer) -- plus
+  # #1347's other half in `scripts/alp_project_loader.py`, a HAND_PORT file.
+  # All four pin sites move in this one change: this tag, `ci.yml`'s
+  # `sdk_parity` checkout `ref:`, and BOTH `PINNED_SDK_COMMIT` and
+  # `HAND_PORT_PINNED_SDK_COMMIT` in
+  # `python/tests/gates/test_planner_relocation_freshness.py`.
+  # `STRICT_LOADERS_PINNED_SDK_COMMIT` does NOT move and is not stale:
+  # `scripts/strict_loaders.py` is byte-identical between `26b0040e` and
+  # `ccd34f06` (re-hashed, not assumed -- `29cd2c62...`, the value
+  # `STRICT_LOADERS_HASH` already carries), so its audit still holds at its
+  # own, deliberately separate, pin.
+  #
+  # alp-sdk#1344 is deliberately NOT picked up: still OPEN and CONFLICTING
+  # upstream, so tan-cli#550/#551 stay open and are not claimed here.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `ccd34f06` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, NO re-vendor: nothing
+  #     under `examples/`, `metadata/catalog*` or the scaffold templates moved
+  #     in this range (the whole diff is `scripts/`, `metadata/schemas|socs`,
+  #     `docs/`, `tests/` and CHANGELOG), so `python/tan/templates/vendored/`
+  #     stays at its `f30f4d4b` vendor point -- see that tree's `MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0
+  #
+  # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
+  # predates every commit this bump exists to pick up.
+  PINNED_SDK_TAG: ccd34f0648cc4f26a3230f337935050cd999d8a0
 
 jobs:
   seam1-plan-shape:

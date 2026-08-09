@@ -12,10 +12,12 @@ Four properties this file exists to hold:
 **Every failure is a coded issue, never a traceback.** An unknown template, an
 unwritable destination, a destination that is a file, files already in the way,
 a missing SDK checkout for `--from-example`, a vendored template tree that will
-not read -- each maps to an `issues[].code` and an exit code. This is the port's
-recurring bug class: an uncaught exception replaces the envelope with a Python
-traceback on stderr, and the extension parses stdout, so it renders NOTHING with
-no error visible on either side. The catch-all at the bottom of `init` is the
+not read, a `--som` whose SoM family has no vendored tree at all
+(`init.som-unsupported`, tan-cli#579) -- each maps to an `issues[].code` and an
+exit code. This is the port's recurring bug class: an uncaught exception
+replaces the envelope with a Python traceback on stderr, and the extension
+parses stdout, so it renders NOTHING with no error visible on either side.
+The catch-all at the bottom of `init` is the
 backstop for the case nobody enumerated.
 
 **`--preview` writes nothing.** Not one directory, not one file, not even the
@@ -108,6 +110,7 @@ from tan.core.scaffold import (
     PlannedFile,
     ScaffoldWriteError,
     TemplateDataError,
+    UnsupportedSomError,
     collect_file_changes,
     is_plain_relative,
     parse_cores,
@@ -488,6 +491,18 @@ def _plan_from_template(
         )
     try:
         files = plan_template_files(template_id, sku)
+    except UnsupportedSomError as err:
+        # tan-cli#579. A VALIDATION failure, not an internal one: the tree is
+        # not missing from the install, it was never captured -- alp-sdk's
+        # scaffold catalog declares no entry for this SoM family -- so the
+        # actionable thing is the `--som`/`--template` pair the customer typed.
+        # Distinct from `init.invalid-som` above, which says "this TEMPLATE
+        # supports one SKU"; this one says "tan has no scaffold for this SoM
+        # family at all, in any family-split template". `UnsupportedSomError`
+        # itself records why refusing beats vendoring or warning.
+        raise InitError(
+            "init.som-unsupported", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
     except TemplateDataError as err:
         # tan's own template data is unreadable -- a broken installation (or a
         # frozen binary built without the template `--add-data`), not a project
