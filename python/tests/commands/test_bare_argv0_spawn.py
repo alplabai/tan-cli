@@ -30,7 +30,7 @@ from tan.commands import flash_cmd, size_cmd
 from tan.commands.build import execute as execute_module
 from tan.core.bootstrap import venv_layout
 from tan.core.flash_plan import FlashInputs, FlashPlan
-from tan.core.tool_lookup import ToolResolution
+from tan.core.tool_lookup import ToolResolution, windows_candidate_names
 
 
 def createprocess_would_load(argv0: str, executable: str | None, cwd: str, path: str) -> str:
@@ -520,7 +520,6 @@ def test_the_windows_walk_never_considers_the_bare_extensionless_name(tool, expe
     precisely so this runs on Linux CI, where `resolve_tool`'s Windows branch
     cannot be reached at all (`Path` dispatches on `os.name` at construction,
     so patching `os.name` raises rather than reaching it)."""
-    from tan.core.tool_lookup import windows_candidate_names
 
     names = windows_candidate_names(tool, ".COM;.EXE;.BAT;.CMD")
     assert names == expected
@@ -539,7 +538,6 @@ def test_an_empty_pathext_entry_never_becomes_the_bare_name_by_accident():
     the same reason the `%PATH%` walk itself skips empty directory entries,
     and the same class of defect as
     `test_an_empty_path_entry_is_never_the_current_directory` above."""
-    from tan.core.tool_lookup import windows_candidate_names
 
     assert windows_candidate_names("npm", ".COM;;.EXE;") == ["npm.COM", "npm.EXE"]
     assert windows_candidate_names("npm", "") == []

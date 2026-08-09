@@ -61,9 +61,13 @@ suffixed sibling. Three reasons the oracle's shape is the one to consolidate on:
 What is given up is bare-identity DISCOVERY of an extension-less file that is
 a valid PE. Windows will execute one of those -- `.exe` is appended only to a
 name carrying no path -- and that capability is untouched here: an absolute
-`tool` is answered by existence alone and spawned verbatim, so a plan or a
-venv rewrite may still name one. Only finding it by bare name on `%PATH%` is
-refused, and the refusal names the `%PATH%` it walked.
+`tool` is answered by existence alone and spawned verbatim, so a plan may
+still name one. A venv rewrite is the narrower case: `venv.tool_in_venv`
+(`tan/core/venv.py:277`) appends `.exe` whenever the winning directory is
+`Scripts`, which is what `_resolve_layout` picks for a stock Windows venv, so
+a rewrite can only name an extension-less file in the `bin`-on-Windows layout.
+Only finding it by bare name on `%PATH%` is refused, and the refusal names the
+`%PATH%` it walked.
 """
 from __future__ import annotations
 
