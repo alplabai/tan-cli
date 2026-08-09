@@ -435,7 +435,24 @@ def _bash_available() -> bool:
     has no installed distributions..." banner instead, which `_bash_complete`
     would then misread as `COMPREPLY`. Spawn a trivial command and require the
     literal expected output before treating `bash` as usable, rather than
-    trusting presence on `PATH`."""
+    trusting presence on `PATH`.
+
+    A version floor is deliberately NOT part of this check, and that was
+    measured rather than assumed. Retiring the Rust oracle (tan-cli#269)
+    dropped `actions-rust-lang/setup-rust-toolchain@v1` from the macOS jobs,
+    and with it the `brew install bash` its internal "Unbork mac" step ran, so
+    from that PR onward macOS CI resolves `bash` to Apple's `/bin/bash`
+    3.2.57 -- the last GPLv2 release -- where these tests had been running on
+    Homebrew bash 5 all along. `BASH_SCRIPT` was then run under a locally
+    built GNU bash 3.2.0 and under bash 5.2.21: every `COMPREPLY` this file
+    asserts on came back identical on both, with empty stderr and rc 0. It
+    uses nothing newer than bash 3.2 -- indexed arrays, `[[ ]]`, `local`,
+    `$(( ))`, `compgen`; no `declare -A`, no `${var,,}`, no `mapfile`, no
+    globstar. If that ever changes, this probe is the place to grow a
+    capability check for the specific construct -- not a version compare (see
+    `tests/installers/test_installer_release_layout.py`'s
+    `_bash_setlocale_warning_probe` for the same rule applied to a behaviour
+    bash 3.2 genuinely lacks)."""
     import shutil as _shutil
     import subprocess as _sp
 

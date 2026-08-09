@@ -124,6 +124,48 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **The tan-cli#490 installer test that reds on macOS from the Rust-oracle
+  retirement onward now probes for the shell capability it needs instead of
+  merely for `bash` on `PATH`.** `test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic`
+  proves its mechanism by making bash warn about an invalid locale — but its
+  guard was `shutil.which("bash") is None`, presence only. macOS ships bash
+  3.2.57 as `/bin/bash`, which has no setlocale warning at all (its
+  `locale.c:180` returns a bool and prints nothing; the string
+  `cannot change locale` occurs nowhere in the 3.2 sources, verified against
+  the tarball), so the guard passed and the assertion then failed with output
+  exactly `'reached'`. That had been masked for months:
+  `actions-rust-lang/setup-rust-toolchain@v1` carries an internal step named
+  "Unbork mac" that runs `brew install bash`, so every macOS job silently got
+  Homebrew bash 5.x on `PATH` as a side effect of a Rust toolchain it needed
+  for something else; dropping the action drops the bash. The guard is now a
+  behavioural probe — the invalid-locale `export` form run once — and the skip
+  names the resolved binary and its version rather than skipping silently. It
+  is deliberately not a version compare: bash 3.2 lacks the warning and 5.2
+  has it, but which release in between introduced it was never established, so
+  a version floor would be inferring the behaviour rather than measuring it.
+  Re-adding `brew install bash` to the workflow was rejected for the same
+  reason — it pins CI to a host detail the test never intended to depend on
+  and leaves the guard wrong for every other bash-3.2 host. Verified against a
+  locally built GNU bash 3.2.0: the pre-fix test fails with `'reached'`, the
+  fixed one skips. (#269)
+  - **The half of that test that needs no special shell is now its own test
+    and runs everywhere.** `test_install_sh_pins_lc_all_as_an_export_inside_the_subshell`
+    pins `install.sh:465-492`'s actual line
+    (`verify_out="$(export LC_ALL=C; "$1" --version 2>&1)"`) and refuses the
+    command-prefix shape. It reads text and spawns nothing, yet it sat behind
+    the mechanism assertions and so never ran on any host whose bash could not
+    warn — losing the real #490 regression guard exactly where the shell was
+    least ordinary.
+  - **The other live-`bash` call sites were re-measured, not assumed.**
+    `tests/commands/test_completion_command.py` drives the emitted
+    `BASH_SCRIPT` in a real `bash -c` at three places, all of which had been
+    running on Homebrew bash 5 on macOS until now. Run under a locally built
+    bash 3.2.0 and under bash 5.2.21, every `COMPREPLY` they assert on came
+    back identical, rc 0, empty stderr: the script uses indexed arrays,
+    `[[ ]]`, `local`, `$(( ))` and `compgen` and nothing newer than 3.2. No
+    change needed; `_bash_available`'s docstring now records the measurement
+    so the next reader does not have to redo it.
+
 - **`tan/planner/` re-synced against alp-sdk `ccd34f06`, closing nine planner
   defects that were already fixed upstream.** `tan/planner/` is a hash-audited
   verbatim mirror of alp-sdk's `scripts/alp_orchestrate/`; three upstream PRs
