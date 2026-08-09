@@ -2,10 +2,18 @@
 """Run the committed ``contract/envelopes`` fixtures against the PYTHON tan and
 assert byte-compatibility with the recorded expectations.
 
-These are the same goldens the Rust binary is held to by
-``crates/tan-cli/tests/contract.rs`` -- this is the cross-language conformance
-gate. The harness below mirrors that Rust one exactly; every deviation would
-produce a false diff rather than a real one:
+These are the same golden FILES the frozen Rust binary is held to by
+``crates/tan-cli/tests/contract.rs``, but this harness -- not that one -- is the
+SHIPPING gate: the release assets are PyInstaller freezes of ``python/``
+(tan-cli#271). Where the two implementations have parted ways the golden follows
+the shipping Python CLI and ``contract.rs`` is allowed to go red; the five
+``debug-config-preview-*`` cases are exactly that, re-recorded under tan-cli#502
+(see each case's ``PROVENANCE.txt`` and ``contract/README.md``, "Known
+divergence from ``crates/``").
+
+The MECHANICS below still mirror the Rust harness deliberately, because a
+deviation there would produce a false diff rather than a real one -- the one
+exception is called out on ``CASE_METADATA``:
 
 * ``args.txt`` is **one argv token per line**, deliberately NOT shell-split
   (``contract/README.md``: "avoids quoting ambiguity across platforms"). Blank
@@ -19,7 +27,8 @@ produce a false diff rather than a real one:
   ``SOURCE_DATE_EPOCH=0`` pins any timestamped output.
 * Fixture inputs are copied into the scratch dir RECURSIVELY (that is what lets
   a case ship a synthetic ``sdk/`` checkout and pass ``--sdk-root ./sdk``); only
-  the three harness metadata files are skipped, and only at the top level.
+  the harness metadata files (``CASE_METADATA``) are skipped, and only at the
+  top level.
 * Normalisation is SCOPED to the path-shaped keys in ``PATH_KEYS``: ``\\`` ->
   ``/`` and then the absolute scratch path down to ``__WORKDIR__``. A blanket
   rewrite over every string leaf would launder a real drift inside
@@ -71,7 +80,14 @@ WORK_DIR_TOKEN = "__WORKDIR__"
 
 #: Harness metadata, skipped when copying fixture inputs -- top level only, so a
 #: fixture ``sdk/`` subtree containing its own ``args.txt`` is still copied.
-CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit"})
+#:
+#: ``PROVENANCE.txt`` is the one entry the Rust harness's own list does not carry
+#: (``crates/`` is frozen and cannot be updated to match). It is documentation --
+#: why a golden was re-recorded, against which version, and what it now diverges
+#: from -- not an input any case's command reads, so the deviation cannot produce
+#: a false diff: the Rust side merely copies one extra text file into a scratch
+#: directory whose contents ``debug-config --preview`` never looks at.
+CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit", "PROVENANCE.txt"})
 
 #: Fixtures whose COMMAND the Python port has not landed yet. The MVP's scope is
 #: ``build``; nothing in the committed golden set exercises ``build`` (see
@@ -94,48 +110,34 @@ NOT_PORTED = {
 #: oracle, so the shared golden cannot describe both sides at once.
 #:
 #: This is the opposite direction from :data:`NOT_PORTED` above -- there the
-#: port does LESS -- and it is why these five are declared rather than simply
-#: regenerated. The golden is the CROSS-LANGUAGE contract: the same file holds
-#: the Rust binary via ``crates/tan-cli/tests/contract.rs``, and ``crates/`` is
-#: frozen. Regenerating it to match the port turns the Rust conformance run red
-#: and quietly redefines "the contract" as "whatever the port last emitted".
-#: A deliberate divergence has to be DECLARED, not written into the shared file.
-#: (Measured: regenerating these five reddened ``test (ubuntu-latest)``,
-#: ``test (macos-latest)`` and ``test (windows-latest)`` on the PR.)
+#: port does LESS.
 #:
-#: Four of the five are tan-cli#138. ``create_launch_draft`` restores the
-#: v0.3.1 ``preLaunchTask`` default for the three build target kinds, which
-#: the frozen oracle had made opt-in in tan-cli#85. alp-sdk-vscode contributes
-#: task providers for exactly those labels and never passes
-#: ``--pre-launch-task``, so without the default its contribution is dead and
-#: build-then-debug silently stops happening.
+#: **An entry here is a LAST RESORT, not the default handling for a divergence.**
+#: A ``strict=True`` xfail fails only on XPASS, so it pins "this envelope differs
+#: from its golden somehow" and nothing finer: every OTHER field in that envelope
+#: loses its gate for as long as the entry stands. The default handling is to
+#: RE-RECORD the golden against the shipping CLI and leave a ``PROVENANCE.txt``
+#: beside it saying what moved, when, against which version, why the previous
+#: recording was wrong, and that the frozen ``crates/`` harness now disagrees.
+#: Five ``debug-config-preview-*`` entries lived here for exactly that reason and
+#: were re-recorded under tan-cli#502 -- see those cases' ``PROVENANCE.txt``.
 #:
-#: ``yocto-userspace`` is the fifth and its cause is DIFFERENT, not a sibling
-#: of the other four's: this target deliberately gains NO default preLaunchTask
-#: (see ``tan.core.debug_launch.DEFAULT_PRE_LAUNCH_TASK`` for why naming its
-#: task would put an error dialog in front of every F5), so its
-#: ``data.configuration`` matches the golden byte-for-byte. Its sole diff is a
-#: brand-new entry in ``issues[]`` -- tan-cli#321's
-#: ``debug-config.gdbserver-address-unresolved`` info notice, which the frozen
-#: oracle predates and never emits. It is declared here (rather than simply
-#: regenerated) for the same reason as the other four: the fixture asserts the
-#: whole envelope as one document, so any divergence anywhere in it needs the
-#: same declare-don't-silently-fix treatment.
+#: The cost the remaining entry accepts, spelled out so the next one is chosen
+#: with open eyes: the golden is the CROSS-LANGUAGE contract, the same file holds
+#: the frozen Rust binary via ``crates/tan-cli/tests/contract.rs``, and
+#: re-recording it reddens that harness (measured on tan-cli#502: the oracle's
+#: envelope for each of the five equalled the OLD golden byte-for-byte, so
+#: re-recording turns those five ``contract.rs`` cases red until tan-cli#269
+#: deletes that gate). Declaring instead keeps ``crates/`` green -- at the price
+#: of the SHIPPING side of that fixture having no gate at all. Weigh which side
+#: you would rather have unguarded; for a ``data`` value a consumer writes
+#: verbatim (``data.configuration``, alp-sdk-vscode#342) the answer is the
+#: shipping side, every time.
 #:
-#: ``strict=True`` for the same reason as above, and it carries more weight
-#: here: an XPASS means the divergence VANISHED -- someone reverted the #138
-#: restoration (four cases) or the #321 issue stopped firing (the fifth) --
-#: which is a regression that must fail loudly rather than quietly re-green
-#: the suite.
+#: ``strict=True``: an XPASS means the divergence VANISHED -- the shipping
+#: behaviour was reverted -- which is a regression that must fail loudly rather
+#: than quietly re-green the suite.
 DELIBERATE_DIVERGENCE = {
-    "debug-config-preview-zephyr-mcu": "tan-cli#138: restores the v0.3.1 preLaunchTask default",
-    "debug-config-preview-zephyr-mcu-sdk-identity": (
-        "tan-cli#138: restores the v0.3.1 preLaunchTask default"
-    ),
-    "debug-config-preview-baremetal-mcu": (
-        "tan-cli#138: restores the v0.3.1 preLaunchTask default"
-    ),
-    "debug-config-preview-native-host": "tan-cli#138: restores the v0.3.1 preLaunchTask default",
     "validate-offline-clean": (
         "tan-cli#498 defect 1: the two v2 structural checks in `validate_board_text` were "
         "gated on `schemaVersion >= 2`, a condition no conforming alp-sdk project can meet "
@@ -154,14 +156,6 @@ DELIBERATE_DIVERGENCE = {
         "envelope's SHAPE is covered instead by "
         "`test_validate_command.py::test_text_and_json_formats_are_unchanged`, on a board.yaml "
         "that is genuinely clean."
-    ),
-    "debug-config-preview-yocto-userspace": (
-        "tan-cli#321: adds the debug-config.gdbserver-address-unresolved info issue "
-        "(this target's default gdbserver <host>:<port> is unresolved) that the frozen "
-        "oracle never emits -- data.configuration itself matches the golden (this target "
-        "gets no tan-cli#138 preLaunchTask default), the sole diff is one extra entry in "
-        "issues[]; declared here because the fixture compares the whole envelope as one "
-        "document"
     ),
 }
 
@@ -297,6 +291,8 @@ def test_envelope_matches_expected(fixture):
 
     assert actual == expected, (
         f"{case}: envelope drifted from the committed golden -- if this is a "
-        "deliberate contract change, regenerate the fixture (see "
-        "contract/README.md), don't just fix the assertion"
+        "deliberate contract change, re-record the fixture against the shipping "
+        "CLI and write its PROVENANCE.txt (see contract/README.md, "
+        "'Regenerating a golden'), don't just fix the assertion and don't "
+        "declare it in DELIBERATE_DIVERGENCE to keep crates/ green"
     )

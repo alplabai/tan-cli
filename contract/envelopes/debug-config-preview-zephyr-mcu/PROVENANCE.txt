@@ -1,0 +1,96 @@
+SPDX-License-Identifier: Apache-2.0
+
+PROVENANCE — contract/envelopes/debug-config-preview-zephyr-mcu/expected.json
+=============================================================================
+
+Re-recorded on : 2026-08-09
+Recorded from  : the SHIPPING Python CLI, `tan 0.5.2-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`), NOT the frozen Rust
+                 oracle.
+Issue          : tan-cli#502
+Branch         : fix/502-rerecord-debug-config-goldens (off dev @ f0ab62b)
+
+How it was captured
+-------------------
+Exactly as `python/tests/conformance/test_contract_envelopes.py` invokes it, by
+importing that harness's own `fresh_dir` / `copy_fixture_inputs` / `normalise`
+so the recording cannot drift from the comparison:
+
+    python -m tan --format json debug-config --target-kind zephyr-mcu \
+        --server jlink --preview
+
+run from a fresh empty scratch directory nested under its own fresh parent
+(`<temp>/tan-contract-<case>-<pid>/root`), with `SOURCE_DATE_EPOCH=0` and
+`HOME`/`USERPROFILE` pointed at a second fresh directory, then normalised
+through the harness's `normalise()` (PATH_KEYS `\` -> `/`, the scratch path
+down to `__WORKDIR__`). Python 3.12.3, lane-private venv, `tan` resolved from
+this worktree.
+
+What changed in the golden
+--------------------------
+One key added, nothing else moved, `expected.exit` still 0:
+
+    + "data" . "configuration" . "preLaunchTask": "alp: build active target"
+
+Why the PREVIOUS recording was wrong
+------------------------------------
+It described the frozen Rust v0.4.1 oracle, not the binary that ships.
+
+tan-cli#85 made `preLaunchTask` opt-in. tan-cli#138 restored the v0.3.1 default
+for the three build target kinds, because alp-sdk-vscode contributes task
+providers for exactly these labels (`docs/DEBUG.md:326,342,360,392` there) and
+never passes `--pre-launch-task` — without the default that contribution is
+dead and build-then-debug silently stops happening. The golden was never
+re-recorded after #138. Instead the difference was DECLARED, as a
+`pytest.mark.xfail(strict=True)` entry in the harness's `DELIBERATE_DIVERGENCE`
+map.
+
+That declaration is what made the stale recording harmful rather than merely
+untidy. A strict xfail fails only on XPASS, so it did not pin "the envelope
+differs from the golden in exactly this one key" — it pinned only "the envelope
+differs somehow". `data.configuration` is the value alp-sdk-vscode#342 writes
+into `launch.json` verbatim, the highest-consequence field in this envelope,
+and ANY further drift in it (a changed `executable`, a dropped `servertype`, a
+stray new key) stayed green underneath that xfail.
+
+It also shipped. `.github/workflows/release.yml`'s "Bundle the envelope
+contract" step re-packages `expected.json` verbatim into the published
+`envelope-contract.json` release asset, so the stale value was not an internal
+fixture problem: consumers were handed it AS the contract, advertising a
+`data.configuration` the binary does not emit.
+
+Measured in this worktree BEFORE the re-record, under the harness's own
+conditions:
+
+    === debug-config-preview-zephyr-mcu
+      exit: golden=0 actual=0
+      EXTRA-IN-ACTUAL .data.configuration.preLaunchTask = "alp: build active target"
+
+tan-cli#535 deliberately corrected the divergence RECORD (the reason strings and
+`contract/README.md`) without re-recording, and says so in its own body. This is
+the re-recording it declined to do.
+
+DIVERGENCE FROM crates/ — read this before "fixing" a red cargo test
+--------------------------------------------------------------------
+`crates/tan-cli/tests/contract.rs` holds the FROZEN Rust v0.4.1 oracle to this
+same `expected.json` file. Measured here on 2026-08-09, BEFORE the re-record:
+
+  * `cargo test --locked -p alp-tan-cli --test contract` -> 24 passed; 0 failed.
+  * Replaying this case's `args.txt` through `target/debug/tan` (`tan 0.4.1`)
+    under the same harness conditions produced an envelope EQUAL to the old
+    golden — `preLaunchTask` absent, `issues: []`.
+
+So after this re-record the oracle no longer matches the golden, and
+`contract.rs::debug_config_preview_zephyr_mcu` FAILS. That is deliberate and
+authorised, not an accident:
+
+  * the Python conformance harness pins the SHIPPING wire, and the release
+    assets ARE the Python program (PyInstaller freezes of `python/`,
+    tan-cli#271) — the Rust binary ships to nobody;
+  * `crates/` is FROZEN and its contract gate is scheduled for deletion under
+    tan-cli#269. Landing this re-record BEFORE that deletion is what stops
+    `data.configuration` coverage silently dropping to zero in the gap.
+
+Do NOT re-green the Rust harness by editing `crates/`, and do NOT re-green it by
+reverting this golden. The two harnesses disagree on this case on purpose; the
+Rust one is the side that is wrong about what ships.
