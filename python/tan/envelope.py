@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -153,6 +153,40 @@ class SdkInfo:
         # from every committed golden, because none of them resolves a checkout.
         # `data.sdkPath` stays raw/native on both sides; only this key is posix.
         return {"root": self.root.replace("\\", "/"), "sourceTier": self.source_tier}
+
+
+@dataclass
+class SdkDisclosure:
+    """What a command already knew about its SDK resolution at the moment it
+    blew up, so its OUTER `<command>.internal-failure` catch-all can report it
+    (tan-cli#497 defect 2, the site the first pass missed).
+
+    Every command here splits into a `_run`-style inner function that resolves
+    the SDK and an outer wrapper that guards the whole thing with a bare
+    `except Exception`. The facts -- which checkout answered, and the
+    `sdk.project-pin-unresolved` / `sdk.global-default-foreign-project` pair
+    that says the pin was ignored -- are computed INSIDE the inner function, so
+    the handler in the outer one had no name to read them from and reported the
+    crash alone. `model`/`run` avoided that by resolving in the outer function;
+    the three that could not (their resolution needs paths the inner function
+    resolves) pass one of these down and `record()` into it the instant the
+    pair is known.
+
+    MUTABLE and shared by reference on purpose: the handler must see what the
+    inner call recorded before it raised. Reading an unrecorded disclosure is
+    the honest "nothing was resolved yet" -- `None` and `[]`, exactly what a
+    crash before the ladder ran should report.
+    """
+
+    sdk: SdkInfo | None = None
+    issues: list[Issue] = field(default_factory=list)
+
+    def record(self, sdk: SdkInfo | None, issues: list[Issue]) -> None:
+        """Copies `issues` rather than aliasing it: the caller goes on to
+        `append` command-specific issues onto its own list, and those are not
+        resolution facts -- a crash after them must not report them twice."""
+        self.sdk = sdk
+        self.issues = list(issues)
 
 
 #: The four commands resolving the SDK through `resolve_sdk_root_wide` rather

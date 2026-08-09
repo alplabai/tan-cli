@@ -383,8 +383,17 @@ def test_a_pending_slice_and_a_tbd_helper_yield_an_empty_bundle_at_rc_zero(tmp_p
     assert doc["data"]["helper_mcus"] == []
     # The `TBD` sentinel is the LEGITIMATE not-yet-built state: a warning, never
     # the error a genuinely missing concrete path gets.
-    assert doc["issues"][0]["code"] == "image.helper-skipped"
-    assert doc["issues"][0]["severity"] == "warning"
+    #
+    # tan-cli#499 defect 1: this asserted `issues[0]` was the helper notice and
+    # said nothing about the `status: pending` SLICE, which was dropped in
+    # total silence -- the very shape the issue reports. Both notices are now
+    # asserted, by code, so neither can go quiet again.
+    assert [(i["code"], i["severity"]) for i in doc["issues"]] == [
+        ("image.slice-skipped", "warning"),
+        ("image.helper-skipped", "warning"),
+    ]
+    assert "m55_hp" in doc["issues"][0]["message"]
+    assert "pending" in doc["issues"][0]["message"]
     assert (tmp_path / "br" / "image-bundle" / "bundle-manifest.json").is_file()
 
 
@@ -570,3 +579,256 @@ def test_text_mode_writes_nothing_to_stdout_and_always_names_the_bundle(tmp_path
     assert result.stdout == ""
     assert "image: skipping c (build_dir missing)" in result.stderr
     assert "image: bundle ready at" in result.stderr
+
+
+# --------------------------------------------------------------------------
+# tan-cli#499 defect 1 -- a non-ok slice is never dropped in silence
+# tan-cli#497 defects 5 and 6
+# --------------------------------------------------------------------------
+
+
+def _broken_pin_workspace(tmp_path: Path) -> Path:
+    """A project whose `.alp/sdk-path` names a checkout that does not resolve,
+    beside a sibling checkout discovery DOES find. `conftest.py`'s autouse
+    fixture has already repointed HOME, so `~/.alp/sdk-default` cannot
+    interfere."""
+    write(tmp_path / "alp-sdk" / "scripts" / "alp_project.py", "# marker\n")
+    project = tmp_path / "proj"
+    write(project / "board.yaml", "som:\n  sku: E1M-AEN801\n")
+    write(
+        project / ".alp" / "sdk-path",
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}),
+    )
+    return project
+
+
+def test_a_skipped_slice_is_reported_not_dropped_in_silence(tmp_path):
+    """tan-cli#499 defect 1. A heterogeneous project builds its Zephyr cores
+    but the Yocto slice is skipped under executionPolicy; `tan build` keeps a
+    PARTIAL build at ok:true/exit 0 and writes `status: skipped`. `tan image`
+    then reached a bare `continue` and reported `ok: true`, `exitCode: 0`,
+    `issues: []` while writing a `bundle-manifest.json` whose `boot_order`
+    still named a core `slices[]` carried no artefact for.
+
+    Fails against dev: there `issues` is `[]` and stderr names only the
+    bundle."""
+    wbytes(tmp_path / "br" / "m55_hp-zephyr" / "zephyr" / "zephyr.bin", b"ART")
+    (tmp_path / "br" / "a55_0-yocto").mkdir(parents=True, exist_ok=True)
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info:\n  sku: E1M-AEN801\nslices:\n"
+        "- core_id: m55_hp\n  os: zephyr\n  build_dir: m55_hp-zephyr\n  status: ok\n"
+        "- core_id: a55_0\n  os: yocto\n  build_dir: a55_0-yocto\n  status: skipped\n"
+        "helper_mcus: []\nboot_order:\n- core: m55_hp\n- core: a55_0\n",
+    )
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br")
+    assert result.returncode == 0
+    doc = envelope(result)
+    # Still a green exit -- a warning, not an exit-code flip (a `failed` status
+    # has already exited non-zero at `tan build`).
+    assert doc["ok"] is True
+    assert [i["code"] for i in doc["issues"]] == ["image.slice-skipped"]
+    assert doc["issues"][0]["severity"] == "warning"
+    assert doc["issues"][0]["message"] == "image: skipping a55_0 (status: skipped)"
+    # The shape that made the silence dangerous: boot_order still names the core.
+    assert [s["core_id"] for s in doc["data"]["slices"]] == ["m55_hp"]
+    assert [b["core"] for b in doc["data"]["boot_order"]] == ["m55_hp", "a55_0"]
+
+
+def test_a_skipped_slice_is_named_in_text_mode_too(tmp_path):
+    """The default mode, which the extension never uses and a human always
+    does. Same manifest, no `--format json`."""
+    wbytes(tmp_path / "br" / "m55_hp-zephyr" / "zephyr" / "zephyr.bin", b"ART")
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info:\n  sku: E1M-AEN801\nslices:\n"
+        "- core_id: m55_hp\n  os: zephyr\n  build_dir: m55_hp-zephyr\n  status: ok\n"
+        "- core_id: a55_0\n  os: yocto\n  build_dir: a55_0-yocto\n  status: failed\n"
+        "helper_mcus: []\nboot_order: []\n",
+    )
+    result = run_cli(tmp_path, "--build-root", "br")
+    assert result.returncode == 0
+    assert "image: skipping a55_0 (status: failed)" in result.stderr
+
+
+def test_a_slice_with_no_declared_status_stays_silent(tmp_path):
+    """The narrowing, pinned -- the same one `size`'s twin guard applies. A
+    manifest that OMITS `status` says nothing about whether the slice built,
+    and this module's reader is deliberately tolerant, not a validator;
+    reporting there would diverge from the oracle on every no-status case in
+    the frozen parity corpus. Passes on dev too: it guards the FIX from
+    over-reaching, not the defect."""
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices:\n- core_id: c\n  os: zephyr\n"
+        "helper_mcus: []\nboot_order: []\n",
+    )
+    doc = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "br"))
+    assert doc["issues"] == []
+
+
+def test_a_rejected_sdk_root_flag_is_named_not_reported_as_absent(tmp_path):
+    """tan-cli#497 defect 6. The `image.helper-missing` guard only tested
+    `sdk_root is None`, which `resolve_project_context` also returns for a
+    SUPPLIED-but-invalid `--sdk-root` -- so the diagnostic told the reporter
+    to pass the flag they had just typed, on a hard-error path that refuses
+    to produce the bundle.
+
+    Fails against dev: there the message reads "no --sdk-root and no
+    discoverable checkout" and the typed path appears nowhere."""
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
+        "- name: gd32_bridge\n  chip: gd32g553\n"
+        "  firmware_path: firmware/gd32-bridge/build/zephyr/zephyr.bin\n"
+        "boot_order: []\n",
+    )
+    doc = envelope(
+        run_cli(
+            tmp_path,
+            "--format",
+            "json",
+            "--build-root",
+            "br",
+            "--sdk-root",
+            "/definitely/not/a/checkout",
+        )
+    )
+    message = doc["issues"][0]["message"]
+    assert doc["issues"][0]["code"] == "image.helper-missing"
+    assert '--sdk-root "/definitely/not/a/checkout" is not an alp-sdk checkout' in message
+    assert "no --sdk-root" not in message
+
+
+def test_an_absent_sdk_root_flag_still_says_so(tmp_path):
+    """The other arm of the same clause, unchanged -- a caller who really did
+    pass nothing must still be told to pass something."""
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
+        "- name: gd32_bridge\n  chip: gd32g553\n"
+        "  firmware_path: firmware/gd32-bridge/build/zephyr/zephyr.bin\n"
+        "boot_order: []\n",
+    )
+    doc = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "br"))
+    assert (
+        "sdk root not resolved (no --sdk-root and no discoverable checkout)"
+        in doc["issues"][0]["message"]
+    )
+
+
+def test_the_sdk_pin_warning_reaches_image_text_mode_not_only_json(tmp_path):
+    """tan-cli#497 defect 5. The pair went into `issues` and nowhere else, so
+    the DEFAULT mode dropped both warnings on BOTH the `_error_outcome` path
+    and the happy one, while `--format json` reported them.
+
+    Fails against dev: there stderr carries only the manifest refusal."""
+    project = _broken_pin_workspace(tmp_path)
+    result = run_cli(project)
+    assert result.returncode == 1
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "gone-checkout" in result.stderr
+    assert "image: system-manifest.yaml not found at" in result.stderr
+
+
+def test_the_sdk_pin_warning_reaches_image_text_mode_on_the_happy_path_too(tmp_path):
+    """The happy half: a bundle whose helper firmwares were resolved out of a
+    FALLBACK checkout used to be reported as a plain `image: bundle ready at
+    ...` with no mention that the pin had been ignored."""
+    project = _broken_pin_workspace(tmp_path)
+    write(
+        project / "build" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus: []\nboot_order: []\n",
+    )
+    result = run_cli(project)
+    assert result.returncode == 0
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "image: bundle ready at" in result.stderr
+    doc = envelope(run_cli(project, "--format", "json"))
+    assert [i["code"] for i in doc["issues"]] == ["sdk.project-pin-unresolved"]
+
+
+def _invoke_in_process(monkeypatch, project: Path, *argv):
+    """`image` mounted on a throwaway `typer.Typer()` and driven in-process.
+
+    The subprocess `run_cli` above cannot reach `image`'s outer catch-all: every
+    enumerated failure below it is already coded, so provoking the handler needs
+    a monkeypatched raise, and a monkeypatch does not cross a `subprocess.run`
+    boundary. Same shape `test_build_command.py` uses for `build`'s own
+    identical guard."""
+    import typer
+    from typer.testing import CliRunner
+
+    from tan.commands import image_cmd
+
+    monkeypatch.chdir(project)
+    app = typer.Typer()
+    app.command("image")(image_cmd.image)
+    return CliRunner().invoke(app, list(argv))
+
+
+def test_the_internal_failure_catch_all_reports_the_pin_warning_too(
+    tmp_path, monkeypatch
+):
+    """tan-cli#497 defect 5, the site the first pass missed. `_error_outcome`
+    and the happy path both report the SDK-resolution pair; `image`'s outer
+    `image.internal-failure` handler -- which runs strictly AFTER
+    `resolve_project_context` has already answered -- reported only the crash,
+    in JSON and text alike.
+
+    Fails against the pre-fix branch: there `issues` is
+    `[image.internal-failure]` alone and `sdk` is absent."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.image_cmd.load_manifest", boom)
+    result = _invoke_in_process(monkeypatch, project, "--format", "json")
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "image.internal-failure",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    assert doc["sdk"]["sourceTier"] == "discovery"
+
+
+def test_the_internal_failure_catch_all_reaches_image_text_mode_too(
+    tmp_path, monkeypatch
+):
+    """The DEFAULT mode, same site.
+
+    Fails against the pre-fix branch: stderr carries only `image: internal
+    failure`."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("tan.commands.image_cmd.load_manifest", boom)
+    result = _invoke_in_process(monkeypatch, project)
+    assert result.exit_code == 5
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "image: internal failure" in result.stderr
+
+
+def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
+    tmp_path, monkeypatch
+):
+    """The negative control. `SdkDisclosure` starts empty, so a raise BEFORE
+    `resolve_project_context` answers must report the crash alone -- without
+    this, a fix that appended something unconditionally would be
+    indistinguishable from one that reports what was really resolved."""
+    project = _broken_pin_workspace(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr("tan.commands.image_cmd.resolve_project_context", boom)
+    result = _invoke_in_process(monkeypatch, project, "--format", "json")
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == ["image.internal-failure"]
+    assert "sdk" not in doc
