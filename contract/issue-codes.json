@@ -876,6 +876,14 @@
       "note": "tan-cli#284: fires from `rollback_relocation_after()` when a LATER phase (venv/west) fails after the checkout was already relocated, and the rollback itself is reported -- whether the move-back and the pointer restore both succeeded, only the pointer restore failed, or the move-back itself could not complete. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "cli.interrupted",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/cli.py",
+      "note": "tan-cli#491 defect 4: the ONE envelope a `--format json` run interrupted by Ctrl-C reports. SIGINT does not reach `tan.cli.main` as a raw `KeyboardInterrupt` -- Typer catches it and re-raises `Exit(130)`, which Click turns into `sys.exit(130)` -- so before this code existed an interrupted run was indistinguishable from any other non-zero exit with no envelope and fell into the `cli.parse-error` fallback: an envelope asserting the COMMAND LINE was invalid for a run that was already programming a board, at an `exitCode` of 130, outside the contract's fixed 0-5 set. The envelope reports `exitCode` 1 (`ExitCode.RUNTIME_FAILURE`) and the process exits 1 to match, since the wire invariant is `process exit code == envelope.exitCode` (tan-cli#327); TEXT mode is untouched and still exits 130 through Click's own machinery. A DELIBERATE divergence from the frozen v0.4.1 oracle, which has no SIGINT handler at all and simply dies from the signal with zero bytes on stdout -- the port cannot copy that and still keep `stdout is the envelope channel`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "cli.command-deferred",
       "status": "reserved",
       "severity": "error",
