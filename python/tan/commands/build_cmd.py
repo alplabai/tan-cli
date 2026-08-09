@@ -98,6 +98,7 @@ from tan.commands.build.token_substitution import (
     TokenSubstitutionError,
     apply_plan_token_substitution,
 )
+from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
 from tan.commands.deferred_cmd import DEFERRED_ISSUE_CODE, DEFERRED_ISSUE_URL
 from tan.commands.sdk_cmd import (
     global_default_foreign_project_issue,
@@ -106,6 +107,7 @@ from tan.commands.sdk_cmd import (
 )
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
+from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT
 from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
 from tan.env import stderr_is_tty
@@ -983,6 +985,14 @@ def _dispatch(
     missing_app_dirs = {
         i: msg for i, msg in _missing_app_dirs(plan, build_root).items() if i not in held
     }
+    # tan-cli#517, filtered the same way and for the same reason: a slice
+    # that will not dispatch has no substitution to announce, and saying so
+    # anyway would bury the verdict that actually stopped it.
+    substituted_app_dirs = {
+        i: msg
+        for i, msg in _substituted_app_dirs(plan, build_root).items()
+        if i not in held and i not in missing_app_dirs
+    }
 
     held_outcomes = {
         i: SliceOutcome(
@@ -1059,6 +1069,9 @@ def _dispatch(
                 outcomes.append(held_outcomes[i])
                 issues.append(Issue("build.app-dir-missing", "error", app_dir_message))
                 continue
+            substituted = substituted_app_dirs.get(i)
+            if substituted is not None:
+                issues.append(Issue("build.app-dir-substituted", "info", substituted))
             outcomes.append(next(dispatched))
     return outcomes, issues
 
@@ -1123,6 +1136,93 @@ def _missing_app_dirs(plan: BuildPlan, build_root: Path) -> dict[int, str]:
     return missing
 
 
+#: The one backend whose app dir the planner may SILENTLY substitute. Only
+#: `_zephyr_app_dir` carries the parent fallback (`tan/planner/
+#: orchestrator.py:397-401`); the `baremetal` arm beside it builds
+#: `cmake -S <_resolve_app_path(app)>` with no `CMakeLists.txt` probe at all,
+#: so nothing is ever substituted there and announcing one would be a lie.
+#: Narrower than `_APP_DIR_REQUIRED_BACKENDS` above for that reason, not by
+#: oversight.
+_APP_DIR_SUBSTITUTING_BACKENDS = frozenset({"zephyr"})
+
+
+def _substituted_app_dirs(plan: BuildPlan, build_root: Path) -> dict[int, str]:
+    """Slice indices whose `cores.<id>.app` resolved to a real directory that
+    carries no `CMakeLists.txt`, so `west build` will be pointed at its
+    PARENT instead (tan-cli#517), each mapped to the announcement.
+
+    ANNOUNCED, never refused. The fallback is the shipped convention, not a
+    defect: 96 of 105 enabled app-carrying zephyr/baremetal core entries
+    across alp-sdk `dev`'s own examples are `app: ./src`, sources-only, with
+    the one `CMakeLists.txt` at the example root doing
+    `target_sources(app PRIVATE src/main.c)`. Refusing would break 91% of the
+    SDK's own examples, which is why tan-cli#517 asks for visibility and
+    explicitly not for a refusal. What was wrong was only that it happened
+    SILENTLY: on a multi-core project the parent IS the project root, which
+    is very often the OTHER core's application, so a typo in one core's
+    `app:` that still names an existing directory builds the wrong source
+    tree and reports success.
+
+    `severity: "info"`, not `"warning"`. The measurement above is the
+    argument: the substitution fires on the overwhelming majority of real
+    builds, so `"warning"` would put a permanent yellow item on nearly every
+    successful build in a consumer that surfaces `issues[]` on the ok path
+    (alp-sdk-vscode does, since alp-sdk-vscode#485) -- and a warning that is
+    always there is one nobody reads on the day it matters. `"info"` is the
+    severity this registry already uses for exactly this shape: something
+    was substituted/migrated on your behalf and you should be able to see it
+    (`debug-config.legacy-entry-migrated`).
+
+    Named BOTH ways, as the issue asks: the configured path and the
+    substituted one. Naming only the substituted one would be indis-
+    tinguishable from a correctly-configured self-contained app dir.
+
+    The probe MIRRORS `_zephyr_app_dir`'s own two-line condition rather than
+    reading the substituted path back out of `command.args`. `tan/planner/**`
+    is a hash-audited relocation of alp-sdk's `scripts/alp_orchestrate/**`
+    (`tests/gates/test_planner_relocation_freshness.py`) and cannot be
+    changed here, so the condition is stable; reading `command.args` instead
+    would bind this to the ARGV POSITION of `west build`'s app argument,
+    which is not a contract anywhere. Note `appDir` is NOT the substituted
+    value: `buildplan.py` emits `_resolve_app_path(app)` there, the
+    configured path, and only the `west build` positional gets
+    `_zephyr_app_dir`'s result -- which is what makes both halves of the
+    message recoverable from the plan at all.
+
+    Guarded exactly like `_missing_app_dirs`: no `command` means nothing was
+    going to dispatch, and a nonexistent `app:` is that function's refusal,
+    reported there and not softened into an advisory here.
+    """
+    substituted: dict[int, str] = {}
+    for i, sl in enumerate(plan.slices):
+        if (
+            sl.backend not in _APP_DIR_SUBSTITUTING_BACKENDS
+            or sl.app_dir is None
+            or sl.command is None
+        ):
+            continue
+        app_dir_path = Path(sl.app_dir)
+        if not app_dir_path.is_absolute():
+            app_dir_path = build_root / app_dir_path
+        if not app_dir_path.is_dir() or (app_dir_path / "CMakeLists.txt").is_file():
+            continue
+        parent = app_dir_path.parent
+        if not (parent / "CMakeLists.txt").is_file():
+            # `_zephyr_app_dir`'s third arm: neither has one, so it returns
+            # the configured path unchanged. Nothing was substituted, so
+            # there is nothing to announce -- the build fails in west/CMake
+            # naming the path the project actually configured.
+            continue
+        substituted[i] = (
+            f"core `{sl.core_id}`: app directory has no CMakeLists.txt "
+            f"({app_dir_path}) -- building its parent instead ({parent}). This is the "
+            f"`app: ./src` sources-only convention when intended; if it was not, "
+            f"`cores.{sl.core_id}.app` names the wrong directory and this build is "
+            f"against the parent's sources."
+        )
+    return substituted
+
+
 def _backend_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[Issue]:
     """Name the backend string the plan sent that this CLI does not know.
     Recomputed from the slice rather than sniffed out of the outcome message:
@@ -1181,6 +1281,34 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     return issues
 
 
+def _toolchain_for_plan(plan_text: str) -> ToolchainResolution:
+    """This host's `${TOOLCHAIN_ROOT}` -- resolved ONLY when `plan_text`
+    actually names the token (tan-cli#547).
+
+    The laziness is the point, and it is a property of THIS call site rather
+    than of `resolve_toolchain_root` itself: no SDK plan names
+    `${TOOLCHAIN_ROOT}` today, and every one of those builds must keep
+    costing zero filesystem scans of `/opt` and `$HOME`. It also keeps the
+    resolver's own failure modes (an unreadable scan root, an ambiguous
+    host) entirely out of the way of a plan that would never have consumed
+    the value.
+
+    Asked of the plan's re-serialised JSON, not of `plan_text` directly: a
+    plan is free to spell the token's `$` as `\\u0024`, which a raw substring
+    search would miss while `substitute_plan_tokens` -- which sees the
+    DECODED string -- would not, leaving the slice demoted on a host that
+    has a toolchain. `plan_text` is already known to parse (`_acquire_plan`
+    returned a `BuildPlan` from it), so the round trip cannot fail here.
+
+    An untokened plan (`planPathMode` absent) never reaches substitution at
+    all, but is not special-cased: it also never contains the token, so the
+    same one check covers both.
+    """
+    if TOKEN_TOOLCHAIN_ROOT not in json.dumps(json.loads(plan_text)):
+        return ToolchainResolution(None)
+    return resolve_toolchain_root()
+
+
 def _build(
     *,
     # Defaulted so `mode` stays optional for the OTHER caller of this engine:
@@ -1213,6 +1341,7 @@ def _build(
     # anything and before any command is assembled, so an unresolvable token
     # can never reach disk or an argv. A no-op on an untokened plan (every
     # plan the SDK emits today).
+    toolchain = _toolchain_for_plan(text)
     try:
         plan, demotions = apply_plan_token_substitution(
             plan,
@@ -1220,12 +1349,8 @@ def _build(
             exec_base=build_root,
             sdk_root=sdk_root,
             python=_planner_python(build_root, sdk_root),
-            # NOT YET PORTED: `crate::toolchain::resolve_toolchain_root`. Left
-            # unresolved rather than guessed -- resolution is lazy, so a plan
-            # that never names ${TOOLCHAIN_ROOT} (every SDK plan today) is
-            # unaffected, and one that does is demoted per its own
-            # executionPolicy instead of built against the host root.
-            toolchain_root=None,
+            toolchain_root=toolchain.root,
+            toolchain_advice=toolchain.advice,
         )
     except TokenSubstitutionError as err:
         # RuntimeFailure for every code this pass raises, `build.plan-invalid`

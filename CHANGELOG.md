@@ -246,6 +246,41 @@ All notable changes to `tan` are documented here. Format follows
   untouched and still exits 130 through Click's own machinery. A deliberate
   divergence from the oracle, which has no SIGINT handler at all and simply
   dies from the signal with zero bytes on stdout. (#491)
+- **`${TOOLCHAIN_ROOT}` was a recognised build-plan token with no resolver
+  behind it, so every slice naming it demoted on EVERY host** -- not, as the
+  stub's own comment and ADR 0021 both claimed, only where the host has no
+  detectable toolchain. `crate::toolchain::resolve_toolchain_root` is now
+  ported (`tan/commands/build/toolchain.py`), its contract MEASURED against
+  the frozen v0.4.1 oracle rather than read out of `crates/`:
+  `ZEPHYR_SDK_INSTALL_DIR` wins verbatim when the path exists (trailing slash
+  and all, contents unvalidated), a stale or empty one falls through to a
+  scan of `/opt` and the home directory for `zephyr-sdk*`, exactly one
+  candidate resolves, and zero or several stay unresolved. The
+  several-installs case gets the oracle's own sharper reason -- naming each
+  install, sorted, so the caller can pick one -- where this port previously
+  told a user with two SDKs installed to install an SDK. Resolution stays
+  LAZY: a plan that names no `${TOOLCHAIN_ROOT}` (every plan the SDK emits
+  today) never triggers the filesystem scan. Two deliberate, documented
+  divergences from the oracle: a candidate must be a DIRECTORY (the oracle
+  accepts a plain file, so a downloaded `zephyr-sdk-*.tar.xz` left beside the
+  install makes a one-toolchain host look ambiguous and demote everything),
+  and the scan reads `HOME`/`USERPROFILE`/`Path.home()` rather than `HOME`
+  alone (the oracle's Linux-only behaviour, reproduced literally, would
+  re-open the measured Git Bash/MSYS miss `doctor` already fixed). (#547)
+- **A `cores.<id>.app` that exists but carries no `CMakeLists.txt` had its
+  app directory silently swapped for its PARENT.** `_zephyr_app_dir`'s
+  fallback is deliberate and load-bearing -- 96 of 105 enabled
+  zephyr/baremetal core entries across alp-sdk `dev`'s own examples are
+  `app: ./src`, sources-only -- so it is announced, not refused: the new
+  `build.app-dir-substituted` (severity `info`) names BOTH the configured
+  path and the substituted one. On a multi-core project that parent is the
+  project root, i.e. very often the OTHER core's application, so a typo in
+  one core's `app:` that still lands on an existing directory used to build
+  the wrong source tree at exit 0 with `issues: []`. The notice never holds a
+  slice back and never changes the exit code; a slice already refused by
+  `build.app-dir-missing` (#483) or held by a `${TOOLCHAIN_ROOT}` demotion
+  does not also collect one. `zephyr` only -- the `baremetal` arm has no
+  fallback to announce. (#517)
 - **`tan validate --offline` called board.yaml files clean that the SDK
   rejects.** Its two structural checks -- no top-level `os:`, a `cores:` block
   is required -- sat behind a `schemaVersion >= 2` gate no conforming project

@@ -801,7 +801,24 @@ _MODULE_BUDGET: dict[str, int] = {
     # 1783 on the merged tree, MEASURED with `wc -l`: both sides grew this file
     # -- tan-cli#530's resolver on `dev` and #488's doctor/consent guards here --
     # and the auto-merge kept only one side's number.
-    "tan/commands/build_cmd.py": 1783,
+    # 1908, not 1783, MEASURED on this tree, from the two issues in this PR.
+    # tan-cli#547 adds `_toolchain_for_plan` (the LAZY call site: the host
+    # toolchain scan runs only for a plan that actually names
+    # `${TOOLCHAIN_ROOT}`, which is the property the issue asks the port to
+    # preserve rather than merely claim) and threads the resolver's own
+    # `toolchain_advice` through the substitution call, replacing the
+    # hardcoded `toolchain_root=None` stub. The resolver ITSELF is a new
+    # module (`tan/commands/build/toolchain.py`, 219 lines, well under the
+    # 800 cap and therefore not budgeted) rather than more of this file --
+    # extraction cannot shrink a module total, but it can stop one growing.
+    # tan-cli#517 adds `_substituted_app_dirs` plus its
+    # `_APP_DIR_SUBSTITUTING_BACKENDS` constant and the `_dispatch` wiring;
+    # most of that is the docstring recording WHY the parent fallback is
+    # announced and not refused (96 of 105 of alp-sdk's own example core
+    # entries take it), why the severity is `info` and not `warning`, and why
+    # the probe mirrors `_zephyr_app_dir`'s condition instead of reading the
+    # substituted path back out of `command.args`.
+    "tan/commands/build_cmd.py": 1908,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
@@ -1566,6 +1583,17 @@ _MIRRORED = ("tan/planner/",)
 # says to: taking either side's figure by ownership is the arithmetic mistake,
 # and here it would have shipped a budget the tree already exceeds.
 #
+# RE-MEASURED BELOW on the tree rebased onto tan-cli#582's dev, by the gate's
+# own `ast.walk` span over ALL of `tan/` INCLUDING `tan/planner/` -- NOT
+# computed from the diff, and NOT dev's 221 carried over. Exactly ONE new
+# crossing from this branch, set-differenced against dev:
+# `build_cmd._substituted_app_dirs` at 75 lines (tan-cli#517), all but nine
+# of which is the docstring recording why the parent fallback is announced
+# rather than refused, why the severity is `info`, and why the probe mirrors
+# `_zephyr_app_dir` instead of reading `command.args`. tan-cli#547's resolver
+# adds NONE: `resolve_toolchain_root` is 29 lines, `_candidates` 38,
+# `_scan_roots` 22, `build_cmd._toolchain_for_plan` 26 -- the reasoning that
+# would have pushed them over lives in the module docstring instead.
 # 224 as of the tan-cli#540/#541 REVIEW, RE-WALKED with this gate's own
 # `_long_functions` over all of `tan/` INCLUDING `tan/planner/` on the final
 # tree, after rebasing onto dev's 707927f. Never arithmetic: dev independently
@@ -1652,6 +1680,10 @@ _MIRRORED = ("tan/planner/",)
 # measured 704 here (701 at `origin/dev` -- +3 for defect 2's
 # `_zephyr_base_will_adopt` gate and defect 3's occupied-target call), still
 # under the 707 ceiling.
+# MERGED VALUE, tan-cli#547/#517 on top of dev carrying #494/#495 (#583):
+# re-walked with the gate's own AST walk on the MERGED tree, 227 -- the two
+# comment blocks above describe disjoint crossing sets, so neither side's
+# number is the answer and only a walk of the union is.
 # MERGED VALUE, tan-cli#540/#541 on top of dev carrying #494/#495 (#583):
 # re-walked on the MERGED tree with the gate's own AST walk, 230. The
 # crossing sets above are disjoint, so neither side's number is the answer.
@@ -1661,9 +1693,13 @@ _MIRRORED = ("tan/planner/",)
 # crossings; the sets are disjoint, which is why neither side's number is the
 # answer and only a walk of the union is. `_FUNCTION_WORST_BUDGET` stays 707:
 # worst measured 704 here (`bootstrap_cmd.py:_run`, +3 from #583), not 701.
+# MERGED VALUE on dev carrying #494/#495 (#583) and #498 (#576): re-walked
+# on the merged tree, 231. Disjoint crossing sets, so no side's number applies.
 # MERGED VALUE on dev carrying #494/#495 (#583) and #498 (#576): re-walked on
 # the merged tree, 234. Disjoint crossing sets, so no side's number applies.
-_FUNCTION_COUNT_BUDGET = 234
+# MERGED VALUE on dev carrying #583/#576/#575: re-walked on the merged tree,
+# 235. Disjoint crossing sets, so no single side's number applies.
+_FUNCTION_COUNT_BUDGET = 235
 _FUNCTION_WORST_BUDGET = 707
 
 
