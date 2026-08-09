@@ -122,6 +122,16 @@ def test_a_well_formed_warning_entry_still_parses(entry):
         (_plan_with_command(args=["bu" + NUL + "ild"]), "slices[0].command.args[0]"),
         (_plan_with_command(args=["ok", "bu" + NUL + "ild"]), "slices[0].command.args[1]"),
         (_plan_with_command(cwd="build/c" + NUL + "1"), "slices[0].command.cwd"),
+        # REVIEW round: a fourth vector of the same class, missed by the first
+        # pass. Re-measured on `--execute` against this branch BEFORE the
+        # `buildRoot` refusal was added: `exit 5 build.internal-failure:
+        # ValueError: embedded null byte`, from
+        # `manifest.write_post_build_manifest` ->
+        # `confine_to_build_root(Path(base), plan_build_root)` -> `Path.resolve`,
+        # which runs after EVERY dispatch. No oracle answer to pre-empt: v0.4.1
+        # has no `--execute`, and on `--materialise` it never reads the plan's
+        # `buildRoot` (measured `exit 0 ok:true`).
+        (_plan(buildRoot="bui" + NUL + "ld"), "buildRoot"),
     ],
 )
 def test_an_embedded_nul_on_the_spawn_path_is_a_coded_refusal(plan_json, fragment):
@@ -138,24 +148,41 @@ def test_an_embedded_nul_on_the_spawn_path_is_a_coded_refusal(plan_json, fragmen
 @pytest.mark.parametrize(
     "plan_json",
     [
-        # `command.tool`: measured `build.missing-tool` / exit 1 already -- a
-        # NUL-bearing path can never exist on disk, so the lookup simply
-        # fails. Not a crash, so not refused here.
+        # `command.tool`: measured on `--execute` -- the slice is `skipped`
+        # with "tool `tr<NUL>ue` not found", the envelope carries a
+        # `build.missing-tool` WARNING and a `build.nothing-built` ERROR, and
+        # the run exits 1. A NUL-bearing path can never exist on disk, so the
+        # miss is guaranteed. Not a crash, so not refused here.
         _plan_with_command(tool="we" + NUL + "st"),
-        # `configArtefacts[].path`: the oracle DOES have a measured answer
-        # here -- exit 3 `build.materialise-failed`, "failed to write
-        # `build/m\u000055/alp.conf`: file name contained an unexpected NUL
-        # byte". Refusing it at parse would contradict that, so it is left to
-        # the materialiser (tan-cli#491, reported separately).
+        # `configArtefacts[].path` / `sharedArtefacts[].path`: the ORACLE has
+        # a measured answer -- exit 3 `build.materialise-failed`, "failed to
+        # write `gen/a.conf`: file name contained an unexpected NUL byte" --
+        # so this parser must not pre-empt it with a vaguer refusal. THIS PORT
+        # does not reach that answer: measured on `--materialise`, both give
+        # `exit 5 build.internal-failure: ValueError: embedded null byte`.
+        # That is a LIVE defect of this same class, left open only because the
+        # fix belongs in `tan.commands.build.materialise`, out of this lane's
+        # file -- listed as known-remaining on the PR. It is NOT, as this test
+        # used to say, "left to the materialiser": the materialiser does not
+        # handle it.
         _plan_with_slice(configArtefacts=[{"path": "b/m" + NUL + "55.conf", "contents": "x"}]),
+        _plan(sharedArtefacts=[{"path": "gen/s" + NUL + ".h", "contents": "x"}]),
+        # `buildDir`: measured on `--execute` with a slice that would succeed
+        # (`backend: baremetal`, `command.tool: true`) -- exit 0, `ok:true`,
+        # slice status `ok`. Nothing on the execute path opens it, so the NUL
+        # is carried into `data` and dropped. Accepted because the value never
+        # reaches an OS call -- NOT, as this test used to say, because "the
+        # slice fails on its own terms"; it does not fail at all.
         _plan_with_slice(buildDir="build/c" + NUL + "1"),
     ],
 )
 def test_a_nul_off_the_spawn_path_is_deliberately_still_accepted(plan_json):
-    """The scope line. These three carry a NUL too, but each already has a
-    coded (or oracle-specified) answer downstream, so a parse-time refusal
-    here would REPLACE a better error with a worse one."""
-    assert parse_build_plan(plan_json).slices[0] is not None
+    """The scope line. Each of these carries a NUL this parser lets through,
+    for a reason recorded per-case above -- either the oracle owns the answer
+    (the two artefact paths) or the value never reaches an OS call
+    (`command.tool`, `buildDir`). Two of the four are still WRONG downstream
+    and are reported, not silently fixed."""
+    assert parse_build_plan(plan_json) is not None
 
 
 # --------------------------------------------------------------------------

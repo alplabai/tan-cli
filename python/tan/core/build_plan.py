@@ -250,33 +250,59 @@ def _reject_nul(value: str, context: str) -> None:
 
     ORACLE NOTE -- a MEASURED DIVERGENCE, stated plainly. v0.4.1 has no
     `--execute` flag, so the oracle has no observable behaviour at all for a
-    NUL-bearing plan on the spawn path; the only path it can reach is
-    `--plan` display, where it echoes the NUL back at exit 0. This parse runs
-    on that path too, so `tan build --plan --plan-from <nul-plan>` now exits
-    1 here where the oracle exits 0. That trade is taken deliberately, for
-    the same reason and in the same shape as the `=`/empty env names above,
-    which already diverge from the oracle in exactly this way (measured: the
-    oracle accepts `{"F=OO": "bar"}` at exit 0; this module has refused it
-    since before this change). The alternative is keeping a
-    `build.internal-failure` exit 5 on the only path where the value is ever
-    USED.
+    NUL-bearing plan on the spawn path; the only path it can reach is plan
+    DISPLAY, where it echoes the NUL back at exit 0. This parse runs on that
+    path too, so `tan build --plan-from <nul-plan>` -- which implies display
+    in this port, exactly as it does in the oracle -- now exits 1 here where
+    the oracle exits 0.
 
-    The divergence is deliberately NARROW. Where the oracle DOES have a
-    measured answer, it is honoured rather than pre-empted:
+    **That surface is `--plan-from`, NOT `--plan`.** An earlier version of
+    this note named `tan build --plan --plan-from <nul-plan>` as the diverging
+    invocation; measured, `--plan` on `tan build` is a deferred stub in this
+    port and answers `exit 1 cli.command-deferred` for EVERY plan, valid or
+    not (tan-cli#427), so nothing about a NUL is observable through it.
 
-      * `configArtefacts[].path` -- oracle exits 3 with
-        `build.materialise-failed`, "file name contained an unexpected NUL
-        byte". Refusing it here would replace that specific error with a
-        vaguer one, so it is left to the materialiser.
-      * `command.tool` -- already answered downstream as `build.missing-tool`
-        at exit 1, because a NUL-bearing path can never exist on disk.
-      * `buildDir` -- no crash; the slice fails on its own terms.
+    The trade is taken deliberately, for the same reason and in the same shape
+    as the `=`/empty env names above, which already diverge from the oracle in
+    exactly this way (measured: `{"F=OO": "bar"}` is `exit 0 ok:true` on the
+    oracle and `exit 1 build.plan-invalid` here, and has been since before this
+    change). The alternative is keeping a `build.internal-failure` exit 5 on
+    the only path where the value is ever USED.
+
+    The divergence is deliberately NARROW, and three NUL-bearing fields are
+    still accepted here. What each one ACTUALLY does was re-measured; an
+    earlier version of this list described two of them wrongly:
+
+      * `configArtefacts[].path` and `sharedArtefacts[].path` -- the oracle
+        exits 3 `build.materialise-failed`, "file name contained an unexpected
+        NUL byte", so this parser must not pre-empt it with a vaguer refusal.
+        But this port does NOT reach that answer: measured on
+        `tan build --plan-from <f> --materialise`, both fields give
+        `exit 5 build.internal-failure: ValueError: embedded null byte`. They
+        are NOT "left to the materialiser" in any working sense -- they are a
+        LIVE defect of exactly the class this function exists to close, left
+        open because the fix belongs in `tan.commands.build.materialise`
+        (`confine_to_build_root`/`_write`), out of this lane's file.
+      * `command.tool` -- answered downstream: the slice is `skipped` with
+        `tool `<name>` not found`, the envelope carries a `build.missing-tool`
+        warning and a `build.nothing-built` error, exit 1. A NUL-bearing path
+        can never exist on disk, so the miss is guaranteed.
+      * `buildDir` -- no crash, and no failure either: measured, a slice with
+        a NUL `buildDir` RUNS and SUCCEEDS -- `exit 0`, `ok:true`, slice
+        status `ok`. Nothing on the execute path opens it (`plan_tokens.
+        _substitute_slice` substitutes it; `SliceOutcome.build_dir` comes from
+        `resolve_zephyr_artefact(cwd, ...)`, not from the plan), so the NUL is
+        carried into `data` and dropped. Left accepted rather than refused
+        because the value never reaches an OS call -- but "the slice fails on
+        its own terms", which this note used to claim, is simply not what
+        happens.
     """
     if "\0" in value:
         raise PlanParseError(
             "build.plan-invalid",
-            f"`{context}` contains an embedded NUL byte -- it cannot be passed to a "
-            f"process or its environment. This is a malformed plan; re-emit it.",
+            f"`{context}` contains an embedded NUL byte -- it cannot be handed to a "
+            f"process, its environment, or the filesystem. This is a malformed plan; "
+            f"re-emit it.",
         )
 
 
@@ -477,6 +503,17 @@ def parse_build_plan(text: str) -> BuildPlan:
         )
 
     _require_strings(raw, _REQUIRED_STR_TOP, _OPTIONAL_STR_TOP, "")
+    # tan-cli#491 defect 8, REVIEW round: a fourth live NUL vector of the same
+    # class as `env`/`envAppendPath`/`command.args`/`command.cwd`, missed by
+    # the first pass. `buildRoot` reaches `manifest.write_post_build_manifest`
+    # -> `confine_to_build_root(Path(base), plan_build_root)` -> `Path.resolve`
+    # after every dispatch, so measured on `tan build --plan-from <f>
+    # --execute` a NUL here gave `exit 5 build.internal-failure: ValueError:
+    # embedded null byte` -- tan reporting itself as broken for a malformed
+    # plan, the exact shape this defect is about. The oracle has no answer to
+    # pre-empt: it has no `--execute`, and on `--materialise` it never reads
+    # the plan's `buildRoot` at all (measured: `exit 0 ok:true`).
+    _reject_nul(raw["buildRoot"], "buildRoot")
 
     if not isinstance(raw["slices"], list):
         raise PlanParseError("build.plan-invalid", "`slices` must be a list")
