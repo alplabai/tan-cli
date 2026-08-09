@@ -71,9 +71,20 @@ def _write(tmp_path, text):
     (tmp_path / "board.yaml").write_text(text, encoding="utf-8")
 
 
+#: A board.yaml the OFFLINE structural checks pass -- and, deliberately, one
+#: alp-sdk's own `scripts/validate_board_yaml.py` also accepts the shape of.
+#:
+#: It grew a `cores:` block in tan-cli#498 defect 1. Until then it was
+#: `som:` + `preset:` alone, which every test here treated as the canonical
+#: clean board while the real validator answered `error[ALP-B001]: required
+#: key 'cores' is missing` (measured) -- the exact false pass #498 is about.
+#: A fixture that is only valid because the checker was dead is not a fixture.
+_CLEAN_BOARD = "som:\n  sku: E1M-AEN701\npreset: e1m-evk\ncores:\n  m55_hp:\n    app: ./src\n"
+
+
 def test_diagnostic_v1_clean_is_schema_shaped(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    _write(tmp_path, "som:\n  sku: E1M-AEN701\npreset: e1m-evk\n")
+    _write(tmp_path, _CLEAN_BOARD)
     result = runner.invoke(app, ["validate", "--offline", "--format", "diagnostic-v1"])
     assert result.exit_code == int(ExitCode.SUCCESS), result.output
     doc = json.loads(result.output)
@@ -188,12 +199,91 @@ def test_text_and_json_formats_are_unchanged(tmp_path, monkeypatch):
     fixtures; this only guards that adding two new format values didn't
     disturb the `--format` validation branch itself."""
     monkeypatch.chdir(tmp_path)
-    _write(tmp_path, "som:\n  sku: E1M-AEN701\npreset: e1m-evk\n")
+    _write(tmp_path, _CLEAN_BOARD)
     result = runner.invoke(app, ["validate", "--offline", "--format", "json"])
     assert result.exit_code == int(ExitCode.SUCCESS), result.output
     envelope = json.loads(result.output)
     assert envelope["command"] == "validate"
     assert envelope["data"]["outcome"] == "clean"
+
+
+def test_offline_refuses_a_board_with_no_cores_block(tmp_path, monkeypatch):
+    """tan-cli#498 defect 1. `board.schema.json`'s ROOT carries
+    `"required": ["som", "cores"]` with NO `schemaVersion` condition, so a
+    board without `cores:` is refused by the real validator -- measured, on
+    this exact text, as `error[ALP-B001]: required key 'cores' is missing`,
+    exit 1. `tan validate --offline` called it `outcome: clean`, exit 0,
+    because the check was gated on `schemaVersion >= 2` and alp-sdk pins
+    `LATEST = 1` with an empty migration registry: 0 of the 100 board.yaml
+    files under `alp-sdk/examples` declare the key, so the gate never opened.
+
+    This is the path `validate.sdk-root-unresolved`'s own message recommends
+    to a user with no checkout."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som:\n  sku: E1M-AEN701\npreset: e1m-evk\n")
+    result = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert envelope["data"]["outcome"] == "schema-violation"
+    assert [i["code"] for i in envelope["issues"]] == ["validate.schema-violation"]
+    assert "required key 'cores' is missing" in envelope["issues"][0]["message"]
+
+
+def test_offline_refuses_a_top_level_os_key(tmp_path, monkeypatch):
+    """The sibling half of defect 1, and the shape #498's own failure scenario
+    names: `som:` + `os: zephyr`, no `schemaVersion:`. The schema's root
+    `"not": {"required": ["os"]}` fires on the KEY, so this is checked with
+    `in` rather than `is not None` -- a bare `os:` with no value is the same
+    violation and used to slip past even once the gate was open.
+
+    Both findings are reported, not just the first: the spawn path against the
+    real SDK answers three (`ALP-B002` unknown key, `ALP-B001` missing cores,
+    `ALP-B099` the `not` clause) for this input, and reporting one of two
+    would send the user round the loop twice."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som:\n  sku: E1M-AEN801\nos: zephyr\n")
+    result = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    messages = [i["message"] for i in envelope["issues"]]
+    assert len(messages) == 2
+    assert "unknown key 'os'" in messages[0]
+    assert "required key 'cores' is missing" in messages[1]
+
+    # A valueless `os:` is the same violation.
+    valueless = tmp_path / "valueless"
+    valueless.mkdir()
+    _write(valueless, "som:\n  sku: E1M-AEN801\nos:\ncores:\n  m55_hp:\n    app: ./src\n")
+    monkeypatch.chdir(valueless)
+    result = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    assert "unknown key 'os'" in json.loads(result.output)["issues"][0]["message"]
+
+
+def test_offline_accepts_every_board_yaml_the_templates_ship(tmp_path, monkeypatch):
+    """The over-refusal guard for defect 1: making a dead check live must not
+    start rejecting the projects tan itself creates. Every `tan init` template
+    board.yaml has to pass its own offline validator, or the first thing a new
+    user does after `tan init` is watch `tan validate --offline` fail."""
+    from tan import templates
+
+    boards = sorted(Path(templates.__file__).parent.rglob("board.yaml"))
+    assert boards, "no template board.yaml found -- the walk is wrong, not the templates"
+    for board in boards:
+        result = validate_cmd.validate_board_text(board.read_text(encoding="utf-8"))
+        assert result.outcome == "clean", f"{board}: {result.findings}"
+
+
+def test_a_cores_block_that_is_not_a_mapping_is_refused(tmp_path, monkeypatch):
+    """`cores:` present but scalar. An EMPTY mapping is deliberately NOT
+    refused -- the no-PyYAML reader (`_top_level_shape`) represents every
+    block-opening key as `{}` and cannot see inside it, so failing on `{}`
+    would refuse every real board on a host without PyYAML."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som:\n  sku: E1M-AEN801\ncores: m55_hp\n")
+    result = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    assert "must be a mapping" in json.loads(result.output)["issues"][0]["message"]
 
 
 def test_validate_without_offline_and_no_sdk_is_sdk_root_unresolved(tmp_path, monkeypatch):
@@ -213,7 +303,7 @@ def test_validate_without_offline_and_no_sdk_is_sdk_root_unresolved(tmp_path, mo
     neither a developer's shell nor a `tan sdk switch --global` pin can
     resolve an SDK here and make this test silently spawn something."""
     monkeypatch.chdir(tmp_path)
-    _write(tmp_path, "som:\n  sku: E1M-AEN701\npreset: e1m-evk\n")
+    _write(tmp_path, _CLEAN_BOARD)
     result = runner.invoke(app, ["validate", "--format", "json"])
     assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
     envelope = json.loads(result.output)
@@ -305,20 +395,60 @@ def test_found_but_invalid_board_yaml_keeps_validation_failure_text(tmp_path, mo
     assert "no board.yaml to validate" not in result.output
 
 
-def test_validate_offline_unreadable_board_yaml_is_still_internal_failure(tmp_path, monkeypatch):
-    """A genuine internal failure -- board.yaml exists but cannot be read --
-    is a real tan-can't-cope case, not a validation verdict, and must stay at
-    exit 5. Mirrors the oracle's own offline path
-    (`crates/tan-cli/src/commands/validate.rs::run_offline`), which reports
-    the identical situation as `InternalFailure`."""
+def test_validate_offline_unreadable_board_yaml_is_the_users_problem_at_exit_2(
+    tmp_path, monkeypatch
+):
+    """tan-cli#498 defect 3, and the direct inversion of what this test used
+    to assert. A board.yaml that exists but cannot be READ was reported as
+    `validate.internal-failure` at exit 5 -- "tan crashed" -- for an error the
+    guard's own inline comment already called the user's to fix, and the exit-5
+    assertion here was the only thing pinning it.
+
+    Three measurements said it was wrong: the SAME file on the spawn path
+    exits 2 `validate.failed`; the envelope carried `data.outcome: "failed"`
+    (a verdict) beside `exitCode: 5`, contradicting the command's own
+    outcome->exit mapping; and `docs/bootstrap-manifest-unreadable.md` answers
+    the identical input class for `tan bootstrap` at exit 2. The frozen oracle
+    shares the flaw and is deliberately diverged from here, in the family of
+    tan-cli#262 and commit 49a5fde.
+
+    A directory named `board.yaml` is the portable stand-in: it `exists()` and
+    is not readable as text on every host."""
     monkeypatch.chdir(tmp_path)
-    # A directory named `board.yaml` exists() but is not readable as text.
     (tmp_path / "board.yaml").mkdir()
     result = runner.invoke(app, ["validate", "--offline", "--format", "json"])
-    assert result.exit_code == int(ExitCode.INTERNAL_FAILURE), result.output
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
     envelope = json.loads(result.output)
-    assert envelope["exitCode"] == int(ExitCode.INTERNAL_FAILURE)
-    assert [i["code"] for i in envelope["issues"]] == ["validate.internal-failure"]
+    assert envelope["exitCode"] == int(ExitCode.VALIDATION_FAILURE)
+    assert [i["code"] for i in envelope["issues"]] == ["validate.board-yaml-unreadable"]
+    assert envelope["data"]["outcome"] == "failed"
+
+
+def test_a_non_utf8_board_yaml_is_the_same_verdict_on_both_paths(tmp_path, monkeypatch):
+    """The #498 defect-3 scenario as filed: a board.yaml saved in cp1252 with
+    one non-ASCII byte (`# 100 <b5>A idle rail`), entirely plausible on a
+    Windows editor. It used to be a tan CRASH with `--offline` and a
+    validation verdict without it -- one file, two stories, from the same
+    command.
+
+    Text mode gets its own verdict line for the same reason
+    `validate.board-yaml-missing` does (tan-cli#350): nothing was validated,
+    so "validation failure" claims a verdict that was never reached."""
+    (tmp_path / "board.yaml").write_bytes(
+        b"# 100 \xb5A idle rail\nsom:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert [i["code"] for i in envelope["issues"]] == ["validate.board-yaml-unreadable"]
+    assert "0xb5" in envelope["issues"][0]["message"]
+
+    text = runner.invoke(app, ["validate", "--offline"])
+    assert text.exit_code == int(ExitCode.VALIDATION_FAILURE), text.output
+    assert "validate: board.yaml could not be read" in text.output
+    assert "validate: validation failure" not in text.output
 
 
 class _OsWithUnresolvableAbspath:
@@ -399,7 +529,7 @@ def test_unknown_format_is_rejected_and_lists_all_four_choices(tmp_path, monkeyp
 #: A valid board for the stand-in SDK to be handed. Its CONTENT is irrelevant
 #: to every test below -- the stand-in validator decides the verdict -- but it
 #: must exist, because the missing-board guard runs first on both paths.
-_BOARD = "som:\n  sku: E1M-AEN701\npreset: e1m-evk\n"
+_BOARD = _CLEAN_BOARD
 
 
 def _make_sdk(root: Path, validator_body: str) -> Path:
@@ -467,7 +597,11 @@ def test_a_schema_invalid_board_returns_the_validators_own_diagnostics(tmp_path,
     are stripped, the `-->` arrow and its indented source/hint continuation are
     consumed as part of the one block, and the message that reaches the wire is
     the diagnostic's own text -- not the seven-line rendered block, and not a
-    synthesized "Validation ended with outcome ..." placeholder."""
+    synthesized "Validation ended with outcome ..." placeholder.
+
+    Since tan-cli#498 defect 2 the block's own `ALP-B005`, its `= hint:` and
+    its `= see:` are carried into that message rather than consumed as
+    padding; the source excerpt and the caret line still are not."""
     stderr = (
         "\x1b[31merror[ALP-B005]\x1b[0m: SoM SKU 'E1M-NX9999' does not resolve\n"
         "  --> board.yaml:3:8\n"
@@ -483,9 +617,16 @@ def test_a_schema_invalid_board_returns_the_validators_own_diagnostics(tmp_path,
     assert envelope["data"]["outcome"] == "schema-violation"
     assert [i["code"] for i in envelope["issues"]] == ["validate.schema-violation"]
     issue = envelope["issues"][0]
-    assert issue["message"] == "SoM SKU 'E1M-NX9999' does not resolve"
+    assert issue["message"] == (
+        "ALP-B005: SoM SKU 'E1M-NX9999' does not resolve\n"
+        "  hint: did you mean E1M-NX9?\n"
+        "  see: docs/diagnostics/ALP-B005.md"
+    )
     assert issue["severity"] == "error"
     assert "\x1b" not in json.dumps(envelope)
+    # Still ONE finding, not one per continuation line: the block's skipping
+    # is unchanged, only what is read out of it on the way past.
+    assert envelope["data"]["issueCount"] == 1
 
 
 def test_a_clean_board_carrying_warnings_is_still_a_pass(tmp_path, monkeypatch):
@@ -832,20 +973,107 @@ def test_the_sdk_unresolved_remedy_routes_through_the_shared_next_steps(
     assert "--offline" in message
 
 
+def _pairs(findings):
+    return tuple((f.severity, f.message) for f in findings)
+
+
 def test_a_rich_header_needs_a_real_alp_code(tmp_path, monkeypatch):
     """`parse_rich_header`'s own narrowness, unit-tested: `error[B005]:` is not
     a diagnostic header (no `ALP-` prefix), so the line is dropped rather than
     turned into a finding whose message is the whole line."""
     parse = validate_cmd.parse_validator_stderr
     assert parse("error[B005]: nope\n", "error") == ()
-    assert parse("error[ALP-B005]: ok\n", "error") == (("error", "ok"),)
-    assert parse("note[ALP-Z9]: hi\n", "error") == (("note", "hi"),)
+    assert _pairs(parse("error[ALP-B005]: ok\n", "error")) == (("error", "ok"),)
+    assert _pairs(parse("note[ALP-Z9]: hi\n", "error")) == (("note", "hi"),)
     # A header with no arrow line is complete on its own -- the next header
     # must not be swallowed as its continuation.
-    assert parse("error[ALP-B1]: a\nerror[ALP-B2]: b\n", "error") == (
+    assert _pairs(parse("error[ALP-B1]: a\nerror[ALP-B2]: b\n", "error")) == (
         ("error", "a"),
         ("error", "b"),
     )
+    # The code itself is retained now (tan-cli#498 defect 2) rather than
+    # matched and thrown away.
+    assert [f.alp_code for f in parse("error[ALP-B1]: a\nnote[ALP-Z9]: b\n", "error")] == [
+        "ALP-B1",
+        "ALP-Z9",
+    ]
+
+
+def test_a_rich_block_keeps_its_code_hint_range_and_doc_page():
+    """tan-cli#498 defect 2, at the parser. Every field the SDK renders around
+    the message -- the `ALP-Bxxx`, the arrow's 1-based `line:col`, the caret
+    run's span, the `= hint:` remedy and the `= see:` landing page -- used to
+    be consumed as block padding and dropped. Verbatim from a real
+    `validate_board_yaml.py` run on alp-sdk's own
+    `tests/fixtures/board_yaml_bad/ALP-B005-bad-sku.yaml`."""
+    stderr = (
+        "error[ALP-B005]: SoM SKU 'E1M-AEN999' does not resolve to a known module\n"
+        "  --> tests/fixtures/board_yaml_bad/ALP-B005-bad-sku.yaml:2:8\n"
+        "   |\n"
+        " 2 |   sku: E1M-AEN999   # not a real SKU\n"
+        "   |        ^^^^^^^^^^\n"
+        "   = hint: did you mean 'E1M-AEN801'?\n"
+        "   = see: docs/diagnostics/ALP-B005.md\n"
+    )
+    (finding,) = validate_cmd.parse_validator_stderr(stderr, "error")
+    assert finding.severity == "error"
+    assert finding.message == "SoM SKU 'E1M-AEN999' does not resolve to a known module"
+    assert finding.alp_code == "ALP-B005"
+    assert finding.hint == "did you mean 'E1M-AEN801'?"
+    assert finding.doc_uri == "docs/diagnostics/ALP-B005.md"
+    assert (finding.line, finding.col, finding.span) == (2, 8, 10)
+
+
+def test_the_rich_fields_reach_both_machine_documents(tmp_path, monkeypatch):
+    """The consumer-facing half of defect 2. `--format diagnostic-v1` is the
+    document alp-sdk's `check_diagnostic_schema.py` is meant to point at
+    instead of `alp_cli.main`, and every entry used to arrive as
+    `validate-schema-violation` with no `hint`, no `documentationUri` and a
+    zeroed range -- strictly less than the document it would replace, whose
+    own `_diagnostic_to_json` emits `ALP-B005` plus both fields.
+
+    The LSP range is ZERO-based (`2:8` + a 10-caret span -> line 1, characters
+    7..17) and SARIF's is ONE-based, per each schema's own convention."""
+    stderr = (
+        "error[ALP-B005]: SoM SKU 'E1M-AEN999' does not resolve to a known module\n"
+        "  --> board.yaml:2:8\n"
+        "   |\n"
+        " 2 |   sku: E1M-AEN999\n"
+        "   |        ^^^^^^^^^^\n"
+        "   = hint: did you mean 'E1M-AEN801'?\n"
+        "   = see: docs/diagnostics/ALP-B005.md\n"
+    )
+    result, _sdk = _spawn(
+        tmp_path, monkeypatch, _stub(stderr=stderr, code=1), fmt="diagnostic-v1"
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    (diag,) = json.loads(result.output)["diagnostics"]
+    assert diag["code"] == "ALP-B005"
+    assert diag["hint"] == "did you mean 'E1M-AEN801'?"
+    assert diag["documentationUri"] == "docs/diagnostics/ALP-B005.md"
+    assert diag["range"] == {
+        "start": {"line": 1, "character": 7},
+        "end": {"line": 1, "character": 17},
+    }
+    # The bare message, not the envelope's human composition: the code, hint
+    # and page are structured fields here, and alp-sdk's own document does the
+    # same.
+    assert diag["message"] == "SoM SKU 'E1M-AEN999' does not resolve to a known module"
+
+    second = tmp_path / "sarif-run"
+    second.mkdir()
+    result, _sdk = _spawn(second, monkeypatch, _stub(stderr=stderr, code=1), fmt="sarif")
+    run = json.loads(result.output)["runs"][0]
+    assert run["tool"]["driver"]["rules"] == [
+        {"id": "ALP-B005", "helpUri": "docs/diagnostics/ALP-B005.md"}
+    ]
+    assert run["results"][0]["ruleId"] == "ALP-B005"
+    assert run["results"][0]["locations"][0]["physicalLocation"]["region"] == {
+        "startLine": 2,
+        "startColumn": 8,
+        "endLine": 2,
+        "endColumn": 18,
+    }
 
 
 # ───────────────── #376's acceptance criterion, on a REAL SDK ─────────────────
