@@ -220,11 +220,21 @@ def test_format_before_another_global_flag_no_longer_aborts_the_whole_reorder(tm
     pre-subcommand `--format` back when a hand-written allowlist in `cli.py`
     decided that (deleted by tan-cli#378), so this argv isolates the reorder
     fix from that separate, unrelated refusal -- `--preview` so the command
-    never writes `launch.json` anywhere."""
+    never writes `launch.json` anywhere.
+
+    tan-cli#476 half (b) changed what this argv EXITS with, not what it
+    measures. `tmp_path` is an empty scratch directory, so with no
+    `--target-kind` given `debug-config` now refuses
+    (`debug-config.target-kind-unresolved`, exit 2) instead of silently
+    defaulting to a `native-host` draft. The old `returncode == 0` was only
+    ever a proxy for "the relocated flag reached the command's own dispatch";
+    that is asserted directly now, by the issue code being one `debug-config`
+    itself minted rather than a Click-level `cli.parse-error` on the stranded
+    `--sdk-root`. Pinning exit 0 here would pin the #476 defect."""
     p = run("--format", "json", "--sdk-root", "X", "debug-config", "--preview", cwd=tmp_path)
     env = json.loads(p.stdout)
     assert env["command"] == "debug-config", env
-    assert p.returncode == 0, (p.returncode, env)
+    assert all(i["code"].startswith("debug-config.") for i in env["issues"]), env["issues"]
 
 
 # --------------------------------------------------------------------------
