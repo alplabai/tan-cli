@@ -635,7 +635,70 @@ _MODULE_BUDGET: dict[str, int] = {
     # wraps. `doctor_cmd.py`/`clean_cmd.py`/`inspect_cmd.py` took the same
     # conversion at 97/92/93 chars and kept their one-liners, which is why
     # only this one moves a number.
-    "tan/commands/flash_cmd.py": 2631,
+    #
+    # RE-MEASURED BELOW after rebasing onto that 2631. NOT 2951, and NOT
+    # 2951 + 2 either: this branch measured 2951 against a 2629 base, while
+    # dev reached 2631 from the same 2629 by the two-line `from_resolution`
+    # wrap -- and that wrap lands INSIDE a region this branch also rewrites,
+    # so the two do not simply stack. `wc -l` on the rebased tree is the only
+    # number that means anything here.
+    #
+    # As of tan-cli#540 + tan-cli#541 -- the two remaining
+    # intent-vs-observed defects on the write path, both of which live in
+    # this file. #540: `swd_probe`'s J-Link arm asserted `{device} flashed via
+    # J-Link @ {base}` on JLinkExe's exit code ALONE, on the one backend whose
+    # Commander script has no `verifybin` to fall back on -- #522 measured on
+    # real silicon that a halt failure does not move that exit code, so a load
+    # into a core that never halted reported a clean flash. Two pure helpers
+    # (`_swd_probe_halt_markers` reads the transcript, `_swd_probe_unconfirmed
+    # _message` swaps the claim and quotes what J-Link actually said), one
+    # `_Entry` field and one `_run` warning (`flash.swd-probe-write-
+    # unconfirmed`) mirroring `preflight_unarmed`'s existing shape exactly.
+    # #541: the `_Tee` that #522 needs handed the child `subprocess.PIPE` for
+    # both streams, so the child stopped seeing a tty and `pyocd`/`west`/
+    # `openocd` dropped the progress bar an operator watches through a
+    # multi-minute write. `_spawn`'s live-console branch now tees through a
+    # pty when the console is a real terminal (`_open_console_pty`,
+    # `_shape_console_pty`, `_close_console_pty`, `_tee_text`), keeping the
+    # pipes on Windows, on a non-terminal sink and on a host that cannot
+    # allocate one. Growth is overwhelmingly docstring: every one of the four
+    # new helpers is a handful of lines of body under a docstring recording
+    # WHY a pipe was not enough, which platform gets which path, and which
+    # `None` arm exists for which failure -- the same density the rest of this
+    # module's spawn machinery already carries, and the reason a reader can
+    # tell a deliberate platform difference from a silent one.
+    #
+    # 3124 as of the tan-cli#540/#541 REVIEW, `wc -l` on the final tree after
+    # rebasing onto dev's 707927f -- not 2953, and not 2953 plus a guess at
+    # the review's own diff. Two MAJORs, both paid for in prose:
+    #   * #540's marker search became POSITIONAL. `jlink_commander_script`
+    #     emits two halt-capable stages and the post-load `r`/`g` is ON BY
+    #     DEFAULT, so a positionless search reported a SUCCESSFUL flash as
+    #     unconfirmed and told the operator to re-flash hardware. One new
+    #     pure helper (`_jlink_load_completed_at`, 8 lines of body) plus the
+    #     docstring recording the transcript ordering that was established by
+    #     RUNNING the Commander script through a capturing stub, and why the
+    #     boundary is the load COMPLETING rather than starting.
+    #   * #541's pty merge was damaging the customer-visible string.
+    #     `_console_lines` (7 lines of body, under a docstring naming both
+    #     things `str.splitlines()` gets wrong for a transcript drawn on a
+    #     terminal) plus `_ANSI_ESCAPE_RE`, and `_capture_tail`'s own
+    #     docstring now answers the question a reader of it will have -- why
+    #     a pty run has no stderr to prefer, measured rather than asserted.
+    #
+    # 3152, not 3124, as of the CRLF defect the Windows CI leg found in that
+    # same `_console_lines` (tan-cli#575 review). `\r\n` is a LINE ENDING and
+    # a bare `\r` is a progress redraw; reading both as redraws erased every
+    # row of a Windows transcript (measured: `_console_lines('Error: could
+    # not connect to target\r\n')` -> `[]`, so the operator got `exited
+    # rc=3`). Two lines of body -- one `rstrip("\r")` and its comment -- and
+    # 26 of docstring: the measurement, why the strip is `rstrip` rather than
+    # "remove one" (a redraw is only observable when content FOLLOWS the
+    # `\r`), and the reading pinned for a transcript that ends mid-row. The
+    # prose is the point: this is the SECOND defect caused by this one
+    # function's model of what ends a line, and the next reader has to be
+    # able to see the distinction without re-deriving it from a red CI leg.
+    "tan/commands/flash_cmd.py": 3152,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -1503,6 +1566,48 @@ _MIRRORED = ("tan/planner/",)
 # says to: taking either side's figure by ownership is the arithmetic mistake,
 # and here it would have shipped a budget the tree already exceeds.
 #
+# 224 as of the tan-cli#540/#541 REVIEW, RE-WALKED with this gate's own
+# `_long_functions` over all of `tan/` INCLUDING `tan/planner/` on the final
+# tree, after rebasing onto dev's 707927f. Never arithmetic: dev independently
+# measures 221 on the same walk, and 221 + "three new helpers" would have been
+# wrong twice over, because two of the three crossings are functions that
+# ALREADY existed and grew past the cap rather than new ones. The three, all
+# in `flash_cmd.py`, all docstring:
+#   * `_swd_probe_halt_markers` 70 (from 19), ~10 of body. The MAJOR-1 fix
+#     turns a positionless substring search into a positional one; the prose
+#     is the transcript ordering established by RUNNING the Commander script
+#     through a capturing stub, why the boundary is the load COMPLETING, and
+#     why a mid-load marker cannot reach the function at all (`-ExitOnError 1`
+#     moves the exit code, so `_flash_entry` never gets to the ok path).
+#   * `_open_console_pty` 54, 12 of body -- unchanged by the review, carried
+#     over from #541: why the pipe tee cost a flash tool its `isatty()` (with
+#     the measured before/after) and the three cases that deliberately keep
+#     the pipe (Windows, a non-terminal sink, a host with no pty to give).
+#   * `_capture_tail` 53 (from 13), 8 of body. It answers the question a
+#     reader of it will now ask -- why a pty run has no `.stderr` to prefer
+#     -- with the measurement rather than an assertion, and says what the
+#     alternative (two ptys) would cost the #540 marker search. The `\r`/CSI
+#     work itself was extracted into `_console_lines`, which sits UNDER the
+#     cap and is why this is 53 and not 90-odd.
+# Extracting further would only move that prose somewhere a reader of the
+# function would not find it. `_FUNCTION_WORST_BUDGET` is untouched: the worst
+# is still `bootstrap_cmd.py:_run` at 701, which none of this goes near. Of
+# the 224, `tan/planner/` contributes 49 -- unchanged, and NOT excluded from
+# the walk.
+#
+# 225 as of the CRLF fix the Windows CI leg forced onto that same review
+# (tan-cli#575). MEASURED with this gate's own walk on the final tree, both
+# ways: 224 before the fix, 225 after -- never 224 + a guess. The single new
+# crossing is `flash_cmd.py:_console_lines`, which went 35 -> 63 on TWO lines
+# of body (`rstrip("\r")` and its comment); the other 26 are the docstring
+# recording that `\r\n` is a line ending and a bare `\r` is a redraw, with the
+# measurement that shows reading them alike erased every row of a Windows
+# transcript. So this is a docstring crossing a length proxy, not new
+# complexity -- extracting a 9-line function to get back under 50 would put
+# the distinction somewhere the next reader of `_console_lines` would not
+# find it, which is exactly how this defect reached a customer-visible string
+# twice. `_FUNCTION_WORST_BUDGET` is untouched (worst is still
+# `bootstrap_cmd.py:_run` at 701), and `tan/planner/` still contributes 49.
 # 225 as of tan-cli#498, RE-WALKED with the gate's own AST walk over all of
 # `tan/` INCLUDING `tan/planner/` (49 of the 225 crossings live there) after
 # this branch was rebased onto dev's 221 -- never carried over from the
@@ -1547,13 +1652,18 @@ _MIRRORED = ("tan/planner/",)
 # measured 704 here (701 at `origin/dev` -- +3 for defect 2's
 # `_zephyr_base_will_adopt` gate and defect 3's occupied-target call), still
 # under the 707 ceiling.
+# MERGED VALUE, tan-cli#540/#541 on top of dev carrying #494/#495 (#583):
+# re-walked on the MERGED tree with the gate's own AST walk, 230. The
+# crossing sets above are disjoint, so neither side's number is the answer.
 # MERGED VALUE, tan-cli#498 on top of dev carrying #494/#495 (#583): re-walked
 # with the gate's own AST walk on the MERGED tree, 230 -- not 226 + 4 and not
 # 225 + 5. The two comment blocks above each describe their own side's
 # crossings; the sets are disjoint, which is why neither side's number is the
 # answer and only a walk of the union is. `_FUNCTION_WORST_BUDGET` stays 707:
 # worst measured 704 here (`bootstrap_cmd.py:_run`, +3 from #583), not 701.
-_FUNCTION_COUNT_BUDGET = 230
+# MERGED VALUE on dev carrying #494/#495 (#583) and #498 (#576): re-walked on
+# the merged tree, 234. Disjoint crossing sets, so no side's number applies.
+_FUNCTION_COUNT_BUDGET = 234
 _FUNCTION_WORST_BUDGET = 707
 
 

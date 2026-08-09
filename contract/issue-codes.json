@@ -1028,6 +1028,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.swd-probe-write-unconfirmed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#540. swd_probe's J-Link arm asserted `{device} flashed via J-Link @ {base}` on JLinkExe's exit code ALONE, and jlink_commander_script gives that arm no `verifybin` at all -- so a load into a core that never halted reported a clean flash with nothing having checked the bytes landed. tan-cli#522 established on real E1M-AEN801 silicon that a halt failure does NOT make JLinkExe exit non-zero even with -ExitOnError 1 (which this arm carries), so the exit code cannot tell the two runs apart. The entry's own message is now qualified from the transcript (_swd_probe_unconfirmed_message), and this code is the machine-readable half: an `ok` entry whose prose carries a caveat is not something a --format json consumer can key off. Blast radius is GD32 bridge flashing -- flash_method: swd_probe appears in alp-sdk metadata solely under helper_firmware: (name: gd32_bridge, chip: gd32g553) on E1M-V2N101, E1M-V2M101 and E1M-V2M102. Deliberately a warning, not an error, and the entry stays status ok with rc 0: the write may well have landed (a busy-resident core is the documented benign shape on the Flow D side) and there is no bench evidence that a GD32 halt failure means a failed write, so failing the run would trade an overstatement for a false negative on a command that writes hardware. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "generate.in-process-unavailable",
       "status": "reserved",
       "severity": "warning",
