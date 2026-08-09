@@ -6367,3 +6367,149 @@ def test_the_pty_path_reports_the_whole_diagnosis_with_no_escapes(tmp_path):
         "the image on the device may be partial",
     ):
         assert line in message, repr(message)
+
+
+# ── tan-cli#575 review: `\r\n` is a LINE ENDING, not a progress redraw ───────
+#
+# The redraw collapse above erased EVERY line of a Windows transcript. These
+# cases are written against explicit byte sequences rather than against a real
+# Windows child, because this box is Linux and the host's line-ending
+# translation would make them vacuous: `subprocess.run(text=True)` folds
+# `\r\n` to `\n` before tan ever sees it, and the live-console `_Tee` -- the
+# branch that DOES deliver `\r\n` intact, since it decodes the raw pipe itself
+# -- only ever sees `\r\n` when the CHILD wrote it, which on Linux it does not.
+# `_console_lines` is pure, so feeding it the exact string a Windows child
+# produces exercises the identical code path on either host. The Windows CI
+# leg (`pytest across python/ (windows-latest)`), which is where this defect
+# surfaced, is the end-to-end confirmation.
+
+
+def test_console_lines_keeps_a_crlf_terminated_line_instead_of_erasing_it():
+    """The defect, at the pure function. A Windows child ends its lines with
+    `\\r\\n`; splitting on `\\n` alone leaves every row ending in `\\r`, and the
+    segment after that LAST `\\r` is the empty string -- so every row failed
+    the blank test and the whole transcript vanished.
+
+    Measured on the source before this fix:
+
+        _console_lines('Error: could not connect to target\\r\\n')  ->  []
+
+    which is why the Windows CI leg saw `_capture_tail` fall through to the
+    bare `swd_probe[e1]: exited rc=3`. Not a test artefact: it blanks the
+    flash failure diagnosis for every Windows operator, the exact surface
+    tan-cli#541's MAJOR 2 exists to protect."""
+    from tan.commands.flash_cmd import _console_lines
+
+    assert _console_lines("Error: could not connect to target\r\n") == [
+        "Error: could not connect to target"
+    ]
+    # A whole multi-line diagnosis, not just one row.
+    assert _console_lines(
+        "Error: flash algo timed out\r\n"
+        "  target reported SWD fault at 0x08000000\r\n"
+        "  the image on the device may be partial\r\n"
+    ) == [
+        "Error: flash algo timed out",
+        "  target reported SWD fault at 0x08000000",
+        "  the image on the device may be partial",
+    ]
+
+
+def test_console_lines_collapses_a_redraw_on_a_crlf_stream_without_losing_the_lines():
+    """Both rules at once, on ONE stream -- the case that proves the CRLF fix
+    was not bought by disabling the redraw collapse.
+
+    A Windows `pyocd`/`west` draws its bar with bare `\\r` (nothing is drawn
+    after the last one on that row, so the row shows its final state) and ends
+    each completed row with `\\r\\n` (a terminator, which erases nothing). The
+    bar must still cost ONE slot AND the CRLF-terminated lines must survive."""
+    from tan.commands.flash_cmd import _console_lines
+
+    assert _console_lines("[40%] x\r[70%] x\r[100%] x\r\n Error: y\r\n") == [
+        "[100%] x",
+        " Error: y",
+    ]
+    # And with the tool's colour on it, as a real Windows console tool emits.
+    assert _console_lines(
+        "\r[ 40%] writing image"
+        "\r[100%] writing image\r\n"
+        "\x1b[31mError: could not connect to target\x1b[0m\r\n"
+    ) == ["[100%] writing image", "Error: could not connect to target"]
+
+
+def test_console_lines_is_unchanged_for_an_lf_only_redraw():
+    """The negative control: the Linux/pty shape tan-cli#575 measured must come
+    out byte-for-byte as it did before, so this is a repair of the Windows path
+    and not a re-litigation of the collapse. #575 measured
+
+        'swd_probe[gd32_bridge]: [100%] writing image
+         | Error: could not connect to target'
+
+    and that still holds, end to end through `_execute_message`."""
+    from tan.commands.flash_cmd import _Outcome, _console_lines, _execute_message
+
+    transcript = (
+        "\r[ 40%] writing image"
+        "\r[ 70%] writing image"
+        "\r[100%] writing image\n"
+        "Error: could not connect to target\n"
+    )
+
+    assert _console_lines(transcript) == [
+        "[100%] writing image",
+        "Error: could not connect to target",
+    ]
+    message = _execute_message(
+        _Outcome(success=False, returncode=1, stdout=transcript), "swd_probe", "gd32_bridge"
+    )
+    assert message == (
+        "swd_probe[gd32_bridge]: [100%] writing image | Error: could not connect to target"
+    ), repr(message)
+
+
+def test_console_lines_keeps_a_row_whose_trailing_carriage_return_drew_nothing():
+    """A bare `\\r` at the very end of the input, with no `\\n` after it.
+
+    The reading pinned here: the row SURVIVES. A `\\r` returns the cursor to
+    column 0 and erases nothing by itself -- only what is drawn AFTER it
+    overwrites anything -- so a transcript that stops there is still showing
+    that row on the operator's terminal. This is not a hypothetical shape: it
+    is a tool killed on `_FLASH_TIMEOUT_S`, or one whose last bar update never
+    got its newline out, and reading the trailing `\\r` as an erasure would
+    throw away the diagnosis of the very run that failed."""
+    from tan.commands.flash_cmd import _Outcome, _capture_tail, _console_lines
+
+    assert _console_lines("Error: could not connect to target\r") == [
+        "Error: could not connect to target"
+    ]
+    # A redraw that ends the same way still collapses to its final state.
+    assert _console_lines("[40%] x\r[70%] x\r") == ["[70%] x"]
+    # And a `\r` that drew nothing cannot erase a row that a real one already
+    # redrew (`a\r\r\n` is one row reading `a`).
+    assert _console_lines("a\r\r\n") == ["a"]
+    assert (
+        _capture_tail(_Outcome(success=False, returncode=2, stdout="Error: target lost\r"))
+        == "Error: target lost"
+    )
+
+
+def test_capture_tail_surfaces_a_windows_shaped_transcript_not_the_bare_rc():
+    """The CI failure itself, at the consumer. `test_execute_message_text_mode_
+    now_surfaces_a_real_spawn_diagnosis` spawns a real child, so on Linux it
+    can only ever produce `\\n`; this feeds the bytes that child produces on
+    WINDOWS -- where `_Tee` decodes the raw pipe itself and so hands `\\r\\n`
+    straight through -- to the same two functions.
+
+    Before this fix `_capture_tail` returned `None`-shaped nothing here and
+    `_execute_message` reported `swd_probe[e1]: exited rc=3`."""
+    from tan.commands.flash_cmd import _Outcome, _capture_tail, _execute_message
+
+    outcome = _Outcome(
+        success=False, returncode=3, stderr="Error: could not connect to target\r\n"
+    )
+
+    assert _capture_tail(outcome) == "Error: could not connect to target"
+    assert (
+        _execute_message(outcome, "swd_probe", "e1")
+        == "swd_probe[e1]: Error: could not connect to target"
+    )

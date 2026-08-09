@@ -1325,13 +1325,41 @@ def _console_lines(text: str) -> list[str]:
       `FAIL:` line are strings a customer reads and a `--format json` consumer
       may store or re-render; measured, a raw `\\x1b[31m` shipped inside one.
 
+    **`\\r\\n` is a LINE ENDING; a bare `\\r` is a redraw.** The two have to be
+    told apart BEFORE the collapse above, or the collapse eats the whole
+    transcript on Windows (tan-cli#575 review). A Windows child writes `\\r\\n`,
+    and the live-console tee reads the raw pipe and decodes it itself
+    (`_Tee`) rather than letting `text=True` translate -- so every `\\r\\n` the
+    tool wrote reaches here intact. Split on `\\n`, and each row then ENDS in
+    `\\r`; the segment after that last `\\r` is the empty string, every row is
+    dropped by the blank test below, and `_capture_tail` returns nothing but
+    the bare `exited rc=N`. Measured on the shipped source before this fix:
+    `_console_lines('Error: could not connect to target\\r\\n')` -> `[]`. That
+    is not a test artefact -- it blanks the flash failure diagnosis for every
+    Windows operator, which is the exact surface tan-cli#541's MAJOR 2 exists
+    to protect. So the carriage return that belongs to the TERMINATOR is
+    stripped first, and only what is left is read for redraws.
+
+    `rstrip("\\r")` rather than removing exactly one, because a redraw is only
+    ever observable when content FOLLOWS the `\\r`: trailing carriage returns
+    drew nothing, so they can erase nothing. That also settles the last
+    segment, which has no `\\n` after it and so no terminator to strip --
+    a transcript that ends mid-row (`'Error: ...\\r'`, a tool killed on
+    `_FLASH_TIMEOUT_S` just after returning the cursor, or a bar's final
+    `\\r` with the newline still unwritten) keeps the row the terminal is
+    still showing, where reading it as an erasure would throw away the
+    diagnosis of the very run that failed.
+
     Deliberately NOT a terminal emulator: no cursor-position model, no
     scrollback. It collapses `\\r` runs and drops escape sequences, which is
     the whole of the damage a progress bar does to a captured transcript."""
     lines = []
     for raw in text.split("\n"):
+        # The `\r` of a `\r\n` terminator (and any trailing one that drew
+        # nothing) is not a redraw -- strip it before looking for redraws.
+        row = raw.rstrip("\r")
         # After the last `\r`: what the redraws finally left on that row.
-        drawn = _ANSI_ESCAPE_RE.sub("", raw.rsplit("\r", 1)[-1]).rstrip()
+        drawn = _ANSI_ESCAPE_RE.sub("", row.rsplit("\r", 1)[-1]).rstrip()
         if drawn.strip():
             lines.append(drawn)
     return lines

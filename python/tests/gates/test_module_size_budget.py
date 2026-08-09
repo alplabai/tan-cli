@@ -664,7 +664,20 @@ _MODULE_BUDGET: dict[str, int] = {
     #     terminal) plus `_ANSI_ESCAPE_RE`, and `_capture_tail`'s own
     #     docstring now answers the question a reader of it will have -- why
     #     a pty run has no stderr to prefer, measured rather than asserted.
-    "tan/commands/flash_cmd.py": 3124,
+    #
+    # 3152, not 3124, as of the CRLF defect the Windows CI leg found in that
+    # same `_console_lines` (tan-cli#575 review). `\r\n` is a LINE ENDING and
+    # a bare `\r` is a progress redraw; reading both as redraws erased every
+    # row of a Windows transcript (measured: `_console_lines('Error: could
+    # not connect to target\r\n')` -> `[]`, so the operator got `exited
+    # rc=3`). Two lines of body -- one `rstrip("\r")` and its comment -- and
+    # 26 of docstring: the measurement, why the strip is `rstrip` rather than
+    # "remove one" (a redraw is only observable when content FOLLOWS the
+    # `\r`), and the reading pinned for a transcript that ends mid-row. The
+    # prose is the point: this is the SECOND defect caused by this one
+    # function's model of what ends a line, and the next reader has to be
+    # able to see the distinction without re-deriving it from a red CI leg.
+    "tan/commands/flash_cmd.py": 3152,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -1487,7 +1500,21 @@ _MIRRORED = ("tan/planner/",)
 # is still `bootstrap_cmd.py:_run` at 701, which none of this goes near. Of
 # the 224, `tan/planner/` contributes 49 -- unchanged, and NOT excluded from
 # the walk.
-_FUNCTION_COUNT_BUDGET = 224
+#
+# 225 as of the CRLF fix the Windows CI leg forced onto that same review
+# (tan-cli#575). MEASURED with this gate's own walk on the final tree, both
+# ways: 224 before the fix, 225 after -- never 224 + a guess. The single new
+# crossing is `flash_cmd.py:_console_lines`, which went 35 -> 63 on TWO lines
+# of body (`rstrip("\r")` and its comment); the other 26 are the docstring
+# recording that `\r\n` is a line ending and a bare `\r` is a redraw, with the
+# measurement that shows reading them alike erased every row of a Windows
+# transcript. So this is a docstring crossing a length proxy, not new
+# complexity -- extracting a 9-line function to get back under 50 would put
+# the distinction somewhere the next reader of `_console_lines` would not
+# find it, which is exactly how this defect reached a customer-visible string
+# twice. `_FUNCTION_WORST_BUDGET` is untouched (worst is still
+# `bootstrap_cmd.py:_run` at 701), and `tan/planner/` still contributes 49.
+_FUNCTION_COUNT_BUDGET = 225
 _FUNCTION_WORST_BUDGET = 707
 
 

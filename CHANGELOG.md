@@ -76,8 +76,15 @@ All notable changes to `tan` are documented here. Format follows
   so the bar is drawn to the width the operator is looking at. `_capture_tail`
   -- which composes the text-mode `FAIL:` line and `data.entries[].message`
   -- now reads the lines a TERMINAL would be showing rather than what
-  `str.splitlines()` finds: it splits on `\n` alone, keeps only the segment
-  after the last `\r`, and strips CSI/OSC escape sequences. Without that, a
+  `str.splitlines()` finds: it splits on `\n` alone, strips the `\r` of a
+  `\r\n` TERMINATOR, keeps only the segment after the last `\r` that remains,
+  and strips CSI/OSC escape sequences. Telling the terminator apart from a
+  redraw is load-bearing on Windows, where the child writes `\r\n` and the tee
+  decodes the raw pipe itself rather than letting `text=True` translate: read
+  positionlessly, every row ended in `\r`, the segment after it was empty, and
+  the entire transcript was erased -- measured, `_console_lines('Error: could
+  not connect to target\r\n')` returned `[]` and the operator got the bare
+  `swd_probe[e1]: exited rc=3` instead of the tool's diagnosis. Without that, a
   `\r`-redrawn bar is one line on screen and N lines to `splitlines()`, so
   three of the tail's four slots went to redraws of the same bar and pushed
   the tool's real diagnosis out, while raw `\x1b[31m` shipped verbatim inside
