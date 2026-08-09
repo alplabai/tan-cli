@@ -50,9 +50,14 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   ``RuntimeFailure`` (1) -- do not "fix" that back to oracle parity; that
   parity is the bug #262 fixes.
   A genuine `tan`-side crash is unaffected by this decision and keeps its own
-  exit code: a file that could not be read, or an unexpected exception that
-  escaped tan's own code, stays ``ExitCode.INTERNAL_FAILURE`` (5, the two
-  cases already implemented below); the spawn-LAUNCH I/O error specifically
+  exit code: an unexpected exception that escaped tan's own code stays
+  ``ExitCode.INTERNAL_FAILURE`` (5). **tan-cli#498 defect 3 removed the other
+  case that used to sit here** -- a ``board.yaml`` tan could not READ (a
+  directory, a cp1252 file, a permission error) is now
+  ``validate.board-yaml-unreadable`` at exit **2**, because it is the user's
+  file to fix, not a tan crash, and because the identical file on the spawn
+  path already answered exit 2 (measured, both paths). See the guard itself
+  for the full argument; the spawn-LAUNCH I/O error specifically
   (the subprocess could not even be started -- no interpreter on PATH, the
   script unreadable) is ``validate.spawn-failed`` at
   ``ExitCode.RUNTIME_FAILURE`` (1) -- the "generic runtime failure (e.g. I/O
@@ -368,16 +373,48 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 #: diagnostic block (`tan_core::validate::parse_rich_header`). `(\S.*)` rather
 #: than `(.+)` so a header whose message is whitespace-only does not match,
 #: matching the Rust `if !message.is_empty()` after its `trim_start`.
-_RICH_HEADER_RE = re.compile(r"^(error|warning|note)\[ALP-[A-Z][0-9]+\]:\s*(\S.*)$")
+#:
+#: tan-cli#498 defect 2: the `ALP-[A-Z][0-9]+` run is now a CAPTURING group.
+#: The oracle matches the same text and throws the code away
+#: (`crates/tan-core/src/validate.rs:375-382` keeps severity + message only),
+#: so every rich diagnostic reached a consumer as `validate-schema-violation`
+#: with no way back to `docs/diagnostics/ALP-B005.md`. Diagnostic codes are on
+#: this repo's verbatim-fidelity list; dropping one is not a formatting choice.
+_RICH_HEADER_RE = re.compile(r"^(error|warning|note)\[(ALP-[A-Z][0-9]+)\]:\s*(\S.*)$")
 
 #: `^\s+-->\s+\S+:(\d+):(\d+)` -- the location arrow. The trailing
 #: `(?:\s|$)` reproduces `is_arrow_line`'s `rsplitn(3, ':')`: `a:1:2:xyz` is
 #: NOT an arrow there (its last field is not numeric), and without the anchor
 #: this regex would match its `a:1:2` prefix and disagree.
-_ARROW_RE = re.compile(r"^\s+-->\s+\S+:[0-9]+:[0-9]+(?:\s|$)")
+#:
+#: The two number runs are CAPTURING since tan-cli#498 defect 2 -- the same
+#: `line:col` the SDK renders and the oracle throws away. What is matched is
+#: unchanged: adding a group changes no line's arrow-or-not verdict.
+_ARROW_RE = re.compile(r"^\s+-->\s+\S+:([0-9]+):([0-9]+)(?:\s|$)")
 
 #: `^\s+[|0-9^= ]` -- an indented source/underline/hint continuation line.
 _BLOCK_CONTINUATION_RE = re.compile(r"^\s[\s|^=0-9]")
+
+#: The caret underline inside a rich block (`   |        ^^^^^^^^^^`). The
+#: whole line must be bar-then-carets, so a `^` that happens to appear in the
+#: quoted SOURCE line above it cannot be mistaken for the underline. Its
+#: length is `Diagnostic.span`, which is what turns an LSP range into a real
+#: span instead of a zero-width point (tan-cli#498 defect 2).
+_CARET_RE = re.compile(r"^\s*\|\s*(\^+)\s*$")
+
+#: `   = hint: <text>` inside a rich block -- `Diagnostic.hint`, the field that
+#: carries "did you mean 'E1M-AEN801'?". NOT reachable by `_HINT_RE` below,
+#: which anchors on `hint:` at the start of a line and can never match the
+#: `= ` prefix; the oracle consumes these lines as block padding and discards
+#: them (tan-cli#498 defect 2).
+_BLOCK_HINT_RE = re.compile(r"^\s*=\s*hint:\s*(\S.*?)\s*$")
+
+#: `   = see: docs/diagnostics/ALP-B005.md` inside a rich block --
+#: `Diagnostic.doc_url`, reported as `documentationUri`. Taken from the
+#: validator's own output rather than rebuilt from the code: alp-sdk's
+#: `_doc_url` honours `ALP_DIAG_BASE_URL`, so synthesising the path here would
+#: contradict the child whenever that variable is set.
+_BLOCK_SEE_RE = re.compile(r"^\s*=\s*see:\s*(\S.*?)\s*$")
 
 #: `^(FAIL|WARN)\s+(.+)` -- the legacy line shape `validate_board_yaml.py`
 #: still emits for its consistency failures (`FAIL consistency: ...`).
@@ -401,13 +438,47 @@ _HEADER_SEVERITY = {"error": "error", "warning": "warning", "note": "note"}
 
 
 @dataclass(frozen=True)
+class _Finding:
+    """One thing the validator said, with everything it said ABOUT it.
+
+    tan-cli#498 defect 2. This used to be a bare `(severity, message)` tuple,
+    which is all the frozen oracle keeps -- so `error[ALP-B005]: ...` reached
+    the user as the message alone: no code to look up
+    `docs/diagnostics/ALP-B005.md` with, no `did you mean 'E1M-AEN801'?`, and
+    a zeroed `--format diagnostic-v1` range even though the SDK had supplied
+    `2:8`. The envelope's `issues[]` still carries `validate.<outcome>` as its
+    CODE -- that is wire contract, unchanged -- but the ALP code, hint and
+    documentation URI are no longer thrown away between the child's stderr and
+    the document a machine consumer reads.
+
+    `line`/`col`/`span` are the validator's own 1-BASED numbers (the same
+    convention `alp_cli.diagnostic` renders `--> path:line:col` from), and 0
+    means "not stated". Both exporters convert from this single 1-based
+    source, in opposite directions: `diagnostic-v1` is zero-based (LSP) and
+    SARIF is one-based (spec). Do not pre-convert either here.
+    """
+
+    severity: str
+    message: str
+    #: `ALP-B005` and friends, or `None` for a finding tan itself produced
+    #: (every offline structural check) or a legacy `FAIL`/`WARN` line.
+    alp_code: str | None = None
+    hint: str | None = None
+    #: The `= see:` target verbatim, e.g. `docs/diagnostics/ALP-B005.md`.
+    doc_uri: str | None = None
+    line: int = 0
+    col: int = 0
+    span: int = 0
+
+
+@dataclass(frozen=True)
 class _Result:
     outcome: str
-    #: `(severity, message)` per finding, in the order they must reach
+    #: One `_Finding` per thing to report, in the order they must reach
     #: `issues[]`. The offline checks only ever produce `error`; the spawn
     #: path carries the validator's own severities (see `_HEADER_SEVERITY`
     #: and `_severity_for_outcome`).
-    findings: tuple[tuple[str, str], ...]
+    findings: tuple[_Finding, ...]
 
 
 class BoardShapeError(Exception):
@@ -466,16 +537,47 @@ def _top_level_shape(text: str) -> dict[str, Any]:
     return shape
 
 
-def _effective_schema_version(doc: dict[str, Any]) -> int:
-    raw = doc.get("schemaVersion")
-    try:
-        return int(str(raw))
-    except (TypeError, ValueError):
-        return 1
+#: `doc.get(key, _MISSING)` -- distinguishes an ABSENT key from one written
+#: with no value (`cores:` on a line by itself, which PyYAML reads as `None`).
+#: The two are different defects and get different messages.
+_MISSING = object()
 
 
 def validate_board_text(text: str) -> _Result:
-    """The offline structural validator. Pure: text in, outcome out."""
+    """The offline structural validator. Pure: text in, outcome out.
+
+    **tan-cli#498 defect 1: the two structural checks below are UNCONDITIONAL.**
+    They used to sit behind `_effective_schema_version(doc) >= 2`, which no
+    conforming alp-sdk project can satisfy -- `scripts/alp_migrate` pins
+    `LATEST = 1` with an empty registry, `board.schema.json` calls an absent
+    `schemaVersion` "version 1 permanently", and 0 of the 100 `board.yaml`
+    files under `alp-sdk/examples` declare it (measured, alp-sdk `99e47476`).
+    Neither check ever ran, so `--offline` answered `clean`, exit 0, on boards
+    the SDK rejects -- on the very path `validate.sdk-root-unresolved`'s own
+    message recommends to a user with no checkout.
+
+    The gate was also WRONG about the SDK: nothing in `board.schema.json` is
+    conditioned on `schemaVersion`. Its ROOT carries `"required": ["som",
+    "cores"]` and `"not": {"required": ["os"]}` outright, so the v1-shaped
+    board the gate was protecting is the board the real validator refuses --
+    measured on the `contract/envelopes/validate-offline-clean` fixture's own
+    board.yaml (`som:` + `preset:`, no `cores:`), which
+    `scripts/validate_board_yaml.py` answers with `error[ALP-B001]: required
+    key 'cores' is missing`, exit 1.
+
+    **A deliberate divergence from the frozen oracle**, which carries the
+    identical dead gate (`crates/tan-core/src/validate.rs:282`), in the family
+    of tan-cli#262's. It costs that one conformance case, DECLARED in
+    `tests/conformance/test_contract_envelopes.py`'s `DELIBERATE_DIVERGENCE`
+    (with the full rationale) rather than re-recorded, for that map's own
+    reason: the golden is the cross-language contract the frozen Rust binary
+    is also held to.
+
+    Deliberately NOT added: a `som:` requirement (the schema has one too).
+    Making the shipped-dead checks reachable is the fix; growing this into a
+    second copy of `board.schema.json` is not -- ADR-0017 says the SDK owns
+    the schema.
+    """
     doc = _load_yaml(text)
     if doc is None:
         raise BoardShapeError("the document is empty")
@@ -492,21 +594,44 @@ def validate_board_text(text: str) -> _Result:
         )
 
     messages: list[str] = []
-    if _effective_schema_version(doc) >= 2:
-        # I-02: the OS is derived from each core's Cortex class and is never
-        # selectable, so a top-level `os:` is rejected outright.
-        if doc.get("os") is not None:
-            messages.append(
-                "board.yaml v2: top-level 'os:' is not valid; move it into a 'cores:' block"
-            )
-        cores = doc.get("cores")
-        if not isinstance(cores, dict) or not cores:
-            messages.append(
-                "board.yaml v2: 'cores:' block is required and must have at least one entry"
-            )
+
+    # I-02: the OS is derived from each core's Cortex class and is never
+    # selectable, so a top-level `os:` is rejected outright. `in`, not
+    # `get(...) is not None`: `board.schema.json`'s `"not": {"required":
+    # ["os"]}` fires on the KEY, so a bare `os:` with no value is the same
+    # violation and used to slip through.
+    if "os" in doc:
+        messages.append(
+            "unknown key 'os': the OS is a property of each core, derived from "
+            "its Cortex class, and is never selectable at the top level. Move "
+            "it under `cores:`:\n  cores:\n    <core-id>:\n      os: <os>"
+        )
+
+    cores = doc.get("cores", _MISSING)
+    if cores is _MISSING:
+        messages.append(
+            "required key 'cores' is missing. Name at least one core:\n"
+            "  cores:\n    <core-id>:\n      app: ./src"
+        )
+    elif not isinstance(cores, dict):
+        # An EMPTY mapping is deliberately not flagged: the no-PyYAML reader
+        # (`_top_level_shape`) represents every block-opening key as `{}` and
+        # cannot see inside it, so failing on `{}` would refuse every real
+        # board on a host without PyYAML. Emptiness is the SDK's to catch.
+        #
+        # One asymmetry follows from that and is accepted: a valueless
+        # `cores:` reads as `None` under PyYAML (refused here) and as `{}`
+        # under the fallback (accepted). The fallback is a degraded reader by
+        # construction -- its own docstring says it answers scalar-vs-block
+        # and nothing else -- and under-refusing there is the right side to
+        # err on, since the SDK validator still sees the real document.
+        messages.append(
+            f"`cores:` must be a mapping of core id -> settings, but a "
+            f"{type(cores).__name__} was given ({cores!r})"
+        )
 
     outcome = OUTCOME_CLEAN if not messages else OUTCOME_SCHEMA_VIOLATION
-    return _Result(outcome, tuple(("error", message) for message in messages))
+    return _Result(outcome, tuple(_Finding("error", message) for message in messages))
 
 
 # ───────────────────────── full (spawn) validation ─────────────────────────
@@ -533,9 +658,9 @@ def _severity_for_outcome(outcome: str) -> str:
     return "warning" if outcome == OUTCOME_MISSING_PRESET else "error"
 
 
-def parse_validator_stderr(stderr: str, severity: str) -> tuple[tuple[str, str], ...]:
-    """The validator's stderr as `(severity, message)` findings -- port of
-    `tan_core::validate::parse_validation_issues`.
+def parse_validator_stderr(stderr: str, severity: str) -> tuple[_Finding, ...]:
+    """The validator's stderr as [`_Finding`]s -- port of
+    `tan_core::validate::parse_validation_issues`, plus tan-cli#498 defect 2.
 
     Three shapes are recognised, and anything else is dropped: a rich
     `error[ALP-B*]` block (whose `-->` arrow and indented source/hint
@@ -544,11 +669,22 @@ def parse_validator_stderr(stderr: str, severity: str) -> tuple[tuple[str, str],
     joined by TWO spaces exactly as the oracle does), and a standalone
     `hint:`/`suggestion:` line.
 
+    **What the block's continuation lines are now READ for.** The oracle walks
+    them only to know where the block ends -- "block code/line/col are parsed
+    for correct line skipping but not retained" is its own comment -- so the
+    `ALP-Bxxx` code, the `= hint:` remedy and the `= see:` documentation path
+    were consumed and dropped on every real run. Measured against alp-sdk's
+    own `tests/fixtures/board_yaml_bad/ALP-B005-bad-sku.yaml`, the user was
+    told the SKU was wrong and shown neither the suggested `E1M-AEN801` nor
+    the code that finds `docs/diagnostics/ALP-B005.md`. The skipping is
+    unchanged (same lines consumed, one block still one finding); the fields
+    now travel on the `_Finding` instead of being thrown away.
+
     ANSI escapes are stripped per line before any of that -- see the module
     docstring; without it the rich-header match fails on every real run.
     """
     lines = [_ANSI_RE.sub("", raw) for raw in stderr.replace("\r\n", "\n").split("\n")]
-    findings: list[tuple[str, str]] = []
+    findings: list[_Finding] = []
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -558,14 +694,35 @@ def parse_validator_stderr(stderr: str, severity: str) -> tuple[tuple[str, str],
 
         rich = _RICH_HEADER_RE.match(line)
         if rich:
-            findings.append((_HEADER_SEVERITY[rich.group(1)], rich.group(2).strip()))
+            block_line = block_col = block_span = 0
+            hint: str | None = None
+            doc_uri: str | None = None
             i += 1
             # Only an arrow line opens a continuation run: a header on its own
             # is a complete finding, and the next line may be another header.
-            if i < len(lines) and _ARROW_RE.match(lines[i]):
+            if i < len(lines) and (arrow := _ARROW_RE.match(lines[i])):
+                block_line, block_col = int(arrow.group(1)), int(arrow.group(2))
                 i += 1
                 while i < len(lines) and _BLOCK_CONTINUATION_RE.match(lines[i]):
+                    if (caret := _CARET_RE.match(lines[i])) and not block_span:
+                        block_span = len(caret.group(1))
+                    elif (found_hint := _BLOCK_HINT_RE.match(lines[i])) and hint is None:
+                        hint = found_hint.group(1)
+                    elif (see := _BLOCK_SEE_RE.match(lines[i])) and doc_uri is None:
+                        doc_uri = see.group(1)
                     i += 1
+            findings.append(
+                _Finding(
+                    _HEADER_SEVERITY[rich.group(1)],
+                    rich.group(3).strip(),
+                    alp_code=rich.group(2),
+                    hint=hint,
+                    doc_uri=doc_uri,
+                    line=block_line,
+                    col=block_col,
+                    span=block_span,
+                )
+            )
             continue
 
         legacy = _FAIL_WARN_RE.match(line)
@@ -576,13 +733,16 @@ def parse_validator_stderr(stderr: str, severity: str) -> tuple[tuple[str, str],
                 parts.append(lines[i].strip())
             # WARN is a warning whatever the outcome; FAIL follows the outcome.
             findings.append(
-                ("warning" if legacy.group(1) == "WARN" else severity, "  ".join(parts))
+                _Finding(
+                    "warning" if legacy.group(1) == "WARN" else severity,
+                    "  ".join(parts),
+                )
             )
             i += 1
             continue
 
         if _HINT_RE.match(line):
-            findings.append(("note", line.strip()))
+            findings.append(_Finding("note", line.strip()))
             i += 1
             continue
 
@@ -605,7 +765,7 @@ def analyze_validator_output(status: int | None, stderr: str) -> _Result:
     return _Result(outcome, parse_validator_stderr(stderr, _severity_for_outcome(outcome)))
 
 
-def _synthesised_finding(outcome: str, stderr: str) -> tuple[str, str]:
+def _synthesised_finding(outcome: str, stderr: str) -> _Finding:
     """The one finding a non-clean run with NOTHING parseable still owes the
     wire -- `to_cli_issues`' own synthesis, plus the last non-empty stderr
     line. The oracle stops at "Validation ended with outcome 'failed'.", which
@@ -616,7 +776,7 @@ def _synthesised_finding(outcome: str, stderr: str) -> tuple[str, str]:
     tail = [line.strip() for line in _ANSI_RE.sub("", stderr).splitlines() if line.strip()]
     if tail:
         message = f"{message} Last line of validator output: {tail[-1]}"
-    return "error", message
+    return _Finding("error", message)
 
 
 def _resolve_board_path(project: str | None, board_yaml: str | None) -> tuple[str, str]:
@@ -637,82 +797,146 @@ def _resolve_board_path(project: str | None, board_yaml: str | None) -> tuple[st
     return root, f"{root}{sep}{leaf}"
 
 
-#: A single point: every issue this command emits is document-level rather
-#: than tied to a source line/column. The offline checks have none to give
-#: (`board.yaml` parses fine; the finding is about the whole document), and
-#: the spawn path deliberately drops the SDK's own `Diagnostic.line`/`.col` --
-#: `parse_validator_stderr` consumes the `-->` arrow only to skip the block,
-#: exactly as the oracle does ("block code/line/col are parsed for correct
-#: line skipping but not retained", `parse_validation_issues`), because the
-#: envelope's `Issue` has nowhere to carry them. Zero
-#: satisfies `diagnostic-v1.schema.json`'s `required: [start, end]` honestly --
-#: it is not a claim about *where* on the line, only that no better position
-#: is known.
+#: The position both exporters fall back to when NOTHING located the finding:
+#: every offline structural check (`board.yaml` parses fine; the finding is
+#: about the whole document), a legacy `FAIL`/`WARN` line, and any rich block
+#: whose `-->` arrow was absent. Zero satisfies
+#: `diagnostic-v1.schema.json`'s `required: [start, end]` honestly -- it is not
+#: a claim about *where* on the line, only that no better position is known.
+#:
+#: It is no longer the position of EVERY issue: since tan-cli#498 defect 2 a
+#: rich block keeps its arrow's `line:col` and its caret's span, which is what
+#: lets an IDE underline the offending value instead of the file's first
+#: character.
 _ZERO_POSITION = {"line": 0, "character": 0}
 
 
-def _issue_to_diagnostic(issue: Issue, board_path: str) -> dict[str, Any]:
-    """One `issues[].code` (e.g. `validate.schema-violation`) as one
-    `$defs/diagnostic` entry. The dot is stripped because `diagnostic-v1`'s
-    `code` pattern (`^[A-Za-z][A-Za-z0-9_-]*$`) forbids it -- this is a
-    different wire, not a rename of the envelope code.
+def _lsp_range(finding: _Finding) -> dict[str, Any]:
+    """`$defs/range` for one finding -- ZERO-based, the LSP convention
+    `diagnostic-v1.schema.json` mandates and `alp_cli.diagnostic_format.
+    _lsp_range` implements: `start = (line - 1, col - 1)`, `end` on the same
+    line at `start.character + max(1, span)`.
 
-    Deliberate omission: the oracle (`diagnostic_format.py:_diagnostic_to_
-    json`) sets `documentationUri` unconditionally via `_doc_url`, which
-    builds `docs/diagnostics/<code>.md`. tan ships no such landing pages, so
-    there is no honest URL to put there; the field is left out rather than
-    invented. It is optional in `diagnostic-v1.schema.json`, so the document
-    still validates."""
+    A finding with no stated line (`line == 0`) collapses to
+    [`_ZERO_POSITION`] rather than underflowing to `-1`, which
+    `$defs/position`'s `minimum: 0` forbids."""
+    if finding.line <= 0 or finding.col <= 0:
+        return {"start": _ZERO_POSITION, "end": _ZERO_POSITION}
+    start = {"line": finding.line - 1, "character": finding.col - 1}
     return {
-        "uri": board_path,
-        "range": {"start": _ZERO_POSITION, "end": _ZERO_POSITION},
-        "severity": issue.severity,
-        "code": issue.code.replace(".", "-"),
-        "message": issue.message,
+        "start": start,
+        "end": {
+            "line": start["line"],
+            "character": start["character"] + max(1, finding.span),
+        },
     }
 
 
-def _diagnostic_v1_document(issues: list[Issue], board_path: str) -> dict[str, Any]:
+def _diagnostic_code(issue: Issue, finding: _Finding) -> str:
+    """The `code` for the diagnostic/SARIF wire: the validator's OWN
+    `ALP-Bxxx` when it gave one, else the envelope code with its dot stripped
+    (`diagnostic-v1`'s `code` pattern `^[A-Za-z][A-Za-z0-9_-]*$` forbids a
+    dot -- that is a different wire, not a rename of the envelope code).
+
+    tan-cli#498 defect 2: every entry used to be `validate-schema-violation`,
+    which made the document alp-sdk's `check_diagnostic_schema.py` is meant to
+    repoint at tan strictly less informative than the one it replaces --
+    alp-sdk's own `_diagnostic_to_json` emits `ALP-B003`/`ALP-B005` there."""
+    return finding.alp_code or issue.code.replace(".", "-")
+
+
+def _issue_to_diagnostic(issue: Issue, finding: _Finding, board_path: str) -> dict[str, Any]:
+    """One reported finding as one `$defs/diagnostic` entry.
+
+    `hint` and `documentationUri` are emitted when -- and only when -- the
+    validator supplied them, mirroring `_diagnostic_to_json`'s own `if
+    diag.hint`. tan still does NOT synthesise a `documentationUri` for its own
+    codes: it ships no `docs/diagnostics/<code>.md` landing pages, so there is
+    no honest URL to invent. What changed in tan-cli#498 is that the SDK's
+    `= see:` line is no longer discarded on the way past -- that URL is the
+    child's, not tan's, and it exists."""
+    diagnostic = {
+        "uri": board_path,
+        "range": _lsp_range(finding),
+        "severity": issue.severity,
+        "code": _diagnostic_code(issue, finding),
+        # `finding.message`, NOT `issue.message`: the envelope's message is the
+        # HUMAN composition ([`_issue_message`] folds the code and hint into it
+        # because `issues[].code` is `validate.<outcome>` and has nowhere else
+        # to put them). Here they are structured fields of their own, so
+        # repeating them inside `message` would hand a machine consumer the
+        # same three facts twice and diverge from alp-sdk's own
+        # `_diagnostic_to_json`, which emits the bare message.
+        "message": finding.message,
+    }
+    if finding.hint:
+        diagnostic["hint"] = finding.hint
+    if finding.doc_uri:
+        diagnostic["documentationUri"] = finding.doc_uri
+    return diagnostic
+
+
+def _diagnostic_v1_document(
+    reported: list[tuple[Issue, _Finding]], board_path: str
+) -> dict[str, Any]:
     """`metadata/schemas/diagnostic-v1.schema.json`, mirroring
     `scripts/alp_cli/diagnostic_format.py:to_machine_json`'s shape."""
     return {
         "schemaVersion": _DIAGNOSTIC_SCHEMA_VERSION,
         "tool": {"name": "tan", "version": TAN_VERSION},
-        "diagnostics": [_issue_to_diagnostic(i, board_path) for i in issues],
+        "diagnostics": [_issue_to_diagnostic(i, f, board_path) for i, f in reported],
     }
 
 
-def _sarif_document(issues: list[Issue], board_path: str) -> dict[str, Any]:
+def _sarif_region(finding: _Finding) -> dict[str, int]:
+    """ONE-based SARIF `region`, the opposite convention to [`_lsp_range`] and
+    a direct passthrough of the validator's own numbers plus the span width
+    (`alp_cli.diagnostic_format._sarif_region`). An unlocated finding stays at
+    `1:1`, as it was before tan-cli#498."""
+    if finding.line <= 0 or finding.col <= 0:
+        return {"startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 1}
+    return {
+        "startLine": finding.line,
+        "startColumn": finding.col,
+        "endLine": finding.line,
+        "endColumn": finding.col + max(1, finding.span),
+    }
+
+
+def _sarif_document(
+    reported: list[tuple[Issue, _Finding]], board_path: str
+) -> dict[str, Any]:
     """SARIF 2.1.0 (`runs[].results[]`), mirroring
     `scripts/alp_cli/diagnostic_format.py:to_sarif`. A separate artefact from
     `diagnostic-v1.schema.json` -- SARIF `region` is one-based by spec, so it
-    does not reuse `_ZERO_POSITION`.
+    does not reuse [`_lsp_range`].
 
-    Deliberate omission: the oracle's `_sarif_rules` gives every rule a
-    `helpUri` via the same `_doc_url`-backed `documentationUri` as above. Same
-    reasoning as `_issue_to_diagnostic`: tan has no `docs/diagnostics/<code>.md`
-    to point at, so `helpUri` is left off each rule rather than faked.
-    `helpUri` is optional in the SARIF 2.1.0 schema."""
+    `helpUri` follows `documentationUri` exactly: present on a rule whose
+    validator named a `= see:` page, absent otherwise. tan invents none for
+    its own codes (it has no landing pages), and `helpUri` is optional in the
+    SARIF 2.1.0 schema."""
     rules: dict[str, dict[str, str]] = {}
     results = []
-    for issue in issues:
-        code = issue.code.replace(".", "-")
-        rules.setdefault(code, {"id": code})
+    for issue, finding in reported:
+        code = _diagnostic_code(issue, finding)
+        if code not in rules:
+            rule = {"id": code}
+            if finding.doc_uri:
+                rule["helpUri"] = finding.doc_uri
+            rules[code] = rule
         results.append(
             {
                 "ruleId": code,
                 "level": _SARIF_LEVEL[issue.severity],
-                "message": {"text": issue.message},
+                # The bare message, for the same reason as `_issue_to_
+                # diagnostic`'s: the code is `ruleId` and the landing page is
+                # the rule's `helpUri`.
+                "message": {"text": finding.message},
                 "locations": [
                     {
                         "physicalLocation": {
                             "artifactLocation": {"uri": board_path},
-                            "region": {
-                                "startLine": 1,
-                                "startColumn": 1,
-                                "endLine": 1,
-                                "endColumn": 1,
-                            },
+                            "region": _sarif_region(finding),
                         }
                     }
                 ],
@@ -737,6 +961,29 @@ def _sarif_document(issues: list[Issue], board_path: str) -> dict[str, Any]:
     }
 
 
+def _issue_message(finding: _Finding) -> str:
+    """The human-facing message for one finding: the validator's text, led by
+    its own `ALP-Bxxx` code and trailed by the remedy and landing page it
+    named.
+
+    tan-cli#498 defect 2, the human half. The envelope's `issues[].code` stays
+    `validate.<outcome>` (wire contract, registered in
+    `contract/issue-codes.json`), which is why the diagnostic code has to
+    travel in the MESSAGE for a `--format text`/`json` reader: without it the
+    user is told the SKU is wrong and given neither the suggestion nor
+    anything to look `docs/diagnostics/ALP-B005.md` up by. Laid out as
+    alp-sdk's own renderer lays it out, minus the severity word (already an
+    `Issue` field) and the source excerpt (tan has not read the file)."""
+    message = (
+        f"{finding.alp_code}: {finding.message}" if finding.alp_code else finding.message
+    )
+    if finding.hint:
+        message += f"\n  hint: {finding.hint}"
+    if finding.doc_uri:
+        message += f"\n  see: {finding.doc_uri}"
+    return message
+
+
 def _emit(
     *,
     output_format: ValidateOutputFormat,
@@ -747,6 +994,7 @@ def _emit(
     exit_code: ExitCode,
     command_line: str = "",
     sdk: SdkInfo | None = None,
+    findings: tuple[_Finding, ...] | None = None,
 ) -> None:
     # tan-cli#478 review: `issues` may now carry the SDK-resolution pair
     # (`sdk.project-pin-unresolved`, `sdk.global-default-foreign-project`)
@@ -766,12 +1014,29 @@ def _emit(
     #     failure" wording that issue removed for the nothing-was-checked case.
     #
     # Split once, here, rather than at each of the four readers below.
-    findings = [issue for issue in issues if not issue.code.startswith("sdk.")]
+    reportable = [issue for issue in issues if not issue.code.startswith("sdk.")]
+
+    # tan-cli#498 defect 2: `findings` is the RICH form of that same list, 1:1
+    # with `reportable` and in the same order -- the diagnostic-v1/SARIF
+    # documents read it for the `ALP-Bxxx` code, hint, documentation URI and
+    # source range that `Issue` has nowhere to carry. A caller with nothing
+    # richer to say (every `fail()` refusal) passes none, and each issue
+    # stands in for its own location-less finding.
+    #
+    # Paired against `reportable`, NOT against `issues`, and that is the whole
+    # interaction between #478 and #498: the callers below prepend
+    # `sdk_context_issues` to `issues` while `findings=result.findings` counts
+    # only the validator's own, so `zip(issues, findings)` would slide every
+    # ALP code, hint and source range one position off the issue it describes
+    # the moment a `.alp/sdk-path` pin misses. Filter first, then pair.
+    if findings is None:
+        findings = tuple(_Finding(issue.severity, issue.message) for issue in reportable)
+    reported = list(zip(reportable, findings))
     if output_format == ValidateOutputFormat.JSON:
         data = {
             "schemaVersion": DATA_SCHEMA_VERSION,
             "outcome": outcome,
-            "issueCount": len(findings),
+            "issueCount": len(reported),
             # The validator command line that actually ran, or `""` -- which
             # every guard and the whole offline path keep, and which the two
             # committed conformance fixtures pin.
@@ -801,13 +1066,13 @@ def _emit(
         # `json.dumps(to_machine_json(collector), indent=2)` -- these two
         # formats are ported documents, not the envelope (which is
         # deliberately compact; see `tan.envelope.emit`'s `separators`).
-        typer.echo(json.dumps(_diagnostic_v1_document(findings, board_path), indent=2))
+        typer.echo(json.dumps(_diagnostic_v1_document(reported, board_path), indent=2))
     elif output_format == ValidateOutputFormat.SARIF:
         # indent=2, matching scripts/alp_cli/validate.py:36.
-        typer.echo(json.dumps(_sarif_document(findings, board_path), indent=2))
+        typer.echo(json.dumps(_sarif_document(reported, board_path), indent=2))
     else:
         stream = typer.get_text_stream("stderr")
-        if len(findings) == 1 and findings[0].code == "validate.board-yaml-missing":
+        if len(reportable) == 1 and reportable[0].code == "validate.board-yaml-missing":
             # tan-cli#350: this is not a VALIDATION failure -- there is no
             # board.yaml to validate, so nothing was checked and found
             # wrong. Every other non-clean outcome below still says
@@ -816,16 +1081,33 @@ def _emit(
             # `--format json`'s `issues[].message`) already names where tan
             # looked and the remedy -- see the guard above.
             stream.write("validate: no board.yaml to validate\n")
-            # tan-cli#478 review finding 6: this branch prints `findings[0]`
+            # tan-cli#478 review finding 6: this branch prints `reportable[0]`
             # alone -- deliberately, per tan-cli#350, to keep the verdict
-            # wording narrow -- but the sdk.* advisories `findings` filters
+            # wording narrow -- but the sdk.* advisories `reportable` filters
             # OUT of `issueCount`/sarif/diagnostic-v1 still belong on the
             # customer's screen; the other two branches below already print
             # them because they loop over the unfiltered `issues`.
             for issue in issues:
                 if issue.code.startswith("sdk."):
                     stream.write(f"{issue.message}\n")
-            stream.write(f"{findings[0].message}\n")
+            stream.write(f"{reportable[0].message}\n")
+        elif len(reportable) == 1 and reportable[0].code == "validate.board-yaml-unreadable":
+            # tan-cli#498 defect 3, the text half, and the same reasoning as
+            # #350's line above: a board.yaml tan could not even DECODE was
+            # never checked, so "validation failure" claims a verdict that was
+            # never reached. The exit code (2) and issue code are what a
+            # machine consumer reads; this line is what a human does.
+            #
+            # Keyed off `reportable`, and the sdk.* advisories printed first,
+            # for tan-cli#478 review finding 6's reason applied to this
+            # branch: a prepended `sdk.project-pin-unresolved` would otherwise
+            # take `len(issues)` to 2 and silently restore the "validation
+            # failure" wording this branch exists to replace.
+            stream.write("validate: board.yaml could not be read\n")
+            for issue in issues:
+                if issue.code.startswith("sdk."):
+                    stream.write(f"{issue.message}\n")
+            stream.write(f"{reportable[0].message}\n")
         elif outcome != OUTCOME_CLEAN:
             stream.write("validate: validation failure\n")
             for issue in issues:
@@ -999,11 +1281,37 @@ def validate(
             try:
                 text = Path(board_path).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as err:
-                # Not a tan bug: an unreadable or non-UTF-8 file is the user's to fix.
+                # tan-cli#498 defect 3. Not a tan bug: an unreadable or
+                # non-UTF-8 file is the user's to fix -- which this comment
+                # already said while the code emitted
+                # `validate.internal-failure` at exit 5, i.e. told CI and
+                # alp-sdk-vscode that tan had CRASHED. Three measurements
+                # against it: the identical file on the spawn path exits 2;
+                # the envelope carried `data.outcome: "failed"` (a verdict)
+                # beside `exitCode: 5`, contradicting this command's own
+                # outcome->exit mapping below; and
+                # `docs/bootstrap-manifest-unreadable.md` answers the same
+                # input class for `tan bootstrap` as exit 2.
+                #
+                # 2, not 1: `validate.spawn-failed` owns exit 1 for "nothing
+                # validated anything", which this resembles -- the tie is
+                # broken by the SPAWN path answering exit 2 `validate.failed`
+                # on the same cp1252 file (measured). One file must not be a
+                # crash on one path and a verdict on the other.
+                #
+                # Its OWN code, not `validate.failed`: file-level problems
+                # named before anything reads the board are a family
+                # (`validate.board-yaml-missing` is the other), and a consumer
+                # can act on "fix the encoding" without parsing prose. The
+                # frozen oracle shares the exit-5 flaw; diverging is what
+                # commit 49a5fde did for `tan sdk install`/`sdk switch` and
+                # b4cef84 for the SIBLING BoardShapeError branch in the oracle
+                # itself, left unapplied to the read case. A genuine tan crash
+                # keeps exit 5 -- the `except Exception` backstop is unchanged.
                 fail(
-                    "internal-failure",
+                    "board-yaml-unreadable",
                     f"could not read board.yaml: {err}",
-                    ExitCode.INTERNAL_FAILURE,
+                    ExitCode.VALIDATION_FAILURE,
                 )
                 return
 
@@ -1090,7 +1398,7 @@ def validate(
                 result = _Result(
                     OUTCOME_FAILED,
                     (
-                        (
+                        _Finding(
                             "error",
                             f"the SDK validator did not finish within "
                             f"{VALIDATOR_TIMEOUT_S}s and was killed: {command_line}",
@@ -1119,8 +1427,8 @@ def validate(
         issues = [
             *sdk_context_issues,
             *(
-                Issue(f"validate.{result.outcome}", severity, message)
-                for severity, message in result.findings
+                Issue(f"validate.{result.outcome}", finding.severity, _issue_message(finding))
+                for finding in result.findings
             ),
         ]
         exit_code = (
@@ -1139,6 +1447,10 @@ def validate(
             # `None` on the offline path (never resolved) -- the two committed
             # conformance fixtures are offline runs and stay `sdk`-less.
             sdk=sdk_info,
+            # 1:1 with `issues`, built from the same list above -- the
+            # diagnostic-v1/SARIF documents read the ALP code, hint,
+            # documentation URI and range off these.
+            findings=result.findings,
         )
     except typer.Exit:
         raise
