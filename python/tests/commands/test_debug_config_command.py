@@ -16,6 +16,7 @@ import typer
 
 from tan.commands.debug_config_cmd import (
     _resolve_from_build,
+    _sdk_core_refusal_authority,
     _select_slice,
 )
 from tan.core.debug_launch import (
@@ -2147,6 +2148,61 @@ def test_an_unknown_core_with_no_manifest_is_refused_before_the_write(tmp_path):
 
     assert env["exitCode"] == 2, env
     assert not launch_json(tmp_path).exists(), "wrote a launch.json it had just refused"
+
+
+def test_only_an_sdk_this_project_is_entitled_to_may_refuse_a_core():
+    """tan-cli#477 major 2, REVIEW round: WHICH checkout gets to refuse.
+
+    The refusal above is decided by an alp-sdk checkout, and with no
+    `--sdk-root` and no project pin that can be the machine-global default --
+    which `tan bootstrap` may have last pointed at an unrelated project.
+    Measured on a project directory naming no SDK at all:
+
+        resolve_project_context('.', None, None).sdk
+        -> SdkInfo(root='.../sdk-triage', source_tier='globalDefault',
+                   foreign_global_default_for='.../t477/p')
+
+    and the verdict flips purely on who answers -- measured, one project, one
+    `--core m55_hp`, two checkouts differing only in `e8.json`'s `cores[]`:
+    `--sdk-root A` exit 0, `--sdk-root B` exit 2 `debug-config.core-unknown`.
+    `debug-config` publishes no `sdk` envelope block and does not emit the
+    `sdk.global-default-foreign-project` warning `size`/`image` emit, so that
+    verdict would arrive unattributable.
+
+    A checkout another project pinned cannot PROVE anything about this
+    project's SoM, so it declines and the run stays on the "cannot be asked"
+    floor. Every other tier still refuses."""
+    assert _sdk_core_refusal_authority("/sdk", "sdkRootFlag", None) == "/sdk"
+    assert _sdk_core_refusal_authority("/sdk", "projectPin", None) == "/sdk"
+    # This project's OWN bootstrap set the global default -- still entitled.
+    assert _sdk_core_refusal_authority("/sdk", "globalDefault", None) == "/sdk"
+    # Another project's bootstrap set it. Declines.
+    assert _sdk_core_refusal_authority("/sdk", "globalDefault", "/elsewhere") is None
+    # Nothing resolved at all.
+    assert _sdk_core_refusal_authority(None, "none", None) is None
+
+
+def test_the_sdk_core_refusal_names_the_checkout_that_decided_it(tmp_path):
+    """tan-cli#477 major 2, REVIEW round. The with-manifest arm needs no such
+    line -- the manifest is inside the project the user pointed at -- but this
+    arm's authority may be a checkout the argv never mentions, and the envelope
+    carries no `sdk` block to look it up in. So the message names the path and
+    the tier that chose it, which is what makes `--sdk-root <the right one>`
+    the obvious next move rather than a support ticket."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    write_sdk_fixture(tmp_path)
+
+    env = envelope(run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                           "--core", "no_such_core", "--sdk-root", "./sdk",
+                           "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 2, env
+    message = next(i["message"] for i in env["issues"]
+                   if i["code"] == "debug-config.core-unknown")
+    assert "sdk" in message, message
+    assert "--sdk-root" in message, message
+    assert "sdkRootFlag" in message, message
 
 
 def test_a_core_the_sdk_cannot_be_asked_about_is_still_not_refused(tmp_path):

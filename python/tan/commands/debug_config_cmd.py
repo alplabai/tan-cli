@@ -177,11 +177,20 @@ def _normalise(path: str) -> str:
 
 def _resolve_project_reporting_fields(
     project_arg: str, board_yaml_arg: str | None, sdk_root_arg: str | None
-) -> tuple[str, str, str | None]:
-    """`(project.root, project.boardYaml, sdk_root)`. The first two, both
-    posix, are the fields this command REPORTS; `sdk_root` is read for the
-    alp-sdk#1026 metadata fallback (`_fill_debug_probe_identity_from_sdk`)
-    below and is NEVER attached to the outgoing envelope.
+) -> tuple[str, str, str | None, str, str | None]:
+    """`(project.root, project.boardYaml, sdk_root, sdk_source_tier,
+    foreign_global_default_for)`. The first two, both posix, are the fields
+    this command REPORTS; `sdk_root` is read for the alp-sdk#1026 metadata
+    fallback (`_fill_debug_probe_identity_from_sdk`) below and is NEVER
+    attached to the outgoing envelope.
+
+    The last two are the SDK's PROVENANCE, and they are returned for exactly
+    one consumer: [`_sdk_core_refusal_authority`], the tan-cli#477 review
+    round. Reading a debug-probe identity out of whatever SDK happened to
+    resolve is harmless -- the worst case is a placeholder that stays a
+    placeholder. REFUSING the run at exit 2 on that same checkout's word is
+    not, so the caller has to know which tier answered before it lets the
+    answer decide anything.
 
     Delegates to the SAME shared resolver every other command uses
     (`build_output.resolve_project_context`, port of
@@ -209,7 +218,13 @@ def _resolve_project_reporting_fields(
     """
     context = resolve_project_context(project_arg, board_yaml_arg, sdk_root_arg)
     sdk_root = context.sdk.root if context.sdk is not None else None
-    return context.workspace_root, context.board_yaml, sdk_root
+    return (
+        context.workspace_root,
+        context.board_yaml,
+        sdk_root,
+        context.sdk_source_tier,
+        context.foreign_global_default_for,
+    )
 
 
 def _workspace_relative(workspace_root: str, path: str) -> str:
@@ -494,17 +509,76 @@ def _sdk_published_cores(sdk_root: str | None, board_yaml_path: str) -> frozense
     return frozenset(cores)
 
 
-def _sdk_core_unknown_message(core: str, published: frozenset[str]) -> str:
+def _sdk_core_refusal_authority(
+    sdk_root: str | None, sdk_source_tier: str, foreign_global_default_for: str | None
+) -> str | None:
+    """The SDK root that is allowed to REFUSE a `--core`, or `None`.
+
+    tan-cli#477 major 2, REVIEW round. The refusal below is decided by an SDK
+    checkout, and until this guard existed that could be a checkout the user
+    never named: with no `--sdk-root` and no project pin, `resolve_sdk_tiered`
+    falls through to the machine-global default (`~/.alp/sdk-default`), which
+    `tan bootstrap` may have last pointed at an unrelated project. Measured on
+    this box, from a project directory that names no SDK at all:
+
+        resolve_project_context('.', None, None).sdk
+        -> SdkInfo(root='.../alp-workspace/sdk-triage',
+                   source_tier='globalDefault',
+                   foreign_global_default_for='.../t477/p')
+
+    and the refusal flips purely on which checkout answers -- measured, same
+    project, same `--core m55_hp`, two SDK roots differing only in `e8.json`'s
+    `cores[]`: `--sdk-root A` -> exit 0, `--sdk-root B` -> exit 2
+    `debug-config.core-unknown`. `debug-config` reports no `sdk` block at all
+    (deliberately -- see [`_resolve_project_reporting_fields`]) and does not
+    emit the `sdk.global-default-foreign-project` warning `size`/`image` emit
+    for this same situation, so a customer would have no way to see that a
+    stranger's checkout had just refused their build.
+
+    The guard's own rule -- "refuse only what you can PROVE unknown" -- settles
+    it. A global default last pinned by ANOTHER project cannot prove anything
+    about THIS project's SoM, so it declines to `None`, which the caller reads
+    as "cannot be asked" and stays silent, exactly as it does with no SDK at
+    all. That single flag is the whole discriminator on purpose: every other
+    way to arrive here -- `--sdk-root`, a working project pin, or a global
+    default THIS project's own bootstrap set (including after a broken pin fell
+    through to it) -- is an SDK this project is entitled to be judged by. Those
+    still refuse, and the refusal now names the checkout and the tier that
+    decided it.
+    """
+    if sdk_root is None:
+        return None
+    if foreign_global_default_for is not None:
+        return None
+    return sdk_root
+
+
+def _sdk_core_unknown_message(
+    core: str, published: frozenset[str], sdk_root: str, sdk_source_tier: str
+) -> str:
     """The tan-cli#477 counterpart of `debug_launch.explicit_core_unknown_
     message`, which names the cores a BUILD produced. There is no build here,
     so it names the cores the SDK publishes instead -- same refusal, same
-    code, a different (and the only available) authority."""
+    code, a different (and the only available) authority.
+
+    It names WHICH checkout, and by which tier it was chosen (REVIEW round).
+    The build-manifest arm needs no such line -- the manifest is inside the
+    project the user pointed at -- but this arm's authority may be a checkout
+    the argv never mentions (`--sdk-root` absent, a project pin, or a global
+    default), and `debug-config` publishes no `sdk` envelope block for the
+    reader to look it up in. A refusal a customer cannot attribute is a support
+    ticket; naming the path makes `--sdk-root <the right one>` the obvious next
+    move. See [`_sdk_core_refusal_authority`] for the tier that is NOT allowed
+    to get this far."""
     cores = ", ".join(sorted(published))
     return (
         f"--core {core} names no core this project's SoM has (its cores, per "
         f"the SDK's published metadata for this board.yaml's som.sku: "
         f"{cores}), and this project has no build/system-manifest.yaml to "
         "check against instead. Pass a --core value this SoM actually has. "
+        f"That core list came from the alp-sdk checkout at {sdk_root} "
+        f"(resolved by: {sdk_source_tier}) -- if that is not the checkout this "
+        "project should be judged against, pass --sdk-root explicitly. "
         "Left unrefused, this wrote a launch.json whose device stayed the "
         "literal <resolved-device> placeholder at exit 0 -- a file that looks "
         "valid and fails later in the debugger (tan-cli#477)."
@@ -1271,9 +1345,13 @@ def _run(
             f"never creates one.",
             launch_json_path,
         )
-    project_root, board_yaml, sdk_root = _resolve_project_reporting_fields(
-        project_arg, board_yaml_arg, sdk_root_arg
-    )
+    (
+        project_root,
+        board_yaml,
+        sdk_root,
+        sdk_source_tier,
+        foreign_global_default_for,
+    ) = _resolve_project_reporting_fields(project_arg, board_yaml_arg, sdk_root_arg)
     # tan-cli#236, the pair of #170 above: `boardYaml` reported only when a
     # file is really at the resolved path.
     project = Project.resolved(project_root, board_yaml)
@@ -1410,13 +1488,25 @@ def _run(
                     launch_json_path,
                 )
         else:
-            published_cores = _sdk_published_cores(sdk_root, board_yaml)
+            # NOT `sdk_root` directly: only a checkout this project is entitled
+            # to be judged by may turn a `--core` into an exit-2 refusal. See
+            # `_sdk_core_refusal_authority` (tan-cli#477 REVIEW round) -- the
+            # identity fallback further down still reads `sdk_root` whatever
+            # its provenance, because filling a placeholder from the wrong
+            # checkout leaves a placeholder, while refusing on its word stops
+            # the run.
+            refusal_sdk = _sdk_core_refusal_authority(
+                sdk_root, sdk_source_tier, foreign_global_default_for
+            )
+            published_cores = _sdk_published_cores(refusal_sdk, board_yaml)
             if published_cores and core not in published_cores:
                 return _explicit_core_unknown_failure(
                     generated_at,
                     target,
                     server,
-                    _sdk_core_unknown_message(core, published_cores),
+                    _sdk_core_unknown_message(
+                        core, published_cores, str(refusal_sdk), sdk_source_tier
+                    ),
                     launch_json_path,
                 )
 
