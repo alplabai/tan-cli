@@ -674,6 +674,13 @@ def _fallback_install_commands() -> dict[str, dict[str, str]]:
             "cmake": "winget install -e --id Kitware.CMake",
             "python": "winget install -e --id Python.Python.3.12",
             "ninja": "winget install -e --id Ninja-build.Ninja",
+            # NOT in `prerequisites.windows` -- the manifest declares an install
+            # command for a tool it does not require. `7z` is what unpacks the
+            # Zephyr SDK's native-Windows hosttools archive, so a Windows user
+            # who takes that optional step needs the line; bootstrap.ps1 itself
+            # does not. Carried because this table is byte-pinned to the
+            # manifest's `prerequisites.install.windows`, not to its tool LIST.
+            "7zip": "winget install -e --id 7zip.7zip",
         },
     }
 
@@ -809,29 +816,28 @@ def fallback_facts(min_python: tuple[int, int]) -> BootstrapFacts:
             "native_sim / Yocto need WSL2 (docs/cross-platform-setup.md section 5).",
         ),
         # Transcribed from `contract/fixtures/bootstrap/manifest.json`, the
-        # vendored producer output every other fallback field is held against by
-        # `test_the_fallback_constants_match_the_real_manifest_field_for_field`.
-        #
-        # ONE deliberate departure, in the first element's closing clause. The
-        # fixture sends the reader to `tan sdk switch`, which is in
-        # `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` -- this build REFUSES it, so
-        # copying that sentence would end a manual-install hint on a dead
-        # command, and `tests/commands/test_sdk_onboarding_dead_end.py` fails the
-        # build for exactly that (it is what caught this transcription). The
-        # replacement is the LIVE alp-sdk manifest's own current wording for the
-        # same sentence -- the SDK has already corrected it, so the vendored
-        # fixture is simply the stale copy. Held to a one-clause difference by
-        # `test_the_posix_fallback_matches_the_manifest_except_for_the_refused_
-        # subcommand`, which retires when that fixture is refreshed.
+        # vendored producer output every fallback field is held against by
+        # `test_the_fallback_constants_match_the_real_manifest_field_for_field`
+        # -- this one included, since tan-cli#585 re-vendored the fixture. It
+        # used to carry ONE deliberate departure: the stale fixture ended this
+        # first note on `tan sdk switch`, which is in
+        # `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` and REFUSES in this build, so
+        # transcribing it verbatim failed `test_sdk_onboarding_dead_end.py`.
+        # The refresh removed the conflict at its source; nothing here is
+        # exempt from the field-for-field check any more.
         manual_install_posix=(
             "The Zephyr SDK (`west sdk install`) is a separate, manual, one-time install on "
             "Linux/macOS -- not auto-installed by bootstrap.sh. It is the one every Zephyr-on-M "
-            "customer needs: it provides the `arm-zephyr-eabi` cross toolchain the real-silicon "
-            "build (`west build` / `west flash`) actually uses. Run it from your west workspace's "
+            "customer on Linux or Apple Silicon macOS needs (Intel Mac excepted -- see below): it "
+            "provides the `arm-zephyr-eabi` cross toolchain the real-silicon build (`west build` / "
+            "`west flash`) actually uses. Run it from your west workspace's "
             "top-level directory -- the alp-sdk checkout's parent directory -- after this script "
             "completes, e.g. `west sdk install --gnu-toolchains arm-zephyr-eabi --no-hosttools "
             "--install-dir \"$PWD/zephyr-sdk\"`; see docs/getting-started.md for the full one-liner "
-            "and select the checkout with `tan build --sdk-root <path>` or `.alp/sdk-path`.",
+            "and select the checkout with `tan build --sdk-root <path>` or `.alp/sdk-path`. On an "
+            "Intel Mac this command has no target to install: the pinned SDK ships `macos-aarch64` "
+            "only (no `macos-x86_64`), so real-silicon Zephyr builds need a Linux host instead -- "
+            "`native_sim` and this bootstrap step are unaffected.",
             "The Arm GNU Toolchain (`arm-none-eabi-gcc`) is a SEPARATE manual install, needed by "
             "three opt-in paths -- rebuilding the GD32 bridge firmware (custom-carrier bring-up or"
             " bridge recovery), building the CC3501E bridge firmware's silicon-free stub target "

@@ -592,21 +592,25 @@ def test_print_env_and_workspace_are_refused_together(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("mutation", "fragment"),
+    ("original", "mutation", "fragment"),
     [
-        ('"schemaVersion": 99', "schemaVersion 99"),
-        ('"pythonMinVersion": "three.ten"', "is not MAJOR.MINOR"),
-        ('"dirName": "../escape"', "is not a plain relative path"),
+        ('"schemaVersion": 1', '"schemaVersion": 99', "schemaVersion 99"),
+        # The PREREQUISITES floor, spelled with its value: tan-cli#585's
+        # re-vendor gave the fixture a SECOND `pythonMinVersion` (`zephyr`'s,
+        # `3.12`, which no consumer here reads), and a key-only match took the
+        # first line in the file -- mutating an unread field, so nothing
+        # refused and this case passed while testing nothing.
+        ('"pythonMinVersion": "3.10"', '"pythonMinVersion": "three.ten"', "is not MAJOR.MINOR"),
+        ('"dirName": ".venv"', '"dirName": "../escape"', "is not a plain relative path"),
     ],
 )
 def test_a_present_but_unusable_manifest_is_fatal_never_a_silent_fallback(
-    mutation, fragment, tmp_path
+    original, mutation, fragment, tmp_path
 ):
     """Falling back HERE would re-introduce hand-ported behaviour against an SDK
     that explicitly declared something else. Diffed byte-identical against the
     oracle on all three."""
-    key = mutation.split(":")[0]
-    original = [line for line in REAL_MANIFEST.splitlines() if key in line][0].strip().rstrip(",")
+    assert REAL_MANIFEST.count(original) == 1, original
     sdk = make_sdk(tmp_path, manifest=REAL_MANIFEST.replace(original, mutation))
     proc = run_tan("bootstrap", "--format", "json", "--sdk-root", str(sdk), cwd=sdk.parent)
     env = envelope(proc)
@@ -1760,52 +1764,56 @@ def test_a_bad_format_value_is_a_usage_error_not_a_crash(tmp_path):
 def test_the_fallback_constants_match_the_real_manifest_field_for_field():
     """The fallback is what a customer on a RELEASED SDK actually gets, and
     `check_bootstrap_manifest.py` does not scan this repo -- so nothing but this
-    holds the two in step."""
+    holds the two in step.
+
+    `manual_install_posix` was exempt here until tan-cli#585: the vendored
+    fixture was stale, its first note ended on `tan sdk switch` (refused by
+    this build), and transcribing it verbatim failed
+    `test_sdk_onboarding_dead_end.py`. Re-vendoring removed the conflict at
+    its source, so the exemption is gone and EVERY field is compared --
+    `from_manifest` excepted, which is the parse-vs-fallback flag itself and
+    differs by construction.
+    """
     manifest = parse_bootstrap_manifest(REAL_MANIFEST)
     fallback = fallback_facts(manifest.python_min_version)
     for field in vars(manifest):
-        if field in ("from_manifest", "manual_install_posix"):
+        if field == "from_manifest":
             continue
         assert getattr(fallback, field) == getattr(manifest, field), field
 
 
-def test_the_posix_fallback_matches_the_manifest_except_for_the_refused_subcommand():
-    """`manual_install_posix` is the ONE field the check above cannot demand
-    equality on, because two gates genuinely conflict over it (tan-cli#495
-    defect 6).
+def test_no_instruction_in_the_vendored_manifest_names_a_refused_subcommand():
+    """tan-cli#585 acceptance 3: the fixture cannot RE-acquire guidance for a
+    subcommand this build refuses.
 
-    The vendored fixture's first note ends by sending the reader to `tan sdk
-    switch`, which is in `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` -- this build
-    REFUSES it. Copying it would end a manual-install hint on a dead command
-    and `test_sdk_onboarding_dead_end.py` fails the build for exactly that.
-    Not copying it fails the field-for-field check above. Something has to
-    give, so what gives is recorded here rather than by widening either gate:
-    the substituted clause is the LIVE alp-sdk manifest's own current wording
-    for the same sentence (the SDK has already corrected it; the vendored
-    fixture is the stale copy), so this is a fixture refresh waiting to happen,
-    not a permanent divergence.
-
-    Held to an EXACT one-clause difference so the field still cannot drift:
-    the other two notes must match byte for byte, and the first must match up
-    to its closing sentence.
+    Scanned over the whole file, not just the note that was wrong: `switch`
+    was the one a gate happened to catch, and a future re-vendor could just as
+    easily bring back `tan sdk install`. Checked against
+    `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` rather than a literal, so a
+    subcommand ADDED to that frozenset later is covered here the day it lands.
     """
-    manifest = parse_bootstrap_manifest(REAL_MANIFEST)
-    fallback = fallback_facts(manifest.python_min_version)
+    from tan.commands import sdk_cmd
 
-    assert len(fallback.manual_install_posix) == len(manifest.manual_install_posix) == 3
-    assert fallback.manual_install_posix[1:] == manifest.manual_install_posix[1:]
+    assert sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS  # else this asserts nothing
 
-    stale = "the `tan sdk switch` step that pins it per project."
-    fixed = "select the checkout with `tan build --sdk-root <path>` or `.alp/sdk-path`."
-    assert manifest.manual_install_posix[0].endswith(stale)
-    assert fallback.manual_install_posix[0].endswith(fixed)
-    # Identical up to that clause -- nothing else was reworded in passing.
-    assert (
-        fallback.manual_install_posix[0][: -len(fixed)]
-        == manifest.manual_install_posix[0][: -len(stale)]
-    )
-    # And the refused verb appears in no shipped fallback string at all.
-    assert not any("tan sdk switch" in note for note in fallback.manual_install_posix)
+    # Both spellings: `alp` is the retired binary name, and a re-vendor could
+    # bring back either form of the same dead instruction.
+    refused = [
+        f"{binary} sdk {sub}"
+        for sub in sorted(sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS)
+        for binary in ("tan", "alp")
+    ]
+
+    for phrase in refused:
+        assert phrase not in REAL_MANIFEST, phrase
+
+    # And the shipped fallback, transcribed from that same file, stays clean --
+    # driven off the SAME derived list, so this half cannot fall behind the
+    # frozenset while the half above tracks it.
+    facts = fallback_facts((3, 10))
+    for note in (*facts.manual_install_posix, *facts.manual_install_windows):
+        for phrase in refused:
+            assert phrase not in note, phrase
 
 
 def test_the_reuse_test_compares_the_full_patch_level(tmp_path):

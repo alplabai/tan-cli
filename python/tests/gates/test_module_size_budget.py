@@ -260,7 +260,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # field gate holds them against) rather than the oracle's older copy, and
     # carry the comment recording the one clause that must diverge because
     # `test_sdk_onboarding_dead_end.py` refuses a shipped `tan sdk switch`.
-    "tan/core/bootstrap.py": 2049,
+    # 2055 as of tan-cli#585, which re-vendored that fixture: the whole growth
+    # is TRANSCRIPTION, not logic. The manifest's first POSIX note gained an
+    # Intel-Mac paragraph (+3 wrapped string lines) and its Windows install map
+    # gained a `7zip` entry (+1, with the comment recording why a command exists
+    # for a tool `prerequisites.windows` does not list). Held down by the
+    # departure comment shrinking, since the exemption it documented is gone.
+    "tan/core/bootstrap.py": 2055,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
     # newline/`"`-injection hole on the artefact/atoc/serial interpolations,

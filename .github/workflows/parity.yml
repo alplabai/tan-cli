@@ -183,12 +183,18 @@ env:
   #   the shipped Python `tan` carries no vendored copy of
   #   `metadata/bootstrap.json` to diff -- `tan.core.bootstrap` reads it
   #   live off the bound SDK root. `contract/fixtures/bootstrap/
-  #   manifest.json` served only the frozen Rust oracle, guarded at its own
-  #   freeze point by that crate's own `cargo test`; tan-cli#269 deleted the
-  #   guard along with `crates/`, so the fixture is now unguarded frozen data
-  #   -- re-point it at a Python check or retire it, but do not read it as
-  #   still-verified. `tests/parity/bootstrap_manifest_parity.py` survives as
-  #   a manual diagnostic tool (see its module doc), not run in CI.
+  #   manifest.json` was written for the Rust oracle and guarded by that
+  #   crate's own `cargo test`, which tan-cli#269 deleted along with
+  #   `crates/` -- but it is NOT unguarded, and never was: the Python
+  #   `test_the_fallback_constants_match_the_real_manifest_field_for_field`
+  #   asserts `tan.core.bootstrap.fallback_facts` equals it field for field,
+  #   and since tan-cli#585 with no exemption, alongside
+  #   `test_no_instruction_in_the_vendored_manifest_names_a_refused_
+  #   subcommand`. That fixture TRACKS `PINNED_SDK_TAG` since #585 (it had
+  #   gone stale enough to send a customer to `tan sdk switch`, which this
+  #   build refuses), so bump it with the pin.
+  #   `tests/parity/bootstrap_manifest_parity.py` survives as a manual
+  #   diagnostic tool (see its module doc), not run in CI.
   #
   # HELD at f4d87a1f from tan-cli#425 through tan-cli#485 (moved again below,
   # to `53557a60`, in #485's own fix). The `2bc6b400` bump #425 tried and
@@ -295,9 +301,18 @@ env:
   #     real `v0.15.0` tag (`e2928b9f`), so the emit's own doc links resolve
   #     and that divergence is healed. See that tree's `MANIFEST.md`.
   #   - seam1_field_diff PASS, rc 0 (above)
-  # `bootstrap_manifest_parity.py` is NOT driven by this pin and is not run in
-  # CI -- `contract/` stays frozen at its own v0.14.0 vendor point, so its
-  # `DIFFERS` against any newer ref is the expected, documented answer.
+  # `bootstrap_manifest_parity.py` is not run in CI, but since tan-cli#585
+  # `contract/fixtures/bootstrap/manifest.json` DOES track this pin -- so a
+  # `DIFFERS` reported against the ref named here is a re-vendor prompt, not
+  # the expected answer it used to be. Bumping this pin means: run
+  # `python3 tests/parity/bootstrap_manifest_parity.py --sdk alp-sdk`, and on
+  # a `DIFFERS` copy the SDK's `metadata/bootstrap.json` over the fixture,
+  # then re-run `python/tests/commands/test_bootstrap_command.py` (the
+  # field-for-field gate over `fallback_facts`, no exemptions since #585, plus
+  # the check that no note names a subcommand in
+  # `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS`). The fixture went stale for exactly
+  # as long as this block said not to bother: it was still telling customers
+  # to run `tan sdk switch`, which this build refuses.
   #
   # `f30f4d4b` -> `ccd34f06` (tan-cli#552/#553/#554/#555/#557/#558/#559/#562/
   # #563). Three upstream commits touch `scripts/alp_orchestrate/` in this
@@ -501,14 +516,17 @@ jobs:
         run: python3 tests/parity/kconfig_fixture_parity.py --sdk alp-sdk
 
       # `tan bootstrap` reads the SDK's metadata/bootstrap.json (alp-sdk#917)
-      # live off the bound SDK root -- no baked-in copy of it ships, so there
-      # is no vendored artefact left for a byte-parity step to guard here.
-      # (The Rust oracle carried one, frozen alongside it at
-      # `contract/fixtures/bootstrap/manifest.json` and guarded by its own
-      # `cargo test`; tan-cli#269 deleted both, so that fixture is now
-      # unguarded frozen data.) See `tests/parity/bootstrap_manifest_
-      # parity.py`'s module doc for why the script itself is kept as a manual
-      # tool rather than deleted.
+      # live off the bound SDK root -- no baked-in copy of it SHIPS, so there
+      # is no released artefact for a byte-parity step to guard here.
+      # (`contract/fixtures/bootstrap/manifest.json` is a test fixture, not a
+      # shipped file. tan-cli#269 deleted the `cargo test` that guarded it,
+      # but not the guarantee: `python/tests/commands/test_bootstrap_command.py`
+      # asserts `tan.core.bootstrap.fallback_facts` equals it field for field
+      # -- every field since tan-cli#585 -- and that no note in it names a
+      # subcommand this build refuses. Since #585 it tracks `PINNED_SDK_TAG`;
+      # re-vendor it when that pin moves.) See `tests/parity/bootstrap_
+      # manifest_parity.py`'s module doc for why the script itself is kept as
+      # a manual tool rather than deleted.
 
       # `tan doctor`'s zephyrSdk check (tan-cli#160) prints a hand-ported copy
       # of alp-sdk's metadata/toolchains.json zephyrSdk.version (the retired

@@ -262,10 +262,14 @@ One directory per case, mirroring the retired `cli-rs/contract` harness:
 | *(optional)* `board.yaml` / other fixture inputs | Copied into the isolated working directory the case runs in before `tan` is spawned. **Directories are copied recursively**, which is what lets a case ship a synthetic `sdk/` checkout (`scripts/alp_project.py` + `metadata/…` + `examples/…`) and pass `--sdk-root ./sdk`. That relative argv keeps the "no absolute paths in argv" rule intact — `data.sdkRoot` comes back as the literal `./sdk` on every platform. |
 
 `contract/fixtures/` (sibling directory) is not an envelope-golden directory.
-It holds shared synthetic SDK, bootstrap-manifest, and toolchain inputs. Note
-that `contract/fixtures/bootstrap/manifest.json` was guarded only by a
-`crates/` unit test and is, since tan-cli#269, unguarded frozen data — re-point
-it at a Python check or retire it, but do not read it as still-verified.
+It holds shared synthetic SDK, bootstrap-manifest, and toolchain inputs.
+`contract/fixtures/bootstrap/manifest.json` is a vendored copy of alp-sdk's
+`metadata/bootstrap.json`, re-vendored at `PINNED_SDK_TAG` by tan-cli#585. It
+is verified data, not frozen data: `python/tests/commands/test_bootstrap_command.py`
+asserts `tan.core.bootstrap.fallback_facts` equals it field for field (no
+exemptions) and that no instruction in it names a subcommand in
+`sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS`. `tests/parity/bootstrap_manifest_parity.py`
+byte-diffs it against an SDK checkout by hand.
 
 ## What a golden does NOT cover: key ORDER
 
