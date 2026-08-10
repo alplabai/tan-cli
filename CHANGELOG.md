@@ -343,6 +343,23 @@ All notable changes to `tan` are documented here. Format follows
   issue code at exit 2, naming the offending flag and value. A non-hex value
   (`--cfsr zz`) is untouched and still exits 2 the way it always did. (#616)
 
+- **The envelope's "no payload may ever crash stdout" guard did not cover the
+  write, nor its own fallback.** The lone-surrogate case is closed by scrubbing
+  the finished document, but two sites could still leave stdout empty:
+  `_serialise`'s `except` arm re-serialises `project`/`sdk` VERBATIM, so an
+  unencodable value there detonated the very fallback that exists to keep
+  stdout alive and `to_json()` raised out through `tan.cli`'s two envelope
+  printers; and `emit()`'s `print(text)` sat outside every guard, which is
+  where the encode actually happens. Both now fall back to one ASCII-only
+  `envelope.serialize-failed` document at exit 5, so the invariant holds
+  structurally rather than for the one character class that filed the issue.
+  The write guard is narrowed to the ENCODE class on purpose: an encode failure
+  happens before any byte leaves the stream, but an `OSError` from a buffered
+  stream has already left a truncated document on the wire, and appending a
+  second one to that would report a clean fallback over unparseable stdout —
+  so an I/O failure still propagates. No new issue code, and a valid payload's
+  bytes are unchanged. (#491)
+
 - **An AEN MRAM write with no wrong-board guard now says so.** The
 
 - **A helper MCU that Alp Lab programs in production is no longer flashed
