@@ -9,6 +9,21 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Added
 
+- **`tan explain --code <ALP-Bxxx|ALP_ERR_*>` — diagnostic-code lookup, ported
+  from alp-sdk.** `scripts/alp_cli/explain.py` was the only reader of the SDK's
+  generated `metadata/error-catalog.json`, so retiring it under ADR-0020
+  end-state B would have made every `ALP-Bxxx` landing page and every
+  `ALP_ERR_*` enum comment unreachable from any CLI. The verb moves here
+  instead: same case-insensitive lookup over both code shapes, same `summary` /
+  `cause` / `fix` / `doc` field order, same `difflib` shortlist on a miss, and
+  `data.diagnostic` carries the catalogue entry byte-for-byte as `alp explain
+  <code> --json` printed it. A flag on the existing verb, not a new command —
+  `--template` / `--target` and the overview are unchanged byte for byte, and
+  `--code` is the one mode that resolves a checkout. With none resolvable it
+  refuses (`explain.sdk-root-unresolved`, exit 1) rather than answering from a
+  vendored copy: the code list is alp-sdk's fact (I-26/ADR-0017). This ENABLES
+  the alp-sdk-side removal; it does not perform it.
+
 - **A re-sync PROPOSER for `tan/planner/`: `python/scripts/planner_resync.py` +
   `.github/workflows/planner-resync.yml`.** ADR-0020's remediation asked for an
   automatic `repository_dispatch` from alp-sdk CI into tan on every planner
