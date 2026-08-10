@@ -68,6 +68,7 @@ from tan.commands.sdk_cmd import (
     ActiveSdk,
     global_default_foreign_project_issue,
     project_pin_issue,
+    rejected_sdk_root_message,
     resolve_sdk_tiered,
 )
 from tan.core.global_flags import accept_global_flags
@@ -90,6 +91,13 @@ SDK_UNRESOLVED_CODE = "presets.sdk-root-unresolved"
 SDK_UNRESOLVED_MESSAGE = (
     "alp-sdk root is unresolved. Returning built-in defaults and empty SDK preset lists."
 )
+
+#: What the reader GOT instead, for the `--sdk-root`-was-given-and-rejected
+#: branch (`sdk_cmd.rejected_sdk_root_message`, tan-cli#497). The no-flag
+#: message above is byte-pinned by the `presets-no-sdk` golden envelope and the
+#: `["presets","--format","json"]` oracle-parity case and is NOT touched; this
+#: branch is unreachable from either, because neither passes the flag.
+SDK_UNRESOLVED_CONSEQUENCE = "Returning built-in defaults and empty SDK preset lists."
 
 #: Built-in, SDK-independent defaults, verbatim from
 #: `tan_core::presets::empty_preset_catalogue`. Order is the wire order (these are
@@ -627,7 +635,19 @@ def presets(
                 if issue is not None
             ]
         else:
-            issues = [Issue(SDK_UNRESOLVED_CODE, "warning", SDK_UNRESOLVED_MESSAGE)]
+            # tan-cli#497 defect 7 (the sibling of `examples_cmd`'s): a
+            # rejected `--sdk-root` is named, so the reader can see WHICH path
+            # failed the loader-marker check instead of only that "the alp-sdk
+            # root is unresolved".
+            issues = [
+                Issue(
+                    SDK_UNRESOLVED_CODE,
+                    "warning",
+                    rejected_sdk_root_message(sdk_root, SDK_UNRESOLVED_CONSEQUENCE)
+                    if sdk_root
+                    else SDK_UNRESOLVED_MESSAGE,
+                )
+            ]
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring
         # No registry entry applies (`contract/issue-codes.json` covers
         # `bootstrap.*`/`debug-config.*` only), so this follows the port's
