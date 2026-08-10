@@ -363,8 +363,26 @@ HAND_PORT_PINNED_SDK_COMMIT = "7d58ef32d0a730c902e335adfd7764c2ec500ba5"  # alp-
 #: `som_metadata.py` are both ported out of the SAME
 #: `scripts/alp_project_loader.py`, so a filename-keyed table (like
 #: PINNED_HASHES above, where the relocation is 1:1) cannot hold this.
+#:
+#: `scripts/sentinels.py` is in THIS table but deliberately NOT in
+#: HAND_PORT_SOURCES: it has no `tan/planner/` file of its own to name. Its
+#: one function is hand-copied INTO another module --
+#: `zephyr_board.py::_is_tbd`, the relocated spelling of `sentinels.is_tbd`
+#: (alp-sdk #1048), which upstream imports from both `scripts/` and
+#: `alp_orchestrate/` and which would otherwise cost a whole tracked module
+#: for three lines. `slugs.py:42` sets the same precedent with its own
+#: `_is_tbd`. Tracking the SDK-side hash anyway is the point: without it, an
+#: upstream change to what counts as the `TBD` sentinel (the normalisation is
+#: currently case- and surrounding-whitespace-insensitive, exact-match only)
+#: would drift both copies silently, and neither this table nor
+#: `test_every_planner_module_is_tracked_or_declared_exempt` -- which only
+#: walks files that exist under `tan/planner/` -- would say a word. Verified
+#: byte-identical between `ccd34f06` and `7d58ef32` (1186 bytes,
+#: `54c0b5c4...`), so pinning it here at HAND_PORT_PINNED_SDK_COMMIT re-freezes
+#: nothing unaudited.
 HAND_PORT_HASHES: dict[str, str] = {
     "scripts/gen_zephyr_board.py": "75958a138c4fc24d39815edcc6a2a009a8f1d31360aae4b8fc3e5a82f05e0d77",
+    "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/alp_project_loader.py": "d5f142173a13cfac9e130ef8fde90d35d6bb92d21d152925a275b3e8bdaa49db",
     "scripts/alp_template.py": "6e62ac385154cef4decb8bb54eb9fae27e45f9797faffe8159cedca770f1f352",
     "scripts/alp_project_emit/__init__.py": "62c4742bc373e7fafcd8aa864ad7692d3c05b610c6d7457023aeb82c98847d88",

@@ -51,6 +51,17 @@ pytestmark = pytest.mark.skipif(
            "missing root, not a pass.",
 )
 
+#: NOT an E3 hardware fact, and not a plausible-looking one either: real Alif
+#: TCM globals are `0x5xxxxxxx`-shaped. `_port_aen301` below must put SOMETHING
+#: in `itcm_global_base` / `dtcm_global_base` for the emit to run at all, and
+#: `TBD` is not available -- the generator's own `_is_tbd` would make it refuse.
+#: So a deliberately impossible value is used, nothing in this module asserts
+#: on it, and it is named here rather than left as a bare `0` in an argument
+#: list so nobody mining this fixture for a real `metadata/socs/alif/ensemble/
+#: e3.json` can cargo-cult it out. The real E3 numbers are TBD and belong
+#: upstream, authored from the datasheet.
+_FIXTURE_TCM_BASE = 0
+
 AEN801_PRESET = "e1m_modules/E1M-AEN801.yaml"
 AEN301_PRESET = "e1m_modules/E1M-AEN301.yaml"
 E8_SOC = "socs/alif/ensemble/e8.json"
@@ -148,20 +159,20 @@ def _port_aen301(mm: _MutatedMetadata) -> None:
     in the SoC JSON, a `topology.<core>.zephyr_full_name` in the SoM preset,
     and the SoC's own `zephyr_peripherals_dtsi`.
 
-    The TCM base addresses below are FIXTURE VALUES, not a claim about E3
-    silicon -- alp-sdk's `e3.json` declares none today and this repo does not
-    invent hardware facts. Nothing here asserts on them; every assertion in
-    the tests that use this helper is about the part designator and the
-    peripherals-overlay include, which is what tan-cli#493 is about. The real
-    E3 numbers are TBD and belong upstream, in `metadata/socs/alif/ensemble/
-    e3.json`, alongside a real `zephyr/dts/alif/ensemble_e3_peripherals.dtsi`.
+    The TCM base addresses are `_FIXTURE_TCM_BASE` -- see that constant for
+    why they are deliberately impossible rather than plausible. Nothing here
+    asserts on them; every assertion in the tests that use this helper is
+    about the part designator and the peripherals-overlay include, which is
+    what tan-cli#493 is about. The real E3 numbers are TBD and belong
+    upstream, in `metadata/socs/alif/ensemble/e3.json`, alongside a real
+    `zephyr/dts/alif/ensemble_e3_peripherals.dtsi`.
     """
     for core in ("m55_hp", "m55_he"):
         mm.json_core_set(
             E3_SOC, core,
             zephyr_cpucluster=f"rtss_{core.split('_')[1]}",
-            itcm_global_base=0,
-            dtcm_global_base=0,
+            itcm_global_base=_FIXTURE_TCM_BASE,
+            dtcm_global_base=_FIXTURE_TCM_BASE,
         )
     mm.json_set(E3_SOC, "zephyr_peripherals_dtsi",
                 "alif/ensemble_e3_peripherals.dtsi")
