@@ -23,13 +23,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 
 import pytest
 
 from tan.core import faultdecode as port
+from tests.conftest import REAL_ENVIRON
 
 _GOLDEN_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "faultdecode_golden.json"
 _GOLDEN = json.loads(_GOLDEN_PATH.read_text(encoding="utf-8"))
@@ -46,8 +46,23 @@ def _resolve_oracle_path() -> Path | None:
     sitting next to this repo at any ancestor level (the layout every
     contributor's alp-sdk + tan-cli pair actually uses, worktree or not).
     Returns `None` only when neither is present, so the caller can skip.
+
+    Reads `REAL_ENVIRON` (captured at collection time in `tests/conftest.py`),
+    NOT `os.environ` -- this runs from inside test bodies, by which point the
+    autouse `_scrub_sdk_discovery_env` fixture has already deleted
+    `ALP_SDK_ROOT` from the live process environment. An `os.environ` read here
+    therefore ALWAYS saw it gone, so every live re-check in this module skipped
+    unconditionally, on every machine and in CI's `sdk_parity: true` job alike.
+    Measured on `dev` @ 1813e46 with `ALP_SDK_ROOT=<a real alp-sdk checkout>`:
+    `8 passed, 3 skipped`, the 3 being exactly these. The sibling module
+    `tests/commands/test_faultdecode_command.py` had the identical defect and
+    fixed it this way in tan-cli#254/#256; this copy of `_resolve_oracle_path`
+    was never brought along. A gate that cannot fail is not a gate -- and
+    tan-cli#616 makes this one load-bearing, since it is what polices the
+    deliberate divergence from upstream (see
+    `test_decode_diverges_from_the_sdk_original_only_where_tan_cli_616_declares`).
     """
-    override = os.environ.get("ALP_SDK_ROOT")
+    override = REAL_ENVIRON.get("ALP_SDK_ROOT")
     if override:
         candidate = Path(override) / "scripts" / "alp_cli" / "faultdecode.py"
         if not candidate.is_file():
@@ -159,10 +174,51 @@ def test_bit_tables_match_the_sdk_original_exactly():
     )
 
 
-def test_decode_matches_the_sdk_original_over_many_fault_words():
+#: MLSPERR (MMFSR bit 5) | LSPERR (BFSR bit 13) -- the two CFSR CAUSE bits
+#: alp-sdk's `_root_cause` ladder never gave a branch to, which is what let
+#: `HFSR.FORCED` (or the bare `<NAME> set (<REG>)` fallback) answer for them.
+_LAZY_FP_BITS = (1 << 5) | (1 << 13)
+
+
+def _declared_divergence(cfsr: int, theirs_root_cause: str) -> str | None:
+    """Which tan-cli#616 divergence class this case falls into, or `None`.
+
+    Deliberately TIGHT on both sides: the class is claimed only when the
+    upstream answer is one of the specific wrong ones #616 names. A predicate
+    that excused every mismatch on any CFSR containing LSPERR would also excuse
+    an unrelated regression on such a word.
+    """
+    if cfsr & _LAZY_FP_BITS and (
+        theirs_root_cause.startswith("Forced HardFault --")
+        or theirs_root_cause.startswith(("LSPERR set (BFSR):", "MLSPERR set (MMFSR):"))
+    ):
+        # #616 defect A: a fault taken during lazy FP state preservation is a
+        # CAUSE (with an address, when the VALID bit is set), and `FORCED` is
+        # only ever the escalation that carried it to the HardFault handler.
+        return "lazy-fp-preservation-is-a-cause"
+    if theirs_root_cause.startswith(("BFARVALID set (BFSR):", "MMARVALID set (MMFSR):")):
+        # Same rule one step down: an address-VALID bit qualifies the register
+        # beside it and describes nothing that broke, so it must not be
+        # announced as the cause while a real one sits later in the flag list.
+        return "address-valid-is-not-a-cause"
+    return None
+
+
+def test_decode_diverges_from_the_sdk_original_only_where_tan_cli_616_declares():
     """`decode()` + `render_human()` + `report_to_json()`, swept over every
-    single-bit case and a batch of random combinations, diffed against the
-    SDK original's own functions."""
+    single-bit case, a batch of random combinations, and the deterministic
+    words that exercise each declared divergence, diffed against the SDK
+    original's own functions.
+
+    This used to assert byte-equality outright. tan-cli#616 makes tan diverge
+    ON PURPOSE (see `tan/core/faultdecode.py::_root_cause` and
+    `tests/fixtures/faultdecode_golden.PROVENANCE.txt`), so the assertion
+    becomes: every difference is `root_cause` ONLY, and every one falls into a
+    class this module names. A difference in any other field, or a `root_cause`
+    difference outside those classes, is still a failure -- deleting this test,
+    or loosening it to "differs somehow", would give the divergence exactly the
+    unpinned freedom tan-cli#502's PROVENANCE calls out as the harm.
+    """
     original = _load_original()
     import random
 
@@ -176,21 +232,54 @@ def test_decode_matches_the_sdk_original_over_many_fault_words():
         cases.append(
             (random.getrandbits(32), random.getrandbits(32), random.getrandbits(6))
         )
+    # The random sweep reaches `lazy-fp-preservation-is-a-cause` by luck and
+    # `address-valid-is-not-a-cause` essentially never (almost every random
+    # 32-bit CFSR carries a cause bit). These four make both classes, and the
+    # #616 repro itself, reachable deterministically, so the non-vacuity check
+    # below cannot be satisfied by a lucky seed alone.
+    cases += [
+        (0x2000, 0x40000000, 0),  # LSPERR + FORCED -- the issue's own repro
+        (0x0020, 0x40000000, 0),  # MLSPERR + FORCED
+        (0x2000, 0, 0),           # LSPERR alone
+        (0x8000, 0, 0x2),         # BFARVALID (no cause) + DFSR BKPT
+    ]
 
-    mismatches = []
+    mismatches: list[str] = []
+    classes: set[str] = set()
     for cfsr, hfsr, dfsr in cases:
         for bfar, mmfar in ((None, None), (0x20000000, None), (None, 0x20000004)):
             ours = port.decode(cfsr=cfsr, hfsr=hfsr, dfsr=dfsr, bfar=bfar, mmfar=mmfar)
             theirs = original.decode(
                 cfsr=cfsr, hfsr=hfsr, dfsr=dfsr, bfar=bfar, mmfar=mmfar
             )
+            if port.report_to_json(ours, None) == original.report_to_json(
+                theirs, None
+            ) and port.render_human(ours, None, False) == original.render_human(
+                theirs, None, False
+            ):
+                continue
+            where = f"cfsr={hex(cfsr)} hfsr={hex(hfsr)} dfsr={hex(dfsr)} bfar={bfar} mmfar={mmfar}"
+            kind = _declared_divergence(cfsr, theirs.root_cause)
+            if kind is None:
+                mismatches.append(f"{where}: UNDECLARED divergence -- {ours.root_cause!r}")
+                continue
+            # Adopting their `root_cause` must make both renderings identical
+            # again: that is the exact assertion "differs in root_cause ONLY".
+            ours.root_cause = theirs.root_cause
             if port.report_to_json(ours, None) != original.report_to_json(
                 theirs, None
             ) or port.render_human(ours, None, False) != original.render_human(
                 theirs, None, False
             ):
-                mismatches.append((hex(cfsr), hex(hfsr), hex(dfsr), bfar, mmfar))
-    assert not mismatches, f"{len(mismatches)} decode mismatches: {mismatches[:5]}"
+                mismatches.append(f"{where}: differs BEYOND root_cause ({kind})")
+                continue
+            classes.add(kind)
+    assert not mismatches, f"{len(mismatches)} undeclared mismatches: {mismatches[:5]}"
+    # Non-vacuity: a sweep that stopped reaching the divergent words would pass
+    # this test while proving nothing about the thing it exists to police.
+    assert classes == {"lazy-fp-preservation-is-a-cause", "address-valid-is-not-a-cause"}, (
+        f"the sweep no longer exercises every declared divergence class: {sorted(classes)}"
+    )
 
 
 def test_parse_dump_matches_the_sdk_original():
@@ -249,3 +338,111 @@ def test_mmfsr_bfsr_ufsr_sub_registers_compose_into_cfsr():
 def test_last_occurrence_of_a_token_wins():
     found = port.parse_dump("cfsr: 0x1\ncfsr: 0x2\n")
     assert found["cfsr"] == 0x2
+
+
+# --------------------------------------------------------------------------
+# tan-cli#616 defect A: HFSR.FORCED is an ESCALATION, never the root cause
+# --------------------------------------------------------------------------
+#
+# These pin the exact strings. `faultdecode` is a diagnostic command whose
+# whole output IS its contract -- a reworded root cause is a different
+# diagnosis handed to a firmware engineer at 2am, not a cosmetic change -- so
+# a substring probe would let the wording rot underneath a green bar.
+
+
+#: The verbatim answer for `--cfsr 0x2000` (BFSR bit 13, LSPERR).
+_LSPERR_ROOT_CAUSE = (
+    "Bus fault while lazily preserving the floating-point context -- the deferred push of the "
+    "FP registers into the space the exception frame reserved for them hit a faulting address, "
+    "so that stack memory is bad or absent (a corrupted or overflowed stack pointer). Check "
+    "SP/PSPLIM and that the stack fits the larger FP-extended exception frame."
+)
+
+#: The verbatim answer for `--cfsr 0x20` (MMFSR bit 5, MLSPERR).
+_MLSPERR_ROOT_CAUSE = (
+    "MemManage fault while lazily preserving the floating-point context -- the MPU forbids the "
+    "deferred push of the FP registers into the space the exception frame reserved for them "
+    "(wrong region permissions, or a stack that has overflowed out of its region)."
+)
+
+#: The verbatim answer when FORCED really IS all there is to say.
+_FORCED_ROOT_CAUSE = (
+    "Forced HardFault -- a configurable fault escalated but its own status bits are clear; the "
+    "escalation usually means faults are disabled (SHCSR) or it faulted at priority -1."
+)
+
+
+def test_forced_hardfault_does_not_shadow_the_lsperr_it_escalated():
+    """tan-cli#616's own repro: `--cfsr 0x2000 --hfsr 0x40000000`.
+
+    `HFSR.FORCED` (bit 30) says a configurable fault could not be taken by its
+    own handler and escalated; WHAT faulted is in CFSR. Leading with the
+    escalation handed the operator the least actionable half of the registers
+    -- and, here, a factually false half: the old answer asserted "its own
+    status bits are clear" with LSPERR demonstrably set."""
+    report = port.decode(cfsr=0x2000, hfsr=0x40000000)
+    assert report.root_cause == _LSPERR_ROOT_CAUSE
+    # The escalation is not lost -- it is reported where a qualifier belongs.
+    assert report.has("FORCED")
+
+
+def test_forced_hardfault_does_not_shadow_the_mlsperr_it_escalated():
+    report = port.decode(cfsr=0x20, hfsr=0x40000000)
+    assert report.root_cause == _MLSPERR_ROOT_CAUSE
+    assert report.has("FORCED")
+
+
+def test_lsperr_reports_the_bfar_address_when_the_valid_bit_is_set():
+    """A cause branch, not the bare `<NAME> set (<REG>)` fallback, means LSPERR
+    now carries the faulting address the fallback threw away."""
+    report = port.decode(cfsr=(1 << 13) | (1 << 15), hfsr=1 << 30, bfar=0x2000FFF0)
+    assert report.root_cause == (
+        "Bus fault while lazily preserving the floating-point context at 0x2000fff0 (BFAR) -- "
+        "the deferred push of the FP registers into the space the exception frame reserved for "
+        "them hit a faulting address, so that stack memory is bad or absent (a corrupted or "
+        "overflowed stack pointer). Check SP/PSPLIM and that the stack fits the larger "
+        "FP-extended exception frame."
+    )
+
+
+def test_forced_stays_the_root_cause_when_cfsr_names_no_cause():
+    """The demotion is conditional, not a deletion. With CFSR genuinely clear,
+    `FORCED` is the whole story and the sentence's "its own status bits are
+    clear" is true -- which is exactly when it may be said."""
+    assert port.decode(hfsr=1 << 30).root_cause == _FORCED_ROOT_CAUSE
+
+
+def test_forced_stays_the_root_cause_when_cfsr_holds_only_an_address_valid_bit():
+    """`BFARVALID` says the address register beside it is trustworthy. It is
+    not a fault, so it does not disqualify `FORCED` from answering -- and it
+    must not answer itself."""
+    report = port.decode(cfsr=1 << 15, hfsr=1 << 30, bfar=0x20000000)
+    assert report.root_cause == _FORCED_ROOT_CAUSE
+
+
+def test_a_cfsr_cause_bit_with_no_ladder_branch_still_beats_forced():
+    """The guard is keyed on the flag's REGISTER, not on a list of names, so a
+    CFSR bit added to the tables tomorrow outranks `FORCED` the day it lands --
+    before anyone remembers to give it a `_root_cause` branch. That omission is
+    precisely how LSPERR/MLSPERR, in the bit tables since day one, came to be
+    reported as "Forced HardFault" for as long as they were.
+
+    Built by hand rather than by decoding a word, because every real CFSR cause
+    bit now HAS a branch: this is the future-bit case, and it is the only way
+    to exercise the guard itself rather than a branch above it."""
+    report = port.FaultReport(
+        flags=[
+            port.DecodedFlag(reg="BFSR", name="BFARVALID", bit=15, meaning="valid."),
+            port.DecodedFlag(reg="UFSR", name="FUTUREBIT", bit=26, meaning="A bit from 2027."),
+            port.DecodedFlag(reg="HFSR", name="FORCED", bit=30, meaning="escalated."),
+        ]
+    )
+    assert port._root_cause(report) == "FUTUREBIT set (UFSR): A bit from 2027."
+
+
+def test_an_address_valid_bit_is_never_announced_as_the_root_cause():
+    """The fallback obeys the same rule as the `FORCED` guard: with `BFARVALID`
+    first in the flag list and a real (if unladdered) fault after it, the fault
+    is what gets named."""
+    report = port.decode(cfsr=1 << 15, dfsr=0x2, bfar=0x20000000)
+    assert report.root_cause == "BKPT set (DFSR): Breakpoint -- a BKPT instruction or hardware breakpoint."
