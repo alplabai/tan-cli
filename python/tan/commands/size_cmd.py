@@ -81,6 +81,7 @@ from tan.core.system_manifest import (
     slice_elf_candidates,
     slice_footprint_dirs,
 )
+from tan.core.tool_lookup import resolve_tool
 from tan.env import use_color
 from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -102,44 +103,51 @@ _SIZE_TOOL_TIMEOUT = 30
 _MAX_ELF_BYTES = 512 * 1024 * 1024
 
 
-def _find_on_path(command: str) -> bool:
-    """Whether `command` resolves on PATH -- port of `util::command_on_path`.
+def _find_on_path(command: str) -> str | None:
+    """Where `command` resolves on PATH -- the ABSOLUTE path, or `None`.
 
-    Hand-rolled rather than `shutil.which`, which on Windows ALWAYS inserts
-    `os.curdir` ahead of the search list (even when an explicit `path=` is
-    given). `where.exe` has the same behaviour, and the oracle walks PATH by hand
-    for exactly this reason: a project checked out with its own `size.exe` at its
-    root would otherwise be reported as "available" and then SPAWNED. A project
-    directory must never supply the executable.
+    Port of `util::command_on_path`, hand-rolled rather than `shutil.which`,
+    which on Windows ALWAYS inserts `os.curdir` ahead of the search list (even
+    when an explicit `path=` is given). `where.exe` has the same behaviour, and
+    the oracle walks PATH by hand for exactly this reason: a project checked out
+    with its own `size.exe` at its root would otherwise be reported as
+    "available" and then SPAWNED. A project directory must never supply the
+    executable.
+
+    **tan-cli#567: it now returns the PATH, not a bool.** The walk above was
+    correct and its result was then thrown away -- `_sizes_from_size_tool` was
+    handed the bare identity and `subprocess.run` gave it straight back to
+    `CreateProcess`, whose documented search order puts the parent process's
+    current directory AHEAD of `%PATH%`. The hardened check found the real
+    `size.exe`; the spawn then ran the project's. Returning the resolved path
+    is what makes the check and the spawn agree, and it is the same
+    one-resolver rule tan-cli#510 established for the build spawn -- which is
+    why the walk itself is no longer written out here but delegated to
+    `tan.core.tool_lookup.resolve_tool`, the ONE copy (tan-cli#532).
+
+    `os.environ`, deliberately: unlike a build slice, `tan size` pins no `PATH`
+    of its own, so the environment this resolves against IS the one
+    `_sizes_from_size_tool`'s child inherits.
     """
-    raw = os.environ.get("PATH")
-    if not raw:
-        return False
-    dirs = [d for d in raw.split(os.pathsep) if d]
-    if os.name != "nt":
-        for directory in dirs:
-            candidate = Path(directory) / command
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return True
-        return False
-    pathext = os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
-    exts = [e for e in pathext.split(";") if e]
-    has_ext = Path(command).suffix != ""
-    for directory in dirs:
-        base = Path(directory)
-        if has_ext:
-            if (base / command).is_file():
-                return True
-        elif any((base / f"{command}{ext}").is_file() for ext in exts):
-            return True
-    return False
+    return resolve_tool(command, os.environ).resolved
 
 
 def _sizes_from_size_tool(size_bin: str, elf: str) -> tuple[int, int] | None:
     """Run the size tool on `elf` and parse its Berkeley output. `None` when the
     tool fails to spawn, times out, exits non-zero, or its output does not parse
     -- every one of which falls through to the next measurement rung rather than
-    failing the command."""
+    failing the command.
+
+    `size_bin` is the ABSOLUTE path [`_find_on_path`] resolved, never a bare
+    identity (tan-cli#567). A bare name here would be handed back to the
+    platform's own resolver, which on Windows searches the parent process's
+    current directory before `%PATH%` -- so a bare `size_bin` is refused
+    outright rather than spawned. Refused, not "resolved here": a second
+    resolution at the spawn is exactly the drift tan-cli#510 was filed over,
+    and this rung failing closed simply falls through to the ELF-section-header
+    measurement, which needs no subprocess at all."""
+    if not Path(size_bin).is_absolute():
+        return None
     try:
         out = subprocess.run(
             [size_bin, elf],
@@ -609,7 +617,12 @@ def _run(
         )
 
     sku = board if board is not None else (manifest.sku.strip() or None)
-    size_bin = next((t for t in SIZE_TOOLS if _find_on_path(t)), None)
+    # tan-cli#567: the RESOLVED absolute path of the first size tool that is
+    # really on PATH, not its bare name -- that path is what
+    # `_sizes_from_size_tool` spawns, so the current directory cannot supply a
+    # different `size.exe` than the one this check just approved. `None` still
+    # means "no size tool on PATH", and the fallback rungs below are unchanged.
+    size_bin = next(filter(None, (_find_on_path(t) for t in SIZE_TOOLS)), None)
     rows = [
         _measure_slice(s, build_root, sku, metadata_root, size_bin)
         for s in manifest.slices

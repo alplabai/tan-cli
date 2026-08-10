@@ -42,6 +42,25 @@ module's own `_ToolResolution` docstring for why one resolver, not two. Not
 back-ported to `crates/`, which ships to nobody (`docs/ROADMAP.md`); fixed
 Python-side only.
 
+**tan-cli#567, a third DELIBERATE divergence from the frozen Rust oracle** --
+the one above, widened, and recorded here so the register stays complete.
+Two things in this file still handed the platform a bare identity after #510.
+(1) `_terminate`'s Windows `taskkill`: `CreateProcess` reaches
+`%SystemRoot%\\System32` only AFTER the current directory, so a cancelled build
+in a project carrying its own `taskkill.exe` ran that one -- now resolved
+first, see [`_taskkill_program`]. (2) The lookup itself, on POSIX: an EMPTY
+`PATH` entry (`PATH="$PATH:"`, `PATH=":$PATH"` -- both routine) means "the
+current directory" to every POSIX consumer, and `shutil.which` duly joins `""`
+with the name and probes it relative to cwd. Measured on `dev`,
+`_resolve_tool("cwdprobe", {"PATH": ":/nope:"})` answered the RELATIVE string
+`'cwdprobe'` for a file that existed only in the process's own working
+directory, which `execute_slices` then spawned -- live on this path since #510,
+because the Windows branch already filtered empty entries and the POSIX branch
+did not. Empty entries are dropped before the walk; the same tree now answers
+`None`. See `tan.core.tool_lookup.resolve_tool`, which is where that walk now
+lives (this module keeps `_ToolResolution`/`_resolve_tool` as re-export
+aliases). Not back-ported to `crates/`; fixed Python-side only.
+
 **How the post-build write reaches `tan run` without a `build_cmd.py` change.**
 The Rust oracle's executor (`execute/mod.rs::execute_slices_outcome`) returns
 a `NativeBuildOutcome` bundling the dispatch result with the write's two
@@ -87,6 +106,7 @@ from tan.core.plan_exec import (
     sdk_stamp_key,
 )
 from tan.core.system_manifest import SliceRunResult
+from tan.core.tool_lookup import ToolResolution, resolve_tool
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.core.zephyr_env import zephyr_env_overrides
 from tan.envelope import Issue
@@ -357,13 +377,31 @@ def _terminate(proc: subprocess.Popen) -> None:
     deadlocks on that same block. `start_new_session=True` at spawn (see
     `execute_slices`) puts the child in its own POSIX process group so
     `killpg` reaches every descendant; Windows has no process groups, so
-    `taskkill /T` walks the OS-tracked parent-PID tree instead."""
+    `taskkill /T` walks the OS-tracked parent-PID tree instead.
+
+    **tan-cli#567.** That `taskkill` used to be spawned as a BARE `argv[0]`,
+    which is the one place in this file #510 did not reach. `CreateProcess`
+    with `lpApplicationName=NULL` searches the parent process's CURRENT
+    DIRECTORY *before* the system directories, and the current directory here
+    is the customer's project -- so a project carrying its own `taskkill.exe`
+    got that binary run, with whatever privileges tan has, the moment a build
+    was cancelled. `taskkill` really does live in `%SystemRoot%\\System32`,
+    which is on every sane `%PATH%`, so the hardened lookup finds the real one;
+    the `%SystemRoot%` fallback covers a stripped `%PATH%`, and a host where
+    NEITHER answers falls back to killing the direct child rather than spawning
+    a name the current directory could supply. That last case loses the
+    grandchildren, which is a worse cleanup but not a worse *hazard* -- and it
+    is unreachable on any Windows install that still has System32."""
     if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-            capture_output=True,
-            check=False,
-        )
+        taskkill = _taskkill_program()
+        if taskkill is None:
+            proc.kill()
+        else:
+            subprocess.run(
+                [taskkill, "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+            )
     else:
         try:
             pgid = os.getpgid(proc.pid)
@@ -377,96 +415,31 @@ def _terminate(proc: subprocess.Popen) -> None:
     proc.wait()
 
 
-@dataclass(frozen=True)
-class _ToolResolution:
-    """One answer to both "is `tool` available" and "where is it" --
-    `resolved` is the absolute path to actually spawn (`None` when nothing
-    was found), `searched` is always populated, found or not, and describes
-    where this looked.
+def _taskkill_program() -> str | None:
+    """The absolute path to Windows' own `taskkill`, or `None`.
 
-    Replaces the old `_command_on_path`/`_tool_is_available` pair
-    (tan-cli#510): that pair answered a bare bool from one hardened lookup,
-    and the spawn below then repeated a SEPARATE, unhardened one -- handing
-    the bare identity straight to the platform's own resolver, whose Windows
-    search order includes a current-directory step the availability check
-    was written specifically to exclude. One resolver now; the check and the
-    spawn can never again disagree about what ran."""
-
-    resolved: str | None
-    searched: str
+    `%PATH%` first, through the same hardened walk every other spawn in this
+    port now uses (`os.curdir` is never consulted); then `%SystemRoot%\\System32`
+    directly, because a `%PATH%` stripped of the system directories is a real
+    (if unusual) CI shape and losing the process-tree kill there would be a
+    regression this fix does not need to cause. `None` only when both miss --
+    see [`_terminate`] for why that answers with `proc.kill()` rather than a
+    bare name."""
+    resolved = resolve_tool("taskkill", os.environ).resolved
+    if resolved is not None:
+        return resolved
+    system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+    return str(system32) if system32.is_file() else None
 
 
-def _resolve_tool(tool: str, env: dict[str, str]) -> _ToolResolution:
-    """Resolve `command.tool` -- an identity per ADR-0020 (never a path in a
-    well-formed plan), or an absolute path a caller already resolved
-    (`west_program`'s workspace-venv rewrite, `execute_slices` below) -- to
-    the absolute path to spawn.
-
-    An absolute `tool` is answered by existence alone: whoever produced it
-    already did the searching, and re-walking PATH for something that is
-    already a path would be wrong.
-
-    A bare/relative name is walked exactly the way the old
-    `_command_on_path` did -- this IS that lookup, now doubling as the
-    resolution the spawn itself uses instead of a second, divergent one:
-    POSIX via `shutil.which` (no CWD special-case there); Windows via a
-    hand-rolled `%PATH%` walk, deliberately NOT `shutil.which`, whose
-    stdlib implementation inserts `os.curdir` ahead of every PATH entry
-    ("the current directory takes precedence on Windows" -- its own source
-    comment), reproducing `CreateProcess`'s native search order -- mirrors
-    Rust's `command_on_path` (`crates/tan-cli/src/util.rs`), precisely so a
-    project checked out with its own `west.exe`/`openocd.exe` at its root
-    can never get spawned in place of the real tool.
-
-    `env` -- MAJOR 2 of the tan-cli#510 review: this used to read
-    `os.environ["PATH"]` directly, 46 lines before `execute_slices`
-    assembled the slice's OWN `env` (the one the spawn below actually gets),
-    so a plan that pinned a different `PATH` in `command.env` resolved
-    against the PARENT's PATH and then spawned a DIFFERENT binary than the
-    one the check just approved -- the pre-fix `Command::new(&tool)` case
-    this whole issue exists to close, reintroduced one call up. Callers pass
-    the FULLY ASSEMBLED slice env (post `assemble_slice_env`/
-    `with_venv_on_path`), never `os.environ` -- a plan that pins a PATH is
-    asking for that PATH to be used, matching pre-fix POSIX `Popen`, which
-    always selected via `os.get_exec_path(env)` (the spawn's OWN env), never
-    the calling process's.
-
-    `searched` is populated on every return, including a hit: a missingTool
-    refusal that can only say "not found" is a support ticket; one that
-    names the literal PATH entries this walked is a fix the customer
-    applies themselves (tan-cli#510 acceptance)."""
-    if Path(tool).is_absolute():
-        if Path(tool).exists():
-            return _ToolResolution(tool, f"`{tool}` (given as an absolute path)")
-        # tan-cli#510 review, minor: the old wording ("searched `<path>`
-        # (given as an absolute path)") echoed the same path back as if a
-        # search had run one -- nothing was searched, the path was just
-        # checked. Naming the miss plainly avoids the tautology.
-        return _ToolResolution(None, f"`{tool}` -- that path does not exist")
-
-    if os.name != "nt":
-        # `os.get_exec_path(env)` mirrors what a POSIX `Popen(..., env=env)`
-        # itself consults to resolve a bare argv[0] (`os.defpath` when `env`
-        # carries no `PATH` at all) -- the same fallback `shutil.which`'s own
-        # `path=None` default would use from `os.environ`, reproduced here
-        # against `env` instead.
-        search_dirs = os.get_exec_path(env)
-        path = os.pathsep.join(search_dirs)
-        return _ToolResolution(shutil.which(tool, path=path), f"PATH: {path}")
-
-    path = env.get("PATH")
-    if not path:
-        return _ToolResolution(None, "PATH is unset")
-    pathext = [e for e in env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep) if e]
-    names = [tool] if Path(tool).suffix else [tool + ext for ext in pathext]
-    for directory in path.split(os.pathsep):
-        if not directory:
-            continue
-        for name in names:
-            candidate = Path(directory) / name
-            if candidate.is_file():
-                return _ToolResolution(str(candidate), f"PATH: {path}")
-    return _ToolResolution(None, f"PATH: {path}")
+#: tan-cli#567/#532: the ONE hardened lookup, now in `tan.core.tool_lookup`
+#: so the flash write path and the size path spawn the SAME resolved path
+#: instead of keeping a third and fourth opinion about it. Imported under the
+#: private names this module's call sites (and `tests/commands/test_execute.py`)
+#: already use -- the move is a relocation, not a rename. See that module's
+#: docstring for `_ToolResolution`'s reasoning, which travelled with it.
+_ToolResolution = ToolResolution
+_resolve_tool = resolve_tool
 
 
 def _cwd_under_build_root(raw_cwd: str | None) -> bool:
