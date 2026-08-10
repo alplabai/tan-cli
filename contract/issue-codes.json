@@ -2397,6 +2397,14 @@
       "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.zephyr-sdk-available-for-host` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "support-bundle.redaction-skipped",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
+      "note": "Added by tan-cli#499. `_redact` scrubs the resolved home directory out of the WRITTEN bundle before the user attaches it, but it is refused wholesale when $HOME is a filesystem root -- Docker/OpenShift hand a uid with no /etc/passwd entry HOME=/, and replacing that unanchored rewrote every path separator in every string of the file (measured: exit 0, no warning, 88 `<home>` substitutions in one bundle -- of the illustrative shape `workspaceRoot: \"<home>srv<home>ci<home>work<home>...\"`, real paths elided). This code is what says the file went out UNREDACTED, in the envelope AND in text mode, so the refusal is never silent. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "doctor.fix-needs-sudo",
       "status": "reserved",
       "severity": "warning",

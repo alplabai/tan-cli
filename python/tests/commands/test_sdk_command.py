@@ -487,7 +487,11 @@ def test_a_dead_network_returns_a_message_never_an_exception(
     def boom(*_args, **_kwargs):
         raise raised
 
-    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.urlopen", boom)
+    # `OpenerDirector.open`, not `urlopen`: tan-cli#497 builds an EXPLICIT
+    # opener (its own `ProxyHandler`, because urllib's env-derived one ignores
+    # `ALL_PROXY` on an https request), so the module-level `urlopen` is no
+    # longer the call this path makes.
+    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.OpenerDirector.open", boom)
     releases, error = _fetch_releases()
     assert releases == []
     assert error is not None and expect_in_message in error
@@ -502,7 +506,7 @@ def test_the_tls_hint_does_not_assert_a_proxy_with_no_evidence_for_one():
     network that also hides a REAL proxy misconfiguration by sending the one
     population likely to have one down the wrong path too. This message must
     name the alternative instead of asserting a single cause."""
-    message = describe_network_error("certificate verify failed")
+    message = describe_network_error("certificate verify failed", proxy_used=False)
     assert "usually" not in message.lower()
     assert "corporate CA" in message
     assert "trust" in message.lower() and ("load" in message.lower() or "ca" in message.lower())
@@ -851,3 +855,210 @@ def test_current_text_mode_does_not_wrap_off_a_terminal(tmp_path, isolated_home)
     )
     assert long_line in proc.stderr.splitlines()
     assert len(long_line) == 137
+
+
+# ── tan-cli#497 defect 1: the quickstart child checkout ──────────────────────
+
+
+def test_current_sees_the_child_checkout_the_acting_commands_resolve(tmp_path, isolated_home):
+    """tan-cli#497 defect 1. `resolve_sdk_tiered` alone has NO candidate for a
+    CHILD `<ws>/alp-sdk` -- the README Quickstart cwd, straight after
+    `git clone https://github.com/alplabai/alp-sdk`.
+
+    Measured there before the fix: `sdkPath: null`, `sourceTier: "none"`, no
+    `sdk` key, `issues: []`, and the text telling someone standing beside a
+    checkout to go clone one -- while `tan doctor` in the SAME cwd reported that
+    checkout at `sourceTier: "discovery"`. `sdk current` is the one command
+    whose entire job is "which SDK am I on?", so it must answer what
+    `build`/`doctor`/`validate` would act on. Asserted AGAINST
+    `resolve_sdk_root_ladder` itself rather than a hardcoded tier, so the two
+    cannot drift apart again."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    child = make_sdk_root(workspace / "alp-sdk", version="0.14.0")
+
+    from tan.commands.build_cmd import resolve_sdk_root_ladder
+
+    expected = resolve_sdk_root_ladder(None, workspace)
+    assert expected.path is not None and Path(expected.path) == child
+
+    doc = envelope(run_tan("sdk", "current", "--format", "json", cwd=workspace))
+    assert doc["data"]["sdkPath"] == str(child)
+    assert doc["data"]["sourceTier"] == expected.tier == "discovery"
+    # POSIX separators, not the host's: `SdkInfo.as_dict` normalises `sdk.root`
+    # unconditionally (mirrors `sdk_report.rs`'s `root.replace('\\', "/")`), so
+    # `data.sdkPath` and `sdk.root` deliberately differ in separator style on
+    # Windows. Asserting `str(child)` here would pin the platform-native form
+    # and bake back the bug `SdkInfo.as_dict`'s own comment names.
+    assert doc["sdk"] == {"root": str(child).replace("\\", "/"), "sourceTier": "discovery"}
+    assert doc["data"]["readiness"]["version"] == "0.14.0"
+    # The "go clone one" text is exactly what must NOT be printed here.
+    text = run_tan("sdk", "current", cwd=workspace)
+    assert "git clone" not in text.stderr + text.stdout
+
+
+def test_current_still_answers_none_when_there_really_is_no_checkout(tmp_path, isolated_home):
+    """The other half: the fall-through tail may only ADD an answer where there
+    was none. An empty workspace must still report `sourceTier: "none"` with no
+    `sdk` key -- the shape the `sdk-current-no-sdk` golden pins."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    doc = envelope(run_tan("sdk", "current", "--format", "json", cwd=workspace))
+    assert doc["data"]["sdkPath"] is None
+    assert doc["data"]["sourceTier"] == "none"
+    assert "sdk" not in doc
+
+
+# ── tan-cli#497 defect 8: ALL_PROXY must actually steer the request ──────────
+
+
+def test_all_proxy_is_installed_on_the_opener_urllib_would_have_ignored(monkeypatch):
+    """tan-cli#497 defect 8. `urlopen` derives its proxies from
+    `getproxies_environment()`, which maps `ALL_PROXY` to the key `all`;
+    `ProxyHandler` then installs an `all_open` method that `OpenerDirector._open`
+    -- dispatching on `req.type`, i.e. `"https"` -- never calls.
+
+    Measured live against the GitHub Releases API before the fix:
+    `HTTPS_PROXY` at a closed port failed as it should (rc 1,
+    `[Errno 111] Connection refused`), while `ALL_PROXY` at the SAME closed port
+    connected DIRECTLY and returned rc 0 with 13 releases -- the mandated proxy
+    silently bypassed. This asserts the handler tan builds itself carries the
+    value under a key an `https://` request actually dispatches on."""
+    import urllib.request
+
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:45999")
+
+    seen = {}
+    real_build_opener = urllib.request.build_opener
+
+    def capture(*handlers):
+        for handler in handlers:
+            if isinstance(handler, urllib.request.ProxyHandler):
+                seen["proxies"] = dict(handler.proxies)
+        return real_build_opener(*handlers)
+
+    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.build_opener", capture)
+    monkeypatch.setattr(
+        "tan.commands.sdk_cmd.urllib.request.OpenerDirector.open",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("connect: refused")),
+    )
+
+    releases, error = _fetch_releases()
+    assert releases == []
+    assert seen["proxies"] == {"http": "http://127.0.0.1:45999",
+                               "https": "http://127.0.0.1:45999"}
+    # A proxy WAS used, so the connect-failure hint is earned here.
+    assert error is not None and "ALL_PROXY/HTTPS_PROXY/NO_PROXY" in error
+
+
+def test_no_proxy_sends_the_request_direct_and_stops_blaming_the_proxy(monkeypatch):
+    """The second wrong-blame case. `_proxy_configured()` was a bare env scan,
+    so a `NO_PROXY` that correctly exempts the target still had the failure of
+    the resulting DIRECT connection hinted at a proxy that had no part in it.
+    Measured: `HTTPS_PROXY` at a closed port with `NO_PROXY=api.github.com`
+    returns rc 0 and the release list, so the proxy really is out of the
+    picture."""
+    import urllib.request
+
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:45999")
+    monkeypatch.setenv("NO_PROXY", "api.github.com")
+
+    seen = {}
+    real_build_opener = urllib.request.build_opener
+
+    def capture(*handlers):
+        for handler in handlers:
+            if isinstance(handler, urllib.request.ProxyHandler):
+                seen["proxies"] = dict(handler.proxies)
+        return real_build_opener(*handlers)
+
+    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.build_opener", capture)
+    monkeypatch.setattr(
+        "tan.commands.sdk_cmd.urllib.request.OpenerDirector.open",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("connect: refused")),
+    )
+
+    releases, error = _fetch_releases()
+    assert releases == []
+    # DIRECT: an EMPTY handler, not urllib's env-derived fallback.
+    assert seen["proxies"] == {}
+    assert error is not None and "ALL_PROXY/HTTPS_PROXY/NO_PROXY" not in error
+
+
+def test_a_socks_proxy_is_refused_rather_than_silently_bypassed(monkeypatch):
+    """urllib carries no SOCKS transport where the oracle's ureq does (measured:
+    the oracle dialled a `socks5://` `ALL_PROXY`). Falling back to a direct
+    connection would silently circumvent the only egress a locked-down host
+    has -- so this refuses, naming the variable, the scheme and the two ways
+    out. No network call is made at all, which is what the un-patched opener
+    here proves."""
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+
+    releases, error = _fetch_releases()
+    assert releases == []
+    assert error == (
+        "Alp SDK: ALL_PROXY names a socks5:// proxy, which this build of tan "
+        "cannot route through (its HTTP client has no socks5 transport). Unset "
+        "ALL_PROXY, or point it at an http:// or https:// proxy, or add "
+        "api.github.com to NO_PROXY to allow a direct connection."
+    )
+
+
+def test_the_socks_refusal_names_the_variable_that_actually_won(monkeypatch):
+    """Review round on #620. The first cut said "Set `HTTPS_PROXY` to an http://
+    or https:// proxy" -- which CANNOT take effect, because
+    `HTTPS_PROXY_ENV_VARS` puts `ALL_PROXY` ahead of `HTTPS_PROXY` and the
+    selection never reaches it. Measured:
+    `ALL_PROXY=socks5://127.0.0.1:45997 HTTPS_PROXY=http://127.0.0.1:45996
+    tan sdk list --online` gave the identical refusal at rc 1 with NEITHER
+    socket touched.
+
+    That is the same self-defeating-remediation class as tan-cli#497 defect 7,
+    which this branch fixes two commands away -- so the remediation must name
+    the variable the selection ACTUALLY read, and offer unsetting it."""
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:45997")
+    # The variable the reader would otherwise be sent to set, still losing.
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:45996")
+
+    _, error = _fetch_releases()
+    assert error is not None
+    assert "Unset ALL_PROXY, or point it at an http:// or https:// proxy" in error
+    # Naming the LOSING variable as the fix is what made the old text unusable.
+    assert "Set HTTPS_PROXY" not in error
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "`os.environ` is case-INSENSITIVE on Windows, so `https_proxy` and "
+        "`HTTPS_PROXY` are the same variable there -- `_proxy_variable_name` "
+        "still finds a value under `HTTPS_PROXY` first (it precedes `https_proxy` "
+        "in HTTPS_PROXY_ENV_VARS) and correctly names IT, so the case actually "
+        "exercised is 'which of two case-insensitive aliases for the ONE set "
+        "variable does the message print', not 'which variable won' -- a "
+        "question this platform cannot ask. Coverage for the real feature (the "
+        "message names whichever env var actually won) stays load-bearing on "
+        "POSIX, where the two spellings are genuinely distinct variables."
+    ),
+)
+def test_the_socks_refusal_names_https_proxy_when_that_is_what_won(monkeypatch):
+    """The other half: the variable is not hardcoded. With only `https_proxy`
+    set, IT is what the selection read, so it is what the remediation must
+    name -- telling this reader to unset `ALL_PROXY` would be the same
+    unusable instruction pointed the other way."""
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("https_proxy", "socks5h://127.0.0.1:45997")
+
+    _, error = _fetch_releases()
+    assert error is not None
+    assert error.startswith("Alp SDK: https_proxy names a socks5h:// proxy")
+    assert "Unset https_proxy, or point it at an http:// or https:// proxy" in error

@@ -174,21 +174,57 @@ def _is_under(base: str, path: str) -> bool:
     return path_n.startswith(base_n.rstrip("\\/") + os.sep)
 
 
+def _resolves_onto_project_root(target: str, project_root: str) -> bool:
+    """The lexical ancestor test of [`is_unsafe_removal_target`], re-run on
+    RESOLVED copies -- an intentional divergence from the oracle.
+
+    `path_guard::is_unsafe_removal_target` (and this port before it) compares
+    `normpath` spellings only, so both of its arms are defeated by naming the
+    project root through a symlinked PARENT component: with
+    `<base>/wlink -> <base>/work`, `--build-root <base>/wlink/proj` is not
+    lexically `<base>/work/proj`, `_remove_dir` lstats only the final component
+    (a real directory, so the link arm never fires), and `shutil.rmtree` deletes
+    the user's sources at exit 0 with `issues: []`. Measured: the frozen oracle
+    destroys the identical tree, so this is an inherited design gap rather than
+    a port regression -- and a destructive one is worth diverging on. The test
+    is ADDITIVE, so it can only ever refuse more, never remove more.
+
+    A link spelled AS the target is deliberately NOT resolved: [`_remove_dir`]
+    unlinks such a target ITSELF and never recurses through it, so removing it
+    costs exactly the link (verified against the Rust binary). Resolving here
+    would refuse that harmless case.
+
+    Resolution is for the COMPARISON only. `data.buildRoot` and every reported
+    `targets[].path` keep the spelling the caller typed, which
+    `test_normalize_is_lexical_and_never_resolves_a_symlink` and the
+    `clean` oracle-parity fixture both pin.
+    """
+    if is_link(target):
+        return False
+    resolved = os.path.realpath(target)
+    if not _has_normal_component(_normalize(resolved)):
+        return True
+    return _is_under(resolved, os.path.realpath(project_root))
+
+
 def is_unsafe_removal_target(project_root: str, target: str) -> bool:
     """True when recursively removing `target` would take out far more than a
     build tree, and the caller must refuse -- `path_guard::is_unsafe_removal_target`.
 
     Rejects a filesystem/drive/UNC root (no `Normal` component at all), and the
-    project root itself or any ancestor of it. Deliberately does NOT require
-    containment under the project root: an out-of-tree slice build dir is a
-    supported clean target (see the module docstring).
+    project root itself or any ancestor of it -- named lexically OR through a
+    symlinked parent ([`_resolves_onto_project_root`]). Deliberately does NOT
+    require containment under the project root: an out-of-tree slice build dir
+    is a supported clean target (see the module docstring).
     """
     target_n = _normalize(target)
     if not _has_normal_component(target_n):
         return True
     # True when the target IS the project root or an ancestor of it -- both
     # would delete the user's sources.
-    return _is_under(target_n, project_root)
+    if _is_under(target_n, project_root):
+        return True
+    return _resolves_onto_project_root(target, project_root)
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +615,35 @@ def os_error_text(err: BaseException) -> str:
     return f"{err.strerror} (os error {code})"
 
 
-def _retry_after_clearing_readonly(func, path, _exc=None) -> None:
+#: The two functions `shutil.rmtree` hands its error hook that CANNOT be called
+#: with one positional argument. On POSIX `rmtree` runs the fd-based
+#: `_rmtree_safe_fd` walk, which reports failures of `os.open` (shutil 3.12
+#: lines 682 and 781) and `os.close` (692/712/791/808) through the same hook as
+#: the one-argument `os.scandir`/`os.unlink`/`os.rmdir`/`os.lstat`. `os.open`
+#: needs `flags` and `os.close` takes an fd, not the path the hook is handed --
+#: so retrying either is a `TypeError`, not a repair. Windows' `_rmtree_unsafe`
+#: never passes these, which is why the crash was POSIX-only.
+_NOT_RETRYABLE_WITH_PATH_ALONE = frozenset({os.open, os.close})
+
+
+def _reraise_removal_failure(func, path, exc) -> None:
+    """Re-raise the failure `shutil.rmtree` reported, so the caller's
+    `except (OSError, ValueError)` sees it and answers `clean.remove-failed`.
+
+    `exc` is the exception under `onexc` and an `exc_info` TUPLE under the
+    deprecated `onerror` (see `_RMTREE_HOOK`), so both shapes are unwrapped
+    here. A hook that has nothing to re-raise still must not return quietly --
+    `rmtree` would then report the tree as removed -- so the fallback states the
+    operation that failed.
+    """
+    if isinstance(exc, tuple) and len(exc) == 3:
+        exc = exc[1]
+    if isinstance(exc, BaseException):
+        raise exc
+    raise OSError(f"{getattr(func, '__name__', func)} failed on {path}")
+
+
+def _retry_after_clearing_readonly(func, path, exc=None) -> None:
     """`shutil.rmtree` error hook: clear the read-only bit and retry once.
 
     Rust's `remove_dir_all` deletes a read-only file on Windows outright (it
@@ -594,9 +658,30 @@ def _retry_after_clearing_readonly(func, path, _exc=None) -> None:
     replace the whole mode with `0o200` and strip the owner's read/execute bits
     from a directory mid-walk. A failure here propagates out of `rmtree` and is
     reported by the caller as `clean.remove-failed`.
+
+    The retry is only attempted for a `func` that a path alone can drive
+    ([`_NOT_RETRYABLE_WITH_PATH_ALONE`]). It used to end in a bare `func(path)`,
+    so a build directory the invoking user OWNS but cannot open -- a
+    `chmod -R a-r` or tar-preserved tree, where `os.chmod` SUCCEEDS and
+    `os.open` is what failed -- raised `TypeError: open() missing required
+    argument 'flags' (pos 2)`. That is neither `OSError` nor `ValueError`, so it
+    sailed past the caller's best-effort guard, aborted the target loop and hit
+    `clean`'s outer catch-all: exit 5, `clean.internal-failure`, and every
+    remaining target (`.alp-build-state.json` and every out-of-tree slice dir)
+    silently skipped. Measured on the oracle for the same tree: exit 0, a
+    `clean.remove-failed` WARNING, and the state file removed -- which is what
+    re-raising the original failure restores.
     """
+    if func in _NOT_RETRYABLE_WITH_PATH_ALONE:
+        _reraise_removal_failure(func, path, exc)
     os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
-    func(path)
+    try:
+        func(path)
+    except TypeError:
+        # Belt and braces for a future `shutil` that routes one more
+        # many-argument callable through this hook: the removal still failed,
+        # and it must be reported as such rather than escaping as a `TypeError`.
+        _reraise_removal_failure(func, path, exc)
 
 
 #: `shutil.rmtree`'s error-hook keyword. `onerror` is deprecated from 3.12 and
