@@ -59,6 +59,105 @@ def _scrub_lone_surrogates(text: str) -> str:
     return _LONE_SURROGATE.sub(_REPLACEMENT_CHARACTER, text)
 
 
+#: OPEN QUESTION, deliberately left open (tan-cli#491). This substitution is
+#: SILENT: nothing in the envelope tells a consumer that a value it is reading
+#: was rewritten, so a path that differs from the real one only in the bytes
+#: that were replaced reads as authoritative. Announcing it -- a `warning`
+#: issue beside the payload -- was considered and NOT done, because the
+#: substitution was chosen for byte parity with the frozen v0.4.1 oracle
+#: (`Path::to_string_lossy` makes the identical replacement and emits no issue
+#: of its own), so adding one changes the wire bytes of a case that currently
+#: matches by construction. `--format json` is a machine contract; that is a
+#: divergence to decide deliberately, not a side effect of a bug fix. Left for
+#: the maintainer with the trade-off recorded rather than settled here.
+
+
+#: tan-cli#491's invariant is that NO payload, however malformed, may stop the
+#: single envelope from being written -- the same claim `_serialise`'s own
+#: `# noqa: BLE001 -- no payload may ever crash stdout` has always made. After
+#: the surrogate scrub above, TWO sites still broke it, both measured on
+#: `dev`@`4dcfdf5`, not theorised:
+#:
+#:   * `_serialise`'s `except` arm re-serialises `self.project` (and
+#:     `self.sdk`) VERBATIM, so a value there that `json.dumps` cannot encode
+#:     detonates the very fallback that exists to keep stdout alive:
+#:     `Envelope("x", Project(root=<non-str>, board_yaml=None), {"ok": 1}, [],
+#:     0).to_json()` raised `TypeError: Object of type ... is not JSON
+#:     serializable` straight out of the arm -- zero bytes on stdout through
+#:     `emit()`, a raw traceback through `tan.cli`'s two `to_json()` callers.
+#:   * `emit()`'s `print(text)` sat outside every guard. That is the exact
+#:     placement error #491 names: `_serialise()` returns a `str` and reports
+#:     success, and the ENCODE happens one call later, at the write.
+#:
+#: `_last_resort_document` is what both sites fall back to. It is deliberately
+#: `ensure_ascii=True` -- the opposite of `_serialise`, which needs
+#: `ensure_ascii=False` for byte parity on the normal path. Here the document's
+#: job is to be writable to a stdout that has ALREADY refused one string, so
+#: pure ASCII (encodable under utf-8, ascii, latin-1, every Windows code page)
+#: is worth more than parity. It is also why no surrogate scrub is needed on
+#: this path: `ensure_ascii=True` renders one as the escape `\udcff`, ASCII on
+#: the wire.
+#:
+#: TWO of its fields are not literals, and neither is trusted. `command` is
+#: typed `str` but nothing enforces that at runtime, and a non-`str` there made
+#: the document itself raise (`TypeError: Object of type ... is not JSON
+#: serializable`) -- taking `to_json()` AND `emit()` down with it, since
+#: `emit`'s own arm calls this with the same argument. The reason text runs
+#: `err.__str__`, which is payload code too. Both go through `str()` inside a
+#: guard, so the only way out of the function is a document. `"cli"` is the
+#: fallback command name because `tan.cli`'s own envelopes already use it for a
+#: run with no resolved subcommand -- a value a consumer already handles.
+#:
+#: Both guards catch `Exception`, deliberately NOT `BaseException`: a `__str__`
+#: that raises `KeyboardInterrupt` escapes intact, and that is correct.
+#: Swallowing an interrupt is the defect #491's own Ctrl-C arm exists to fix.
+#:
+#: `envelope.serialize-failed` and `ExitCode.INTERNAL_FAILURE` (5) reuse the
+#: existing fallback's code and exit code rather than introducing new ones: the
+#: consumer effect is identical (tan could not represent this run's output),
+#: and `contract/issue-codes.json` already registers it.
+def _last_resort_document(command: str, err: Exception) -> str:
+    """One parseable envelope built from ASCII literals and two COERCED
+    strings -- what stdout gets when neither the real envelope nor
+    `_serialise`'s own fallback could be produced or written. See the notes
+    above for the two sites, the two coercions, and the reused issue code.
+    """
+    try:
+        reason = f"{type(err).__name__}: {err}"
+    except Exception:  # noqa: BLE001 -- an exception's own __str__ may raise
+        reason = type(err).__name__
+    try:
+        name = str(command)
+    except Exception:  # noqa: BLE001 -- so may an object standing in for a command name
+        name = "cli"
+    return json.dumps(
+        {
+            "command": name,
+            "ok": False,
+            "exitCode": int(ExitCode.INTERNAL_FAILURE),
+            # Never the real `project`/`sdk`/`data`: carrying them through is
+            # precisely what broke the arm that sent us here. Hand-built rather
+            # than `Project.as_dict()`/`Issue.as_dict()` for the same reason --
+            # this document may not call code that can raise. The cost is that
+            # a field added to either type would silently give this envelope a
+            # different shape from every other one on the contract, which
+            # `test_the_last_resort_document_has_the_same_key_set_as_a_normal_envelope`
+            # is what notices.
+            "project": {"root": None, "boardYaml": None},
+            "data": None,
+            "issues": [
+                {
+                    "code": "envelope.serialize-failed",
+                    "severity": "error",
+                    "message": f"failed to write command output: {reason}",
+                }
+            ],
+        },
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+
+
 def json_safe_floats(value: Any) -> Any:
     """`value` with every NON-FINITE float replaced by `None`, recursively --
     `serde_json`'s own answer for an `f64` RFC 8259 cannot express (tan-cli#387).
@@ -418,33 +517,49 @@ class Envelope:
             )
         except Exception as err:  # noqa: BLE001 -- no payload may ever crash stdout
             fallback_code = int(ExitCode.INTERNAL_FAILURE)
-            fallback = {
-                "command": self.command,
-                "ok": False,
-                "exitCode": fallback_code,
-                "project": self.project.as_dict(),
-            }
-            if self.sdk is not None:
-                fallback["sdk"] = self.sdk.as_dict()
-            fallback["data"] = None
-            fallback["issues"] = [
-                Issue(
-                    "envelope.serialize-failed",
-                    "error",
-                    f"failed to serialize command output: {err}",
-                ).as_dict()
-            ]
-            # Scrubbed on this arm too: `self.project.as_dict()` is carried into
-            # the fallback verbatim, and `err` itself stringifies whatever the
-            # failed payload held -- either can carry the same lone surrogate,
-            # so the fallback that exists to keep stdout alive must not be the
-            # thing that kills it.
-            return (
-                _scrub_lone_surrogates(
-                    json.dumps(fallback, separators=(",", ":"), ensure_ascii=False)
-                ),
-                fallback_code,
-            )
+            # The WHOLE fallback, construction included, sits inside the guard
+            # below -- not just its `json.dumps`. Building it runs payload code
+            # in three places, and every one of them can raise: `SdkInfo.
+            # as_dict()` calls `self.root.replace(...)` (an `AttributeError` for
+            # a non-`str` root), the f-string below calls `err.__str__`, and
+            # `json.dumps` then re-encodes `project`/`sdk` verbatim. With only
+            # the `dumps` wrapped, the first two escaped `_serialise` entirely
+            # -- past `emit()`, past `to_json()`, out to a traceback and zero
+            # bytes on stdout, which is the exact shape tan-cli#491 is about.
+            try:
+                fallback = {
+                    "command": self.command,
+                    "ok": False,
+                    "exitCode": fallback_code,
+                    "project": self.project.as_dict(),
+                }
+                if self.sdk is not None:
+                    fallback["sdk"] = self.sdk.as_dict()
+                fallback["data"] = None
+                fallback["issues"] = [
+                    Issue(
+                        "envelope.serialize-failed",
+                        "error",
+                        f"failed to serialize command output: {err}",
+                    ).as_dict()
+                ]
+                # Scrubbed on this arm too: `self.project.as_dict()` is carried
+                # into the fallback verbatim, and `err` itself stringifies
+                # whatever the failed payload held -- either can carry the same
+                # lone surrogate, so the fallback that exists to keep stdout
+                # alive must not be the thing that kills it.
+                return (
+                    _scrub_lone_surrogates(
+                        json.dumps(fallback, separators=(",", ":"), ensure_ascii=False)
+                    ),
+                    fallback_code,
+                )
+            except Exception as fallback_err:  # noqa: BLE001 -- nor may THIS arm crash stdout
+                # Keeping this here (rather than only at `emit`) is what makes
+                # `to_json()` total as well -- and `to_json()` is what
+                # `tan.cli`'s `_usage_error_envelope`/`_interrupted_envelope`
+                # print. See `_last_resort_document`.
+                return _last_resort_document(self.command, fallback_err), fallback_code
 
 
 #: Whether this process has already written its one envelope to stdout.
@@ -454,6 +569,24 @@ _emitted = False
 #: The exit code the LAST-emitted envelope's own JSON actually reports --
 #: `None` until `emit()` runs once. See `envelope_emitted_exit_code()`.
 _emitted_exit_code: int | None = None
+
+#: Why `emit()`'s guard below catches `(ValueError, TypeError)` and not
+#: `Exception` (tan-cli#491). Those are the ENCODE class: `UnicodeEncodeError`
+#: is a `UnicodeError` is a `ValueError`, and a codec handed something it
+#: cannot accept raises `TypeError`. They fire BEFORE any byte leaves the
+#: stream, because `TextIOWrapper.write` encodes the whole string before
+#: writing any of it -- measured on an ascii-encoded stream, the buffer is
+#: empty after the raise and the ASCII document then lands as the only thing on
+#: it. Recovering there is safe: stdout is still empty.
+#:
+#: An `OSError` is deliberately NOT caught. Measured on a
+#: `TextIOWrapper`->`BufferedWriter(4096)`->raw stream that accepts one block
+#: and then fails, given a 20 KB envelope: 4096 bytes of a TRUNCATED first
+#: document are already on the wire. Appending the last-resort document to that
+#: would report a clean `envelope.serialize-failed` over stdout no consumer can
+#: parse -- worse than the raise, which at least claims nothing. So an I/O
+#: failure propagates exactly as it did before this guard existed, and
+#: `_emitted` stays `False`.
 
 
 def emit(envelope: Envelope) -> int:
@@ -477,10 +610,18 @@ def emit(envelope: Envelope) -> int:
     learn the fallback happened; `tan.cli.main`'s process boundary is that
     caller, so the wire invariant `process exit code == envelope.exitCode`
     holds even when serialisation fails.
+
+    Same for the WRITE failing (tan-cli#491): the last-resort document below
+    reports 5 too, and this returns 5, so a command that had already committed
+    to `typer.Exit(0)` still exits 5 to match the JSON stdout actually carries.
     """
     global _emitted, _emitted_exit_code
-    text, exit_code = envelope._serialise()
-    print(text)
+    try:
+        text, exit_code = envelope._serialise()
+        print(text)
+    except (ValueError, TypeError) as err:  # the ENCODE class only -- see above
+        exit_code = int(ExitCode.INTERNAL_FAILURE)
+        print(_last_resort_document(envelope.command, err))
     _emitted = True
     _emitted_exit_code = exit_code
     return exit_code
