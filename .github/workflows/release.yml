@@ -531,13 +531,17 @@ jobs:
       # Rust v0.4.1 oracle; deleting it left the discovery gate covering
       # exactly the same set.
       #
-      # The five `debug-config-preview-*` goldens are the one gap, and were
-      # already: they are `pytest.mark.xfail(strict=True)` in the conformance
-      # suite on a documented, permanent divergence (see contract/README.md,
-      # "Known divergence: debug-config-preview-*", tan-cli#502) -- this step
-      # re-packages their frozen-oracle `expected.json` verbatim, so this
-      # asset's five `envelopes["debug-config-preview-*"]` entries do NOT
-      # reflect what `tan` actually emits for `data.configuration`/`issues[]`.
+      # The five `debug-config-preview-*` goldens used to be the one gap: they
+      # were `pytest.mark.xfail(strict=True)` in the conformance suite, and this
+      # step re-packaged their frozen-oracle `expected.json` verbatim, so the
+      # asset's five `envelopes["debug-config-preview-*"]` entries did NOT
+      # reflect what `tan` emits for `data.configuration`/`issues[]`. tan-cli#502
+      # re-recorded all five against the shipping CLI and dropped the xfails, so
+      # they are gated like every other case now (see contract/README.md, "Why
+      # the five `debug-config-preview-*` goldens were re-recorded").
+      # `validate-offline-clean` is the one remaining xfail'd entry, and so the
+      # one entry this asset still advertises inaccurately (tan-cli#498 -- see
+      # contract/README.md, "Residual limitation").
       # Run it locally with `python3` from the repo root to see exactly what
       # ships.
       - name: Bundle the envelope contract

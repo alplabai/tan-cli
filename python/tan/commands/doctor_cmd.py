@@ -107,7 +107,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import typer
@@ -142,6 +142,7 @@ from tan.core.bootstrap import (
 )
 from tan.core.consent import can_prompt
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
+from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, venv_python, west_program, west_workspace_dir
@@ -252,6 +253,17 @@ class Check:
     ride on the per-check JSON at all (mirroring Rust's `DoctorCheck`, which
     has no such field either), only on the report-level
     `data.missingPrerequisites` `doctor()` builds from it.
+
+    `scope` (tan-cli#549) is `host` or `project` -- see `tan.core.doctor_scope`
+    for the two definitions and the judgement calls. REQUIRED and KEYWORD-ONLY,
+    which is the enforcement mechanism itself: a check authored without one is
+    a `TypeError` at its own construction site, in every branch, on every
+    platform, including the ones no test host reaches (`longPaths`, `sevenZip`,
+    the six `fix:*` outcomes). A default -- any default -- would put the
+    consumer straight back on a hand-list for whatever the default silently
+    mislabelled, which is the failure this field exists to end. Keyword-only so
+    it can be required without renumbering the positional `fix` argument a
+    dozen call sites here already pass positionally.
     """
 
     name: str
@@ -260,9 +272,34 @@ class Check:
     fix: str | None = None
     code: str | None = None
     missing: list[dict[str, str | None]] | None = None
+    scope: str = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        # A `str` annotation does not stop `scope=""` or a typo'd `"Host"`, and
+        # a consumer filtering on `scope` cannot tell an unrecognised value from
+        # a row it is meant to hide -- the same fail-open silence the
+        # name-matching seam had. Refuse at construction instead. Every value in
+        # this package is a literal that `test_doctor_check_scope.py` already
+        # checks statically, so this arm is unreachable from shipping code; it
+        # is here for a caller that computes one.
+        if self.scope not in CHECK_SCOPES:
+            raise ValueError(
+                f"doctor check {self.name!r} declares scope {self.scope!r}; "
+                f"the wire vocabulary is {CHECK_SCOPES}"
+            )
 
     def as_dict(self) -> dict:
-        out = {"name": self.name, "status": self.status, "detail": self.detail}
+        # `scope` between `status` and `detail`: the three machine-read fields
+        # first, the prose last. Key ORDER is not a contract on this seam
+        # (`contract/README.md`, "What a golden does NOT cover: key ORDER") --
+        # both conformance harnesses compare parsed maps -- so this is
+        # readability, not compatibility.
+        out = {
+            "name": self.name,
+            "status": self.status,
+            "scope": self.scope,
+            "detail": self.detail,
+        }
         # Omitted when absent, not null -- Rust's `skip_serializing_if`.
         if self.fix is not None:
             out["fix"] = self.fix
@@ -574,6 +611,7 @@ def python_check(
             ),
             # FROZEN (contract/issue-codes.json). Spelled, never derived.
             code="bootstrap.python-not-runnable",
+            scope="host",
         )
     binary, version = found
     if version < floor:
@@ -598,12 +636,14 @@ def python_check(
             ),
             # FROZEN (contract/issue-codes.json).
             code="bootstrap.python-too-old",
+            scope="host",
         )
     return Check(
         "hostPython",
         "pass",
         f"Python {_fmt(version)} (`{binary}`) meets the effective floor "
         f"{_fmt(floor)} ({floor_source}).",
+        scope="host",
     )
 
 
@@ -684,6 +724,7 @@ def python_floor_skew_check(
         f"manifest would have accepted is refused up front rather than failing "
         f"later at Zephyr's CMake configure.",
         fix,
+        scope="project",
     )
 
 
@@ -730,6 +771,7 @@ def prerequisites_check(
             # FROZEN (contract/issue-codes.json).
             code="bootstrap.prerequisites-missing",
             missing=missing_data,
+            scope="host",
         )
     if venv_refusal is not None:
         return Check(
@@ -739,9 +781,11 @@ def prerequisites_check(
             "Install the missing prerequisites, then run `tan bootstrap`.",
             code=f"bootstrap.{venv_refusal.code}",
             missing=missing_data,
+            scope="host",
         )
     return Check(
-        "hostPrerequisites", "pass", f"{', '.join(checked)} present ({source})."
+        "hostPrerequisites", "pass", f"{', '.join(checked)} present ({source}).",
+        scope="host",
     )
 
 
@@ -863,6 +907,7 @@ def west_check(
                 f"`bin`/`Scripts` directory holds the `west` launcher) would "
                 f"additionally put it on bare PATH, for tools that spawn it "
                 f"directly rather than through tan.",
+                scope="host",
             )
         if resolved is not None:
             return Check(
@@ -873,6 +918,7 @@ def west_check(
                 f"not be executed there -- no build slice can run it. `westResolved` "
                 f"is the check that owns this failure; see it for the remedy.",
                 "Run `tan bootstrap` to recreate the workspace venv.",
+                scope="host",
             )
         return Check(
             "west",
@@ -890,6 +936,7 @@ def west_check(
             "bootstrap`; otherwise activate the workspace venv (its `bin`/`Scripts` "
             "directory holds the `west` launcher) so tools invoked directly find it "
             "too.",
+            scope="host",
         )
     if version is None:
         return Check(
@@ -899,6 +946,7 @@ def west_check(
             f"command could parse.",
             "Run `west --version` by hand; a west that cannot report its version "
             "usually cannot run either.",
+            scope="host",
         )
     if floor is not None and version < floor:
         return Check(
@@ -907,8 +955,9 @@ def west_check(
             f"west {_fmt(version)} ({found}) is older than the {_fmt(floor)} floor "
             f"alp-sdk's metadata/bootstrap.json pins.",
             "Upgrade inside the workspace venv: `pip install --upgrade west`.",
+            scope="host",
         )
-    return Check("west", "pass", f"west {_fmt(version)} ({found}).")
+    return Check("west", "pass", f"west {_fmt(version)} ({found}).", scope="host")
 
 
 def west_resolved_check(
@@ -976,6 +1025,7 @@ def west_resolved_check(
             "west resolved neither through the workspace venv nor PATH -- no build "
             "slice can be executed. Run `tan bootstrap` to create the workspace venv.",
             "tan bootstrap",
+            scope="project",
         )
     if not ran:
         return Check(
@@ -988,10 +1038,11 @@ def west_resolved_check(
             f"launcher file in place while breaking it. Run `tan bootstrap` to "
             f"recreate the workspace venv.",
             "tan bootstrap",
+            scope="project",
         )
     if version is None:
-        return Check("westResolved", "pass", f"west resolved: {found}.")
-    return Check("westResolved", "pass", f"west {_fmt(version)} resolved: {found}.")
+        return Check("westResolved", "pass", f"west resolved: {found}.", scope="project")
+    return Check("westResolved", "pass", f"west {_fmt(version)} resolved: {found}.", scope="project")
 
 
 def zephyr_sdk_install_command() -> str:
@@ -1038,7 +1089,7 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
     this Fail's advice is only actionable together with that check.
     """
     if detected:
-        return Check("zephyrSdk", "pass", "Zephyr SDK toolchain detected.")
+        return Check("zephyrSdk", "pass", "Zephyr SDK toolchain detected.", scope="host")
     where = (
         f"ZEPHYR_SDK_INSTALL_DIR=`{env_dir}` does not contain a working toolchain"
         if env_dir
@@ -1076,6 +1127,7 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
         f"{ZEPHYR_SDK_INSTALL_VERSION}): from an initialised west workspace, run "
         f"`{zephyr_sdk_install_command()}`.{host_tool_note} Details: "
         "https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
+        scope="host",
     )
 
 
@@ -1101,6 +1153,7 @@ def seven_zip_check(found: bool) -> Check:
             "sevenZip",
             "pass",
             "7-Zip is available -- `west sdk install` can extract the toolchain.",
+            scope="host",
         )
     programs = ", ".join(SEVEN_ZIP_PROGRAMS)
     return Check(
@@ -1111,6 +1164,7 @@ def seven_zip_check(found: bool) -> Check:
         "pure-Python fallback, so it will fail on native Windows. Install it with "
         f"`{SEVEN_ZIP_INSTALL_COMMAND}`.",
         f"Install 7-Zip before running `west sdk install`: `{SEVEN_ZIP_INSTALL_COMMAND}`.",
+        scope="host",
     )
 
 
@@ -1165,9 +1219,11 @@ def zephyr_workspace_check(workspace_dir: str, version_text: str | None) -> Chec
             f"workspace at `{workspace_dir}` does not look like a Zephyr checkout "
             f"(no readable zephyr/VERSION file).",
             "Run `tan bootstrap`, or point the workspace at a real Zephyr checkout.",
+            scope="project",
         )
     return Check(
-        "zephyrWorkspace", "pass", f"Zephyr {version_text} at `{workspace_dir}`."
+        "zephyrWorkspace", "pass", f"Zephyr {version_text} at `{workspace_dir}`.",
+        scope="project",
     )
 
 
@@ -1196,6 +1252,7 @@ def setools_check(
             "`app-release-exec-linux`. Nothing to check on this host -- run the "
             "flash from WSL2/Linux (Windows hosts pass the SE-UART through with "
             "usbipd), or use the J-Link Flow D path below.",
+            scope="host",
         )
 
     problems: list[str] = []
@@ -1235,6 +1292,7 @@ def setools_check(
             "pass",
             f"SETOOLS ready: $SETOOLS_DIR=`{setools_dir}` has "
             f"{'/'.join(SETOOLS_EXECUTABLES)}, $SE_UART=`{se_uart}`, `fdt` importable.",
+            scope="host",
         )
     return Check(
         "setools",
@@ -1247,6 +1305,7 @@ def setools_check(
         f"redistribute it -- then `export SETOOLS_DIR=<...>/app-release-exec-linux`, "
         f"`export SE_UART=/dev/ttyUSB0` (your SE-UART device), and `pip install fdt` "
         f"into the workspace venv. See docs/aen-bench-bringup.md.",
+        scope="host",
     )
 
 
@@ -1294,6 +1353,7 @@ def jlink_check(
             + requirements,
             "Install the SEGGER J-Link Software & Documentation Pack "
             f"(V{_fmt(JLINK_MIN_DLL)} or newer) and update the probe to V13 firmware.",
+            scope="host",
         )
     if version is None:
         return Check(
@@ -1303,6 +1363,7 @@ def jlink_check(
             f"the Flow D MRAM loader could not be confirmed. " + requirements,
             "Run `JLinkExe -?` by hand and confirm the banner reports "
             f"V{_fmt(JLINK_MIN_DLL)} or newer.",
+            scope="host",
         )
     if version < JLINK_MIN_DLL:
         return Check(
@@ -1313,9 +1374,11 @@ def jlink_check(
             f"to program MRAM with on this DLL. " + requirements,
             f"Upgrade the SEGGER J-Link pack to V{_fmt(JLINK_MIN_DLL)}+ and put the "
             f"probe on matched V13 firmware.",
+            scope="host",
         )
     return Check(
-        "jlink", "pass", f"J-Link V{_fmt(version)} ({found}). " + requirements
+        "jlink", "pass", f"J-Link V{_fmt(version)} ({found}). " + requirements,
+        scope="host",
     )
 
 
@@ -1356,6 +1419,7 @@ def zephyr_sdk_host_check(host_os: str, arch: str) -> Check:
             "zephyrSdkAvailableForHost",
             "pass",
             f"The Zephyr SDK publishes a host build for {tag}.",
+            scope="host",
         )
     served = ", ".join(ZEPHYR_SDK_HOSTS)
     if tag == "windows-aarch64":
@@ -1386,7 +1450,7 @@ def zephyr_sdk_host_check(host_os: str, arch: str) -> Check:
     else:
         detail = f"The Zephyr SDK publishes no host build for {tag}. Served hosts are {served}."
         fix = f"Build on one of {served} -- natively, or in a VM/container on this machine."
-    return Check("zephyrSdkAvailableForHost", "fail", detail, fix)
+    return Check("zephyrSdkAvailableForHost", "fail", detail, fix, scope="host")
 
 
 def _enable_long_paths_fix(key: str) -> str:
@@ -1490,7 +1554,7 @@ def long_paths_check(registry_enabled: bool | None, git_core_longpaths: bool | N
         )
         fix = f"{_GIT_LONG_PATHS_FIX}\n{_enable_long_paths_fix(key)}"
 
-    return Check("longPaths", status, f"{headline} ({registry_detail}; {git_detail}).", fix)
+    return Check("longPaths", status, f"{headline} ({registry_detail}; {git_detail}).", fix, scope="host")
 
 
 def home_path_check(home: str | None) -> Check:
@@ -1515,6 +1579,7 @@ def home_path_check(home: str | None) -> Check:
             "Could not resolve the home directory (neither USERPROFILE nor HOME is set).",
             "Set HOME (or USERPROFILE on Windows) -- tan resolves ~/.alp for the SDK cache "
             "and the global default-SDK pointer from it.",
+            scope="host",
         )
     if " " in home:
         return Check(
@@ -1525,8 +1590,9 @@ def home_path_check(home: str | None) -> Check:
             "inherits the space.",
             "Create the workspace at a space-free path (e.g. C:\\alp or /opt/alp) and run "
             "tan from there with --project, rather than under the home directory.",
+            scope="host",
         )
-    return Check("homePath", "pass", f"Home directory has no spaces: {home}")
+    return Check("homePath", "pass", f"Home directory has no spaces: {home}", scope="host")
 
 
 # ---------------------------------------------------------------------------
@@ -1676,8 +1742,9 @@ def sdk_check(
                 f"or `tan init --sdk-root <path>` to write it into "
                 f".alp/sdk-path, which outranks both discovery tiers.",
                 code=SDK_DISCOVERY_DIVERGENT,
+                scope="project",
             )
-        return Check("sdk", "pass", detail)
+        return Check("sdk", "pass", detail, scope="project")
     scope_note = f" for --project {project_scope}" if project_scope is not None else ""
     if broken_global_default is not None:
         pointer = str(_home_alp_dir() / "sdk-default")
@@ -1690,12 +1757,14 @@ def sdk_check(
             f"nothing else either.",
             f"{global_default_pointer_fix_hint(pointer)}, or pass "
             f"--sdk-root <path> directly.",
+            scope="project",
         )
     return Check(
         "sdk",
         "fail",
         f"no SDK selected{scope_note} -- {NO_SDK_NEXT_STEPS}",
         "--sdk-root <path>",
+        scope="project",
     )
 
 
@@ -1718,19 +1787,21 @@ def board_yaml_preflight_check(present: bool, project_selected: bool) -> Check:
     `boardYaml` check in this file and it is never dropped.
     """
     if present:
-        return Check("boardYaml", "pass", "board.yaml found")
+        return Check("boardYaml", "pass", "board.yaml found", scope="project")
     if project_selected:
         return Check(
             "boardYaml",
             "fail",
             "board.yaml not found -- run `tan init` or pass `--board-yaml <path>`",
             "tan init",
+            scope="project",
         )
     return Check(
         "boardYaml",
         "warn",
         "no project selected -- no board.yaml found",
         "Select a project with `--project <dir>` (or `--board-yaml <path>`) to check one.",
+        scope="project",
     )
 
 
@@ -1742,13 +1813,14 @@ def workspace_preflight_check(workspace_dir: str | None) -> Check:
     exists to build against.
     """
     if workspace_dir is not None:
-        return Check("workspace", "pass", f"Zephyr workspace at {workspace_dir}")
+        return Check("workspace", "pass", f"Zephyr workspace at {workspace_dir}", scope="project")
     return Check(
         "workspace",
         "fail",
         "no Zephyr workspace -- run `tan bootstrap` (reuses a compatible Zephyr, else "
         "bootstraps one)",
         "tan bootstrap",
+        scope="project",
     )
 
 
@@ -1774,7 +1846,8 @@ def zephyr_version_preflight_check(
         return None
     if workspace_version == sdk_pin:
         return Check(
-            "zephyrVersion", "pass", f"Zephyr v{workspace_version} matches the SDK pin"
+            "zephyrVersion", "pass", f"Zephyr v{workspace_version} matches the SDK pin",
+            scope="project",
         )
     return Check(
         "zephyrVersion",
@@ -1782,6 +1855,7 @@ def zephyr_version_preflight_check(
         f"reused Zephyr v{workspace_version} != SDK pin v{sdk_pin} -- run `tan bootstrap` "
         "to refresh the workspace",
         "tan bootstrap",
+        scope="project",
     )
 
 
@@ -1824,7 +1898,8 @@ def venv_provenance_check(record: WorkspaceSdkRecord | None, sdk_root: str | Non
         return None
     if os.path.normcase(_abs_posix(record.sdk_path)) == os.path.normcase(_abs_posix(sdk_root)):
         return Check(
-            "venvProvenance", "pass", f"workspace venv populated for the active SDK ({record.sdk_path})"
+            "venvProvenance", "pass", f"workspace venv populated for the active SDK ({record.sdk_path})",
+            scope="project",
         )
     return Check(
         "venvProvenance",
@@ -1833,6 +1908,7 @@ def venv_provenance_check(record: WorkspaceSdkRecord | None, sdk_root: str | Non
         f"one currently selected ({sdk_root}) -- Zephyr packages installed into it may not "
         "match; run `tan bootstrap` to resync the venv",
         "tan bootstrap",
+        scope="project",
     )
 
 
@@ -1871,8 +1947,9 @@ def sdk_provenance_check(sdk_root: str) -> Check:
             "warn",
             f"{detail} -- {behind} commit(s) behind upstream",
             f"Update the SDK checkout: git -C {sdk_root} pull",
+            scope="project",
         )
-    return Check("sdkProvenance", "pass", detail)
+    return Check("sdkProvenance", "pass", detail, scope="project")
 
 
 def _is_own_git_checkout(root: str) -> bool:
@@ -2465,6 +2542,7 @@ def fix_needs_sudo_check(tool: str, command: str) -> Check:
         f"re-run `tan doctor`.",
         command,
         code="doctor.fix-needs-sudo",
+        scope="host",
     )
 
 
@@ -2487,6 +2565,7 @@ def fix_installed_check(tool: str, command: str) -> Check:
         f"made after it started -- open a new shell, then re-run `tan "
         f"doctor` there to confirm.",
         code="doctor.fix-installed",
+        scope="host",
     )
 
 
@@ -2504,6 +2583,7 @@ def fix_spawn_failed_check(tool: str, command: str, err: Exception) -> Check:
         f"yourself, then re-run `tan doctor`.",
         command,
         code="doctor.fix-spawn-failed",
+        scope="host",
     )
 
 
@@ -2520,6 +2600,7 @@ def fix_failed_check(tool: str, command: str, returncode: int) -> Check:
         f"yourself to see the full output, then re-run `tan doctor`.",
         command,
         code="doctor.fix-failed",
+        scope="host",
     )
 
 
@@ -2535,6 +2616,7 @@ def fix_timed_out_check(tool: str, command: str) -> Check:
         f"with no result. Run it yourself, then re-run `tan doctor`.",
         command,
         code="doctor.fix-timed-out",
+        scope="host",
     )
 
 
@@ -2607,6 +2689,7 @@ def fix_installer_not_found_check(installer: str, tools: list[str]) -> Check:
         f"package manager this host already has -- `hostPrerequisites` above "
         f"names {'each' if many else 'its'} exact install command.",
         code="doctor.fix-installer-not-found",
+        scope="host",
     )
 
 
@@ -3052,6 +3135,7 @@ def _collect(
                 f"tan's built-in prerequisite list, which may not match this SDK.",
                 "Update `tan` or pin an SDK whose metadata/bootstrap.json this "
                 "version understands; `tan bootstrap` will refuse outright until then.",
+                scope="project",
             )
         )
 

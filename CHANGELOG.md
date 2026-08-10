@@ -9,6 +9,47 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Added
 
+- **Every `tan doctor` check now carries a `scope` — `host` or `project` — so a
+  consumer stops hand-maintaining a list of tan's own check names.** The
+  envelope carried `checks[].name` and nothing else, so anyone splitting "facts
+  about this machine" from "facts about the project you opened" matched
+  strings. `alp-sdk-vscode` did exactly that; between v0.4.0 and 0.5.1 the
+  check `zephyrSdkHost` was renamed `zephyrSdkAvailableForHost`, the stale
+  entry then matched nothing, nothing failed on either side, and the row it was
+  meant to admit was silently never admitted — which reads to a user as "not a
+  problem" rather than "not asked" (alp-sdk-vscode#472, patched downstream in
+  alp-sdk-vscode#487 with the caveat that a re-derived hand-list rots again).
+  `host` means the verdict is about this machine (a tool on PATH, an OS
+  setting, the host interpreter); `project` means it is about the selected
+  project, the resolved alp-sdk checkout, or the Zephyr workspace built for it.
+  The rule and the two definitions are pinned in `contract/README.md`; the
+  classification itself deliberately is not, because reproducing it downstream
+  is the hand-list this field exists to delete. Additive: a new key on an
+  existing object, no key removed or renamed, present on every entry rather
+  than sometimes, and no committed golden carries a `checks[]` array to move.
+  Emitted by `tan doctor`, and by the `doctor.checks[]` inside the file
+  `tan support-bundle` writes — that report is built from the same type. That
+  command's own stdout envelope carries no `checks[]` and is unchanged. (#549)
+  - **A check cannot be added without one.** `scope` is a required
+    keyword-only field, so a check authored without it is a `TypeError` at its
+    own construction site — on every branch and every platform, including the
+    ones no test host reaches (`longPaths`, `sevenZip`, the six `fix:*`
+    outcomes). `python/tests/gates/test_doctor_check_scope.py` adds the static
+    half: it walks every `Check(...)` call site under `python/tan/`, requires a
+    literal value from the vocabulary, refuses a name that declares two
+    different scopes on two branches, and pins the current classification in
+    both directions so a reclassification is a reviewed edit rather than a
+    one-word refactor.
+  - **`tan doctor` and `tan doctor --build` are now contractually the same
+    check set.** `--build` gated exactly one check (`zephyrWorkspace`) and
+    stopped gating it in #290; it has been accepted-and-ignored since. That was
+    observable but unwritten, so `alp-sdk-vscode` still spawns both in parallel
+    on every dependency-panel refresh and merges them — it could not delete the
+    second subprocess safely, because deleting a seam on one pin's behaviour is
+    how the allowlist rotted in the first place. Now pinned by two tests (unit
+    and spawned-binary) and stated in `contract/README.md`, so one invocation
+    is enough. Neither invocation's output changed as part of this.
+
 - **`scripts/tan-surface/` — a command-surface walk that drives every `tan`
   command, in dependency order, against a real project.** `scripts/e2e-full.sh`
   is a release *regression* harness: it hijacks `$HOME`, wipes its tree every
@@ -123,6 +164,29 @@ All notable changes to `tan` are documented here. Format follows
   `--target-kind` to let it infer. (#489)
 
 ### Fixed
+
+- **The five `debug-config-preview-*` goldens are re-recorded against the
+  shipping CLI and are real gates again.** They described the frozen Rust
+  v0.4.1 oracle, not the binary that ships: four were missing
+  `data.configuration.preLaunchTask` (tan-cli#138 restored the v0.3.1 default
+  that tan-cli#85 had made opt-in — `alp: build active target`, `alp: build
+  baremetal target`, `alp: build native_sim target`) and `yocto-userspace`
+  recorded `issues: []` where the CLI emits tan-cli#321's
+  `debug-config.gdbserver-address-unresolved`. The difference had been
+  DECLARED as `xfail(strict=True)` instead, which fails only on XPASS and so
+  pinned "this envelope differs somehow" and nothing finer — leaving every
+  other field, including the `data.configuration` alp-sdk-vscode#342 writes
+  into `launch.json` verbatim, ungated on the shipping side; and the stale
+  values shipped, because `release.yml`'s `Bundle the envelope contract` step
+  re-packages `expected.json` into the published `envelope-contract.json`.
+  Re-recording was blocked only because the same files held the frozen oracle
+  through `crates/tan-cli/tests/contract.rs`; tan-cli#269 deleted `crates/`,
+  so that blocker is gone. All five carry a `PROVENANCE.txt` recording what
+  moved, when, against which version, and why the previous recording was
+  wrong. `contract/README.md`, the conformance harness's own comments and the
+  `Bundle the envelope contract` step comment are updated to match — this
+  supersedes the coverage description the earlier #502 entry below records.
+  (#502)
 
 - **The vendored bootstrap manifest no longer tells a customer, mid-onboarding,
   to run a subcommand this build refuses.**
