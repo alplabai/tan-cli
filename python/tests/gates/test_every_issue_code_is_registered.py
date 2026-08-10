@@ -387,6 +387,11 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/commands/build/token_substitution.py", "TokenSubstitutionError"): 0,
     ("tan/commands/build_cmd.py", "BuildError"): 0,
     ("tan/commands/build_cmd.py", "_refuse"): 0,
+    # tan-cli#616: `faultdecode_cmd._refuse(code, message, *, envelope_mode)`
+    # -- same shape and same 0th position as `build_cmd`'s namesake. Its two
+    # call sites carry the literals (`faultdecode.no-registers`,
+    # `faultdecode.invalid-register-value`), which is what this index resolves.
+    ("tan/commands/faultdecode_cmd.py", "_refuse"): 0,
     ("tan/commands/build/materialise.py", "MaterialiseError"): 0,
     ("tan/commands/model_cmd.py", "ModelError"): 0,
     ("tan/commands/kconfig_cmd.py", "_CoreResolutionError"): 0,
@@ -433,6 +438,9 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
         ("tan/commands/build_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse`'s OWN body,
         # forwarding ITS OWN `code` parameter -- `_refuse` is itself in
         # `_FULL_CODE_CALLABLES`, so its call sites carry the literal.
+        ("tan/commands/faultdecode_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse`'s OWN
+        # body (tan-cli#616) -- `_refuse` is itself in `_FULL_CODE_CALLABLES`,
+        # so both of its call sites carry the literal.
         ("tan/commands/monitor_cmd.py", "err.code"),  # <- MonitorError
         ("tan/commands/init_cmd.py", "err.code"),  # <- InitError
         ("tan/commands/model_cmd.py", "err.code"),  # <- ModelError

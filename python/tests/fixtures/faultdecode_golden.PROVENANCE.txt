@@ -1,0 +1,106 @@
+SPDX-License-Identifier: Apache-2.0
+
+PROVENANCE — python/tests/fixtures/faultdecode_golden.json
+==========================================================
+
+Re-recorded on : 2026-08-10
+Recorded from  : the SHIPPING Python CLI, `tan 0.5.2-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`) — for TWO decode_cases
+                 only. Every other value in the file is still the original
+                 alp-sdk recording and was not touched.
+Issue          : tan-cli#616 (defect A)
+Branch         : fix/616-faultdecode-escalation-and-negative-cfsr (off dev @ 1813e46)
+Interpreter    : Python 3.12.3, lane-private venv, `tan` resolved from this worktree.
+
+What this file is, and what changed about that
+----------------------------------------------
+The file was frozen from alp-sdk's `scripts/alp_cli/faultdecode.py`, of which
+`tan/core/faultdecode.py` is a port. It carries two sections:
+
+  * `bit_tables`   — every (register, bit, name, meaning) quadruple.
+                     UNCHANGED by tan-cli#616. The register-level facts are
+                     ARM architectural definitions and are not what diverged.
+  * `decode_cases` — 102 swept cases (a single-bit sweep over cfsr/hfsr/dfsr
+                     plus a handful of composed/realistic words), each with
+                     `report_json` and `render_human`.
+
+Two of the 102 were re-recorded. Both differ in `root_cause` and in NOTHING
+else — measured before writing, by diffing `report_json` with `root_cause`
+removed and finding it equal:
+
+    cfsr=0x00000020 hfsr=0x0 dfsr=0x0  (MLSPERR alone)
+      - "MLSPERR set (MMFSR): MemManage fault during lazy floating-point
+         state preservation."
+      + "MemManage fault while lazily preserving the floating-point context
+         -- the MPU forbids the deferred push of the FP registers into the
+         space the exception frame reserved for them (wrong region
+         permissions, or a stack that has overflowed out of its region)."
+
+    cfsr=0x00002000 hfsr=0x0 dfsr=0x0  (LSPERR alone)
+      - "LSPERR set (BFSR): Bus fault during lazy floating-point state
+         preservation."
+      + "Bus fault while lazily preserving the floating-point context -- the
+         deferred push of the FP registers into the space the exception frame
+         reserved for them hit a faulting address, so that stack memory is bad
+         or absent (a corrupted or overflowed stack pointer). Check SP/PSPLIM
+         and that the stack fits the larger FP-extended exception frame."
+
+`render_human` moved for the same two cases and for the same reason: it prints
+`root_cause` verbatim under "Most likely cause:". The "Set flags:" block of
+both is byte-identical, LSPERR/MLSPERR included — the bit tables did not move.
+
+How it was re-recorded
+----------------------
+Not by hand. The two values were produced by calling the shipping
+`tan.core.faultdecode.decode()` / `report_to_json()` / `render_human()` with
+each case's OWN recorded `cfsr`/`hfsr`/`dfsr`/`bfar`/`mmfar` inputs — i.e. the
+same three calls `tests/core/test_faultdecode.py::test_decode_matches_the_
+frozen_golden` makes, so the recording cannot drift from the comparison. Cases
+whose output was unchanged were left byte-for-byte alone; the resulting diff is
+4 lines.
+
+Why the change is correct, and why it is a DIVERGENCE
+-----------------------------------------------------
+tan-cli#616 defect A: `HFSR.FORCED` (bit 30) is the ESCALATION MECHANISM — a
+configurable fault escalated because it could not be taken — not the fault.
+The fault is in CFSR. Upstream's `_root_cause` ladder has no branch for LSPERR
+(BFSR bit 13) or MLSPERR (MMFSR bit 5), the only two CFSR cause bits it never
+gave one, so those two words fell past every branch and landed on `FORCED`:
+
+    $ tan faultdecode --cfsr 0x2000 --hfsr 0x40000000
+      Most likely cause:
+        Forced HardFault -- a configurable fault escalated but its own status
+        bits are clear; ...
+
+— which is not merely the least actionable half of what the registers say, it
+is FALSE: LSPERR is set, so its own status bits are demonstrably not clear.
+
+tan now (a) gives LSPERR/MLSPERR real root-cause branches and (b) makes
+`FORCED` the headline only when CFSR names no cause at all. alp-sdk's
+`scripts/alp_cli/faultdecode.py` still does neither. That is a deliberate,
+maintainer-decided divergence, reserved for exactly this decision in tan-cli#539
+and now taken; `tan/core/faultdecode.py::_root_cause`'s docstring records it at
+the source, and `tests/core/test_faultdecode.py::test_decode_diverges_from_the_
+sdk_original_only_where_tan_cli_616_declares` polices it against a live alp-sdk
+checkout — a mismatch OUTSIDE the declared classes still fails. THE UPSTREAM
+SHOULD FOLLOW: alp-sdk carries the same defect and nothing here fixes it there.
+
+Note what this file could NOT have caught, and still cannot
+-----------------------------------------------------------
+`decode_cases` is a SINGLE-BIT sweep plus a few composed words. It contains no
+`CFSR-cause + HFSR.FORCED` combination at all, which is why the FORCED-shadows-
+the-cause half of defect A left every one of the 102 cases green and had to be
+found by hand. The FORCED guard is therefore pinned by named unit tests in
+`tests/core/test_faultdecode.py`, not by growing this fixture: these 102 rows
+are upstream's answers, and adding tan-only rows would blur what the file is.
+
+Why re-recording is an ordinary change now
+------------------------------------------
+It was not always. tan-cli#539 reserved both halves of #616 because
+`contract/envelopes` goldens also held the FROZEN Rust v0.4.1 oracle to the
+same bytes, so changing the output reddened `crates/tan-cli/tests/contract.rs`
+on every platform. tan-cli#269 deleted `crates/` (`2883cdf`) and tan-cli#594
+re-recorded the affected goldens against the shipping Python CLI. There is no
+second gate left to disagree with this fixture. (Independently: `contract/
+envelopes/` has no `faultdecode` case at all — checked, 17 case directories,
+none of them this verb — so no envelope golden moved for #616.)
