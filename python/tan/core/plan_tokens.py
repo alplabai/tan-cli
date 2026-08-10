@@ -291,19 +291,27 @@ def _substitute_artefact_lenient(
 
 
 def _substitute_command_lenient(
-    i: int, cmd: SliceCommand, values: TokenValues
+    base: str, cmd: SliceCommand, values: TokenValues
 ) -> tuple[SliceCommand, str | None]:
+    """`base` is the plan path of the command being substituted --
+    `slices[N].command` for the slice's own, `slices[N].postCommands[M]` for
+    one of its post-build steps (tan-cli#550). Parameterised rather than
+    duplicated so a post-build step's `${SDK_ROOT}` / `${TOOLCHAIN_ROOT}` /
+    `${UNKNOWN}` is substituted, demoted and refused by exactly the same rules
+    as the slice's own command: those steps are spawned by the same executor,
+    so a token this pass left standing in one would be handed to
+    `subprocess` verbatim."""
     demoted_field: str | None = None
 
     new_cwd = cmd.cwd
     if new_cwd is not None:
-        cwd_field = f"slices[{i}].command.cwd"
+        cwd_field = f"{base}.cwd"
         new_cwd, cwd_unresolved = _sub_field_lenient(cwd_field, new_cwd, values)
         demoted_field = _record_first(cwd_field, cwd_unresolved, demoted_field)
 
     new_args: list[str] = []
     for j, arg in enumerate(cmd.args):
-        field = f"slices[{i}].command.args[{j}]"
+        field = f"{base}.args[{j}]"
         sub, unresolved = _sub_field_lenient(field, arg, values)
         new_args.append(sub)
         demoted_field = _record_first(field, unresolved, demoted_field)
@@ -322,7 +330,9 @@ def _substitute_slice(i: int, sl: Slice, values: TokenValues) -> tuple[Slice, st
     (`buildDir`, then `configArtefacts`, then `env`, then `envAppendPath`,
     then `command`), with `appDir` -- a field the Rust `BuildSlice` doesn't
     carry -- inserted right after `buildDir`, the other bare slice-level path
-    field."""
+    field, and `postCommands` -- a field the oracle predates entirely
+    (alp-sdk #1344) -- last, immediately after the `command` it follows on the
+    wire and in execution order."""
     demoted_field: str | None = None
 
     build_dir_field = f"slices[{i}].buildDir"
@@ -365,9 +375,26 @@ def _substitute_slice(i: int, sl: Slice, values: TokenValues) -> tuple[Slice, st
 
     new_command = sl.command
     if new_command is not None:
-        new_command, cmd_demoted = _substitute_command_lenient(i, new_command, values)
+        new_command, cmd_demoted = _substitute_command_lenient(
+            f"slices[{i}].command", new_command, values
+        )
         if cmd_demoted is not None:
             demoted_field = _record_first(cmd_demoted, True, demoted_field)
+
+    # tan-cli#550: the post-build steps are spawned by the same executor as
+    # `command`, so they are substituted by the same pass. Skipping them
+    # would hand `cmake --build ${PROJECT_ROOT}/...` to `subprocess` with the
+    # literal token still in it -- the executor has no second substitution
+    # pass to catch it, and neither the LeftoverToken nor the
+    # ${TOOLCHAIN_ROOT}-demotion guard would ever see the field.
+    new_post: list[SliceCommand] = []
+    for j, step in enumerate(sl.post_commands):
+        new_step, step_demoted = _substitute_command_lenient(
+            f"slices[{i}].postCommands[{j}]", step, values
+        )
+        new_post.append(new_step)
+        if step_demoted is not None:
+            demoted_field = _record_first(step_demoted, True, demoted_field)
 
     new_slice = replace(
         sl,
@@ -377,6 +404,7 @@ def _substitute_slice(i: int, sl: Slice, values: TokenValues) -> tuple[Slice, st
         env=new_env,
         env_append_path=new_env_append,
         command=new_command,
+        post_commands=tuple(new_post),
     )
     return new_slice, demoted_field
 

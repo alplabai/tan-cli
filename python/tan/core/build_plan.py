@@ -70,6 +70,22 @@ class Slice:
     command: SliceCommand | None
     env: dict[str, str]
     env_append_path: dict[str, list[str]]
+    #: Steps that MUST run, in order, after `command` succeeds (alp-sdk
+    #: #1344, tan-cli#550). `west build` and `bitbake` configure AND build in
+    #: one invocation and carry none; a baremetal slice's `cmake -S ... -B .`
+    #: only CONFIGURES, so its `cmake --build .` arrives here.
+    #:
+    #: Defaulted rather than required -- the strict-producer/tolerant-consumer
+    #: rule this module's own docstring states. A plan emitted by an alp-sdk
+    #: predating #1344 has no `postCommands` key at all, and refusing it would
+    #: turn "your SDK is older than your tan" into `build.plan-invalid` for
+    #: every slice, including the zephyr/yocto ones whose correct value is
+    #: `[]` anyway.
+    #:
+    #: A tuple, not a list: this dataclass is `frozen=True`, and a mutable
+    #: default on a frozen dataclass is a `ValueError` at class-definition
+    #: time. Every consumer only iterates it.
+    post_commands: tuple[SliceCommand, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -382,6 +398,44 @@ def _command(raw: Any, context: str) -> SliceCommand | None:
     return SliceCommand(tool=tool, args=list(args), cwd=cwd)
 
 
+def _post_commands(raw: Any, context: str) -> tuple[SliceCommand, ...]:
+    """Validate a slice's `postCommands` (alp-sdk #1344, tan-cli#550).
+
+    Absent or `null` is `()`, not a refusal -- see [`Slice.post_commands`] for
+    why an older SDK's plan must still parse. Anything else must be a LIST,
+    and every entry a real command object: a `null` entry is refused here
+    rather than silently dropped, because `_command` answers `None` for a null
+    `command` (the plan's own "this slice has nothing to run" signal) and that
+    meaning does not exist inside a step list -- a dropped step is a build
+    step that never ran with nothing on the wire to say so, which is the exact
+    class of silence tan-cli#550 is about.
+
+    Each entry goes through the SAME `_command` validation as the slice's own
+    `command`: identical `tool` shape rules (bare identity or host-absolute,
+    never a relative path with a separator), identical `args`/`cwd` typing and
+    identical embedded-NUL refusal. They are handed to `subprocess` by the
+    same executor, so a shape this parser accepts here but not there would be
+    a hole, not a tolerance."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise PlanParseError(
+            "build.plan-invalid", f"`{context}` must be a list of command objects or null"
+        )
+    steps: list[SliceCommand] = []
+    for i, entry in enumerate(raw):
+        if entry is None:
+            raise PlanParseError(
+                "build.plan-invalid",
+                f"`{context}[{i}]` must be an object -- a null step is not a command, and "
+                f"a step that cannot run must be absent from the list, not present as null",
+            )
+        step = _command(entry, f"{context}[{i}]")
+        if step is not None:
+            steps.append(step)
+    return tuple(steps)
+
+
 def _env(raw: Any, context: str) -> dict[str, str]:
     if not isinstance(raw, dict) or not all(
         isinstance(k, str) and _is_legal_env_name(k) and isinstance(v, str) for k, v in raw.items()
@@ -431,6 +485,7 @@ def _slice(raw: Any, i: int) -> Slice:
         command=_command(raw["command"], f"slices[{i}].command"),
         env=_env(raw["env"], f"slices[{i}].env"),
         env_append_path=_env_append_path(raw["envAppendPath"], f"slices[{i}].envAppendPath"),
+        post_commands=_post_commands(raw.get("postCommands"), f"slices[{i}].postCommands"),
     )
 
 
