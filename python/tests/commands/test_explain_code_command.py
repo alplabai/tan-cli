@@ -185,6 +185,44 @@ def test_the_success_envelope_names_the_checkout_it_read(tmp_path, monkeypatch):
     assert doc["project"] == {"root": None, "boardYaml": None}
 
 
+def _write_pin(workspace: Path, target: Path) -> None:
+    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_cmd._pointer_target`
+    reads -- mirrors `test_sdk_discovery_ladders._write_pin`."""
+    (workspace / ".alp").mkdir(parents=True, exist_ok=True)
+    (workspace / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(target).replace("\\", "/")}), encoding="utf-8"
+    )
+
+
+def test_project_flag_picks_which_checkout_the_ladder_answers(tmp_path, monkeypatch):
+    """`--project` is the ONE input the SDK ladder exists to resolve against on
+    the `--code` path -- unlike `--template`/`--target`, which read no checkout
+    at all. MEASURED pre-fix: `bind_sdk` resolved from the bare CWD and
+    `--project` was accepted-and-ignored, so running from a cwd pinned to
+    SDK-A with `--project <projB>` (pinned to SDK-B) still answered SDK-A --
+    the exact accepted-but-ignored input class `explain`'s own `--sdk-root`
+    rationale says this command refuses."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    sdk_a = _sdk(tmp_path / "sdk-a", {"ALP-B003": _ALP_B003})
+    entry_b = dict(_ALP_B003, summary="FROM SDK-B")
+    sdk_b = _sdk(tmp_path / "sdk-b", {"ALP-B003": entry_b})
+    proj_b = tmp_path / "proj-b"
+    proj_b.mkdir()
+    _write_pin(cwd, sdk_a)
+    _write_pin(proj_b, sdk_b)
+
+    monkeypatch.chdir(cwd)
+    result = runner.invoke(
+        app, ["explain", "--code", "ALP-B003", "--project", str(proj_b), "--format", "json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert doc["data"]["diagnostic"]["summary"] == "FROM SDK-B"
+    assert doc.get("sdk", {}).get("root") == str(sdk_b).replace("\\", "/")
+
+
 # ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------
@@ -225,6 +263,41 @@ def test_no_sdk_bound_refuses_on_the_text_path_too(tmp_path, monkeypatch):
     )
 
 
+def test_an_sdk_root_flag_missing_the_marker_is_unresolved_not_unreadable(tmp_path, monkeypatch):
+    """`--sdk-root` is the ladder's TERMINAL tier (I-31: a typo'd flag must not
+    fall through to a lower one) but was taken on faith -- no `SDK_MARKER`
+    check. MEASURED pre-fix: pointing it at a directory that resolves but is
+    not an alp-sdk checkout reached `resolve_code` and misreported
+    `explain.catalog-unreadable`, telling the caller to run the catalogue
+    generator inside a directory that was never a checkout. Fixed, it reports
+    the SAME code `presets --sdk-root <bad>` reports for this input class."""
+    not_an_sdk = tmp_path / "not-an-sdk"
+    not_an_sdk.mkdir()
+    result = _run(
+        tmp_path, monkeypatch, "--code", "ALP-B003", "--sdk-root", str(not_an_sdk),
+        "--format", "json",
+    )
+
+    assert result.exit_code == 1, result.output
+    doc = json.loads(result.stdout)
+    assert doc["issues"][0]["code"] == "explain.sdk-root-unresolved"
+    assert "sdk" not in doc
+
+
+def test_a_nonexistent_sdk_root_flag_is_unresolved_too(tmp_path, monkeypatch):
+    """The other half of the same measurement: a `--sdk-root` naming a path
+    that does not exist at all -- not just one lacking the marker."""
+    result = _run(
+        tmp_path, monkeypatch, "--code", "ALP-B003", "--sdk-root",
+        str(tmp_path / "does-not-exist"), "--format", "json",
+    )
+
+    assert result.exit_code == 1, result.output
+    doc = json.loads(result.stdout)
+    assert doc["issues"][0]["code"] == "explain.sdk-root-unresolved"
+    assert "sdk" not in doc
+
+
 def test_a_checkout_with_no_catalogue_names_the_path_it_looked_at(tmp_path, monkeypatch):
     """A DIFFERENT refusal from "no SDK bound", deliberately: the checkout
     resolved fine, so the reader needs to know which file is missing and how
@@ -259,18 +332,23 @@ def test_a_malformed_catalogue_is_a_coded_refusal_not_a_traceback(tmp_path, monk
     assert "not valid JSON" in doc["issues"][0]["message"]
 
 
-@pytest.mark.parametrize("catalog", ['["ALP-B003"]', '{"codes": ["ALP-B003"]}'])
+@pytest.mark.parametrize(
+    "catalog",
+    ['["ALP-B003"]', '{"codes": ["ALP-B003"]}', '{"codes": {"ALP-B003": "not an object"}}'],
+)
 def test_a_wrong_shaped_catalogue_refuses_at_exit_1_not_exit_5(tmp_path, monkeypatch, catalog):
-    """What the two `isinstance` guards in `load_codes` actually DECIDE.
+    """What the three `isinstance` guards in `load_codes` actually DECIDE.
 
-    Both documents parse as JSON, so neither is caught by the malformed-JSON
+    All three documents parse as JSON, so none is caught by the malformed-JSON
     arm. MEASURED with each guard removed in turn: the top-level array escapes
-    as `AttributeError: 'list' object has no attribute 'get'`, and the
+    as `AttributeError: 'list' object has no attribute 'get'`, the
     list-valued `codes` as `TypeError: list indices must be integers` (its
     elements survive `lookup`'s dict comprehension, so `"ALP-B003"` MATCHES and
-    then indexes a list by string). Both land in `explain`'s catch-all as
-    `explain.internal-failure` at exit 5 -- "tan hit a bug" for a checkout
-    problem the reader could fix.
+    then indexes a list by string), and the non-object ENTRY as `AttributeError:
+    'str' object has no attribute 'get'` (it matches `lookup` fine -- the key is
+    a normal string -- and only `summary_line`'s `entry.get(...)` trips). All
+    three land in `explain`'s catch-all as `explain.internal-failure` at exit 5
+    -- "tan hit a bug" for a checkout problem the reader could fix.
 
     Pinned here rather than only in `tests/core/test_error_catalog.py`: a
     `pytest.raises(CatalogUnreadable)` there goes red on the raw exception
@@ -370,6 +448,28 @@ def test_code_cannot_be_combined_with_another_selector(tmp_path, monkeypatch, ot
             "message": (
                 "Use --code on its own; it cannot be combined with --template or "
                 "--target."
+            ),
+        }
+    ]
+
+
+def test_code_cannot_be_combined_with_the_positional_template_id(tmp_path, monkeypatch):
+    """`tan explain minimal-app --code ALP-B003`: the positional set
+    `template`, not `--template`. The refusal must name the positional, not a
+    flag the caller never typed -- the same distinction
+    `explain.positional-template-conflict` already draws for the
+    positional-vs-flag conflict."""
+    result = _run(tmp_path, monkeypatch, "minimal-app", "--code", "ALP-B003", "--format", "json")
+
+    assert result.exit_code == 1, result.output
+    doc = json.loads(result.stdout)
+    assert doc["issues"] == [
+        {
+            "code": "explain.ambiguous-selector",
+            "severity": "error",
+            "message": (
+                "Use --code on its own; it cannot be combined with the positional "
+                "template id or --target."
             ),
         }
     ]

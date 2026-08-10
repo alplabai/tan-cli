@@ -81,6 +81,16 @@ def load_codes(sdk_root: Path | str) -> dict[str, dict]:
     as `explain.py`'s `data.get("codes", {})` does -- an empty catalogue is a
     catalogue in which every code is unknown, which the miss path already
     reports honestly.
+
+    Every VALUE in `codes` is also checked here, not just `codes` itself: a
+    catalogue shaped `{"codes": {"ALP-B003": "not an object"}}` (also a list,
+    also `null`) otherwise reaches `lookup`, matches on `ALP-B003`, and
+    `resolve_code`'s `entry = codes[key]` then hands a non-dict to
+    `summary_line`/`detail_lines`, both of which call `entry.get(...)`.
+    Measured with this guard removed: `AttributeError: 'str' object has no
+    attribute 'get'`, surfacing as `explain.internal-failure` at exit 5 for a
+    checkout problem the reader could fix -- the same exit-1-not-exit-5
+    concern `codes` itself is guarded for, just one dereference deeper.
     """
     path = catalog_path(sdk_root)
     try:
@@ -102,6 +112,11 @@ def load_codes(sdk_root: Path | str) -> dict[str, dict]:
     codes = data.get("codes", {})
     if not isinstance(codes, dict):
         raise CatalogUnreadable(path, "error catalog's `codes` is not a JSON object")
+    for code, entry in codes.items():
+        if not isinstance(entry, dict):
+            raise CatalogUnreadable(
+                path, f"error catalog entry '{code}' is not a JSON object"
+            )
     return codes
 
 

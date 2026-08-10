@@ -97,10 +97,26 @@ alp-sdk `origin/dev` worktree, and each one deliberate
   exactly as the catalogue holds it. Joining it onto the resolved checkout
   would be a value alp-sdk never wrote; `sdk.root` in the same envelope is
   what a consumer joins it against.
+* **The no-near-miss sentence is tan's own wording, not `explain.py`'s.**
+  `explain.py` prints ``unknown code 'ZZZ' -- run `alp explain` against a
+  code from metadata/error-catalog.json`` -- its own binary name and
+  subcommand, which cannot be repeated verbatim from a `tan`-only install;
+  this prints `` explain: unknown code 'ZZZ' -- pass a code from the SDK's
+  metadata/error-catalog.json.`` instead (`_unknown_code_line`). Only the
+  WITH-SUGGESTIONS miss sentence is verbatim from `explain.py`.
+* **The whole JSON MISS document, not just the hit path.** `alp_cli explain
+  <bad> --json` prints `{"error": "unknown-code", "code": ..., "suggestions":
+  [...]}` as its ENTIRE stdout document for a miss. `tan explain --code <bad>
+  --format json` wraps instead, the same as the hit path: `data.diagnostic`
+  is `null` (never the bare `"error"` shape), `data.suggestions` carries the
+  shortlist, and the reason lives in `issues[0]` (`explain.code-unknown`) --
+  not folded into `data` the way `explain.py`'s single-document miss is.
 """
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -118,6 +134,25 @@ from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
+
+#: An unrecognised `[TEMPLATE]`/`--template` value shaped like a diagnostic
+#: code (`ALP-B003`, `ALP_ERR_NO_BACKEND`) rather than a template id. The
+#: overview deliberately never lists `--code` (it would break the golden), so
+#: `--help` was the ONLY way to discover it -- a caller who typed the
+#: alp-sdk spelling minus the flag got "unknown template" with no pointer at
+#: the flag that would have worked. Anchored (not a bare `search`) so an id
+#: that merely CONTAINS one of these shapes mid-string doesn't false-positive.
+_LOOKS_LIKE_A_DIAGNOSTIC_CODE = re.compile(r"^(ALP-B\d+|ALP_ERR_.+)$", re.IGNORECASE)
+
+
+def _code_hint(value: str) -> str:
+    """The extra sentence appended to `explain.template-unknown`'s text line
+    when `value` is shaped like a diagnostic code -- empty string otherwise,
+    so every other rejected template keeps its existing, golden-pinned
+    wording verbatim."""
+    if _LOOKS_LIKE_A_DIAGNOSTIC_CODE.match(value):
+        return f" Looking for a diagnostic code? Use --code {value} instead."
+    return ""
 
 
 @dataclass(frozen=True)
@@ -565,7 +600,7 @@ def resolve(template: str | None, target: str | None) -> _Result:
             "explain.template-unknown",
             f"Unknown template '{template}'.",
             f"explain: unknown template '{template}'. Run tan explain without "
-            f"selectors to list available topics.",
+            f"selectors to list available topics.{_code_hint(template)}",
             selector_value=template,
         )
 
@@ -589,41 +624,67 @@ def resolve(template: str | None, target: str | None) -> _Result:
     return _overview()
 
 
-def bind_sdk(sdk_root_arg: str | None) -> tuple[Path, SdkInfo]:
+def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[Path, SdkInfo]:
     """The checkout `--code` reads, via the NARROW ladder (`--sdk-root` >
-    `.alp/sdk-path` > `~/.alp/sdk-default` > discovery), walked from the CWD.
+    `.alp/sdk-path` > `~/.alp/sdk-default` > discovery), walked from the
+    `--project`-resolved workspace root -- `os.path.join(cwd, project)`, the
+    same join `build_cmd.build`/`run_cmd.run`/`inspect_cmd.inspect` use, so an
+    absolute `--project` replaces the cwd outright rather than nesting under it.
 
     Narrow because `explain` is not one of the four commands the oracle routes
     wide (`init`/`generate`/`examples`/`renode`), so following the
     thirteen-command majority makes `tan explain --code` answer out of the same
     checkout `tan validate` used in the same directory -- the only reason to
-    look a code up while a build is failing. From the CWD rather than
-    `--project` (accepted-and-unread here, see `explain`'s docstring): a user
-    standing in their own project still gets that project's `.alp/sdk-path`
-    pin, because the CWD is the workspace root then.
+    look a code up while a build is failing. `--project` IS read here (unlike
+    every other selector on this command, see `explain`'s docstring): it is the
+    one input this whole ladder exists to resolve against, and the twelve other
+    `resolve_sdk_root_ladder` call sites all pass a `--project`-derived root,
+    not the bare CWD -- accepting the flag and then resolving from the CWD
+    anyway is the accepted-but-ignored input class this command refuses
+    everywhere else (`explain`'s `--sdk-root` rationale).
 
-    Raises `ExplainError` when no tier resolves anything -- a refusal naming
-    what it could not find, never an empty answer. Both imports are LOCAL so
-    the three SDK-free paths keep paying nothing for a mode they never enter.
+    Raises `ExplainError` when no tier resolves anything, INCLUDING when
+    `--sdk-root` (the terminal tier) points at a directory that resolves but
+    carries no `SDK_MARKER` -- `resolve_sdk_root_ladder` itself does not check
+    that for its terminal tier (I-31: a typo'd flag must not fall through to a
+    lower tier), so an unmarked `--sdk-root` would otherwise reach
+    `resolve_code` and misreport as `explain.catalog-unreadable` ("run the
+    generator" in a checkout that was never one) instead of naming the real
+    problem. Either way this is a refusal naming what it could not find, never
+    an empty answer. Both imports are LOCAL so the three SDK-free paths keep
+    paying nothing for a mode they never enter.
     """
     from tan.commands.build_cmd import resolve_sdk_root_ladder
     from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+    from tan.core.shapes import SDK_MARKER
 
-    resolution = resolve_sdk_root_ladder(sdk_root_arg, Path.cwd())
-    if resolution.path is None:
+    cwd = Path.cwd()
+    workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
+    resolution = resolve_sdk_root_ladder(sdk_root_arg, workspace_root)
+    if resolution.path is None or not resolution.path.joinpath(*SDK_MARKER).exists():
         raise ExplainError(
             "explain.sdk-root-unresolved",
             f"alp-sdk root is unresolved, so no diagnostic catalogue could be "
             f"read -- {NO_SDK_NEXT_STEPS}.",
             f"explain: alp-sdk root is unresolved, so no diagnostic catalogue "
             f"could be read -- {NO_SDK_NEXT_STEPS}.",
+            selector_value=code.strip(),
         )
     return resolution.path, SdkInfo.from_resolution(str(resolution.path), resolution)
 
 
 def _unknown_code_line(code: str, suggestions: list[str]) -> str:
-    """`explain.py`'s own miss sentence: the difflib shortlist when there is
-    one, otherwise a pointer at the catalogue that holds every real code."""
+    """The difflib shortlist when there is one, otherwise a pointer at the
+    catalogue that holds every real code.
+
+    Only the WITH-SUGGESTIONS branch is `explain.py`'s own miss sentence,
+    verbatim. The no-near-miss branch is tan's OWN wording, not a port: measured
+    against alp-sdk `origin/dev`, `explain.py` there prints ``unknown code
+    'ZZZ' -- run `alp explain` against a code from metadata/error-
+    catalog.json`` (its own binary name, its own subcommand spelling), which
+    this port cannot repeat verbatim -- there is no `alp explain` in a
+    `tan`-only install. See the module DIVERGENCE list above.
+    """
     if suggestions:
         return f"explain: unknown code '{code}'; did you mean: " + ", ".join(suggestions) + "?"
     return (
@@ -751,7 +812,7 @@ def explain(
         help="alp-sdk diagnostic or error code to explain (e.g. ALP-B003, "
         "ALP_ERR_NO_BACKEND). Reads the bound SDK checkout.",
     ),
-    project: str = typer.Option(  # accepted, not read; see below
+    project: str = typer.Option(  # read by --code ONLY; see below
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
     ),
     sdk_root: str = typer.Option(  # read by --code ONLY; see below
@@ -761,12 +822,20 @@ def explain(
 ) -> None:
     """Explain a project/module template or a generation target.
 
-    `--project` is declared, not consumed, on EVERY path including `--code`:
-    `explain` is project-agnostic (it reads no board.yaml, and the oracle's
-    `project` stays `null`/`null` regardless of either flag's value), but clap
-    makes both `global = true` in Rust, so `tan --sdk-root X explain` /
-    `tan --project X explain` must not be parse errors -- verified against the
-    oracle. `alp-sdk-vscode/src/ideHub/newProjectFlowPanel.ts:188` invokes
+    `--project` is declared on EVERY path but consumed by `--code` ALONE
+    (`bind_sdk`): `--template`/`--target` are project-agnostic (they read no
+    board.yaml, and the oracle's `project` stays `null`/`null` regardless of
+    either flag's value on those two paths), but clap makes both `global =
+    true` in Rust, so `tan --sdk-root X explain` / `tan --project X explain`
+    must not be parse errors -- verified against the oracle. The reported
+    envelope `project` key STILL stays `null`/`null` even on `--code`
+    (`_emit`'s own docstring): `--project` there only picks WHICH checkout the
+    SDK ladder resolves, the same role it plays for `tan validate`/`tan
+    build`, it is not itself echoed as a project root. Accepting the flag and
+    then resolving from the bare CWD regardless of its value would be the
+    accepted-but-ignored input class this command refuses everywhere else --
+    which is exactly what an earlier version of `bind_sdk` did (tan-cli#627
+    review). `alp-sdk-vscode/src/ideHub/newProjectFlowPanel.ts:188` invokes
     exactly the `--sdk-root` shape. `--sdk-root` IS consumed, but only by
     `--code` (`bind_sdk`): it is the terminal tier of the SDK ladder (I-31),
     and the alternative -- accepting the flag that names the checkout the
@@ -799,6 +868,13 @@ def explain(
         )
         return
 
+    # Captured BEFORE the fold below overwrites `template`: whether it was the
+    # positional that supplied it (`--template` itself was absent), needed by
+    # the `--code` clash message just below so it names what the caller
+    # actually typed, the same way `explain.positional-template-conflict`
+    # above already does.
+    template_via_positional = template is None and template_arg is not None
+
     if template is None:
         template = template_arg
 
@@ -811,14 +887,24 @@ def explain(
         # own golden-pinned message on every input that reaches it, which is
         # every input with no `--code`. Same issue code for both -- one name
         # for "you named more than one thing to explain".
+        #
+        # `template_selector_name` names the POSITIONAL when that is what set
+        # `template` (`tan explain minimal-app --code ALP-B003`): the fixed
+        # wording named `--template` unconditionally there, even though the
+        # caller never typed that flag -- the same accepted-but-ignored-input
+        # confusion `explain.positional-template-conflict` exists to avoid.
+        # `--target` stays fixed either way; it has no positional form.
+        template_selector_name = (
+            "the positional template id" if template_via_positional else "--template"
+        )
         _fail(
             json_mode,
             ExplainError(
                 "explain.ambiguous-selector",
-                "Use --code on its own; it cannot be combined with --template or "
-                "--target.",
-                "explain: use --code on its own, not combined with --template or "
-                "--target.",
+                f"Use --code on its own; it cannot be combined with "
+                f"{template_selector_name} or --target.",
+                f"explain: use --code on its own, not combined with "
+                f"{template_selector_name} or --target.",
             ),
         )
         return
@@ -831,7 +917,7 @@ def explain(
             # envelope should report -- nothing was resolved. A `resolve_code`
             # failure below DOES carry the checkout it read, so the reader can
             # see WHICH catalogue answered "unknown".
-            sdk_root_path, sdk = bind_sdk(sdk_root)
+            sdk_root_path, sdk = bind_sdk(sdk_root, project, code)
             result = resolve_code(code, sdk_root_path)
         else:
             result = resolve(template, target)
@@ -928,7 +1014,7 @@ def _fail(json_mode: bool, err: ExplainError, sdk: SdkInfo | None = None) -> Non
 # still missing (`--all`/`--board-yaml`/`--ci`/`--no-color`/
 # `--non-interactive`/`--quiet`/`--verbose`) on top of `--target`, already
 # declared and read above; see `tan.core.global_flags`. `--project`/
-# `--sdk-root` are ALSO declared already (accepted, not read -- see
+# `--sdk-root` are ALSO declared already (read by `--code` alone -- see
 # `explain`'s own docstring); the decorator leaves both untouched the same
 # way it leaves `--target` untouched.
 explain = accept_global_flags(explain)

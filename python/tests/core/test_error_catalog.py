@@ -95,6 +95,47 @@ def test_a_non_object_codes_value_is_a_catalog_error(tmp_path):
     assert err.value.detail == "error catalog's `codes` is not a JSON object"
 
 
+def test_a_non_object_entry_is_a_catalog_error(tmp_path):
+    """A `codes:` value that parses fine but whose OWN entry is not an object
+    (a string, a list, `null`) would otherwise reach `resolve_code`'s `entry =
+    codes[key]`, which hands it straight to `summary_line`/`detail_lines` --
+    both `entry.get(...)`. Measured with this guard removed: `AttributeError:
+    'str' object has no attribute 'get'`, the same exit-1-not-exit-5 concern
+    `test_a_non_object_codes_value_is_a_catalog_error` pins one level up."""
+    _write(tmp_path, {"codes": {"ALP-B003": "not an object"}})
+    with pytest.raises(CatalogUnreadable) as err:
+        load_codes(tmp_path)
+    assert err.value.detail == "error catalog entry 'ALP-B003' is not a JSON object"
+
+
+def test_an_unreadable_catalogue_path_is_a_catalog_error(tmp_path):
+    """The `except (OSError, UnicodeDecodeError)` arm, hit by a PATH that
+    exists but cannot be read as a file -- a directory sitting where the
+    catalogue should be. Distinct from `test_a_missing_catalogue_names_the_
+    generator` (`FileNotFoundError`, caught by its own earlier arm) and from
+    every JSON-shape test above (those all get past `read_text` and fail
+    later): this is the one case that fails ON THE READ ITSELF for a reason
+    other than "does not exist". Deleting this except arm is GREEN under the
+    default `-k "explain or error_catalog"` sweep with no other change --
+    that gap is what this test (plus the sibling non-UTF-8 one) closes."""
+    (tmp_path / "metadata" / "error-catalog.json").mkdir(parents=True)
+    with pytest.raises(CatalogUnreadable) as err:
+        load_codes(tmp_path)
+    assert err.value.detail.startswith("error catalog is unreadable:")
+
+
+def test_a_non_utf8_catalogue_is_a_catalog_error(tmp_path):
+    """The same `except (OSError, UnicodeDecodeError)` arm, hit by a readable
+    file whose bytes are not valid UTF-8 -- a `UnicodeDecodeError` rather than
+    an `OSError`, so both members of the tuple get their own test."""
+    (tmp_path / "metadata").mkdir()
+    (tmp_path / "metadata" / "error-catalog.json").write_bytes(b"\xff\xfe")
+    with pytest.raises(CatalogUnreadable) as err:
+        load_codes(tmp_path)
+    assert err.value.detail.startswith("error catalog is unreadable:")
+    assert "codec can't decode" in err.value.detail
+
+
 @pytest.mark.parametrize(
     "typed,expected",
     [("alp-b003", "ALP-B003"), ("  ALP-B003 ", "ALP-B003"), ("\talp_err_x\n", "ALP_ERR_X")],
