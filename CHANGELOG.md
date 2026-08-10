@@ -14,17 +14,23 @@ All notable changes to `tan` are documented here. Format follows
   cloned probe serial and a write to the wrong board, and no shipped alp-sdk
   preset carries a SW-DP ID — so every `swd_probe` write runs unguarded, with
   at most the `flash.dpidr-preflight-unarmed` warning that an unattended bench
-  never reads. With this variable exported, a real write whose DPIDR preflight
-  would not run fails the entry (`flash.entry-failed`) **before anything is
-  spawned**. Default (unset) behaviour is byte-for-byte unchanged, `--dry-run`
-  is unaffected, and `expect_dpidr` stays optional in metadata: the switch is a
+  never reads — and on the openocd/pyocd arm, which the shipped V2N/V2M
+  manifests select on a host with no J-Link, not even that: the advisory is
+  derived from the J-Link arm having run, so that path has no guard *and* no
+  signal. With this variable exported, a real write whose DPIDR preflight would
+  not run fails the entry (`flash.entry-failed`) **before anything is spawned**.
+  Default (unset) behaviour is byte-for-byte unchanged, `--dry-run` is
+  unaffected, and `expect_dpidr` stays optional in metadata: the switch is a
   host policy for a factory/bench machine, not a new manifest requirement — a
   customer recovering a bricked bridge must not be refused for a field alp-sdk
   has not populated yet. A `swd_probe` entry on the openocd/pyocd arm refuses
   unconditionally under the switch, because the SW-DP ID read is a
   JLinkExe-only primitive and that arm cannot be armed at all;
   `openocd_usb_location` selects a probe but never confirms which board is on
-  the other end of the cable. Documented in `docs/setools.md`. Closes #589.
+  the other end of the cable. **Scoped to `swd_probe`:** despite the
+  method-neutral name it does not cover Flow D (`alif_mram_jlink`), whose own
+  unarmed writes still proceed with no guard and no signal — Refs #609.
+  Documented in `docs/setools.md`. Closes #589.
 
 - **Every `tan doctor` check now carries a `scope` — `host` or `project` — so a
   consumer stops hand-maintaining a list of tan's own check names.** The
@@ -182,20 +188,26 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
-- **A `swd_probe` write whose post-load reset was refused now says the reset
-  did not happen, instead of nothing at all.** #575 made halt-marker detection
-  positional and correctly dropped a post-load marker from the *write* verdict
-  — a marker printed after the load completed says nothing about whether the
-  bytes landed. But it then dropped the marker entirely, so the commonest real
-  outcome (the post-write `r`/`g` is on by default, and a freshly-written
-  resident image is exactly what refuses it) reported the bare
+- **A `swd_probe` write whose core stayed busy after the load now says so,
+  instead of nothing at all.** #575 made halt-marker detection positional and
+  correctly dropped a post-load marker from the *write* verdict — a marker
+  printed after the load completed says nothing about whether the bytes landed.
+  But it then dropped the marker entirely, so the commonest real outcome (the
+  post-write `r`/`g` is on by default, and a freshly-written resident image is
+  exactly what refuses it) reported the bare
   `GD32G553MEY7TR flashed and verified via J-Link @ 0x08000000` with no
   qualification: the operator was told the write succeeded, and told nothing
   about the target possibly still running its old firmware. Such a run now
-  appends Flow D's own clause — `; reset requested, core was busy and did not
-  halt (J-Link reported "…") -- the target may still be running the firmware
-  it had. Power-cycle it and confirm the new firmware answers.` — on both the
-  `.bin` and ELF/HEX arms. The write claim is untouched in both, and
+  appends `; after the load the core was busy and did not halt (J-Link reported
+  "…") -- the target may not have been taken through a halted reset into the
+  firmware just written, and may still be running the firmware it had.
+  Power-cycle it and confirm the new firmware answers.` — on both the `.bin`
+  and ELF/HEX arms. The `core was busy and did not halt` clause is Flow D's
+  own; the sentence deliberately stops short of Flow D's `reset requested`,
+  because on this backend `verifybin` sits between the load and the `r`/`g`
+  and `flash_args.reset: false` removes the reset altogether, neither of which
+  `flash_cmd` can see — so the stage is not something the marker's position
+  proves. The write claim is untouched on both arms, and
   `flash.swd-probe-write-unconfirmed` deliberately does **not** fire: the write
   IS confirmed, and reusing that advisory would undo #575. The pre-load wording
   is unchanged, and a marker on both sides of the load still gets the

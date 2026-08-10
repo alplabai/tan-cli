@@ -788,9 +788,9 @@ _MODULE_BUDGET: dict[str, int] = {
     # with the gate's own module walk on THIS tree, never carried forward by
     # arithmetic:
     #   * #590 (a refused POST-load reset said nothing) adds
-    #     `_swd_probe_reset_halt_markers` (44 lines) and
-    #     `_swd_probe_reset_qualified` (25), plus the
-    #     `_SWD_PROBE_RESET_REFUSED` constant and the third argument to
+    #     `_swd_probe_post_load_halt_markers` (44 lines) and
+    #     `_swd_probe_post_load_qualified` (25), plus the
+    #     `_SWD_PROBE_BUSY_AFTER_LOAD` constant and the third argument to
     #     `_swd_probe_qualified_message`. The bulk is reasoning, not code: the
     #     boundary this partition shares with `_swd_probe_halt_markers` is the
     #     exact thing #575 got wrong in the other direction, so WHY a
@@ -806,7 +806,27 @@ _MODULE_BUDGET: dict[str, int] = {
     #     the declaration, and both unconditional readings are wrong in
     #     opposite directions. Re-deriving that from the diff would take a
     #     reader back through two closed issues.
-    "tan/commands/flash_cmd.py": 3641,
+    # 3689, not 3641, after tan-cli#589/#590's REVIEW round -- +48, all comment,
+    # no behaviour. Two corrections drove it, and both are the kind that is
+    # worthless unless written down where the next reader trips on the same
+    # thing:
+    #   * MINOR 1: the post-load qualification claimed the POST-WRITE RESET
+    #     failed, which the partition cannot prove -- `verifybin` sits between
+    #     the load and the `r`/`g` on the `.bin` arm, and `flash_args.reset:
+    #     false` removes the `r`/`g` entirely without `flash_cmd` being able to
+    #     tell (`do_reset` is a `plan_swd_probe` local, never carried on
+    #     `FlashPlan`). Both facts now sit on `_SWD_PROBE_BUSY_AFTER_LOAD`, so
+    #     nobody re-tightens the wording back to Flow D's.
+    #   * MAJOR 3: `_swd_probe_require_dpidr_refusal`'s docstring weighed only
+    #     "refuse always" against "advisory only" and read as though opt-in were
+    #     the only workable design. Refuse-by-default WITH an override is a
+    #     third option and is stronger for the customer recovery path; the
+    #     docstring now records why the shipped default is nonetheless the
+    #     advisory (scope, plus tan-cli#610's unverified SW-DP ID) rather than
+    #     pretending the alternative does not exist.
+    # Re-walked with the gate's own module walk after the edits, not adjusted
+    # by arithmetic from 3641.
+    "tan/commands/flash_cmd.py": 3689,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -1990,15 +2010,19 @@ _MIRRORED = ("tan/planner/",)
 # how the number was obtained.
 # 244, not 243, as of tan-cli#589 + tan-cli#590. EXACTLY ONE new crossing, and
 # it is a new function rather than an existing one growing:
-# `flash_cmd.py:_swd_probe_require_dpidr_refusal` at 59 lines, of which 48 are
-# the docstring arguing why `ALP_FLASH_REQUIRE_DPIDR` is an opt-in host policy
-# instead of a promotion of `flash.dpidr-preflight-unarmed` -- the reasoning a
-# future reader would otherwise have to rebuild from two closed issues before
-# daring to make the guard unconditional and refuse every shipped preset.
-# #590's own two new functions (`_swd_probe_reset_halt_markers` at 44,
-# `_swd_probe_reset_qualified` at 25) are both UNDER the cap and move nothing;
-# `_swd_probe_qualified_message` (81 -> 116) and `_flash_entry` (451 -> 487)
-# were already over and move nothing either.
+# `flash_cmd.py:_swd_probe_require_dpidr_refusal`, measured at 83 lines after
+# the review round (59 before it), nearly all of it the docstring weighing the
+# THREE available defaults for the wrong-board guard -- advisory, refuse-always,
+# and refuse-with-override -- and recording why the shipped one is the advisory.
+# That is the reasoning a future reader would otherwise have to rebuild from
+# three issues (#589, #609, #610) before daring to change the default in either
+# direction.
+# #590's own two new functions (`_swd_probe_post_load_halt_markers` at 48,
+# `_swd_probe_post_load_qualified` at 24) are both UNDER the cap and move
+# nothing; `_swd_probe_qualified_message` (81 -> 117) and `_flash_entry`
+# (451 -> 487) were already over and move nothing either.
+# Every number above re-walked with this file's own `_long_functions` after the
+# review edits, never adjusted by arithmetic from the pre-review values.
 # `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
 # `bootstrap_cmd.py:_run`, measured at 704 on this tree, and nothing here is
 # within 600 lines of it.

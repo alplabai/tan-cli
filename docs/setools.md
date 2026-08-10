@@ -109,12 +109,32 @@ entry whenever the same cloned-serial risk applies (tan-cli#520).
 
 ### `ALP_FLASH_REQUIRE_DPIDR=1` — making an unarmed `swd_probe` write refuse
 
-`flash_args.expect_dpidr` is **optional**, so a `swd_probe` write with none
-set proceeds and only raises the `flash.dpidr-preflight-unarmed` warning. An
-unattended bench reads no warnings, so `tan flash` also honours an env switch:
-with **`ALP_FLASH_REQUIRE_DPIDR=1`** exported, a real `swd_probe` write whose
-DPIDR preflight would not run **fails the entry before anything is spawned**
-(`flash.entry-failed`) instead of warning. Unset — the default — nothing
+> **Scope: `swd_probe` only — this switch does NOT cover Flow D.** Despite the
+> method-neutral name, the gate is keyed on `flash_method: swd_probe`, so an
+> `alif_mram_jlink` (Flow D) MRAM write is completely unaffected by it: with no
+> `flash_args.expect_dpidr` set, such a write proceeds with **no wrong-board
+> guard and no warning of any kind** — the advisory below is structurally
+> unreachable on that path. Exporting this variable on an AEN factory host buys
+> you nothing. Tracked separately; Refs tan-cli#609. Until that lands, the only
+> Flow D protection is setting `flash_args.expect_dpidr` (with
+> `flash_args.jlink_device`) on the entry itself, as described above.
+
+`flash_args.expect_dpidr` is **optional**, so a `swd_probe` write with none set
+proceeds unguarded. What it emits depends on which arm the run takes, and the
+difference matters:
+
+- **J-Link arm** — raises the `flash.dpidr-preflight-unarmed` warning.
+- **openocd/pyocd arm** — raises **nothing at all**. The advisory is derived
+  from the J-Link arm having been taken, so on this arm there is no guard *and*
+  no signal. This is the arm the shipped `E1M-V2N101`/`V2N102`/`V2M101`/`V2M102`
+  `flash_args` select on a host with no J-Link, i.e. the default path a
+  bricked-bridge recovery takes today.
+
+An unattended bench reads no warnings, and the openocd/pyocd arm emits none to
+read, so `tan flash` also honours an env switch: with
+**`ALP_FLASH_REQUIRE_DPIDR=1`** exported, a real `swd_probe` write whose DPIDR
+preflight would not run **fails the entry before anything is spawned**
+(`flash.entry-failed`) instead of proceeding. Unset — the default — nothing
 changes.
 
 The policy belongs to the host, not to the manifest. Export it on a factory or
@@ -123,13 +143,15 @@ leave it unset on a customer machine, where a bricked-bridge recovery must not
 be blocked by a metadata field alp-sdk has not populated yet. It is read as the
 exact string `1`, the same as `ALP_FLASH_FORCE`.
 
-Two things it does **not** do: it does not apply to `--dry-run` (a preview
-writes nothing), and it does not make `expect_dpidr` mandatory in metadata.
-Note that a `swd_probe` entry taking the **openocd/pyocd** arm refuses under
-this switch unconditionally — the SW-DP ID read is a JLinkExe-only primitive,
-so that arm cannot be armed at all. `openocd_usb_location` is not a substitute:
-a USB path selects a *probe*, it never confirms which *board* is on the other
-end of the SWD cable (tan-cli#589).
+Three things it does **not** do: it does not cover Flow D (see the note above),
+it does not apply to `--dry-run` (a preview writes nothing), and it does not
+make `expect_dpidr` mandatory in metadata.
+
+A `swd_probe` entry taking the **openocd/pyocd** arm refuses under this switch
+unconditionally — the SW-DP ID read is a JLinkExe-only primitive, so that arm
+cannot be armed at all. `openocd_usb_location` is not a substitute: a USB path
+selects a *probe*, it never confirms which *board* is on the other end of the
+SWD cable (tan-cli#589).
 
 ## Related
 

@@ -2576,15 +2576,20 @@ boot_order: []
 #
 # The advisory above is the DEFAULT and stays the default. #589 records a
 # measured near-miss on `alplab-gw`: J-Link serial `603000869` is OEM-cloned
-# across two probes (the GD32 bridge at USB path `3-4.2`, SW-DP `0x0BE12477`;
-# an AEN E8 at `3-4.4.3`, SW-DP `0x4C013477`), `JLinkExe` selects only by
-# serial, and on 2026-08-09 the GD32 probe was physically off the bus -- so
-# `603000869` resolved deterministically to the Alif E8, on a place nobody had
-# reserved. An unattended run reads no warnings, so a bench/factory host needs
-# a way to make an unarmed write REFUSE. That policy belongs to the host, not
-# to the manifest: a customer recovering a bricked bridge (the only customer
-# path onto this backend) must not be refused for a metadata field alp-sdk has
-# not populated yet.
+# across two probes -- a GD32 bridge at USB path `3-4.2` and an AEN E8 at
+# `3-4.4.3` -- `JLinkExe` selects only by serial, and on 2026-08-09 the GD32
+# probe was physically off the bus, so `603000869` resolved deterministically
+# to the Alif E8, on a place nobody had reserved. An unattended run reads no
+# warnings, so a bench/factory host needs a way to make an unarmed write
+# REFUSE.
+#
+# The per-board SW-DP IDs are deliberately NOT restated here (tan-cli#590
+# REVIEW, MINOR 2). The GD32's is CONTESTED -- #589 reports `0x0BE12477`,
+# alp-sdk `metadata/chips/gd32_swd.yaml` reports `0x6BA02477` for the same
+# part -- and tan-cli#610 is open to stop asserting the unsourced value, the
+# GD32 being unreachable on this bench to settle it. Nothing in this file
+# needs a real ID: the fixtures below use a placeholder, because what is under
+# test is whether the guard is ARMED, never what it compares against.
 
 
 def _require_dpidr_run(
@@ -2717,12 +2722,19 @@ def test_require_dpidr_refuses_before_anything_is_spawned(tmp_path, monkeypatch)
 def test_require_dpidr_lets_an_armed_write_through(tmp_path, monkeypatch):
     """The other direction, and the one that keeps the gate honest: a manifest
     that DOES carry `expect_dpidr` is unaffected -- the strict mode demands a
-    guard, it does not forbid a write."""
+    guard, it does not forbid a write.
+
+    The `expect_dpidr` value is a deliberate PLACEHOLDER, not any board's real
+    SW-DP IDR (tan-cli#590 REVIEW, MINOR 2 / tan-cli#610). This gate reads only
+    whether the key is PRESENT (`_fa_has_key`); what it holds is compared by
+    the preflight, which is stubbed here. Using a real-looking ID would assert
+    a hardware fact this test does not measure and cannot -- and the GD32's is
+    contested and unmeasurable on this bench."""
     spawned: list = []
     exit_code, data, issues, _lines, _sdk = _require_dpidr_run(
         tmp_path,
         monkeypatch,
-        flash_args='{base: "0x08000000", expect_dpidr: "0x0BE12477"}',
+        flash_args='{base: "0x08000000", expect_dpidr: "0xDEADBEEF"}',
         spawned=spawned,
     )
 
@@ -6616,7 +6628,7 @@ def test_a_halt_failure_after_an_observed_load_does_not_doubt_the_write(
     advisory still does not fire -- and the tail says only that the RESET did
     not happen, which is what a post-load marker is actually evidence of. The
     exact string is pinned in
-    `test_a_post_load_halt_failure_qualifies_the_reset_on_the_bin_arm`."""
+    `test_a_post_load_halt_failure_qualifies_the_outcome_on_the_bin_arm`."""
     _exit_code, data, issues, lines, _sdk = _swd_probe_run(
         tmp_path, monkeypatch, stdout=_LOAD_THEN_RESET_FAILURE_TRANSCRIPT
     )
@@ -6762,7 +6774,7 @@ def test_the_elf_arm_gets_the_same_positional_reading_as_the_bin_arm(tmp_path, m
     deliberately untouched -- still the plain `flashed via J-Link`, still no
     address, still no advisory -- which is all this test was ever about. The
     exact string is pinned in
-    `test_a_post_load_halt_failure_qualifies_the_reset_on_the_elf_arm`."""
+    `test_a_post_load_halt_failure_qualifies_the_outcome_on_the_elf_arm`."""
     _exit_code, data, issues, lines, _sdk = _swd_probe_run(
         tmp_path,
         monkeypatch,
@@ -6786,14 +6798,24 @@ def test_the_elf_arm_gets_the_same_positional_reading_as_the_bin_arm(tmp_path, m
     assert not any("UNCONFIRMED" in line for line in lines), lines
 
 
-# ── tan-cli#590: a refused POST-load reset must say the reset did not happen ─
+# ── tan-cli#590: a busy core after the load must not report a bare success ──
 #
 # #575 was right that a marker printed after the load says nothing about
 # whether the bytes landed, and dropping it from the WRITE verdict removed a
 # real false alarm. What it did not follow is that the marker says nothing at
-# all: it says the RESET did not happen. Flow D already draws that distinction
-# (`_FLOW_D_VERIFIED_ONLY`, `reset requested, core was busy and did not halt`)
-# and this reuses its clause rather than inventing a fourth phrasing.
+# all: it says the core was still running after the bytes landed, so nothing
+# took the part through a halted reset INTO the image just written. Flow D
+# already draws that distinction (`_FLOW_D_VERIFIED_ONLY`, `reset requested,
+# core was busy and did not halt`) and this reuses its `core was busy and did
+# not halt` clause rather than inventing a fourth phrasing.
+#
+# It does NOT reuse Flow D's `reset requested` (tan-cli#590 REVIEW, MINOR 1).
+# Flow D can say that because `plan_alif_mram_jlink` always emits a reset;
+# this backend cannot, on two measured counts -- `verifybin` sits between the
+# load and the `r`/`g` on the `.bin` arm, and `flash_args.reset: false`
+# removes the `r`/`g` entirely without `flash_cmd` being able to tell (`do_
+# reset` is a `plan_swd_probe` local, never carried on `FlashPlan`). The
+# wording is narrowed to what the partition proves; the remediation is not.
 #
 # This is the COMMON post-write shape, not an edge one: the post-load `r`/`g`
 # is on by default and is exactly the stage a freshly-written resident image
@@ -6802,14 +6824,15 @@ def test_the_elf_arm_gets_the_same_positional_reading_as_the_bin_arm(tmp_path, m
 #: The reset-scoped tail, byte-for-byte. Both markers appear in
 #: `_LOAD_THEN_RESET_FAILURE_TRANSCRIPT` after the load completes, so both are
 #: quoted, in `_FLOW_D_HALT_FAILURE_MARKERS` order.
-_RESET_REFUSED_TAIL = (
-    '; reset requested, core was busy and did not halt (J-Link reported "Failed to '
-    'halt CPU" / "CPU is not halted") -- the target may still be running the firmware '
-    "it had. Power-cycle it and confirm the new firmware answers."
+_BUSY_AFTER_LOAD_TAIL = (
+    '; after the load the core was busy and did not halt (J-Link reported "Failed to '
+    'halt CPU" / "CPU is not halted") -- the target may not have been taken through a '
+    "halted reset into the firmware just written, and may still be running the "
+    "firmware it had. Power-cycle it and confirm the new firmware answers."
 )
 
 
-def test_a_post_load_halt_failure_qualifies_the_reset_on_the_bin_arm(tmp_path, monkeypatch):
+def test_a_post_load_halt_failure_qualifies_the_outcome_on_the_bin_arm(tmp_path, monkeypatch):
     """tan-cli#590, the gap. `.bin` + a post-load halt refusal reported the
     bare `flashed and verified via J-Link @ 0x08000000` and nothing else, so
     the operator was told the write succeeded (true) and told nothing about
@@ -6827,16 +6850,16 @@ def test_a_post_load_halt_failure_qualifies_the_reset_on_the_bin_arm(tmp_path, m
 
     assert data["entries"][0]["message"] == (
         "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed and verified via J-Link "
-        "@ 0x08000000" + _RESET_REFUSED_TAIL
+        "@ 0x08000000" + _BUSY_AFTER_LOAD_TAIL
     ), data["entries"][0]
     # Explicitly NOT the write-scoped advisory -- #590 requires this, because
     # reusing it would undo #575: the write IS confirmed here.
     assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues), issues
     assert data["entries"][0]["status"] == "ok", data["entries"][0]
-    assert any("reset requested" in line for line in lines), lines
+    assert any("after the load the core was busy" in line for line in lines), lines
 
 
-def test_a_post_load_halt_failure_qualifies_the_reset_on_the_elf_arm(tmp_path, monkeypatch):
+def test_a_post_load_halt_failure_qualifies_the_outcome_on_the_elf_arm(tmp_path, monkeypatch):
     """The same treatment on the arm that cannot verify, which #590 asks for
     explicitly: the reset tail is appended and the WRITE claim is left exactly
     as unqualified as it is today. `flashed via J-Link` stays -- a post-load
@@ -6860,12 +6883,12 @@ def test_a_post_load_halt_failure_qualifies_the_reset_on_the_elf_arm(tmp_path, m
     )
 
     assert data["entries"][0]["message"] == (
-        "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed via J-Link" + _RESET_REFUSED_TAIL
+        "swd_probe[gd32_bridge]: GD32G553MEY7TR flashed via J-Link" + _BUSY_AFTER_LOAD_TAIL
     ), data["entries"][0]
     assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues), issues
 
 
-def test_a_pre_load_halt_failure_keeps_its_own_wording_and_gains_no_reset_tail(
+def test_a_pre_load_halt_failure_keeps_its_own_wording_and_gains_no_post_load_tail(
     tmp_path, monkeypatch
 ):
     """#590 is explicit that the pre-load wording stays as-is: that case
@@ -6895,7 +6918,7 @@ def test_a_pre_load_halt_failure_keeps_its_own_wording_and_gains_no_reset_tail(
         "taken through a halted reset -- it may still be running the firmware it had. "
         "Power-cycle it and confirm the new firmware answers."
     ), data["entries"][0]
-    assert "reset requested" not in data["entries"][0]["message"], data["entries"][0]
+    assert "after the load the core was busy" not in data["entries"][0]["message"], data["entries"][0]
 
 
 def test_a_marker_on_both_sides_of_the_load_gets_the_write_wording_only(
@@ -6920,11 +6943,11 @@ def test_a_marker_on_both_sides_of_the_load_gets_the_write_wording_only(
 
     message = data["entries"][0]["message"]
     assert "the core did not halt" in message, message
-    assert "reset requested" not in message, message
+    assert "after the load the core was busy" not in message, message
     assert message.count("Power-cycle it") == 1, message
 
 
-def test_a_clean_write_gains_no_reset_qualification(tmp_path, monkeypatch):
+def test_a_clean_write_gains_no_post_load_qualification(tmp_path, monkeypatch):
     """The regression guard the two new tests need beside them: a transcript
     with a completed load and NO halt failure anywhere must still produce the
     bare claim. A tail that appears on every flash is noise, and noise is what
@@ -6941,7 +6964,7 @@ def test_a_clean_write_gains_no_reset_qualification(tmp_path, monkeypatch):
     assert not any(i.code == "flash.swd-probe-write-unconfirmed" for i in issues), issues
 
 
-def test_reset_markers_are_empty_when_no_completed_load_was_reported():
+def test_post_load_markers_are_empty_when_no_completed_load_was_reported():
     """The partition's boundary condition, as a unit. When JLinkExe never
     reported a load FINISHING there is no boundary, and
     `_swd_probe_halt_markers` already counts every marker as the WRITE's. The
@@ -6961,11 +6984,11 @@ def test_reset_markers_are_empty_when_no_completed_load_was_reported():
         stderr="",
     )
     for outcome in (never, truncated):
-        assert flash_cmd._swd_probe_reset_halt_markers(outcome) == [], outcome
+        assert flash_cmd._swd_probe_post_load_halt_markers(outcome) == [], outcome
         assert flash_cmd._swd_probe_halt_markers(outcome) == ["Failed to halt CPU"], outcome
 
 
-def test_the_openocd_arm_gets_no_reset_qualification():
+def test_the_openocd_arm_gets_no_post_load_qualification():
     """The arm gate, as a unit on the pure function: the openocd/pyocd arm
     composes neither claim (`plan_swd_probe`'s fallback branch builds its own
     message) and never emits these J-Link phrases, so a message it produced
