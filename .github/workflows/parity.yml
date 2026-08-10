@@ -378,6 +378,14 @@ env:
   # predates every commit this bump exists to pick up.
   PINNED_SDK_TAG: 7d58ef32d0a730c902e335adfd7764c2ec500ba5
 
+permissions:
+  # Least privilege by default (tan-cli#435). Every job here READS: this
+  # repository, plus `alplabai/alp-sdk`, which is public, so the default
+  # token reads it with no extra grant. Nothing in this workflow writes to
+  # either repository -- the planner RE-SYNC, which does push, is a separate
+  # workflow (`planner-resync.yml`) with its own `contents: write`.
+  contents: read
+
 jobs:
   seam1-plan-shape:
     name: "seam1 -- plan-shape parity"
@@ -399,8 +407,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           # On a `repository_dispatch` the workflow FILE has to come from the
           # DEFAULT branch -- that is GitHub's rule and why #195 put the trigger
           # on `main`. But what we CHECK OUT and test is a separate choice, and
@@ -418,24 +427,60 @@ jobs:
           # run keeps checkout's default (the PR head) by passing an empty ref.
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
+      # `client_payload.*` is attacker-controlled by construction -- anyone able
+      # to POST a `repository_dispatch` picks every field -- so it is carried in
+      # as an ENV VAR, never interpolated into the shell, and then matched
+      # against an allow-list before it reaches `git` or `$GITHUB_OUTPUT`.
+      # `planner-resync.yml`, the OTHER consumer of this same dispatch, has
+      # done it this way since it was written; this file interpolated the field
+      # straight into four `run:` blocks, which `zizmor` reports as
+      # high-confidence `template-injection` (tan-cli#435). Single quotes were
+      # not a defence: a payload containing one closes the string, and the
+      # double-quoted twin in `first-blink` expanded `$(...)` outright.
+      # `PINNED_SDK_TAG` is a workflow-level `env:`, so the fallback is already
+      # an ordinary environment variable here and needs no expansion.
       - name: resolve alp-sdk ref
         id: sdk_ref
         shell: bash
+        env:
+          PAYLOAD_REF: ${{ github.event.client_payload.sdk_ref }}
         run: |
+          set -euo pipefail
           # A dispatch carries the alp-sdk SHA that just landed; a plain PR run
           # has no payload and falls back to the pin. Written as one expression
           # so the two paths cannot drift apart.
-          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
+          dispatched="${PAYLOAD_REF:-}"
+          ref="${dispatched:-${PINNED_SDK_TAG}}"
+          # Allow-list, not a deny-list: a git ref needs none of the characters
+          # a shell or an argument injection needs. Same expression as
+          # `planner-resync.yml`'s. It also protects `$GITHUB_OUTPUT` below --
+          # a payload carrying a newline would otherwise write extra keys.
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
+            exit 1
+          fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          if [ -n "${{ github.event.client_payload.sdk_ref }}" ]; then
+          if [ -n "${dispatched}" ]; then
             echo "::notice::DISPATCHED by alp-sdk -- comparing against the ref that just landed: ${ref}"
           else
             echo "::notice::comparing against the pinned alp-sdk ref: ${ref}"
           fi
 
       - name: clone alp-sdk
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
@@ -487,7 +532,7 @@ jobs:
           fi
           echo "::warning::PINNED_SDK_TAG is ${behind} contract-surface commit(s) behind alp-sdk dev (${head}). Both seams are green against a pin that no longer reflects the planner. Re-bump PINNED_SDK_TAG in .github/workflows/parity.yml."
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.x"
 
@@ -620,8 +665,9 @@ jobs:
           echo "::notice::planner-relocation-freshness audited against alp-sdk ${commit}"
 
       - name: clone alp-sdk at the planner audit commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.planner_audit.outputs.commit }}
           path: alp-sdk-planner-audit
@@ -661,8 +707,9 @@ jobs:
           echo "::notice::hand-port-relocation-freshness audited against alp-sdk ${commit}"
 
       - name: clone alp-sdk at the hand-port audit commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.hand_port_audit.outputs.commit }}
           path: alp-sdk-hand-port-audit
@@ -691,8 +738,9 @@ jobs:
           echo "::notice::strict-loaders-relocation-freshness audited against alp-sdk ${commit}"
 
       - name: clone alp-sdk at the strict-loaders audit commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.strict_loaders_audit.outputs.commit }}
           path: alp-sdk-strict-loaders-audit
@@ -869,8 +917,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           # On a `repository_dispatch` the workflow FILE has to come from the
           # DEFAULT branch -- that is GitHub's rule and why #195 put the trigger
           # on `main`. But what we CHECK OUT and test is a separate choice, and
@@ -888,22 +937,42 @@ jobs:
           # run keeps checkout's default (the PR head) by passing an empty ref.
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
+      # Env var + allow-list, not interpolation -- see seam1's comment above.
       - name: resolve alp-sdk ref
         id: sdk_ref
         shell: bash
+        env:
+          PAYLOAD_REF: ${{ github.event.client_payload.sdk_ref }}
         run: |
           set -euo pipefail
-          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
+          dispatched="${PAYLOAD_REF:-}"
+          ref="${dispatched:-${PINNED_SDK_TAG}}"
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
+            exit 1
+          fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          if [ -n "${{ github.event.client_payload.sdk_ref }}" ]; then
+          if [ -n "${dispatched}" ]; then
             echo "::notice::seam2 DISPATCHED by alp-sdk -- building against the ref that just landed: ${ref}"
           else
             echo "::notice::seam2 building against the pinned alp-sdk ref: ${ref}"
           fi
 
       - name: clone alp-sdk
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
@@ -912,7 +981,7 @@ jobs:
       # `tan` under test IS this interpreter now (tan-cli#269 retired the
       # self-contained cargo binary), so a floating newest-3.x would decide
       # what the seam executes.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -1145,7 +1214,7 @@ jobs:
 
       - name: upload seam2 logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: seam2-logs
           path: |
@@ -1175,16 +1244,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
+      # Env var + allow-list, not interpolation -- see seam1's comment above.
+      # This one was DOUBLE-quoted, so a payload's `$(...)` ran outright.
       - name: resolve alp-sdk ref
         id: sdk_ref
         shell: bash
+        env:
+          PAYLOAD_REF: ${{ github.event.client_payload.sdk_ref }}
         run: |
           set -euo pipefail
-          ref="${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}"
+          ref="${PAYLOAD_REF:-${PINNED_SDK_TAG}}"
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
+            exit 1
+          fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "::notice::first-blink building against alp-sdk ref: ${ref}"
 
@@ -1197,8 +1286,9 @@ jobs:
       # 2 by design. A dedicated parent is what the guard asks for and what
       # README tells customers to do -- this job runs the documented layout.
       - name: clone alp-sdk into a dedicated workspace parent
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: ws/alp-sdk
@@ -1206,7 +1296,7 @@ jobs:
       # Pinned, NOT `3.x`, for the same reason seam2 pins it: `tan` IS this
       # interpreter now (tan-cli#269), and `python/pyproject.toml` floors at
       # 3.12.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -1382,7 +1472,7 @@ jobs:
 
       - name: upload first-blink logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: first-blink-logs
           path: |
@@ -1473,26 +1563,47 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           # Same rule as every other job in this file -- see seam1's comment.
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
+      # Env var + allow-list, not interpolation -- see seam1's comment above.
       - name: resolve alp-sdk ref
         id: sdk_ref
         shell: bash
+        env:
+          PAYLOAD_REF: ${{ github.event.client_payload.sdk_ref }}
         run: |
-          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
+          set -euo pipefail
+          ref="${PAYLOAD_REF:-${PINNED_SDK_TAG}}"
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
+            exit 1
+          fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: clone alp-sdk
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 

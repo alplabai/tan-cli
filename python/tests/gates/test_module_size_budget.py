@@ -247,7 +247,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # Two functions LEFT this file in the same change (`_manifest_points_at`,
     # `_same_directory`, both moved down to `tan/core/bootstrap.py`), so the
     # figure is net of that removal.
-    "tan/commands/bootstrap_cmd.py": 3034,
+    "tan/commands/bootstrap_cmd.py": 3070,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
     # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
@@ -1214,7 +1214,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # closes the silent target discard AND the `--core` hole it opened. Most of
     # the growth is the measured rationale each carries, per this file's own
     # "needs a reason in the diff" rule.
-    "tan/commands/generate_cmd.py": 1303,
+    "tan/commands/generate_cmd.py": 1312,
     # 1215, not 1096, as of tan-cli#464 (measured majors, then an independent
     # design review): the `globalDefault` tier gained a `writtenFor`-vs-caller
     # check (`_workspace_under`, `global_default_foreign_project_issue`) and a
@@ -1330,12 +1330,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # overlap inside `_emit`: #478's `sdk.*` filter and #498's `_Finding`
     # pairing collapse into one `reportable`/`reported` pair rather than
     # stacking, so the union is smaller than either side's sum implies.
-    "tan/commands/validate_cmd.py": 1478,
+    "tan/commands/validate_cmd.py": 1490,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
     # resolved, the same cost `project_pin_issue` above already justified.
-    "tan/commands/new_som_cmd.py": 1341,
+    "tan/commands/new_som_cmd.py": 1353,
 
     # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
@@ -1381,7 +1381,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # something else: "this TEMPLATE supports one SKU", not "tan has no
     # scaffold for this SoM family"). Re-measured: exactly `wc -l` on this
     # branch.
-    "tan/commands/init_cmd.py": 1057,
+    "tan/commands/init_cmd.py": 1121,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
@@ -2204,8 +2204,48 @@ _MIRRORED = ("tan/planner/",)
 # `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
 # `bootstrap_cmd.py:_run` at 704 on both trees, and the longest thing this
 # change adds is 58.
+# tan-cli#491 (defects 5/6/10) + tan-cli#497 (defect 7, the five remaining
+# `--sdk-root`-dropping sites). FIVE module entries move, each RE-MEASURED with
+# this gate's own `len(read_text().splitlines())` on the final tree, never
+# computed from the old value:
+#   * `init_cmd.py` 1057 -> 1121, the largest by far and all of it #491 d5:
+#     `_sdk_block` (the new seam) plus the `_Sdk.tier` field. Most of those 64
+#     lines are the two docstrings, which carry the three decisions a reader
+#     would otherwise have to re-derive -- why the block is gated on the loader
+#     marker rather than on `sdk is not None`, why the root is absolute where
+#     the oracle echoed the flag verbatim, and why `_emit_error`'s parameter
+#     defaults to `None`.
+#   * `validate_cmd.py` 1478 -> 1490, `new_som_cmd.py` 1341 -> 1353,
+#     `generate_cmd.py` 1303 -> 1312: the same #497 shape three times -- a
+#     conditional on the rejected-flag branch plus the comment saying which
+#     branch is which. No new function in any of them.
+#   * `bootstrap_cmd.py` 3034 -> 3048: #491 d10 is a ONE-token fix (`[]` ->
+#     `log.take_issues()`); the growth is `_fatal`'s docstring, which is where
+#     the rationale was put deliberately. Inside `_run` it would have pushed
+#     the package's longest function past `_FUNCTION_WORST_BUDGET` for a
+#     comment, which is the drift this gate names -- `_run` measures 705 here
+#     (704 on `3aa1a74`), the +1 being the one-line pointer at the call site.
+# `tan/core/shapes.py` gains `rejected_sdk_root_message` and stays far under
+# the 800 cap, so it needs no entry.
+#
+# `bootstrap_cmd.py` 3048 -> 3070, review remainders on #491/#497 (this PR):
+# `_refusal` grows a `log.take_issues()`-shaped `issues` parameter and a
+# docstring explaining why its default is `None` rather than `_fatal`'s
+# required-and-explicit shape -- the fix for the sibling of #491 d10 a
+# reviewer found on `_refusal` itself (the `host_python is None` refusal was
+# reachable after `log.warn("yocto-host", ...)` / `log.warn(*skew)` and
+# discarded both). Inside `_run` that call site gains one keyword argument
+# plus a four-line comment pointing at the reason, which is what pushes
+# `_run` itself from 707 to 711 -- re-measured on the final tree, not
+# computed from the old value.
+#
+# `_FUNCTION_COUNT_BUDGET` is untouched (no new function; `_refusal` and
+# `_run` both already existed). `_FUNCTION_WORST_BUDGET` moves with `_run`:
+# 707 -> 711, MEASURED by this gate's own `_long_functions` walk on the final
+# tree -- `bootstrap_cmd.py:_run` is still the package's single longest
+# function.
 _FUNCTION_COUNT_BUDGET = 246
-_FUNCTION_WORST_BUDGET = 707
+_FUNCTION_WORST_BUDGET = 711
 
 
 def _modules() -> list[Path]:

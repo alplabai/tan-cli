@@ -89,7 +89,7 @@ from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
-from tan.core.shapes import yaml_kind
+from tan.core.shapes import rejected_sdk_root_message, yaml_kind
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -403,11 +403,19 @@ def _resolve(
                     )
                     exit_code = ExitCode.VALIDATION_FAILURE
     elif sdk is None:
+        # tan-cli#497 defect 7: when `--sdk-root` WAS given and the loader-marker
+        # check rejected it, name the value. The bare string below is the answer
+        # for BOTH cases today, so a typo'd flag read as "alp-sdk root is
+        # unresolved" with the path the user had just typed nowhere in the
+        # envelope (`data.sdkRoot` is `null` on this branch) and nowhere in the
+        # stderr text either.
         issues.append(
             Issue(
                 "pinmux.sdk-root-unresolved",
                 "warning",
-                "alp-sdk root is unresolved; cannot read the pinmux table.",
+                rejected_sdk_root_message(sdk_root, "Cannot read the pinmux table.")
+                if sdk_root
+                else "alp-sdk root is unresolved; cannot read the pinmux table.",
             )
         )
 

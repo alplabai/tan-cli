@@ -1144,3 +1144,33 @@ def test_a_real_sdk_backed_board_passes_without_offline(tmp_path, monkeypatch):
     assert offline["data"]["outcome"] == "clean"
     assert offline["data"]["commandLine"] == ""
     assert "sdk" not in offline
+
+
+def test_a_rejected_sdk_root_flag_is_named_in_the_refusal(tmp_path, monkeypatch):
+    """tan-cli#497 defect 7. `--sdk-root` is TERMINAL (I-31) and
+    `resolve_sdk_root_ladder` returns it verbatim and unvalidated -- this
+    command's own `_is_sdk_root` re-check (see the `sdk_tier == "sdkRootFlag"`
+    guard) is the ONLY place that knows the path was rejected, and it dropped
+    the value. The refusal carries no `sdk` block, so nothing else in the
+    envelope named it either.
+
+    The typo'd root is a real directory missing only `scripts/alp_project.py`,
+    so this pins the marker branch rather than "the path does not exist".
+    """
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, _CLEAN_BOARD)
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    result = runner.invoke(app, ["validate", "--sdk-root", str(typo), "--format", "json"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert "sdk" not in envelope
+    assert [i["code"] for i in envelope["issues"]] == ["validate.sdk-root-unresolved"]
+    assert envelope["issues"][0]["message"] == (
+        f'alp-sdk root is unresolved: --sdk-root "{typo}" is not an alp-sdk '
+        "checkout (scripts/alp_project.py not found under it). Nothing was "
+        "validated. `tan validate --offline` runs the structural checks that "
+        "need no SDK."
+    )
+    # Nothing ran, so nothing is reported as having run -- unchanged by #497.
+    assert envelope["data"]["commandLine"] == ""

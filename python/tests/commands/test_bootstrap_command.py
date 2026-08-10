@@ -3066,3 +3066,40 @@ def test_print_env_names_the_venv_layout_that_exists_not_the_hosts(tmp_path):
     # on POSIX, `#   & "...Activate.ps1"` on Windows.
     hint = next(line for line in proc.stdout.splitlines() if line.startswith("#   "))
     assert f".venv/{other_layout}/" in hint.replace("\\", "/"), hint
+
+
+def test_a_relocation_refusal_keeps_the_warnings_the_run_already_recorded(tmp_path):
+    """tan-cli#491 defect 10. The relocation-failure return passed a literal
+    `[]` to `_fatal` instead of `log.take_issues()`, so every warning recorded
+    before that point was dropped from the envelope: the refusal carried
+    `bootstrap.failed` alone.
+
+    `bootstrap.python-floor-skew` is the warning used here because it fires on
+    EVERY run against the shipped manifest (declared 3.10, effective floor
+    3.12) -- the control case above pins that, so its absence here can only be
+    the drop, never "this workspace happens not to warn".
+
+    `--dry-run` so nothing is moved; the guard runs and refuses either way, and
+    `<workspace>/alp-sdk` already existing is what makes `relocate_checkout`
+    return its error."""
+    sdk = make_sdk(tmp_path / "src" / "alp-sdk", tools=[PRESENT_TOOL])
+    workspace = tmp_path / "ws"
+    (workspace / "alp-sdk").mkdir(parents=True)
+
+    env = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--dry-run", "--format", "json",
+            "--sdk-root", str(sdk), "--workspace", str(workspace),
+            cwd=tmp_path,
+        )
+    )
+    assert env["exitCode"] == 1 and env["ok"] is False, env
+    assert "bootstrap.failed" in codes(env), env
+    assert "already exists; refusing to relocate" in (
+        [i["message"] for i in env["issues"] if i["code"] == "bootstrap.failed"][0]
+    )
+    skew = [i for i in env["issues"] if i["code"] == "bootstrap.python-floor-skew"]
+    assert len(skew) == 1 and skew[0]["severity"] == "warning", env
+    # Order is the contract `_fatal` states: the run's warnings, then the
+    # `bootstrap.failed` error that ended it.
+    assert codes(env)[-1] == "bootstrap.failed", env
