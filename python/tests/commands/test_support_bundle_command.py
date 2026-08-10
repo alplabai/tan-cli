@@ -74,7 +74,7 @@ def _clean_checks(*, fail=False, warn=False):
     checklist's own SDK verdict, superseded here by the debug report's
     `sdkRoot`."""
     status = "fail" if fail else ("warn" if warn else "pass")
-    checks = [doctor_cmd.Check("sdk", "pass", "alp-sdk at /sdk")]
+    checks = [doctor_cmd.Check("sdk", "pass", "alp-sdk at /sdk", scope="project")]
     if fail or warn:
         checks.append(
             doctor_cmd.Check(
@@ -82,10 +82,11 @@ def _clean_checks(*, fail=False, warn=False):
                 status,
                 "missing from PATH: ninja." if fail else "west is old.",
                 fix="Install the missing prerequisites, then run `tan bootstrap`.",
+                scope="host",
             )
         )
     else:
-        checks.append(doctor_cmd.Check("hostPrerequisites", "pass", "git, cmake present"))
+        checks.append(doctor_cmd.Check("hostPrerequisites", "pass", "git, cmake present", scope="host"))
     return checks
 
 

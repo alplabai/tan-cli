@@ -1541,24 +1541,24 @@ def test_collect_wires_the_resolved_jlink_device_and_its_source_into_the_check(t
 
 def test_a_single_failing_check_exits_4_never_0():
     checks = [
-        doctor_cmd.Check("a", "pass", "fine"),
-        doctor_cmd.Check("b", "fail", "broken"),
+        doctor_cmd.Check("a", "pass", "fine", scope="host"),
+        doctor_cmd.Check("b", "fail", "broken", scope="host"),
     ]
     assert doctor_cmd.exit_code_for(checks) == 4
 
 
 def test_warnings_alone_do_not_fail_the_host():
-    checks = [doctor_cmd.Check("a", "warn", "meh"), doctor_cmd.Check("b", "unknown", "?")]
+    checks = [doctor_cmd.Check("a", "warn", "meh", scope="host"), doctor_cmd.Check("b", "unknown", "?", scope="host")]
     assert doctor_cmd.exit_code_for(checks) == 0
 
 
 def test_unknown_is_counted_in_no_summary_bucket():
     summary = doctor_cmd.summarise(
         [
-            doctor_cmd.Check("a", "pass", ""),
-            doctor_cmd.Check("b", "warn", ""),
-            doctor_cmd.Check("c", "fail", ""),
-            doctor_cmd.Check("d", "unknown", ""),
+            doctor_cmd.Check("a", "pass", "", scope="host"),
+            doctor_cmd.Check("b", "warn", "", scope="host"),
+            doctor_cmd.Check("c", "fail", "", scope="host"),
+            doctor_cmd.Check("d", "unknown", "", scope="host"),
         ]
     )
     assert summary == {"pass": 1, "warn": 1, "fail": 1}
@@ -1567,9 +1567,9 @@ def test_unknown_is_counted_in_no_summary_bucket():
 def test_issues_default_to_doctor_dot_check_name_and_skip_passing_checks():
     issues = doctor_cmd.checks_to_issues(
         [
-            doctor_cmd.Check("west", "warn", "old"),
-            doctor_cmd.Check("jlink", "pass", "fine"),
-            doctor_cmd.Check("setools", "unknown", "not askable"),
+            doctor_cmd.Check("west", "warn", "old", scope="host"),
+            doctor_cmd.Check("jlink", "pass", "fine", scope="host"),
+            doctor_cmd.Check("setools", "unknown", "not askable", scope="host"),
         ]
     )
     assert [(i.code, i.severity) for i in issues] == [("doctor.west", "warning")]
@@ -1661,6 +1661,67 @@ def test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback(tmp_
     if host_python["status"] == "fail":
         assert codes & {"bootstrap.python-not-runnable", "bootstrap.python-too-old"}
     assert {"summary", "checks", "generatedAt", "nextSteps"} <= set(envelope["data"])
+
+
+def test_every_check_on_the_wire_carries_a_scope(tmp_path):
+    """tan-cli#549 as the CONSUMER sees it: not "`_collect` returns a field"
+    but "the JSON a spawned `tan doctor` prints carries it on every row".
+
+    Both values must appear on the same scrubbed host, because the split is
+    only useful if it splits: `alp-sdk-vscode` renders the `host` rows with no
+    folder open, and it can only stop hand-maintaining a list of tan's check
+    names if the data answers that for it. Statuses are deliberately not
+    asserted here -- they are host facts (see the case above)."""
+    proc = run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True)
+    envelope = json.loads(proc.stdout)
+    checks = envelope["data"]["checks"]
+    assert checks
+    missing = [c for c in checks if c.get("scope") not in ("host", "project")]
+    assert missing == [], f"checks without a usable scope: {missing}"
+    assert {c["scope"] for c in checks} == {"host", "project"}
+
+
+def test_build_and_plain_doctor_put_the_same_checks_on_the_wire(tmp_path):
+    """The other half of tan-cli#549, end to end. `alp-sdk-vscode` spawns
+    `doctor --build` and plain `doctor` in parallel on every dependency-panel
+    refresh and merges the results, because nothing in the contract promised
+    the two carried the same checks -- so the second subprocess could not be
+    deleted even once it was measured to contribute nothing.
+
+    `--build` has gated no check since tan-cli#290 (`_collect` takes the flag
+    and reads it nowhere). This pins that end to end, on the real binary, so
+    `contract/README.md` can state it and a consumer can act on it. Compared
+    as `(name, scope)` pairs: a status is a host fact and two consecutive
+    probes of the same wedged tool may legitimately disagree; the check SET is
+    the contract."""
+    plain = json.loads(
+        run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True).stdout
+    )
+    build = json.loads(
+        run_tan("doctor", "--build", "--format", "json", cwd=tmp_path, scrub_path=True).stdout
+    )
+    assert [(c["name"], c["scope"]) for c in plain["data"]["checks"]] == [
+        (c["name"], c["scope"]) for c in build["data"]["checks"]
+    ]
+
+
+def test_as_dict_carries_scope_and_still_omits_an_absent_fix():
+    """The serializer itself: `scope` is always present, `fix` is still
+    omitted rather than emitted as null (Rust's `skip_serializing_if`, which
+    the extension's optional-field handling depends on)."""
+    assert doctor_cmd.Check("homePath", "pass", "fine", scope="host").as_dict() == {
+        "name": "homePath",
+        "status": "pass",
+        "scope": "host",
+        "detail": "fine",
+    }
+    assert doctor_cmd.Check("boardYaml", "warn", "d", "f", scope="project").as_dict() == {
+        "name": "boardYaml",
+        "status": "warn",
+        "scope": "project",
+        "detail": "d",
+        "fix": "f",
+    }
 
 
 @pytest.mark.parametrize(
@@ -2870,7 +2931,7 @@ def test_doctor_fix_explains_a_missing_installer_in_both_text_and_json(monkeypat
     hat. `can_prompt` is stubbed for the reason the section header above
     gives: `CliRunner`'s pipes are never a tty."""
     missing = [{"tool": "ninja", "command": "brew install ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
     monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
@@ -3004,7 +3065,7 @@ def test_doctor_fix_invokes_run_fix_and_folds_its_checks_into_the_report_when_co
     replaced by `pass` (the feature unwired entirely): `run_fix` would never
     be called and its Check would never reach `data.checks`/`issues`."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
 
@@ -3034,7 +3095,7 @@ def test_doctor_fix_guard_honours_ci_even_in_text_mode(monkeypatch, tmp_path):
     that condition, and text mode makes `not json_mode` true) and against
     `if fix or True` (guard deleted, always runs)."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
 
     calls = []
@@ -3054,7 +3115,7 @@ def test_doctor_fix_guard_honours_no_tty_the_same_way_ci_does(monkeypatch, tmp_p
     output but never passed `--ci`) must refuse `--fix` the same way `--ci`
     does."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
 
     calls = []
@@ -3174,7 +3235,7 @@ def test_doctor_fix_with_stderr_none_does_not_crash_before_reaching_fix_suppress
 
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     real_stderr_box: list[object] = []
 
     def _collect_stub(*a, **k):  # noqa: ARG001
@@ -3234,7 +3295,7 @@ def test_doctor_fix_with_stdin_none_does_not_crash_before_reaching_fix_suppresse
     lands exactly where a real detached-stdio host already has
     `sys.stdin is None` by the time `--fix`'s consent gate is evaluated."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
 
     def _collect_stub(*a, **k):  # noqa: ARG001
         doctor_cmd.sys.stdin = None
@@ -3258,7 +3319,7 @@ def test_doctor_fix_format_json_is_no_longer_a_silent_no_op(monkeypatch, tmp_pat
     Now it must carry a `doctor.fix-suppressed` issue naming why, even though
     `run_fix` itself is never called."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     calls = []
     monkeypatch.setattr(doctor_cmd, "run_fix", lambda m: calls.append(m) or [])
@@ -3296,7 +3357,7 @@ def test_doctor_fix_suppressed_notice_reaches_text_mode_not_just_json(monkeypatc
     branch, so an issues-only entry like `fix_suppressed_issue` never
     reached stderr at all outside `--format json`."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.chdir(tmp_path)
 
@@ -3358,7 +3419,7 @@ def test_doctor_no_color_flag_reaches_the_render_and_suppresses_ansi(monkeypatch
 
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
-    stub_checks = [doctor_cmd.Check("west", "fail", "west not found")]
+    stub_checks = [doctor_cmd.Check("west", "fail", "west not found", scope="host")]
 
     def stub_collect(*a, on_check=None, **k):
         if on_check is not None:
@@ -3401,8 +3462,8 @@ def test_checks_stream_incrementally_not_in_one_final_flush(monkeypatch, tmp_pat
     events: list[str] = []
 
     def fake_collect(*args, on_check=None, **kwargs):  # noqa: ARG001
-        first = doctor_cmd.Check("alpha", "pass", "alpha detail")
-        second = doctor_cmd.Check("beta", "pass", "beta detail")
+        first = doctor_cmd.Check("alpha", "pass", "alpha detail", scope="host")
+        second = doctor_cmd.Check("beta", "pass", "beta detail", scope="host")
         if on_check is not None:
             on_check(first)
         # Stand-in for the second check's own slow probe -- spelled without
@@ -3459,7 +3520,7 @@ def test_a_print_failure_does_not_discard_an_already_completed_diagnosis(monkeyp
     goes through the real `print`. Proves both halves finding 2 asks for:
     the finished `west` verdict survives (exit 0, no internal-failure), and
     the guard is not silent about WHY that check's own block did not print."""
-    stub_checks = [doctor_cmd.Check("west", "pass", "west 1.2.0 found")]
+    stub_checks = [doctor_cmd.Check("west", "pass", "west 1.2.0 found", scope="host")]
 
     def stub_collect(*a, on_check=None, **k):
         if on_check is not None:
@@ -3538,7 +3599,7 @@ def test_doctor_fix_passes_a_real_on_check_to_run_fix_in_text_mode_and_none_unde
     must NOT print `--fix` checks under `--format json` -- the same `stream`
     gate `_collect` is given, applied consistently to the second caller."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
 
