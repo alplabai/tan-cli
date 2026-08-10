@@ -127,20 +127,81 @@ def _use_color(no_color: bool) -> bool:
         return False
 
 
+class NegativeRegisterValue(Exception):
+    """A fault register was given a negative value (tan-cli#616).
+
+    Not a `typer.BadParameter`: this refusal carries a REGISTERED issue code
+    (`faultdecode.invalid-register-value`) so a `--format json` consumer can
+    branch on it, the same way `faultdecode.no-registers` already lets it tell
+    "nothing to analyse" from a tan crash. `BadParameter` would land on
+    `cli.main`'s generic `command: "cli"` / `cli.parse-error` fallback instead
+    -- the two-paths-of-one-verb disagreement tan-cli#399 closed everywhere
+    else in this command.
+    """
+
+    def __init__(self, option: str, value: str) -> None:
+        self.option = option
+        self.value = value
+        self.message = (
+            f"--{option}: {value!r} is negative -- a fault register value is "
+            "unsigned, so there is nothing to decode. Pass the value exactly as "
+            "the dump printed it (hex, with or without a 0x prefix)."
+        )
+        super().__init__(self.message)
+
+
 def _parse_hexint(option: str, value: str | None) -> int | None:
     """A fault-register value, hex by default: these are CPU status registers,
     always read in hex, so a bare ``8200`` means ``0x8200`` (not decimal 8200)
-    and ``0x8200`` works too. Mirrors the original's `_HexInt.convert`."""
+    and ``0x8200`` works too. Mirrors the original's `_HexInt.convert`.
+
+    A NEGATIVE value is refused (tan-cli#616). `int(text, 16)` happily accepts
+    a leading `-`, and everything downstream then treats the result as a
+    register word: `--cfsr=-8200` rendered `"0x-0008200"` (not a hex integer in
+    any sense), decoded twelve flags that are not set out of Python's infinite
+    two's-complement sign extension, concluded "Stack overflow", and exited 0.
+    A register is unsigned by construction, so a sign is a user error and the
+    only correct answer is a refusal -- confident nonsense at exit 0 is the
+    worst possible one for a tool whose entire output is a diagnosis.
+    """
     if value is None:
         return None
     text = value.strip()
     try:
         # base 16 accepts an optional 0x prefix and a bare hex run alike.
-        return int(text, 16)
+        parsed = int(text, 16)
     except ValueError as err:
         raise typer.BadParameter(
             f"{value!r} is not a valid integer (try 0x...)", param_hint=f"--{option}"
         ) from err
+    if parsed < 0:
+        raise NegativeRegisterValue(option, value)
+    return parsed
+
+
+def _refuse(code: str, message: str, *, envelope_mode: bool) -> typer.Exit:
+    """Build `faultdecode`'s refusal on whichever surface the caller asked for,
+    and return the `typer.Exit` for the caller to `raise`.
+
+    One place, because the refusals have to agree with the success path AND
+    with each other about whether stdout is an envelope (tan-cli#399): a second
+    refusal that wrote plain text under `--format json` would hand the consumer
+    `command: "cli"` here and `command: "faultdecode"` one invocation later,
+    which is the exact defect that issue closed for the first one.
+    """
+    if envelope_mode:
+        emit(
+            Envelope(
+                "faultdecode",
+                Project(root=None, board_yaml=None),
+                None,
+                [Issue(code, "error", message)],
+                ExitCode.VALIDATION_FAILURE,
+            )
+        )
+    else:
+        typer.echo(f"Error: {message}", err=True)
+    return typer.Exit(int(ExitCode.VALIDATION_FAILURE))
 
 
 #: How long the IMPLICIT stdin auto-consume waits for a non-TTY stdin to offer
@@ -392,16 +453,21 @@ def faultdecode(
     #    (tan-cli#388): reading stdin first meant `--cfsr 0x8200` -- the
     #    primary documented invocation, where no dump is needed or wanted --
     #    still blocked on a stdin nobody was ever going to write to.
-    cfsr_i = _parse_hexint("cfsr", cfsr)
-    hfsr_i = _parse_hexint("hfsr", hfsr)
-    dfsr_i = _parse_hexint("dfsr", dfsr)
-    bfar_i = _parse_hexint("bfar", bfar)
-    mmfar_i = _parse_hexint("mmfar", mmfar)
-    mmfsr_i = _parse_hexint("mmfsr", mmfsr)
-    bfsr_i = _parse_hexint("bfsr", bfsr)
-    ufsr_i = _parse_hexint("ufsr", ufsr)
-    pc_i = _parse_hexint("pc", pc)
-    lr_i = _parse_hexint("lr", lr)
+    try:
+        cfsr_i = _parse_hexint("cfsr", cfsr)
+        hfsr_i = _parse_hexint("hfsr", hfsr)
+        dfsr_i = _parse_hexint("dfsr", dfsr)
+        bfar_i = _parse_hexint("bfar", bfar)
+        mmfar_i = _parse_hexint("mmfar", mmfar)
+        mmfsr_i = _parse_hexint("mmfsr", mmfsr)
+        bfsr_i = _parse_hexint("bfsr", bfsr)
+        ufsr_i = _parse_hexint("ufsr", ufsr)
+        pc_i = _parse_hexint("pc", pc)
+        lr_i = _parse_hexint("lr", lr)
+    except NegativeRegisterValue as err:
+        raise _refuse(
+            "faultdecode.invalid-register-value", err.message, envelope_mode=envelope_mode
+        ) from None
 
     # `--pc`/`--lr` are addresses to symbolicate, not status registers, and
     # neither satisfies the "something to analyse" check below -- so neither
@@ -439,23 +505,14 @@ def faultdecode(
             "no fault registers supplied -- pass --cfsr/--hfsr/--dfsr "
             "or pipe a dump via --file/-/stdin."
         )
-        if envelope_mode:
-            # The refusal has to agree with the success path about whether
-            # stdout is an envelope (tan-cli#399); leaving it to `cli.main`'s
-            # generic fallback gave the consumer `command: "cli"` here and
-            # `command: "faultdecode"` one invocation later.
-            emit(
-                Envelope(
-                    "faultdecode",
-                    Project(root=None, board_yaml=None),
-                    None,
-                    [Issue("faultdecode.no-registers", "error", no_registers)],
-                    ExitCode.VALIDATION_FAILURE,
-                )
-            )
-        else:
-            typer.echo(f"Error: {no_registers}", err=True)
-        raise typer.Exit(int(ExitCode.VALIDATION_FAILURE))
+        # The refusal has to agree with the success path about whether stdout is
+        # an envelope (tan-cli#399); leaving it to `cli.main`'s generic fallback
+        # gave the consumer `command: "cli"` here and `command: "faultdecode"`
+        # one invocation later. `_refuse` is that agreement, shared with the
+        # negative-register refusal above.
+        raise _refuse(
+            "faultdecode.no-registers", no_registers, envelope_mode=envelope_mode
+        )
 
     report = decode(
         cfsr=cfsr_v or 0,

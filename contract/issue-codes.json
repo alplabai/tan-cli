@@ -2606,6 +2606,15 @@
       "consumerEffect": "Distinguishes 'nothing to analyse' from a tan crash on the one refusal `faultdecode` has. Reachable only under `--format json`: the command's own `--json` is the unwrapped SDK report surface (see faultdecode_cmd.py's module docstring) and keeps writing the human error line to stderr, envelope-free, exactly as the forwarded child did.",
       "emittedBy": "python/tan/commands/faultdecode_cmd.py",
       "note": "Exit 2 (ValidationFailure), matching the `click.UsageError` the alp_cli original raised for the same input. Added by tan-cli#399, which made `--format json` emit tan's envelope with the decode report as `data`; without this the refusal path went out as `command: \"cli\"` / `cli.parse-error` while the success path emitted `command: \"faultdecode\"`. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "faultdecode.invalid-register-value",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code with `===` yet; registered so a fault-decode panel has a stable spelling to bind to",
+      "consumerEffect": "Separates 'that register value cannot be read' from both a successful decode and `faultdecode.no-registers`: the input was supplied, it was just not a register value, so re-running with the same paste will not help. The message names the offending FLAG and the offending VALUE verbatim, so a panel can highlight the field the user must fix.",
+      "emittedBy": "python/tan/commands/faultdecode_cmd.py",
+      "note": "Exit 2 (ValidationFailure), same as the sibling `faultdecode.no-registers`, and emitted through the same `_refuse` helper so both refusals agree with the success path about whether stdout is an envelope. Added by tan-cli#616: `_parse_hexint` used `int(text, 16)`, which accepts a leading `-`, so `--cfsr=-8200` rendered `\"0x-0008200\"`, decoded twelve flags that are not set out of Python's two's-complement sign extension, concluded \"Stack overflow\" and exited 0. A fault register is unsigned by construction. Covers all ten register/address flags (--cfsr/--hfsr/--dfsr/--bfar/--mmfar/--mmfsr/--bfsr/--ufsr/--pc/--lr). NOT used for a non-hex value (`--cfsr zz`), which stays a `typer.BadParameter` so the v0.4.1 oracle's exit-code parity for that input is preserved. DIVERGES from alp-sdk's `scripts/alp_cli/faultdecode.py`, which still decodes a negative CFSR at exit 0; the upstream should follow. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
     }
   ]
 }
