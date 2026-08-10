@@ -1151,7 +1151,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # `_vendored_files` stays under 50 lines and the FUNCTION ratchet holds at
     # 237 rather than being raised for a 4-line guard. Re-measured: exactly
     # `wc -l` on this branch.
-    "tan/core/scaffold.py": 1452,
+    # 1494, not 1452, as of tan-cli#494 defect 1's residue: the prune list gains
+    # `out` and `bwdt` (two lines of DATA -- `.gitignore:4`/`:6`, both inside
+    # the same `# Build directories` block the first cut transcribed from), and
+    # the rest is the comment that block's own false completeness claim earned.
+    # It now names each of the seven patterns with its `.gitignore` line, the
+    # `dxcom -o out/` line in the shipped example README that makes `out/`
+    # reachable, the untracked-name invariant that makes ADDING a declared
+    # pattern safe where inventing one is not, and the drift gate that re-reads
+    # the block. No new function, so the FUNCTION ratchet does not move.
+    # Re-measured with THIS gate's own walk on this branch (1494), not `wc -l`.
+    "tan/core/scaffold.py": 1494,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one

@@ -189,6 +189,24 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan init --from-example` no longer copies an example's `out/` build
+  directory into the customer's new project.** The build-output prune list
+  added in #583 transcribed five of the seven directory patterns alp-sdk's
+  `.gitignore` declares, and claimed in its own comment to be complete;
+  `out/` (`.gitignore:4`) and `bwdt/` (`:6`) sit in the same
+  `# Build directories` block as `build/` and were both missed. `out/` is
+  reachable by following a shipped example's own instructions —
+  `examples/camera-vision/ai-object-detection-realtime/README.md:83` says to
+  run `dxcom -m yolov8n.onnx -c yolov8n_config.json -o out/` inside the
+  example. A binary there (`.dxnn`) failed the whole command with
+  `init.example-unreadable` at exit 1; an all-text one (Intel HEX is ASCII,
+  so `out/zephyr/zephyr.hex` qualifies) was copied silently at `ok:true` /
+  exit 0 / `issues: []`. A drift gate now re-reads that `.gitignore` block out
+  of a bound `ALP_SDK_ROOT` checkout and fails when alp-sdk declares a build
+  directory the list does not know. Vendored-template renders are unaffected:
+  every one across 12 SKUs × 6 templates is sha256-identical to `dev`.
+  Refs #494.
+
 - **An AEN MRAM write with no wrong-board guard now says so.** The
   `flash.dpidr-preflight-unarmed` advisory was gated on
   `flash_method: swd_probe`, and the AEN dispatches Flow D

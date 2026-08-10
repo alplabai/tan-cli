@@ -1246,13 +1246,54 @@ def _feature_file(unit_name: str, todo_line: str) -> str:
 #: Directory names under an SDK example that hold BUILD OUTPUT, never example
 #: source -- pruned by [`read_example_tree`] (tan-cli#494 defect 1).
 #:
-#: Transcribed from alp-sdk's OWN `.gitignore` (`build/`, `build_*/`,
-#: `cmake-build-*/`, `twister-out*/`), which is the authority on what is
-#: untracked artifact in that repo: `tan init --from-example` copies an
+#: Transcribed from alp-sdk's OWN `.gitignore`, which is the authority on what
+#: is untracked artifact in that repo: `tan init --from-example` copies an
 #: example into a NEW project, and a `west build` run in place turns a 6-file
 #: example into 613 files of `CMakeCache.txt`/`.ninja_deps`/`libapp.a`. Those
 #: are not the customer's project, and the first binary among them aborts the
 #: whole command with `init.example-unreadable`.
+#:
+#: The transcription is of TWO blocks, and the round of this fix that shipped
+#: with tan-cli#583 took only part of the first -- it claimed in this very
+#: comment to be "EXACTLY the five `.gitignore` patterns" while covering five
+#: of the SEVEN directory patterns alp-sdk declares:
+#:
+#: * `.gitignore:1-6`, the `# Build directories` block -- `build/`, `build_*/`,
+#:   `out/`, `cmake-build-*/`, `bwdt/`. `out/` and `bwdt/` were BOTH missed.
+#: * `.gitignore:36-37`, the west/twister block -- `twister-out/`,
+#:   `twister-out.*/`. Both were taken.
+#:
+#: `out/` is not hypothetical and is not only a `west build -d out` spelling:
+#: `examples/camera-vision/ai-object-detection-realtime/README.md:83` tells the
+#: customer, in the example's own instructions, to run `dxcom -m yolov8n.onnx
+#: -c yolov8n_config.json -o out/` INSIDE the example. Measured with that `out/`
+#: present: a `.dxnn` blob there fails the whole command with
+#: `init.example-unreadable`, and an all-text `out/` (Intel HEX is ASCII, so
+#: `out/zephyr/zephyr.hex` qualifies) is copied silently at `ok:true` / exit 0 /
+#: `issues: []` -- a stale artefact from someone else's build landing in a brand
+#: new project. `bwdt/` carries no explanation anywhere in alp-sdk, but it sits
+#: inside that `# Build directories` block, so the same authority covers it.
+#:
+#: Pruning by a `.gitignore`d NAME can only ever drop artefact, never source: a
+#: name alp-sdk declares untracked cannot BE tracked example content there, and
+#: `--from-example` reads an alp-sdk checkout by construction
+#: (`init_cmd._plan_from_example` resolves under `<sdk>/examples`). Measured
+#: against alp-sdk `origin/dev` 7d58ef32: ZERO tracked files anywhere in that
+#: repo lie under an `out/` or `bwdt/` path segment. That invariant is what
+#: makes ADDING a declared pattern safe and INVENTING one unsafe -- an earlier
+#: cut also pruned `build-`, in no pattern there, which would have silently
+#: dropped a hand-written `build-utils/` from a customer's new project.
+#:
+#: FILE patterns are deliberately out of scope: `.gitignore:55` also declares
+#: `*.out`, but this mechanism prunes DIRECTORY names off `os.walk`'s
+#: `dirnames`, and a file-level filter is a different change with a different
+#: blast radius. No shipped example carries one.
+#:
+#: `tests/core/test_scaffold.py::test_the_prune_list_still_covers_alp_sdk_s_own_
+#: build_directory_gitignore_block` re-reads that block out of a bound
+#: `ALP_SDK_ROOT` checkout and fails when alp-sdk declares a build directory
+#: this list does not know -- so the next one is caught rather than transcribed
+#: short a second time.
 #:
 #: DELIBERATE DIVERGENCE from the frozen oracle, which has the same missing
 #: exclusion (`crates/tan-core/src/wizard/filesystem.rs::collect_example_files`)
@@ -1260,18 +1301,19 @@ def _feature_file(unit_name: str, todo_line: str) -> str:
 #: RIGHT, and copying a build tree into a new project is not. No parity fixture
 #: pins `--from-example` content (`oracle_fixtures/PARITY-COVERAGE.txt` covers
 #: `scaffold` refusals only), so nothing frozen moves for this.
-#:
-#: The set is EXACTLY the five `.gitignore` patterns and no more. An earlier
-#: cut also pruned `build-`, which appears in no pattern there -- an invented
-#: rule that would silently drop a hand-written `build-utils/` from a
-#: customer's new project, which is the same class of damage as copying the
-#: build tree in. What the SDK declares untracked is the whole authority here.
-_EXAMPLE_BUILD_OUTPUT_DIRS = ("build", "twister-out")
+_EXAMPLE_BUILD_OUTPUT_DIRS = ("build", "out", "bwdt", "twister-out")
 _EXAMPLE_BUILD_OUTPUT_PREFIXES = ("build_", "cmake-build-", "twister-out.")
 
 
 def _is_build_output_dir(name: str) -> bool:
-    """Whether a directory NAME under an example is untracked build output."""
+    """Whether a directory NAME under an example is untracked build output.
+
+    Exact-match names and `startswith` prefixes are kept apart on purpose: the
+    `.gitignore` patterns behind the first group carry no `*`, so `out/` must
+    NOT match `outputs/` or `outbox/` and `build/` must not match
+    `build-utils/`. Only the three patterns that really are globs
+    (`build_*/`, `cmake-build-*/`, `twister-out.*/`) get prefix treatment.
+    """
     return name in _EXAMPLE_BUILD_OUTPUT_DIRS or name.startswith(
         _EXAMPLE_BUILD_OUTPUT_PREFIXES
     )
