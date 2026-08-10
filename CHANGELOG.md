@@ -2289,6 +2289,118 @@ All notable changes to `tan` are documented here. Format follows
     this change.
   (Refs #503, #537)
 
+### Security
+
+- **`parity.yml` interpolated an attacker-controlled `repository_dispatch`
+  payload straight into four `run:` shells.** This one is not a hardening
+  nicety, it is a code-execution path, and it is the more serious half of what
+  #435 turned up. `parity.yml` listens on `repository_dispatch: types:
+  [alp-sdk-planner-change]`, and every one of its four `resolve alp-sdk ref`
+  steps expanded `${{ github.event.client_payload.sdk_ref }}` into the script
+  GitHub then hands to `bash`. Three wrapped it in SINGLE quotes, which is not
+  a defence -- a payload containing one closes the string -- and the twin in
+  `first-blink` used DOUBLE quotes, where `$(...)` and backticks simply run.
+  The unvalidated value was then written to `$GITHUB_OUTPUT` (a newline
+  injects further keys) and passed as `ref:` to `actions/checkout`. Anyone who
+  can POST a `repository_dispatch` to this repository picks every field, so a
+  leaked dispatch token -- or a compromise on the alp-sdk side that fires
+  these dispatches -- became command execution on tan-cli's runner. `zizmor
+  1.29.0` reports all six sites as high-confidence `template-injection`.
+
+  Fixed by adopting the pattern `planner-resync.yml` has used since it was
+  written -- the OTHER consumer of this same dispatch, whose own comment names
+  the attack (`sdk_ref: "x; curl ... | sh"`): carry the field in as an `env:`
+  var, never interpolate it into the shell, and match it against an allow-list
+  before it reaches `git` or `$GITHUB_OUTPUT`. The correct defence already
+  existed in this repository; it had simply never been applied to the workflow
+  that receives the same event. (#435)
+
+- **That allow-list was itself line-oriented, and let a newline through.**
+  Found while proving the fix above rather than after shipping it, and it is
+  the reason `planner-resync.yml`'s guard is edited here too: both spelled the
+  check `printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$'`,
+  and `grep` returns 0 when ANY line matches. Measured: a payload of
+  `dev\nref=attacker` PASSES -- `dev` matches on line one, and `ref=attacker`
+  then lands in `$GITHUB_OUTPUT` as its own key, which is precisely the
+  injection the guard exists to refuse. The regex was right; the tool applying
+  it was not.
+
+  Both now use a POSIX `case`, which tests the whole string, newline included:
+
+  ```sh
+  case "${ref}" in
+    ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*) ...refuse... ;;
+  esac
+  [ "${#ref}" -le 201 ] || ...refuse...
+  ```
+
+  Verified to accept `7d58ef32d0a730c902e335adfd7764c2ec500ba5`, `origin/dev`,
+  `v0.15.0-rc1`, `dev` and `main`, and to refuse the newline payload, an
+  embedded `'`, `$(...)`, a backtick, a leading `-` (`--upload-pack=evil`), a
+  leading `.`, the empty string, and 202 characters while accepting 201 --
+  the same bound the regex expressed. (#435)
+
+- **Every `uses:` in `.github/workflows/` is pinned to a full commit SHA.**
+  All 63 external references resolved through mutable major tags -- 30 x
+  `actions/checkout@v4`, 14 x `actions/setup-python@v5`, 9 x
+  `actions/upload-artifact@v4`, 3 x `actions/download-artifact@v4`, 2 x
+  `actions/setup-node@v4`, 2 x `actions/checkout@v6`, plus
+  `actions/attest-build-provenance@v2` and the third-party
+  `softprops/action-gh-release@v2`, the last of which runs in the one job
+  holding `contents: write`. A retagged `@v4` executes on the next run with no
+  diff anywhere. Each is now pinned with a trailing `# vX.Y.Z` comment so the
+  human-readable version survives the pin. (#435)
+
+- **`persist-credentials: false` on 31 of 32 checkouts.** Only `release.yml`
+  had it (four sites, from #444); every checkout in the other seven workflows
+  left a usable git credential in `.git/config` for the rest of the job. The
+  one exception is deliberate and now says so in place: `planner-resync.yml`'s
+  tan-cli `dev` checkout, whose `propose` step pushes `auto/planner-resync`
+  through exactly that credential. Setting it there would not fail at
+  checkout -- it fails minutes later at the push, after the re-sync is already
+  computed, and the PR is then never opened. (#435)
+
+- **`contents: read` declared in the four workflows that had no `permissions:`
+  block at all** -- `ci.yml`, `clean-host.yml`, `getting-started.yml`,
+  `parity.yml` -- so they ran on whatever the repository default happened to
+  be. `getting-started.yml`'s own step comment already stated the requirement
+  verbatim ("`contents: read` is enough to list public releases"); it just had
+  no block to say it in. (#435)
+
+### Added — CI
+
+- **A `zizmor` gate, and a Dependabot config to keep the pins from rotting.**
+  Nothing in this repository read `.github/workflows/`, so a security
+  regression there landed green. `ci.yml`'s new `workflow-security` job runs
+  `zizmor==1.29.0 --min-severity medium --no-online-audits`, with the reviewed
+  baseline in `.github/zizmor.yml`.
+
+  Three choices in it are measured rather than assumed. `--min-confidence
+  medium` was tried and **rejected**: all 26 `artipacked` findings are Low
+  confidence, so that flag silently drops the entire credential-persistence
+  audit -- a gate that cannot fail on the defect it was written for is
+  decoration. `--no-online-audits` keeps the verdict independent of the GitHub
+  API, verified to match a networked run. And the gate is falsifiable, which
+  is the only thing that makes its green bar mean anything -- same invocation,
+  `dev` at `01374d4` versus this branch:
+
+  ```text
+  dev @ 01374d4   rc=14   165 findings: 63 unpinned-uses, 26 artipacked,
+                          12 excessive-permissions, 6 template-injection
+  this branch     rc=0    no finding at or above medium
+  ```
+
+  The baseline holds two entries, each carrying its argument in full: the
+  `planner-resync.yml` checkout that must keep its credential, and
+  `setup-node` in the npm job, which zizmor flags for a caching capability the
+  step never enables (it passes no `cache:` input and installs nothing).
+  `softprops/action-gh-release` is kept and pinned rather than replaced with
+  `gh release`, which #435 explicitly allows: the step sets
+  `fail_on_unmatched_files: true` and `gh release create` has no equivalent --
+  a glob matching nothing yields a Release with zero assets at exit 0, which
+  is #450's spent `v0.5.0` tag exactly. `.github/dependabot.yml` covers
+  `github-actions` weekly against `dev`, one PR per action; the Python
+  dependency lock stays with #437 rather than being half-done here. (#435)
 
 
 ## [0.5.1] — 2026-08-04

@@ -69,6 +69,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  # Least privilege by default (tan-cli#435). No job here needs a token at
+  # all: they check out, build, and run tests. Declared anyway rather than
+  # inherited, because the repository default is a SETTING -- it can be
+  # widened for an unrelated reason, and this workflow would silently widen
+  # with it. `zizmor` reported all three jobs as `excessive-permissions`
+  # (medium) for exactly that reason before this block existed.
+  contents: read
+
 jobs:
   # The PYTHON package is what the release assets are frozen from, and until
   # this job existed NOTHING in CI ran it: release.yml's `gates` job calls this
@@ -105,8 +114,10 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12" # pyproject's requires-python floor
       # tan-cli#503: `tests/commands/test_completion_command.py`'s zsh-driven
@@ -247,9 +258,10 @@ jobs:
       # ported: tan-cli#550/#551 stay open.
       #
       # Still not a tag, for the same reason as above.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: ${{ inputs.sdk_parity }}
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: 7d58ef32d0a730c902e335adfd7764c2ec500ba5
           path: alp-sdk
@@ -300,8 +312,10 @@ jobs:
   shim:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24" # same major release.yml's publish_npm job packs with
       # The FILE, not the directory: `--test <dir>` resolves its argument as a
@@ -326,8 +340,10 @@ jobs:
   wheel-floor:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12" # pyproject's requires-python floor
       # Derived, never hardcoded: a pin written here would be a SECOND place to
@@ -376,3 +392,50 @@ jobs:
             exit 1
           }
           echo "setuptools 68.1.2 rejects project.license, as it must"
+
+  # The workflows audit themselves (tan-cli#435). Nothing else in this
+  # repository reads `.github/workflows/`, so before this job a security
+  # regression there -- a `uses:` back on a mutable tag, a checkout that leaves
+  # its credential behind, a job that inherits write, a `client_payload` field
+  # interpolated into a shell -- landed green and stayed until someone thought
+  # to look.
+  #
+  # THE VERDICT IS FALSIFIABLE, which is the part worth checking before
+  # trusting it. Same invocation, zizmor 1.29.0:
+  #
+  #   this tree      rc=0    no finding at or above medium
+  #   dev @ 01374d4  rc=14   63 unpinned-uses, 26 artipacked,
+  #                          12 excessive-permissions, 6 template-injection
+  #
+  # So it fails on every class the PR that introduced it fixed, not merely on
+  # nothing.
+  workflow-security:
+    name: zizmor · workflow security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      # PINNED, for the same reason the actions above are: a linter that
+      # resolves live decides this gate's verdict on its own schedule, and a
+      # new audit landing upstream would redden an unrelated PR. Moving it is
+      # a reviewed edit here -- Dependabot does not see a version inside a
+      # `run:` step.
+      - name: install zizmor
+        run: pip install "zizmor==1.29.0"
+      # `--min-severity medium`, and NOT also `--min-confidence medium`: all 26
+      # `artipacked` findings are Low confidence, so adding that flag silently
+      # drops the whole credential-persistence audit. Measured, not assumed.
+      #
+      # `--no-online-audits` keeps the gate hermetic: no token, no API, no
+      # rate limit deciding whether CI is green. Verified to reach the same
+      # verdict as a networked run on this tree, which is what the
+      # `planner-resync.yml` entry in `.github/zizmor.yml` is for.
+      #
+      # The baseline is `.github/zizmor.yml`, picked up automatically. It has
+      # two entries and both carry their argument in full.
+      - name: audit .github/workflows
+        run: zizmor --min-severity medium --no-online-audits .github/workflows/
