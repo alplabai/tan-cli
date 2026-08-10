@@ -128,8 +128,8 @@ create a second list that immediately drifts.
 | `data.available.projectTemplates` (+ `moduleTemplates`, `generationTargets`), `data.summary`, `data.details` | `explain` | golden `explain-overview` |
 | `data.examples[].{id,sourceDir,title,description}` | `examples` | golden `examples-catalog` |
 | `data.targets` / `.written` / `.failed` | `generate` | golden `generate-board-yaml-missing` |
-| `data.checks[].{name,status}`, `data.summary.{pass,warn,fail}`, `data.nextSteps`, the literal check name `workspace` | `doctor --build` | `doctor_build_data_keys_the_extension_reads` — a KEY-SET assertion, not a golden, because doctor's values are host facts |
-| `data.checks[].scope` | `doctor` (both invocations) | `python/tests/gates/test_doctor_check_scope.py` + `test_every_check_on_the_wire_carries_a_scope` — see "`doctor` check scope" below |
+| `data.checks[].{name,status}`, `data.summary.{pass,warn,fail}`, `data.nextSteps`, the literal check name `workspace` | `doctor` (both invocations) | `python/tests/commands/test_doctor_command.py` — KEY-SET assertions, not a golden, because doctor's values are host facts. `test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback` reads `name`/`status` off the spawned envelope and pins `data`'s key set; `test_unknown_is_counted_in_no_summary_bucket` pins the three summary buckets; `test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host` pins the literal `workspace`. (The Rust `doctor_build_data_keys_the_extension_reads` cited here until #601 went with `crates/`.) |
+| `data.checks[].scope` | `doctor` (both invocations); also the `support-bundle` FILE's `doctor.checks[]`, not that command's envelope | `python/tests/gates/test_doctor_check_scope.py` + `test_every_check_on_the_wire_carries_a_scope` — see "`doctor` check scope" below |
 | `data.written` | `build --materialise` | **NOT COVERED.** Reaching it needs a resolvable alp-sdk checkout and a Python spawn; nothing in this suite is allowed either. |
 | `data.releases` | `sdk list` | **NOT COVERED.** Hits the GitHub releases API. |
 | `data.configuration` (the `launch.json` entry alp-sdk-vscode#342 writes verbatim) | `debug-config` | **PARTIAL.** Oracle-parity fixtures covered only the bare `zephyr-mcu` invocation (all three servers) and `native-host`, and were themselves deleted with the oracle suite (tan-cli#269) — see "Known divergence: `debug-config-preview-*`" below for `zephyr-mcu-sdk-identity`, `baremetal-mcu` and `yocto-userspace`, which are not. The five `debug-config-preview-*` goldens above no longer pin this field either (`xfail(strict=True)`, same section). |
@@ -143,6 +143,18 @@ that reads as covered is worse than one everybody knows about.
 `host` or `project`.** A consumer splitting the report into "facts about this
 machine" and "facts about the project you opened" reads that field. It must
 never go back to matching `checks[].name`.
+
+**This covers `support-bundle` too, not only `doctor`.**
+`tan support-bundle` builds its debug report from the same `Check` type, so
+every entry in the WRITTEN BUNDLE's `doctor.checks[]` carries `scope` on the
+same two values. Its own check names (`workspaceRoot`, `sdkRoot`,
+`cortexDebugExtension`, `{server}Backend`, `gdb`, `lldb`, …) are classified by
+the same rule below. That command's stdout ENVELOPE is unaffected — its `data`
+carries `outputPath`/`targetKind`/`server`/`decisionCount` and no `checks[]` at
+all — so the shape change is in the attached file only. Stated rather than left
+to be discovered: the field arrived for `doctor`'s consumer, but it changed
+`support-bundle`'s output in the same commit, and a shape change nobody wrote
+down is what this file exists to prevent.
 
 | Value | The check's verdict is about |
 |---|---|

@@ -27,8 +27,9 @@ All notable changes to `tan` are documented here. Format follows
   is the hand-list this field exists to delete. Additive: a new key on an
   existing object, no key removed or renamed, present on every entry rather
   than sometimes, and no committed golden carries a `checks[]` array to move.
-  Emitted by `tan doctor` and by `tan support-bundle`'s own debug report, which
-  is built from the same type. (#549)
+  Emitted by `tan doctor`, and by the `doctor.checks[]` inside the file
+  `tan support-bundle` writes — that report is built from the same type. That
+  command's own stdout envelope carries no `checks[]` and is unchanged. (#549)
   - **A check cannot be added without one.** `scope` is a required
     keyword-only field, so a check authored without it is a `TypeError` at its
     own construction site — on every branch and every platform, including the

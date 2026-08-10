@@ -92,23 +92,48 @@ _PINNED_SCOPES = {
 }
 
 
+def _local_check_names(tree: ast.AST) -> set[str]:
+    """What `Check` is spelled as IN THIS MODULE.
+
+    `from tan.commands.doctor_cmd import Check as DoctorCheck` was measured to
+    slip every case in this file straight past a walk that keyed on the literal
+    callee spelling `Check`: the construction was invisible, so it could carry
+    no `_PINNED_SCOPES` entry and no consistency check. The missing-scope half
+    still held (a required keyword-only field is a `TypeError` at construction,
+    verified), but the CLASSIFICATION half -- the part that stops a scope
+    drifting silently -- did not, and that is the half only this walk provides.
+
+    Import aliases are resolved; a later rebinding (`C = Check`) is not, and
+    cannot usefully be, without evaluating the module. That residue is
+    acceptable precisely because it is only the classification half at risk:
+    presence is enforced by the constructor, on every path, alias or not."""
+    local = {"Check"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "Check":
+                    local.add(alias.asname or alias.name)
+    return local
+
+
 def _check_calls() -> list[tuple[str, ast.Call]]:
-    """Every `Check(...)`/`<mod>.Check(...)` construction under `python/tan/`,
-    with the file it sits in. Matched on the callee SPELLING, both the bare
-    name (`doctor_cmd`'s own sites) and the attribute form
-    (`support_bundle_cmd`, which builds a doctor-shaped report of its own out
-    of the same class)."""
+    """Every `Check(...)` construction under `python/tan/`, with the file it
+    sits in. Three callee shapes are matched: the bare name (`doctor_cmd`'s own
+    sites), whatever local alias an `import ... as` bound it to, and the
+    attribute form `<mod>.Check` (`support_bundle_cmd`, which builds a
+    doctor-shaped report of its own out of the same class)."""
     found: list[tuple[str, ast.Call]] = []
     for path in sorted(_PACKAGE.rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError as err:  # pragma: no cover -- fails elsewhere first
             pytest.fail(f"{path} does not parse: {err}")
+        local = _local_check_names(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            named = (isinstance(func, ast.Name) and func.id == "Check") or (
+            named = (isinstance(func, ast.Name) and func.id in local) or (
                 isinstance(func, ast.Attribute) and func.attr == "Check"
             )
             if named:
@@ -116,23 +141,45 @@ def _check_calls() -> list[tuple[str, ast.Call]]:
     return found
 
 
-def _literal_scope(call: ast.Call) -> str | None:
-    for keyword in call.keywords:
-        if keyword.arg == "scope" and isinstance(keyword.value, ast.Constant):
-            value = keyword.value.value
-            return value if isinstance(value, str) else None
+def _literal_str(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
     return None
+
+
+def _keyword(call: ast.Call, arg: str) -> ast.AST | None:
+    """The value passed for `arg`, when it was passed by keyword. A `**splat`
+    entry (`keyword.arg is None`) is deliberately not resolved -- its contents
+    are a runtime dict -- so a `Check(**{...})` reads here as passing neither
+    `name` nor `scope`, and reds the scope case rather than going quietly
+    green on an unreadable construction."""
+    for keyword in call.keywords:
+        if keyword.arg == arg:
+            return keyword.value
+    return None
+
+
+def _literal_scope(call: ast.Call) -> str | None:
+    return _literal_str(_keyword(call, "scope"))
 
 
 def _literal_name(call: ast.Call) -> str | None:
-    """The check's name when it is a plain string literal. `None` for the
-    computed ones -- `fix:{tool}`, `{server}Backend`, and
-    `support_bundle_cmd._extension_check`'s `name` parameter -- which still
-    have to declare a scope, they just cannot be keyed by name here."""
-    if call.args and isinstance(call.args[0], ast.Constant):
-        value = call.args[0].value
-        return value if isinstance(value, str) else None
-    return None
+    """The check's name when it is a plain string literal, passed EITHER
+    positionally or as `name=`.
+
+    Reading only `args[0]` was measured to make `Check(name="brandNewCheck",
+    ..., scope="project")` invisible to the classification pin: a whole new
+    check could enter with no `_PINNED_SCOPES` entry and every case here stay
+    green. `name` is the first field of the dataclass, so both spellings are
+    legal Python and both must be seen.
+
+    Still `None` for the genuinely computed ones -- `fix:{tool}`,
+    `{server}Backend`, and `support_bundle_cmd._extension_check`'s `name`
+    parameter -- which must still declare a scope, they just cannot be keyed
+    by name here."""
+    if call.args:
+        return _literal_str(call.args[0])
+    return _literal_str(_keyword(call, "name"))
 
 
 def test_the_walk_finds_the_call_sites_it_is_meant_to_guard():
