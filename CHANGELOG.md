@@ -2381,6 +2381,86 @@ All notable changes to `tan` are documented here. Format follows
     this change.
   (Refs #503, #537)
 
+- **Five assertions that could not fail, in the harnesses that grade this
+  repository.** A gate that cannot fail is worse than no gate: it reports OK
+  about something it never checked. Each of these was measured broken, and
+  each fix was proven by watching it go red without the change. (Refs #500)
+
+  - **`tests/parity/test_planner_emit_parity.py`'s 775 cases could all SKIP at
+    exit 0 while CI believed they ran.** The module's
+    `pytestmark = skipif(not HAS_UPSTREAM)` reads
+    `<ALP_SDK_ROOT>/scripts/alp_orchestrate/__init__.py`, but the CI jobs that
+    bind an SDK pre-flight-guard a DIFFERENT file,
+    `<ALP_SDK_ROOT>/scripts/alp_project.py`. A checkout satisfying the guard
+    and shipping no `scripts/alp_orchestrate/` drops the whole module -- and
+    its own non-vacuity canary `test_the_breadth_layer_still_covers_every_board`,
+    which sits under the same mark -- to SKIP, and `parity.yml`'s
+    `python-tests` job stays green. Not hypothetical: alp-sdk retiring that
+    package is the relocation's STATED end state. Measured cost: coverage of
+    `tan/planner/**` (3998 statements) falls 83% -> 27%, with
+    `zephyr_board.py`, `project_emit/dts.py`, `west_libs.py`, `native_sim.py`
+    and `hw_info.py` all at 0%, and a mutation halving every emitted partition
+    `base_kib` produces an identical suite result.
+
+    `pytest` marks ACCUMULATE, so a function-level mark cannot cancel a
+    module-level one -- the new assertion therefore lives in its own module,
+    `tests/parity/test_planner_parity_actually_ran.py`, outside that gate. No
+    bound root still SKIPs, which is the honest `pull_request` state; a bound
+    root that cannot answer the suite now FAILS.
+
+  - **`scripts/e2e-full.sh` reported a fabricated product defect on a long
+    workdir.** The #407 positive assertion grepped `tan doctor`'s text report
+    for a fixed sentence, but doctor's renderer wraps every check block at
+    `shutil.get_terminal_size(fallback=(100,24)).columns` unconditionally --
+    unlike `tan.env.wrap_width` it does not consult isatty -- and the two
+    absolute paths ahead of that sentence move the wrap point with the
+    harness's own `$WORK` length. Measured: at `len($WORK) >= 40` the sentence
+    straddles a line break, `grep -q` misses, and the harness scored
+    `bad "#407: doctor's text report is silent about the second checkout"`
+    against a report naming both checkouts plainly, then exited 1. Prose is now
+    matched through a `flatprose` helper; the PATH half still greps the
+    unflattened file, because `wrap_block` passes `break_long_words=False` and
+    a path token always survives intact.
+
+  - **The same file's #407 NEGATIVE control could never fire.** It grepped for
+    the check name `sdkDiscoveryDivergent`, deleted by the reconciliation that
+    the comment thirty lines above it describes -- measured absent from
+    `python/` and `contract/` entirely, present only in this script. It scored
+    a PASS on every host. It now keys on the same sentence the positive
+    assertion uses, which is what that comment already prescribed.
+
+  - **`scripts/e2e-linux-freeze.sh` printed `freeze OK` for a build that
+    exited 1.** It ran `bash scripts/build_binary.sh 2>&1 | tail -3` and
+    consulted the pipeline status nowhere, judging success one line down on
+    `[ -x dist/tan/tan ]` alone -- and `build_binary.sh`'s over-ceiling path
+    quarantines only the ARCHIVE, leaving the onedir tree in place. `tail -3`
+    compounded it: the ERROR block is six lines, so the
+    `ERROR: dist/tan.tar.gz was ... B (ceiling ...)` and `Quarantined as ...`
+    lines were truncated away and no ERROR token reached the operator at all.
+    Now unpiped with its status read, which is what every workflow calling
+    that script already does deliberately.
+
+  - **`version_check.py` accepted a CHANGELOG section that was only a
+    heading.** `changelog_problems()` checked the `## [<target>]` heading
+    EXISTS and nothing further, so an empty section passed every pre-tag gate
+    and then killed `release.yml` after four PyInstaller freezes, with the tag
+    already pushed and immutable -- #212's failure mode surviving #212's fix,
+    one condition over. A new `changelog_section_body()` slices the section the
+    same way `release.yml` does (anchored `^## [` to the next one) and the
+    empty case is refused with its own wording, distinct from the
+    absent-heading one.
+
+  Two of the seven items in #500 are deliberately NOT here, which is why this
+  is `Refs` and not `Closes`: the vacuous macOS `arch` step
+  (`python-binaries.yml`) and the hand-port freshness gate's wiring
+  (`parity.yml` seam1) both live in workflow files tan-cli#435 was editing at
+  the time, so they were held back rather than conflicted over. #435 has since
+  landed, and a third item joins them: `parity.yml` asserts BY NODE ID that
+  three freshness tests PASSED, precisely because "a skip does not fail
+  pytest's exit code" -- the new guard added here gets no such assertion, so a
+  `pytestmark` added to its module later would re-open the same hole silently.
+  All three follow in one workflow-side change.
+
 ### Security
 
 - **`parity.yml` interpolated an attacker-controlled `repository_dispatch`
@@ -2493,6 +2573,7 @@ All notable changes to `tan` are documented here. Format follows
   is #450's spent `v0.5.0` tag exactly. `.github/dependabot.yml` covers
   `github-actions` weekly against `dev`, one PR per action; the Python
   dependency lock stays with #437 rather than being half-done here. (#435)
+
 
 
 ## [0.5.1] — 2026-08-04
