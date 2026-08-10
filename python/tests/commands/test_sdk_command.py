@@ -885,7 +885,12 @@ def test_current_sees_the_child_checkout_the_acting_commands_resolve(tmp_path, i
     doc = envelope(run_tan("sdk", "current", "--format", "json", cwd=workspace))
     assert doc["data"]["sdkPath"] == str(child)
     assert doc["data"]["sourceTier"] == expected.tier == "discovery"
-    assert doc["sdk"] == {"root": str(child), "sourceTier": "discovery"}
+    # POSIX separators, not the host's: `SdkInfo.as_dict` normalises `sdk.root`
+    # unconditionally (mirrors `sdk_report.rs`'s `root.replace('\\', "/")`), so
+    # `data.sdkPath` and `sdk.root` deliberately differ in separator style on
+    # Windows. Asserting `str(child)` here would pin the platform-native form
+    # and bake back the bug `SdkInfo.as_dict`'s own comment names.
+    assert doc["sdk"] == {"root": str(child).replace("\\", "/"), "sourceTier": "discovery"}
     assert doc["data"]["readiness"]["version"] == "0.14.0"
     # The "go clone one" text is exactly what must NOT be printed here.
     text = run_tan("sdk", "current", cwd=workspace)
@@ -1030,6 +1035,20 @@ def test_the_socks_refusal_names_the_variable_that_actually_won(monkeypatch):
     assert "Set HTTPS_PROXY" not in error
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "`os.environ` is case-INSENSITIVE on Windows, so `https_proxy` and "
+        "`HTTPS_PROXY` are the same variable there -- `_proxy_variable_name` "
+        "still finds a value under `HTTPS_PROXY` first (it precedes `https_proxy` "
+        "in HTTPS_PROXY_ENV_VARS) and correctly names IT, so the case actually "
+        "exercised is 'which of two case-insensitive aliases for the ONE set "
+        "variable does the message print', not 'which variable won' -- a "
+        "question this platform cannot ask. Coverage for the real feature (the "
+        "message names whichever env var actually won) stays load-bearing on "
+        "POSIX, where the two spellings are genuinely distinct variables."
+    ),
+)
 def test_the_socks_refusal_names_https_proxy_when_that_is_what_won(monkeypatch):
     """The other half: the variable is not hardcoded. With only `https_proxy`
     set, IT is what the selection read, so it is what the remediation must

@@ -21,6 +21,7 @@ import typer
 from typer.testing import CliRunner
 
 from tan.commands import sdk_cmd
+from tan.commands.build_cmd import _abs_posix
 from tan.commands.inspect_cmd import (
     ResolvedDebugContext,
     collect_resolved_values,
@@ -304,7 +305,12 @@ def test_a_non_ascii_path_prints_raw_utf8_like_the_oracle(tmp_path, monkeypatch)
 
     result = runner.invoke(app, ["inspect"])
     assert result.exit_code == 0
-    assert f'workspaceRoot="{project}"' in result.stderr
+    # Forward slashes, not the host's: `_abs_posix` (which builds
+    # `workspaceRoot`) always converts, per its own docstring, because the
+    # result also lands in a CMake `-D` argument where a Windows backslash is
+    # an escape. Asserting `str(project)` here would pin the platform-native
+    # form on Windows and fail against the port's real, long-standing output.
+    assert f'workspaceRoot="{_abs_posix(str(project))}"' in result.stderr
     # The escape the oracle never emits, in any field.
     assert "\\u00e9" not in result.stderr
 
