@@ -199,7 +199,12 @@ All notable changes to `tan` are documented here. Format follows
   where the encode actually happens. Both now fall back to one ASCII-only
   `envelope.serialize-failed` document at exit 5, so the invariant holds
   structurally rather than for the one character class that filed the issue.
-  No new issue code, and a valid payload's bytes are unchanged. (#491)
+  The write guard is narrowed to the ENCODE class on purpose: an encode failure
+  happens before any byte leaves the stream, but an `OSError` from a buffered
+  stream has already left a truncated document on the wire, and appending a
+  second one to that would report a clean fallback over unparseable stdout —
+  so an I/O failure still propagates. No new issue code, and a valid payload's
+  bytes are unchanged. (#491)
 
 - **An AEN MRAM write with no wrong-board guard now says so.** The
   `flash.dpidr-preflight-unarmed` advisory was gated on
