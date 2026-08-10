@@ -226,6 +226,71 @@ All notable changes to `tan` are documented here. Format follows
   is unchanged, and a marker on both sides of the load still gets the
   write-scoped sentence alone. Closes #590.
 
+- **`tan generate --target zephyr-board` stops emitting Ensemble E8 facts for
+  every `E1M-AEN*` SKU.** `"Alif Ensemble E8"`, the
+  `#include <alif/ensemble_e8_peripherals.dtsi>` line and the
+  `"The Ensemble E8 RTSS-<role> has CONFIG_NUM_IRQS=480"` comment were
+  generator constants while `_sku_family_slug()` routes E3/E4/E6 silicon down
+  the same path, so following alp-sdk `docs/porting-new-som.md` §10 for an
+  E1M-AEN301 emitted an **E3 board tree labelled E8, including the E8
+  peripherals overlay** — exit 0, no warning, while the twister `.yaml` from
+  the same run correctly said "Alif Ensemble E3". The part designator now
+  comes from the SoC JSON's `part`, and the overlay from its new
+  `zephyr_peripherals_dtsi`; a SoC that declares neither is REFUSED rather
+  than inheriting a sibling part's node set (the E8's overlay declares
+  `ethosu85`; an E3 carries 2x Ethos-U55 and no U85). Four more fail-open
+  paths raise: a `memory_map:` declaring a SIBLING core's `<role>_slot0` but
+  not this core's (which put `slot0_partition@10000` exactly on top of the
+  sibling's declared window, silently undoing alp-sdk#1069), a
+  `silicon_variant:` matching no `variants[].order_code`, a partition outside
+  its own flash node, and an `mcuboot` base off the App MRAM window. Fixed
+  upstream in alp-sdk#1352 and carried here as a
+  `tan/planner/zephyr_board.py` hand-port re-sync, not a local patch — the
+  mirror is hash-audited and a tan-side fix would be exactly the drift that
+  gate exists to catch. (#493; refs #584, #591)
+  - **#591 is NOT closed by this, and its headline symptom is unchanged.**
+    The re-sync does carry the message fix it asked for — a `memory_map:`
+    that is complete except for `atoc` now names the alp-sdk vintage rather
+    than *"AEN disjoint-slot0 memory_map is missing an integer-`base` region
+    named 'atoc'"* — but that branch is **unreachable on any real checkout**:
+    `_aen_peripherals_dtsi` runs before `_aen_flash_partitions`, the `atoc`
+    region first exists at alp-sdk `d639e777` and `zephyr_peripherals_dtsi`
+    at its descendant `7d58ef32`, so every tree carrying the field also
+    carries the region. Measured against `v0.15.0`, the newest release,
+    `tan generate --target zephyr-board` still exits 3 on every AEN board —
+    now on `SoC spec alif:ensemble:e8 (E8) has no zephyr_peripherals_dtsi`.
+    That message is itself wrong for the only case it fires on:
+    `zephyr/dts/alif/ensemble_e8_peripherals.dtsi` **does** ship at `v0.15.0`
+    (64677 bytes), so it tells an E8 user to create a file already in their
+    checkout. It needs the same vintage branch the ATOC message has, upstream
+    in `scripts/gen_zephyr_board.py` — filed as alp-sdk#1354, to be re-synced
+    in, never patched into the mirror.
+  - **#591's release-sequencing half is now a checklist item, not just an
+    issue.** `docs/release-contract.md` gains an *"alp-sdk must be released
+    BEFORE (or with) the tan tag that requires it"* section with the `git tag
+    --contains <commit>` check and both currently-outstanding requirements
+    (alp-sdk#1289 `d639e777`, alp-sdk#1352 `7d58ef32`) — **neither is in any
+    alp-sdk tag today**, which is why the refusal's own advice to "upgrade
+    alp-sdk to a release that includes it" cannot be followed yet.
+  - **The SDK pins move to `7d58ef32` together, and that pulls in
+    alp-sdk#1344's PLANNER half.** alp-sdk#1352's generator requires the
+    `zephyr_peripherals_dtsi` field, which exists only in trees that also
+    contain #1344, and tan's emit-parity oracle is a single bound checkout —
+    measured, an oracle left at `ccd34f06` makes the AEN board emit refuse
+    (`generate.emit-failed`, exit 3). So `buildplan.py` / `orchestrator.py` /
+    `__init__.py` are re-synced too (a baremetal slice's `postCommands`, the
+    configure's `-B .`, the `-DALP_*` settings, `alp-baremetal.cmake` as its
+    config artefact), along with the vendored `tests/parity/
+    seam1_field_diff.py` comparator that allows the two additive plan keys.
+    **#1344's CONSUMER half is NOT ported and is not claimed:** tan's executor
+    still does not RUN a plan's `postCommands`, so an `os: baremetal` slice
+    still only configures — tan-cli#550/#551 stay open. All four pin sites
+    move in this one change (`parity.yml`'s `PINNED_SDK_TAG`, `ci.yml`'s
+    `sdk_parity` checkout `ref:`, and both `PINNED_SDK_COMMIT` /
+    `HAND_PORT_PINNED_SDK_COMMIT`); every other file in both hash tables was
+    re-hashed one by one and is byte-identical between the two commits, so
+    nothing unaudited is re-frozen.
+
 - **The five `debug-config-preview-*` goldens are re-recorded against the
   shipping CLI and are real gates again.** They described the frozen Rust
   v0.4.1 oracle, not the binary that ships: four were missing

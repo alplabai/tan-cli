@@ -321,6 +321,50 @@ covered by the same attestation. The `release` job is the only job with
 `id-token: write` / `attestations: write` — every other job keeps the
 workflow-level `contents: write` (or, for `gates`, `contents: read`).
 
+## alp-sdk must be released BEFORE (or with) the tan tag that requires it
+
+**Check this before every tag.** `tan/planner/` is a hash-audited mirror of
+alp-sdk's planner, and a re-sync can start REQUIRING a `metadata/**` fact that
+only unreleased alp-sdk carries. When it does, the released `tan` refuses on a
+released alp-sdk, and the refusal reads to a customer as a defect in their own
+board or SoM metadata. That is not hypothetical — it is tan-cli#591, found in
+the v0.6.0 triage sweep, and the maintainer's 2026-08-09 decision on it was
+**option 3: cut an alp-sdk release when tan is about to release.** No SDK
+version floor in tan, no graceful degradation. This section is where that
+decision lives, because an issue is not a checklist.
+
+**The check.** For each `metadata/**` fact the planner has started requiring
+since the last tag, confirm the alp-sdk commit that introduced it is contained
+in a published alp-sdk **tag**:
+
+```
+git -C <alp-sdk> tag --contains <commit>      # non-empty, or the tag is premature
+```
+
+**Currently outstanding — do not cut a tan release carrying the AEN board emit
+until this clears:**
+
+| Requirement | alp-sdk commit | In a tag? |
+|---|---|---|
+| SE-owned ATOC reservation (`atoc` in `memory_map:`) — alp-sdk#1289 | `d639e777` | **NO** — `git tag --contains d639e777` is empty; `git merge-base --is-ancestor d639e777 v0.15.0` is false |
+| `zephyr_peripherals_dtsi` on the SoC JSON — alp-sdk#1352 | `7d58ef32` | **NO** — descendant of the above, same answer |
+
+Both are reached by `tan generate --target zephyr-board` on any `E1M-AEN*`
+SKU, so today that command fails against **every** released alp-sdk. Until an
+alp-sdk release contains `7d58ef32`, a tan tag carrying this planner ships a
+subcommand that cannot succeed for AEN users on any SDK they can install.
+
+**When that release exists**, two strings stop being true and must be
+revisited in the same change: `zephyr_board.py`'s ATOC refusal says *"upgrade
+alp-sdk to a release that includes alp-sdk#1289"* (an issue number, not a
+version — replace it with the actual floor once one exists), and this table's
+"In a tag?" column. Both live upstream in alp-sdk
+`scripts/gen_zephyr_board.py`, so the string fix is an alp-sdk change
+re-synced in, never a patch to the mirror. Tracked as **alp-sdk#1354**, which
+also carries the reason the ATOC message is not the one a user actually sees
+today: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an ancestor of
+`7d58ef32`, so every checkout with the field already has the region.
+
 ## Decisions
 
 - **Archive, not a raw binary (tan-cli#349, from v0.5.0).** The build

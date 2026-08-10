@@ -235,15 +235,23 @@ jobs:
       # `scripts/alp_project_loader.py`), and the emit-parity cases diff the
       # ported planner against the pre-fix `scripts/alp_orchestrate/`.
       #
-      # alp-sdk#1344 is deliberately NOT picked up: still OPEN and CONFLICTING
-      # upstream, so tan-cli#550/#551 stay open.
+      # `ccd34f06` -> `7d58ef32` for tan-cli#493/#591, again in the SAME change
+      # as `parity.yml`'s `PINNED_SDK_TAG` and both freshness pins. It carries
+      # alp-sdk#1352 (the #493/#591 fix: AEN board facts read from the SoC
+      # JSON's `part` / `family` / the new `zephyr_peripherals_dtsi`, four
+      # fail-open paths turned into refusals, and the `atoc`-absent message
+      # naming the alp-sdk vintage instead of the consumer's SoM preset) and,
+      # unavoidably, alp-sdk#1344's PLANNER half -- #1352 is its child and the
+      # `zephyr_peripherals_dtsi` metadata exists nowhere before it. #1344's
+      # CONSUMER half (a plan's `postCommands` actually being RUN) is NOT
+      # ported: tan-cli#550/#551 stay open.
       #
       # Still not a tag, for the same reason as above.
       - uses: actions/checkout@v4
         if: ${{ inputs.sdk_parity }}
         with:
           repository: alplabai/alp-sdk
-          ref: ccd34f0648cc4f26a3230f337935050cd999d8a0
+          ref: 7d58ef32d0a730c902e335adfd7764c2ec500ba5
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
