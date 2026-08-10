@@ -50,16 +50,32 @@ def _resolve_oracle_path() -> Path | None:
     Reads `REAL_ENVIRON` (captured at collection time in `tests/conftest.py`),
     NOT `os.environ` -- this runs from inside test bodies, by which point the
     autouse `_scrub_sdk_discovery_env` fixture has already deleted
-    `ALP_SDK_ROOT` from the live process environment. An `os.environ` read here
-    therefore ALWAYS saw it gone, so every live re-check in this module skipped
-    unconditionally, on every machine and in CI's `sdk_parity: true` job alike.
-    Measured on `dev` @ 1813e46 with `ALP_SDK_ROOT=<a real alp-sdk checkout>`:
-    `8 passed, 3 skipped`, the 3 being exactly these. The sibling module
+    `ALP_SDK_ROOT` from the live process environment, so an `os.environ` read
+    here ALWAYS saw it gone.
+
+    Scope of what that broke, stated narrowly because the record will be cited:
+    the override was dead, so resolution fell entirely to the sibling walk
+    below, and the live re-checks in this module skipped **whenever
+    `ALP_SDK_ROOT` named a checkout the sibling walk could not also reach on
+    its own**. Both the standard contributor layout and CI's own satisfy that
+    walk -- CI checks alp-sdk out to `path: alp-sdk` inside the workspace
+    (`.github/workflows/ci.yml`), which the walk finds -- so this was NOT a
+    vacuous `sdk_parity` job, and it is NOT a recurrence of tan-cli#275.
+    Measured both ways on `dev` @ 1813e46 with the pre-fix reader:
+    CI-shaped layout, `ALP_SDK_ROOT` bound as CI binds it -> `18 passed, 0
+    skipped`; `ALP_SDK_ROOT` pointing outside the walk (a scratch worktree,
+    which is how a bounded change to this file gets developed) -> `8 passed,
+    3 skipped`, the 3 being exactly these.
+
+    The fix is still worth making and is strictly stronger: it makes the
+    documented `ALP_SDK_ROOT` override authoritative again, which removes a
+    silent dependency on where the two checkouts happen to sit relative to
+    each other. The sibling module
     `tests/commands/test_faultdecode_command.py` had the identical defect and
     fixed it this way in tan-cli#254/#256; this copy of `_resolve_oracle_path`
-    was never brought along. A gate that cannot fail is not a gate -- and
-    tan-cli#616 makes this one load-bearing, since it is what polices the
-    deliberate divergence from upstream (see
+    was never brought along. tan-cli#616 makes it load-bearing, since this is
+    what resolves the oracle for the gate policing the deliberate divergence
+    from upstream (see
     `test_decode_diverges_from_the_sdk_original_only_where_tan_cli_616_declares`).
     """
     override = REAL_ENVIRON.get("ALP_SDK_ROOT")
@@ -180,6 +196,27 @@ def test_bit_tables_match_the_sdk_original_exactly():
 _LAZY_FP_BITS = (1 << 5) | (1 << 13)
 
 
+#: `(cfsr, hfsr, dfsr)` words that pair a lazy-FP-preservation bit with an
+#: HFSR cause, i.e. the region where the new LSPERR/MLSPERR branches sit next
+#: to a branch upstream ALREADY had an answer for.
+#:
+#: The sweep could not reach this region and it mattered: the single-bit sweep
+#: never pairs two bits, and the seeded 200 random CFSR words essentially
+#: always carry a higher-priority cause, so LSPERR never won one. A draft of
+#: tan-cli#616 placed both branches ABOVE `VECTTBL`/`DEBUGEVT` and silently
+#: overrode both on exactly these words -- an undeclared third divergence class
+#: that this test would have flagged and structurally never saw. These four
+#: words must produce NO divergence at all: they are the pin that the new
+#: branches sit at the BOTTOM of the ladder, and moving them back up reds this
+#: test as an UNDECLARED divergence.
+_TWO_BIT_PRECEDENCE_CASES: list[tuple[int, int, int]] = [
+    (0x2000, 0x00000002, 0),  # LSPERR  + HFSR.VECTTBL  -> VECTTBL wins
+    (0x0020, 0x00000002, 0),  # MLSPERR + HFSR.VECTTBL  -> VECTTBL wins
+    (0x2000, 0x80000000, 0),  # LSPERR  + HFSR.DEBUGEVT -> DEBUGEVT wins
+    (0x0020, 0x80000000, 0),  # MLSPERR + HFSR.DEBUGEVT -> DEBUGEVT wins
+]
+
+
 def _declared_divergence(cfsr: int, theirs_root_cause: str) -> str | None:
     """Which tan-cli#616 divergence class this case falls into, or `None`.
 
@@ -243,6 +280,7 @@ def test_decode_diverges_from_the_sdk_original_only_where_tan_cli_616_declares()
         (0x2000, 0, 0),           # LSPERR alone
         (0x8000, 0, 0x2),         # BFARVALID (no cause) + DFSR BKPT
     ]
+    cases += _TWO_BIT_PRECEDENCE_CASES
 
     mismatches: list[str] = []
     classes: set[str] = set()
@@ -438,6 +476,43 @@ def test_a_cfsr_cause_bit_with_no_ladder_branch_still_beats_forced():
         ]
     )
     assert port._root_cause(report) == "FUTUREBIT set (UFSR): A bit from 2027."
+
+
+#: The two HFSR causes that keep their precedence over the new lazy-FP
+#: branches, verbatim.
+_VECTTBL_ROOT_CAUSE = (
+    "Vector-table read fault -- a bus error reading an exception vector (VTOR points at bad "
+    "memory, or the vector table is unmapped)."
+)
+_DEBUGEVT_ROOT_CAUSE = (
+    "Debug event with no debugger attached -- a stray BKPT or a watchpoint firing in a "
+    "free-running build."
+)
+
+
+@pytest.mark.parametrize(
+    ("cfsr", "hfsr", "expected"),
+    [
+        (0x2000, 0x00000002, _VECTTBL_ROOT_CAUSE),   # LSPERR  + VECTTBL
+        (0x0020, 0x00000002, _VECTTBL_ROOT_CAUSE),   # MLSPERR + VECTTBL
+        (0x2000, 0x80000000, _DEBUGEVT_ROOT_CAUSE),  # LSPERR  + DEBUGEVT
+        (0x0020, 0x80000000, _DEBUGEVT_ROOT_CAUSE),  # MLSPERR + DEBUGEVT
+    ],
+)
+def test_vecttbl_and_debugevt_keep_their_precedence_over_a_lazy_fp_fault(cfsr, hfsr, expected):
+    """The new LSPERR/MLSPERR branches sit at the BOTTOM of the ladder, below
+    `VECTTBL` and `DEBUGEVT` as well as below every CFSR branch.
+
+    A bad VTOR / unmapped vector table, and a stray BKPT in a free-running
+    build, are both more specific findings than "something faulted during the
+    deferred FP push" -- and, decisively, both are answers upstream ALREADY
+    gave. Overriding them would be a third divergence class that tan-cli#616
+    never asked for and that nothing in the issue justifies.
+
+    Oracle-free on purpose: the live sweep that also covers these words skips
+    without an alp-sdk checkout, and this precedence must be pinned on every
+    machine, not only one with a sibling checkout on disk."""
+    assert port.decode(cfsr=cfsr, hfsr=hfsr).root_cause == expected
 
 
 def test_an_address_valid_bit_is_never_announced_as_the_root_cause():

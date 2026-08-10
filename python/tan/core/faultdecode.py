@@ -296,19 +296,35 @@ def _root_cause(report: FaultReport) -> str:
     if report.has("UNDEFINSTR"):
         return ("Undefined instruction -- a corrupted/wild PC executed a bad opcode, or code was "
                 "built for a different ISA than the running core.")
-    # LAST of the CFSR causes, on purpose (tan-cli#616). The ladder is
-    # most-specific-first, and a lazy-FP-preservation fault names WHEN the
-    # fault was taken rather than WHAT the code did wrong -- so it answers only
-    # when no other CFSR bit can. That placement is also what keeps the
-    # divergence from alp-sdk minimal and legible: it changes the answer for
-    # exactly the words upstream had no answer for (LSPERR/MLSPERR as the only
-    # cause bits, which fell through to `FORCED` or to the bare `<NAME> set
-    # (<REG>)` fallback), and leaves every existing precedence untouched. An
-    # earlier draft placed these beside the MSTKERR/STKERR stacking family; the
-    # live-oracle sweep in `tests/core/test_faultdecode.py` caught that it also
-    # reordered LSPERR ahead of UNALIGNED/INVSTATE/NOCP on CFSR words where
-    # upstream already had a perfectly good answer, which is scope #616 never
-    # asked for.
+    if report.has("VECTTBL"):
+        return ("Vector-table read fault -- a bus error reading an exception vector (VTOR points at "
+                "bad memory, or the vector table is unmapped).")
+    if report.has("DEBUGEVT"):
+        return ("Debug event with no debugger attached -- a stray BKPT or a watchpoint firing in a "
+                "free-running build.")
+    # LAST of the CAUSES -- below VECTTBL and DEBUGEVT as well as below every
+    # CFSR branch, on purpose (tan-cli#616). The ladder is most-specific-first,
+    # and a lazy-FP-preservation fault names WHEN the fault was taken rather
+    # than WHAT the code did wrong, so it answers only when nothing else can.
+    # `VECTTBL` (VTOR points at bad memory, or the vector table is unmapped)
+    # and `DEBUGEVT` (a stray BKPT in a free-running build) are both more
+    # specific findings than "something faulted during the deferred FP push",
+    # so both keep their existing precedence over these two.
+    #
+    # That placement is also what keeps the divergence from alp-sdk minimal and
+    # checkable: it changes the answer for exactly the words upstream had no
+    # answer for (LSPERR/MLSPERR as the only cause bits, which fell through to
+    # `FORCED` or to the bare `<NAME> set (<REG>)` fallback) and leaves every
+    # existing precedence untouched -- a claim the live-oracle sweep in
+    # `tests/core/test_faultdecode.py` enforces rather than merely asserts.
+    #
+    # Two earlier drafts got this wrong in the same way, by inserting rather
+    # than deciding. The first placed these beside the MSTKERR/STKERR stacking
+    # family, which reordered LSPERR ahead of UNALIGNED/INVSTATE/NOCP; the
+    # sweep caught it. The second placed them here but ABOVE VECTTBL/DEBUGEVT,
+    # which silently overrode both on two-bit words like
+    # `cfsr=0x2000 hfsr=0x2` -- and the sweep did NOT catch that, because it
+    # never paired two bits. It does now (`_TWO_BIT_PRECEDENCE_CASES`).
     if report.has("LSPERR"):
         return (f"Bus fault while lazily preserving the floating-point context{addr or ''} -- the "
                 "deferred push of the FP registers into the space the exception frame reserved for "
@@ -320,12 +336,6 @@ def _root_cause(report: FaultReport) -> str:
                 "the MPU forbids the deferred push of the FP registers into the space the exception "
                 "frame reserved for them (wrong region permissions, or a stack that has overflowed "
                 "out of its region).")
-    if report.has("VECTTBL"):
-        return ("Vector-table read fault -- a bus error reading an exception vector (VTOR points at "
-                "bad memory, or the vector table is unmapped).")
-    if report.has("DEBUGEVT"):
-        return ("Debug event with no debugger attached -- a stray BKPT or a watchpoint firing in a "
-                "free-running build.")
     if report.has("FORCED") and not _cfsr_names_a_cause(report):
         return ("Forced HardFault -- a configurable fault escalated but its own status bits are clear; "
                 "the escalation usually means faults are disabled (SHCSR) or it faulted at priority -1.")

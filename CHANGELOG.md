@@ -196,20 +196,38 @@ All notable changes to `tan` are documented here. Format follows
   were the only two CFSR cause bits with no branch in the root-cause ladder, so
   `--cfsr 0x2000 --hfsr 0x40000000` answered `Forced HardFault -- ... its own
   status bits are clear`, which was both the least actionable half of the
-  registers and, with LSPERR set, false. They now have real branches — carrying
-  the BFAR/MMFAR address the old fallback threw away — placed last among the
-  CFSR causes, and `FORCED` is the headline only when CFSR names no cause at
-  all. The escalation is not lost: it is still reported, verbatim, as its own
-  `[HFSR] FORCED (bit 30)` entry under `Set flags:`, which is where a qualifier
-  belongs. An address-VALID bit (`BFARVALID`/`MMARVALID`) is likewise never
-  announced as a root cause. This DIVERGES from alp-sdk's
-  `scripts/alp_cli/faultdecode.py`, deliberately and by a maintainer decision
-  reserved for it in #539; the upstream carries the same defect and should
-  follow. The divergence is policed rather than described — a live-oracle sweep
-  fails on any difference outside the two declared classes, and it can fail
-  again at all because the same change fixed the `os.environ` read that had
-  been skipping every oracle re-check in that module unconditionally. Two
-  fixture cases re-recorded, `root_cause` only, with a `PROVENANCE.txt`.
+  registers and, with LSPERR set, self-contradicting — the same screen printed
+  `[HFSR] FORCED (bit 30): ... the real cause is in CFSR above` two rows higher.
+  They now have real branches — carrying the BFAR/MMFAR address the old
+  fallback threw away — placed at the BOTTOM of the whole cause ladder, below
+  `VECTTBL` and `DEBUGEVT` as well as below every CFSR branch, so that every
+  existing precedence is genuinely untouched and the change moves the answer
+  for exactly the words upstream had no answer for. `FORCED` is the headline
+  only when CFSR names no cause at all. The escalation is not lost: it is still
+  reported, verbatim, as its own `[HFSR] FORCED (bit 30)` entry under
+  `Set flags:`, which is where a qualifier belongs. An address-VALID bit
+  (`BFARVALID`/`MMARVALID`) is likewise never announced as a root cause. This
+  DIVERGES from alp-sdk's `scripts/alp_cli/faultdecode.py`, deliberately and by
+  a maintainer decision reserved for it in #539; the upstream carries the same
+  defect and should follow. The divergence is policed rather than described — a
+  live-oracle sweep fails on any difference outside the two declared classes,
+  and it now sweeps two-bit words as well as single-bit ones, which is the only
+  way it can reach the region where these branches meet `VECTTBL`/`DEBUGEVT`.
+  Two fixture cases re-recorded, `root_cause` only, with a `PROVENANCE.txt`.
+
+- **`tests/core/test_faultdecode.py`'s `ALP_SDK_ROOT` override was dead**, so
+  resolving the alp-sdk oracle fell entirely to the sibling-directory walk
+  beside it: `_resolve_oracle_path` read `os.environ` from inside a test body,
+  after the autouse `_scrub_sdk_discovery_env` fixture has deleted the
+  variable. The live oracle re-checks in that module therefore skipped whenever
+  `ALP_SDK_ROOT` named a checkout the sibling walk could not also reach on its
+  own. This was **not** a vacuous `sdk_parity` CI job: CI checks alp-sdk out to
+  `path: alp-sdk` inside the workspace, which that walk finds — measured with
+  the pre-fix reader in CI's exact layout, `18 passed, 0 skipped`. The fix
+  makes the documented override authoritative again and removes the silent
+  dependency on where the two checkouts sit relative to each other. The sibling
+  module `tests/commands/test_faultdecode_command.py` fixed the identical
+  defect in #254/#256; this copy was never brought along.
 
 - **`tan faultdecode` refuses a negative register value instead of decoding
   nonsense at exit 0.** `int(text, 16)` accepts a leading `-`, so
