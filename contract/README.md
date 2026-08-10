@@ -18,12 +18,15 @@ and diffs the complete envelope and process exit code. It runs in the normal
 Python CI job. A breaking shipping-wire change therefore fails before it can be
 discovered silently in the extension.
 
-**Five cases are the declared exception to that last sentence** — the
-`debug-config-preview-*` goldens (see "Known divergence" below). Their
-`test_envelope_matches_expected` runs are `pytest.mark.xfail(strict=True)`,
-so a NEW drift in `data.configuration`/`issues[]` beyond the declared one
-still stays green there; the live pin for those fields is elsewhere (also
-below), not this fixture.
+**One case is the declared exception to that last sentence** —
+`validate-offline-clean` (tan-cli#498). Its `test_envelope_matches_expected`
+run is `pytest.mark.xfail(strict=True)`, so a NEW drift in that envelope beyond
+the declared one stays green there; the live pin for its shape is
+`test_validate_command.py::test_text_and_json_formats_are_unchanged`, not this
+fixture. The five `debug-config-preview-*` goldens used to be exceptions too;
+they were re-recorded against the shipping CLI under tan-cli#502 and are real
+gates again (see "Why the five `debug-config-preview-*` goldens were
+re-recorded" below).
 
 **There is exactly ONE enforcer, and deleting the other did not weaken it.**
 `crates/tan-cli/tests/contract.rs` used to run the same fixtures against the
@@ -35,13 +38,16 @@ while `test_contract_envelopes.py` AUTO-DISCOVERS the same 17 by walking
 one did, and it is the gate a NEW case is covered by with nothing to remember
 to add.
 
-**What DID change is why the five `debug-config-preview-*` goldens are still
-frozen.** The reason used to be structural: those `expected.json` files were
-`crates/`'s golden too, `crates/` was frozen, and regenerating them measurably
-reddened `contract.rs` on every platform. That blocker is gone with
-`contract.rs`. The goldens below are still stale as of this writing and still
-`xfail(strict=True)`, but re-recording them is now an ordinary change to this
-directory rather than something policy forbids (tan-cli#502).
+**What DID change is that the five `debug-config-preview-*` goldens are no
+longer frozen.** The reason they were frozen was structural: those
+`expected.json` files were `crates/`'s golden too, `crates/` was frozen, and
+regenerating them measurably reddened `contract.rs` on every platform. That
+blocker went with `contract.rs`, so re-recording them became an ordinary change
+to this directory rather than something policy forbids — which is exactly what
+tan-cli#502 does: all five are re-recorded against the shipping Python CLI and
+gated normally again, with no `xfail` left on any of them. A re-recorded golden
+must carry a `PROVENANCE.txt` (see "Fixture shape" below); one without
+provenance is indistinguishable from a laundered one.
 
 ## The frozen wire vocabulary (issue #106)
 
@@ -131,10 +137,11 @@ create a second list that immediately drifts.
 | `data.checks[].{name,status}`, `data.summary.{pass,warn,fail}`, `data.nextSteps`, the literal check name `workspace` | `doctor --build` | `doctor_build_data_keys_the_extension_reads` — a KEY-SET assertion, not a golden, because doctor's values are host facts |
 | `data.written` | `build --materialise` | **NOT COVERED.** Reaching it needs a resolvable alp-sdk checkout and a Python spawn; nothing in this suite is allowed either. |
 | `data.releases` | `sdk list` | **NOT COVERED.** Hits the GitHub releases API. |
-| `data.configuration` (the `launch.json` entry alp-sdk-vscode#342 writes verbatim) | `debug-config` | **PARTIAL.** Oracle-parity fixtures covered only the bare `zephyr-mcu` invocation (all three servers) and `native-host`, and were themselves deleted with the oracle suite (tan-cli#269) — see "Known divergence: `debug-config-preview-*`" below for `zephyr-mcu-sdk-identity`, `baremetal-mcu` and `yocto-userspace`, which are not. The five `debug-config-preview-*` goldens above no longer pin this field either (`xfail(strict=True)`, same section). |
+| `data.configuration` (the `launch.json` entry alp-sdk-vscode#342 writes verbatim) | `debug-config` | goldens `debug-config-preview-{zephyr-mcu,zephyr-mcu-sdk-identity,baremetal-mcu,native-host,yocto-userspace}` — one per `--target-kind`, re-recorded against the shipping CLI under tan-cli#502 and no longer `xfail`'d, so an added key or a changed `program`/`executable` reds here. Oracle-parity fixtures additionally covered the bare `zephyr-mcu` invocation (all three servers) and `native-host`, but they consumed `crates/` and were deleted with it in tan-cli#269; these goldens are what survived. |
 
-The last two rows are stated rather than quietly omitted: an uncovered field
-that reads as covered is worse than one everybody knows about.
+The `build --materialise` and `sdk list` rows are stated rather than quietly
+omitted: an uncovered field that reads as covered is worse than one everybody
+knows about.
 
 `tan doctor` WITHOUT `--build` emits a different check vocabulary
 (`workspaceRoot`, `lldb`, `longPaths`, …). No consumer matches those by name,
@@ -163,15 +170,21 @@ exists so the extension's own contract test diffs against a
 published artefact instead of a hand-copied fixture that drifts. Fetch it at
 `https://github.com/alplabai/tan-cli/releases/download/<tag>/envelope-contract.json`.
 
-**Known limitation, inherited verbatim by this asset:** the packaging step
-re-packages `expected.json` files, not `tan`'s live output, so the published
-asset's five `envelopes["debug-config-preview-*"]` entries carry the same
-frozen-oracle values the "Known divergence" section documents below — they do
-not reflect the shipping Python CLI's `data.configuration.preLaunchTask` or
-`yocto-userspace`'s `issues[]` entry. A consumer reading this asset alone (the
-extension does not do this today — see below) would be told those fields
-never appear. They do; see "Known divergence" for what actually ships and
-what pins it live.
+The packaging step re-packages `expected.json` files, not `tan`'s live output,
+so **what the asset advertises is exactly as accurate as the goldens are**. The
+five `debug-config-preview-*` entries used to be the counter-example: they
+carried frozen-oracle values, so the asset told a consumer that
+`data.configuration.preLaunchTask` and `yocto-userspace`'s
+`debug-config.gdbserver-address-unresolved` issue never appear — while the same
+asset's `issueCodes` list published that very code. Both are corrected as of
+tan-cli#502; those five now carry the shipping CLI's own output.
+
+**Residual limitation:** `validate-offline-clean` is still recorded from the
+frozen oracle (`xfail`'d, tan-cli#498), so that one entry advertises an exit-0
+"clean" envelope for a `board.yaml` the shipping CLI refuses with exit 2
+`validate.schema-violation`. The rule for telling them apart: a golden with a
+`PROVENANCE.txt` beside it is a re-recording against the shipping CLI; a golden
+named in `DELIBERATE_DIVERGENCE` is not.
 
 ## Fixture shape (`envelopes/<case>/`)
 
@@ -182,6 +195,7 @@ One directory per case, mirroring the retired `cli-rs/contract` harness:
 | `args.txt` | The `tan` argv, **one token per line** (not shell-split — avoids quoting ambiguity across platforms). |
 | `expected.json` | The full golden envelope, normalized (see below). |
 | `expected.exit` | The golden process exit code, as a bare integer. |
+| *(when re-recorded)* `PROVENANCE.txt` | Why this golden was re-recorded, when, against which `tan` version, what moved, and why the previous recording was wrong. **Required on any golden re-recorded against the shipping CLI** — a re-recorded golden with no provenance is indistinguishable from a laundered one. Harness metadata, like the three rows above: skipped when fixture inputs are copied (`CASE_METADATA`). |
 | *(optional)* `board.yaml` / other fixture inputs | Copied into the isolated working directory the case runs in before `tan` is spawned. **Directories are copied recursively**, which is what lets a case ship a synthetic `sdk/` checkout (`scripts/alp_project.py` + `metadata/…` + `examples/…`) and pass `--sdk-root ./sdk`. That relative argv keeps the "no absolute paths in argv" rule intact — `data.sdkRoot` comes back as the literal `./sdk` on every platform. |
 
 `contract/fixtures/` (sibling directory) is not an envelope-golden directory.
@@ -270,89 +284,102 @@ just the one that captured it:
 | `debug-config-preview-zephyr-mcu-sdk-identity` | `debug-config --target-kind zephyr-mcu --server jlink --core m55_hp --sdk-root ./sdk --preview` (fixture SDK) | 0 | |
 | `debug-config-preview-baremetal-mcu` | `debug-config --target-kind baremetal-mcu --server openocd --preview` | 0 | |
 | `debug-config-preview-yocto-userspace` | `debug-config --target-kind yocto-userspace --server gdbserver --preview` | 0 | |
-| `debug-config-preview-native-host` | `debug-config --target-kind native-host --server none --preview` | 0 | One profile per `--target-kind`. Unlike the other cases these pin a `data` value that is itself a consumer ARTEFACT, not a report: alp-sdk-vscode#342 writes `data.configuration` into `launch.json` verbatim, so on a case *without* a declared divergence the golden pins the emitted key SET — an added key or a changed `program`/`executable` fails here instead of shipping. **All five of the rows above currently carry a declared, `xfail(strict=True)` divergence from this golden — see "Known divergence: `debug-config-preview-*`" right below this table for what actually ships and what pins it instead.** `--preview` reads no `board.yaml`, spawns no Python and probes no PATH; the only host-dependent output is the absolute working directory, tokenized as `__WORKDIR__` above. |
+| `debug-config-preview-native-host` | `debug-config --target-kind native-host --server none --preview` | 0 | One profile per `--target-kind`. Unlike the other cases these pin a `data` value that is itself a consumer ARTEFACT, not a report: alp-sdk-vscode#342 writes `data.configuration` into `launch.json` verbatim, so the golden pins the emitted key SET — an added key or a changed `program`/`executable` fails here instead of shipping. **All five were re-recorded against the shipping Python CLI under tan-cli#502 and carry a `PROVENANCE.txt`; none is `xfail`'d any more — see "Why the five `debug-config-preview-*` goldens were re-recorded" right below this table.** `--preview` reads no `board.yaml`, spawns no Python and probes no PATH; the only host-dependent output is the absolute working directory, tokenized as `__WORKDIR__` above. |
 | `presets-no-sdk` | `presets --format json` (no SDK resolvable) | 0 | Pins the `presets.sdk-root-unresolved` warning ON THE WIRE — the one frozen issue code reachable hermetically — plus the full `PresetsData` key set with `soms: []`. |
 | `presets-heterogeneous-som` | `presets --sdk-root ./sdk --format json` (fixture SDK) | 0 | Issue #106's worked example made executable. The fixture SoM has an `a55` (`machine:` → yocto) and an `m33` (`board:` → zephyr), so `data.soms[].cores[].{id,os}` carries two different values — rename `soms` or `cores` and this fails instead of quietly scaffolding a multi-core part single-core with no IPC. Also pins `boardLibraries` discovery. |
 | `explain-overview` | `explain --format json` | 0 | `data.available.projectTemplates`, the New Project wizard's starter list. Fully hermetic — the catalogues are static, no SDK involved. |
 | `examples-catalog` | `examples --sdk-root ./sdk --format json` (fixture SDK) | 0 | `data.examples[].sourceDir`, which is what `tan init --from-example <sourceDir>` is handed back; a rename breaks scaffolding from an SDK example. Also pins README-derived `title`/`description`. |
-| version-format tests (no fixture dir) | `--version` | 0 | `python/tests/test_cli_skeleton.py` and the Rust mirror assert the format rather than a literal version that changes every release. |
-| issue-code gates (no fixture dir) | — | — | Python AST gates check the shipping emit sites; `contract.rs` checks Rust-owned registry entries. They prove spelling/registration, while command tests prove reachability. |
-| `doctor_build_data_keys_the_extension_reads` (in `contract.rs`, no fixture dir) | `doctor --build --format json` | — | KEY-SET assertion, not a value diff: doctor's values are host facts (what is on PATH, whether a Zephyr workspace exists), its key names are not. Covers `data.summary.{pass,warn,fail}`, `data.nextSteps`, `data.checks[].{name,status}` and the literal check name `workspace`. |
+| version-format tests (no fixture dir) | `--version` | 0 | `python/tests/test_cli_skeleton.py` asserts the format rather than a literal version that changes every release. (A Rust mirror of it existed until tan-cli#269 deleted `crates/`.) |
+| issue-code gates (no fixture dir) | — | — | Python AST gates check the shipping emit sites. They prove spelling/registration, while command tests prove reachability. The Rust half, which checked the registry entries the frozen oracle owned, went with `crates/` in tan-cli#269 — see the `emittedBy` note under "Frozen issue codes". |
+| doctor `--build` key set (no fixture dir) | `doctor --build --format json` | — | KEY-SET assertion, not a value diff: doctor's values are host facts (what is on PATH, whether a Zephyr workspace exists), its key names are not. Covers `data.summary.{pass,warn,fail}`, `data.nextSteps`, `data.checks[].{name,status}` and the literal check name `workspace`, in `python/tests/commands/test_doctor_command.py` — the envelope `data` key set and `summary`'s `{pass,warn,fail}` shape, plus the build preflight's leading check names (`sdk`, `boardYaml`, `workspace`) in `test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host`. The single named Rust assertion that used to own this row, `doctor_build_data_keys_the_extension_reads`, went with `crates/` in tan-cli#269; the Python coverage is spread across that module rather than concentrated in one test. |
 
-### Known divergence: `debug-config-preview-*` (tan-cli#502)
+### Why the five `debug-config-preview-*` goldens were re-recorded (tan-cli#502)
 
-The five `debug-config-preview-*` goldens above no longer describe the
-shipping Python CLI, on purpose, and are marked
-`pytest.mark.xfail(strict=True)` in `test_contract_envelopes.py`'s
-`DELIBERATE_DIVERGENCE` (see that dict's own comment for the full reasoning).
-Two distinct, unrelated causes, both legitimate shipped-behaviour changes —
-neither is a tan regression, so neither golden has been re-recorded yet. (The
-intro above used to give a second, structural reason — re-recording reddened
-the frozen `crates/` oracle test — which no longer applies; that test is
-deleted.):
+All five `debug-config-preview-*` goldens above were **re-recorded against the
+shipping Python CLI** (`tan 0.5.2-rc1.dev0`) on 2026-08-09 and are no longer
+`xfail`'d — `data.configuration` and `issues[]` are real gates again on every
+one of the five, including the three (`zephyr-mcu-sdk-identity`,
+`baremetal-mcu`, `yocto-userspace`) that never had an oracle-parity fixture at
+all. Each case carries a `PROVENANCE.txt` recording what moved, when, against
+which version, and why the previous recording was wrong.
+
+What they were re-recorded FROM, and why that recording was wrong — two
+distinct, unrelated causes, both legitimate shipped-behaviour changes:
 
 - **`zephyr-mcu`, `zephyr-mcu-sdk-identity`, `baremetal-mcu`, `native-host`**
-  (tan-cli#138): `data.configuration.preLaunchTask` is now present, restoring
-  the v0.3.1 default the frozen oracle had made opt-in (tan-cli#85).
-  alp-sdk-vscode's task providers depend on exactly these labels
-  (`docs/DEBUG.md:326,342,360,392` there) and never pass
-  `--pre-launch-task`, so shipping without the default silently breaks
-  build-then-debug. Live pin: `python/tests/core/test_debug_launch.py`
-  (`DEFAULT_PRE_LAUNCH_TASK`, key position via `runToEntryPoint`/
-  `preLaunchTask` adjacency) and `python/tests/commands/
-  test_debug_config_command.py` at the envelope level for `zephyr-mcu`.
+  (tan-cli#138): `data.configuration.preLaunchTask` is present and the old
+  golden omitted it. tan-cli#85 had made it opt-in; #138 restored the v0.3.1
+  default for the three build target kinds because alp-sdk-vscode's task
+  providers depend on exactly these labels (`docs/DEBUG.md:326,342,360,392`
+  there) and never pass `--pre-launch-task`, so shipping without the default
+  silently breaks build-then-debug. Emitted values, verbatim: `alp: build
+  active target` (both `zephyr-mcu` cases), `alp: build baremetal target`,
+  `alp: build native_sim target`. Live unit pins for the value itself:
+  `python/tests/core/test_debug_launch.py` (`DEFAULT_PRE_LAUNCH_TASK`, key
+  position via `runToEntryPoint`/`preLaunchTask` adjacency) and
+  `python/tests/commands/test_debug_config_command.py` at the envelope level
+  for `zephyr-mcu`.
 
-  **Oracle-parity coverage of the REST of the envelope was narrower than
-  this bullet's grouping suggests, and is now zero — read it per case, not per
-  cause.** It came from
+  **Why re-recording all five mattered, and not just the two the cause-grouping
+  makes salient: oracle-parity coverage of the REST of the envelope was
+  narrower PER CASE than that grouping suggests, and is now zero.** It came
+  from
   `python/tests/parity/test_oracle_parity.py::test_debug_config_resolution_matches_rust`
   and `::test_debug_config_native_host_preview_global_format_matches_rust`,
-  deleted with the oracle suite in tan-cli#269. They diffed
-  the WHOLE envelope against the live frozen oracle with `preLaunchTask`
-  stripped out first, so any OTHER field drifting (a changed `executable`, a
-  dropped `servertype`, a stray key) still fails there — but only for the
-  **bare** `zephyr-mcu` invocation (jlink/openocd/pyocd, no `--sdk-root`/
-  `--core`) and for `native-host`. `zephyr-mcu-sdk-identity` shares the
-  `preLaunchTask` cause but is a DIFFERENT parity case (it resolves
-  `configuration.device` and `project.boardYaml` off the fixture SDK, which
-  the bare `zephyr-mcu` case does not exercise); that resolution is unit-pinned
-  in `python/tests/commands/test_debug_config_command.py` but has no live
-  oracle-parity fixture. `baremetal-mcu`'s full envelope has no such fixture
-  either — only its `preLaunchTask` value is unit-pinned. Both gaps leave an
-  unrelated drift in that target's `data.configuration` unguarded outside this
-  xfail'd golden. Filed as tan-cli#529 rather than fixed here: extending
-  `test_debug_config_resolution_matches_rust`'s parametrization to
-  `zephyr-mcu-sdk-identity` and `baremetal-mcu` needs, respectively, an
-  `--sdk-root`-driven variant and a `system-manifest.yaml` fixture shaped for
-  the baremetal target class — both beyond this golden-accuracy fix.
+  both deleted with the oracle suite in tan-cli#269. They diffed the WHOLE
+  envelope against the live frozen oracle with `preLaunchTask` stripped out
+  first, so any OTHER field drifting (a changed `executable`, a dropped
+  `servertype`, a stray key) failed there — but only for the **bare**
+  `zephyr-mcu` invocation (jlink/openocd/pyocd, no `--sdk-root`/`--core`) and
+  for `native-host`. `zephyr-mcu-sdk-identity` shares the `preLaunchTask` cause
+  but was a DIFFERENT parity case (it resolves `configuration.device` and
+  `project.boardYaml` off the fixture SDK, which the bare `zephyr-mcu` case
+  does not exercise), and it never had a full-envelope parity fixture; that
+  resolution is unit-pinned in
+  `python/tests/commands/test_debug_config_command.py` and nowhere else.
+  `baremetal-mcu`'s full envelope never had one either — only its
+  `preLaunchTask` value was unit-pinned. So for those two cases an
+  unrelated drift anywhere in `data.configuration` was unguarded outside the
+  golden, and once the parity tests went with `crates/` these re-recorded
+  goldens became the only envelope-level gate they have. Extending the parity
+  parametrization was filed as tan-cli#529 while that suite still existed; the
+  suite is gone, so the goldens are the coverage.
 - **`yocto-userspace`** (tan-cli#321, an unrelated cause from the four above):
-  `data.configuration` matches the golden exactly — this target gets no
-  `preLaunchTask` default at all — but the envelope now also carries a
+  `data.configuration` was already correct — this target deliberately gets no
+  `preLaunchTask` default at all — but the envelope also carries a
   `debug-config.gdbserver-address-unresolved` info issue (registered
   `reserved`/`consumer: none` in `issue-codes.json`) when the default
-  `<host>:<port>` placeholder is still unresolved, which the frozen oracle
-  predates and never emits. Live pin:
-  `python/tests/commands/test_debug_config_command.py` asserts the issue's
-  code, severity and message end to end, and its absence once
-  `--gdbserver-address` is supplied. **That pin covers only `issues[]`.**
-  Like `baremetal-mcu`, `yocto-userspace` has no live oracle-parity fixture
-  for the rest of its envelope (`data.configuration.executable`, `cwd`, …), so
-  an unrelated drift there is also unguarded outside this xfail'd golden — the
-  same tan-cli#529 follow-up covers extending parity coverage to this case
-  too.
+  `<host>:<port>` placeholder is still unresolved, and the old golden said
+  `issues: []`. That made the published asset self-contradictory: it listed the
+  code in `issueCodes` while its envelope told the consumer this command
+  reports nothing.
 
-Consequence for consumers: the published `envelope-contract.json` release
-asset's five corresponding entries (see "Published as a release asset" above)
-inherit the same frozen values, so a consumer reading that asset alone is
-told these fields never appear. alp-sdk-vscode does not fetch this asset
-programmatically today (only a checklist line in its own
-`docs/CONTRIBUTING.md`), so the practical exposure is documentation drift, not
-a live break — but should the extension start consuming it, these five
-entries would need filtering or annotation first. Whether to change what
-`release.yml`'s `Bundle the envelope contract` step publishes for these five
-cases (e.g. skip them, or publish a second "shipping" value alongside the
-frozen one) is an open question for whoever owns that consumer contract, not
-resolved by this section.
+Both were previously handled by DECLARING the difference as a strict xfail
+rather than re-recording. That is what this change reverses, and the reason is
+not tidiness: a strict xfail fails only on XPASS, so it pinned "this envelope
+differs from its golden somehow" and nothing finer. Every other field in all
+five — a changed `executable`, a dropped `servertype`, a stray new key — was
+unguarded for as long as the declaration stood, and `data.configuration` is the
+value alp-sdk-vscode#342 writes into `launch.json` verbatim. The stale values
+also shipped: `release.yml`'s `Bundle the envelope contract` step re-packages
+`expected.json` into the published `envelope-contract.json` asset.
+
+Recorded because it was the entire objection to re-recording for as long as it
+applied, and because it is the evidence these five goldens really did move: the
+frozen v0.4.1 oracle emitted neither the `preLaunchTask` nor the
+`gdbserver-address-unresolved` issue, so `crates/tan-cli/tests/contract.rs` —
+which held that oracle to these same `expected.json` files — went from **24
+passed; 0 failed** to **19 passed; 5 failed** when the re-record was first
+measured in-tree on 2026-08-09, the five failures being exactly these cases and
+nothing else. That harness, and the `cargo test --locked` CI job that ran it,
+were deleted in tan-cli#269. The disagreement therefore no longer exists
+anywhere: the Python conformance harness is the only gate over these goldens,
+it pins the SHIPPING wire, and the release assets ARE the Python program
+(PyInstaller freezes of `python/`, tan-cli#271). Nothing green depends on these
+five matching the retired oracle any more — and re-recording is what stops
+`data.configuration` losing its last envelope-level gate on the three cases
+(`zephyr-mcu-sdk-identity`, `baremetal-mcu`, `yocto-userspace`) that never had
+a parity fixture.
 
 Deliberately **outside the envelope**: nothing, as of tan-cli#399's close-out.
 `faultdecode` was the one verb here — its `--format json` used to print the
@@ -360,8 +387,9 @@ SDK's unwrapped fault report
 (`fault_detected`/`inputs`/`flags`/`addresses`/`root_cause`/`symbols`)
 verbatim, the output contract it inherited from the retired
 stdio-inheriting forward to `python -m alp_cli faultdecode` (the oracle mapped
-the global `--format json` onto the child's own `--json`,
-`crates/tan-cli/src/commands/sdk_cli.rs`) — but `faultdecode_cmd.py` now
+the global `--format json` onto the child's own `--json`, in the
+since-deleted `crates/tan-cli/src/commands/sdk_cli.rs`) — but
+`faultdecode_cmd.py` now
 treats `--format json` as a second, distinct spelling that wraps the report in
 the standard envelope; its OWN `--json` flag is the one that stays the
 unwrapped compatibility surface, unchanged, so a saved script or a pipe using
@@ -393,16 +421,23 @@ reading as coverage is how an inert gate survives.
 There is no `--bless` flag. To update a golden on
 purpose:
 
-1. Build `tan` and run the case's `args.txt` by hand from an empty directory,
-   with `SOURCE_DATE_EPOCH=0` and `HOME`/`USERPROFILE` pointed at another
-   empty directory, `--format json`.
+1. Run the case's `args.txt` through the **shipping Python CLI** by hand from an
+   empty directory, with `SOURCE_DATE_EPOCH=0` and `HOME`/`USERPROFILE` pointed
+   at another empty directory, `--format json`. (Reuse the conformance
+   harness's own `fresh_dir` / `copy_fixture_inputs` / `normalise` if you can —
+   that is how the tan-cli#502 re-record was captured, and it removes any chance
+   of the recording and the comparison disagreeing about isolation.)
 2. Copy the printed envelope into `expected.json`, converting any `\` path
    separator to `/` (Windows only — Unix output is already normalized).
 3. Update `expected.exit` if the exit code changed.
-4. Re-run `cd python && python -m pytest
+4. **Write or update the case's `PROVENANCE.txt`** — what was re-recorded, on
+   what date, against which `tan` version, and why the previous recording was
+   wrong. This is not optional bookkeeping: a re-recorded golden with no
+   provenance is indistinguishable from a laundered one.
+5. Re-run `cd python && python -m pytest
    tests/conformance/test_contract_envelopes.py -q`. That is the whole gate —
    the second, `cargo`-side harness this step used to name went with `crates/`
    in tan-cli#269.
-5. Explain the *intentional* shape change in the commit message — a golden
+6. Explain the *intentional* shape change in the commit message — a golden
    update with no explanation of why the wire format changed is exactly the
    drift this gate exists to catch.

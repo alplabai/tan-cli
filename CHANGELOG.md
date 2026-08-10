@@ -124,6 +124,29 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **The five `debug-config-preview-*` goldens are re-recorded against the
+  shipping CLI and are real gates again.** They described the frozen Rust
+  v0.4.1 oracle, not the binary that ships: four were missing
+  `data.configuration.preLaunchTask` (tan-cli#138 restored the v0.3.1 default
+  that tan-cli#85 had made opt-in — `alp: build active target`, `alp: build
+  baremetal target`, `alp: build native_sim target`) and `yocto-userspace`
+  recorded `issues: []` where the CLI emits tan-cli#321's
+  `debug-config.gdbserver-address-unresolved`. The difference had been
+  DECLARED as `xfail(strict=True)` instead, which fails only on XPASS and so
+  pinned "this envelope differs somehow" and nothing finer — leaving every
+  other field, including the `data.configuration` alp-sdk-vscode#342 writes
+  into `launch.json` verbatim, ungated on the shipping side; and the stale
+  values shipped, because `release.yml`'s `Bundle the envelope contract` step
+  re-packages `expected.json` into the published `envelope-contract.json`.
+  Re-recording was blocked only because the same files held the frozen oracle
+  through `crates/tan-cli/tests/contract.rs`; tan-cli#269 deleted `crates/`,
+  so that blocker is gone. All five carry a `PROVENANCE.txt` recording what
+  moved, when, against which version, and why the previous recording was
+  wrong. `contract/README.md`, the conformance harness's own comments and the
+  `Bundle the envelope contract` step comment are updated to match — this
+  supersedes the coverage description the earlier #502 entry below records.
+  (#502)
+
 - **The tan-cli#490 installer test that reds on macOS from the Rust-oracle
   retirement onward now probes for the shell capability it needs instead of
   merely for `bash` on `PATH`.** `test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic`
