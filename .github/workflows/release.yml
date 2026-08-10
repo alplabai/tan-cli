@@ -166,7 +166,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing in this job pushes; don't leave a git credential helper
           # configured with write-capable creds for a job that never uses it.
@@ -307,7 +307,7 @@ jobs:
             container: python:3.12-slim-bullseye
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing in this job pushes; don't persist write-capable creds a
           # PyInstaller build + its resolved deps never need (tan-cli#435).
@@ -493,7 +493,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # This job creates the Release/uploads assets through the GitHub
           # API (softprops/action-gh-release, actions/attest-build-provenance
@@ -781,7 +781,7 @@ jobs:
       # reports success while shipping nothing (#151).
       NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # `npm publish` authenticates via NODE_AUTH_TOKEN (npm registry
           # token), not a persisted git remote; nothing here pushes to the
