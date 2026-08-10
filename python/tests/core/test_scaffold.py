@@ -21,6 +21,7 @@ from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     TEMPLATE_IDS,
     CoresError,
+    ExampleReadError,
     PlannedFile,
     ScaffoldWriteError,
     TemplateDataError,
@@ -686,15 +687,96 @@ def test_from_example_leaves_a_built_in_place_example_s_build_tree_behind(tmp_pa
     assert planned == ["CMakeLists.txt", "board.yaml", "src/main.c"]
 
 
+def test_from_example_leaves_behind_the_out_dir_the_examples_own_readme_creates(
+    tmp_path,
+):
+    """**tan-cli#494 defect 1, residue.** The round of this fix that shipped with
+    tan-cli#583 transcribed FIVE of the SEVEN directory patterns alp-sdk's
+    `.gitignore` declares, while its own comment claimed the set was "EXACTLY
+    the five `.gitignore` patterns": `out/` (`.gitignore:4`) and `bwdt/`
+    (`.gitignore:6`) sit inside the very same `# Build directories` block as
+    `build/` and were both missed.
+
+    `out/` is the one that bites. It is not only a `west build -d out` spelling
+    -- `examples/camera-vision/ai-object-detection-realtime/README.md:83` tells
+    the customer, in the example's OWN instructions, to run `dxcom -m
+    yolov8n.onnx -c yolov8n_config.json -o out/` inside the example directory.
+    Intel HEX is ASCII, so an all-text `out/` copies SILENTLY: measured on that
+    example with `out/zephyr/zephyr.hex` + `out/CMakeCache.txt` present,
+    `tan init --from-example` returned `ok:true`, exit 0, `issues: []` and
+    planned both of them into the customer's brand new project. A stale
+    artefact from someone else's build, arriving as if it were the project's
+    own.
+    """
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+            "board.yaml": "som:\n  sku: E1M-AEN801\n",
+            "out/zephyr/zephyr.hex": ":020000040000FA\n:00000001FF\n",
+            "out/CMakeCache.txt": "CMAKE_BUILD_TYPE:STRING=\n",
+            "bwdt/report.txt": "artefact\n",
+        },
+    )
+
+    planned = sorted(f.relative_path for f in read_example_tree(source))
+
+    assert planned == ["CMakeLists.txt", "board.yaml", "src/main.c"]
+
+
+def test_from_example_no_longer_hard_fails_on_the_binary_blob_out_dir_carries(
+    tmp_path,
+):
+    """The loud half of the same residue. `dxcom -o out/` leaves a `.dxnn`
+    behind, which is binary, so before this fix the whole command died --
+    measured through the real CLI against a mirrored SDK root:
+
+        init.example-unreadable
+        Example 'camera-vision/ai-object-detection-realtime' could not be read:
+        .../out/yolov8n.dxnn: 'utf-8' codec can't decode byte 0xff in position
+        8: invalid start byte
+
+    exit 1, no project written. `--from-example` is the one init path that
+    requires a checkout, and it was broken by following the checked-out
+    example's own README.
+    """
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+        },
+    )
+    blob = source / "out" / "yolov8n.dxnn"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"\x7fELF\x02\x01\x01\x00\xff\xfe dxnn blob")
+
+    try:
+        files = read_example_tree(source)
+    except ExampleReadError as err:  # pragma: no cover -- the defect itself
+        pytest.fail(
+            f"a binary under the example's `out/` still aborts the whole command: "
+            f"{err}"
+        )
+
+    assert sorted(f.relative_path for f in files) == ["CMakeLists.txt", "src/main.c"]
+
+
 def test_from_example_keeps_a_hand_written_directory_that_merely_starts_with_build(
     tmp_path,
 ):
-    """The pruning list is EXACTLY alp-sdk's five `.gitignore` patterns
-    (`build/`, `build_*/`, `cmake-build-*/`, `twister-out/`, `twister-out.*/`)
-    and nothing more. An earlier cut of this fix also pruned `build-`, which
-    appears in no pattern there -- an invented rule that silently drops a
-    hand-written `build-utils/` from the customer's project, which is the same
-    damage as copying the build tree in, just in the other direction.
+    """The pruning list is EXACTLY alp-sdk's seven `.gitignore` DIRECTORY
+    patterns (`build/`, `build_*/`, `out/`, `cmake-build-*/`, `bwdt/`,
+    `twister-out/`, `twister-out.*/`) and nothing more. An earlier cut of this
+    fix also pruned `build-`, which appears in no pattern there -- an invented
+    rule that silently drops a hand-written `build-utils/` from the customer's
+    project, which is the same damage as copying the build tree in, just in the
+    other direction.
+
+    The five non-glob patterns must match EXACTLY, which is why `outputs/` and
+    `outbox/` are here beside `build-utils/`: adding `out` as a `startswith`
+    prefix rather than an exact name would have eaten both.
     """
     source = _example(
         tmp_path / "ex",
@@ -703,6 +785,9 @@ def test_from_example_keeps_a_hand_written_directory_that_merely_starts_with_bui
             "src/main.c": "int main(void) { return 0; }\n",
             "build-utils/gen.py": "print('hi')\n",
             "buildings.md": "not a build dir\n",
+            "outputs/report.md": "a hand-written outputs dir\n",
+            "outbox/note.md": "not `out/`\n",
+            "bwdtools/helper.py": "not `bwdt/`\n",
         },
     )
 
@@ -712,8 +797,114 @@ def test_from_example_keeps_a_hand_written_directory_that_merely_starts_with_bui
         "CMakeLists.txt",
         "build-utils/gen.py",
         "buildings.md",
+        "bwdtools/helper.py",
+        "outbox/note.md",
+        "outputs/report.md",
         "src/main.c",
     ]
+
+
+#: The two alp-sdk `.gitignore` headings that declare directories a built-in-
+#: place EXAMPLE can carry, each paired with a sentinel that must be found
+#: inside it. A block runs from its heading to the next blank line.
+#:
+#: Two blocks, not one, and the second is the reason this gate is shaped the
+#: way it is: `_EXAMPLE_BUILD_OUTPUT_DIRS` was transcribed from BOTH
+#: (`.gitignore:1-6` and `:34-39`), so gating only the first would leave the
+#: other half an ungated hand transcription -- exactly the defect class
+#: tan-cli#494 defect 1 is, one block over. The sentinel is what stops a
+#: renamed or restructured heading turning this into a silent pass on an empty
+#: read.
+_SDK_GITIGNORE_BLOCKS = (
+    ("# Build directories", "build/"),
+    ("# Zephyr / west workspace artefacts when this repo is the topdir.", ".west/"),
+)
+
+#: Directory patterns inside those blocks that are deliberately NOT pruned,
+#: each with the reason it cannot be example build output.
+#:
+#: All three are in the second block, which -- unlike the first -- is not
+#: build output wholesale: it is what west/Zephyr leave when ALP-SDK ITSELF is
+#: the west topdir, i.e. at the checkout root, never inside an
+#: `examples/<x>/` directory. `.west/` is the workspace marker (tan writes its
+#: own `tan-workspace-sdk` record into one), `modules/` is where `west update`
+#: clones the manifest projects, and `zephyr/.cache/` belongs to the vendored
+#: Zephyr tree. `modules` in particular must NOT become a pruned name: it is an
+#: ordinary source directory inside a project (`tan scaffold` itself writes
+#: `src/modules/<nm>/<nm>.c`), and pruning by name matches at every depth.
+#:
+#: An entry appearing in either block that is neither pruned nor listed here
+#: fails the gate, so the next one is a decision rather than an omission.
+_SDK_NOT_EXAMPLE_BUILD_OUTPUT = (".west/", "modules/", "zephyr/.cache/")
+
+
+def _sdk_gitignore_block(lines: list[str], heading: str) -> list[str]:
+    """The patterns alp-sdk's `.gitignore` declares under `heading`, up to the
+    next blank line. Empty when the heading is absent -- the caller's sentinel
+    assertion is what turns that into a failure rather than a silent pass."""
+    if heading not in lines:
+        return []
+    block = []
+    for line in lines[lines.index(heading) + 1 :]:
+        if not line.strip():
+            break
+        block.append(line.strip())
+    return block
+
+
+@pytest.mark.skipif(SDK is None, reason="needs ALP_SDK_ROOT / ALP_SDK_PARITY_ROOT")
+def test_the_prune_list_still_covers_alp_sdk_s_own_build_directory_gitignore_blocks():
+    """The drift gate the first cut of this fix did not have.
+
+    `_EXAMPLE_BUILD_OUTPUT_DIRS`/`_PREFIXES` is a hand transcription of another
+    repo's `.gitignore`, and tan-cli#583 transcribed it SHORT -- five of seven
+    -- while asserting completeness in its own comment. Nothing measured that
+    claim, so `out/` shipped unpruned. This re-reads BOTH source blocks out of
+    the bound checkout and fails when alp-sdk declares a directory that is
+    neither pruned nor recorded as deliberately kept.
+
+    Deliberately NOT a sweep of the whole `.gitignore`: that file also declares
+    `.vscode/*`, `vendors/`, licence-gated wheels and key material, none of
+    which an example carries. The two blocks in `_SDK_GITIGNORE_BLOCKS` are the
+    scope, and each is asserted to have been FOUND before its contents are
+    judged.
+    """
+    assert SDK is not None
+    lines = (SDK / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    patterns: list[str] = []
+    for heading, sentinel in _SDK_GITIGNORE_BLOCKS:
+        block = _sdk_gitignore_block(lines, heading)
+        assert sentinel in block, (
+            f"alp-sdk's '{heading}' block was not found, or no longer contains "
+            f"'{sentinel}' -- the heading moved or the block was restructured, "
+            f"and this gate was about to pass on an empty read. Re-derive it "
+            f"from {SDK / '.gitignore'}."
+        )
+        patterns.extend(block)
+
+    unknown = []
+    for pattern in patterns:
+        if not pattern.endswith("/"):
+            continue  # a FILE pattern (e.g. `*.out`) -- out of scope, see the
+            # constant's own comment in tan/core/scaffold.py.
+        if pattern in _SDK_NOT_EXAMPLE_BUILD_OUTPUT:
+            continue
+        name = pattern[:-1]
+        probe = name.replace("*", "x") if "*" in name else name
+        if not scaffold_module._is_build_output_dir(probe):
+            unknown.append(pattern)
+
+    assert unknown == [], (
+        f"alp-sdk declares director{'y' if len(unknown) == 1 else 'ies'} "
+        f"{unknown} that tan's `--from-example` prune list does not know, so "
+        f"`tan init --from-example` would copy {'it' if len(unknown) == 1 else 'them'} "
+        f"into a customer's new project. Either add the name to "
+        f"`_EXAMPLE_BUILD_OUTPUT_DIRS` (exact) / `_EXAMPLE_BUILD_OUTPUT_PREFIXES` "
+        f"(glob) in tan/core/scaffold.py, or -- if it is not example build "
+        f"output -- record it in `_SDK_NOT_EXAMPLE_BUILD_OUTPUT` above WITH the "
+        f"reason. See tan-cli#494 defect 1."
+    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
