@@ -258,10 +258,32 @@ def _clean_str(value: Any) -> str | None:
 
 
 def _as_f64(value: Any) -> float | None:
-    """serde_json's `as_f64`: a JSON number, never a bool and never a string."""
+    """serde_json's `as_f64`: a JSON number, never a bool and never a string.
+
+    The `float()` is guarded (tan-cli#499 defect 8, REVIEW round). Python's
+    `json` reads an arbitrarily long integer literal exactly, so a 400-digit
+    `mram_mb` / `soc_flash_mb` / `tcm_kb` in a SoC JSON arrives here as an
+    `int` that `float()` cannot represent -- `OverflowError: int too large to
+    convert to float`, which escaped to `size`'s catch-all and collapsed the
+    WHOLE run: measured `exit 5 size.internal-failure`, `data.slices` empty
+    (every other slice's measurement discarded). The first pass at defect 8
+    fixed `core/size.py`'s three casts and left this one, so the same input
+    class still reached the same exit-5 point through a different door.
+
+    `None` -- "no such number" -- is the answer, which is what a value serde_json
+    could not have produced deserves; `resolve_budget` then leaves that region
+    unresolved instead of guessing. Measured after: the same SoC JSON is
+    `exit 0`, other slices intact. Still not byte-identical to the oracle, which
+    refuses the whole document and answers `budget_note: "unreadable SoM preset
+    for <SKU>"` -- that residual lives in `_read_soc`'s degrade-to-empty (and in
+    `json.loads` accepting literals serde_json rejects), not here.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        return float(value)
+    except OverflowError:
+        return None
 
 
 def _read_soc(path: str) -> tuple[list[dict], float | None, list[tuple[str, float | None]]]:

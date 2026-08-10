@@ -67,7 +67,7 @@ that registry and this `expected.json` into the SAME
 told a consumer this command reports no issues at all. It reports one.
 
 And, as with the four siblings, the strict xfail fails only on XPASS, so it
-pinned nothing beyond "the envelope differs somehow". This case has no live
+pinned nothing beyond "the envelope differs somehow". This case never had an
 oracle-parity fixture: the tan-cli#321 issue itself is unit-pinned in
 `python/tests/commands/test_debug_config_command.py`, but the rest of the
 envelope — `data.configuration.program`, `cwd`, `MIMode`,
@@ -95,9 +95,9 @@ does not promote it — nothing binds it with `===` yet — so renaming or dropp
 it is still not a breaking wire change. Promote it to `frozen` when a consumer
 actually binds it.
 
-DIVERGENCE FROM crates/ — read this before "fixing" a red cargo test
---------------------------------------------------------------------
-`crates/tan-cli/tests/contract.rs` holds the FROZEN Rust v0.4.1 oracle to this
+DIVERGENCE FROM crates/ — historical, closed by tan-cli#269
+------------------------------------------------------------
+`crates/tan-cli/tests/contract.rs` held the FROZEN Rust v0.4.1 oracle to this
 same `expected.json` file. Measured here on 2026-08-09, BEFORE the re-record:
 
   * `cargo test --locked -p alp-tan-cli --test contract` -> 24 passed; 0 failed.
@@ -105,19 +105,14 @@ same `expected.json` file. Measured here on 2026-08-09, BEFORE the re-record:
     under the same harness conditions produced an envelope EQUAL to the old
     golden — `issues: []`, no `preLaunchTask`.
 
-So after this re-record the oracle no longer matches the golden, and
-`contract.rs::debug_config_preview_yocto_userspace` FAILS. That is deliberate
-and authorised, not an accident:
+That measurement is why re-recording was blocked for as long as it was: it
+would have turned `contract.rs::debug_config_preview_yocto_userspace` red. It
+no longer can. tan-cli#269 deleted `crates/` and that harness outright, so
+there is no second gate left to disagree with this golden and no red `cargo`
+job to "fix" by reverting it. The Python conformance harness is the only gate
+over this file, it pins the SHIPPING wire, and the release assets ARE the
+Python program (PyInstaller freezes of `python/`, tan-cli#271).
 
-  * the Python conformance harness pins the SHIPPING wire, and the release
-    assets ARE the Python program (PyInstaller freezes of `python/`,
-    tan-cli#271) — the Rust binary ships to nobody;
-  * `crates/` is FROZEN and its contract gate is scheduled for deletion under
-    tan-cli#269. Landing this re-record BEFORE that deletion is what stops
-    `data.configuration` coverage silently dropping to zero in the gap — and for
-    this case, which has no parity fixture, that Rust gate is the ONLY
-    envelope-level gate it has today.
-
-Do NOT re-green the Rust harness by editing `crates/`, and do NOT re-green it by
-reverting this golden. The two harnesses disagree on this case on purpose; the
-Rust one is the side that is wrong about what ships.
+The oracle-parity fixtures went with `crates/` in the same issue, so for this
+case — which never had one — this re-recorded golden is now the ONLY
+envelope-level gate on its `data.configuration`.

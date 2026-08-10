@@ -47,10 +47,10 @@ map.
 
 This case had the LEAST left standing under that xfail of the five. A strict
 xfail fails only on XPASS, so it pinned only "the envelope differs somehow",
-and `baremetal-mcu` has no live oracle-parity fixture at all
-(`test_debug_config_resolution_matches_rust` covers the bare `zephyr-mcu`
+and `baremetal-mcu` never had an oracle-parity fixture at all
+(`test_debug_config_resolution_matches_rust` covered the bare `zephyr-mcu`
 invocation; `test_debug_config_native_host_preview_global_format_matches_rust`
-covers `native-host`). Only this target's `preLaunchTask` VALUE was unit-pinned
+covered `native-host`; both went with `crates/` in tan-cli#269). Only this target's `preLaunchTask` VALUE was unit-pinned
 in `python/tests/core/test_debug_launch.py`. Everything else in its
 `data.configuration` — `executable` `${workspaceFolder}/build/baremetal/app.elf`,
 `servertype`, `configFiles` — and any key added to it was caught by nothing at
@@ -73,9 +73,9 @@ tan-cli#535 deliberately corrected the divergence RECORD (the reason strings and
 `contract/README.md`) without re-recording, and says so in its own body. This is
 the re-recording it declined to do.
 
-DIVERGENCE FROM crates/ — read this before "fixing" a red cargo test
---------------------------------------------------------------------
-`crates/tan-cli/tests/contract.rs` holds the FROZEN Rust v0.4.1 oracle to this
+DIVERGENCE FROM crates/ — historical, closed by tan-cli#269
+------------------------------------------------------------
+`crates/tan-cli/tests/contract.rs` held the FROZEN Rust v0.4.1 oracle to this
 same `expected.json` file. Measured here on 2026-08-09, BEFORE the re-record:
 
   * `cargo test --locked -p alp-tan-cli --test contract` -> 24 passed; 0 failed.
@@ -83,19 +83,14 @@ same `expected.json` file. Measured here on 2026-08-09, BEFORE the re-record:
     under the same harness conditions produced an envelope EQUAL to the old
     golden — `preLaunchTask` absent, `issues: []`.
 
-So after this re-record the oracle no longer matches the golden, and
-`contract.rs::debug_config_preview_baremetal_mcu` FAILS. That is deliberate and
-authorised, not an accident:
+That measurement is why re-recording was blocked for as long as it was: it
+would have turned `contract.rs::debug_config_preview_baremetal_mcu` red. It no
+longer can. tan-cli#269 deleted `crates/` and that harness outright, so there
+is no second gate left to disagree with this golden and no red `cargo` job to
+"fix" by reverting it. The Python conformance harness is the only gate over
+this file, it pins the SHIPPING wire, and the release assets ARE the Python
+program (PyInstaller freezes of `python/`, tan-cli#271).
 
-  * the Python conformance harness pins the SHIPPING wire, and the release
-    assets ARE the Python program (PyInstaller freezes of `python/`,
-    tan-cli#271) — the Rust binary ships to nobody;
-  * `crates/` is FROZEN and its contract gate is scheduled for deletion under
-    tan-cli#269. Landing this re-record BEFORE that deletion is what stops
-    `data.configuration` coverage silently dropping to zero in the gap — and for
-    this case, which has no parity fixture, that Rust gate is the ONLY
-    envelope-level gate it has today.
-
-Do NOT re-green the Rust harness by editing `crates/`, and do NOT re-green it by
-reverting this golden. The two harnesses disagree on this case on purpose; the
-Rust one is the side that is wrong about what ships.
+The oracle-parity fixtures went with `crates/` in the same issue, so for this
+case — which never had one — this re-recorded golden is now the ONLY
+envelope-level gate on its `data.configuration`.

@@ -231,6 +231,57 @@ def budget_note_only(note: str) -> MemoryBudget:
     return MemoryBudget(None, None, note)
 
 
+def _saturating_u64(value: float) -> int:
+    """Rust's `as u64` cast for a FINITE input -- truncate toward zero, 0 at or
+    below zero, `u64::MAX` above it -- and 0, never a number, for a NON-FINITE
+    one.
+
+    That cast used to sit outside its caller's `try` (tan-cli#499 defect 8), so
+    an infinite `mram_mb` / `soc_flash_mb` / `tcm_kb` / `sram_banks_kb` entry --
+    which `json.loads` produces for an `Infinity` literal or an overflowing
+    `1e400` in a SoC JSON -- collapsed the whole `tan size` run into
+    `size.internal-failure` at exit 5, with `data.slices` EMPTY (every other
+    slice's measurement discarded) and `project` null. Python's `int()` refuses
+    `inf` (`OverflowError: cannot convert float infinity to integer`) where
+    Rust's cast does not, so the two cases have to be separated by hand.
+
+    **Where the boundary sits, and why it is NOT "saturate everything"
+    (tan-cli#499 REVIEW).** The first version of this fix answered `+inf` with
+    `u64::MAX`, arguing continuity across the f64 range. Measured, that
+    manufactures a confidently WRONG budget at `ok:true`, which is the exact
+    failure class this issue exists to close:
+
+        # SoC JSON with "mram_mb": 1e400
+        this branch, before:  exit 0 ok:true  flash.total 18446744073709551615
+        tan 0.4.1:            exit 0 ok:true  flash.total null,
+                              budget_note "unreadable SoM preset for E1M-AEN801"
+
+    16 EiB of flash, stated as fact, on a manifest a customer could then read as
+    "plenty of room". So the saturation is BOUNDED to the inputs where the
+    oracle demonstrably saturates -- the finite ones:
+
+        # SoC JSON with "mram_mb": 1e300   (finite; serde_json reads it)
+        this branch:  exit 0  flash.total 18446744073709551615
+        tan 0.4.1:    exit 0  flash.total 18446744073709551615   <- byte-identical
+
+    A NON-finite value is not a point on that curve: serde_json refuses `1e400`
+    / `Infinity` / `NaN` outright, so there is no oracle answer to be continuous
+    WITH. Those join the negative/NaN arm at 0 -- this module's own "unresolved"
+    value (`_region_resolved` treats 0 as unresolved, `classify` skips it,
+    `budget_fully_known()` is False for it), so the envelope reports `pct: null`
+    and no budget rather than a fabricated maximum. A residual divergence from
+    the oracle stays (`total: 0` vs `total: null` plus a note); it is upstream
+    of this file and NOT fixed here -- see the PR's "Not fixed" section.
+    """
+    if value != value or value <= 0:  # NaN, -inf, and every non-positive
+        return 0
+    if value == float("inf"):
+        # NOT `_U64_MAX`: see the docstring. An input the oracle's own reader
+        # refuses is answered "no budget", not "the largest budget there is".
+        return 0
+    return min(int(value), _U64_MAX)
+
+
 def _mb_to_bytes(mb: float) -> int:
     """Megabytes -> bytes with Rust's `as u64` cast semantics: truncate toward
     zero, and saturate a negative or NaN input to 0. A `Some(0)` total counts as
@@ -240,9 +291,7 @@ def _mb_to_bytes(mb: float) -> int:
         value = float(mb) * 1024.0 * 1024.0
     except (TypeError, ValueError, OverflowError):
         return 0
-    if value != value or value <= 0:  # NaN or non-positive
-        return 0
-    return min(int(value), _U64_MAX)
+    return _saturating_u64(value)
 
 
 def _kib_to_bytes(kib: float) -> int:
@@ -250,15 +299,24 @@ def _kib_to_bytes(kib: float) -> int:
         value = float(kib) * 1024.0
     except (TypeError, ValueError, OverflowError):
         return 0
-    if value != value or value <= 0:
-        return 0
-    return min(int(value), _U64_MAX)
+    return _saturating_u64(value)
 
 
 def sram_banks(variant: dict) -> list[tuple[str, float]]:
     """A SoC-JSON variant's `sram_banks_kb` as ordered `(name, kib)` pairs,
-    dropping non-numeric entries. Insertion order is the wire order, so the
-    first-matching-bank rule in [`resolve_budget`] is deterministic."""
+    dropping non-numeric and unrepresentable entries. Insertion order is the
+    wire order, so the first-matching-bank rule in [`resolve_budget`] is
+    deterministic.
+
+    A JSON integer too large for an f64 is DROPPED, not crashed on
+    (tan-cli#499 defect 8): `float(10**400)` raises `OverflowError: int too
+    large to convert to float`, which took the whole `tan size` run to
+    `size.internal-failure` at exit 5. Dropping matches what `_mb_to_bytes`
+    already does with the identical value -- its own `float()` raises inside a
+    `try` and it returns the unresolved 0 -- so both regions answer "no budget"
+    for an unrepresentable integer rather than one crashing and one not. A
+    non-finite FLOAT is passed through and reaches the same answer one level
+    down: [`_saturating_u64`] resolves it to 0, not to `u64::MAX`."""
     raw = variant.get("sram_banks_kb")
     if not isinstance(raw, dict):
         return []
@@ -266,7 +324,11 @@ def sram_banks(variant: dict) -> list[tuple[str, float]]:
     for name, value in raw.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
-        out.append((str(name), float(value)))
+        try:
+            kib = float(value)
+        except OverflowError:
+            continue
+        out.append((str(name), kib))
     return out
 
 

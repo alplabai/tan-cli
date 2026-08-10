@@ -4,13 +4,12 @@
 alp-sdk's canonical `--emit kconfig` contract anchor vs. the pinned alp-sdk
 checkout's own copy.
 
-`crates/tan-core/src/kconfig.rs` and `crates/tan-cli/src/commands/kconfig.rs`
-both `include_str!` a vendored byte-copy of alp-sdk's
-`tests/fixtures/kconfig-contract/emit-kconfig.golden.json` (this repo's own
-copy lives at the same relative path,
-`tests/fixtures/kconfig-contract/emit-kconfig.golden.json`) to test
-`parse_kconfig`/`Envelope<KconfigData>` against the SDK's real field
-contract without a Zephyr/west workspace. That vendored copy can drift from
+This repo keeps a vendored byte-copy of alp-sdk's
+`tests/fixtures/kconfig-contract/emit-kconfig.golden.json` at the same
+relative path, so `tan kconfig`'s parse/envelope path can be tested against
+the SDK's real field contract without a Zephyr/west workspace. Its reader is
+`python/tests/commands/test_kconfig_command.py` (until tan-cli#269 the retired
+Rust oracle `include_str!`d the same file from two places). That vendored copy can drift from
 upstream exactly like the wizard-scaffold vendoring `scaffold_byte_parity.py`
 guards (see that script + `tests/parity/README.md`'s "Scaffold byte-parity"
 section) — a future SDK field rename would go unnoticed here forever, the
@@ -19,9 +18,8 @@ is the tan-cli-side gate: byte-diff the vendored copy against the pinned
 alp-sdk checkout's own copy of the same fixture.
 
 Unlike `seam1_field_diff.py` (which hard-requires `--sdk`), this gate is
-optionally self-skipping, same as `scaffold_byte_parity.py`: `tan-core`'s own
-`cargo test` (`parse_kconfig_accepts_the_canonical_alp_sdk_fixture` /
-`canonical_alp_sdk_fixture_round_trips_into_the_kconfig_envelope`) already
+optionally self-skipping, same as `scaffold_byte_parity.py`:
+`python/tests/commands/test_kconfig_command.py` already
 proves the vendored copy is internally consistent (deserializes, round-trips
 through the envelope) without an SDK checkout — a local dev-loop run with no
 reachable alp-sdk checkout is a clean no-op, not a failure. Reachability is
@@ -82,9 +80,9 @@ def run(sdk_root: Path) -> bool:
     upstream = upstream_path.read_bytes()
     if vendored != upstream:
         print(f"FAIL: {VENDORED_PATH} differs from upstream {upstream_path} "
-              f"-- re-vendor the fixture (tan-cli's `Option<String>` field "
-              f"contract in crates/tan-core/src/kconfig.rs may also need a "
-              f"matching update if a field was added/removed/renamed)")
+              f"-- re-vendor the fixture (tan's kconfig field contract in "
+              f"tan/commands/kconfig_cmd.py may also need a matching update "
+              f"if a field was added/removed/renamed)")
         return False
 
     print(f"PASS: {FIXTURE_RELPATH} is byte-identical to upstream "

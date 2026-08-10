@@ -12,7 +12,11 @@ from tan crashing, and with no coded signal to fall back on. The persisted
 downstream flashing/OTA tooling parses long after the run that wrote it.
 
 The oracle's answers, MEASURED on `tan 0.4.1` and hardcoded below rather than
-guessed, come from two different layers and this suite pins both:
+guessed, come from two different layers and this suite pins both. Hardcoding
+is now the ONLY way they can be pinned -- tan-cli#269 deleted `crates/`, and
+the live byte-for-byte comparison this module used to carry alongside them
+went with it; the recorded values below are what remains of that measurement,
+and they are still exactly what the shipped v0.4.1 CLI produced:
 
   `.inf` / `-.inf` / `.nan` -> `null`
       serde_yaml resolves all three to non-finite `f64`, and `serde_json`
@@ -252,57 +256,3 @@ def test_image_envelope_and_persisted_bundle_manifest_are_both_strict_json(tmp_p
         encoding="utf-8"
     )
     assert strict_loads(persisted)["hw_info"] == ORACLE_HW_INFO
-
-
-# --------------------------------------------------------------------------
-# The oracle, live.
-# --------------------------------------------------------------------------
-
-
-def oracle_binary() -> str | None:
-    """The shipped Rust `tan`, resolved by the ONE shared resolver.
-
-    Deliberately not re-derived here: tan-cli#393 is exactly what a hand-copied
-    fourth copy of this rule costs (two copies picked a stale
-    `target/release/tan` and measured against the wrong binary silently).
-    """
-    from tests.parity.oracle import rust_binary
-
-    return rust_binary()
-
-
-def test_image_matches_the_oracle_byte_for_byte_on_non_finite_hw_info(tmp_path):
-    oracle = oracle_binary()
-    if oracle is None:
-        pytest.skip("no Rust oracle built (target/{release,debug}/tan absent)")
-
-    port_root = tmp_path / "port"
-    rust_root = tmp_path / "rust"
-    port_root.mkdir()
-    rust_root.mkdir()
-    build_root_with_manifest(port_root)
-    build_root_with_manifest(rust_root)
-
-    port = run_cli(port_root, "image", "--format", "json", "--build-root", "br")
-    rust = subprocess.run(
-        [oracle, "image", "--format", "json", "--build-root", "br"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=str(rust_root),
-        timeout=180,
-    )
-
-    assert port.returncode == rust.returncode == 0
-    # `project.root` is the only key that legitimately differs (two temp dirs),
-    # so the comparison is over `data` -- which is where the divergence lived.
-    assert strict_loads(port.stdout)["data"] == strict_loads(rust.stdout)["data"]
-
-    port_manifest = port_root / "br" / "image-bundle" / "bundle-manifest.json"
-    rust_manifest = rust_root / "br" / "image-bundle" / "bundle-manifest.json"
-    # Bytes, not parsed objects: the persisted artefact is what downstream
-    # flashing/OTA tooling opens, so indentation and separators are part of the
-    # contract too -- a compare over decoded dicts would pass on a file that
-    # still said `Infinity` if both sides said it.
-    assert port_manifest.read_bytes() == rust_manifest.read_bytes()

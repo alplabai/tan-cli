@@ -983,7 +983,37 @@ _MODULE_BUDGET: dict[str, int] = {
     # and CHANGELOG) but documents why closing it is not a simple mirror of
     # `infer_target_kind`'s own guard -- +20 lines of comment, 0 of code.
     # Measured after both, not computed from the deltas above.
-    "tan/commands/debug_config_cmd.py": 1689,
+    # 1689 -> 1949, closing the two survivors those same two issues left
+    # behind. (An earlier draft of this comment said 1843 while the key below
+    # said 1859 -- neither re-walked after the last edit. Both numbers here are
+    # now `wc -l` on THIS tree; the comment and the key have to be one
+    # measurement, or the ratchet documents a file that does not exist.)
+    # #476 half (b): `_target_kind_unresolved_failure` plus the
+    # `inferred is None` arm that reaches it, so an omitted `--target-kind`
+    # on a project with NO signal is refused instead of defaulting to
+    # native-host and writing a native_sim launch.json into the directory.
+    # #477 major 2: `_sdk_published_cores` + `_sdk_core_unknown_message` +
+    # `_board_som_sku` (the som.sku read the new guard and
+    # `_fill_debug_probe_identity_from_sdk` now share instead of each
+    # spelling the four-step isinstance walk out) turn the `--core` guard's
+    # pre-build arm from silence into a refusal -- the half the inline
+    # comment above used to record as deliberately open, closed by giving it
+    # the SDK's published core list it said it lacked. Both carry the
+    # measurement each claim rests on in their docstrings, which is most of
+    # the growth, along with the module docstring's own exit-code paragraph
+    # being rewritten -- it still listed only tan-cli#462's four exit-2 shapes
+    # and called everything else exit 5, which #476/#477 had already made
+    # untrue on `dev`. Measured with `wc -l` after all of it, not summed from
+    # deltas.
+    #   REVIEW round, +90: `_sdk_core_refusal_authority` decides WHICH alp-sdk
+    # checkout is entitled to turn a `--core` into an exit-2 refusal --
+    # measured, with no `--sdk-root` the answer could come from a global
+    # default another project's bootstrap set, and the verdict flipped purely
+    # on which checkout answered (`--sdk-root A` exit 0, `--sdk-root B` exit 2,
+    # same project, same `--core m55_hp`). `_sdk_core_unknown_message` gained
+    # the checkout + tier it decided from, `_resolve_project_reporting_fields`
+    # returns that provenance, and both carry the measurement they rest on.
+    "tan/commands/debug_config_cmd.py": 1949,
     # 1329, not 1199, as of tan-cli#544's hand-port audit: three alp-sdk
     # commits land here at once -- `_safe_join` + `PathEscapeError`
     # (alp-sdk#1126's resolve-then-contain path-traversal guard, applied at

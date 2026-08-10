@@ -24,7 +24,7 @@ usage error whose message taught that `diagnostic-v1` does not exist, and
 
 The oracle never had this problem: clap derives the parser, the `--help`
 choice list and the completions from ONE `ValueEnum`, which is why the frozen
-oracle help in `tests/parity/oracle_fixtures/test_run_oracle_parity.json`
+oracle help in `tests/fixtures/oracle_captures/test_run_oracle_parity.json`
 still prints a `Possible values:` block this port had lost.
 
 So: one enum per domain, declared here, annotated on every `--format`
@@ -58,7 +58,7 @@ class OutputFormat(str, Enum):
 
     Verbatim from the oracle's own `ValueEnum` (`crates/tan-cli/src/cli.rs`),
     whose `--help` rendering the frozen capture in
-    `tests/parity/oracle_fixtures/test_run_oracle_parity.json` shows:
+    `tests/fixtures/oracle_captures/test_run_oracle_parity.json` shows:
     `text: Human-readable text (default)` / `json: Machine-readable JSON
     envelope`.
     """

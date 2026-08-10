@@ -17,12 +17,12 @@ for every vendored (template, sku) pair, re-run the live SDK emit and assert
 byte-identity against the vendored tree.
 
 Defaults to `python/tan/templates/vendored/` -- the tree the shipped Python
-`tan` actually reads. `crates/tan-core/src/wizard/vendored/` is frozen at its
-own permanent vendor point (`docs/ROADMAP.md`'s Standing Rules: the Rust
-`tan` is the retired oracle, never re-vendored again) and is guarded instead
-by `tan-core`'s own SDK-free `cargo test` byte-parity check
-(`zephyr_app_scaffold_is_byte_exact_for_the_vendored_sku`); pass `--vendored
-crates/tan-core/src/wizard/vendored` to point this script at it by hand.
+`tan` actually reads, and since tan-cli#269 the ONLY vendored scaffold tree in
+the repo. The Rust oracle carried a second copy, frozen at its own permanent
+vendor point and guarded by its own SDK-free `cargo test`; both went with
+`crates/`. `--vendored <path>` still exists for pointing this script at an
+arbitrary tree by hand, but there is no longer a second in-repo tree to point
+it at.
 
 Optionally self-skipping: the vendored tree's own test suite already proves
 it is internally consistent without an SDK checkout, so a local dev-loop run

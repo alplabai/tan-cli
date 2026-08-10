@@ -189,7 +189,7 @@ def _wiring(nm: str) -> str:
 
     `tan scaffold` wrote a module NO SHIPPED TEMPLATE CAN BUILD and said
     nothing about it. Measured off the frozen oracle trees in
-    `tests/parity/oracle_fixtures/scaffold_trees.json`, which are the six
+    `tests/fixtures/oracle_captures/scaffold_trees.json`, which are the six
     project templates' real bytes: not one of the six names `modules` in any
     `CMakeLists.txt`, so `src/modules/<nm>/<nm>.c` is compiled by nothing, and
     only `minimal-app` sets an include directory at all, so

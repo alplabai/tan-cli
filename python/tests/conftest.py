@@ -21,12 +21,11 @@ copy `os.environ` at spawn time and so inherit whatever `monkeypatch` leaves
 in the real environment.
 """
 import os
-import subprocess
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
-
-from tests.parity.oracle import PINNED_ORACLE_VERSION, rust_binary
 
 # Typer renders every `--help` through Rich, and BOTH of Rich's inputs are
 # ambient rather than code under test:
@@ -119,70 +118,11 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The oracle pin. Lifted here from `tests/parity/conftest.py` by tan-cli#393:
-# directory-scoped, it could never reach `tests/commands/`, where the only two
-# other oracle consumers in the tree live -- and both of those had hand-copied
-# a release-first resolver `oracle.rust_binary()` had already been rewritten to
-# remove. One of them went red against a stale `tan 0.3.1` with a diff that
-# read as a port regression; the other stayed GREEN measuring a divergence
-# against that same stale binary. Session-scoped and autouse from the tree
-# root, this now nets every oracle consumer, present and future.
-# ---------------------------------------------------------------------------
-@pytest.fixture(scope="session", autouse=True)
-def pinned_oracle() -> None:
-    """FAIL the session -- never skip -- when a resolved oracle binary is
-    present but does not report :data:`oracle.PINNED_ORACLE_VERSION`.
-
-    Absence stays a skip: that is what each file's own ``missing_for_live``/
-    ``_ORACLE_REQUIRED`` gate already decides, and this fixture defers to it
-    entirely by doing nothing when ``rust_binary()`` returns ``None``. Only WRONGNESS
-    fails here -- a resolved binary that answers the wrong ``--version`` --
-    because a quiet skip in that case would hide exactly the gap this
-    harness exists to surface (``missing_for_live``'s own docstring makes the
-    identical argument for the absence case; tan-cli#272 is where that rule
-    was first written down, and it applies just as hard to wrongness as to
-    absence).
-
-    Session-scoped so this runs the check ONCE per test process rather than
-    once per test case; the resolution cannot change mid-session, so
-    re-checking it per-test bought nothing but 17 extra ``--version``
-    subprocesses a run.
-
-    ``rust_binary()`` is called HERE, in the fixture body, and deliberately
-    NOT at this conftest's import. It can raise -- a ``TAN_RUST_BINARY`` that
-    is set but missing, or the mtime TIE between target/{release,debug} that
-    it now refuses to break silently -- and a raise at conftest import is an
-    ``ImportError while loading conftest``, which aborts the WHOLE pytest
-    session rather than this directory. Measured: with a bogus
-    ``TAN_RUST_BINARY``, ``pytest tests/parity tests/core`` collected zero
-    tests and exited rc=4, so the repo's own ``python -m pytest tests -q``
-    gate would have reported nothing at all. Resolving in the fixture keeps
-    the blast radius on ``tests/parity``, which is what it is about.
-    """
-    rust = rust_binary()
-    if rust is None:
-        return
-    proc = subprocess.run([rust, "--version"], capture_output=True, text=True, encoding="utf-8")
-    assert proc.returncode == 0, f"{rust} is not a working tan binary"
-    stdout = proc.stdout.strip()
-    assert stdout == PINNED_ORACLE_VERSION, (
-        f"resolved oracle {rust!r} reports {stdout!r}, not the pinned "
-        f"{PINNED_ORACLE_VERSION!r} this whole parity suite is measured "
-        "against. oracle.rust_binary() picks the MOST RECENTLY BUILT of "
-        "target/{release,debug}/tan, so a resolved-but-wrong binary means "
-        "either an inverted or TIED mtime between the two profiles (a tie "
-        "raises inside rust_binary() itself -- see that function) or an "
-        "explicit TAN_RUST_BINARY naming the wrong one. Rebuild or remove "
-        "the stale profile, or set TAN_RUST_BINARY=<path to the correct "
-        "build> explicitly."
-    )
-
-
-# ---------------------------------------------------------------------------
-# The SUBJECT under test, pinned the same way the ORACLE is (tan-cli#423).
+# The SUBJECT under test, pinned the way the ORACLE used to be (tan-cli#423).
 #
-# `pinned_oracle` above stops the suite measuring the wrong oracle. Nothing
-# stopped it measuring the wrong SUBJECT: `import tan` and `python -m tan`
+# `pinned_oracle` -- retired with the oracle itself in tan-cli#269 -- stopped
+# the suite measuring the wrong ORACLE. Nothing stopped it measuring the wrong
+# SUBJECT, and that half is still live: `import tan` and `python -m tan`
 # both resolve through `sys.path`, so whichever `tan` is INSTALLED wins
 # whenever the repo's own `python/` is not first. On a developer box with an
 # editable install pointing at a second checkout, that is a completely
@@ -206,7 +146,8 @@ def pinned_oracle() -> None:
 #
 # Two halves, because there are two ways in:
 #   * IN-PROCESS `import tan` -- asserted below, and a mismatch FAILS the
-#     session rather than skipping, for the reason `pinned_oracle` gives.
+#     session rather than skipping: a quiet skip would hide exactly the gap
+#     this fixture exists to surface.
 #   * SPAWNED `[sys.executable, "-m", "tan", ...]` -- 26 test files do this,
 #     and a child resolves through its OWN sys.path, so asserting in this
 #     process would not touch them. `PYTHONPATH` is prepended instead, which
@@ -246,3 +187,60 @@ def tan_under_test() -> None:
         "of exactly this (tan-cli#423). Run pytest from `python/`, or "
         "`pip uninstall alp-tan`, or set PYTHONPATH to this repo's `python/`."
     )
+
+
+# ---------------------------------------------------------------------------
+# A PATH that resolves NOTHING. Lifted here from `tests/parity/oracle.py` when
+# tan-cli#269 deleted that module: the helper was never about the oracle, and
+# its one surviving caller (`tests/test_cli_skeleton.py`) uses it on the
+# PYTHON `tan`.
+# ---------------------------------------------------------------------------
+def empty_tool_inventory(scratch: Path) -> str:
+    """A ``PATH`` value under which every PROBED tool reports absent.
+
+    Any ``shutil.which`` / ``doctor_cmd.on_path`` probe run against this
+    directory finds nothing -- ``west`` for the west-forwarding verbs,
+    ``git``/``cmake``/``ninja``/``python3``/``xz``/``wget`` for
+    ``support-bundle.hostPrerequisites``, and any other which()-gated case's
+    absent-tool branch -- so a test's answer does not depend on what the host
+    running it happens to have installed (tan-cli#313, tan-cli#324).
+
+    Seeds the directory with exactly one file: a symlink to the REAL ``which``
+    this host resolves on its own PATH, POSIX only (a no-op on Windows, whose
+    probe walks ``%PATH%`` by hand and never spawns an external ``which`` at
+    all). A directory that is genuinely, literally empty is NOT a clean
+    "nothing on PATH" answer on POSIX: a probe that resolves a tool by
+    SPAWNING ``which <tool>`` has to find ``which`` itself via this SAME
+    (test-controlled) PATH. An empty directory cannot resolve ``which``
+    either, so the probe fails before it ever answers the question asked --
+    measured directly: a PATH holding every one of ``support-bundle``'s six
+    required tools but NOT ``which`` still reports all six missing, and
+    copying a working ``which`` in (touching nothing else) makes that same
+    warning vanish entirely. Seeding it is what makes "everything missing" a
+    GENUINE probe that ran and found nothing, rather than a degenerate one
+    that could not run at all.
+
+    REPLACES ``PATH`` outright rather than prepending: prepending would still
+    let a REAL tool further down the host's own PATH be found, which is
+    exactly the host-dependence this exists to remove.
+    """
+    stub_dir = scratch / "empty-path"
+    stub_dir.mkdir(exist_ok=True)
+    if sys.platform != "win32":
+        # The seed is NOT optional -- see the docstring. Refuse rather than
+        # silently return a PATH whose "everything missing" answer is an
+        # artefact of an unresolvable `which` spawn (tan-cli#313, #324).
+        real_which = shutil.which("which")
+        if real_which is None:
+            raise RuntimeError(
+                "empty_tool_inventory() cannot seed `which` into the stub PATH: "
+                "shutil.which('which') returned None on this POSIX host. Without "
+                "it a tool probe cannot run at all and reports every tool missing "
+                "for the wrong reason -- refusing rather than pinning that "
+                "artefact."
+            )
+        link = stub_dir / "which"
+        if not link.exists():
+            os.symlink(real_which, link)
+        assert link.exists(), f"failed to seed `which` into {stub_dir}"
+    return str(stub_dir)

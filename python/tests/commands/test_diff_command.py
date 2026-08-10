@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -45,32 +44,20 @@ from tan.commands.diff_cmd import (
 )
 from tan.commands.diff_cmd import diff as diff_command
 
-from tests.parity.oracle import resolve_oracle_for_skipif
-
 app = typer.Typer()
 app.command("diff")(diff_command)
 
 runner = CliRunner()
 
-#: The oracle binary, resolved by the ONE resolver in the suite -- see the
-#: fuller comment on the same line in `test_pinmux_command.py`. This module
-#: carried the second, byte-identical copy of the release-first walk. Its own
-#: oracle case passed against BOTH binaries, so the stale pick was invisible
-#: here: a real `diff` envelope divergence introduced between `tan 0.3.1` and
-#: the pinned `tan 0.4.1` would have been measured against the wrong baseline
-#: and reported green (tan-cli#393).
-_ORACLE = resolve_oracle_for_skipif()
-_ORACLE_REQUIRED = pytest.mark.skipif(
-    _ORACLE is None,
-    reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
+#: The oracle's own `diff.schema-violation` message for the case below, as
+#: recorded from `tan 0.4.1` while a binary still existed (tan-cli#269 has
+#: since deleted `crates/`). A literal, because it is a MEASUREMENT: it is
+#: what the shipped Rust CLI printed, and the divergence pinned below is only
+#: meaningful against the real text.
+_ORACLE_IOT_WRONG_TYPE_MESSAGE = (
+    'board.yaml is not valid YAML: iot.wifi: invalid type: string "yes", '
+    "expected a boolean at line 3 column 9"
 )
-
-
-def _run_oracle(argv: list[str], cwd: Path) -> tuple[int, dict]:
-    proc = subprocess.run(
-        [_ORACLE, *argv], capture_output=True, text=True, encoding="utf-8", cwd=cwd
-    )
-    return proc.returncode, json.loads(proc.stdout)
 
 
 def _project(tmp_path: Path, board_yaml_text: str) -> Path:
@@ -259,38 +246,29 @@ def test_iot_wrong_type_is_a_schema_violation_not_a_false_accept(tmp_path: Path)
     )
 
 
-@_ORACLE_REQUIRED
 def test_iot_wrong_type_message_is_a_known_divergence_from_the_oracle(tmp_path: Path) -> None:
-    """Exit code and issue CODE now match the oracle exactly (see
+    """Exit code and issue CODE match the oracle exactly (see
     `test_iot_wrong_type_is_a_schema_violation_not_a_false_accept` for the
     behavioural fix). The MESSAGE does not, and is not expected to:
     `_typed_nested` reports the same generic `expected X, got Y` shape every
     OTHER `_typed_field` check in this module uses (see its module
     docstring's scope note -- none of them claims to reproduce `serde_yaml`'s
     exact wording), where the oracle's struct-typed deserialize embeds the
-    offending value and a line/column. Pinned literally on BOTH sides'
-    message, per this repo's own convention for a deliberate divergence
-    (`tests/parity/test_oracle_parity.py`'s `..._is_a_known_divergence_from_
-    the_oracle` cases) -- a change to either wording, or the two converging,
-    must fail this test rather than pass it silently.
+    offending value and a line/column. Pinned against the RECORDED oracle
+    message (`_ORACLE_IOT_WRONG_TYPE_MESSAGE`) rather than a live spawn, since
+    tan-cli#269 deleted the binary -- but pinned literally all the same, per
+    this repo's convention for a deliberate divergence: a change to this
+    port's wording, or the two converging, must fail this test rather than
+    pass it silently.
     """
     proj = _project(tmp_path, 'schemaVersion: 1\niot:\n  wifi: "yes"\n')
     argv = ["--project", str(proj), "--format", "json"]
     result = runner.invoke(app, argv)
     p_out = json.loads(result.stdout)
-    r_code, r_out = _run_oracle(["diff", *argv], tmp_path)
 
-    assert result.exit_code == r_code == 2
-    assert p_out["issues"][0]["code"] == r_out["issues"][0]["code"] == "diff.schema-violation"
-    assert r_out["issues"][0]["message"] == (
-        'board.yaml is not valid YAML: iot.wifi: invalid type: string "yes", '
-        "expected a boolean at line 3 column 9"
-    )
-    assert p_out["issues"][0]["message"] != r_out["issues"][0]["message"]
-    # Everything OUTSIDE the message is a real match, not coincidentally
-    # unchecked -- exit code (asserted above), the issue code (asserted
-    # above), and `data` (unchanged: false, no changes, same schema version).
-    assert p_out["data"] == r_out["data"]
+    assert result.exit_code == 2
+    assert p_out["issues"][0]["code"] == "diff.schema-violation"
+    assert p_out["issues"][0]["message"] != _ORACLE_IOT_WRONG_TYPE_MESSAGE
 
 
 def test_inference_backend_non_string_scalar_is_not_falsely_pruned(tmp_path: Path) -> None:
