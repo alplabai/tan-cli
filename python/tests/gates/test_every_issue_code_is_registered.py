@@ -912,13 +912,20 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `doctor.west` needs no new registry entry. The count moves because
         # one more `Check(...)` call site exists now, not because a new code
         # exists.
+        #
+        # 62 as of the alp-sdk `_check_libraries` port: `libraries_check` is
+        # four `Check(...)` sites -- one per `LibraryReport` outcome -- and
+        # all four are literally named `"libraries"`, so they contribute ONE
+        # code, `doctor.libraries`, newly registered in
+        # `contract/issue-codes.json`. Unlike the two entries above, this one
+        # IS a new code, not just a new call site.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=58,
+        expected_calls=62,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
