@@ -27,10 +27,9 @@ All notable changes to `tan` are documented here. Format follows
   unconditionally under the switch, because the SW-DP ID read is a
   JLinkExe-only primitive and that arm cannot be armed at all;
   `openocd_usb_location` selects a probe but never confirms which board is on
-  the other end of the cable. **Scoped to `swd_probe`:** despite the
-  method-neutral name it does not cover Flow D (`alif_mram_jlink`), whose own
-  unarmed writes still proceed with no guard and no signal — Refs #609.
-  Documented in `docs/setools.md`. Closes #589.
+  the other end of the cable. Shipped scoped to `swd_probe`; widened to Flow D
+  in the same release by #609 below. Documented in `docs/setools.md`.
+  Closes #589.
 
 - **Every `tan doctor` check now carries a `scope` — `host` or `project` — so a
   consumer stops hand-maintaining a list of tan's own check names.** The
@@ -187,6 +186,20 @@ All notable changes to `tan` are documented here. Format follows
   `--target-kind` to let it infer. (#489)
 
 ### Fixed
+
+- **An AEN MRAM write with no wrong-board guard now says so.** The
+  `flash.dpidr-preflight-unarmed` advisory was gated on
+  `flash_method: swd_probe`, and the AEN dispatches Flow D
+  (`alif_mram_jlink`) — so a real MRAM write emitted `ISSUES = []`, with no
+  guard *and* no signal that there was none, on a bench where one J-Link
+  serial is cloned across two probes and `JLinkExe` selects by serial alone.
+  Which methods the guard covers is now a table pinned to the backend registry
+  by a gate, so a new backend must declare its side rather than inherit the
+  silence; `ALP_FLASH_REQUIRE_DPIDR=1` follows the same table, and on Flow D
+  refuses ahead of the SETOOLS auto-sign rather than merely ahead of the write.
+  `swd_probe`'s own texts are byte-for-byte unchanged. Arming the AEN manifest
+  is upstream in alp-sdk's `metadata/**` and not part of this change.
+  Closes #609.
 
 - **A `swd_probe` write whose core stayed busy after the load now says so,
   instead of nothing at all.** #575 made halt-marker detection positional and

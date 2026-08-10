@@ -2826,6 +2826,374 @@ def test_require_dpidr_does_not_refuse_a_dry_run(tmp_path, monkeypatch):
     assert "ALP_FLASH_REQUIRE_DPIDR" not in data["entries"][0]["message"], data["entries"][0]
 
 
+# ── tan-cli#609: the unarmed advisory reaches Flow D, not just swd_probe ────
+#
+# Measured on real silicon 2026-08-10 (`e1m-aen-evk-01`, `origin/dev`
+# `a9062ea`, probe SW-DP `0x4C013477`): a genuine Flow D MRAM write emitted
+# `ISSUES = []`, with zero occurrences of `dpidr-preflight-unarmed` or of
+# `preflight` at all across four transcripts. `E1M-AEN801.yaml` carries no
+# `flash_args` block, so nothing arms the guard, and the advisory about an
+# unarmed guard was wired to `swd_probe` alone.
+#
+# The fixture below is that run's SHAPE, not its silicon: a confirmed
+# `alif_mram_jlink` entry with no `expect_dpidr`, everything spawned stubbed
+# out. No SW-DP ID appears anywhere in it -- what is under test is whether the
+# guard is armed, never what it would compare against -- and the AEN's own
+# `0x4C013477` belongs in alp-sdk's `metadata/**`, which is upstream of this
+# repository (issue #609, part 1).
+
+
+def _flow_d_run(
+    tmp_path,
+    monkeypatch,
+    *,
+    flash_args: str = (
+        '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
+        'atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true}'
+    ),
+    require: str | None = None,
+    dry_run: bool = False,
+    spawned: list | None = None,
+):
+    """A confirmed, real Flow D write with every spawn stubbed.
+
+    `flash_args` is spliced verbatim so a test can add or withhold
+    `expect_dpidr`/`jlink_device`. `require` sets `ALP_FLASH_REQUIRE_DPIDR`
+    (absent by default -- the shipped, advisory-only behaviour). `spawned`
+    collects `_spawn` calls, so a test can prove a refusal landed before
+    anything ran."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "a.bin").write_bytes(b"\x00")
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00")
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_hp, os: zephyr, output_artefact: a.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: FLASH_ARGS}
+helper_mcus: []
+boot_order: []
+""".replace("FLASH_ARGS", flash_args)
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir(exist_ok=True)
+    tool_path = fake_tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    tool_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(tool_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.delenv("ALP_FLASH_REQUIRE_DPIDR", raising=False)
+    if require is not None:
+        monkeypatch.setenv("ALP_FLASH_REQUIRE_DPIDR", require)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    # The preflight's own behaviour is tan-cli#512's; what is under test here
+    # is whether an entry that ran WITHOUT one says so.
+    monkeypatch.setattr(flash_cmd, "_flow_d_preflight", lambda *_a, **_k: None)
+
+    calls = spawned if spawned is not None else []
+
+    def _fake_spawn(*args, **kwargs):
+        calls.append((args, kwargs))
+        return flash_cmd._Outcome(success=True, stdout="", stderr="")
+
+    monkeypatch.setattr(flash_cmd, "_spawn", _fake_spawn)
+    return flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=dry_run,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+
+#: The Flow D advisory, byte-for-byte. Two things differ from `swd_probe`'s:
+#: the method names itself, and the remedy names BOTH keys -- Flow D pairs
+#: `expect_dpidr` with `jlink_device` (the live-core attach profile, a
+#: different field from `jlink_flash_device`), so "set expect_dpidr" alone
+#: would earn the next run a half-armed refusal.
+_FLOW_D_UNARMED_ADVISORY = (
+    "m55_hp: alif_mram_jlink wrote with no flash_args.expect_dpidr set -- the "
+    "read-only SW-DP ID preflight did not run, so a cloned/shared probe serial could "
+    "still have reached the wrong board. Set flash_args.expect_dpidr AND "
+    "flash_args.jlink_device (the live-core attach profile, not jlink_flash_device) "
+    "to arm it."
+)
+
+#: `swd_probe`'s advisory, byte-for-byte, pinned HERE as well as being
+#: exercised above: #609 generalised the text off `entry.method`, and the
+#: `swd_probe` rendering must come out of that unchanged.
+_SWD_PROBE_UNARMED_ADVISORY = (
+    "gd32_bridge: swd_probe wrote with no flash_args.expect_dpidr set -- the "
+    "read-only SW-DP ID preflight did not run, so a cloned/shared probe serial could "
+    "still have reached the wrong board. Set flash_args.expect_dpidr to arm it."
+)
+
+#: The Flow D refusal under `ALP_FLASH_REQUIRE_DPIDR=1`, byte-for-byte.
+_REQUIRE_DPIDR_FLOW_D_REFUSAL = (
+    "alif_mram_jlink[m55_hp]: ALP_FLASH_REQUIRE_DPIDR=1 is set and "
+    "flash_args.expect_dpidr is not -- refusing to write with no wrong-board guard. "
+    "The read-only SW-DP ID preflight is the only check that the probe reached the "
+    "intended board: JLinkExe selects a probe by serial alone, and a cloned or shared "
+    "serial cannot be told apart without it. Set flash_args.expect_dpidr to this "
+    "board's SW-DP IDR AND flash_args.jlink_device to its live-core attach profile "
+    "(Flow D pairs the two; jlink_flash_device is the write-time loader, not this), "
+    "or unset ALP_FLASH_REQUIRE_DPIDR to accept an unguarded write."
+)
+
+
+def test_flow_d_write_with_no_expect_dpidr_warns_unarmed(tmp_path, monkeypatch):
+    """tan-cli#609, the defect itself. A confirmed, real Flow D MRAM write
+    with no `flash_args.expect_dpidr` must stop emitting an empty `issues`
+    list.
+
+    Fails against the pre-fix source (measured on `origin/dev` `9ad7ac4`:
+    `issues == []` and no line of text output mentions `expect_dpidr`, because
+    `_flash_entry` gated `preflight_unarmed` on `method ==
+    SWD_PROBE_METHOD`)."""
+    exit_code, data, issues, lines, _sdk = _flow_d_run(tmp_path, monkeypatch)
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    assert entry["method"] == "alif_mram_jlink", entry
+    warnings = [i for i in issues if i.code == "flash.dpidr-preflight-unarmed"]
+    assert len(warnings) == 1, issues
+    assert warnings[0].severity == "warning"
+    assert warnings[0].message == _FLOW_D_UNARMED_ADVISORY, warnings[0].message
+    # And it reaches DEFAULT text output too -- a bench operator does not pass
+    # `--format json`, and the real 2026-08-10 transcripts were text.
+    assert _FLOW_D_UNARMED_ADVISORY in lines, lines
+
+
+def test_flow_d_advisory_names_flow_d_not_swd_probe(tmp_path, monkeypatch):
+    """The generalised text must not mislabel the backend. #609's fix makes an
+    AEN write warn; a warning that calls it a `swd_probe` write would send the
+    operator to the wrong manifest entry and the wrong remedy.
+
+    Fails against a fix that widens the gate but leaves the message literal:
+    the message would read `m55_hp: swd_probe wrote ...` for an
+    `alif_mram_jlink` entry."""
+    _exit_code, _data, issues, _lines, _sdk = _flow_d_run(tmp_path, monkeypatch)
+
+    message = [i for i in issues if i.code == "flash.dpidr-preflight-unarmed"][0].message
+    assert "alif_mram_jlink wrote" in message, message
+    assert "swd_probe" not in message, message
+    # The Flow D remedy names the PAIRED key as well: `expect_dpidr` alone is
+    # a half-armed shape `validate_flow_d_preflight_args` refuses outright.
+    assert "flash_args.jlink_device" in message, message
+
+
+def test_swd_probe_advisory_text_is_unchanged_by_the_generalisation(tmp_path, monkeypatch):
+    """The other half of the same statement: `swd_probe`'s advisory renders
+    byte-for-byte as it did before #609. The message is composed off
+    `entry.method` now, so this pins that the composition reproduces the
+    literal it replaced rather than quietly rewording what a bench operator
+    reads."""
+    _exit_code, _data, issues, lines, _sdk = _require_dpidr_run(
+        tmp_path, monkeypatch, require=None
+    )
+
+    warnings = [i for i in issues if i.code == "flash.dpidr-preflight-unarmed"]
+    assert len(warnings) == 1, issues
+    assert warnings[0].message == _SWD_PROBE_UNARMED_ADVISORY, warnings[0].message
+    assert _SWD_PROBE_UNARMED_ADVISORY in lines, lines
+
+
+def test_flow_d_write_with_expect_dpidr_armed_does_not_warn(tmp_path, monkeypatch):
+    """The complement, so the advisory is a statement about THIS write rather
+    than about the backend: an armed Flow D entry (both paired keys present)
+    flashes clean, with no `flash.dpidr-preflight-unarmed`.
+
+    The ID here is a placeholder. What is under test is whether the guard is
+    armed, never what it compares against."""
+    armed = (
+        '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
+        'atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true, '
+        'expect_dpidr: "0x00000000", jlink_device: Cortex-M55}'
+    )
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=armed
+    )
+
+    assert exit_code == 0
+    assert data["entries"][0]["status"] == "ok", data["entries"][0]
+    assert not any(i.code == "flash.dpidr-preflight-unarmed" for i in issues), issues
+
+
+def test_flow_d_dry_run_does_not_warn_unarmed(tmp_path, monkeypatch):
+    """A preview writes nothing, so there is no unguarded write to report.
+    The flag is computed past every `planning_only or dry_run` return for
+    exactly that reason."""
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, dry_run=True
+    )
+
+    assert exit_code == 0
+    assert data["entries"][0]["status"] == "ok", data["entries"][0]
+    assert not any(i.code == "flash.dpidr-preflight-unarmed" for i in issues), issues
+
+
+def test_require_dpidr_now_refuses_an_unarmed_flow_d_write(tmp_path, monkeypatch):
+    """tan-cli#609's second half. #607 shipped `ALP_FLASH_REQUIRE_DPIDR=1`
+    scoped to `swd_probe`, and its docs said so explicitly. Leaving it there
+    while widening only the advisory would put the strict switch on the
+    factory-programmed GD32 bridge and NOT on AEN MRAM, which is the genuine
+    customer flash path of the two.
+
+    Fails against the pre-fix source (measured on `origin/dev` `9ad7ac4`: the
+    same manifest and env returned exit 0 / `status: ok`, because the gate
+    read `method == SWD_PROBE_METHOD`)."""
+    exit_code, data, issues, lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, require="1"
+    )
+
+    assert exit_code == 1
+    entry = data["entries"][0]
+    assert entry["status"] == "failed", entry
+    assert entry["message"] == _REQUIRE_DPIDR_FLOW_D_REFUSAL, entry
+    failed = [i for i in issues if i.code == "flash.entry-failed"]
+    assert len(failed) == 1, issues
+    assert failed[0].message == _REQUIRE_DPIDR_FLOW_D_REFUSAL
+    assert any(_REQUIRE_DPIDR_FLOW_D_REFUSAL in line for line in lines), lines
+
+
+def test_require_dpidr_refuses_flow_d_before_the_setools_sign(tmp_path, monkeypatch):
+    """WHERE the Flow D refusal fires is load-bearing, not incidental. Flow D
+    can run a SETOOLS auto-sign BEFORE its write, and `app-gen-toc` REWRITES
+    `build/app-package-map.txt` rather than appending -- tan-cli#512 measured
+    a wrong-board abort that correctly left slot0 byte-identical and still
+    left the customer's SETOOLS install mutated, because the sign had already
+    run. So this refusal sits at #512's hoisted point, ahead of the sign.
+
+    The manifest therefore withholds `atoc`/`atoc_address` on purpose: with
+    them present `_resolve_flow_d_atoc_via_setools` returns immediately and
+    the ordering is unobservable. An earlier version of this test asserted
+    only `spawned == []` against the armed-ATOC fixture and SURVIVED deleting
+    the early call site outright (measured) -- the later, shared refusal still
+    beat `_execute`, so the assertion was about a different ordering than the
+    one the docstring claims.
+
+    Fails against a fix that gates Flow D only at the shared `swd_probe` site:
+    `sign_slot0` runs first and this records the call."""
+    signed: list = []
+    monkeypatch.setattr(
+        flash_cmd, "resolve_setools_dir",
+        lambda *_a, **_k: types.SimpleNamespace(
+            path=str(tmp_path / "setools"), source="SETOOLS_DIR"
+        ),
+    )
+    monkeypatch.setattr(
+        flash_cmd, "find_app_gen_toc", lambda *_a, **_k: str(tmp_path / "setools" / "app-gen-toc")
+    )
+
+    def _fake_sign(*args, **_kwargs):
+        signed.append(args)
+        return "atoc.bin", "0x8057F5B0"
+
+    monkeypatch.setattr(flash_cmd, "sign_slot0", _fake_sign)
+
+    spawned: list = []
+    exit_code, _data, _issues, _lines, _sdk = _flow_d_run(
+        tmp_path,
+        monkeypatch,
+        flash_args=(
+            '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
+            "confirm: true}"
+        ),
+        require="1",
+        spawned=spawned,
+    )
+
+    assert exit_code == 1
+    assert signed == [], "the SETOOLS auto-sign ran before the refusal"
+    assert spawned == [], spawned
+
+
+def test_require_dpidr_lets_an_armed_flow_d_write_through(tmp_path, monkeypatch):
+    """The switch refuses UNGUARDED writes, not all writes -- an armed Flow D
+    entry still flashes with the env var set."""
+    armed = (
+        '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
+        'atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true, '
+        'expect_dpidr: "0x00000000", jlink_device: Cortex-M55}'
+    )
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=armed, require="1"
+    )
+
+    assert exit_code == 0
+    assert data["entries"][0]["status"] == "ok", data["entries"][0]
+    assert not any(i.code == "flash.entry-failed" for i in issues), issues
+
+
+def test_require_dpidr_does_not_refuse_a_flow_d_dry_run(tmp_path, monkeypatch):
+    """A preview writes nothing and must not depend on a bench env var --
+    the same rule #589 set for `swd_probe`, now holding for Flow D."""
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, require="1", dry_run=True
+    )
+
+    assert exit_code == 0
+    assert not any(i.code == "flash.entry-failed" for i in issues), issues
+    assert "ALP_FLASH_REQUIRE_DPIDR" not in data["entries"][0]["message"], data["entries"][0]
+
+
+def test_a_non_probe_method_never_warns_unarmed(tmp_path, monkeypatch):
+    """The coverage table's `False` side, exercised rather than asserted. A
+    `zephyr_west_flash` write hands the job to `west flash`, whose RUNNER
+    composes its own probe command line -- tan builds no J-Link session there,
+    so `flash_args.expect_dpidr` would have nothing to arm and an advisory
+    telling the operator to set it would be wrong advice. It is also the AEN's
+    own fallback transport (Flow A over the SE-UART), so this is not a
+    hypothetical entry shape.
+
+    Fails against a fix that drops the method test altogether and warns on
+    every unarmed write."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "a.bin").write_bytes(b"\x00")
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_hp, os: zephyr, output_artefact: a.bin, status: ok,
+   flash_method: zephyr_west_flash, flash_args: {}}
+helper_mcus: []
+boot_order: []
+"""
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
+    )
+
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir(exist_ok=True)
+    west_path = fake_tools / ("west.exe" if os.name == "nt" else "west")
+    west_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(west_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.delenv("ALP_FLASH_REQUIRE_DPIDR", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        flash_cmd, "_spawn", lambda *_a, **_k: flash_cmd._Outcome(success=True, stdout="", stderr="")
+    )
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
+    assert exit_code == 0, data
+    assert data["entries"][0]["status"] == "ok", data["entries"][0]
+    assert not any(i.code == "flash.dpidr-preflight-unarmed" for i in issues), issues
+
+
 # ── yocto_wic target/compress validation (tan-cli#487) ──────────────────────
 
 

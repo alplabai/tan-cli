@@ -478,7 +478,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # recording the placement, the deliberate `.bin`-only asymmetry (no
     # `verifyfile` is emitted on a guess) and the measured divergence from the
     # oracle, which emits no verify line at all.
-    "tan/core/flash_plan.py": 2821,
+    # 2912, not 2821, as of tan-cli#609. `DPIDR_GUARD_COVERAGE` (the table
+    # naming every registered method's wrong-board-guard coverage) plus the
+    # two pure predicates that read it, `dpidr_preflight_possible` and
+    # `dpidr_preflight_unarmed`. Both are well under the function cap; the
+    # bulk of the 91 lines is the table's own comment, recording why `False`
+    # is "tan does not compose this method's probe session" rather than a
+    # safety claim -- the distinction the next backend's author has to get
+    # right, and the one #609 was filed because nobody had had to state.
+    # Re-walked with this file's own measurement, not derived by arithmetic.
+    "tan/core/flash_plan.py": 2912,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
@@ -826,7 +835,21 @@ _MODULE_BUDGET: dict[str, int] = {
     #     pretending the alternative does not exist.
     # Re-walked with the gate's own module walk after the edits, not adjusted
     # by arithmetic from 3641.
-    "tan/commands/flash_cmd.py": 3689,
+    # 3824, not 3689, as of tan-cli#609. Two new functions --
+    # `_dpidr_unarmed_advisory` (the warning text, composed off `entry.method`
+    # now that it is no longer `swd_probe`'s alone) and `_require_dpidr_gate`
+    # (the strict switch's decision, extracted so its two call sites cannot
+    # disagree) -- plus a second, EARLY call site for that gate on the Flow D
+    # path, ahead of the SETOOLS auto-sign, which tan-cli#512 measured
+    # mutating a customer's install before an abort. The rest is commentary
+    # at three sites whose stated scope became false when the guard stopped
+    # being `swd_probe`-only: `_Entry.preflight_unarmed`, `_Context.
+    # require_dpidr`, and `_require_dpidr_refusal`'s "Scope: swd_probe only"
+    # paragraph, which #607 had written and #609 measured the cost of.
+    # (`_swd_probe_require_dpidr_refusal` is that same function, renamed to
+    # `_require_dpidr_refusal` -- the paragraphs above still describe it.)
+    # Re-walked with this file's own module walk, not derived by arithmetic.
+    "tan/commands/flash_cmd.py": 3824,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
