@@ -1587,3 +1587,49 @@ def test_bad_format_value_is_a_usage_error(tmp_path):
     sdk = _marker_sdk(tmp_path / "sdk")
     result = runner.invoke(app, _dry_run_argv(sdk, tmp_path / "out", "--format", "bogus"))
     assert result.exit_code == 2
+
+
+def test_a_rejected_sdk_root_flag_is_named_in_the_refusal(tmp_path):
+    """tan-cli#497 defect 7. `resolve_sdk_tiered` is TERMINAL on `--sdk-root`
+    (I-31) and returns it verbatim even when invalid, so the loader-marker
+    check in `new_som` is the only thing that knows the path was rejected --
+    and this refusal carries no `sdk` block, so the value the caller typed
+    left no trace at all while the message told them to "Use --sdk-root".
+
+    `not-an-sdk` is a real directory missing only `scripts/alp_project.py`."""
+    empty = tmp_path / "not-an-sdk"
+    empty.mkdir()
+    result = runner.invoke(
+        app,
+        ["--dry-run", "--format", "json", "--sdk-root", str(empty),
+         "--sku", "E1M-ZZ9999", "--soc-ref", "nxp:imx9:imx95", "--family", "nxp-imx9"],
+    )
+    assert result.exit_code == 2, result.output
+    env = json.loads(result.output)
+    assert "sdk" not in env
+    assert [i["code"] for i in env["issues"]] == ["new-som.failed"], env
+    assert env["issues"][0]["message"] == (
+        f'alp-sdk root is unresolved: --sdk-root "{empty}" is not an alp-sdk '
+        "checkout (scripts/alp_project.py not found under it). No SoM scaffold "
+        "was written."
+    )
+
+
+def test_the_no_flag_refusal_still_offers_the_flag(tmp_path, monkeypatch):
+    """The other branch: nothing typed, nothing to name, so recommending the
+    flag is right. `conftest.py` already scrubs `ALP_SDK_ROOT` and repoints
+    HOME; `chdir` into an empty tmp_path keeps the discovery tier empty too,
+    so the guard is genuinely reached."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app,
+        ["--dry-run", "--format", "json",
+         "--sku", "E1M-ZZ9999", "--soc-ref", "nxp:imx9:imx95", "--family", "nxp-imx9"],
+    )
+    assert result.exit_code == 2, result.output
+    env = json.loads(result.output)
+    assert [i["code"] for i in env["issues"]] == ["new-som.failed"], env
+    assert env["issues"][0]["message"].startswith(
+        "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+        "alp-sdk checkout, or "
+    )

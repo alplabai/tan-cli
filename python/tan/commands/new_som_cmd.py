@@ -112,6 +112,7 @@ from tan.commands.sdk_cmd import (
     project_pin_issue,
     resolve_sdk_tiered,
 )
+from tan.core.shapes import rejected_sdk_root_message
 from tan.env import stderr_is_tty, stdin_is_tty
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -917,7 +918,18 @@ def new_som(
     workspace_root = Path.cwd() / project if project else Path.cwd()
     active = resolve_sdk_tiered(sdk_root, workspace_root)
     if active.path is None or not Path(active.path).joinpath(*SDK_MARKER).exists():
-        fail(_SDK_ROOT_UNRESOLVED, ExitCode.VALIDATION_FAILURE)
+        # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the value.
+        # `resolve_sdk_tiered` is TERMINAL on the flag (I-31) and returns it
+        # verbatim even when invalid, so the marker check right above is the
+        # ONLY thing that knows the path was rejected -- and this refusal
+        # carries no `sdk` block, so the typed value left no trace at all while
+        # the message told the caller to "Use --sdk-root".
+        fail(
+            rejected_sdk_root_message(sdk_root, "No SoM scaffold was written.")
+            if sdk_root
+            else _SDK_ROOT_UNRESOLVED,
+            ExitCode.VALIDATION_FAILURE,
+        )
         return
     resolved_sdk = Path(active.path)
     # tan-cli#263 review: this command WRITES metadata skeletons into
