@@ -338,13 +338,17 @@ def test_an_unresolved_sdk_is_a_warning_not_a_failure(tmp_path, monkeypatch):
     assert doc["data"]["soms"] == []
     assert doc["data"]["boardLibraries"] == []
     # The FROZEN code, spelled exactly; the wizard matches it with `===`.
+    # tan-cli#497 defect 7: with `--sdk-root` GIVEN, the message names the value
+    # that was rejected and why. The no-flag message is unchanged and stays
+    # pinned by the `presets-no-sdk` golden envelope.
     assert doc["issues"] == [
         {
             "code": "presets.sdk-root-unresolved",
             "severity": "warning",
             "message": (
-                "alp-sdk root is unresolved. Returning built-in defaults and "
-                "empty SDK preset lists."
+                'alp-sdk root is unresolved: --sdk-root "./nope" is not an '
+                "alp-sdk checkout (scripts/alp_project.py not found under it). "
+                "Returning built-in defaults and empty SDK preset lists."
             ),
         }
     ]
@@ -365,12 +369,42 @@ def test_text_mode_reports_the_unresolved_sdk_reason_too(tmp_path, monkeypatch):
     `issues`; text mode built the same list and then never printed it -- a
     customer running a bare `tan presets` with no SDK resolvable saw
     `skus=0` and nothing telling them why. Mirrors `examples_cmd.py`'s own
-    issue-printing loop for its text branch."""
+    issue-printing loop for its text branch.
+
+    Driven WITHOUT `--sdk-root` so it pins the shared `SDK_UNRESOLVED_MESSAGE`
+    constant: with the flag given, tan-cli#497 replaces the message with the
+    one naming the rejected value (covered by its own test below)."""
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["presets", "--sdk-root", "./nope"])
+    result = runner.invoke(app, ["presets"])
     assert result.exit_code == 0
     assert result.stdout == ""
     assert f"presets: {SDK_UNRESOLVED_MESSAGE}" in result.stderr
+
+
+def test_a_rejected_sdk_root_flag_is_named_in_the_message(tmp_path, monkeypatch):
+    """tan-cli#497 defect 7. `--sdk-root` is TERMINAL, so a path without
+    `scripts/alp_project.py` resolves to nothing -- and the warning used to be
+    the same string as the no-flag one, whose remediation is "pass --sdk-root
+    <path>": the flag the caller had just typed, with the failing value nowhere
+    in the JSON envelope or the stderr text. Both modes must now name it."""
+    monkeypatch.chdir(tmp_path)
+    typo = str(tmp_path / "alp-sdk-typo")
+
+    doc = json.loads(
+        runner.invoke(app, ["presets", "--sdk-root", typo, "--format", "json"]).stdout
+    )
+    assert doc["issues"][0]["code"] == "presets.sdk-root-unresolved"
+    assert doc["issues"][0]["message"] == (
+        f'alp-sdk root is unresolved: --sdk-root "{typo}" is not an alp-sdk '
+        "checkout (scripts/alp_project.py not found under it). Returning "
+        "built-in defaults and empty SDK preset lists."
+    )
+
+    text = runner.invoke(app, ["presets", "--sdk-root", typo]).stderr
+    assert f'presets: alp-sdk root is unresolved: --sdk-root "{typo}" is not' in text
+    # The remediation that recommends the flag the caller just passed is GONE
+    # from this branch -- that self-defeating sentence is the defect.
+    assert "pass --sdk-root <path>" not in text
 
 
 def test_a_bad_format_is_a_usage_error_not_a_traceback():
