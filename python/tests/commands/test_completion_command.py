@@ -49,6 +49,7 @@ from typer.testing import CliRunner
 
 from tan.commands.completion_cmd import (
     BASH_SCRIPT,
+    _COMMAND_NAMES,
     FISH_SCRIPT,
     SHELL_UNSUPPORTED_CODE,
     SHELL_UNSUPPORTED_MESSAGE,
@@ -95,7 +96,11 @@ def test_embedded_scripts_are_nonempty_and_shell_specific():
     assert "_tan_complete" in BASH_SCRIPT
     assert BASH_SCRIPT.startswith("# tan CLI bash completion")
     assert "#compdef tan" in ZSH_SCRIPT
-    assert "__fish_use_subcommand" in FISH_SCRIPT
+    # `__fish_seen_subcommand_from`, not `__fish_use_subcommand`: the latter
+    # was the command list's gate until tan-cli#503 measured it returning
+    # false at a global flag's VALUE (`complete -C 'tan --sdk-root /x '`
+    # returned nothing at all in fish 3.7.0), and no line uses it any more.
+    assert "__fish_seen_subcommand_from" in FISH_SCRIPT
     # Every script ends in exactly one trailing newline (this command's own
     # `print(script)` adds the second one the oracle's stdout capture shows).
     for script in (BASH_SCRIPT, ZSH_SCRIPT, FISH_SCRIPT):
@@ -654,6 +659,305 @@ def test_fish_target_completion_lists_every_valid_generate_target():
     assert "os-topology" in listed
     assert "composed-route-table" in listed
     assert "ipc-contract-h" in listed
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#503: bash's OTHER two fixed-index reads. The `--format` value list
+# above was the first consumer of the subcommand scan; the `$cword -eq 1`
+# subcommand gate and the per-command flag `case` still read
+# `${COMP_WORDS[1]}`, so a leading global flag made both miss entirely. These
+# were the frozen oracle's own bytes -- `crates/` was deleted in tan-cli#269,
+# so this port owns them now.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_offers_subcommands_past_a_leading_global_flag():
+    """`tan --sdk-root /x <TAB>` used to offer not one of the 32 subcommand
+    names: the gate that emits them was `[[ $cword -eq 1 ]]`, and `--sdk-root
+    /x` puts the cursor at word 3."""
+    reply = _bash_complete(["tan", "--sdk-root", "/x", ""])
+    assert "validate" in reply
+    assert "size" in reply
+    assert "faultdecode" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_offers_per_command_flags_past_a_leading_global_flag():
+    """`tan --sdk-root /x size --<TAB>` used to fall to the `*)` arm, because
+    `${COMP_WORDS[1]}` was `--sdk-root` rather than `size`, so none of
+    `size`'s own three flags were offered."""
+    reply = _bash_complete(["tan", "--sdk-root", "/x", "size", "--"])
+    assert "--build-root" in reply
+    assert "--board" in reply
+    assert "--fail-over-budget" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_still_offers_subcommands_at_the_first_word():
+    """Regression guard for the shape that already worked: replacing `[[
+    $cword -eq 1 ]]` with the scan must not lose the ordinary `tan <TAB>`."""
+    reply = _bash_complete(["tan", ""])
+    assert "validate" in reply
+    assert "faultdecode" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_offers_subcommands_past_a_valueless_global_flag():
+    """`tan --verbose <TAB>`: a boolean global flag consumes no following
+    word, so the very next word IS the subcommand slot. This shape was broken
+    the same way (`$cword` is 2, not 1) and is fixed by the same scan."""
+    reply = _bash_complete(["tan", "--verbose", ""])
+    assert "validate" in reply
+    assert "size" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_does_not_offer_subcommands_in_a_flag_value_slot():
+    """`tan --sdk-root <TAB>` is completing `--sdk-root`'s VALUE -- a path --
+    not a subcommand. The scan steps past the cursor word there, and that
+    overshoot is what `at_value` detects: without it, the empty `$subcmd`
+    would be read as "no subcommand typed yet" and the completion would start
+    offering 32 command names where a directory belongs."""
+    reply = _bash_complete(["tan", "--sdk-root", ""])
+    assert "validate" not in reply
+    assert "size" not in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_offers_version_at_the_root_only():
+    """`--version` is root-only and no subcommand prints a version for it.
+    Measured on all 32: 29 answer Click's `No such option: --version
+    (Possible options: --verbose)`; `lock` forwards it to `west`, which
+    answers `unexpected arguments: ['--version']`; `quality` and `migrate`
+    refuse earlier on their own required flag (`--profile`, and one of
+    `--check`/`--preview`/`--apply`) and only reach `west` once that is
+    supplied. The capture had it in the always-offered set, so tab-completion
+    taught an argv no subcommand accepts."""
+    assert "--version" in _bash_complete(["tan", ""])
+    assert "--version" not in _bash_complete(["tan", "size", "--"])
+    assert "--version" not in _bash_complete(["tan", "doctor", "--"])
+    assert "--version" not in _bash_complete(["tan", "--sdk-root", "/x", "validate", "--"])
+    # The control: `--verbose`, the flag Click suggests in its own rejection
+    # message, IS accepted everywhere and must still be offered.
+    assert "--verbose" in _bash_complete(["tan", "size", "--"])
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+@pytest.mark.parametrize(
+    "words, cword, wanted",
+    [
+        # `tan --sdk-root=/x size --<TAB>`: bash splits on $COMP_WORDBREAKS,
+        # which contains `=`, so the function is handed SEVEN words, not five.
+        (["tan", "--sdk-root", "=", "/x", "size", "--"], 5, "--build-root"),
+        # `tan --sdk-root C:/proj size --<TAB>`: `:` is a wordbreak too.
+        (["tan", "--sdk-root", "C", ":", "/proj", "size", "--"], 6, "--build-root"),
+    ],
+)
+def test_bash_completion_survives_comp_wordbreaks_splitting(words, cword, wanted):
+    """A skip-N positional scan lands on `=` or `:` and loses the subcommand.
+    These `COMP_WORDS`/`COMP_CWORD` pairs are not constructed by hand -- they
+    were captured from a real bash 5.2.21 under a pty by wrapping
+    `_tan_complete` in a `complete -F` that dumps `${COMP_WORDS[*]}` and
+    `$COMP_CWORD` before delegating.
+
+    `--sdk-root=/x` is a supported argv, not a hypothetical: `tan
+    --sdk-root=/nonexistent validate` parses and runs (exit 0, reporting no
+    board.yaml)."""
+    import subprocess as sp
+
+    words_lit = " ".join(f'"{w}"' for w in words)
+    script = (
+        BASH_SCRIPT
+        + "\nCOMP_WORDS=(" + words_lit + ")\n"
+        + f"COMP_CWORD={cword}\n"
+        + "COMPREPLY=()\n_tan_complete\nprintf '%s\\n' \"${COMPREPLY[@]}\"\n"
+    )
+    proc = sp.run(  # noqa: S603, S607 -- fixed script, no shell metacharacters
+        ["bash", "-c", script], capture_output=True, text=True, timeout=10
+    )
+    reply = [line for line in proc.stdout.splitlines() if line]
+    assert wanted in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_offers_commands_after_an_equals_joined_flag():
+    """`tan --sdk-root=/x <TAB>` -- the value is complete, so a subcommand may
+    follow and the 32 names belong here. Captured split: `(tan --sdk-root =
+    /x "")`, `COMP_CWORD=4`."""
+    reply = _bash_complete(["tan", "--sdk-root", "=", "/x", ""])
+    assert "validate" in reply
+    assert "size" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_treats_the_split_equals_as_a_value_slot():
+    """`tan --sdk-root=<TAB>` splits to `(tan --sdk-root = "")`, so `prev` is
+    the separator rather than the flag. Still a value position: offering 32
+    command names where a path belongs is the wrong answer either way."""
+    reply = _bash_complete(["tan", "--sdk-root", "=", ""])
+    assert "validate" not in reply
+    assert "--project" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+@pytest.mark.parametrize(
+    "words",
+    [
+        # `tan --sdk-root size doctor --<TAB>` -- space form.
+        ["tan", "--sdk-root", "size", "doctor", "--"],
+        # `tan --sdk-root=size doctor --<TAB>` -- captured from real bash as
+        # `(tan --sdk-root = size doctor --)`, `COMP_CWORD=5`. This is the
+        # shape the `=`-separator skip exists for, and the ONLY one: with a
+        # value that is not a command name, the bare-word fallthrough already
+        # steps over it, so a mutant that deletes the skip survives every
+        # other case. Measured both ways -- with the skip this completes
+        # `--build`; without it, `--build-root --fail-over-budget`, i.e. the
+        # value `size` taken for the subcommand.
+        ["tan", "--sdk-root", "=", "size", "doctor", "--"],
+    ],
+    ids=["space", "equals"],
+)
+def test_bash_completion_prefers_a_positional_value_over_a_name_collision(words):
+    """The scan steps over a value-taking flag's value POSITIONALLY before it
+    ever consults the command list, so a `--sdk-root` whose value happens to
+    be spelled like a subcommand still resolves the real subcommand.
+    Membership alone would have answered `size`."""
+    reply = _bash_complete(words)
+    assert "--build" in reply
+    assert "--fix" in reply
+    assert "--build-root" not in reply  # i.e. it did not resolve `size`
+    assert "--fail-over-budget" not in reply
+
+
+def test_zsh_args_state_dispatches_on_the_scanned_subcommand():
+    """tan-cli#503 / zsh. The `args` state dispatched on `$words[2]`, but in
+    that state `_arguments` has REINDEXED `words`: `words[1]` is the
+    subcommand and `words[2]` is the word being completed. Instrumented in
+    zsh 5.9 under a pty (a `print -r` of the live state appended to a file
+    from inside the `args` arm of the EMITTED script):
+
+        ARGS-STATE words=(size --) CURRENT=2 words2=[--] subcmd_scan=[size]
+
+    So `$words[2]` was `--` and matched no arm -- all 21 fell through to
+    `*)`. Driven end to end in the same zsh, before -> after:
+
+        tan size --<TAB>                  12 global flags
+                                       -> + --board --build-root --fail-over-budget
+        tan doctor --<TAB>                12 global flags
+                                       -> + --build --fix
+        tan --sdk-root /x size --<TAB>    12 global flags
+                                       -> + --board --build-root --fail-over-budget
+
+    `$subcmd` is the value the same probe printed as correct, and it is the
+    one bash uses, so the two shells now agree by construction. This assertion
+    is static because a compinit-under-a-pty harness is not something to run
+    in CI; the live run above is what established the behaviour."""
+    lines = ZSH_SCRIPT.splitlines()
+    args_arm = next(i for i, line in enumerate(lines) if line.strip() == "args)")
+    dispatch = next(
+        line.strip() for line in lines[args_arm:] if line.strip().startswith("case ")
+    )
+    assert dispatch == "case $subcmd in"
+    assert "case $words[2] in" not in ZSH_SCRIPT
+
+
+def test_bash_subcommand_flag_list_matches_the_declared_global_surface():
+    """The bash script's per-subcommand `$global_flags` must equal the one
+    table the parser itself reads (`tan.core.global_flags.GLOBAL_FLAGS`) plus
+    `--format` and `--help`, which are declared separately -- and `$root_flags`
+    must add exactly `--version` on top. Pinning it to `GLOBAL_FLAGS` rather
+    than to a retyped literal is what stops the script and the parser drifting
+    a second time."""
+    from tan.core.global_flags import GLOBAL_FLAGS
+
+    def _list(name: str) -> list[str]:
+        line = next(
+            line for line in BASH_SCRIPT.splitlines()
+            if line.strip().startswith(f"local {name}=")
+        )
+        return line.split('="', 1)[1].rstrip('"').split()
+
+    global_flags = _list("global_flags")
+    assert set(global_flags) == set(GLOBAL_FLAGS) | {"--format", "--help"}
+    assert "--version" not in global_flags
+    assert _list("root_flags") == ["$global_flags", "--version"]
+
+
+def test_zsh_offers_version_at_the_root_only():
+    """zsh's `$global_args` is spliced into every per-subcommand `_arguments`
+    arm, so an entry there is offered on all 32. `--version` is now spliced
+    into the root `_arguments -C` call instead, and appears nowhere else."""
+    lines = ZSH_SCRIPT.splitlines()
+    carriers = [line for line in lines if "--version[Show version]" in line]
+    assert len(carriers) == 1, carriers
+    assert carriers[0].strip().startswith("_arguments -C")
+    assert carriers[0].rstrip().endswith("'--version[Show version]'")
+    # Control: `--help` IS accepted on every subcommand and must stay in the
+    # per-arm set.
+    assert any(line.strip() == "'--help[Show help]'" for line in lines)
+
+
+def test_fish_offers_version_at_the_root_only():
+    """fish's flag completions are unconditional unless given an `-n`
+    condition; `--version` now carries the same "no subcommand typed yet"
+    condition as the command list.
+
+    Driven in fish 3.7.0: `complete -C 'tan --'` lists
+    `--version\\tShow version`, and `complete -C 'tan size --'` matches
+    `version` zero times."""
+    line = next(
+        line for line in FISH_SCRIPT.splitlines() if line.endswith("-l version -d 'Show version'")
+    )
+    assert line == (
+        f"complete -c tan -n 'not __fish_seen_subcommand_from {_COMMAND_NAMES}' "
+        "-l version -d 'Show version'"
+    )
+    # Control: `--help` is accepted everywhere and stays unconditional.
+    assert "complete -c tan -l help -d 'Show help'" in FISH_SCRIPT
+
+
+def test_fish_offers_the_command_list_past_a_global_flag_value():
+    """tan-cli#503 / fish. The command list was gated on
+    `__fish_use_subcommand`, whose own body returns 1 at the first token that
+    does not start with `-` -- and a global flag's VALUE is exactly that. So
+    with `tan --sdk-root /x ` typed, the list was suppressed; and because fish
+    offers options only when the current token starts with `-`, the result was
+    NOTHING at all, not even a flag.
+
+    Measured in fish 3.7.0 with the emitted script and the real `__fish_*`
+    helpers, `complete -C '...' | count`:
+
+        tan                      32 -> 32
+        tan --sdk-root /x         0 -> 32
+        tan --sdk-root=/x         0 -> 32
+        tan --verbose             0 -> 32
+        tan validate              0 ->  0   (control: not re-offered)
+
+    `__fish_seen_subcommand_from` scans every word for a member of the list,
+    so a flag value no longer suppresses it. The residual case it shares with
+    the rest of the script: a value that IS a command name (`tan --sdk-root
+    size `) suppresses the list -- the same trade-off every other
+    `__fish_seen_subcommand_from` line in this script already makes."""
+    line = next(
+        line for line in FISH_SCRIPT.splitlines() if line.startswith("complete -c tan -n") and " -a '" in line
+    )
+    assert line == (
+        f"complete -c tan -n 'not __fish_seen_subcommand_from {_COMMAND_NAMES}' "
+        f"-a '{_COMMAND_NAMES}'"
+    )
+    assert "__fish_use_subcommand" not in FISH_SCRIPT
+
+
+def test_spliced_command_names_match_the_registered_command_surface():
+    """`_COMMAND_NAMES` is spliced into fish twice (the `-a` list and the
+    `not __fish_seen_subcommand_from` condition), so it must not drift from
+    what `tan.cli` actually registers. `completion_cmd` cannot import
+    `tan.cli` (import cycle -- see its docstring); this test can."""
+    from tan.cli import _SUBCOMMAND_NAMES
+
+    assert set(_COMMAND_NAMES.split()) == set(_SUBCOMMAND_NAMES)
+    assert len(_COMMAND_NAMES.split()) == 32
 
 
 def test_subcommand_format_overrides_a_leading_root_format():
