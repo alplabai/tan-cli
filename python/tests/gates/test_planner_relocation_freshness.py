@@ -220,10 +220,12 @@ from tests.conftest import sdk_root
 #:     `metadata/socs/alif/ensemble/e8.json`'s new `zephyr_peripherals_dtsi`
 #:     (which the re-synced `zephyr_board.py` REQUIRES) exists only in trees
 #:     that also contain `a712a275`, so the emit-parity oracle cannot be
-#:     pinned between the two. The CONSUMER half is NOT ported and is not
-#:     claimed: `tan`'s executor still does not run a plan's `postCommands`,
-#:     so a baremetal slice still only configures -- tan-cli#550/#551 stay
-#:     OPEN, and the freshness hashes below say nothing about them.
+#:     pinned between the two. The CONSUMER half landed separately, in
+#:     tan-cli#550/#551: `tan.core.build_plan` now parses `postCommands` and
+#:     `tan.commands.build.execute` runs them, so a baremetal slice builds and
+#:     an empty `artifacts.outputDir` is refused rather than reported `ok`.
+#:     That is a `tan/core/` + `tan/commands/` change; the freshness hashes
+#:     below still say nothing about it either way.
 #:   - `7d58ef32` (alp-sdk#1352) -> `scripts/gen_zephyr_board.py` only, a
 #:     HAND_PORT file; see HAND_PORT_PINNED_SDK_COMMIT below.
 #: Every other file in both tables is byte-identical between `ccd34f06` and

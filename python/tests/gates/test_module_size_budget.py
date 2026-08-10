@@ -1174,7 +1174,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # `_vendored_files` stays under 50 lines and the FUNCTION ratchet holds at
     # 237 rather than being raised for a 4-line guard. Re-measured: exactly
     # `wc -l` on this branch.
-    "tan/core/scaffold.py": 1452,
+    # 1494, not 1452, as of tan-cli#494 defect 1's residue: the prune list gains
+    # `out` and `bwdt` (two lines of DATA -- `.gitignore:4`/`:6`, both inside
+    # the same `# Build directories` block the first cut transcribed from), and
+    # the rest is the comment that block's own false completeness claim earned.
+    # It now names each of the seven patterns with its `.gitignore` line, the
+    # `dxcom -o out/` line in the shipped example README that makes `out/`
+    # reachable, the untracked-name invariant that makes ADDING a declared
+    # pattern safe where inventing one is not, and the drift gate that re-reads
+    # both source blocks. No new function, so the FUNCTION ratchet does not
+    # move. Re-measured on this branch by running this gate: exactly `wc -l`,
+    # which is what it counts (`len(read_text().splitlines())` below) -- the
+    # AST walk belongs to the FUNCTION-count gate, not this one.
+    "tan/core/scaffold.py": 1500,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one
@@ -1456,7 +1468,31 @@ _MODULE_BUDGET: dict[str, int] = {
     # The ratchet is re-pinned at the new, smaller size rather than left at the
     # old ceiling -- a budget 27 lines above the file is a ratchet that stopped
     # ratcheting.
-    "tan/commands/build/execute.py": 1092,
+    # 1429, not 1092, as of tan-cli#550/#551: the build plan's per-slice
+    # `postCommands` are now RUN. Measured with `wc -l` on the final tree, not
+    # summed from the diff. Five additions: `_StepResult` + `_spawn_step` (the
+    # Popen/drain/terminate block LIFTED out of `execute_slices`, so the
+    # slice's own command and each post-build step share one spawn instead of
+    # two that can drift on cancellation handling or fd hygiene),
+    # `_run_post_commands`, `_missing_post_tool`, `_PostOutcome`,
+    # `_output_dir_has_a_file` and `_baremetal_artefact_refusal` (the
+    # `os: baremetal` twin of the `os: zephyr` boilerplate guard: an exit code
+    # is not evidence firmware exists).
+    # A NOTABLE SHARE OF THAT IS PROSE, and load-bearing prose: the tan-cli#615
+    # review round added the alp-sdk schema sentence + ADR-0001 citation that
+    # settle skip-vs-fail for a post step, and the block comment above
+    # `_output_dir_has_a_file` recording the artefact-freshness check that was
+    # implemented, MEASURED to false-fail an ordinary incremental rebuild, and
+    # withdrawn. Deleting that comment would invite the same round trip again.
+    # RAISED rather than extracted, deliberately, and the alternative was
+    # measured: a `tan/commands/build/post_commands.py` split needs
+    # `_drain_output`/`_terminate`/`_taskkill_program` to move with it (or a
+    # module cycle), and `_taskkill_program` reads `resolve_tool` out of THIS
+    # module's namespace -- which is exactly what
+    # `test_bare_argv0_spawn.py::test_terminate_spawns_the_resolved_taskkill`
+    # monkeypatches. That is a bigger, riskier blast radius through the cancel
+    # path than the growth it saves.
+    "tan/commands/build/execute.py": 1429,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather
@@ -2110,7 +2146,28 @@ _MIRRORED = ("tan/planner/",)
 # function, one `buildplan.py` mirror function -- so both survive the merge and
 # NEITHER side's 244 does. Re-walked with this file's own `_long_functions` on
 # the merged tree; the value below is that walk's answer, not 244 + 1.
-_FUNCTION_COUNT_BUDGET = 245
+#
+# 246 as of tan-cli#550/#551. EXACTLY ONE function crosses 50 lines that did
+# not before: `tan/commands/build/execute.py:_baremetal_artefact_refusal` at
+# 58 -- the `os: baremetal` evidence guard, whose body is 12 lines and whose
+# docstring is the rest: the three limits it does NOT cover, each of which a
+# reader would otherwise take it as covering (an older plan with no
+# `artifacts.outputDir`, an app that intentionally links no executable, and a
+# previous run's binary left in place). That prose is the deliverable of the
+# tan-cli#615 review's MAJOR 2, so it is not trimmable to duck this ratchet.
+# The other additions in the same change land UNDER the cap on purpose rather
+# than paying it four more times: `_spawn_step`, `_run_post_commands`,
+# `_missing_post_tool` and `_output_dir_has_a_file` all measure 50 or less.
+# `execute_slices` grew (456 -> 493) but was already far over, so it moves
+# nothing here.
+# MEASURED by running this gate's own walk on the final tree and diffing the
+# NAMED set against the same walk of a clean `c933bec` worktree -- not 245 + 1
+# by arithmetic: base 245 / new 246, added
+# {`_baremetal_artefact_refusal`}, removed {}.
+# `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
+# `bootstrap_cmd.py:_run` at 704 on both trees, and the longest thing this
+# change adds is 58.
+_FUNCTION_COUNT_BUDGET = 246
 _FUNCTION_WORST_BUDGET = 707
 
 

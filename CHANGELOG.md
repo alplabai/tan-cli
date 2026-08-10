@@ -189,6 +189,27 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan init --from-example` no longer copies an example's `out/` build
+  directory into the customer's new project.** The build-output prune list
+  added in #583 transcribed five of the seven directory patterns alp-sdk's
+  `.gitignore` declares, and claimed in its own comment to be complete;
+  `out/` (`.gitignore:4`) and `bwdt/` (`:6`) sit in the same
+  `# Build directories` block as `build/` and were both missed. `out/` is
+  reachable by following a shipped example's own instructions —
+  `examples/camera-vision/ai-object-detection-realtime/README.md:83` says to
+  run `dxcom -m yolov8n.onnx -c yolov8n_config.json -o out/` inside the
+  example. A binary there (`.dxnn`) failed the whole command with
+  `init.example-unreadable` at exit 1; an all-text one (Intel HEX is ASCII,
+  so `out/zephyr/zephyr.hex` qualifies) was copied silently at `ok:true` /
+  exit 0 / `issues: []`. A drift gate now re-reads that `.gitignore` block out
+  of a bound `ALP_SDK_ROOT` checkout and fails when alp-sdk declares a
+  directory the list does not know. Vendored-template renders are unaffected:
+  all 66 (alp-sdk's eleven shipped SKUs × 6 templates), plus the six for a
+  synthetic `E1M-ZZZ999` that exercises the unrecognised-prefix fallback, are
+  sha256-identical to `dev`. Refs #494.
+
+- **An AEN MRAM write with no wrong-board guard now says so.** The
+
 - **A helper MCU that Alp Lab programs in production is no longer flashed
   anyway just because it also declares a `flash_method`.** `update_channel` was
   the only way a helper could say it is not a customer flash target, and `tan
@@ -296,6 +317,49 @@ All notable changes to `tan` are documented here. Format follows
   read as a data sample by a live gate
   (`tests/gates/test_oracle_fixture_capture_platform_convention.py`). Refs #503.
 
+- **A baremetal slice now actually builds, and can no longer report `built`
+  when it produced nothing.** `tan build` never read the build plan's
+  `slices[].postCommands`, so an `os: baremetal` core ran only its `cmake -S
+  ... -B .` — a CONFIGURE — and reported `ok: <core> [baremetal]` / `1 of 1
+  slice(s) built` over a build tree holding `CMakeCache.txt` and no object
+  file, archive or executable. The executor now runs each post-build step in
+  plan order after the slice's own command succeeds, stops at the first
+  failure and reports that step's real exit code, and streams its output.
+  Separately, an exit code alone is not evidence firmware exists: a baremetal
+  slice whose plan names an `artifacts.outputDir` is reported `failed`, not
+  `succeeded`, when nothing was linked there — the `os: baremetal` twin of the
+  existing `os: zephyr` boilerplate guard. `postCommands` are parsed tolerantly
+  (absent or `null` is empty, so an older SDK's plan still builds), go through
+  the same `command`-shape, embedded-NUL and token-substitution rules as the
+  slice's own command, and take their skip-vs-fail disposition for a missing
+  tool from the plan's own `executionPolicy.missingTool` — which is what
+  alp-sdk's `build-plan-v1.schema.json` says *("`executionPolicy` applies to
+  each step exactly as it does to `command`")* and what
+  `docs/adr/0001-pmt-contract-decoupling.md` requires of tan. Closes #550.
+  - **Three limits the evidence guard does not cover, stated because a reader
+    would otherwise assume it does.** A plan from an alp-sdk predating the
+    `artifacts.outputDir` key is not judged by it at all. An app that
+    intentionally links no executable (a pure `add_library` tree) is refused by
+    it. And a PREVIOUS run's binary still satisfies it: edit an app to stop
+    defining its executable target, rebuild in place, and the orphaned binary
+    keeps the slice green — `tan clean` or deleting the build directory is what
+    surfaces that today. The third is a disclosure, not a preference: an
+    "artefact newer than this run" check was implemented and withdrawn after
+    measurement, because it cannot tell an orphaned binary from an ordinary
+    incremental rebuild in which `cmake --build .` correctly relinks nothing —
+    end to end, it reported `failed` for a second `tan build` with no source
+    change at all. `CMakeCache.txt`'s mtime is preserved and `Makefile`'s is
+    rewritten in every case, so neither discriminates either.
+  - **The planner half of #550 and all of #551 are upstream and already
+    landed** — emitting the `cmake --build .` step, and passing every
+    `-DALP_SOM_SKU` / `-DALP_SOM_FAMILY` / `-DALP_CORE_ID` / `-DALP_TOOLCHAIN`
+    / `-DALP_BOARD_<slug>` define to the configure instead of into a
+    `cmake-args.txt` nothing read. Both came from alp-sdk#1344 via the #608
+    re-sync; measured on a clean tree at that re-sync, a baremetal configure's
+    `CMakeCache.txt` already carries every one of those defines and no
+    `cmake-args.txt` is written anywhere. Refs #551, which is closed by #608
+    rather than here.
+
 - **A `swd_probe` write whose core stayed busy after the load now says so,
   instead of nothing at all.** #575 made halt-marker detection positional and
   correctly dropped a post-load marker from the *write* verdict — a marker
@@ -377,9 +441,10 @@ All notable changes to `tan` are documented here. Format follows
     configure's `-B .`, the `-DALP_*` settings, `alp-baremetal.cmake` as its
     config artefact), along with the vendored `tests/parity/
     seam1_field_diff.py` comparator that allows the two additive plan keys.
-    **#1344's CONSUMER half is NOT ported and is not claimed:** tan's executor
-    still does not RUN a plan's `postCommands`, so an `os: baremetal` slice
-    still only configures — tan-cli#550/#551 stay open. All four pin sites
+    **#1344's CONSUMER half was not ported in this change and was not
+    claimed by it:** tan's executor did not RUN a plan's `postCommands`, so an
+    `os: baremetal` slice still only configured. That half landed separately in
+    the same release — see the `postCommands` entry above (#550/#551). All four pin sites
     move in this one change (`parity.yml`'s `PINNED_SDK_TAG`, `ci.yml`'s
     `sdk_parity` checkout `ref:`, and both `PINNED_SDK_COMMIT` /
     `HAND_PORT_PINNED_SDK_COMMIT`); every other file in both hash tables was
