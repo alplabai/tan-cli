@@ -202,6 +202,77 @@ All notable changes to `tan` are documented here. Format follows
   `swd_probe`'s own texts are byte-for-byte unchanged. Arming the AEN manifest
   is upstream in alp-sdk's `metadata/**` and not part of this change.
   Closes #609.
+- **None of the three shell-completion scripts found the subcommand reliably,
+  and all three offered a root-only `--version` on every subcommand.** The
+  remaining completion defects from the tan-cli#503 report. Every claim below
+  was driven in a real shell — bash 5.2.21, zsh 5.9 under a pty, fish 3.7.0
+  via `complete -C` — before and after.
+  - **zsh's per-subcommand arms were unreachable dead code.** The `args` state
+    dispatched on `$words[2]`, but `_arguments` REINDEXES `words` there:
+    instrumented, `tan size --<TAB>` arrives with `words=(size --)` and
+    `CURRENT=2`, so `$words[2]` was `--` and matched none of the 21 arms.
+    Every subcommand fell to `*)`: `tan size --<TAB>` offered the 12 global
+    flags and none of `--build-root`/`--board`/`--fail-over-budget`, and `tan
+    doctor --<TAB>` offered neither `--build` nor `--fix`. Now `case $subcmd`.
+  - **fish's command list vanished after any global flag with a value.** It
+    was gated on `__fish_use_subcommand`, whose body returns false at the
+    first token that does not start with `-` — and a flag's value is one. So
+    `complete -C 'tan --sdk-root /x '` returned **nothing at all**: no command
+    names, and no flags either, since fish offers options only when the
+    current token starts with `-`. Now gated on `not
+    __fish_seen_subcommand_from <the 32>`, which ignores flag values:
+    measured, that shape goes from 0 candidates to 32, while `tan validate `
+    correctly still offers 0. fish's per-command flags were already right, so
+    only the command-list half was affected.
+  - **bash keyed all of its decisions off `${COMP_WORDS[1]}`**, the subcommand
+    only when nothing precedes it: `tan --sdk-root /x <TAB>` offered not one
+    of the 32 names and `tan --sdk-root /x size --<TAB>` offered none of
+    `size`'s own three flags. Both now read one `$subcmd` scanned at the top
+    of `_tan_complete`. That scan also had to survive `$COMP_WORDBREAKS`,
+    which contains `=` and `:`: captured from a real bash,
+    `tan --sdk-root=/x size --<TAB>` arrives as **seven** words
+    (`tan --sdk-root = /x size --`) and `tan --sdk-root C:/proj size --<TAB>`
+    as eight, so the scan steps over a `=` that follows a value flag and
+    treats a bare word as the subcommand only when it IS one of the 32 —
+    while still stepping over a value POSITIONALLY first, so
+    `tan --sdk-root=size doctor --<TAB>` resolves `doctor`, not `size`.
+    `--sdk-root=/x` is a supported argv (`tan --sdk-root=/nonexistent
+    validate` parses and runs). The word in a value slot (`tan --sdk-root
+    <TAB>`, and `tan --sdk-root=<TAB>`, whose `prev` is the split-off `=`) is
+    detected separately and keeps its pre-existing fall-through, so the scan
+    cannot start offering command names where a path belongs.
+  - **`--version` is root-only** and no subcommand prints a version for it:
+    measured on all 32, 29 answer Click's `No such option: --version
+    (Possible options: --verbose)`, `lock` forwards it to `west` (`unexpected
+    arguments: ['--version']`), and `quality`/`migrate` refuse earlier on
+    their own required flag and only reach `west` once that is supplied. It
+    now completes at the root only — bash splits `root_flags` out of
+    `global_flags`, pinned by a test to `tan.core.global_flags.GLOBAL_FLAGS`
+    so the script and the parser cannot drift again; zsh splices it into the
+    root `_arguments -C` call; fish shares the command list's condition.
+
+  All four were the frozen oracle's own captured bytes, which is why they were
+  left alone before; `crates/` was deleted in tan-cli#269, so this port owns
+  them and they are fixed rather than preserved.
+
+  **Two adjacent facts, measured and NOT changed here.** (1) The root flag
+  list is offered wherever no subcommand has been typed, but the bare root
+  command accepts much less than it offers: `tan --sdk-root /x --version`,
+  `tan --verbose --version` and `tan --ci --version` all exit 2 with `No such
+  option: --sdk-root`/`--verbose`/`--ci`, because `cli._reorder_global_flags`
+  relocates a global flag ONTO the subcommand and there is none. Narrowing
+  that list changes what `tan <TAB>` offers, which is beyond what tan-cli#503
+  reports; it behaves identically before and after this change. (2)
+  `python/tests/fixtures/oracle_captures/test_command_surface_oracle_parity.json`
+  still holds the pre-change bytes (`cword -eq 1`, `case "${COMP_WORDS[1]}"`,
+  `--ci --help --version`, `complete -c tan -l version`). It is an orphan —
+  its owning `tests/parity/test_command_surface_oracle_parity.py` was deleted
+  in tan-cli#269 — and so are all six sibling `test_*_oracle_parity.json`
+  stores, which is precisely why nothing enforced the bytes this change
+  rewrites. It is not pruned here because the cleanup is directory-wide, not
+  one file, and one of the orphans (`test_flash_oracle_parity.json`) is still
+  read as a data sample by a live gate
+  (`tests/gates/test_oracle_fixture_capture_platform_convention.py`). Refs #503.
 
 - **A `swd_probe` write whose core stayed busy after the load now says so,
   instead of nothing at all.** #575 made halt-marker detection positional and
@@ -1971,7 +2042,15 @@ All notable changes to `tan` are documented here. Format follows
   readiness probe) -- rather than reopen tan-cli#388 for the flag-bearing case
   to fix it. Both the flags-plus-dump merge and the `sys.stdin is None` guard
   now move to tan-cli#537 together with the reader itself: neither can be
-  fixed correctly without touching it.
+  fixed correctly without touching it. (**Correction, tan-cli#503 review
+  round:** only the flags-plus-dump merge actually moved. The `sys.stdin is
+  None` guard landed hours later, independently, in tan-cli#488/#536
+  (`b07eec2`, 2026-08-08 13:20 UTC, after this change merged at 10:31), as
+  part of that issue's round-5 isatty-probe sweep — verified on `dev`, `tan
+  faultdecode --format json 0<&-` exits 2 with a valid
+  `faultdecode.no-registers` envelope rather than an `AttributeError`
+  traceback. The sentence above was true when written and was overtaken the
+  same day.)
 
   Two smaller things this issue also raised are DEFERRED, not closed here:
   - `_parse_hexint` still accepts a negative/out-of-range hex value
