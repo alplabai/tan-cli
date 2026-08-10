@@ -68,6 +68,41 @@ modules_match_their_pinned_sdk_source` now reads its own root from
 `ALP_SDK_HAND_PORT_ROOT`, never `ALP_SDK_ROOT`/`ALP_SDK_PARITY_ROOT` (which
 stay the relocated-planner test's root, pinned at PINNED_SDK_COMMIT).
 
+WHEN THIS GATE FAILS, SOMETHING HAS PROBABLY ALREADY PROPOSED THE FIX.
+`python/scripts/planner_resync.py` + `.github/workflows/planner-resync.yml`
+(alp-sdk#855, ADR-0020's cross-repo remediation) turn a red run here into a PR
+against `dev` on the branch `auto/planner-resync`: look there before re-typing
+an upstream delta by hand. It fires on alp-sdk's existing
+`alp-sdk-planner-change` `repository_dispatch` and, as a backstop that needs no
+alp-sdk credential and no path filter to be right, on a daily cron. Locally:
+
+    python python/scripts/planner_resync.py --sdk-root <alp-sdk> --to origin/dev
+
+(dry run; add `--apply` to write). What it will and will not do, because the
+three tables below are NOT one thing:
+
+  * PINNED_HASHES is 3-WAY MERGED, not copied. `tan/planner/` is not the
+    verbatim mirror it is sometimes called: measured at `7d58ef32`, 16 of the
+    20 relocated modules differ from their upstream counterpart, by 2 lines
+    (`__init__.py`) to 329 (`kconfig_symbols.py`) -- only the UPSTREAM side of
+    this comparison is pinned, and the tan side carries real adaptations. So
+    the tool merges `base = upstream@PINNED_SDK_COMMIT`, `theirs =
+    upstream@<new>`, `ours = tan/planner/<f>`. A conflict writes nothing and
+    blocks PINNED_SDK_COMMIT.
+  * HAND_PORT_HASHES is FLAGGED, never merged. These counterparts are
+    restructured, renamed, split (`alp_project_loader.py` -> TWO tan modules)
+    or inlined (`sentinels.py`), so there is no base/ours/theirs triple a merge
+    could be correct over. The tool attaches the upstream diff and stops; it
+    does not move HAND_PORT_PINNED_SDK_COMMIT, so this test stays red until a
+    human ports it. That is the intended state, not a bug in the automation.
+  * STRICT_LOADERS_PINNED_SDK_COMMIT is checked and NEVER moved automatically
+    -- see that block below for why (it names the introducing commit, and it is
+    where a known open gap is written down).
+
+The automation does not weaken any of this. It proposes; it never merges, and
+a re-sync it could only partly apply opens a PR that says so and fails its own
+job rather than a green one that quietly dropped a file.
+
 Like that test, a missing `ALP_SDK_HAND_PORT_ROOT` SKIPS rather than fails --
 a run that never bound this root (ci.yml's `python` job, a local `pytest
 tests/`, a contributor's checkout) is not set up to do this audit, not
