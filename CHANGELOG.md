@@ -9,6 +9,91 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Added
 
+- **A re-sync PROPOSER for `tan/planner/`: `python/scripts/planner_resync.py` +
+  `.github/workflows/planner-resync.yml`.** ADR-0020's remediation asked for an
+  automatic `repository_dispatch` from alp-sdk CI into tan on every planner
+  change (alp-sdk#855); the *detection* half of that shipped and works —
+  alp-sdk's `dispatch-tan-parity.yml` fires `alp-sdk-planner-change`, `parity.yml`
+  listens, and `test_planner_relocation_freshness.py` goes red within minutes of
+  alp-sdk moving. What never existed is anything that says what the FIX is, so
+  every catch (#320, #485, #543, #493/#591) was hand-carried: read the upstream
+  diff, retype the delta, recompute two sha256 tables by hand, move two commit
+  pins. The new workflow turns a red gate into a PR against `dev` on the fixed
+  branch `auto/planner-resync`, force-pushed so it always reflects the current
+  delta. It **never merges**: a clean merge can still carry behavioural change —
+  the #608 re-sync changed `-B "."` and satisfied #561 without its subject line
+  mentioning either — so a human reads the diff.
+  - **The mirror half is 3-WAY MERGED, not copied, and that distinction is the
+    whole design.** `tan/planner/` is described in places as a verbatim mirror
+    of `scripts/alp_orchestrate/`; measured against alp-sdk `7d58ef32` it is
+    not — 16 of the 20 relocated modules differ from their upstream counterpart,
+    by 2 lines (`__init__.py`) to 329 (`kconfig_symbols.py`), and the
+    differences are real tan-side adaptations (docstrings naming tan's own test
+    files, a PyInstaller-extraction hazard that does not exist upstream,
+    `paths.py`'s bound-SDK-root resolution). Only the UPSTREAM side of the
+    comparison is hash-pinned. A `cp` would silently delete those adaptations,
+    so the tool merges `base = upstream@PINNED_SDK_COMMIT`, `theirs =
+    upstream@<new ref>`, `ours = tan/planner/<file>` instead. Replayed against
+    the real #593 re-sync (alp-sdk `f30f4d4b` → `ccd34f06`) from the commit
+    before it, the tool reproduces the human's port **byte-for-byte** on all
+    four cleanly-mergeable files (`carveout.py`, `kconfig.py`, `libraries.py`,
+    `secure.py`) and refuses the two that needed judgement.
+  - **The hand-port half is FLAGGED, never copied.** `gen_zephyr_board.py`,
+    `alp_template.py`, `alp_project_loader.py` (which feeds TWO tan modules),
+    `alp_project_emit/**` and `sentinels.py` were hand-ported, not relocated:
+    their tan counterparts are restructured, renamed, split or inlined, so
+    there is no `base`/`ours`/`theirs` triple a merge could be correct over.
+    When one of their sources moves, the tool attaches the upstream diff and
+    stops, and does **not** move `HAND_PORT_PINNED_SDK_COMMIT` — so the gate
+    stays red until a human ports it, which is the honest state. Replayed
+    against the real #608 re-sync (`ccd34f06` → `7d58ef32`), it flags
+    `scripts/gen_zephyr_board.py` rather than overwriting the 440-line
+    hand-port.
+  - **`STRICT_LOADERS_PINNED_SDK_COMMIT` is checked and never moved.** It is
+    not an "audited against the latest SDK" pin like the other two: it names
+    the commit that *introduced* `scripts/strict_loaders.py` (`26b0040e`, older
+    than both), and its block in the gate file is where a known open gap is
+    written down — `template.py`'s `_rendered_bytes` / `render_to_envelope`
+    catalog-driven READS are unconfined, so a hostile catalog can read an
+    arbitrary file and return it as scaffold content. Advancing that pin
+    automatically would re-freeze the gap under a newer commit and erase the
+    only record of it.
+  - **Two triggers, deliberately.** `repository_dispatch: [alp-sdk-planner-change]`
+    reuses alp-sdk's EXISTING sender — no new credential, no new secret, and
+    tan's side needs only the default `GITHUB_TOKEN` — and gives minutes-level
+    latency. A daily cron is the backstop, and it is not redundant: the sender's
+    `paths:` filter (`scripts/alp_orchestrate/**`, `metadata/**`,
+    `examples/**/board.yaml`, `tests/parity/**`) misses most hand-port sources.
+    Measured over alp-sdk's last 400 commits touching a tracked hand-port
+    source, **7 of 29 matched none of those paths and fired no dispatch at
+    all** — including `98807809` (the missing `CONFIG_USE_DT_CODE_PARTITION=y`,
+    one of the two defects #279 cites as having shipped before anything
+    noticed) and `cb7f64ae` (alp-sdk#1125/#1126, path traversal). A companion
+    alp-sdk change widens that list; the cron needs no path list to be right.
+    Both triggers only fire from the DEFAULT branch's copy of the workflow —
+    measured 2026-08-10, tan-cli's default branch is `dev`, so this goes live
+    on merge; if it ever moves to `main`, this workflow silently stops running.
+  - **It is honest when it cannot do the job.** `planner_resync.py` exits `1`
+    when part of the re-sync needs a human (a 3-way conflict, a changed
+    hand-port source, a new or removed upstream module) and `2` when the inputs
+    are not fit to reason over (a pin whose blob does not hash to what its own
+    table pins — merging from a base that was never the audited text would
+    produce a plausible diff on a false premise). In both cases the PR is still
+    opened *with the blockers named*, the pins covering them stay put, and the
+    job goes red — never a green PR that quietly dropped a file. Because the PR
+    is opened by `GITHUB_TOKEN`, GitHub's recursion guard means its own CI does
+    not auto-start, so the proposing job runs the freshness gate itself against
+    the re-synced tree and writes that verdict into the PR body.
+  - `client_payload.sdk_ref` is carried in through `env:` and matched against
+    an allow-list pattern before it reaches `git` — a `repository_dispatch`
+    payload is attacker-chosen by construction, and this job holds
+    `contents: write`. 23 unit + integration tests in
+    `python/tests/gates/test_planner_resync.py` cover the gate-file parse and
+    rewrite (including the anchored `^NAME = "<40hex>"` line shape `parity.yml`
+    greps for), the merge/conflict/no-op branches, the pin-movement policy
+    (including the asymmetry where a changed hand-port blocks only its own
+    pin), and all three exit codes. Refs alp-sdk#855.
+
 - **`ALP_FLASH_REQUIRE_DPIDR=1` makes an unarmed write refuse instead of warn,
   on every flash method whose probe session `tan` composes itself —
   `swd_probe` and Flow D (`alif_mram_jlink`).** `flash_args.expect_dpidr` is
