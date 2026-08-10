@@ -1493,6 +1493,30 @@
       "note": "Constructed as the whole literal at a `ExplainError` call site in `explain_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "explain.catalog-unreadable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "note": "`tan explain --code` resolved an alp-sdk checkout but its `metadata/error-catalog.json` is absent, unreadable, not JSON, or wrong-shaped. DISTINCT from `explain.sdk-root-unresolved` on purpose: the checkout is fine and the message names the missing FILE plus the generator that rebuilds it (`scripts/gen_error_catalog.py`), and the envelope still carries the `sdk` block that answered. Constructed as the whole literal at an `ExplainError` call site (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches it yet, so renaming or dropping it is not a breaking wire change."
+    },
+    {
+      "code": "explain.code-unknown",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "note": "`tan explain --code` read the catalogue but the code is not in it. Sibling of `explain.template-unknown`/`explain.target-unknown`, one per selector kind. `data.suggestions` carries the same difflib shortlist the text line names, so a consumer gets the recovery options structured rather than having to re-parse a sentence; it is `[]`, not absent, when nothing was close. Constructed as the whole literal at an `ExplainError` call site. Pre-consumer."
+    },
+    {
+      "code": "explain.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "note": "`tan explain --code` with no alp-sdk checkout resolvable by any ladder tier. Severity `error` and exit 1, NOT `presets.sdk-root-unresolved`'s warning-plus-empty-lists: `presets` still has useful built-in defaults to return without a checkout, whereas a diagnostic code has exactly one source and answering from a vendored copy would answer confidently out of date (I-26/ADR-0017). The `sdk` key is ABSENT on this envelope -- nothing was resolved, so nothing is claimed. Constructed as the whole literal at an `ExplainError` call site. Pre-consumer."
+    },
+    {
       "code": "explain.internal-failure",
       "status": "reserved",
       "severity": "error",

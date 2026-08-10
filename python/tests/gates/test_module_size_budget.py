@@ -1266,6 +1266,29 @@ _MODULE_BUDGET: dict[str, int] = {
     # `_reject_if_sdk_validator_disagrees` all followed the shape. MEASURED on
     # the rebased tree, not 812 + this branch's pre-rebase delta.
     "tan/commands/diff_cmd.py": 822,
+    # NEW ENTRY: 727 -> 934, the diagnostic-code lookup (`tan explain --code`,
+    # ADR-0020 end-state B -- alp-sdk's `scripts/alp_cli/explain.py` moves here
+    # so its retirement loses no capability). The file crosses 800 for the
+    # first time, so this is an addition to the table, not a raise.
+    #
+    # The pure half is already OUT: `tan/core/error_catalog.py` (156 lines) is
+    # a new module holding the catalogue read, the normalise/lookup/difflib
+    # shortlist and the rendered field order, with its own unit tests. What
+    # stays here is the CLI surface it cannot own -- the `--code` option, the
+    # mutual-exclusion guard, the SDK-ladder binding (`bind_sdk`, which
+    # `tan.core` may not do: `tan/core/shapes.py`'s docstring names "tan.core
+    # imports no command module" as the invariant that keeps that direction
+    # acyclic) and three refusal envelopes. ~55 lines of that is executable;
+    # the rest is the module docstring's account of why `--code` is a flag on
+    # this verb rather than a 33rd command, why the other three selectors stay
+    # byte-identical, and the five-bullet DIVERGENCE list against
+    # `alp_cli/explain.py` (frame vs values, stream, envelope wrapping,
+    # `--no-color`, the repo-relative `doc:` path) that `faultdecode_cmd.py`
+    # set the precedent for carrying in the module that diverges.
+    #
+    # MEASURED by this gate's own walk on the final tree (`len(read_text()
+    # .splitlines())`), not by adding a diff stat to 727.
+    "tan/commands/explain_cmd.py": 934,
     "tan/commands/sdk_cmd.py": 1274,
     # 1093 -> 1108: tan-cli#478 wired `sdk_resolution_issues` through the
     # spawn path, so a `globalDefault` written for ANOTHER project stops
