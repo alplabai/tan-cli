@@ -189,6 +189,18 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **The envelope's "no payload may ever crash stdout" guard did not cover the
+  write, nor its own fallback.** The lone-surrogate case is closed by scrubbing
+  the finished document, but two sites could still leave stdout empty:
+  `_serialise`'s `except` arm re-serialises `project`/`sdk` VERBATIM, so an
+  unencodable value there detonated the very fallback that exists to keep
+  stdout alive and `to_json()` raised out through `tan.cli`'s two envelope
+  printers; and `emit()`'s `print(text)` sat outside every guard, which is
+  where the encode actually happens. Both now fall back to one ASCII-only
+  `envelope.serialize-failed` document at exit 5, so the invariant holds
+  structurally rather than for the one character class that filed the issue.
+  No new issue code, and a valid payload's bytes are unchanged. (#491)
+
 - **An AEN MRAM write with no wrong-board guard now says so.** The
   `flash.dpidr-preflight-unarmed` advisory was gated on
   `flash_method: swd_probe`, and the AEN dispatches Flow D
