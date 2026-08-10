@@ -1037,6 +1037,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.recovery-flash-armed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#611. A helper MCU whose SoM preset declares `flash_policy: recovery_only` is programmed by Alp Lab in production and is customer-flashable ONLY to recover a bricked device, with Alp Lab-supplied binaries. `tan flash` declines it on an ordinary run; it is reached only by `--helper <name> --recover`, and this code is emitted when that combination lets a write through. Deliberately a warning, and the entry's own status/rc are untouched: the write is the sanctioned path, not a failure -- what the code carries is that a normally-declined target was authorised, which an `ok` entry's prose alone is not something a `--format json` consumer can key off. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "flash.sdk-root-not-found",
       "status": "reserved",
       "severity": "error",
