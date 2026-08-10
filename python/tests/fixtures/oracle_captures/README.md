@@ -19,7 +19,9 @@ exists because of it.
 ## Which files are still read by code, and which are history only
 
 Measured by walking `python/tests/**/*.py` for uses of
-`tests.oracle_captures.CAPTURES_DIR`;
+`tests.oracle_captures.CAPTURES_DIR` and `oracle_captures.load(...)` (both
+documented in `tests/oracle_captures.py`), plus this gate's own supersession
+check (below) against every `_SUPERSEDED` entry;
 `tests/gates/test_oracle_capture_store_is_labelled.py` re-measures it on every
 run and fails if this table drifts from the tree.
 
@@ -29,7 +31,7 @@ run and fails if this table drifts from the tree.
 | `test_run_oracle_parity.json` | `tests/commands/test_output_format.py` — the frozen `--help` `--format` choice list |
 | `test_build_sdk_root_oracle_parity.json` | none — history only |
 | `test_clean_parity.json` | none — history only |
-| `test_command_surface_oracle_parity.json` | none — history only (**superseded**, see below) |
+| `test_command_surface_oracle_parity.json` | `tests/gates/test_oracle_capture_store_is_labelled.py` — the supersession check below reads it for its three frozen substrings (**superseded**, see below); not a behavioural oracle read |
 | `test_image_size_oracle.json` | none — history only |
 | `test_oracle_parity.json` | none — history only |
 | `platform_bound.json` | none — history only |

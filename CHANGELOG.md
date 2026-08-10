@@ -294,10 +294,33 @@ All notable changes to `tan` are documented here. Format follows
   the same suite under a `PATH` holding only `sh bash git which env ls cat
   uname` fails 36 tests that need real `python3`/`sleep`/`mktemp`/`sed`/
   `curl`/`tar`/`sha256sum` — tools a runner has — so only the identities a
-  runner lacks are removed. A no-op on a host that has no probe tooling, which
-  is every runner. `tests/gates/test_probe_tool_inventory.py` holds all of
-  that in place, including the over-reach direction. Documented in `README.md`,
-  so "I ran the gates locally" has one meaning. Closes #603.
+  runner lacks are removed. A no-op whenever nothing on `PATH` matches — but
+  measured directly, that is not every runner: windows-latest carries the
+  pre-installed Temurin JDK's `jlink.exe`, a stem collision with the bare
+  `"JLink"` identity that has nothing to do with a debug probe, and the
+  fixture farms that (harmless, unrelated) directory for real there.
+  `tests/gates/test_probe_tool_inventory.py` holds all of that in place,
+  including the over-reach direction, seeded so the check is falsifiable on
+  every host that runs it rather than passing vacuously. Documented in
+  `README.md`, so "I ran the gates locally" has one meaning. Closes #603.
+
+- **`test_the_spawn_probe_can_see_a_spawn` failed on windows-latest, which made
+  twelve no-spawn assertions in `test_flash_command.py` vacuous there.** Not
+  the PATH-rebuild above: `_SPAWN_PROBE`'s fake J-Link/openocd/pyocd files were
+  seeded with bare names, the one seed in that file that never got the `.exe`
+  every other fake-tool seed already carries on Windows.
+  `tool_lookup.resolve_tool`'s Windows walk never tries a bare, extensionless
+  identity (a deliberate, separately-landed behaviour change, #567/#600), so
+  the required-tool gate refused before `_execute` and no spawn ever happened
+  — measured with a throwaway diagnostic CI run, not inferred. Fixed by adding
+  the same conditional `.exe` suffix. `tests/conftest.py::_probe_free_path` is
+  separately hardened for Windows shapes that had never actually run: explicit
+  `target_is_directory` on `os.symlink`, a `shutil.copy2`/`copytree` third tier
+  under the symlink/hardlink pair (`os.link` refuses directories and raises
+  across volumes — routine on a GitHub Windows runner), and a lazily-created
+  scratch directory so the documented no-op path really does no filesystem
+  work. New host-independent unit tests cover `_probe_free_path` directly
+  (`tests/test_probe_free_path.py`, 17 cases) — nothing exercised it before.
 
 - **The frozen oracle captures now say they are history, and a gate keeps that
   label true.** #269 deleted `crates/` and the ~13 parity modules that replayed

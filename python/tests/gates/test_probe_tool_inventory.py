@@ -38,6 +38,27 @@ it rebuilds PATH once per session so no probe identity resolves, matching what
 CI already exercises. This module is what stops that fixture rotting into a
 no-op.
 
+## This module's own enforcement was zero, until `tests/gates/conftest.py`
+
+Every runner this suite has ever run on genuinely lacks all fourteen
+[`PROBE_TOOLS`] identities -- that is the premise this whole file exists to
+protect. Which means, without help, the fixture under test never has
+anything real to farm away here: `test_no_probe_tool_resolves_from_the_
+inherited_path` passed identically whether the farming logic worked, was
+broken, or was deleted outright, on every host that has ever run it. A gate
+that cannot fail is not a gate. `tests/gates/conftest.py` closes this by
+seeding one real file per identity onto `PATH` at COLLECTION time --
+guaranteed ahead of the session fixture's SETUP -- so the assertions below
+are now falsifiable.
+
+They are also the ONLY assertions in this whole repository that ever run:
+`.github/workflows/parity.yml`'s `python-tests` matrix (the one job that
+covers windows-latest/macos-latest) passes `--ignore=tests/gates` on every
+OS, and `.github/workflows/ci.yml`'s `python` job runs the full suite
+(`tests/gates` included) on `ubuntu-latest` only. One runner, one seed --
+better than zero either way, but not the three-platform coverage the rest of
+this file's own history (tan-cli#600) argues for.
+
 ## Why this is not "just empty the PATH"
 
 `tests/conftest.py::empty_tool_inventory` builds a PATH under which
@@ -65,7 +86,7 @@ import sys
 import pytest
 
 from tan.commands import doctor_cmd
-from tests.conftest import PROBE_TOOLS
+from tests.conftest import PROBE_TOOLS, REAL_ENVIRON
 
 
 @pytest.mark.parametrize("tool", sorted(PROBE_TOOLS))
@@ -118,9 +139,26 @@ def test_ordinary_host_tooling_is_untouched():
     cat uname` fails 36 tests that need `python3`, `sleep`, `mktemp`, `sed`,
     `curl`, `tar` and `sha256sum` -- all of which a CI runner has. Stripping
     those would not make the suite honest, it would make it wrong in a new
-    direction. This is the pin that says so."""
+    direction. This is the pin that says so.
+
+    A tool absent AFTER neutralisation is checked against `REAL_ENVIRON` --
+    this session's PATH captured before `_probe_tools_are_a_property_of_the_
+    test` touched anything -- before it counts as the over-reach this test
+    exists to catch. Without that check, a host that genuinely never had
+    `git`/`python3` on PATH (a minimal container image, a stripped-down CI
+    base) turns this into a hard failure it has no business being: the
+    absence would be a real host gap, not something the neutralisation did."""
     required = ["git", "python3"] if os.name != "nt" else ["git"]
     missing = [t for t in required if doctor_cmd.on_path(t) is None]
+    if missing:
+        host_never_had = [
+            t for t in missing if shutil.which(t, path=REAL_ENVIRON.get("PATH")) is None
+        ]
+        if host_never_had == missing:
+            pytest.skip(
+                f"this host never had {missing} on PATH even before the probe-tool "
+                "neutralisation ran -- nothing for this gate to check here"
+            )
     assert missing == [], (
         f"ordinary host tooling {missing} no longer resolves. The probe-tool "
         "neutralisation has over-reached into tools a CI runner genuinely has "

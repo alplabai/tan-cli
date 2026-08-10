@@ -23,6 +23,7 @@ in the real environment.
 import os
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -87,7 +88,7 @@ def sdk_root() -> Path | None:
 REAL_ENVIRON: dict[str, str] = dict(os.environ)
 
 
-def _probe_free_path(path: str, scratch: Path) -> str | None:
+def _probe_free_path(path: str, scratch_factory: Callable[[], Path]) -> str | None:
     """`path` with every [`PROBE_TOOLS`] identity unresolvable, or `None`
     when it already is.
 
@@ -98,20 +99,50 @@ def _probe_free_path(path: str, scratch: Path) -> str | None:
     host `JLinkExe` and `openocd` live in `/usr/bin`, alongside every
     coreutil the installer-script tests execute.
 
-    `None` when nothing matched, which is the CI case on all three runners:
-    no filesystem work, no rebuilt PATH, nothing to go wrong on a machine
-    that never had the defect.
+    `None` when nothing matched -- measured, this is NOT guaranteed to be
+    "every runner": a runner can carry an unrelated tool whose STEM happens to
+    match a [`PROBE_TOOLS`] identity (a pip-installed `west`, say), and this
+    function cannot know that in advance. What IS true on the no-match path:
+    no filesystem work, no rebuilt PATH, nothing to go wrong -- which is why
+    `scratch_factory` is a THUNK rather than an already-created directory.
+    Calling `tmp_path_factory.mktemp(...)` eagerly, as a plain argument, would
+    create the scratch dir on every session regardless of whether anything
+    ever matched -- contradicting exactly this claim. It is called at most
+    once, lazily, on the first entry that actually needs farming.
 
-    Links rather than copies: a symlink first, a hardlink second (Windows
-    refuses symlinks without developer mode or elevation, but `os.link` works
-    within a volume). A directory that yields to neither RAISES -- an entry
-    silently left out would remove tools the suite needs, and an entry
+    Links rather than copies where a link is possible, because a copy of a
+    live tool binary changes what `file`/codesigning/AV scanning sees and can
+    be materially slower for a large directory: a symlink first, a hardlink
+    second (Windows refuses a symlink without Developer Mode or elevation,
+    but `os.link` works within a volume). Both are tried per FILE, not per
+    directory -- `entry`'s directory may itself contain sub-directories (a
+    stray `__pycache__`, a vendored tool's own support tree) that neither
+    linking call can target correctly with the file-only handling below, so
+    those are recursed into with `shutil.copytree` instead of linked, and
+    `os.symlink` is always given `target_is_directory=` explicitly rather
+    than left to guess -- omitting it is silently correct on POSIX and
+    silently WRONG on Windows, where a directory symlink created without it
+    is a broken file-type symlink that resolves to nothing.
+
+    A THIRD tier, `shutil.copy2`/`shutil.copytree`, sits below the hardlink:
+    `os.link` fails not only for lack of privilege but for two conditions a
+    single bench host never exercises and a GitHub Windows runner always
+    might -- a source and destination on DIFFERENT VOLUMES (`C:\\hostedtoolcache`
+    vs a `D:\\a\\_temp` scratch dir, both real GitHub Windows runner paths,
+    raise `OSError` cross-device), and a source that is itself a DIRECTORY
+    (`os.link` refuses those unconditionally on every OS). Copying is
+    correctness-first, not performance-first, and is the reason a symlink is
+    always tried first: the fast, cheap path still wins whenever it is legal.
+
+    Only a directory that yields to NONE of the three still RAISES -- an
+    entry silently left out would remove tools the suite needs, and an entry
     silently left in would restore the exact host-dependence this exists to
     close. Loud beats either."""
     entries = path.split(os.pathsep)
     lowered = {t.lower() for t in PROBE_TOOLS}
     rebuilt: list[str] = []
     changed = False
+    scratch: Path | None = None
     for index, entry in enumerate(entries):
         if not entry or not os.path.isdir(entry):
             rebuilt.append(entry)
@@ -127,6 +158,8 @@ def _probe_free_path(path: str, scratch: Path) -> str | None:
         if not any(os.path.splitext(n)[0].lower() in lowered for n in names):
             rebuilt.append(entry)
             continue
+        if scratch is None:
+            scratch = scratch_factory()
         farm = scratch / f"probe-free-{index}"
         farm.mkdir(parents=True, exist_ok=True)
         for name in names:
@@ -136,20 +169,33 @@ def _probe_free_path(path: str, scratch: Path) -> str | None:
             if link.exists() or link.is_symlink():
                 continue
             source = os.path.join(entry, name)
+            is_dir = os.path.isdir(source) and not os.path.islink(source)
             try:
-                os.symlink(source, link)
+                os.symlink(source, link, target_is_directory=is_dir)
+                continue
             except OSError:
+                pass
+            if not is_dir:
                 try:
                     os.link(source, link)
-                except OSError as exc:
-                    raise RuntimeError(
-                        f"cannot neutralise the debug/flash probe tooling in {entry!r}: "
-                        f"neither a symlink nor a hardlink of {name!r} could be made "
-                        f"({exc}). This suite would otherwise run against whatever probe "
-                        "tools this host happens to have installed and disagree with CI "
-                        "silently (tan-cli#603). Remove the probe tooling from PATH for "
-                        "this run, or run the suite somewhere links can be created."
-                    ) from exc
+                    continue
+                except OSError:
+                    pass
+            try:
+                if is_dir:
+                    shutil.copytree(source, link)
+                else:
+                    shutil.copy2(source, link)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot neutralise the debug/flash probe tooling in {entry!r}: "
+                    f"neither a symlink, a hardlink nor a copy of {name!r} could be "
+                    f"made ({exc}). This suite would otherwise run against whatever "
+                    "probe tools this host happens to have installed and disagree "
+                    "with CI silently (tan-cli#603). Remove the probe tooling from "
+                    "PATH for this run, or run the suite somewhere this directory "
+                    "is writable."
+                ) from exc
         rebuilt.append(str(farm))
         changed = True
     return os.pathsep.join(rebuilt) if changed else None
@@ -171,9 +217,26 @@ def _probe_tools_are_a_property_of_the_test(tmp_path_factory) -> None:
     that seeds a fake probe tool is DECLARING its inventory, and that
     declaration is the point.
 
-    A no-op on a host that has no probe tooling -- see `_probe_free_path`."""
+    A no-op on a host with nothing matching -- see `_probe_free_path`, and do
+    not assume that is every runner: measured directly on windows-latest
+    (tan-cli#625 review, a throwaway diagnostic CI step), it is NOT.
+    `C:\\hostedtoolcache\\windows\\Java_Temurin-Hotspot_jdk\\<ver>\\x64\\bin`
+    -- on `PATH` for the pre-installed Temurin JDK, nothing to do with this
+    suite -- carries `jlink.exe`, the JDK's own module-linker tool. That is a
+    STEM collision, not a debug-probe sighting: [`PROBE_TOOLS`] matches
+    case-insensitively by extension-stripped stem so it can also catch
+    `JLink.cmd`/`JLink.EXE`, and `"JLink"` (the bare identity
+    `doctor_cmd._collect` tries second, no `Exe` suffix) collides with Java's
+    `jlink` by coincidence of naming, not by anything actually resembling a
+    debug probe. Farmed like any other match -- correctly, since the function
+    cannot tell "real J-Link" from "same stem, different tool" apart, and
+    farming is safe either way -- but it means this fixture is exercised for
+    real on windows-latest, working around a directory that was never the
+    hazard tan-cli#603 was written against."""
     original = os.environ.get("PATH", "")
-    rebuilt = _probe_free_path(original, tmp_path_factory.mktemp("probe-free-path"))
+    rebuilt = _probe_free_path(
+        original, lambda: tmp_path_factory.mktemp("probe-free-path")
+    )
     if rebuilt is None:
         yield
         return

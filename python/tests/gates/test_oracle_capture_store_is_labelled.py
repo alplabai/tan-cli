@@ -51,6 +51,7 @@ _CAPTURES = oracle_captures.CAPTURES_DIR
 _README = _CAPTURES / "README.md"
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 _TAN_ROOT = _TESTS_ROOT.parent / "tan"
+_THIS_MODULE = Path(__file__).resolve().relative_to(_TESTS_ROOT.parent).as_posix()
 
 #: `<capture stem>` -> the substrings that capture froze and the shipped
 #: source has since moved past, paired with the module that must no longer
@@ -79,22 +80,62 @@ def _walk_strings(payload: object):
             yield from _walk_strings(value)
 
 
+#: `CAPTURES_DIR / "<name>.json"` -- a reader that builds its own path.
+_PATTERN_CAPTURES_DIR = re.compile(r'CAPTURES_DIR\s*/\s*[\'"]([^\'"]+)[\'"]')
+#: A call to `oracle_captures`'s `load` accessor with a literal capture name,
+#: qualified (`oracle_captures.load`) or bare (reachable via `from tests.
+#: oracle_captures import load`) -- documented in `tests/oracle_captures.py`'s
+#: own docstring and, until this pattern existed, a SECOND way into this
+#: file's measurement it could not see at all: a module reading a capture
+#: through that accessor -- one the README still labelled history-only --
+#: read here as having no reader, and the drift check passed vacuously
+#: (measured directly against a throwaway repro module: reverting this
+#: pattern turns that case green again). `\b` ahead of the accessor name so a
+#: `reload`/`preload` call is not mistaken for it -- there is a word boundary
+#: before a bare call or right after the `oracle_captures.` qualifier, never
+#: inside a longer identifier that merely ends the same way.
+#:
+#: Spelled with a run-time join rather than as one literal string: written
+#: out whole, this pattern's own OWN example would itself be a textbook
+#: instance of the shape it matches, and self-match against this file during
+#: collection.
+_ACCESSOR_NAME = "".join(["l", "o", "a", "d"])
+_PATTERN_LOAD_CALL = re.compile(
+    r'\b(?:oracle_captures\.)?' + _ACCESSOR_NAME + r'\(\s*[\'"]([^\'"]+)[\'"]'
+)
+
+
 def _measured_live_readers() -> dict[str, set[str]]:
     """Capture filename -> the test modules that read it, derived from the
     tree rather than from the README.
 
-    Matches `CAPTURES_DIR / "<name>"`, which is the ONLY documented way in --
-    `tests/oracle_captures.py` is "the one module that knows where the store
-    lives", and both current readers go through it."""
-    pattern = re.compile(r'CAPTURES_DIR\s*/\s*[\'"]([^\'"]+)[\'"]')
+    Two call shapes are matched textually -- `CAPTURES_DIR / "<name>"` and
+    `oracle_captures.load("<name>")` -- both documented in
+    `tests/oracle_captures.py`. A THIRD shape exists and cannot be matched
+    textually at all: `test_each_declared_supersession_is_still_real` below
+    reads `_CAPTURES / f"{stem}.json"` for every key of `_SUPERSEDED`, an
+    f-string built from a loop variable rather than a literal. That one is
+    measured directly off the `_SUPERSEDED` mapping instead of regexed."""
     readers: dict[str, set[str]] = {}
+
+    def record(name: str, module_rel: str) -> None:
+        if not name.endswith((".json", ".txt")):
+            name = f"{name}.json"
+        readers.setdefault(name, set()).add(module_rel)
+
     for module in sorted(_TESTS_ROOT.rglob("*.py")):
         if module.name == "oracle_captures.py":
             continue
-        for name in pattern.findall(module.read_text(encoding="utf-8")):
-            readers.setdefault(name, set()).add(
-                module.relative_to(_TESTS_ROOT.parent).as_posix()
-            )
+        text = module.read_text(encoding="utf-8")
+        module_rel = module.relative_to(_TESTS_ROOT.parent).as_posix()
+        for name in _PATTERN_CAPTURES_DIR.findall(text):
+            record(name, module_rel)
+        for name in _PATTERN_LOAD_CALL.findall(text):
+            record(name, module_rel)
+
+    for stem in _SUPERSEDED:
+        record(stem, _THIS_MODULE)
+
     return readers
 
 
@@ -113,10 +154,20 @@ def test_the_store_carries_a_readme_at_the_top_of_the_directory():
 
 def test_every_file_in_the_store_is_named_in_the_readme():
     """A capture added, renamed or left behind without a row is how the last
-    five orphans went unnoticed through tan-cli#269."""
+    five orphans went unnoticed through tan-cli#269.
+
+    Matched backtick-wrapped (`` `<name>` ``, the table's own row format,
+    `test_the_readme_live_reader_table_matches_the_measured_tree` below reads
+    the same way) rather than as a bare substring: an unanchored `p.name not
+    in text` would be satisfied by the filename appearing anywhere at all --
+    prose, a `PROVENANCE.txt` mention, a coincidental substring of another
+    row's own reader path -- none of which is the row this test exists to
+    require."""
     text = _README.read_text(encoding="utf-8")
     unlisted = sorted(
-        p.name for p in _CAPTURES.iterdir() if p.name != "README.md" and p.name not in text
+        p.name
+        for p in _CAPTURES.iterdir()
+        if p.name != "README.md" and f"`{p.name}`" not in text
     )
     assert unlisted == [], (
         f"{unlisted} sit in {_CAPTURES} with no row in README.md. Add one saying "
@@ -135,7 +186,14 @@ def test_the_readme_live_reader_table_matches_the_measured_tree():
         row = next((line for line in text.splitlines() if line.startswith(f"| `{name}`")), None)
         if row is None:
             continue  # covered by the previous test, with a better message
-        claims_none = "none" in row
+        # The reader CELL specifically, not the row as a whole: `"none" in
+        # row` is satisfied by a path or note containing "none" anywhere --
+        # including in the FILE column, or a future reader path that happens
+        # to contain the substring -- and would silently flip that row to
+        # "history only" without the table actually saying so.
+        cells = [c.strip() for c in row.split("|")]
+        reader_cell = cells[2] if len(cells) > 2 else ""
+        claims_none = reader_cell.lower().startswith("none")
         if measured.get(name) and claims_none:
             problems.append(f"{name}: README says history-only, but {sorted(measured[name])} read it")
         if not measured.get(name) and not claims_none:
