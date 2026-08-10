@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # ADR-0020 (alp-sdk#855 amendment) two-seam parity gate + cross-repo trigger.
-# See tests/parity/README.md for the full rationale (oracle SHA, the
-# checkout-root/sdkCommit normalization, the allowed debug.probe delta).
+# See tests/parity/README.md for the full rationale (frozen build-plan oracle
+# SHA, the checkout-root/sdkCommit normalization, the allowed debug.probe
+# delta). NOTE: "oracle" throughout this file means the FROZEN alp-sdk
+# `--emit build-plan` captures under `tests/parity/oracle/`, not the retired
+# Rust `tan` binary -- tan-cli#269 deleted `crates/` and every step here now
+# runs the Python `tan` installed from `python/`.
 #
 #   seam1-plan-shape : live `--emit build-plan` vs. the frozen oracle,
 #                       toolchain-free. Implemented.
@@ -43,7 +47,7 @@ on:
   # so without this the three jobs below never ran on those commits at all --
   # and release.yml's `python-gates` call then skipped them a SECOND time, on
   # the belief they already had. `ci.yml` has always carried
-  # `push: branches: [main]` for the Rust gates; this is the Python side of the
+  # `push: branches: [main]` for its own gates; this is the seam side of the
   # same guarantee, and it is what makes the `python_only` comment below true.
   push:
     branches: [main]
@@ -64,7 +68,7 @@ on:
   repository_dispatch:
     types: [alp-sdk-planner-change]
   # release.yml's `python-gates` job calls this workflow so a release tag is
-  # gated on the Python suite too, not just ci.yml's Rust jobs -- a release tag
+  # gated on the Python suite too, not just ci.yml's own `python` job -- a release tag
   # can be cut from any green-on-main commit, and until this existed the Python
   # port (python/tests) had no vote on whether `v0.5.0-rc.1` ships. See the
   # `python-tests` job below for the collected-test counts and the condition
@@ -89,7 +93,7 @@ on:
   # commit that is NOT on `main` still gets no seam2/first-blink vote, and no
   # vote from seam1's emit/kconfig/bootstrap/toolchain/scaffold parity steps
   # (it does now get seam1's tests/gates vote, unconditionally). release.yml:90
-  # refuses the analogous assumption for the Rust gates and re-runs ci.yml
+  # refuses the analogous assumption and re-runs ci.yml
   # unconditionally. Tag from `main` and the two agree; tag from anywhere else
   # and the Python side is still the weaker of the two, just less weak than it
   # was. If tags ever get cut off-main, delete the remaining `python_only`
@@ -171,18 +175,20 @@ env:
   # - scaffold byte-parity now defaults to `python/tan/templates/vendored/`
   #   (`scaffold_byte_parity.py`'s own default) -- the tree the shipped
   #   Python `tan` actually reads. It WAS re-vendored to v0.15.0-rc1 (see
-  #   that tree's `MANIFEST.md`) and PASSES. `crates/tan-core/src/wizard/
-  #   vendored/` stays frozen at v0.14.0 and is no longer this gate's
-  #   concern -- its own SDK-free `cargo test` guards it at that point.
+  #   that tree's `MANIFEST.md`) and PASSES. (The Rust oracle's own second
+  #   copy of this tree was the other half of this split; tan-cli#269 deleted
+  #   it with `crates/`, so `python/tan/templates/vendored/` is now the only
+  #   vendored scaffold tree in the repo.)
   # - bootstrap-manifest byte-parity is REMOVED (see the seam1 job below):
   #   the shipped Python `tan` carries no vendored copy of
   #   `metadata/bootstrap.json` to diff -- `tan.core.bootstrap` reads it
   #   live off the bound SDK root. `contract/fixtures/bootstrap/
-  #   manifest.json` now serves only the frozen Rust oracle, guarded at its
-  #   own freeze point by `manifest.rs`'s own `cargo test`
-  #   (`the_fallback_matches_the_real_manifest_field_for_field`).
-  #   `tests/parity/bootstrap_manifest_parity.py` itself survives as a
-  #   manual diagnostic tool (see its module doc), not run in CI.
+  #   manifest.json` served only the frozen Rust oracle, guarded at its own
+  #   freeze point by that crate's own `cargo test`; tan-cli#269 deleted the
+  #   guard along with `crates/`, so the fixture is now unguarded frozen data
+  #   -- re-point it at a Python check or retire it, but do not read it as
+  #   still-verified. `tests/parity/bootstrap_manifest_parity.py` survives as
+  #   a manual diagnostic tool (see its module doc), not run in CI.
   #
   # HELD at f4d87a1f from tan-cli#425 through tan-cli#485 (moved again below,
   # to `53557a60`, in #485's own fix). The `2bc6b400` bump #425 tried and
@@ -497,18 +503,17 @@ jobs:
       # `tan bootstrap` reads the SDK's metadata/bootstrap.json (alp-sdk#917)
       # live off the bound SDK root -- no baked-in copy of it ships, so there
       # is no vendored artefact left for a byte-parity step to guard here.
-      # (The Rust oracle's `crates/tan-core/src/bootstrap/manifest.rs` DOES
-      # carry one, frozen alongside it at `contract/fixtures/bootstrap/
-      # manifest.json` -- `docs/ROADMAP.md`'s crates/contract freeze -- and
-      # that fixture is still guarded, at its own freeze point, by
-      # `manifest.rs`'s own `cargo test` (`the_fallback_matches_the_real_
-      # manifest_field_for_field`).) See `tests/parity/
-      # bootstrap_manifest_parity.py`'s module doc for why the script itself
-      # is kept as a manual tool rather than deleted.
+      # (The Rust oracle carried one, frozen alongside it at
+      # `contract/fixtures/bootstrap/manifest.json` and guarded by its own
+      # `cargo test`; tan-cli#269 deleted both, so that fixture is now
+      # unguarded frozen data.) See `tests/parity/bootstrap_manifest_
+      # parity.py`'s module doc for why the script itself is kept as a manual
+      # tool rather than deleted.
 
       # `tan doctor`'s zephyrSdk check (tan-cli#160) prints a hand-ported copy
-      # of alp-sdk's metadata/toolchains.json zephyrSdk.version
-      # (crates/tan-core/src/host_env.rs::ZEPHYR_SDK_INSTALL_VERSION).
+      # of alp-sdk's metadata/toolchains.json zephyrSdk.version (the retired
+      # Rust oracle spelled the same constant
+      # `crates/tan-core/src/host_env.rs::ZEPHYR_SDK_INSTALL_VERSION`).
       # scripts/check_toolchain_lock.py guards every CI *workflow* copy of
       # that pin but cannot see this checkout (tan-cli#172) -- this is the
       # tan-side half, reusing this job's alp-sdk checkout rather than a
@@ -523,9 +528,9 @@ jobs:
       # as the kconfig step above) rather than a second clone. The vendored tree
       # is captured at this exact pin, so a re-vendor that drifts from the SDK
       # fails here instead of shipping silently (the drift that hid the stale
-      # `minimal` README before this gate ran in CI). `crates/tan-core/src/
-      # wizard/vendored/` (the frozen Rust oracle's own copy) is measured only
-      # by its own SDK-free `cargo test`, not by this step.
+      # `minimal` README before this gate ran in CI). The frozen Rust oracle's
+      # own second copy of this tree went with `crates/` in tan-cli#269, so
+      # this is the only vendored scaffold tree left to measure.
       - name: scaffold byte-parity (vendored tree vs. pinned alp-sdk --emit scaffold)
         if: ${{ !inputs.python_only }}
         run: python3 tests/parity/scaffold_byte_parity.py --sdk alp-sdk
@@ -856,11 +861,13 @@ jobs:
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
 
+      # Pinned, NOT `3.x`: `python/pyproject.toml` floors at 3.12 and the
+      # `tan` under test IS this interpreter now (tan-cli#269 retired the
+      # self-contained cargo binary), so a floating newest-3.x would decide
+      # what the seam executes.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          python-version: "3.12"
 
       - name: host deps
         run: |
@@ -872,36 +879,18 @@ jobs:
       - name: west + SDK python deps
         run: python3 -m pip install --upgrade pip west pyyaml jsonschema pyelftools
 
-      # `tan generate` live-run e2e (tan-cli#113 + the SoM-swap regression
-      # test for PR #157's output-directory bug): spawns the REAL
-      # `alp_project.py` from the checkout above (already pinned to
-      # PINNED_SDK_TAG by the `clone alp-sdk` step) and asserts what actually
-      # lands on disk -- `zephyr-board`/`west-libraries`/`hw-info-h`, the
-      # SoM-swap non-collision case, `--core` forwarded vs. refused, and the
-      # ValidationFailure(2)-not-InternalFailure(5) exit-code mapping. Needs
-      # only python + the SDK checkout + the pyyaml/jsonschema deps the step
-      # above just installed (no Zephyr SDK/west workspace/Renode, no
-      # separate `cargo build` -- `cargo test` builds the tan binary itself),
-      # so it genuinely runs BEFORE those -- placed here, not after them, so a
-      # Renode CDN hiccup or a Zephyr-SDK sha256 mismatch downstream can never
-      # cost the PR this coverage (tan-cli#158 review finding 4: an earlier
-      # revision of this step made this same claim in its comment while
-      # sitting after all three installs). `TAN_LIVE_RUN_SDK_ROOT` pointed at
-      # THIS job's own pinned `alp-sdk/` checkout is what lets the suite
-      # inherit the pin by construction rather than a second hardcoded SHA --
-      # see `crates/tan-cli/tests/live_run_generate.rs`'s module docs.
-      # `TAN_LIVE_RUN_REQUIRED=1` is what makes a missing root here a hard
-      # panic instead of a quiet skip -- this is the one job that wires the
-      # root, so absence here means the wiring broke, not "not applicable"
-      # (deliberately not keyed off the generic `CI` var: this repo's own
-      # `ci.yml` `test` job also runs under `CI=true` with neither var set,
-      # and gating on `CI` alone made that unrelated job hard-panic instead
-      # of skipping -- tan-cli#158 review finding 1).
-      - name: generate live-run e2e (tan generate vs pinned alp-sdk)
-        env:
-          TAN_LIVE_RUN_SDK_ROOT: ${{ github.workspace }}/alp-sdk
-          TAN_LIVE_RUN_REQUIRED: "1"
-        run: cargo test --locked -p alp-tan-cli --test live_run_generate
+      # The `tan generate` live-run e2e that used to sit here was
+      # `crates/tan-cli/tests/live_run_generate.rs`, deleted with the rest of
+      # `crates/` by tan-cli#269. Nothing is lost by dropping the step: its
+      # whole claim -- spawn a REAL `tan generate` against a pinned alp-sdk
+      # checkout and assert what lands on disk -- is superseded, and widened,
+      # by `python/tests/parity/test_planner_emit_parity.py`, which spawns
+      # `tan generate --output <path>` once per `board.yaml` in the SDK's
+      # `examples/` and byte-compares the written file against
+      # `alp_project.py`'s own front door, across all twelve relocated emit
+      # targets. That module runs in this file's own `python-tests` matrix,
+      # on all three platforms, with `ALP_SDK_ROOT` bound to this same
+      # `PINNED_SDK_TAG`. Do not re-add a narrower shell copy of it here.
 
       # Zephyr itself. `west init -l` against alp-sdk's own manifest is what a
       # customer's `tan bootstrap` does, so the tree under test is the pinned
@@ -963,8 +952,12 @@ jobs:
           echo "$HOME/renode" >> "$GITHUB_PATH"
           "$HOME/renode/renode" --version
 
-      - name: build tan
-        run: cargo build --locked --bin tan
+      # `tan` under test is the PYTHON package, installed from this checkout
+      # (tan-cli#269). `pip install -e ./python` puts the `tan` console script
+      # on PATH, which is what the steps below invoke -- no absolute path into
+      # a build directory any more, and no second copy of the resolution rule.
+      - name: install tan (the executor under test)
+        run: python3 -m pip install -e ./python
 
       # ---- the seam itself -------------------------------------------------
 
@@ -988,7 +981,7 @@ jobs:
           ZEPHYR_BASE: ${{ github.workspace }}/zephyr
         run: |
           set -euo pipefail
-          "${GITHUB_WORKSPACE}/target/debug/tan" \
+          tan \
               --sdk-root "${GITHUB_WORKSPACE}/alp-sdk" \
               --format json build --materialise > /tmp/seam2-materialise.json
           python3 -c '
@@ -1017,7 +1010,7 @@ jobs:
           ZEPHYR_BASE: ${{ github.workspace }}/zephyr
         run: |
           set -euo pipefail
-          "${GITHUB_WORKSPACE}/target/debug/tan" \
+          tan \
               --sdk-root "${GITHUB_WORKSPACE}/alp-sdk" \
               build --native 2>&1 | tee /tmp/seam2-build.log
           # `tee` would mask a non-zero tan exit without this; the whole point
@@ -1163,11 +1156,12 @@ jobs:
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: ws/alp-sdk
 
+      # Pinned, NOT `3.x`, for the same reason seam2 pins it: `tan` IS this
+      # interpreter now (tan-cli#269), and `python/pyproject.toml` floors at
+      # 3.12.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          python-version: "3.12"
 
       # Deliberately NOT pip-installing west here: `tan bootstrap` creating the
       # venv and installing west into it is one of the things under test.
@@ -1187,8 +1181,14 @@ jobs:
               ninja-build device-tree-compiler gperf ca-certificates curl xz-utils \
               pkg-config libusb-1.0-0-dev libudev-dev
 
-      - name: build tan
-        run: cargo build --locked --bin tan
+      # `tan` under test is the PYTHON package from this checkout
+      # (tan-cli#269), on PATH as the `tan` console script. Installed with
+      # `--user`-free plain pip into the runner's own interpreter, NOT into
+      # the workspace venv `tan bootstrap` is about to create -- that venv is
+      # the thing under test, and installing tan inside it would let the
+      # bootstrap step's own product decide which tan runs.
+      - name: install tan (the customer's binary)
+        run: python3 -m pip install -e ./python
 
       # THE STEP THAT DID NOT EXIST. Exit 0 is necessary but not sufficient --
       # a bootstrap that "succeeds" without creating the workspace is exactly
@@ -1197,7 +1197,7 @@ jobs:
         working-directory: ws/alp-sdk
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/target/debug/tan" bootstrap --non-interactive \
+          tan bootstrap --non-interactive \
               2>&1 | tee /tmp/first-blink-bootstrap.log
           for p in ../.west/config ../.venv ../zephyr ../modules; do
             if [ ! -e "$p" ]; then
@@ -1234,7 +1234,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          "$GITHUB_WORKSPACE/target/debug/tan" doctor --format json \
+          tan doctor --format json \
               > /tmp/first-blink-doctor-before.json
           code=$?
           set -e
@@ -1297,7 +1297,7 @@ jobs:
         working-directory: ws/alp-sdk
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/target/debug/tan" doctor --format json \
+          tan doctor --format json \
               > /tmp/first-blink-doctor-after.json
           python3 -c '
           import json, sys
@@ -1321,7 +1321,7 @@ jobs:
           # because discovery checked the root, its siblings and its ancestors
           # but never a CHILD (util.rs `discover_sdk_root`). Passing the flag
           # here again would hide the bug it was found by.
-          "$GITHUB_WORKSPACE/target/debug/tan" init \
+          tan init \
               --from-example peripheral-io/hello-world \
               --name my-app --non-interactive
           test -f my-app/board.yaml || { echo "::error::tan init wrote no board.yaml"; exit 1; }
@@ -1330,7 +1330,7 @@ jobs:
         working-directory: ws/my-app
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/target/debug/tan" build 2>&1 | tee /tmp/first-blink-build.log
+          tan build 2>&1 | tee /tmp/first-blink-build.log
           echo "first blink: bootstrap -> doctor -> init -> build, all from the commands a customer types."
 
       - name: upload first-blink logs
@@ -1349,8 +1349,7 @@ jobs:
   # `python/tests` ran on NO CI machine at all before this job (see the collect
   # counts a few lines down -- collection depends on ALP_SDK_ROOT and
   # --ignore=tests/gates; this job runs with both bound). `ci.yml` ALSO runs
-  # the four cargo gates plus cross-platform build/MSRV checks plus its own
-  # `python` job (`python -m pytest tests -q`, no --ignore) -- grep for
+  # its own `python` job (`python -m pytest tests -q`, no --ignore) -- grep for
   # `pytest` in that file does NOT return zero hits -- but that job only binds
   # `ALP_SDK_ROOT` when called with `sdk_parity: true`, which release.yml's
   # `gates` job does not do (see that job's own comment for the open
@@ -1384,9 +1383,11 @@ jobs:
   #     because it depends on this repo alone. Need an absolute? Measure it:
   #     `python -m pytest --collect-only -q` from `python/`. Do not write the
   #     answer back into this comment.
-  #   * a locally built Rust `tan` -- `tests/parity/oracle.py::rust_binary()`
-  #     auto-discovers `target/{release,debug}/tan{.exe}`, so building it here
-  #     is enough; no `TAN_RUST_BINARY` needed for this job's own checkout.
+  #   The SECOND oracle this job used to arm -- a locally built Rust `tan`,
+  #   auto-discovered off `target/{release,debug}/` -- is gone with `crates/`
+  #   (tan-cli#269). Nothing in the suite resolves or spawns a Rust binary any
+  #   more, so `ALP_SDK_ROOT` is the only binding left that changes what this
+  #   job measures.
   #
   # `--ignore=tests/gates`: NOT because those tests don't matter, but because
   # they already run, correctly, in seam1 above -- all five files, each bound
@@ -1412,11 +1413,10 @@ jobs:
   # rewriting those cases to skip, and it is the only way any of `tan
   # monitor`'s non-hardware-gated logic gets checked in CI at all.
   #
-  # Matrix mirrors ci.yml's own Rust `test` job for the same reason it gives:
-  # `tan`'s path handling (os.pathsep env append, `.venv` discovery, `.exe`
-  # suffixes) differs per host, and the Python port re-implements exactly that
-  # handling -- untested on two of three platforms is not a smaller risk here
-  # than it is for the Rust side.
+  # Matrix runs all three platforms for the reason ci.yml's retired Rust
+  # `test` job gave: `tan`'s path handling (os.pathsep env append, `.venv`
+  # discovery, `.exe` suffixes) differs per host. With that job gone
+  # (tan-cli#269) this matrix is the ONLY cross-platform check in the repo.
   python-tests:
     name: "python -- pytest across python/ (${{ matrix.os }})"
     strategy:
@@ -1449,11 +1449,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          rustflags: "" # keep parity with ci.yml's local-gate rationale
-
       - name: install alp-tan[monitor] + pytest
         shell: bash
         working-directory: python
@@ -1462,16 +1457,14 @@ jobs:
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -e ".[monitor]" pytest
 
-      # Auto-discovered by tests/parity/oracle.py off target/{release,debug}/
-      # tan{.exe} -- no TAN_RUST_BINARY needed for this job's own build.
-      - name: build the Rust tan (parity oracle)
-        run: cargo build --locked --bin tan
-
       # THE context worth adding to branch protection for the Python suite --
       # see .github/workflows/ci.yml's header for the full tan-cli#392 note and
-      # the exact three strings this matrix produces. Nothing in this file can
-      # change branch protection; it can only make sure the job is worth
-      # requiring, which is what the guard below is for.
+      # the exact three strings this matrix produces. That note stopped being
+      # advisory at tan-cli#269, which deleted the five cargo contexts
+      # protection actually requires; this matrix HAS to be wired in before
+      # anything can merge. Nothing in this file can change branch protection;
+      # it can only make sure the job is worth requiring, which is what the
+      # guard below is for.
       #
       # The binding is ASSERTED before pytest runs, against the variable
       # actually exported rather than a re-derived path. This job's whole value

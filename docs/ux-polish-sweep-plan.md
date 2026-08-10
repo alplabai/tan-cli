@@ -16,7 +16,7 @@
 - **Gate:** `py -3.12 -m pytest tests -q` — **zero failures**. Not a count. `ci.yml:82-86` states this explicitly: *"Zero failures is the gate, not a count... Pinning a number would turn every landed port into a red build."*
 - **`ALP_SDK_ROOT`** must be unset, or bound to alp-sdk `main`/`dev`/the pinned commit. An arbitrary feature branch turns ~400 `test_planner_emit_parity.py` cases red.
 - **All new files carry** `# SPDX-License-Identifier: Apache-2.0` as line 1.
-- **Never touch** `crates/`, `contract/`, or `target/debug/tan.exe`. They are the frozen oracle.
+- **Never touch** `contract/` in this plan — it is live shared API data with a conformance gate over it. (`crates/` and `target/debug/tan.exe`, named here when this plan was written, were deleted by tan-cli#269; there is no oracle binary to run or protect any more. Where a behaviour question needs an oracle answer, cite `python/tests/fixtures/oracle_captures/` — do not assert one from memory.)
 - **Never change `--format json` output** in this plan. Every task is text-mode, help-text, or stderr only.
 - **Branch per task**, PR into `dev` (not `main`). No `Co-Authored-By: Claude` and no AI attribution in any commit message or PR body.
 - **Conventional commit prefixes**, matching repo history: `feat(cli):`, `fix(build):`, `docs(...)`.

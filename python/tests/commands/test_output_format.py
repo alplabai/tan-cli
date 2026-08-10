@@ -21,13 +21,16 @@ wants do not exist.
 
 The oracle had none of this: clap derives parser, help and completions from
 one `ValueEnum`, and the committed oracle help in
-`tests/parity/oracle_fixtures/test_run_oracle_parity.json` still shows the
+`tests/fixtures/oracle_captures/test_run_oracle_parity.json` still shows the
 choice list this port dropped.
 
-`tests/parity/test_run_oracle_parity.py` cannot catch any of it -- it extracts
+`test_run_oracle_parity.py` could not have caught any of it -- it extracted
 flag NAMES with `re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", help_text)` and
-compares sets, so a missing or wrong VALUE list is structurally invisible to
-it. Hence this module: for every registered command, the three surfaces are
+compared sets, so a missing or wrong VALUE list was structurally invisible to
+it; tan-cli#269 has since deleted that module along with the rest of the
+oracle-parity suite, which leaves this file the ONLY thing measuring the port
+against the recorded choice list. Hence this module: for every registered
+command, the three surfaces are
 parsed independently (Click's live parameter type, the rendered `--help`, the
 emitted shell scripts) and asserted equal. Adding a fourth format, or a second
 command with a wider domain, is a one-line enum edit -- and if any surface
@@ -38,7 +41,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 
 import pytest
 from typer.main import get_command
@@ -54,18 +56,17 @@ from tan.output_format import (
     format_values,
     resolve_format,
 )
+from tests import oracle_captures
 
 runner = CliRunner()
 
-#: The frozen oracle `--help` captures. Read (never written) from the parity
-#: tree so the choice list this port renders is checked against the Rust CLI's
-#: own, not against a second hand-copy of it living here.
-_ORACLE_HELP_FIXTURE = (
-    Path(__file__).resolve().parents[1]
-    / "parity"
-    / "oracle_fixtures"
-    / "test_run_oracle_parity.json"
-)
+#: The frozen oracle `--help` captures. Read (never written) through
+#: `tests.oracle_captures`, the one module that knows where the store lives,
+#: so the choice list this port renders is checked against the Rust CLI's own
+#: and not against a second hand-copy of it living here. The store outlived
+#: the binary (tan-cli#269): a recorded `--help` is still exactly what the
+#: shipped v0.4.1 CLI printed.
+_ORACLE_HELP_FIXTURE = oracle_captures.CAPTURES_DIR / "test_run_oracle_parity.json"
 
 
 # ---------------------------------------------------------------------------

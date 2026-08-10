@@ -2,13 +2,15 @@
 #
 # The first-install gate (tan-cli#207).
 #
-# Every other workflow here tests `tan` from a cargo checkout. `ci.yml` runs the
-# four cargo gates; `parity.yml` builds a `target/debug/tan` and points it at a
-# west workspace it assembled BY HAND (`west init -l` / `west update` /
-# `west zephyr-export`), then builds an example that already existed in the SDK.
-# Neither ever ran `install.sh`, `tan bootstrap` or `tan init` -- before this
-# file, a grep for tan subcommand invocations across `.github` returned three
-# COMMENT lines (`parity.yml`) and no `run:` step at all.
+# Every other workflow here tests `tan` from a SOURCE checkout. `ci.yml` runs
+# the pytest suite; `parity.yml` pip-installs `python/` and points the `tan`
+# console script at a west workspace it assembled BY HAND (`west init -l` /
+# `west update` / `west zephyr-export`), then builds an example that already
+# existed in the SDK. (Until tan-cli#269 both did the same thing with a
+# `cargo build --bin tan`; only the provenance of the binary changed.) Neither
+# ever ran `install.sh`, `tan bootstrap` or `tan init` -- before this file, a
+# grep for tan subcommand invocations across `.github` returned three COMMENT
+# lines (`parity.yml`) and no `run:` step at all.
 #
 # So the entire environment-provisioning path a first-install customer walks had
 # no signal: installer -> venv -> west workspace -> scaffold -> build. A
@@ -422,7 +424,8 @@ jobs:
           # The workflow equivalent of the `source <venv>/bin/activate` line
           # `tan bootstrap --print-env` prints -- a customer runs it, so this job
           # runs it. It is not here to cover for tan's own venv discovery; that
-          # has its own tests (crates/tan-cli/src/venv.rs), and the subject of
+          # has its own tests (`python/tests/`; the retired Rust oracle's lived in
+          # `crates/tan-cli/src/venv.rs`), and the subject of
           # THIS job is the documented customer path.
           with open(os.environ["GITHUB_PATH"], "a") as fh:
               fh.write(os.path.join(d["venvDir"], "bin") + "\n")

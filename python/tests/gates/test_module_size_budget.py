@@ -749,7 +749,35 @@ _MODULE_BUDGET: dict[str, int] = {
     # cost a paragraph of its own -- the `.bin` residual sentence had to STOP
     # naming the post-write `r`/`g` as the stage that failed, because under
     # the positional rule no post-load marker ever reaches that branch.
-    "tan/commands/flash_cmd.py": 3206,
+    # 3404, not 3206, as of tan-cli#567: no spawn on the write path may get a
+    # bare `argv[0]` any more. `_execute` resolves every program position to an
+    # absolute path before spawning and refuses a plan whose program is on
+    # neither PATH nor the venv (`_unresolved_program_outcome`), the DPIDR
+    # preflight does the same, `_child_env`/`_resolution_env` give the lookup
+    # and the spawn ONE definition of the child's environment, and the module
+    # docstring, `_tool_available` and `_execute` each carry the reasoning for
+    # why the resolved path -- not the identity the tool gate approved -- is
+    # what runs. +198 net, re-walked with `wc -l` on THIS tree at each step,
+    # not carried forward by arithmetic:
+    #   * +142 (3206 -> 3348) is mostly that reasoning: `CreateProcess`
+    #     searching the customer's project directory ahead of `%PATH%` is not
+    #     self-evident from the diff, and the ORDER of the venv rewrite and the
+    #     PATH resolution is load-bearing in a way a future reader would
+    #     otherwise "simplify".
+    #   * +45 (3348 -> 3393) is the `executable=` correction the frozen oracle
+    #     envelope forced (`_execute`'s own docstring records it): an `argv[0]`
+    #     rewrite, which is what #510 used for the build spawn, made `dd`'s own
+    #     diagnostic read `/usr/bin/dd: failed to open ...` in
+    #     `data.entries[].message` where the oracle says `dd: ...`, so the
+    #     parameter is threaded through all four spawn helpers instead.
+    #   * +11 (3393 -> 3404) is this PR's review round, correcting
+    #     `_unresolved_program_outcome`'s docstring: it claimed the `gunzip`/
+    #     `xz`/`dd` halves of a `.wic.gz` pipeline reach the spawn ungated, and
+    #     measurement says otherwise (`dd` is in `yocto_wic`'s `requires`;
+    #     `plan_yocto_wic` `which`-checks the decompressor itself). Trimmed to
+    #     land the function at exactly 50 lines rather than push the function
+    #     ratchet up for a comment.
+    "tan/commands/flash_cmd.py": 3404,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
@@ -1318,7 +1346,22 @@ _MODULE_BUDGET: dict[str, int] = {
     # `tool` that fails to launch reports `resolvedTool: null`,
     # indistinguishable from "never resolved" without a separate field this
     # port does not add).
-    "tan/commands/build/execute.py": 1119,
+    # 1092, not 1119, as of tan-cli#567: LOWERED. `_ToolResolution`/
+    # `_resolve_tool` moved out to `tan/core/tool_lookup.py` so the flash and
+    # size paths share the one hardened lookup instead of keeping a third and
+    # fourth opinion about it (tan-cli#532, 3 of its 5 sites); the private names
+    # stay as re-export aliases, and `_taskkill_program` came back the other way
+    # so the cancel path stops spawning a bare `taskkill`. -27 net, per-hunk
+    # from `git diff -U0` against the merge base, not arithmetic: -90/+25 where
+    # the relocated block was (the replacement being `_taskkill_program` plus
+    # the two aliases), +15/-1 on `_terminate`'s docstring, +9/-5 at its call
+    # site, +1 import, and +19 for the module docstring's tan-cli#567
+    # divergence entry (added in this PR's review round -- the register has to
+    # be real for the PR body to be able to say the divergence is recorded).
+    # The ratchet is re-pinned at the new, smaller size rather than left at the
+    # old ceiling -- a budget 27 lines above the file is a ratchet that stopped
+    # ratcheting.
+    "tan/commands/build/execute.py": 1092,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather
@@ -1888,7 +1931,35 @@ _MIRRORED = ("tan/planner/",)
 # `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
 # `bootstrap_cmd.py:_run` at 704, which none of this goes near. Of the 242,
 # `tan/planner/` contributes 54 (was 49) -- and is NOT excluded from the walk.
-_FUNCTION_COUNT_BUDGET = 242
+# 238, not 237, as of tan-cli#567 -- re-walked on THIS tree with the gate's own
+# `ast.walk` span>50 over all of `tan/` including `tan/planner/`. The spans
+# below are the RE-WALK's own numbers: an earlier version of this comment
+# carried `_execute` as "47 -> 59" and `_flow_d_preflight` as "156 -> 172",
+# both measured before commit 20f6ccf threaded `executable=` through the spawn
+# helpers and never re-taken. The crossing set, measured:
+#   * `flash_cmd.py:_execute` 28 -> 88, the ONE new crossing. Its docstring now
+#     carries why the venv rewrite must decide the PATH-prepend BEFORE the
+#     absolute-path resolution runs, why the lookup uses the child's env, and
+#     why the resolved path is applied as `executable=` rather than by
+#     rewriting `argv[0]`.
+#   * `build/execute.py:_resolve_tool` (71) LEFT the walk and
+#     `core/tool_lookup.py:resolve_tool` (83) joined it -- a relocation, net 0.
+#     It grew by 12 on the way for the empty-`PATH`-entry paragraph.
+#   * `flash_cmd.py:_flow_d_preflight` 156 -> 175 and `size_cmd.py:_run`
+#     105 -> 110 were already over and move nothing.
+#   * `flash_cmd.py:_unresolved_program_outcome` lands at exactly 50 (the cap
+#     is `> 50`) after this PR's review round grew its docstring -- trimmed to
+#     the cap deliberately rather than moving this budget for a comment.
+# `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
+# `bootstrap_cmd.py:_run`, measured at 704 here, and nothing above goes near it.
+# MERGED VALUE, #567 merged with dev carrying the planner re-sync: 243, and
+# MEASURED with the gate's own `_long_functions` on the merged tree -- not
+# 238 + 5 nor 242 + 1 by arithmetic. The two paragraphs above describe
+# DISJOINT crossing sets (one `flash_cmd.py` function; five mirror-file
+# functions), so both survive the merge intact and neither side's total does.
+# That the walk agrees with 237 + 1 + 5 is a check on the two paragraphs, not
+# how the number was obtained.
+_FUNCTION_COUNT_BUDGET = 243
 _FUNCTION_WORST_BUDGET = 707
 
 

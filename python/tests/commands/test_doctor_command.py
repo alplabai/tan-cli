@@ -1139,10 +1139,12 @@ def test_zephyr_sdk_install_version_matches_the_real_toolchain_lock():
     """tan-cli#172's Python-side half. `contract/fixtures/toolchains/
     toolchains.json`'s own `_comment` states the rule verbatim: "A NEW
     consumer of this pin needs its own parity assertion; widening this scan
-    will not reach it." Mirrors `crates/tan-core/src/host_env.rs`'s
-    `zephyr_sdk_install_version_matches_the_real_toolchain_lock` -- so a bump
-    that updates the Rust constant but not this one fails HERE, instead of
-    `tan doctor` silently naming a stale `west sdk install --version`."""
+    will not reach it." Mirrored `crates/tan-core/src/host_env.rs`'s
+    `zephyr_sdk_install_version_matches_the_real_toolchain_lock` until
+    tan-cli#269 deleted it; this is now the ONLY assertion in the chain, so a
+    bump that re-vendors the fixture without moving the constant fails HERE or
+    nowhere, and `tan doctor` would otherwise silently name a stale
+    `west sdk install --version`."""
     fixture = REPO_ROOT / "contract" / "fixtures" / "toolchains" / "toolchains.json"
     doc = json.loads(fixture.read_text(encoding="utf-8"))
     assert doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION == doc["zephyrSdk"]["version"]
