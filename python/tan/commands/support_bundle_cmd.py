@@ -308,6 +308,7 @@ def _extension_check(name: str, extension_id: str) -> doctor_cmd.Check:
         "unknown",
         f"{extension_id}: unknown — the standalone tan binary cannot see "
         "VS Code's installed extensions.",
+        scope="host",
     )
 
 
@@ -389,7 +390,7 @@ def _debug_doctor_report(
     a bundle reader looks for it.
     """
     checks = [
-        doctor_cmd.Check("workspaceRoot", "pass", context.workspace_root),
+        doctor_cmd.Check("workspaceRoot", "pass", context.workspace_root, scope="project"),
         doctor_cmd.Check(
             "sdkRoot",
             "pass" if context.sdk_root else "fail",
@@ -402,6 +403,7 @@ def _debug_doctor_report(
             # command that exits 1 is the worst place for the #305 dead end to
             # come back. `doctor_cmd.sdk_check`'s own wording, shared verbatim.
             else f"Resolve an alp-sdk checkout: {NO_SDK_NEXT_STEPS}.",
+            scope="project",
         ),
         _board_yaml_check(context, project_selected),
         *_target_checks(target, server),
@@ -437,19 +439,21 @@ def _board_yaml_check(
     needs none (#100).
     """
     if context.board_yaml_exists:
-        return doctor_cmd.Check("boardYaml", "pass", context.board_yaml_path)
+        return doctor_cmd.Check("boardYaml", "pass", context.board_yaml_path, scope="project")
     if project_selected:
         return doctor_cmd.Check(
             "boardYaml",
             "fail",
             context.board_yaml_path,
             "Create board.yaml or pass `--board-yaml <path>`.",
+            scope="project",
         )
     return doctor_cmd.Check(
         "boardYaml",
         "warn",
         f"no project selected -- no board.yaml at {context.board_yaml_path}",
         "Select a project with `--project <dir>` (or `--board-yaml <path>`) to check one.",
+        scope="project",
     )
 
 
@@ -473,6 +477,7 @@ def _target_checks(target: str, server: str) -> list[doctor_cmd.Check]:
                 "pass" if found else "warn",
                 found or f"No {server} executable was found on PATH.",
                 None if found else f"Install {server} and make sure it is on PATH.",
+                scope="host",
             ),
         ]
     if target == YOCTO_USERSPACE:
@@ -484,6 +489,7 @@ def _target_checks(target: str, server: str) -> list[doctor_cmd.Check]:
                 "pass" if gdb else "warn",
                 gdb or "No local gdb executable was found on PATH.",
                 None if gdb else "Install gdb locally for symbolized remote debugging.",
+                scope="host",
             ),
         ]
     lldb = _first_on_path(_RUNTIME_EXECUTABLES[SERVER_NONE])
@@ -493,6 +499,7 @@ def _target_checks(target: str, server: str) -> list[doctor_cmd.Check]:
             "lldb",
             "pass",
             lldb or "vadimcn.vscode-lldb ships its own LLDB, so none is needed on PATH.",
+            scope="host",
         ),
     ]
 

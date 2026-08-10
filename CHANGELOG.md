@@ -9,6 +9,47 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Added
 
+- **Every `tan doctor` check now carries a `scope` — `host` or `project` — so a
+  consumer stops hand-maintaining a list of tan's own check names.** The
+  envelope carried `checks[].name` and nothing else, so anyone splitting "facts
+  about this machine" from "facts about the project you opened" matched
+  strings. `alp-sdk-vscode` did exactly that; between v0.4.0 and 0.5.1 the
+  check `zephyrSdkHost` was renamed `zephyrSdkAvailableForHost`, the stale
+  entry then matched nothing, nothing failed on either side, and the row it was
+  meant to admit was silently never admitted — which reads to a user as "not a
+  problem" rather than "not asked" (alp-sdk-vscode#472, patched downstream in
+  alp-sdk-vscode#487 with the caveat that a re-derived hand-list rots again).
+  `host` means the verdict is about this machine (a tool on PATH, an OS
+  setting, the host interpreter); `project` means it is about the selected
+  project, the resolved alp-sdk checkout, or the Zephyr workspace built for it.
+  The rule and the two definitions are pinned in `contract/README.md`; the
+  classification itself deliberately is not, because reproducing it downstream
+  is the hand-list this field exists to delete. Additive: a new key on an
+  existing object, no key removed or renamed, present on every entry rather
+  than sometimes, and no committed golden carries a `checks[]` array to move.
+  Emitted by `tan doctor`, and by the `doctor.checks[]` inside the file
+  `tan support-bundle` writes — that report is built from the same type. That
+  command's own stdout envelope carries no `checks[]` and is unchanged. (#549)
+  - **A check cannot be added without one.** `scope` is a required
+    keyword-only field, so a check authored without it is a `TypeError` at its
+    own construction site — on every branch and every platform, including the
+    ones no test host reaches (`longPaths`, `sevenZip`, the six `fix:*`
+    outcomes). `python/tests/gates/test_doctor_check_scope.py` adds the static
+    half: it walks every `Check(...)` call site under `python/tan/`, requires a
+    literal value from the vocabulary, refuses a name that declares two
+    different scopes on two branches, and pins the current classification in
+    both directions so a reclassification is a reviewed edit rather than a
+    one-word refactor.
+  - **`tan doctor` and `tan doctor --build` are now contractually the same
+    check set.** `--build` gated exactly one check (`zephyrWorkspace`) and
+    stopped gating it in #290; it has been accepted-and-ignored since. That was
+    observable but unwritten, so `alp-sdk-vscode` still spawns both in parallel
+    on every dependency-panel refresh and merges them — it could not delete the
+    second subprocess safely, because deleting a seam on one pin's behaviour is
+    how the allowlist rotted in the first place. Now pinned by two tests (unit
+    and spawned-binary) and stated in `contract/README.md`, so one invocation
+    is enough. Neither invocation's output changed as part of this.
+
 - **`scripts/tan-surface/` — a command-surface walk that drives every `tan`
   command, in dependency order, against a real project.** `scripts/e2e-full.sh`
   is a release *regression* harness: it hijacks `$HOME`, wipes its tree every

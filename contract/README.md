@@ -134,7 +134,8 @@ create a second list that immediately drifts.
 | `data.available.projectTemplates` (+ `moduleTemplates`, `generationTargets`), `data.summary`, `data.details` | `explain` | golden `explain-overview` |
 | `data.examples[].{id,sourceDir,title,description}` | `examples` | golden `examples-catalog` |
 | `data.targets` / `.written` / `.failed` | `generate` | golden `generate-board-yaml-missing` |
-| `data.checks[].{name,status}`, `data.summary.{pass,warn,fail}`, `data.nextSteps`, the literal check name `workspace` | `doctor --build` | `doctor_build_data_keys_the_extension_reads` — a KEY-SET assertion, not a golden, because doctor's values are host facts |
+| `data.checks[].{name,status}`, `data.summary.{pass,warn,fail}`, `data.nextSteps`, the literal check name `workspace` | `doctor` (both invocations) | `python/tests/commands/test_doctor_command.py` — KEY-SET assertions, not a golden, because doctor's values are host facts. `test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback` reads `name`/`status` off the spawned envelope and pins `data`'s key set; `test_unknown_is_counted_in_no_summary_bucket` pins the three summary buckets; `test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host` pins the literal `workspace`. (The Rust `doctor_build_data_keys_the_extension_reads` cited here until #601 went with `crates/`.) |
+| `data.checks[].scope` | `doctor` (both invocations); also the `support-bundle` FILE's `doctor.checks[]`, not that command's envelope | `python/tests/gates/test_doctor_check_scope.py` + `test_every_check_on_the_wire_carries_a_scope` — see "`doctor` check scope" below |
 | `data.written` | `build --materialise` | **NOT COVERED.** Reaching it needs a resolvable alp-sdk checkout and a Python spawn; nothing in this suite is allowed either. |
 | `data.releases` | `sdk list` | **NOT COVERED.** Hits the GitHub releases API. |
 | `data.configuration` (the `launch.json` entry alp-sdk-vscode#342 writes verbatim) | `debug-config` | goldens `debug-config-preview-{zephyr-mcu,zephyr-mcu-sdk-identity,baremetal-mcu,native-host,yocto-userspace}` — one per `--target-kind`, re-recorded against the shipping CLI under tan-cli#502 and no longer `xfail`'d, so an added key or a changed `program`/`executable` reds here. Oracle-parity fixtures additionally covered the bare `zephyr-mcu` invocation (all three servers) and `native-host`, but they consumed `crates/` and were deleted with it in tan-cli#269; these goldens are what survived. |
@@ -143,9 +144,71 @@ The `build --materialise` and `sdk list` rows are stated rather than quietly
 omitted: an uncovered field that reads as covered is worse than one everybody
 knows about.
 
-`tan doctor` WITHOUT `--build` emits a different check vocabulary
-(`workspaceRoot`, `lldb`, `longPaths`, …). No consumer matches those by name,
-so they are deliberately not frozen.
+### `doctor` check scope, and why `--build` needs no second spawn (#549)
+
+**Every `data.checks[]` entry carries `scope`, one of exactly two values:
+`host` or `project`.** A consumer splitting the report into "facts about this
+machine" and "facts about the project you opened" reads that field. It must
+never go back to matching `checks[].name`.
+
+**This covers `support-bundle` too, not only `doctor`.**
+`tan support-bundle` builds its debug report from the same `Check` type, so
+every entry in the WRITTEN BUNDLE's `doctor.checks[]` carries `scope` on the
+same two values. Its own check names (`workspaceRoot`, `sdkRoot`,
+`cortexDebugExtension`, `{server}Backend`, `gdb`, `lldb`, …) are classified by
+the same rule below. That command's stdout ENVELOPE is unaffected — its `data`
+carries `outputPath`/`targetKind`/`server`/`decisionCount` and no `checks[]` at
+all — so the shape change is in the attached file only. Stated rather than left
+to be discovered: the field arrived for `doctor`'s consumer, but it changed
+`support-bundle`'s output in the same commit, and a shape change nobody wrote
+down is what this file exists to prevent.
+
+| Value | The check's verdict is about |
+|---|---|
+| `host` | This machine: a tool on PATH, an OS setting, the host interpreter, the home directory, whether the pinned Zephyr SDK publishes a build for this OS/arch. Worth rendering with no folder open. |
+| `project` | The selected project, the resolved alp-sdk checkout, or the Zephyr workspace built for it: is a `board.yaml` there, did a workspace resolve, does its Zephyr match the SDK's pin, where did this venv/SDK come from. |
+
+A project fact may still refine a `host` check — `hostPython`'s floor is the
+higher of the SDK manifest's `pythonMinVersion` and the workspace Zephyr's —
+without changing what the verdict is *about*. The rule is the subject, not the
+inputs.
+
+**This field is additive.** It is a new key on an existing object; `name`,
+`status`, `detail` and `fix` are untouched, no key was removed or renamed, and
+the field is present on every entry rather than sometimes. A consumer on an
+older pin ignores it; a consumer on a newer pin reading an older tan's envelope
+sees it absent, which is the same `undefined` its current allowlist code
+already handles. No golden moved: there is no `doctor` case under
+`envelopes/`, and none of the committed goldens contains a `checks[]` array.
+
+**The scope list is deliberately NOT reproduced here.** Which names are `host`
+today is exactly the hand-list this field exists to delete. The rule above and
+the field are the contract; `python/tests/gates/test_doctor_check_scope.py`
+pins the current classification inside this repo so a reclassification is a
+reviewed edit rather than a silent one.
+
+**Why it was needed:** the extension carried a hand-written list of tan's check
+names. Between v0.4.0 and 0.5.1 `zephyrSdkHost` was renamed
+`zephyrSdkAvailableForHost`; the stale entry matched nothing, nothing failed,
+and the row it was meant to admit was simply never admitted — which reads to a
+user as "not a problem" rather than "not asked" (alp-sdk-vscode#472, patched
+downstream in alp-sdk-vscode#487).
+
+**`doctor` and `doctor --build` emit the same checks.** `--build` gated exactly
+one check (`zephyrWorkspace`) and stopped gating it in tan-cli#290; it is
+accepted for compatibility and reads nowhere. A consumer needs ONE invocation,
+not two merged. Pinned by `test_build_and_plain_doctor_emit_the_same_checks`
+(unit) and `test_build_and_plain_doctor_put_the_same_checks_on_the_wire`
+(spawned binary), so this is a promise rather than an observation about one
+release. Changing it means changing those tests.
+
+Two sentences that stood here previously — that `tan doctor` WITHOUT `--build`
+emits "a different check vocabulary (`workspaceRoot`, `lldb`, `longPaths`, …)"
+— described the frozen v0.4.1 oracle, not the shipping Python CLI. On the
+Python CLI `workspaceRoot` and `lldb` are `support-bundle`'s checks and are not
+emitted by `doctor` at all, and `longPaths` is emitted by both invocations on
+Windows. The check names themselves remain unfrozen: no consumer should match
+them now that `scope` exists.
 
 ### Published as a release asset
 

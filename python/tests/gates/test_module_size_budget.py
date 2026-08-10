@@ -182,7 +182,20 @@ _MODULE_BUDGET: dict[str, int] = {
     # recording the recurrence and why this copy was never itself observed
     # to crash (its own `not json_mode` guard in front) even though the
     # sibling copy in `build_cmd._dispatch` did.
-    "tan/commands/doctor_cmd.py": 3612,
+    # 3696, not 3612, as of tan-cli#549: every check on the wire now carries a
+    # `host`/`project` scope, and `Check.scope` is a REQUIRED keyword-only
+    # field rather than a name->scope lookup table, so all 58 `Check(...)`
+    # constructions in this module declare one. That is most of the growth --
+    # 47 of them needed their own line, the other 11 fitted on an existing one
+    # (two of those eleven were re-wrapped to stay inside the file's own line
+    # width) -- and it is the point: a lookup table can silently miss a name, a
+    # required argument cannot, and a consumer left without a scope for one
+    # check is back on the hand-list this whole change deletes. The rest is
+    # `Check`'s own `__post_init__` vocabulary guard, its `as_dict()` key, and
+    # the docstring paragraph recording why the field is required and
+    # keyword-only. The two definitions and the judgement calls did NOT land
+    # here: they are in `tan/core/doctor_scope.py`, well under its own cap.
+    "tan/commands/doctor_cmd.py": 3696,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -1395,7 +1408,11 @@ _MODULE_BUDGET: dict[str, int] = {
     # `foreign_global_default_for` keyword-only fields `_run`'s success path
     # already threads, defaulted so the outer exception guard (which never
     # resolved a project context) keeps its prior empty-list behaviour.
-    "tan/commands/support_bundle_cmd.py": 932,
+    # 939, not 932, as of tan-cli#549: this command builds a doctor-shaped
+    # report out of `doctor_cmd.Check`, so its nine construction sites each
+    # declare the new required `scope=`. Seven of the nine needed their own
+    # line; the other two fitted on an existing one. No logic changed here.
+    "tan/commands/support_bundle_cmd.py": 939,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring
