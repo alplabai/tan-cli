@@ -67,7 +67,7 @@ prefixed into a silently wrong one (with `HOME=/home/<user>`,
 `/home/<user>-two/alp-sdk` -> `<home>-two/alp-sdk`). And it is REFUSED outright for a home that is a
 filesystem root ([`home_redaction_refusal`]) -- `HOME=/` is what Docker hands a
 uid with no `/etc/passwd` entry, and replacing it shredded every separator in
-the file. A refusal emits `support-bundle.redaction-skipped` in the envelope
+the file (measured: exit 0, no warning, 88 substitutions in one bundle). A refusal emits `support-bundle.redaction-skipped` in the envelope
 AND in text mode: the user is about to attach this file believing it was
 scrubbed.
 """
@@ -145,8 +145,11 @@ def home_redaction_refusal(home: str) -> str | None:
     A home that is a filesystem/drive/UNC ROOT is refused. Docker and OpenShift
     hand a uid with no `/etc/passwd` entry `HOME=/`, and an unanchored
     `str.replace("/", "<home>")` then rewrites EVERY separator in EVERY string
-    of the bundle: measured, `HOME=/ tan support-bundle` exited 0 and wrote
-    `workspaceRoot: "<home>srv<home>ci<home>work<home>..."`. The maintainer
+    of the bundle. MEASURED: `HOME=/ tan support-bundle` exited 0, emitted no
+    warning, and wrote 88 `<home>` substitutions into one bundle -- every
+    separator of every path in it. The shape is
+    `workspaceRoot: "<home>srv<home>ci<home>work<home>..."`, ILLUSTRATIVE and
+    not a transcript: the run's real paths are elided. The maintainer
     receiving that attachment cannot read a single path -- the bundle exists to
     carry exactly those paths verbatim -- and there is nothing to protect
     anyway, because a root home contains no account name.
@@ -190,12 +193,26 @@ def _home_variants() -> tuple[str, ...]:
 #: occurrence must START at one of these (or at the beginning of the string) and
 #: END at one of these, at a path separator, or at the end of the string.
 #:
-#: `/` and `\\` are deliberately ABSENT from the leading set: with
-#: `HOME=/home/dev`, `/srv/home/dev/proj` is a DIFFERENT directory that happens
-#: to contain the home spelling mid-path, and treating a separator as a token
-#: start would rewrite it to `/srv<home>/proj`. They ARE in the trailing set,
-#: because `<home>/proj` is exactly the substitution wanted.
+#: `/` and `\\` are deliberately ABSENT from the leading set for a home with no
+#: drive. The shape that rule DECIDES is a home directly preceded by a
+#: separator -- `/srv//home/dev/proj`, or `file:///home/dev/proj` -- which names
+#: a different directory and must survive; with `HOME=/home/dev` both are left
+#: alone, and treating a separator as a token start would rewrite the first to
+#: `/srv/<home>/proj`.
+#:
+#: Note what this rule does NOT decide, since an earlier version of this comment
+#: claimed it did: `/srv/home/dev/proj` (single separator) is already safe
+#: because the character before the match is `v`, an ordinary name character
+#: that is in no boundary set. Measured both ways -- it survives even with
+#: separators admitted to the leading set.
+#:
+#: Separators ARE in the trailing set, because `<home>/proj` is exactly the
+#: substitution wanted, and they are added back to the LEADING set for a
+#: drive-anchored home -- see [`_home_pattern`].
 _TOKEN_BREAK = " \t\r\n\"'=,;:()[]{}<>|`"
+
+#: Path separators. A leading boundary for a DRIVE-ANCHORED home only.
+_SEPARATORS = "/\\"
 
 
 def _home_pattern(variant: str) -> re.Pattern[str]:
@@ -206,12 +223,23 @@ def _home_pattern(variant: str) -> re.Pattern[str]:
     `/home/<user>-two/alp-sdk` was written as `<home>-two/alp-sdk` and
     `/srv/home/<user>-ops/proj` as `/srv<home>-ops/proj` -- register-grade path
     data corrupted in the one artifact that exists to carry it, at `ok: true`.
+
+    A DRIVE-ANCHORED variant also accepts a separator as its leading boundary.
+    `%USERPROFILE%` starts with a drive letter, so Windows' extended-length
+    prefix put one in front of it and the account name survived: measured,
+    `\\\\?\\C:\\Users\\<name>\\proj` came back UNREDACTED, on the one platform
+    whose home directory is the account name. The POSIX exclusion above cannot
+    be relaxed, but it does not apply here -- a drive letter re-anchors the path
+    absolutely, so no preceding component can make `C:\\Users\\alice` name a
+    different directory the way `/srv` + `/home/dev` does.
     """
     break_class = re.escape(_TOKEN_BREAK)
+    drive_anchored = ntpath.splitdrive(variant)[0] != ""
+    lead_class = break_class + (re.escape(_SEPARATORS) if drive_anchored else "")
     return re.compile(
-        rf"(?<![^{break_class}])"  # string start, or a token break before it
+        rf"(?<![^{lead_class}])"  # string start, or a leading boundary before it
         + re.escape(variant)
-        + rf"(?=[/\\]|[{break_class}]|$)"  # separator, token break, or string end
+        + rf"(?=[{re.escape(_SEPARATORS)}]|[{break_class}]|$)"  # sep, break, or end
     )
 
 

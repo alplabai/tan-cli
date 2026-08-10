@@ -999,7 +999,47 @@ def test_a_socks_proxy_is_refused_rather_than_silently_bypassed(monkeypatch):
     assert releases == []
     assert error == (
         "Alp SDK: ALL_PROXY names a socks5:// proxy, which this build of tan "
-        "cannot route through (its HTTP client has no socks5 transport). Set "
-        "HTTPS_PROXY to an http:// or https:// proxy, or add api.github.com to "
-        "NO_PROXY to allow a direct connection."
+        "cannot route through (its HTTP client has no socks5 transport). Unset "
+        "ALL_PROXY, or point it at an http:// or https:// proxy, or add "
+        "api.github.com to NO_PROXY to allow a direct connection."
     )
+
+
+def test_the_socks_refusal_names_the_variable_that_actually_won(monkeypatch):
+    """Review round on #620. The first cut said "Set `HTTPS_PROXY` to an http://
+    or https:// proxy" -- which CANNOT take effect, because
+    `HTTPS_PROXY_ENV_VARS` puts `ALL_PROXY` ahead of `HTTPS_PROXY` and the
+    selection never reaches it. Measured:
+    `ALL_PROXY=socks5://127.0.0.1:45997 HTTPS_PROXY=http://127.0.0.1:45996
+    tan sdk list --online` gave the identical refusal at rc 1 with NEITHER
+    socket touched.
+
+    That is the same self-defeating-remediation class as tan-cli#497 defect 7,
+    which this branch fixes two commands away -- so the remediation must name
+    the variable the selection ACTUALLY read, and offer unsetting it."""
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:45997")
+    # The variable the reader would otherwise be sent to set, still losing.
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:45996")
+
+    _, error = _fetch_releases()
+    assert error is not None
+    assert "Unset ALL_PROXY, or point it at an http:// or https:// proxy" in error
+    # Naming the LOSING variable as the fix is what made the old text unusable.
+    assert "Set HTTPS_PROXY" not in error
+
+
+def test_the_socks_refusal_names_https_proxy_when_that_is_what_won(monkeypatch):
+    """The other half: the variable is not hardcoded. With only `https_proxy`
+    set, IT is what the selection read, so it is what the remediation must
+    name -- telling this reader to unset `ALL_PROXY` would be the same
+    unusable instruction pointed the other way."""
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("https_proxy", "socks5h://127.0.0.1:45997")
+
+    _, error = _fetch_releases()
+    assert error is not None
+    assert error.startswith("Alp SDK: https_proxy names a socks5h:// proxy")
+    assert "Unset https_proxy, or point it at an http:// or https:// proxy" in error

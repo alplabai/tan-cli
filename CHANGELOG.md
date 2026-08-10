@@ -238,6 +238,18 @@ All notable changes to `tan` are documented here. Format follows
   Closes #499. Refs #497 — the seven other commands that discard a rejected
   `--sdk-root` value (`pinmux`, `init`, `model`, `trace`, `generate`,
   `validate`, `new-som`) are untouched here.
+  - **Behaviour regression, stated plainly: `sdk list --online` no longer works
+    through a `socks5://` proxy, where `tan 0.4.1` did.** The Rust build
+    compiled ureq's `socks-proxy` feature and really dialled such a proxy
+    (measured: the listener was hit); Python's `urllib` has no SOCKS transport
+    at all, so this build REFUSES with a message naming the variable, the
+    scheme and the two ways forward. A user on `ALL_PROXY=socks5://…` loses the
+    command outright rather than seeing it degrade. That is deliberate — the
+    alternative is a silent direct connection, which either circumvents the
+    egress policy that host declared or fails anyway blaming the wrong thing,
+    and is the exact defect fixed directly above. The durable fixes are an
+    optional PySocks extra or a first-class SOCKS transport; neither is in this
+    change, and both are tracked as follow-ups.
 - **An AEN MRAM write with no wrong-board guard now says so.** The
   `flash.dpidr-preflight-unarmed` advisory was gated on
   `flash_method: swd_probe`, and the AEN dispatches Flow D

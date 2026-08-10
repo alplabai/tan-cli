@@ -911,17 +911,29 @@ def _unroutable_proxy_refusal(proxy: str | None, url: str) -> str | None:
     oracle CAN dial SOCKS -- `crates/tan-cli/src/http.rs` compiles ureq's
     `socks-proxy` feature, measured -- so this names the limitation instead of
     hiding it.
+
+    **The remediation names the variable that actually WON, and offers unsetting
+    it first.** The first cut said "Set `HTTPS_PROXY` to an http:// or https://
+    proxy", which cannot take effect: `HTTPS_PROXY_ENV_VARS` puts `ALL_PROXY`
+    ahead of `HTTPS_PROXY`, so the selection never reaches the variable the
+    reader was told to set. Measured --
+    `ALL_PROXY=socks5://127.0.0.1:45997 HTTPS_PROXY=http://127.0.0.1:45996` gave
+    the identical refusal at rc 1 with NEITHER socket touched. That is the same
+    self-defeating-remediation class as tan-cli#497 defect 7, which this branch
+    fixed two commands away: an instruction the user can follow exactly and be
+    no better off.
     """
     if proxy is None:
         return None
     scheme = unsupported_proxy_scheme(proxy)
     if scheme is None:
         return None
+    variable = _proxy_variable_name()
     return (
-        f"Alp SDK: {_proxy_variable_name()} names a {scheme}:// proxy, which this "
+        f"Alp SDK: {variable} names a {scheme}:// proxy, which this "
         f"build of tan cannot route through (its HTTP client has no {scheme} "
-        f"transport). Set HTTPS_PROXY to an http:// or https:// proxy, or add "
-        f"{host_of(url)} to NO_PROXY to allow a direct connection."
+        f"transport). Unset {variable}, or point it at an http:// or https:// "
+        f"proxy, or add {host_of(url)} to NO_PROXY to allow a direct connection."
     )
 
 

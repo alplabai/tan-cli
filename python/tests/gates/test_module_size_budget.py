@@ -1253,7 +1253,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # lines and `_FUNCTION_COUNT_BUDGET` did not have to move. Most of the
     # delta is the measurement record for both -- which env var the oracle
     # really honours, and on which port the connection was observed landing.
-    "tan/commands/sdk_cmd.py": 1403,
+    # 1403 -> 1415 on the #620 review round: the SOCKS refusal named
+    # `HTTPS_PROXY` as the remedy, which cannot take effect while `ALL_PROXY`
+    # outranks it -- measured, both set, identical refusal and NEITHER socket
+    # touched. It now names the variable that actually won, and the docstring
+    # records that measurement so the next edit cannot re-hardcode it.
+    "tan/commands/sdk_cmd.py": 1415,
     # 1093 -> 1108: tan-cli#478 wired `sdk_resolution_issues` through the
     # spawn path, so a `globalDefault` written for ANOTHER project stops
     # being silent here. Raised rather than absorbed by cutting the
@@ -1557,7 +1562,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # plus the `support-bundle.redaction-skipped` warning that says the file
     # went out unscrubbed. A redaction rule with no stated boundary is how
     # this defect shipped, so the boundary is written down.
-    "tan/commands/support_bundle_cmd.py": 1038,
+    # 1038 -> 1066 on the #620 review round: the leading boundary excluded
+    # separators for EVERY home, so a drive-anchored `%USERPROFILE%` behind
+    # an extended-length prefix kept the account name (measured). Plus a
+    # correction: the old comment justified that exclusion with
+    # `/srv/home/dev/proj`, which is decided by the name character before the
+    # match, not by the separator rule -- the shape it really decides is
+    # `/srv//home/dev/proj`, and the test now pins THAT one.
+    "tan/commands/support_bundle_cmd.py": 1066,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring

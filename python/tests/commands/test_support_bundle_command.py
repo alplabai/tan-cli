@@ -704,9 +704,11 @@ def test_redaction_only_replaces_a_whole_path_token():
 def test_a_root_home_is_refused_rather_than_shredding_every_separator():
     """The `HOME=/` half. Docker/OpenShift hand a uid with no /etc/passwd entry
     `HOME=/`; `_home_variants()` then returned `('/',)` and every `/` in every
-    string of the bundle became `<home>` (measured: `workspaceRoot:
-    "<home>srv<home>ci<home>work<home>..."`, exit 0, no warning). A root home has
-    no account name to protect, so the answer is to refuse, not to escape it."""
+    string of the bundle became `<home>`. MEASURED: exit 0, no warning, and 88
+    `<home>` substitutions in a single bundle. The shape
+    `workspaceRoot: "<home>srv<home>ci<home>work<home>..."` is ILLUSTRATIVE --
+    the run's real paths are elided, not transcribed. A root home has no
+    account name to protect, so the answer is to refuse, not to escape it."""
     for root in ("/", "//", "C:\\", "C:/"):
         assert home_redaction_refusal(root) is not None
     assert home_redaction_refusal("/home/dev") is None
@@ -751,3 +753,46 @@ def test_an_ordinary_home_emits_no_redaction_warning(tmp_path, monkeypatch):
 
     doc = json.loads(runner.invoke(app, ["support-bundle", "--format", "json"]).stdout)
     assert [i for i in doc["issues"] if i["code"] == REDACTION_SKIPPED_CODE] == []
+
+
+def test_a_drive_anchored_home_is_redacted_behind_a_separator():
+    """Review round on #620. `_TOKEN_BREAK` excludes `/` and `\\` from the
+    LEADING boundary -- correct for the POSIX case (`/srv/home/dev` is a
+    different directory), but `%USERPROFILE%` starts with a DRIVE LETTER, so
+    Windows' extended-length prefix put a separator in front of it and the
+    account name survived. Measured before the fix:
+    `\\\\?\\C:\\Users\\alice\\proj` came back unredacted -- on the one platform
+    whose home directory IS the account name, which is the whole thing this
+    redaction exists to remove.
+
+    A drive letter re-anchors the path absolutely, so accepting a separator
+    before it cannot admit the POSIX confusion (asserted directly below)."""
+    win = ("C:\\Users\\runner", "C:/Users/runner")
+    assert _redact(r"\\?\C:\Users\runner\proj", win) == r"\\?\<home>\proj"
+    assert _redact("//?/C:/Users/runner/proj", win) == "//?/<home>/proj"
+    assert _redact(r"cmd \\?\C:\Users\runner\build\zephyr.elf", win) == (
+        r"cmd \\?\<home>\build\zephyr.elf"
+    )
+    # Unchanged shapes: no prefix at all, and the bare token.
+    assert _redact(r"C:\Users\runner\proj", win) == r"<home>\proj"
+    assert _redact("C:/Users/runner", win) == "<home>"
+
+
+def test_the_drive_anchored_relaxation_does_not_over_redact():
+    """The relaxation must stay boundary-respecting on BOTH sides: a longer
+    account name that merely starts with the home's, and the same user on a
+    different drive, are different directories."""
+    # `runner` / `runner~1` is the real Windows 8.3-alias pair, and the longer
+    # name genuinely starts with the shorter -- exactly the confusion the
+    # trailing boundary has to refuse.
+    win = ("C:\\Users\\runner", "C:/Users/runner")
+    assert _redact(r"C:\Users\runner~1\proj", win) == r"C:\Users\runner~1\proj"
+    assert _redact(r"D:\Users\runner\proj", win) == r"D:\Users\runner\proj"
+    # And the POSIX leading-separator exclusion is untouched. These two are the
+    # shapes that rule actually DECIDES -- a home directly preceded by a
+    # separator. `/srv/home/<user>/proj` is NOT one of them: it survives on the
+    # `v` before the match whether separators lead or not (measured), so
+    # asserting it here would not hold this relaxation in place at all.
+    posix = ("/home/<user>",)
+    assert _redact("/srv//home/<user>/proj", posix) == "/srv//home/<user>/proj"
+    assert _redact("file:///home/<user>/proj", posix) == "file:///home/<user>/proj"
