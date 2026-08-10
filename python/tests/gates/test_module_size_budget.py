@@ -487,7 +487,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # safety claim -- the distinction the next backend's author has to get
     # right, and the one #609 was filed because nobody had had to state.
     # Re-walked with this file's own measurement, not derived by arithmetic.
-    "tan/core/flash_plan.py": 2912,
+    #
+    # 3071, not 2912, as of tan-cli#611: the `flash_policy` model -- the fact
+    # that answers WHO may flash a helper and WHEN, which neither
+    # `update_channel` (how it is updated in the field) nor `flash_method` (by
+    # what transport) carried. Three constants with the argument on them, plus
+    # `helper_flash_gate` and the two message builders it dispatches to
+    # (`_under_declared_skip_message`, `_recovery_only_skip_message`) and
+    # `_channel_clause`. The gate is 49 lines by DESIGN: the first cut was 91
+    # and the function-count ratchet caught it, so the messages were extracted
+    # rather than the budget raised. Re-walked with this file's own module
+    # walk, not derived by arithmetic.
+    "tan/core/flash_plan.py": 3071,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
@@ -849,7 +860,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # (`_swd_probe_require_dpidr_refusal` is that same function, renamed to
     # `_require_dpidr_refusal` -- the paragraphs above still describe it.)
     # Re-walked with this file's own module walk, not derived by arithmetic.
-    "tan/commands/flash_cmd.py": 3824,
+    #
+    # 3922, not 3824, as of tan-cli#611: the IO half of the `flash_policy`
+    # model -- `--recover`, the `_Context.recover`/`helper_filter` pair,
+    # `_recovery_armed_for`, the `_Entry.recovery_armed` flag and its
+    # `flash.recovery-flash-armed` advisory, and THE HOIST itself (the policy
+    # decision now runs above `_flash_entry`'s `if not raw_method:` guard, with
+    # the paragraph saying why a declaration a consumer silently ignores is
+    # worse than no declaration). The DECISION is not here: it is
+    # `flash_plan.helper_flash_gate`, pure, like every other flash decision.
+    # Plus one line on the module docstring's rc convention, which enumerates
+    # every `-1` skip reason and would otherwise omit the new one.
+    # Re-walked with this file's own module walk, not derived by arithmetic.
+    "tan/commands/flash_cmd.py": 3922,
     # 1643, not 1639, as of tan-cli#485: `_emit_cross_core_shmem_cache`'s
     # docstring/body grew to cover `kind: rpmsg` too (alp-sdk #1088's
     # companion half -- `needs_dcache_off` now checks
