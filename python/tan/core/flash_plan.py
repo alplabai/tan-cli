@@ -2770,6 +2770,97 @@ _REGISTRY: dict[str, BackendMeta] = {
 }
 
 
+# ── tan-cli#609: which methods the wrong-board SW-DP ID guard covers ────────
+
+#: Every registered `flash_method`, mapped to whether **tan itself composes
+#: the J-Link Commander session that performs the write** and can therefore
+#: run the read-only SW-DP IDR preflight (`flow_d_preflight_script`) ahead of
+#: it. `True` is the guard's coverage set.
+#:
+#: A TABLE rather than an inline `method == ...` test at the one call site,
+#: because tan-cli#609 measured what the inline form costs. `flash_cmd` gated
+#: the unarmed-guard ADVISORY on `method == SWD_PROBE_METHOD`; the AEN
+#: dispatches Flow D (`alif_mram_jlink`), so a real MRAM write on
+#: `e1m-aen-evk-01` (2026-08-10, `origin/dev` `a9062ea`) emitted `ISSUES = []`
+#: -- no guard AND no signal -- on a bench where one J-Link serial is
+#: OEM-cloned across two probes and `JLinkExe` selects by serial alone. The
+#: advisory tracked whichever method someone had last wired it to, not the
+#: methods that can actually write.
+#:
+#: `False` is NOT a safety claim about a method. It says only that
+#: `flash_args.expect_dpidr` would have nothing to arm there, because tan does
+#: not build that method's probe session: `zephyr_west_flash` hands the job to
+#: `west flash`, whose runner composes its own command line (a J-Link runner
+#: among them); `baremetal_cmake_flash` hands it to a CMake target; the
+#: `yocto_wic*` pair and `xspi_flashwriter` address a block device and a
+#: serial port, neither probe-selected. An advisory on any of those would tell
+#: an operator to set a key that does nothing.
+#:
+#: `tests/gates/test_dpidr_guard_coverage.py` pins these keys to `_REGISTRY`'s,
+#: so a NEW backend cannot dispatch until someone has decided which side it is
+#: on. That pin is what makes the `.get(..., False)` default in
+#: `dpidr_preflight_possible` a closed question rather than a silent omission.
+DPIDR_GUARD_COVERAGE: dict[str, bool] = {
+    FLOW_D_METHOD: True,
+    SWD_PROBE_METHOD: True,
+    "zephyr_west_flash": False,
+    "baremetal_cmake_flash": False,
+    "yocto_wic": False,
+    "yocto_wic_to_sd_or_emmc": False,
+    "xspi_flashwriter": False,
+}
+
+
+def dpidr_preflight_possible(method: str, preflight_device: str | None) -> bool:
+    """Whether tan CAN run its read-only SW-DP IDR preflight for this entry --
+    i.e. whether `flash_args.expect_dpidr` would arm a real check here. Pure.
+
+    Two conditions, in order:
+
+    * the method is on the `True` side of `DPIDR_GUARD_COVERAGE` (see there);
+    * and, for `swd_probe` ONLY, this entry actually took the J-Link arm
+      (`FlashPlan.preflight_device is not None`).
+
+    That second clause is the one method-specific test left in this predicate,
+    and it is about an ARM WITHIN a covered method, not about which methods
+    are covered. On `swd_probe`'s openocd/pyocd arm the DPIDR read is not
+    merely absent but impossible -- `plan_swd_probe` refuses an `expect_dpidr`
+    that lands there, at plan time -- so "the guard is unarmed, set
+    `expect_dpidr`" would be advice that cannot be taken. Flow D has no such
+    split (it is J-Link by construction) and passes `preflight_device=None`.
+    """
+    if not DPIDR_GUARD_COVERAGE.get(method, False):
+        return False
+    if method == SWD_PROBE_METHOD:
+        return preflight_device is not None
+    return True
+
+
+def dpidr_preflight_unarmed(
+    method: str, flash_args: Any, preflight_device: str | None
+) -> bool:
+    """Whether this write went ahead with a wrong-board guard that COULD have
+    run and was not armed -- the condition `flash.dpidr-preflight-unarmed`
+    reports. Pure.
+
+    `expect_dpidr` PRESENT is the whole test, via `_fa_has_key` rather than
+    `fa_str_checked`: a present-but-null key is a refusal
+    (`validate_flow_d_preflight_args`), never a quiet opt-out, so treating it
+    as absent here would report the wrong thing about a manifest that already
+    cannot flash. Flow D additionally requires `expect_dpidr` to be PAIRED
+    with `jlink_device`, but a half-armed pair refuses before any write, so by
+    the time an entry reaches a caller of this function "present" and "armed"
+    coincide on both covered methods.
+
+    Ask this only of a REAL, CONFIRMED write. It says nothing about a
+    `--dry-run` or an unconfirmed preview, neither of which writes anything
+    for a wrong-board guard to have protected.
+    """
+    return dpidr_preflight_possible(method, preflight_device) and not _fa_has_key(
+        flash_args, "expect_dpidr"
+    )
+
+
 # ── the required-tool gate ──────────────────────────────────────────────────
 
 PROCEED = "proceed"
