@@ -189,6 +189,38 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **A rejected `--sdk-root` is now named in the diagnostic that refuses it, on
+  the five commands still dropping it.** `--sdk-root` is terminal, so a
+  path without `scripts/alp_project.py` resolves to nothing — and `pinmux`,
+  `model build`, `generate`, `validate` and `new-som` answered that with the
+  same string they use when no flag was given, telling the caller to "Use
+  `--sdk-root`", the flag they had just typed, with the failing value nowhere
+  in the envelope or the stderr text. All five now report which path was
+  rejected and which marker was looked for. `init` and `trace` were measured
+  and needed no change — `init` has named the value since it was ported, and
+  `trace`'s guard cannot be reached with the flag given at all. Refs #497
+  (defect 7); §§1–6 and 8 remain.
+
+- **`tan init --format json` emits the `sdk` block again, on all four
+  outcomes.** Preview, successful write, overwrite-guard refusal and every
+  error path omitted `sdk:{root,sourceTier}` entirely, at both resolution
+  tiers, where the frozen v0.4.1 oracle emits it — losing the only field
+  naming which checkout a run is about to permanently pin (`data.sdkPinned`
+  is `null` on three of the four). Refs #491 (defect 5).
+
+- **`tan monitor --format json` keeps the board's bytes off stdout.** miniterm
+  inherited tan's stdout, so a successful session put serial traffic ahead of
+  the envelope and a whole-stdout `JSON.parse` failed on an `ok: true`, exit-0
+  run. Under `--format json` the traffic now goes to stderr, alongside the
+  banners already there; text mode still inherits stdout, so `tan monitor >
+  board.log` is unchanged. Refs #491 (defect 6).
+
+- **A `tan bootstrap` relocation refusal no longer discards the warnings the
+  run had already recorded.** The failure return passed an empty issue list, so
+  `bootstrap.python-floor-skew` — which fires on every run against the shipped
+  alp-sdk manifest — vanished from the envelope and the refusal carried
+  `bootstrap.failed` alone. Refs #491 (defect 10).
+
 - **`tan init --from-example` no longer copies an example's `out/` build
   directory into the customer's new project.** The build-output prune list
   added in #583 transcribed five of the seven directory patterns alp-sdk's

@@ -1747,7 +1747,20 @@ def _refusal(
 
 def _fatal(message: str, data: dict[str, object], issues: list[Issue]) -> Outcome:
     """A failing STEP: the fatal message as a `bootstrap.failed` error issue, on
-    top of whatever warnings the run had already recorded."""
+    top of whatever warnings the run had already recorded.
+
+    `issues` is ALWAYS `log.take_issues()` at the call site. It is a parameter
+    rather than something this helper reads off the log itself because the log
+    is `_run`-local, and passing `[]` is therefore a silent, well-typed way to
+    throw the run's warnings away: tan-cli#491 defect 10, where the relocation
+    refusal did exactly that and emitted `bootstrap.failed` alone.
+    `bootstrap.python-floor-skew` fires on EVERY run against the shipped
+    alp-sdk manifest (declared 3.10, effective floor 3.12) and
+    `bootstrap.yocto-host` on any non-Linux host with a Yocto core in play --
+    both were printed to stderr in text mode and never reached `issues[]`,
+    which is the print-only failure `Log`'s own docstring says it exists to
+    prevent. There is no fatal path that legitimately wants an empty list.
+    """
     return Outcome(
         ExitCode.RUNTIME_FAILURE,
         data,
@@ -2472,7 +2485,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # the checkout or repoint the machine-global default SDK.
         new_root, error = relocate_checkout(paths.repo_root, target, dry_run=dry_run)
         if error is not None:
-            return _fatal(error, payload(), []), reported_project, sdk
+            # `log.take_issues()`, never `[]` -- see `_fatal` (tan-cli#491 d10).
+            return _fatal(error, payload(), log.take_issues()), reported_project, sdk
         if new_root is not None and str(new_root) != str(paths.repo_root):
             old_root = sdk_root
             # Snapshotted BEFORE anything below is mutated (tan-cli#284):

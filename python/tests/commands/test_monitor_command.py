@@ -360,3 +360,75 @@ def test_unfrozen_build_without_pyserial_reports_the_same_code(monkeypatch):
     envelope = json.loads(result.stdout)
     assert [i["code"] for i in envelope["issues"]] == ["monitor.pyserial-missing"], envelope
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# where miniterm's output goes (tan-cli#491 defect 6)
+# ---------------------------------------------------------------------------
+
+
+def _spawn_kwargs(monkeypatch, argv: list[str]) -> dict:
+    """Run `tan monitor <argv>` with a stub spawn and hand back the `kwargs`
+    the command passed to `subprocess.run`."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+    captured: dict = {}
+
+    class _Completed:
+        returncode = 0
+
+    def fake_run(_argv, **kwargs):
+        captured.update(kwargs)
+        return _Completed()
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", fake_run)
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 0, result.stdout
+    return captured
+
+
+def test_json_mode_keeps_the_boards_bytes_off_stdout(monkeypatch):
+    """tan-cli#491 defect 6. The spawn passed no `stdout=`, so miniterm
+    INHERITED tan's stdout and wrote every received serial byte there --
+    reproduced end to end against a real pty: the board's banner preceded the
+    envelope and a whole-stdout `JSON.parse` failed on an `ok: true`, exit-0
+    run. Under `--format json` the child's stdout must therefore be something
+    other than tan's own.
+
+    Asserted as "not inherit, and not stdout" rather than against a specific
+    stream object: pytest's own capture replaces the process streams, so
+    pinning identity here would test the harness, not the command. What the
+    stream IS is `_child_stdout`'s own case below."""
+    kwargs = _spawn_kwargs(monkeypatch, ["--port", "COM7", "--format", "json"])
+    assert "stdout" in kwargs, kwargs
+    assert kwargs["stdout"] is not None, "inherited stdout -- the #491 d6 defect"
+    assert kwargs["stdout"] is not sys.stdout
+
+
+def test_text_mode_still_inherits_stdout(monkeypatch):
+    """The other half, and the reason this is not an unconditional redirect:
+    in text mode there is no envelope to protect, board traffic on stdout is
+    the whole point of an interactive console, and redirecting it would break
+    `tan monitor > board.log`."""
+    kwargs = _spawn_kwargs(monkeypatch, ["--port", "COM7"])
+    assert kwargs.get("stdout") is None, kwargs
+
+
+def test_child_stdout_falls_back_to_devnull_when_there_is_no_real_stderr(monkeypatch):
+    """`_child_stdout` hands the child `sys.__stderr__` -- NOT `sys.stderr`,
+    which `cli.main` binds to a `_TeeStderr` under `--format json`, an object
+    with no `fileno()` for `subprocess` to hand over. `sys.__stderr__` can
+    still be `None` (pythonw, an embedded interpreter) or closed, and the
+    answer then is DEVNULL: dropping the board's bytes is bad, putting them on
+    stdout is the defect."""
+    monkeypatch.setattr(monitor_cmd.sys, "__stderr__", None, raising=False)
+    assert monitor_cmd._child_stdout(True) is monitor_cmd.subprocess.DEVNULL
+
+    class _Closed:
+        def fileno(self):
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr(monitor_cmd.sys, "__stderr__", _Closed(), raising=False)
+    assert monitor_cmd._child_stdout(True) is monitor_cmd.subprocess.DEVNULL
+    # Text mode never consults the stream at all.
+    assert monitor_cmd._child_stdout(False) is None
