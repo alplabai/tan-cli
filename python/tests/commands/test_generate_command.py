@@ -39,9 +39,14 @@ from tan.exit_codes import ExitCode
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 
-def run_cli(argv, cwd):
+def run_cli(argv, cwd, env_extra=None):
     """Spawn the real CLI -- the only way to prove stdout carries exactly one
-    JSON envelope and stderr stays empty under `--format json`."""
+    JSON envelope and stderr stays empty under `--format json`.
+
+    `env_extra` exists for the tests that must redirect HOME: the SDK ladder's
+    `globalDefault` tier reads `~/.alp/sdk-default`, so a real one on the
+    running machine would resolve a checkout and make a "nothing resolves"
+    case vacuously pass."""
     return subprocess.run(
         [sys.executable, "-m", "tan", "generate", *argv],
         capture_output=True,
@@ -49,7 +54,7 @@ def run_cli(argv, cwd):
         encoding="utf-8",
         errors="replace",
         cwd=cwd,
-        env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT)},
+        env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT), **(env_extra or {})},
         check=False,
     )
 
@@ -1783,3 +1788,47 @@ def test_a_partly_written_destination_survives_a_failed_emit(tmp_path, monkeypat
     capsys.readouterr()
     assert destination.exists(), "a partially written artefact was deleted"
     assert "CONFIG_HALF_WRITTEN=y" in destination.read_text(encoding="utf-8")
+
+
+def test_a_rejected_sdk_root_flag_is_named_in_the_refusal(tmp_path):
+    """tan-cli#497 defect 7. This refusal carries no `sdk` block (see the test
+    above), so the value the caller typed appeared nowhere in the envelope --
+    while the message told them to "Use --sdk-root".
+
+    The rejected root exists and is only missing `scripts/alp_project.py`, so
+    this pins the loader-marker branch, not a nonexistent path."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    proc = run_cli(["--sdk-root", str(typo), "--format", "json"], cwd=project)
+    assert proc.returncode == 2
+    env = envelope_of(proc)
+    assert "sdk" not in env
+    assert env["issues"][0]["code"] == "generate.sdk-root-unresolved"
+    assert env["issues"][0]["message"] == (
+        f'alp-sdk root is unresolved: --sdk-root "{typo}" is not an alp-sdk '
+        "checkout (scripts/alp_project.py not found under it). Nothing was generated."
+    )
+
+
+def test_the_no_flag_refusal_still_offers_the_flag(tmp_path):
+    """The other branch of the same guard: no typed value to name, so
+    recommending the flag is right. HOME is redirected so a real
+    `~/.alp/sdk-default` on the running machine cannot resolve a checkout and
+    make this vacuous."""
+    project = tmp_path / "deep" / "project"
+    project.mkdir(parents=True)
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    env_overrides = {"HOME": str(home), "USERPROFILE": str(home)}
+    proc = run_cli(["--format", "json"], cwd=project, env_extra=env_overrides)
+    assert proc.returncode == 2
+    env = envelope_of(proc)
+    assert env["issues"][0]["code"] == "generate.sdk-root-unresolved"
+    assert env["issues"][0]["message"].startswith(
+        "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+        "alp-sdk checkout, or "
+    )

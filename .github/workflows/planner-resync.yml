@@ -129,8 +129,16 @@ jobs:
     name: "propose · tan/planner re-sync"
     runs-on: ubuntu-latest
     steps:
+      # THE ONE CHECKOUT IN THIS REPOSITORY THAT KEEPS ITS CREDENTIAL, and it
+      # must: the `propose` step below runs `git push -q -f origin` against the
+      # `auto/planner-resync` branch through the remote THIS checkout leaves
+      # configured -- no later step sets up a token remote of its own. Adding
+      # `persist-credentials: false` here does not fail the job at checkout
+      # time; it fails several minutes later at the push, after the re-sync has
+      # already been computed and committed, and the PR is then never opened.
+      # Every other checkout in this repository sets it false (tan-cli#435).
       - name: Check out tan-cli dev (the branch the re-sync targets)
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: dev
           fetch-depth: 0
@@ -142,8 +150,9 @@ jobs:
       # checkout cannot be the one this gate was pinned against" -- a correct
       # refusal, but for the wrong reason.
       - name: Check out alp-sdk (full history -- three pins are read)
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           path: alp-sdk
           fetch-depth: 0
@@ -175,8 +184,19 @@ jobs:
           # a shell or an argument-injection needs. `origin/dev`, a 40-hex SHA
           # and `v0.15.0-rc1` all match; anything with a space, quote, `$`,
           # backtick, semicolon, or a leading `-` does not.
-          if ! printf '%s' "${ref}" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$'; then
-            echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
             exit 1
           fi
           # A dispatched SHA lands on alp-sdk dev OR main; both are fetched by
@@ -189,7 +209,7 @@ jobs:
           echo "requested=${ref}" >> "$GITHUB_OUTPUT"
           echo "Re-syncing to alp-sdk ${ref} (${sha})"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 

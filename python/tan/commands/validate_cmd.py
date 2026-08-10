@@ -269,6 +269,7 @@ from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.generate_cmd import _python_too_old
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
+from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, ValidateOutputFormat
@@ -1348,9 +1349,20 @@ def validate(
                 # `test_sdk_onboarding_dead_end.py`'s AST sweep now walks every
                 # string literal under `python/tan/` and fails on the phrase, which
                 # is what catches the SIXTH site before a human has to.
+                #
+                # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the
+                # value. The `--offline` sentence is kept on BOTH branches --
+                # it is the one piece of remediation here that is not the flag
+                # the caller just typed, and it is what an offline run needs.
                 fail(
                     "sdk-root-unresolved",
-                    "alp-sdk root is unresolved. Use --sdk-root, place the project "
+                    rejected_sdk_root_message(
+                        sdk_root,
+                        "Nothing was validated. `tan validate --offline` runs the "
+                        "structural checks that need no SDK.",
+                    )
+                    if sdk_root
+                    else "alp-sdk root is unresolved. Use --sdk-root, place the project "
                     f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. "
                     "`tan validate --offline` runs the structural checks that need "
                     "no SDK.",

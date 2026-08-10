@@ -658,3 +658,50 @@ def test_parse_fails_soft_on_malformed_yaml_as_a_document_error():
         pass
     else:
         raise AssertionError("expected a PinmuxParseError")
+
+
+def test_a_rejected_sdk_root_flag_is_named_in_the_warning(tmp_path: Path) -> None:
+    """tan-cli#497 defect 7. `--sdk-root` is TERMINAL (I-31), so a path with no
+    `scripts/alp_project.py` resolves to nothing -- and this command's warning
+    used to say only "alp-sdk root is unresolved; cannot read the pinmux
+    table.", with the path the user typed nowhere in the envelope
+    (`data.sdkRoot` is `null` on this branch) and nowhere in the stderr text.
+
+    The typo'd root is a REAL directory here, and the `--sku` resolves, so the
+    only thing wrong with the run is the missing loader marker: that is the
+    branch this pins, not "the directory does not exist"."""
+    proj = _project(tmp_path)
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    result = runner.invoke(
+        app,
+        [
+            "--project", str(proj),
+            "--sku", "E1M-AEN801",
+            "--sdk-root", str(typo),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["sdkRoot"] is None
+    issue = envelope["issues"][0]
+    assert issue["code"] == "pinmux.sdk-root-unresolved"
+    assert issue["message"] == (
+        f'alp-sdk root is unresolved: --sdk-root "{typo}" is not an alp-sdk '
+        "checkout (scripts/alp_project.py not found under it). Cannot read the "
+        "pinmux table."
+    )
+
+
+def test_the_no_flag_message_is_unchanged(tmp_path: Path) -> None:
+    """The other branch of the same guard. There is no typed value to name
+    when no flag was given, so its string stays exactly what it was -- pinned
+    here so the #497 fix cannot quietly rewrite the wrong one."""
+    proj = _project(tmp_path)
+    result = runner.invoke(app, ["--project", str(proj), "--sku", "E1M-AEN801", "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["message"] == (
+        "alp-sdk root is unresolved; cannot read the pinmux table."
+    )

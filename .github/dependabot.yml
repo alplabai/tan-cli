@@ -1,0 +1,45 @@
+# Dependabot — GitHub Actions only (tan-cli#435).
+#
+# WHY THIS FILE EXISTS. Every `uses:` in `.github/workflows/` is pinned to a
+# full commit SHA rather than a mutable major tag, which is what stops a
+# compromised or retagged `@v4` from executing in a job that can reach this
+# repository's token. A SHA pin has one cost: it never moves on its own, so
+# without something watching it the pin silently ages past security fixes and
+# past the runtime migrations GitHub announces on the major tag. This file is
+# that something. `unpinned-uses` and "pin rot" are the same defect looked at
+# from two ends; #435 asked for both halves.
+#
+# SCOPE IS DELIBERATELY NARROW. Only `github-actions`. The Python side has its
+# own, different problem -- release builds resolve `typer`, `rich`, `pyyaml`,
+# `jsonschema`, `click`, `truststore`, `certifi` and `pyinstaller` live, with
+# no lock file anywhere in the tree -- and a version-range bump PR is the wrong
+# shape for it: the fix there is a hash-pinned lock, not a floor bump. That is
+# tan-cli#437 and it stays there rather than being half-done here.
+#
+# WHAT A PR FROM THIS FILE LOOKS LIKE. Dependabot rewrites the SHA and the
+# trailing `# vX.Y.Z` comment together, so the human-readable version survives
+# and the diff says which release it moved to. Review it like any other PR:
+# a SHA bump is an unreviewed third-party code change until someone reads it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    # `/` is correct even though the workflows live in `.github/workflows/` --
+    # for this ecosystem Dependabot reads the directory as the REPOSITORY root
+    # and finds the workflows itself. Pointing it at `/.github/workflows` is
+    # the common mistake and yields a config that silently matches nothing.
+    directory: /
+    schedule:
+      interval: weekly
+    # `dev` is the integration branch; `main` only ever receives merges from
+    # it. A PR opened against `main` would be a second, divergent path into
+    # the release branch.
+    target-branch: dev
+    labels:
+      - ci
+    commit-message:
+      prefix: chore
+      include: scope
+    # One PR per action, not a batch: a grouped bump is reviewed as one
+    # decision, and the whole point of pinning is that each third-party SHA
+    # gets looked at on its own.
+    open-pull-requests-limit: 10

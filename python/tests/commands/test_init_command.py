@@ -1057,3 +1057,122 @@ def test_an_alif_family_sku_that_is_not_the_tree_sku_still_scaffolds(tmp_path):
 
     assert proc.returncode == 0, body["issues"]
     assert "sku: E1M-AEN301" in (tmp_path / "board.yaml").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# the envelope's `sdk` block (tan-cli#491 defect 5)
+# ---------------------------------------------------------------------------
+
+
+def _init_sdk_argv(sdk: Path, *extra: str) -> tuple[str, ...]:
+    return ("init", "--template", "minimal-app", "--sdk-root", str(sdk), "--format", "json", *extra)
+
+
+def test_every_init_outcome_carries_the_sdk_block(tmp_path):
+    """tan-cli#491 defect 5. `init` passed no `sdk=` to `Envelope(...)` at all,
+    so the key was ABSENT from all four outcomes -- preview, successful write,
+    overwrite-guard refusal, and every `_emit_error` -- while the frozen v0.4.1
+    oracle answers the identical argv with `sdk:{root,sourceTier}` (the `init`
+    capture in `tests/fixtures/oracle_captures/test_oracle_parity.json`:
+    `"sdk": {"root": "../rust-sdk", "sourceTier": "sdkRootFlag"}`). It was the
+    only field naming WHICH checkout a run is about to permanently pin --
+    `data.sdkPinned` is `null` on three of the four.
+
+    All four asserted as ONE case, deliberately: the defect was that they
+    DISAGREED with the oracle uniformly, and a fix to one path alone would
+    leave the same hole on the other three.
+
+    `root` is the ABSOLUTE path, not the `./sdk` typed -- `_Sdk.display`'s own
+    tan-cli#263 divergence, which this field only reports."""
+    sdk = _sdk_checkout(tmp_path / "sdk")
+    expected = {"root": sdk.as_posix(), "sourceTier": "sdkRootFlag"}
+
+    preview = envelope(run_tan(*_init_sdk_argv(sdk, "--preview"), cwd=tmp_path))
+    assert preview.get("sdk") == expected, preview
+
+    written = envelope(run_tan(*_init_sdk_argv(sdk), cwd=tmp_path))
+    assert written.get("sdk") == expected, written
+    assert written["data"]["sdkPinned"] == sdk.as_posix()
+
+    (tmp_path / "board.yaml").write_text("# local edit\n", encoding="utf-8")
+    refused = envelope(run_tan(*_init_sdk_argv(sdk), cwd=tmp_path))
+    assert refused["exitCode"] == 3, refused
+    assert [i["code"] for i in refused["issues"]] == ["init.would-overwrite"]
+    assert refused.get("sdk") == expected, refused
+
+    failed = envelope(
+        run_tan(
+            "init", "--template", "nope", "--sdk-root", str(sdk), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert [i["code"] for i in failed["issues"]] == ["init.invalid-template"]
+    assert failed.get("sdk") == expected, failed
+
+
+def test_the_sdk_block_reports_the_discovery_tier_too(tmp_path):
+    """The tier is the half `_resolve_sdk_root` was dropping. With no
+    `--sdk-root` the wide ladder answers from the child `<ws>/alp-sdk`, and
+    `sourceTier` must say `discovery` -- a block that hardcoded `sdkRootFlag`
+    would pass the case above and be wrong here.
+
+    HOME is redirected so a real `~/.alp/sdk-default` cannot answer the
+    `globalDefault` tier first and change the expected tier."""
+    _sdk_checkout(tmp_path / "alp-sdk")
+    project = tmp_path / "proj"
+    project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            "init", "--template", "minimal-app", "--preview", "--format", "json",
+            cwd=project,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["sdk"] == {
+        "root": (tmp_path / "alp-sdk").as_posix(),
+        "sourceTier": "discovery",
+    }, env
+
+
+def test_an_sdk_root_that_is_not_a_checkout_reports_no_sdk_block(tmp_path):
+    """The block is gated on the loader marker, matching
+    `build_output.resolve_project_context` ("only what core's own loader-marker
+    check accepted"). `_pin_sdk` silently declines to pin a non-checkout, so
+    reporting `sdk` here would advertise a checkout that is about to be pinned
+    and is not -- and `data.sdkPinned` proves it was not."""
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            *_init_sdk_argv(typo),
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert "sdk" not in env, env
+    assert env["data"]["sdkPinned"] is None
+
+
+def test_an_error_before_the_sdk_resolves_leaves_the_key_absent(tmp_path):
+    """`_emit_error`'s `sdk` defaults to `None` because both handlers can be
+    reached before `_resolve_sdk_root` has run. Proven with `--project` naming
+    a path that is a FILE: `os.path.abspath` succeeds, the scaffold write
+    refuses, and the envelope must still be an envelope."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            "init", "--template", "nope", "--project", str(blocker), "--format", "json",
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert "sdk" not in env, env
+    assert [i["code"] for i in env["issues"]] == ["init.invalid-template"]

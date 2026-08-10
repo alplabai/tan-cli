@@ -125,7 +125,7 @@ from tan.core.scaffold import (
     vendored_core_ids,
     write_files,
 )
-from tan.envelope import Envelope, Issue, Project, emit
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
@@ -222,12 +222,53 @@ def _stderr(line: str) -> None:
     print(line, file=sys.stderr)
 
 
-def _emit_error(json_mode: bool, err: InitError) -> None:
+def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
+    """The envelope's `sdk` block for a resolved [`_Sdk`], or `None`.
+
+    tan-cli#491 defect 5: `init` passed no `sdk=` to `Envelope(...)` on ANY
+    path, so the key was absent from all four outcomes and at both resolution
+    tiers, while the frozen v0.4.1 oracle emits `sdk:{root,sourceTier}` for the
+    identical argv (`test_oracle_parity.json`, the `init` capture:
+    `"sdk": {"root": "../rust-sdk", "sourceTier": "sdkRootFlag"}`). It was the
+    only field naming WHICH checkout a run is about to permanently pin --
+    `data.sdkPinned` is `null` on the preview, refusal and error paths.
+
+    Gated on the loader marker, matching `build_output.resolve_project_context`
+    ("the envelope's `sdk` only records what core's own loader-marker check
+    accepted"), and NOT merely on `sdk is not None`. `_resolve_sdk_root`
+    returns an explicit `--sdk-root` unvalidated, and `_pin_sdk` then silently
+    declines to pin a path that is not a checkout -- so reporting `sdk` there
+    would advertise a checkout that is about to be pinned and is not.
+
+    `SdkInfo.from_resolution`, not a raw `SdkInfo(root, tier)`: `_Sdk` carries
+    `tier` and `foreign_global_default_for`, which is the shape that
+    constructor reads (`tests/gates/test_sdk_info_is_built_from_a_resolution.py`).
+    `init` still surfaces the foreign-global-default warning through its own
+    explicit `global_default_foreign_project_issue` call, computed BEFORE
+    `_pin_sdk` writes -- see that call site.
+
+    Note the ROOT reported is `_Sdk.display`, i.e. absolute, where the oracle
+    echoed `--sdk-root` verbatim. That divergence is `_Sdk`'s own, already
+    deliberate and already documented there (tan-cli#263: a relative pointer
+    persisted into `.alp/sdk-path` resolves against the wrong cwd later); this
+    field simply reports the same value `data.sdkPinned` does.
+    """
+    if sdk is None or not _is_sdk_checkout(sdk.path):
+        return None
+    return SdkInfo.from_resolution(sdk.display, sdk)
+
+
+def _emit_error(json_mode: bool, err: InitError, sdk: _Sdk | None = None) -> None:
     """The error envelope. Note the asymmetry with `_emit_outcome`, which is
     contract, not an oversight: an error reports `project.root: null` and an
     EMPTY `templateId`/`destination` even when the CLI had already resolved
     both, because nothing was created and there is no project to point a
     consumer at. `contract/envelopes/init-invalid-template` pins it.
+
+    `sdk` defaults to `None` because the two `_emit_error` call sites sit in
+    handlers that can be reached BEFORE `_resolve_sdk_root` has run at all (a
+    bad `--template`, an unreadable `--board-yaml`); there is genuinely nothing
+    to report then, and the key stays absent rather than becoming `null`.
     """
     written, unchanged = err.partial
     if json_mode:
@@ -246,6 +287,7 @@ def _emit_error(json_mode: bool, err: InitError) -> None:
                 ),
                 [Issue(err.code, "error", err.message)],
                 err.exit_code,
+                sdk=_sdk_block(sdk),
             )
         )
     else:
@@ -253,7 +295,7 @@ def _emit_error(json_mode: bool, err: InitError) -> None:
     raise typer.Exit(int(err.exit_code))
 
 
-def _emit_outcome(json_mode: bool, outcome: _Outcome) -> None:
+def _emit_outcome(json_mode: bool, outcome: _Outcome, sdk: _Sdk | None = None) -> None:
     if json_mode:
         emit(
             Envelope(
@@ -272,6 +314,7 @@ def _emit_outcome(json_mode: bool, outcome: _Outcome) -> None:
                 ),
                 outcome.issues,
                 outcome.exit_code,
+                sdk=_sdk_block(sdk),
             )
         )
     elif outcome.preview:
@@ -403,6 +446,15 @@ class _Sdk:
 
     path: Path
     display: str
+    #: `SdkRootResolution.tier` carried through (tan-cli#491 defect 5) -- the
+    #: `sourceTier` half of the envelope's `sdk` block, which `init` was the
+    #: only wide-ladder command not to emit at all. `_resolve_sdk_root` had
+    #: the tier in hand on both branches and dropped it here, so neither
+    #: emitter could report which mechanism answered, on ANY of the four
+    #: outcome paths (preview, write, overwrite refusal, every `_emit_error`).
+    #: The explicit-flag branch is `"sdkRootFlag"` by construction; the ladder
+    #: branch carries `resolve_sdk_root_wide`'s own answer.
+    tier: str = "sdkRootFlag"
     #: `SdkRootResolution.foreign_global_default_for` carried through
     #: (tan-cli#464). `None` on the `--sdk-root` branch (an explicit flag is
     #: never "foreign" -- there is nothing to fall through from) and on every
@@ -446,7 +498,7 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     option in this command does that either."""
     if sdk_root:
         resolved = Path(os.path.abspath(os.path.expanduser(sdk_root)))
-        return _Sdk(resolved, posix(resolved))
+        return _Sdk(resolved, posix(resolved), "sdkRootFlag")
     # `_broken_pin` unused: `init` is what WRITES `.alp/sdk-path`, so a broken
     # pin already sitting in the parent workspace is superseded by this run's
     # own resolution rather than something for `init` itself to disclose --
@@ -461,7 +513,12 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     found = resolution.path
     if found is None:
         return None
-    return _Sdk(found, posix(found), resolution.foreign_global_default_for)
+    return _Sdk(
+        found,
+        posix(found),
+        resolution.tier,
+        foreign_global_default_for=resolution.foreign_global_default_for,
+    )
 
 
 def _is_sdk_checkout(root: Path) -> bool:
@@ -935,6 +992,12 @@ def init(
     del verbose, quiet, no_color, target, all_targets
     json_mode = output_format == "json"
 
+    # Bound BEFORE the `try` (tan-cli#491 defect 5): both `except` arms emit an
+    # envelope, and an `InitError` raised before `_resolve_sdk_root` runs (a bad
+    # `--template`, an unreadable `--board-yaml`) must not turn the `sdk` block
+    # into an `UnboundLocalError` inside the very handler whose job is to keep a
+    # traceback off stdout.
+    resolved_sdk: _Sdk | None = None
     try:
         # `--destination`, then the global `--project`, then `.`. `--name` does
         # NOT answer this: it names a subdirectory INSIDE the destination, so
@@ -1030,7 +1093,7 @@ def init(
         if foreign_issue is not None:
             outcome.issues.append(foreign_issue)
     except InitError as err:
-        _emit_error(json_mode, err)
+        _emit_error(json_mode, err, resolved_sdk)
         return
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring
         # Nothing gets to replace the envelope with a traceback. `typer.Exit`
@@ -1044,10 +1107,11 @@ def init(
                 f"init failed unexpectedly: {err.__class__.__name__}: {err}",
                 ExitCode.INTERNAL_FAILURE,
             ),
+            resolved_sdk,
         )
         return
 
-    _emit_outcome(json_mode, outcome)
+    _emit_outcome(json_mode, outcome, resolved_sdk)
 
 
 # tan-cli#261: adds the two oracle `GlobalArgs` flags this command was still
