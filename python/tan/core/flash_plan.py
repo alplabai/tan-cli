@@ -131,6 +131,12 @@ class HelperMcu:
     flash_method: str | None = None
     flash_args: Any = None
     update_channel: str | None = None
+    #: tan-cli#611. WHO may invoke `flash_method`, and WHEN -- the fact neither
+    #: `update_channel` (how a device is updated in the FIELD) nor
+    #: `flash_method` (by what transport) carries. See [`FLASH_POLICY_FACTORY`]
+    #: for the whole argument; `None` means the SoM preset declared nothing and
+    #: every gate below behaves exactly as it did before this field existed.
+    flash_policy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +240,7 @@ def parse_system_manifest(text: str) -> Manifest:
                 flash_method=_opt_str(raw.get("flash_method")),
                 flash_args=raw.get("flash_args"),
                 update_channel=_opt_str(raw.get("update_channel")),
+                flash_policy=_opt_str(raw.get("flash_policy")),
             )
         )
 
@@ -276,6 +283,9 @@ class FlashTarget:
     output_artefact: str | None = None
     firmware_path: str | None = None
     update_channel: str | None = None
+    #: tan-cli#611 -- carried from `HelperMcu.flash_policy`; always `None` for a
+    #: slice, which is an application core and a genuine customer flash target.
+    flash_policy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -436,12 +446,161 @@ def plan_flash_targets(
                     flash_args=h.flash_args,
                     firmware_path=h.firmware_path,
                     update_channel=h.update_channel,
+                    flash_policy=h.flash_policy,
                 )
             )
 
 
     return TargetPlan(
         tuple(targets), tuple(warnings), tuple(refused), tuple(refused_skipped)
+    )
+
+
+# ── who may flash a helper, and when (tan-cli#611) ──────────────────────────
+
+#: A genuine customer flash target. Explicit rather than merely-absent so a SoM
+#: preset can SAY so; absent is treated the same way (see [`helper_flash_gate`]),
+#: because every preset written before this field existed means exactly that.
+FLASH_POLICY_CUSTOMER = "customer"
+
+#: Programmed by Alp Lab in production. Never a customer flash target, and there
+#: is no recovery path declared for it.
+#:
+#: This is the fact tan-cli#611 found nothing carried. `update_channel` answers
+#: how a device is updated in the FIELD; `flash_method` answers by what
+#: TRANSPORT it is written. Neither answers WHO may write it, so `flash` was
+#: inferring the first from the second: it honoured `update_channel` only for a
+#: helper that declared no `flash_method` at all, which mirrored an alp-sdk
+#: schema rule making the two mutually exclusive. That XOR is the modelling
+#: defect -- a helper can legitimately have BOTH an OTA channel for the normal
+#: case and a flash method for the abnormal one -- and this field is what
+#: replaces the inference.
+FLASH_POLICY_FACTORY = "factory"
+
+#: Programmed by Alp Lab in production, and customer-flashable ONLY to recover a
+#: bricked device, with Alp Lab-supplied binaries.
+#:
+#: An unconditional skip would be WRONG for this value: it would remove the one
+#: path that matters at the one moment it matters. So the gate declines it on an
+#: ordinary run and keeps it reachable through a DELIBERATE action -- see
+#: [`helper_flash_gate`]'s `recovery_armed`/`helper_filter` pair, which together
+#: mean a recovery write cannot be reached by a bare `tan flash`.
+FLASH_POLICY_RECOVERY_ONLY = "recovery_only"
+
+#: Every policy this CLI understands, in the order the diagnostics list them.
+FLASH_POLICIES = (
+    FLASH_POLICY_CUSTOMER,
+    FLASH_POLICY_FACTORY,
+    FLASH_POLICY_RECOVERY_ONLY,
+)
+
+#: How a policy-declined helper is named in the human transcript.
+_PRODUCTION_PROGRAMMED = "is programmed by Alp Lab in production"
+
+
+def _channel_clause(channel: str) -> str:
+    """The `update_channel` sentence, or nothing.
+
+    "Mention the update channel only where one exists" is the point: the old
+    message asserted an OTA mechanism as the REASON a helper was skipped, which
+    is only ever true where a channel is declared -- and is not the reason even
+    then. The reason is who programs it; the channel is a separate fact about
+    its life afterwards."""
+    return f" Field updates arrive over update_channel: {channel}." if channel else ""
+
+
+def _under_declared_skip_message(kind: str, entry_id: str, method: str, channel: str) -> str:
+    """A helper carrying BOTH halves and no `flash_policy`.
+
+    Legal only once the upstream XOR is relaxed, and under-declared when it
+    happens: the preset author gave the entry both an update channel and a flash
+    method, and said nothing about who may write it. Declining is fail-safe AND
+    visible -- silently flashing it would be the tan-cli#611 defect one field
+    over."""
+    return (
+        f"flash: {kind} '{entry_id}' declares both flash_method '{method}' and "
+        f"update_channel '{channel}' but no flash_policy, so nothing says who may "
+        f"flash it; skipping. Add flash_policy ({' / '.join(FLASH_POLICIES)}) to "
+        "the helper_firmware entry in the SoM preset."
+    )
+
+
+def _recovery_only_skip_message(
+    kind: str, entry_id: str, channel: str, *, recovery_armed: bool
+) -> str:
+    """The decline for a `recovery_only` helper this run may not write.
+
+    The tail names the EXACT re-run rather than the flag alone, and distinguishes
+    the two ways to be here: `--recover` not given at all, versus given on a run
+    that was never narrowed to this entry. An operator whose device is bricked
+    has no second channel to work anything out from."""
+    if recovery_armed:
+        tail = (
+            " --recover was given but this run is not narrowed to it; a recovery "
+            "flash must name its single target. Re-run with "
+            f"`--helper {entry_id} --recover`."
+        )
+    else:
+        tail = (
+            " To recover a bricked device deliberately, re-run with "
+            f"`--helper {entry_id} --recover`."
+        )
+    return (
+        f"flash: {kind} '{entry_id}' {_PRODUCTION_PROGRAMMED} and is "
+        "customer-flashable only to recover a bricked device, with Alp "
+        f"Lab-supplied binaries; skipping.{_channel_clause(channel)}{tail}"
+    )
+
+
+def helper_flash_gate(
+    target: FlashTarget,
+    *,
+    recovery_armed: bool = False,
+    helper_filter: str | None = None,
+) -> str | None:
+    """The `flash_policy` decision for one target: a skip message, or `None` to
+    let dispatch continue. Pure -- no IO, no `flash_args`, no PATH.
+
+    Called ABOVE `_flash_entry`'s `if not raw_method:` guard, which is the whole
+    of tan-cli#611's tan-side half: the old code consulted the only non-customer
+    declaration there was (`update_channel`) exclusively INSIDE that guard, so a
+    helper declaring both it and a `flash_method` had the declaration silently
+    dropped and was flashed like any other target.
+
+    `recovery_armed` (`--recover`) and `helper_filter` (`--helper NAME`) are BOTH
+    required to reach a `recovery_only` write: the flag alone would let a
+    whole-manifest run sweep a recovery helper in. An UNRECOGNISED policy skips
+    -- a restriction this build does not understand must not become permission."""
+    policy = (target.flash_policy or "").strip()
+    channel = (target.update_channel or "").strip()
+    method = (target.flash_method or "").strip()
+    kind, entry_id = target.kind, target.id
+
+    if not policy:
+        if method and channel:
+            return _under_declared_skip_message(kind, entry_id, method, channel)
+        # Every shape that predates this field, unchanged -- including the
+        # `update_channel`-without-`flash_method` skip, still worded by
+        # `_flash_entry` exactly as before.
+        return None
+    if policy == FLASH_POLICY_CUSTOMER:
+        return None
+    if policy == FLASH_POLICY_FACTORY:
+        return (
+            f"flash: {kind} '{entry_id}' {_PRODUCTION_PROGRAMMED}, not a customer "
+            f"flash target; skipping.{_channel_clause(channel)}"
+        )
+    if policy == FLASH_POLICY_RECOVERY_ONLY:
+        if recovery_armed and helper_filter == entry_id:
+            return None
+        return _recovery_only_skip_message(
+            kind, entry_id, channel, recovery_armed=recovery_armed
+        )
+    return (
+        f"flash: {kind} '{entry_id}' declares flash_policy '{policy}', which this "
+        f"tan does not recognise (known: {', '.join(FLASH_POLICIES)}); refusing to "
+        "treat an unrecognised restriction as permission; skipping. Upgrade tan, "
+        "or correct the SoM preset."
     )
 
 

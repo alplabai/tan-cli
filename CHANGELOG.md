@@ -226,6 +226,30 @@ All notable changes to `tan` are documented here. Format follows
   bytes are unchanged. (#491)
 
 - **An AEN MRAM write with no wrong-board guard now says so.** The
+
+- **A helper MCU that Alp Lab programs in production is no longer flashed
+  anyway just because it also declares a `flash_method`.** `update_channel` was
+  the only way a helper could say it is not a customer flash target, and `tan
+  flash` read it exclusively inside its "no `flash_method`" branch — so a
+  declaration added to an entry that has one was silently dropped and the entry
+  was flashed like any other target, which is worse than carrying no
+  declaration at all. Helpers now carry `flash_policy`, the fact neither field
+  did: **who** may flash it and **when**. `factory` declines always;
+  `recovery_only` declines an ordinary run but stays reachable through `tan
+  flash --helper <name> --recover`, because an unconditional skip would remove
+  the one path that matters when a customer's device is bricked and they are
+  holding Alp Lab-supplied binaries — the flag alone is inert, the run must
+  also name its single target, and an armed recovery write reports
+  `flash.recovery-flash-armed` in both the transcript and the envelope.
+  `customer` (and an absent field — every preset in the tree today) behaves
+  exactly as before, including the CC3501E's unchanged `is Alp-OTA-updated`
+  wording. An unrecognised policy, or an entry declaring both an update channel
+  and a flash method with no policy at all, declines rather than falling back
+  to flashing: on a command that writes hardware, a restriction this build
+  cannot reason about must not become permission. Populating the field is
+  alp-sdk's half (alplabai/alp-sdk#1357), which also relaxes the schema rule
+  making `update_channel` and `flash_method` mutually exclusive — the GD32
+  bridge legitimately has both. Refs #611. The
   `flash.dpidr-preflight-unarmed` advisory was gated on
   `flash_method: swd_probe`, and the AEN dispatches Flow D
   (`alif_mram_jlink`) — so a real MRAM write emitted `ISSUES = []`, with no

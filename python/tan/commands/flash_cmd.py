@@ -10,7 +10,8 @@ Commander temp file.
 **Per-entry rc convention**, mirroring `alp_flash._flash_entry` exactly:
 `0` success / clean-dry-run / clean-skip-via-flag, `-1` silently skipped (no
 `flash_method` / tools missing under `--skip-missing-tools` / an unresolved
-`TBD` in `flash_args`), `>0` failed -- including an `output_artefact`/
+`TBD` in `flash_args` / a `flash_policy` this run may not invoke, **#611**),
+`>0` failed -- including an `output_artefact`/
 `firmware_path` that is the unresolved `TBD` sentinel rather than a path
 (**#222**: a `TBD` in `flash_args` skips, a `TBD` artefact fails).
 `failed` counts only `rc > 0`; skipped
@@ -100,6 +101,7 @@ from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.flash_plan import (
     DPIDR_GUARD_COVERAGE,
     FAIL,
+    FLASH_POLICY_RECOVERY_ONLY,
     FLOW_D_METHOD,
     PIPE,
     SKIP,
@@ -121,6 +123,7 @@ from tan.core.flash_plan import (
     fa_str_checked,
     flash_args_has_tbd,
     flow_d_preflight_script,
+    helper_flash_gate,
     is_pending,
     is_rust_absolute,
     parse_atoc_start_address,
@@ -228,6 +231,14 @@ class _Entry:
     #: which is what decides this flag. NOT part of the envelope contract --
     #: `as_dict()` never emits it, exactly like `preflight_unarmed` above.
     write_unconfirmed: bool = False
+    #: tan-cli#611: set when a `flash_policy: recovery_only` helper was let
+    #: through by `--helper <id> --recover`. The write itself is legitimate --
+    #: it is the bricked-device path the policy exists to keep reachable -- but
+    #: it is also the one write a customer performs on a device that is already
+    #: broken, so `_run` appends a `flash.recovery-flash-armed` warning `Issue`
+    #: (and the matching text line) saying what was armed. NOT part of the
+    #: envelope contract -- `as_dict()` never emits it, like the two above.
+    recovery_armed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -2287,6 +2298,31 @@ class _Context:
     #: mutates anything -- see [`_require_dpidr_refusal`] for the whole
     #: argument and [`_require_dpidr_gate`] for the decision itself.
     require_dpidr: bool = False
+    #: `--recover` (tan-cli#611) -- the operator's half of the deliberate action
+    #: that reaches a `flash_policy: recovery_only` helper. Inert on its own:
+    #: `helper_flash_gate` also requires `helper_filter` to name the entry, so a
+    #: whole-manifest run cannot sweep a recovery helper in.
+    recover: bool = False
+    #: The run's `--helper NAME`, or `None` (tan-cli#611). Already applied by
+    #: `plan_flash_targets` as a target FILTER; carried here as well because the
+    #: recovery gate needs to know the run was narrowed to ONE named entry, which
+    #: a filtered target list alone cannot say (a manifest with a single helper
+    #: yields the same list unfiltered).
+    helper_filter: str | None = None
+
+
+def _recovery_armed_for(target: FlashTarget, ctx: _Context) -> bool:
+    """Did this target reach dispatch as an armed recovery flash?
+
+    The same three-part condition `helper_flash_gate` lets through, stated once
+    here so the `_Entry` flag and the gate cannot drift apart: the preset must
+    declare `recovery_only`, the operator must have passed `--recover`, and the
+    run must be narrowed to this entry by name."""
+    return (
+        (target.flash_policy or "").strip() == FLASH_POLICY_RECOVERY_ONLY
+        and ctx.recover
+        and ctx.helper_filter == target.id
+    )
 
 
 def _resolve_flow_d_atoc_address(flash_args: Any, build_root: str, sdk_root: str) -> Any:
@@ -2530,6 +2566,15 @@ def _flash_entry(
     kind, entry_id = target.kind, target.id
     lines: list[str] = []
 
+    # A `recovery_only` entry reaches dispatch ONLY when the operator both named
+    # it and armed `--recover` -- exactly the condition `helper_flash_gate` lets
+    # through, computed here so every `_Entry` this function builds carries the
+    # flag. Set from here rather than at the write itself so the advisory rides
+    # along even when the entry later skips or fails for an unrelated reason:
+    # the fact worth reporting is that a recovery write was AUTHORISED, not that
+    # one completed. False on every policy-declined path by construction.
+    recovery = _recovery_armed_for(target, ctx)
+
     def entry(
         method: str | None,
         status: str,
@@ -2542,7 +2587,27 @@ def _flash_entry(
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
             preflight_unarmed=preflight_unarmed, write_unconfirmed=write_unconfirmed,
+            recovery_armed=recovery,
         )
+
+    # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
+    # anything about HOW, so a helper the SoM preset declares non-customer is
+    # declined whether or not it also carries a `flash_method`. Previously the
+    # only such declaration (`update_channel`) was consulted exclusively inside
+    # the `if not raw_method:` guard below -- so an entry declaring both had its
+    # declaration silently dropped and was flashed like any other target, which
+    # is worse than carrying no declaration at all.
+    #
+    # `entry(None, ...)`: the method is deliberately NOT reported for a policy
+    # decline. `as_dict()` omits a `None` method entirely, matching the shape
+    # the `update_channel` skip below has always emitted -- an entry nobody was
+    # allowed to flash should not advertise the transport it would have used.
+    policy_skip = helper_flash_gate(
+        target, recovery_armed=ctx.recover, helper_filter=ctx.helper_filter
+    )
+    if policy_skip is not None:
+        lines.append(policy_skip)
+        return -1, entry(None, "skipped", -1, policy_skip), lines
 
     # No flash_method -> silent skip. A helper carrying `update_channel` instead
     # (the AEN cc3501e_otp, programmed over the bridge SPI) gets a clearer reason
@@ -3369,6 +3434,7 @@ def _run(
     capture: bool,
     cwd: str,
     setools_dir_arg: str | None = None,
+    recover: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -3528,10 +3594,33 @@ def _run(
         workspace=workspace,
         setools_dir=setools_dir_arg,
         require_dpidr=require_dpidr,
+        recover=recover,
+        # The RAW `--helper` argument, not a value derived from `plan.targets`:
+        # `helper_flash_gate` needs to know the operator NAMED this entry, and a
+        # manifest carrying exactly one helper produces the same target list
+        # whether or not `--helper` was given (tan-cli#611).
+        helper_filter=helper,
     )
     for target in plan.targets:
         rc, entry, lines = _flash_entry(target, ctx)
         text_lines.extend(lines)
+        if entry.recovery_armed:
+            # tan-cli#611. Emitted BEFORE the entry's own outcome lines are
+            # counted, and to both channels for the same reason `flash.dpidr-
+            # preflight-unarmed` is: the operator running this does not pass
+            # `--format json`, and the extension cannot key off prose. This is
+            # not a warning that something went wrong -- the write is the
+            # sanctioned bricked-device path -- it is the run stating, in the
+            # transcript and in the envelope, that a normally-declined target
+            # was authorised, on the one command that writes hardware.
+            message = (
+                f"{entry.id}: RECOVERY FLASH ARMED (--recover). This helper is "
+                "programmed by Alp Lab in production; this path exists only to "
+                "recover a bricked device, with Alp Lab-supplied binaries. A "
+                "working device is updated over its OTA channel instead."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.recovery-flash-armed", "warning", message))
         # A failed entry used to land only in `data.entries[].message`; `issues`
         # is the channel `--format json` consumers key error rendering off, so
         # `ok:false` must never ship with an empty issues list.
@@ -3738,6 +3827,14 @@ def flash(
         help="When a backend's required tools are all absent from PATH, warn + skip "
         "the entry instead of failing it. No effect under --dry-run.",
     ),
+    recover: bool = typer.Option(
+        False,
+        "--recover",
+        help="Authorise a recovery flash of a helper MCU that Alp Lab programs in "
+        "production (flash_policy: recovery_only). For a BRICKED device only, with "
+        "Alp Lab-supplied binaries. Must be combined with --helper NAME: this flag "
+        "alone flashes nothing.",
+    ),
     setools_dir: str = typer.Option(
         None,
         "--setools-dir",
@@ -3786,6 +3883,7 @@ def flash(
             helper=helper,
             dry_run=dry_run,
             skip_missing_tools=skip_missing_tools,
+            recover=recover,
             capture=json_mode,
             cwd=cwd,
             setools_dir_arg=setools_dir,
