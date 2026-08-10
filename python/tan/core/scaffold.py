@@ -1290,17 +1290,23 @@ def _feature_file(unit_name: str, todo_line: str) -> str:
 #: blast radius. No shipped example carries one.
 #:
 #: `tests/core/test_scaffold.py::test_the_prune_list_still_covers_alp_sdk_s_own_
-#: build_directory_gitignore_block` re-reads that block out of a bound
-#: `ALP_SDK_ROOT` checkout and fails when alp-sdk declares a build directory
-#: this list does not know -- so the next one is caught rather than transcribed
-#: short a second time.
+#: build_directory_gitignore_blocks` re-reads BOTH source blocks out of a bound
+#: `ALP_SDK_ROOT` checkout and fails when alp-sdk declares a directory that is
+#: neither pruned here nor recorded there as deliberately kept -- so the next
+#: one is caught rather than transcribed short a second time.
 #:
-#: DELIBERATE DIVERGENCE from the frozen oracle, which has the same missing
-#: exclusion (`crates/tan-core/src/wizard/filesystem.rs::collect_example_files`)
-#: and fails identically -- the oracle is a fixed point for BEHAVIOUR THAT IS
-#: RIGHT, and copying a build tree into a new project is not. No parity fixture
-#: pins `--from-example` content (`oracle_fixtures/PARITY-COVERAGE.txt` covers
-#: `scaffold` refusals only), so nothing frozen moves for this.
+#: DELIBERATE DIVERGENCE from the v0.4.1 Rust oracle, which HAD the same missing
+#: exclusion (`crates/tan-core/src/wizard/filesystem.rs::collect_example_files`,
+#: deleted along with the rest of `crates/` by tan-cli#269) and failed
+#: identically -- the oracle was a fixed point for BEHAVIOUR THAT IS RIGHT, and
+#: copying a build tree into a new project is not. No parity capture pins
+#: `--from-example` content (`tests/fixtures/oracle_captures/
+#: PARITY-COVERAGE.txt` covers `scaffold` refusals only), so nothing frozen
+#: moves for this.
+#:
+#: Three more references to the now-deleted `crates/` tree survive in this file
+#: (lines 5, 933 and 1048) as history of where this module was ported from;
+#: they are pre-existing and repo-wide, and are left for a sweep of their own.
 _EXAMPLE_BUILD_OUTPUT_DIRS = ("build", "out", "bwdt", "twister-out")
 _EXAMPLE_BUILD_OUTPUT_PREFIXES = ("build_", "cmake-build-", "twister-out.")
 

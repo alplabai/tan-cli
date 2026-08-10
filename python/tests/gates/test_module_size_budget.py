@@ -1159,9 +1159,11 @@ _MODULE_BUDGET: dict[str, int] = {
     # `dxcom -o out/` line in the shipped example README that makes `out/`
     # reachable, the untracked-name invariant that makes ADDING a declared
     # pattern safe where inventing one is not, and the drift gate that re-reads
-    # the block. No new function, so the FUNCTION ratchet does not move.
-    # Re-measured with THIS gate's own walk on this branch (1494), not `wc -l`.
-    "tan/core/scaffold.py": 1494,
+    # both source blocks. No new function, so the FUNCTION ratchet does not
+    # move. Re-measured on this branch by running this gate: exactly `wc -l`,
+    # which is what it counts (`len(read_text().splitlines())` below) -- the
+    # AST walk belongs to the FUNCTION-count gate, not this one.
+    "tan/core/scaffold.py": 1500,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one

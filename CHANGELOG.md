@@ -202,10 +202,11 @@ All notable changes to `tan` are documented here. Format follows
   `init.example-unreadable` at exit 1; an all-text one (Intel HEX is ASCII,
   so `out/zephyr/zephyr.hex` qualifies) was copied silently at `ok:true` /
   exit 0 / `issues: []`. A drift gate now re-reads that `.gitignore` block out
-  of a bound `ALP_SDK_ROOT` checkout and fails when alp-sdk declares a build
+  of a bound `ALP_SDK_ROOT` checkout and fails when alp-sdk declares a
   directory the list does not know. Vendored-template renders are unaffected:
-  every one across 12 SKUs × 6 templates is sha256-identical to `dev`.
-  Refs #494.
+  all 66 (alp-sdk's eleven shipped SKUs × 6 templates), plus the six for a
+  synthetic `E1M-ZZZ999` that exercises the unrecognised-prefix fallback, are
+  sha256-identical to `dev`. Refs #494.
 
 - **An AEN MRAM write with no wrong-board guard now says so.** The
   `flash.dpidr-preflight-unarmed` advisory was gated on
