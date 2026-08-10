@@ -1795,15 +1795,25 @@ def test_no_instruction_in_the_vendored_manifest_names_a_refused_subcommand():
     from tan.commands import sdk_cmd
 
     assert sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS  # else this asserts nothing
-    for sub in sorted(sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS):
-        assert f"tan sdk {sub}" not in REAL_MANIFEST, sub
-        assert f"alp sdk {sub}" not in REAL_MANIFEST, sub
 
-    # And the shipped fallback, transcribed from that same file, stays clean.
+    # Both spellings: `alp` is the retired binary name, and a re-vendor could
+    # bring back either form of the same dead instruction.
+    refused = [
+        f"{binary} sdk {sub}"
+        for sub in sorted(sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS)
+        for binary in ("tan", "alp")
+    ]
+
+    for phrase in refused:
+        assert phrase not in REAL_MANIFEST, phrase
+
+    # And the shipped fallback, transcribed from that same file, stays clean --
+    # driven off the SAME derived list, so this half cannot fall behind the
+    # frozenset while the half above tracks it.
     facts = fallback_facts((3, 10))
     for note in (*facts.manual_install_posix, *facts.manual_install_windows):
-        assert "tan sdk switch" not in note
-        assert "tan sdk install" not in note
+        for phrase in refused:
+            assert phrase not in note, phrase
 
 
 def test_the_reuse_test_compares_the_full_patch_level(tmp_path):
