@@ -220,11 +220,35 @@ def test_format_before_another_global_flag_no_longer_aborts_the_whole_reorder(tm
     pre-subcommand `--format` back when a hand-written allowlist in `cli.py`
     decided that (deleted by tan-cli#378), so this argv isolates the reorder
     fix from that separate, unrelated refusal -- `--preview` so the command
-    never writes `launch.json` anywhere."""
+    never writes `launch.json` anywhere.
+
+    tan-cli#476 half (b) changed what this argv EXITS with, not what it
+    measures. `tmp_path` is an empty scratch directory, so with no
+    `--target-kind` given `debug-config` now refuses
+    (`debug-config.target-kind-unresolved`, exit 2) instead of silently
+    defaulting to a `native-host` draft. The old `returncode == 0` was only
+    ever a proxy for "the relocated flag reached the command's own dispatch";
+    pinning it here would pin the #476 defect.
+
+    The replacement is the NON-VACUOUS form (tan-cli#476 REVIEW round). The
+    first attempt was `all(i["code"].startswith("debug-config.") for i in
+    env["issues"])`, which is `True` for an EMPTY list -- and empty is exactly
+    what this argv produced on the pre-#476 tree (measured: `exit 0`,
+    `issues: []`), so it passed against both trees and could not fail on the
+    behaviour it was written for. Requiring at least one issue AND every code
+    to be `debug-config`'s own makes it fail both ways it should: on a
+    reorder regression the stranded `--sdk-root` mints a Click-level
+    `cli.parse-error` (not a `debug-config.` code), and on a #476 regression
+    there is no issue at all. It deliberately does NOT pin
+    `target-kind-unresolved` by name -- that belongs in
+    `test_debug_config_command.py`, and this file should survive a wording or
+    code refinement over there."""
     p = run("--format", "json", "--sdk-root", "X", "debug-config", "--preview", cwd=tmp_path)
     env = json.loads(p.stdout)
     assert env["command"] == "debug-config", env
-    assert p.returncode == 0, (p.returncode, env)
+    codes = [i["code"] for i in env["issues"]]
+    assert codes, env
+    assert all(c.startswith("debug-config.") for c in codes), codes
 
 
 # --------------------------------------------------------------------------

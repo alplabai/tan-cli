@@ -800,7 +800,18 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         #     creating it and writing a launch.json into it at exit 0.
         # 6 on dev + 1 + 1 + 1. Resolved deliberately at the merge, not
         # discovered from a red gate.
-        expected_calls=9,
+        #   tan-cli#476 half (b)  `_target_kind_unresolved_failure` -- an
+        #     omitted `--target-kind` on a project offering NO signal to
+        #     infer one from used to fall through to `parse_target_kind(
+        #     None)`'s `native-host` default and write an `Alp: Native Sim
+        #     Debug` entry into whatever directory `--project` named. Code
+        #     `debug-config.target-kind-unresolved` registered before this
+        #     bump. tan-cli#477 major 2 added no call site of its own: its
+        #     refusal reuses `_explicit_core_unknown_failure` (already
+        #     counted) with a second, SDK-published authority for the same
+        #     `core-unknown` code.
+        # 9 -> 10.
+        expected_calls=10,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(

@@ -52,6 +52,57 @@ def test_archive_name_accepts_ordinary_identifiers_and_an_inner_dot():
     assert not is_plain_relative("./a")
 
 
+@pytest.mark.parametrize("core_id", ["a/b", "a/./b", "a//b", r"a\b", "a/b/c"])
+def test_archive_name_rejects_a_nested_relative_that_is_not_one_filename(core_id):
+    """tan-cli#499 defect 9. `is_plain_relative` is a PATH guard and correctly
+    accepts a nested relative, but the value is folded into a single FILENAME.
+    `a/b` produced `slices/a/b-zephyr.tar.gz` in a directory nothing created, so
+    `image_cmd._tar_gzip_dir` raised into `BundleWriteError` and the ENTIRE run
+    aborted -- exit 3, `image.bundle-write-failed`, no `bundle-manifest.json`,
+    already-tarred slices orphaned -- where the equally-invalid `../x` takes the
+    intended `image.slice-unsafe-name` warning-skip and still ships a bundle.
+
+    `a\\b` is in the list on POSIX too: `slice_artefact_rel` writes this string
+    into `bundle-manifest.json`, a machine contract read on whatever OS consumes
+    the bundle, where a backslash IS a separator."""
+    assert slice_archive_name(core_id, "zephyr") is None
+    assert slice_artefact_rel(core_id, "zephyr") is None
+    # ... and the `os` field takes the identical check.
+    assert slice_archive_name("m55_hp", core_id) is None
+    assert slice_artefact_rel("m55_hp", core_id) is None
+    # The path guard itself is UNCHANGED -- only what `slice_archive_name` asks.
+    assert is_plain_relative("a/./b")
+
+
+@pytest.mark.parametrize("core_id", ["C:foo", "C:", "c:x", "Z:"])
+def test_archive_name_rejects_a_drive_prefix_on_every_platform(core_id):
+    """tan-cli#499 defect 9, REVIEW round. `is_plain_filename`'s stated rule is
+    that a value bound for `bundle-manifest.json` is judged the same way on
+    every host, because the bundle is read on whatever OS consumes it. The first
+    version applied that to the separators and then guarded the drive check
+    behind `os.name == "nt"` -- so on POSIX, `os.path.splitdrive` is
+    `posixpath`'s, finds nothing, and `C:foo` was accepted and written out as
+    `C:foo-zephyr.tar.gz`: a drive-RELATIVE path to the Windows consumer, which
+    is the hazard the separator rule is stated to prevent. `ntpath.splitdrive`
+    now runs unconditionally.
+
+    Not skipped on POSIX, deliberately: the point is that the answer does NOT
+    depend on the host."""
+    assert slice_archive_name(core_id, "zephyr") is None
+    assert slice_artefact_rel(core_id, "zephyr") is None
+    assert slice_archive_name("m55_hp", core_id) is None
+    assert slice_artefact_rel("m55_hp", core_id) is None
+
+
+def test_the_narrower_filename_guard_still_accepts_every_real_core_id():
+    """The fix must not start refusing the shapes a tan-generated manifest
+    actually carries -- `core_id` comes from the SoC spec's `cores[].id` and
+    `os` from the slice's backend name."""
+    for core_id in ("m55_hp", "m55_he", "a55_0", "cm33", "core.0", "a-b_c1"):
+        for os_name in ("zephyr", "yocto", "baremetal"):
+            assert slice_archive_name(core_id, os_name) == f"{core_id}-{os_name}.tar.gz"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows path shapes")
 def test_guard_rejects_windows_rooted_and_drive_relative_shapes():
     # `\\x` and `C:x` are NOT `isabs()` and carry no `..` -- exactly the shapes an
