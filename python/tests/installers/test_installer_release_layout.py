@@ -47,6 +47,7 @@ import threading
 import uuid
 import zipfile
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -1263,7 +1264,106 @@ def test_sh_noexec_tmpdir_retries_staging_inside_install_dir(release_server, tmp
     assert "noexec" in combined
 
 
+class _BashLocaleProbe(NamedTuple):
+    """What `_bash_setlocale_warning_probe` measured: whether the `bash` this
+    host resolves can emit a `setlocale` warning at all, and which bash that
+    was (both fields are quoted in the skip reason, so a skipped run names the
+    exact binary that could not do it rather than just "no bash")."""
+
+    warns: bool
+    path: str
+    version: str
+
+
+@functools.lru_cache(maxsize=1)
+def _bash_setlocale_warning_probe() -> _BashLocaleProbe:
+    """`shutil.which("bash") is not None` is not proof this bash can perform
+    the observation the mechanism test below makes -- it only proves SOME bash
+    is on `PATH`.
+
+    bash 3.2 has no setlocale warning at all. Its `locale.c:180` reads
+    `r = *lc_all ? (setlocale (LC_ALL, lc_all) != 0) : reset_locale_vars ();`
+    -- a bool, printed nowhere; the string "cannot change locale" does not
+    occur anywhere in the bash-3.2 sources. bash 5.2.21 does carry
+    `setlocale: %s: cannot change locale (%s)`. Which release in between
+    introduced it is NOT established here, which is exactly why this is a
+    behavioural probe and not a version comparison: pinning a version number
+    as the gate would be inferring the behaviour instead of measuring it.
+
+    macOS ships bash 3.2.57 as `/bin/bash` (the last GPLv2 release), so this
+    is not a hypothetical host. It was masked on this repo's macOS CI for
+    months: `actions-rust-lang/setup-rust-toolchain@v1` carries an internal
+    step named "Unbork mac" that runs `brew install bash`, so every macOS job
+    silently got Homebrew's bash 5.x on `PATH` as a side effect of a Rust
+    toolchain it needed for something else entirely. Retiring the Rust oracle
+    (tan-cli#269) removed that action, the jobs fell back to `/bin/bash`
+    3.2.57, and this test failed with output exactly `'reached'` -- no warning
+    in EITHER form, because the shell cannot produce one. The fix is a
+    capability probe, not re-adding `brew install bash` to the workflow: that
+    would pin CI to a host detail the test never intended to depend on and
+    would leave the guard wrong for every other bash-3.2 host.
+
+    Same shape as `_noexec_probe` above, and as
+    `tests/commands/test_completion_command.py:_bash_available` (which spawns
+    `bash -c` rather than trusting `which`, for the Windows WSL-launcher-stub
+    reason), and the same lesson tan-cli#580 recorded when macOS/APFS refused
+    a filename Linux accepted: probe the capability, do not infer it.
+    """
+    resolved = shutil.which("bash")
+    if resolved is None:
+        return _BashLocaleProbe(False, "<not on PATH>", "<not on PATH>")
+    try:
+        version_run = subprocess.run(
+            ["bash", "--version"], capture_output=True, text=True, timeout=15
+        )
+        # The invalid-locale `export` form, run ONCE: the whole question is
+        # whether calling this shell's own setlocale() with a value that
+        # cannot resolve makes it say so.
+        warn_run = subprocess.run(
+            ["bash", "-c", "export LC_ALL=xx_YY.bogus"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # NOT just OSError. This probe runs at MODULE SCOPE, so anything it
+        # raises is an `Interrupted: 1 error during collection` that takes the
+        # whole file's 48 tests with it -- including
+        # `test_install_sh_pins_lc_all_as_an_export_inside_the_subshell`, which
+        # was split out of the mechanism proof precisely so it would keep
+        # running on a host the proof cannot measure. A hung `bash` defeating
+        # that split is the exact outcome the split exists to prevent.
+        # `subprocess.TimeoutExpired` is a `SubprocessError`, NOT an `OSError`,
+        # so the narrower catch missed it: measured with a `bash` stub of
+        # `sleep 30`, collection died with
+        # `subprocess.TimeoutExpired: Command '['bash', '--version']' timed out
+        # after 15 seconds` rather than skipping one test. `ValueError` covers
+        # a `UnicodeDecodeError` out of `text=True` on a non-UTF-8 host.
+        # An unmeasurable shell is exactly the "cannot be asked" case, which
+        # this returns as "cannot warn" -> skip with a reason, never a silent
+        # pass.
+        return _BashLocaleProbe(False, resolved, "<unrunnable>")
+    first_line = (version_run.stdout or version_run.stderr).splitlines()
+    matched = re.search(r"version\s+([0-9][^\s(]*)", first_line[0]) if first_line else None
+    version = matched.group(1) if matched else "<unparsed>"
+    warns = "cannot change locale" in (warn_run.stdout + warn_run.stderr)
+    return _BashLocaleProbe(warns, resolved, version)
+
+
+_BASH_LOCALE_PROBE = _bash_setlocale_warning_probe()
+
+setlocale_warning_capable = pytest.mark.skipif(
+    not _BASH_LOCALE_PROBE.warns,
+    reason=(
+        f"the bash on PATH ({_BASH_LOCALE_PROBE.path}, {_BASH_LOCALE_PROBE.version}) "
+        "emits no setlocale warning, so the mechanism proof cannot run -- the "
+        "install.sh shape pin in "
+        "test_install_sh_pins_lc_all_as_an_export_inside_the_subshell still runs "
+        "and is the actual tan-cli#490 regression guard"
+    ),
+)
+
+
 @posix_only
+@setlocale_warning_capable
 def test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic(tmp_path):
     """tan-cli#490 review, MAJOR 1 (install.sh's `run_health_check`): a
     command-prefix assignment (`LC_ALL=C "$1" --version`) sets LC_ALL only in
@@ -1310,14 +1410,16 @@ def test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic(tmp_path):
 
     The two forms compared below are the exact shapes install.sh had before
     and after this fix (with `C` swapped for an invalid locale value purely
-    so the shell has something to warn about). The final assertions then pin
-    the ACTUAL line in install.sh to the export-in-subshell shape, so a
-    regression back to the command-prefix shape fails this test even without
-    re-deriving the mechanism proof.
-    """
-    if shutil.which("bash") is None:
-        pytest.skip("needs bash -- the '/bin/sh IS bash' class tan-cli#490 targets")
+    so the shell has something to warn about).
 
+    This proof needs a bash that HAS the warning -- see
+    `_bash_setlocale_warning_probe`, and note that bash 3.2 (macOS's
+    `/bin/bash`) does not. The pin on install.sh's actual line lives in
+    `test_install_sh_pins_lc_all_as_an_export_inside_the_subshell` below,
+    deliberately split out of this test so that a bash-3.2 host still runs it:
+    it is the real regression guard, needs no special shell, and used to be
+    unreachable behind this test's assertions.
+    """
     target = tmp_path / "target.sh"
     target.write_text("#!/bin/sh\necho reached\n")
     target.chmod(0o755)
@@ -1343,12 +1445,28 @@ def test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic(tmp_path):
         f"reach that subshell's own setlocale(): {export_out!r}"
     )
 
+
+def test_install_sh_pins_lc_all_as_an_export_inside_the_subshell():
+    """The half of tan-cli#490's guard that pins the ACTUAL line in
+    install.sh, so a regression back to the command-prefix shape fails even
+    where the mechanism proof above cannot run.
+
+    Host-independent on purpose: it reads text, spawns nothing, and needs no
+    particular bash -- not even a POSIX host, since `.gitattributes` pins
+    `install.sh text eol=lf` so the substrings below are byte-identical in a
+    Windows checkout. It was previously the tail of the mechanism test, where
+    it never got to run on any host whose bash could not emit the setlocale
+    warning (macOS's bash 3.2.57), losing the one assertion that does not
+    depend on the shell at all.
+    """
     text = INSTALL_SH.read_text()
     assert 'verify_out="$(export LC_ALL=C; "$1" --version 2>&1)"' in text, (
         "install.sh:run_health_check must set LC_ALL=C via `export` inside "
         "the $(...) subshell, not as a command-prefix assignment on the "
-        "probed binary -- see this test's docstring for why the prefix form "
-        "cannot reach the running shell's own exec-failure diagnostic."
+        "probed binary -- see "
+        "test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic's "
+        "docstring for why the prefix form cannot reach the running shell's "
+        "own exec-failure diagnostic."
     )
     assert 'verify_out="$(LC_ALL=C "$1" --version 2>&1)"' not in text
 

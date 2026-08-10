@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""tan-cli#224: the Python emit-site gate the Rust one cannot stand in for.
+"""tan-cli#224: the Python emit-site gate the Rust one could not stand in for
+-- and, since tan-cli#269 deleted `crates/`, the only emit-site gate there is.
 
-`crates/tan-cli/tests/contract.rs` carries a PAIR of tests --
+`crates/tan-cli/tests/contract.rs` carried a PAIR of tests --
 `every_emitted_issue_code_is_registered` (tan-cli#219: walks every literal
 `code: "family.name"` in `crates/` and asserts it is in
 `contract/issue-codes.json` at some status) and
@@ -9,11 +10,13 @@
 list of `PREFIXING_SITES`, because a code assembled as
 `format!("bootstrap.{code}")` from a bare suffix never appears as one whole
 literal and the first test structurally cannot see it). Both landed in
-commit 78d8308.
+commit 78d8308 and both are gone with the crate.
 
-`crates/` ships to NOBODY -- the release assets are PyInstaller freezes of
+`crates/` shipped to NOBODY -- the release assets are PyInstaller freezes of
 `python/tan` (tan-cli#271) -- so on the surface that actually reaches a
 customer, NEITHER direction of this gate existed until this file. The
+descriptions of the Rust pair kept below are the RECORD of what this file was
+written against, not a claim that a second gate still runs. The
 prefixing shape is not hypothetical on the Python side either:
 `bootstrap_cmd.py`, `debug_config_cmd.py`, `doctor_cmd.py`, `sdk_cmd.py` and
 `validate_cmd.py` all build a code the same way, and `deferred_cmd.py`'s

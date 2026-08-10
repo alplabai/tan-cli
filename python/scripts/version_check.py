@@ -17,10 +17,12 @@ the git tag is. Everything else derives from it or is checked against it:
   derives the asset tag as ``TAG = `v${pkg.version}` `` (npm-shim/postinstall.js:25),
   so a stale shim downloads a tag that does not exist. npm ships SemVer, so no
   translation applies here.
-* ``Cargo.toml`` is deliberately NOT read. It versions the Rust crates, which no
-  longer produce the release assets; release.yml used to gate the tag on it
-  (`grep -m1 '^version = ' Cargo.toml`), which is why a v0.5.0 tag failed before
-  a single asset was built while three files said 0.5.0 and one said 0.4.1-dev.
+* ``Cargo.toml`` is not read, and as of tan-cli#269 does not exist: it versioned
+  the Rust crates, which stopped producing the release assets at the port.
+  release.yml used to gate the tag on it (`grep -m1 '^version = ' Cargo.toml`),
+  which is why a v0.5.0 tag failed before a single asset was built while three
+  files said 0.5.0 and one said 0.4.1-dev. Recorded so a future reader does not
+  re-add a fourth version file on the theory that one was overlooked.
 * ``CHANGELOG.md`` must carry the section ``TAN_VERSION`` will be released
   under. release.yml slices the GitHub Release body out of it by an EXACT
   ``^## \\[<tag minus v>\\]`` match and hard-fails the release job when it

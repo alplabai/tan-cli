@@ -6,7 +6,7 @@ import pytest
 from typer.main import get_command
 
 from tan.cli import app
-from tests.parity.oracle import empty_tool_inventory
+from tests.conftest import empty_tool_inventory
 
 #: `python/` -- `python -m tan` resolves the package off `os.getcwd()` (`-m`
 #: prepends the CURRENT WORKING DIRECTORY to `sys.path`, not the script's own
@@ -347,8 +347,7 @@ _ALL_COMMANDS = sorted(get_command(app).commands)
 def _run_isolated(*argv, cwd: Path, home: Path) -> subprocess.CompletedProcess:
     """Like `run()` above, but with `HOME`/`USERPROFILE` redirected at a
     scratch directory (so a developer's real `~/.alp/sdk-default` cannot make
-    a command resolve an SDK it otherwise would not, the same isolation
-    `tests/parity/oracle.py`'s own `_env` applies) and `PATH` pinned to
+    a command resolve an SDK it otherwise would not) and `PATH` pinned to
     `empty_tool_inventory` (so a `west`-forwarding command -- `lock`/
     `migrate`/`quality` -- cannot spawn a REAL `west` this replay host happens
     to have installed; every other command's PATH probes, e.g. `doctor`'s

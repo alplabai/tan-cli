@@ -9,29 +9,32 @@ pinned Zephyr SDK release (issue #949 item 3) -- its `_comment` names
 `scripts/check_toolchain_lock.py` as the drift gate that keeps every CI
 *workflow* copy of that pin in lockstep. That gate's own scope is workflows
 under `.github/workflows/*.yml` -- it does not, and cannot, see a tan-cli
-checkout, so `crates/tan-core/src/host_env.rs`'s `ZEPHYR_SDK_INSTALL_VERSION`
+checkout, so `tan/commands/doctor_cmd.py`'s `ZEPHYR_SDK_INSTALL_VERSION`
 (the version `tan doctor`'s `zephyrSdk` check prints in its `west sdk
 install --version <..>` remedy, tan-cli#160) is a hand-ported copy of the
 SAME fact, on the side that gate cannot see. This script is the tan-cli-side
 half. It byte-diffs the vendored copy at
-`contract/fixtures/toolchains/toolchains.json` -- which
-`crates/tan-core/src/host_env.rs` `include_str!`s -- against the pinned
+`contract/fixtures/toolchains/toolchains.json` -- which the retired Rust
+oracle `include_str!`d and the Python doctor test reads -- against the pinned
 alp-sdk checkout's `metadata/toolchains.json`. Note the relative paths
 deliberately DIFFER between the two repos (unlike `kconfig_fixture_parity.py`,
 where they match): the vendored copy is a test FIXTURE here, not SDK
 metadata, so it lives under `contract/fixtures/`, the same convention
 `bootstrap_manifest_parity.py` uses for `metadata/bootstrap.json`.
 
-What the byte-diff buys, together with `cargo test`: `host_env.rs`'s
-`zephyr_sdk_install_version_matches_the_real_toolchain_lock` asserts
-`ZEPHYR_SDK_INSTALL_VERSION` equals the vendored fixture's `zephyrSdk.version`
-field. So this gate failing means the FIXTURE went stale, and re-vendoring it
-will then fail that cargo test until `ZEPHYR_SDK_INSTALL_VERSION` is updated
-too -- exactly the chain that keeps a released `tan` honest about an
-SDK-side pin bump.
+What the byte-diff buys, together with the Python-side assertion:
+`python/tests/commands/test_doctor_command.py`'s
+`test_zephyr_sdk_install_version_matches_the_real_toolchain_lock` asserts
+`doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION` equals the vendored fixture's
+`zephyrSdk.version` field. So this gate failing means the FIXTURE went stale,
+and re-vendoring it will then fail that pytest case until
+`ZEPHYR_SDK_INSTALL_VERSION` is updated too -- exactly the chain that keeps a
+released `tan` honest about an SDK-side pin bump. (Until tan-cli#269 the same
+chain ran through `crates/tan-core/src/host_env.rs`'s own `cargo test`; the
+Python half is now the whole of it.)
 
 Optionally self-skipping, same shape as `bootstrap_manifest_parity.py` /
-`kconfig_fixture_parity.py`: `tan-core`'s own `cargo test` already proves the
+`kconfig_fixture_parity.py`: that pytest case already proves the
 vendored copy parses and carries a version matching the constant, without an
 SDK checkout -- a local dev-loop run with no reachable alp-sdk is a clean
 no-op, not a failure. Reachability is resolved in the same order: `--sdk`,
@@ -78,10 +81,11 @@ def run(sdk_root: Path) -> bool:
     upstream = upstream_path.read_bytes()
     if vendored != upstream:
         print(f"FAIL: {VENDORED_PATH} differs from upstream {upstream_path} "
-              f"-- re-vendor the toolchain lock, then re-run `cargo test -p tan-core "
-              f"host_env::` (ZEPHYR_SDK_INSTALL_VERSION in "
-              f"crates/tan-core/src/host_env.rs is asserted against this fixture and will "
-              f"need a matching update if zephyrSdk.version changed)")
+              f"-- re-vendor the toolchain lock, then re-run `cd python && python -m "
+              f"pytest tests/commands/test_doctor_command.py -q` "
+              f"(ZEPHYR_SDK_INSTALL_VERSION in tan/commands/doctor_cmd.py is asserted "
+              f"against this fixture and will need a matching update if "
+              f"zephyrSdk.version changed)")
         return False
 
     print(f"PASS: {VENDORED_RELPATH} is byte-identical to upstream "
