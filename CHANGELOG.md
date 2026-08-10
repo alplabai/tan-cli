@@ -208,6 +208,36 @@ All notable changes to `tan` are documented here. Format follows
   synthetic `E1M-ZZZ999` that exercises the unrecognised-prefix fallback, are
   sha256-identical to `dev`. Refs #494.
 
+- **Seven diagnostics that were computed and then dropped, on `sdk current`,
+  `examples`, `presets`, `sdk list --online`, `clean`, `support-bundle` and
+  `inspect`.** `tan sdk current` — the one command whose whole job is "which
+  SDK am I on?" — answered `sourceTier: "none"` and told the reader to go
+  clone a checkout while standing in the README Quickstart cwd next to one,
+  because it took `resolve_sdk_tiered` alone and never the wide-walk tail
+  `doctor`/`build`/`validate` resolve through; it now falls through to the same
+  ladder, so it can only ever ADD an answer where there was none. A rejected
+  `--sdk-root` is named in the `examples`/`presets` warning instead of being
+  discarded and answered with "pass `--sdk-root <path>`", the flag the caller
+  had just typed. `sdk list --online` honours `ALL_PROXY`/`all_proxy` for real:
+  `urllib` maps them to a key its `https` dispatch never reads, so a host whose
+  only egress was that variable connected DIRECTLY (measured: rc 0 and the full
+  release list through a closed-port proxy) while the failure hint blamed a
+  proxy tan had never contacted; the precedence, the `NO_PROXY` bypass and the
+  `socks5://` refusal are now `tan/core/proxy.py`, measured against the frozen
+  oracle rather than read off it. `tan clean` on a build directory the invoking
+  user owns but cannot open crashed to `clean.internal-failure` at exit 5 with
+  a raw `TypeError`, skipping every remaining target including the state file,
+  where the oracle exits 0 with a `clean.remove-failed` warning and removes it.
+  `tan support-bundle` wrote a bundle whose every path separator had become
+  `<home>` under the `HOME=/` that Docker hands a uid with no `/etc/passwd`
+  entry, and silently rewrote any path the home merely prefixed into a
+  different, wrong one; redaction is now path-boundary anchored, refused for a
+  root home, and a refusal is reported (`support-bundle.redaction-skipped`).
+  `tan inspect` printed `\uXXXX` escapes for a non-ASCII path where the oracle
+  prints raw UTF-8, so the path no longer equalled the one on disk.
+  Closes #499. Refs #497 — the seven other commands that discard a rejected
+  `--sdk-root` value (`pinmux`, `init`, `model`, `trace`, `generate`,
+  `validate`, `new-som`) are untouched here.
 - **An AEN MRAM write with no wrong-board guard now says so.** The
   `flash.dpidr-preflight-unarmed` advisory was gated on
   `flash_method: swd_probe`, and the AEN dispatches Flow D

@@ -284,3 +284,41 @@ def test_a_bad_format_is_a_usage_error_not_a_traceback():
     result = runner.invoke(app, ["inspect", "--format", "yaml"])
     assert result.exit_code == 2
     assert "Traceback" not in result.output
+
+
+def test_a_non_ascii_path_prints_raw_utf8_like_the_oracle(tmp_path, monkeypatch):
+    """tan-cli#499 defect 6. `_format_value_text` called `json.dumps` with the
+    default `ensure_ascii=True`, so a path holding any non-ASCII character was
+    printed with `\\uXXXX` escapes -- no longer equal to the path on disk and no
+    longer paste-able back into a shell.
+
+    Measured on both binaries in a `josé-proj` directory: the oracle prints
+    `workspaceRoot="/.../josé-proj"` (raw UTF-8, `serde_json::to_string` never
+    escapes), the port printed `/.../jos\\u00e9-proj`. `diff_cmd._format_value`
+    already carried `ensure_ascii=False` with a comment saying exactly this.
+    """
+    project = tmp_path / "josé-proj"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+
+    result = runner.invoke(app, ["inspect"])
+    assert result.exit_code == 0
+    assert f'workspaceRoot="{project}"' in result.stderr
+    # The escape the oracle never emits, in any field.
+    assert "\\u00e9" not in result.stderr
+
+
+def test_show_origin_detail_is_not_ascii_escaped_either(tmp_path, monkeypatch):
+    """The value column was the reported half of tan-cli#499 defect 6, but the
+    `detail=` field under `--show-origin` went through a SECOND, separate
+    `json.dumps` with the same default. Every detail string happens to be ASCII
+    today, so only a deliberate non-ASCII one can hold that fix in place."""
+    from tan.commands.inspect_cmd import _inspect_text_lines
+
+    values = [
+        {"key": "boardYamlPath", "value": "/tmp/josé/board.yaml", "source": "cwd",
+         "detail": "found in /tmp/josé"}
+    ]
+    lines = _inspect_text_lines(values, focus=None, show_origin=True, quiet=False)
+    assert lines[1] == 'boardYamlPath="/tmp/josé/board.yaml" source=cwd detail="found in /tmp/josé"'

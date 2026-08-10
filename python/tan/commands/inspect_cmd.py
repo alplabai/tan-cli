@@ -244,9 +244,17 @@ def filter_resolved_values(
 def _format_value_text(value: Any) -> str:
     """Strings JSON-quoted, everything else its compact JSON form -- mirrors
     Rust's `format_value` (`Value::String` -> `serde_json::to_string`, else
-    `Value::to_string()`); `json.dumps` gives the identical rendering for a
-    scalar (`true`/`false`/`null`/a bare number) in either language."""
-    return json.dumps(value)
+    `Value::to_string()`).
+
+    `ensure_ascii=False`, for the same reason `diff_cmd._format_value` carries
+    it: `serde_json::to_string` emits raw UTF-8 and never a `\\uXXXX` escape, so
+    the default `ensure_ascii=True` printed `/home/<user>/jos\\u00e9-proj` where
+    the oracle prints `/home/<user>/josé-proj` -- a path that no longer equals
+    disk and can no longer be pasted back into a shell. Every OTHER scalar
+    (`true`/`false`/`null`/a bare number) renders identically either way, so
+    this is the only character class the two languages ever disagreed on.
+    """
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _inspect_text_lines(
@@ -261,7 +269,7 @@ def _inspect_text_lines(
             if show_origin:
                 lines.append(
                     f"{v['key']}={rendered} source={v['source']} "
-                    f"detail={json.dumps(v['detail'])}"
+                    f"detail={json.dumps(v['detail'], ensure_ascii=False)}"
                 )
             else:
                 lines.append(f"{v['key']}={rendered}")

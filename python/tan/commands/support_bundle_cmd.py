@@ -60,12 +60,24 @@ attached bundle needs the real project layout to diagnose a path problem, and
 none of this command's own inputs (tool presence/versions, filesystem facts)
 carry a token or credential to redact beyond the account name. See
 [`_redact`]/[`_home_variants`].
+
+Two limits on that replacement, both tan-cli#499 defect 5. It is anchored to a
+PATH BOUNDARY, because a bare `str.replace` rewrote any path the home merely
+prefixed into a silently wrong one (with `HOME=/home/<user>`,
+`/home/<user>-two/alp-sdk` -> `<home>-two/alp-sdk`). And it is REFUSED outright for a home that is a
+filesystem root ([`home_redaction_refusal`]) -- `HOME=/` is what Docker hands a
+uid with no `/etc/passwd` entry, and replacing it shredded every separator in
+the file. A refusal emits `support-bundle.redaction-skipped` in the envelope
+AND in text mode: the user is about to attach this file believing it was
+scrubbed.
 """
 
 from __future__ import annotations
 
 import json
+import ntpath
 import os
+import re
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -114,27 +126,103 @@ DATA_SCHEMA_VERSION = "1"
 # ---------------------------------------------------------------------------
 
 
+#: The issue code that says the bundle went out UNREDACTED. Redaction is a
+#: best-effort privacy measure, so refusing it is not an error -- but it must
+#: not be silent either: the user is about to attach this file to a public
+#: issue believing the account name was scrubbed.
+REDACTION_SKIPPED_CODE = "support-bundle.redaction-skipped"
+
+
+def _resolved_home() -> str:
+    """`%USERPROFILE%` on Windows, `$HOME` elsewhere; `""` when unset."""
+    return os.environ.get("USERPROFILE" if os.name == "nt" else "HOME") or ""
+
+
+def home_redaction_refusal(home: str) -> str | None:
+    """Why `<home>`-redaction must NOT run for this home directory, or `None`
+    when it is safe to run.
+
+    A home that is a filesystem/drive/UNC ROOT is refused. Docker and OpenShift
+    hand a uid with no `/etc/passwd` entry `HOME=/`, and an unanchored
+    `str.replace("/", "<home>")` then rewrites EVERY separator in EVERY string
+    of the bundle: measured, `HOME=/ tan support-bundle` exited 0 and wrote
+    `workspaceRoot: "<home>srv<home>ci<home>work<home>..."`. The maintainer
+    receiving that attachment cannot read a single path -- the bundle exists to
+    carry exactly those paths verbatim -- and there is nothing to protect
+    anyway, because a root home contains no account name.
+
+    Pure and taking the home as an argument so the rule is testable without
+    mutating the process environment.
+
+    `ntpath.splitdrive` unconditionally, not `os.path`'s: the same cross-OS
+    rule `core.image_bundle.is_plain_filename` settled on. `os.path.splitdrive`
+    is a no-op on POSIX, so a Windows drive or UNC root would be judged an
+    ordinary directory when this rule is exercised anywhere but Windows, and
+    the rule would then be untestable on the host CI runs on.
+    """
+    if not home:
+        return None
+    stripped = ntpath.splitdrive(home)[1].strip("\\/")
+    if stripped == "":
+        return (
+            f'$HOME is the filesystem root ("{home}"), so redacting it would '
+            "replace every path separator in the bundle. Written UNREDACTED "
+            "instead -- a root home carries no account name to protect, but "
+            "check the file before attaching it anywhere public."
+        )
+    return None
+
+
 def _home_variants() -> tuple[str, ...]:
     """The resolved home directory, in both its native and posix-slash
     spelling -- the bundle mixes both (native in doctor detail strings and
     `--destination`-normalised paths, posix in `workspaceRoot`/`sdkRoot`/
     `boardYamlPath`), so redaction has to look for both. Empty when the host
     has neither `USERPROFILE` nor `HOME` set -- redacts nothing rather than
-    guessing."""
-    home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
-    if not home:
+    guessing -- and empty for a home [`home_redaction_refusal`] refuses."""
+    home = _resolved_home()
+    if not home or home_redaction_refusal(home):
         return ()
     return tuple({home, home.replace("\\", "/")})
 
 
+#: Characters that end a path token in the strings this bundle carries. A home
+#: occurrence must START at one of these (or at the beginning of the string) and
+#: END at one of these, at a path separator, or at the end of the string.
+#:
+#: `/` and `\\` are deliberately ABSENT from the leading set: with
+#: `HOME=/home/dev`, `/srv/home/dev/proj` is a DIFFERENT directory that happens
+#: to contain the home spelling mid-path, and treating a separator as a token
+#: start would rewrite it to `/srv<home>/proj`. They ARE in the trailing set,
+#: because `<home>/proj` is exactly the substitution wanted.
+_TOKEN_BREAK = " \t\r\n\"'=,;:()[]{}<>|`"
+
+
+def _home_pattern(variant: str) -> re.Pattern[str]:
+    """A path-boundary-anchored matcher for one home spelling.
+
+    A bare `str.replace` rewrote any path the home merely PREFIXES into a
+    silently wrong one: measured with `HOME=/home/<user>`,
+    `/home/<user>-two/alp-sdk` was written as `<home>-two/alp-sdk` and
+    `/srv/home/<user>-ops/proj` as `/srv<home>-ops/proj` -- register-grade path
+    data corrupted in the one artifact that exists to carry it, at `ok: true`.
+    """
+    break_class = re.escape(_TOKEN_BREAK)
+    return re.compile(
+        rf"(?<![^{break_class}])"  # string start, or a token break before it
+        + re.escape(variant)
+        + rf"(?=[/\\]|[{break_class}]|$)"  # separator, token break, or string end
+    )
+
+
 def _redact(value: Any, home_variants: tuple[str, ...]) -> Any:
-    """Recursively replace every literal `home_variants` occurrence in every
-    string this bundle payload carries with `<home>`. Walks dicts/lists;
-    every other JSON-safe type (bool/int/float/None) passes through
+    """Recursively replace every path-boundary-anchored `home_variants`
+    occurrence in every string this bundle payload carries with `<home>`. Walks
+    dicts/lists; every other JSON-safe type (bool/int/float/None) passes through
     unchanged."""
     if isinstance(value, str):
         for variant in home_variants:
-            value = value.replace(variant, "<home>")
+            value = _home_pattern(variant).sub("<home>", value)
         return value
     if isinstance(value, dict):
         return {k: _redact(v, home_variants) for k, v in value.items()}
@@ -795,6 +883,13 @@ def _run(
     issues = sdk_resolution_issues(
         context.broken_project_pin, context.sdk_tier, context.foreign_global_default_for
     )
+    # tan-cli#499: a bundle that went out UNREDACTED must say so. `_redact` is
+    # silent by construction (it returns a payload either way), so the one
+    # condition under which it is skipped wholesale is reported here, beside
+    # the path the user is about to attach.
+    refusal = home_redaction_refusal(_resolved_home())
+    if refusal is not None:
+        issues.append(Issue(REDACTION_SKIPPED_CODE, "warning", refusal))
     issues.extend(_doctor_issues(checks))
     exit_code = doctor_cmd.exit_code_for(checks)
 
@@ -914,8 +1009,12 @@ def support_bundle(
         # from `outcome.sdk` instead would be a second copy of the same
         # decision in the one command whose whole purpose is explaining a
         # broken machine; this only ever re-prints what is already there.
+        #
+        # tan-cli#499 adds `support-bundle.redaction-skipped` to the same
+        # loop: the warning that the attached file was NOT scrubbed is
+        # useless in the one mode the user reads, and text is the default.
         for issue in outcome.issues:
-            if issue.code.startswith("sdk."):
+            if issue.code.startswith("sdk.") or issue.code == REDACTION_SKIPPED_CODE:
                 typer.echo(issue.message, err=True)
         for line in outcome.text:
             typer.echo(line, err=True)

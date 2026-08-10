@@ -37,7 +37,13 @@ import typer
 from typer.testing import CliRunner
 
 from tan.commands import doctor_cmd
-from tan.commands.support_bundle_cmd import _home_variants, _redact, support_bundle
+from tan.commands.support_bundle_cmd import (
+    REDACTION_SKIPPED_CODE,
+    _home_variants,
+    _redact,
+    home_redaction_refusal,
+    support_bundle,
+)
 
 
 def _local_app():
@@ -664,3 +670,84 @@ def test_a_bad_format_is_a_usage_error_not_a_traceback():
     result = runner.invoke(app, ["support-bundle", "--format", "yaml"])
     assert result.exit_code == 2
     assert "Traceback" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#499 defect 5 -- redaction must be path-anchored, and never silent
+# ---------------------------------------------------------------------------
+
+
+def test_redaction_only_replaces_a_whole_path_token():
+    """tan-cli#499 defect 5, the prefix half. `_redact` did an unanchored
+    `str.replace`, so any path the home merely PREFIXES was rewritten into a
+    silently WRONG one. Both shapes below were reproduced end to end with
+    `HOME=/home/<user>`: `/home/<user>-two/alp-sdk` was written as
+    `<home>-two/alp-sdk`, and `/srv/home/<user>-ops/proj` as
+    `/srv<home>-ops/proj` -- register-grade path data corrupted at `ok: true`,
+    in the one artifact that exists to carry it verbatim.
+
+    The third case is the one a trailing-boundary rule alone would still get
+    wrong: `/srv/home/<user>/proj` ends on a separator but is a DIFFERENT
+    directory, so a leading boundary is required too."""
+    home = ("/home/<user>",)
+    assert _redact("/home/<user>-two/alp-sdk", home) == "/home/<user>-two/alp-sdk"
+    assert _redact("/srv/home/<user>-ops/proj", home) == "/srv/home/<user>-ops/proj"
+    assert _redact("/srv/home/<user>/proj", home) == "/srv/home/<user>/proj"
+    # What must STILL be redacted: the whole token, a prefix ending on a
+    # separator, and either of those embedded in a command line.
+    assert _redact("/home/<user>", home) == "<home>"
+    assert _redact("/home/<user>/proj", home) == "<home>/proj"
+    assert _redact("run /home/<user>/x --in /home/<user>", home) == "run <home>/x --in <home>"
+    assert _redact('quoted "/home/<user>/x"', home) == 'quoted "<home>/x"'
+
+
+def test_a_root_home_is_refused_rather_than_shredding_every_separator():
+    """The `HOME=/` half. Docker/OpenShift hand a uid with no /etc/passwd entry
+    `HOME=/`; `_home_variants()` then returned `('/',)` and every `/` in every
+    string of the bundle became `<home>` (measured: `workspaceRoot:
+    "<home>srv<home>ci<home>work<home>..."`, exit 0, no warning). A root home has
+    no account name to protect, so the answer is to refuse, not to escape it."""
+    for root in ("/", "//", "C:\\", "C:/"):
+        assert home_redaction_refusal(root) is not None
+    assert home_redaction_refusal("/home/dev") is None
+    assert home_redaction_refusal("") is None
+
+
+def test_a_root_home_writes_an_unredacted_bundle_and_says_so(tmp_path, monkeypatch):
+    """The end-to-end shape, in BOTH output modes. A refusal the user never
+    sees is the same defect one layer down: they are about to attach this file
+    believing the account name was scrubbed."""
+    env_key = "USERPROFILE" if os.name == "nt" else "HOME"
+    monkeypatch.setenv(env_key, "C:\\" if os.name == "nt" else "/")
+    write(tmp_path / "board.yaml", "x")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+
+    doc = json.loads(runner.invoke(app, ["support-bundle", "--format", "json"]).stdout)
+    warning = [i for i in doc["issues"] if i["code"] == REDACTION_SKIPPED_CODE]
+    assert len(warning) == 1
+    assert warning[0]["severity"] == "warning"
+    assert "filesystem root" in warning[0]["message"]
+
+    bundle_text = open(doc["data"]["outputPath"], encoding="utf-8").read()
+    # Nothing shredded: the paths a maintainer needs are readable.
+    assert "<home>" not in bundle_text
+    assert str(tmp_path).replace("\\", "/") in bundle_text
+
+    text_result = runner.invoke(app, ["support-bundle"])
+    assert "filesystem root" in text_result.stderr
+
+
+def test_an_ordinary_home_emits_no_redaction_warning(tmp_path, monkeypatch):
+    """The warning must fire ONLY where redaction was actually skipped --
+    otherwise it is noise on every healthy run and stops being read."""
+    env_key = "USERPROFILE" if os.name == "nt" else "HOME"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv(env_key, str(home))
+    write(tmp_path / "board.yaml", "x")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+
+    doc = json.loads(runner.invoke(app, ["support-bundle", "--format", "json"]).stdout)
+    assert [i for i in doc["issues"] if i["code"] == REDACTION_SKIPPED_CODE] == []

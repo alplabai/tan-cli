@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from tan.cli import app
 from tan.commands.examples_cmd import (
+    SDK_UNRESOLVED_MESSAGE,
     Example,
     discover_examples,
     example_description_from_readme,
@@ -410,3 +411,44 @@ def test_examples_category_flag_narrows_the_real_command_and_composes_with_filte
     assert composed.exit_code == 0
     composed_ids = [e["id"] for e in json.loads(composed.stdout)["data"]["examples"]]
     assert composed_ids == ["audio/i2s-tone"]
+
+
+def test_a_rejected_sdk_root_flag_is_named_in_the_message(tmp_path, monkeypatch):
+    """tan-cli#497 defect 7. `_resolve_sdk` returns a bare `None` on the
+    terminal `--sdk-root` branch, so the path the caller typed was discarded and
+    the warning read "pass --sdk-root <path> to name the checkout" -- the flag
+    they had just passed -- with the failing value nowhere in the JSON envelope
+    and nowhere in the stderr text either.
+
+    The `sdk` key stays ABSENT (pinned by
+    `test_a_sdk_root_that_is_not_a_checkout_is_an_empty_catalogue_not_a_failure`),
+    so the message is the only place this fact can live."""
+    monkeypatch.chdir(tmp_path)
+    typo = str(tmp_path / "alp-sdk-typo")
+
+    doc = json.loads(
+        runner.invoke(app, ["examples", "--sdk-root", typo, "--format", "json"]).stdout
+    )
+    assert [i["code"] for i in doc["issues"]] == ["examples.sdk-root-unresolved"]
+    assert doc["issues"][0]["message"] == (
+        f'alp-sdk root is unresolved: --sdk-root "{typo}" is not an alp-sdk '
+        "checkout (scripts/alp_project.py not found under it). Returning an "
+        "empty example catalogue."
+    )
+    assert "sdk" not in doc
+
+    text = runner.invoke(app, ["examples", "--sdk-root", typo]).stderr
+    assert typo in text
+    # The self-defeating remediation is gone from THIS branch.
+    assert "pass --sdk-root <path>" not in text
+
+
+def test_the_no_flag_message_still_names_the_flag_as_the_remedy(tmp_path, monkeypatch):
+    """The other half of the same rule: with no `--sdk-root` given there is no
+    typed value to name, and recommending the flag is exactly right. This is the
+    branch `SDK_UNRESOLVED_MESSAGE` still covers, and it must not follow the
+    flag branch's wording."""
+    monkeypatch.chdir(tmp_path)
+    doc = json.loads(runner.invoke(app, ["examples", "--format", "json"]).stdout)
+    assert doc["issues"][0]["message"] == SDK_UNRESOLVED_MESSAGE
+    assert "pass --sdk-root <path> to name the checkout." in doc["issues"][0]["message"]
