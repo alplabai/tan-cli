@@ -26,6 +26,47 @@ All notable changes to `tan` are documented here. Format follows
   `openocd_usb_location` selects a probe but never confirms which board is on
   the other end of the cable. Documented in `docs/setools.md`. Closes #589.
 
+- **Every `tan doctor` check now carries a `scope` — `host` or `project` — so a
+  consumer stops hand-maintaining a list of tan's own check names.** The
+  envelope carried `checks[].name` and nothing else, so anyone splitting "facts
+  about this machine" from "facts about the project you opened" matched
+  strings. `alp-sdk-vscode` did exactly that; between v0.4.0 and 0.5.1 the
+  check `zephyrSdkHost` was renamed `zephyrSdkAvailableForHost`, the stale
+  entry then matched nothing, nothing failed on either side, and the row it was
+  meant to admit was silently never admitted — which reads to a user as "not a
+  problem" rather than "not asked" (alp-sdk-vscode#472, patched downstream in
+  alp-sdk-vscode#487 with the caveat that a re-derived hand-list rots again).
+  `host` means the verdict is about this machine (a tool on PATH, an OS
+  setting, the host interpreter); `project` means it is about the selected
+  project, the resolved alp-sdk checkout, or the Zephyr workspace built for it.
+  The rule and the two definitions are pinned in `contract/README.md`; the
+  classification itself deliberately is not, because reproducing it downstream
+  is the hand-list this field exists to delete. Additive: a new key on an
+  existing object, no key removed or renamed, present on every entry rather
+  than sometimes, and no committed golden carries a `checks[]` array to move.
+  Emitted by `tan doctor`, and by the `doctor.checks[]` inside the file
+  `tan support-bundle` writes — that report is built from the same type. That
+  command's own stdout envelope carries no `checks[]` and is unchanged. (#549)
+  - **A check cannot be added without one.** `scope` is a required
+    keyword-only field, so a check authored without it is a `TypeError` at its
+    own construction site — on every branch and every platform, including the
+    ones no test host reaches (`longPaths`, `sevenZip`, the six `fix:*`
+    outcomes). `python/tests/gates/test_doctor_check_scope.py` adds the static
+    half: it walks every `Check(...)` call site under `python/tan/`, requires a
+    literal value from the vocabulary, refuses a name that declares two
+    different scopes on two branches, and pins the current classification in
+    both directions so a reclassification is a reviewed edit rather than a
+    one-word refactor.
+  - **`tan doctor` and `tan doctor --build` are now contractually the same
+    check set.** `--build` gated exactly one check (`zephyrWorkspace`) and
+    stopped gating it in #290; it has been accepted-and-ignored since. That was
+    observable but unwritten, so `alp-sdk-vscode` still spawns both in parallel
+    on every dependency-panel refresh and merges them — it could not delete the
+    second subprocess safely, because deleting a seam on one pin's behaviour is
+    how the allowlist rotted in the first place. Now pinned by two tests (unit
+    and spawned-binary) and stated in `contract/README.md`, so one invocation
+    is enough. Neither invocation's output changed as part of this.
+
 - **`scripts/tan-surface/` — a command-surface walk that drives every `tan`
   command, in dependency order, against a real project.** `scripts/e2e-full.sh`
   is a release *regression* harness: it hijacks `$HOME`, wipes its tree every
@@ -182,6 +223,71 @@ All notable changes to `tan` are documented here. Format follows
   `Bundle the envelope contract` step comment are updated to match — this
   supersedes the coverage description the earlier #502 entry below records.
   (#502)
+
+- **The vendored bootstrap manifest no longer tells a customer, mid-onboarding,
+  to run a subcommand this build refuses.**
+  `contract/fixtures/bootstrap/manifest.json` ended its Zephyr-SDK guidance on
+  "the `tan sdk switch` step that pins it per project", but `switch` is in
+  `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` and exits 1 — a dead end at exactly the
+  point the reader is told how to pin their SDK. The fixture is re-vendored
+  from alp-sdk at `PINNED_SDK_TAG` `ccd34f06` (byte-identical to alp-sdk
+  `origin/dev` for this file), where the sentence already reads "select the
+  checkout with `tan build --sdk-root <path>` or `.alp/sdk-path`" — both real
+  mechanisms in this build. Refs #585, closes the workaround #583 left behind.
+  - **The same note also gained an Intel-Mac paragraph**, and it reaches users
+    the same way the fixed sentence does — it is the SAME field
+    (`manualInstallHints.posix.note[0]` → `manual_install_posix`), transcribed
+    at `tan/core/bootstrap.py:838` and printed to the user by
+    `optional_libs_block` (`:1876-1879`).
+    The pinned Zephyr SDK ships `macos-aarch64` only (no `macos-x86_64`), so
+    `west sdk install` has no target on an Intel Mac and real-silicon Zephyr
+    builds there need a Linux host; `native_sim` and bootstrap are unaffected.
+  - **One other field reaches `tan`**: `prerequisites.install.windows.7zip`
+    (`winget install -e --id 7zip.7zip`), added to `_fallback_install_commands`
+    so the fallback stays equal to the manifest. It is deliberately absent from
+    `prerequisites.windows` — the manifest declares an install command for a
+    tool it does not require, because `7z` unpacks the Zephyr SDK's
+    native-Windows hosttools archive, an optional step.
+  - **Three fields moved that no `tan` consumer parses**: `_comment` now names
+    Python Tan instead of the retired Rust reader, and `zephyr.pythonMinVersion`
+    (`"3.12"`) and a top-level `verdict` block are new upstream keys with no
+    `BootstrapFacts` field and no parse arm. `tan` reads
+    `prerequisites.pythonMinVersion` (`"3.10"`) by contract, so the two floors
+    the file now carries disagree — tracked separately, resolution is upstream.
+  - **#583's exemption is gone, not widened.** `manual_install_posix` is no
+    longer skipped by
+    `test_the_fallback_constants_match_the_real_manifest_field_for_field`, and
+    the test that pinned the one-clause divergence is deleted. Replacing it,
+    `test_no_instruction_in_the_vendored_manifest_names_a_refused_subcommand`
+    scans the whole fixture against `NOT_PORTED_SDK_SUBCOMMANDS` rather than a
+    literal, so a future re-vendor cannot re-acquire guidance for `install`
+    either, and a subcommand added to that frozenset is covered the day it
+    lands.
+  - **The refresh exposed a mutation test that located its target by key
+    alone.** `test_a_present_but_unusable_manifest_is_fatal_never_a_silent_fallback`
+    took the FIRST line containing the key, and with two `pythonMinVersion`
+    keys in the refreshed file that is `zephyr`'s — a field no consumer reads.
+    So the case mutated an unread field and failed for the wrong reason
+    (measured: the reconstructed locator picks `"pythonMinVersion": "3.12"`,
+    and the case reds on the missing refusal rather than on the floor it
+    exists to guard). It fails loudly, which is how this was found — it was
+    never a test that could not fail. Each case now names its original text
+    explicitly and asserts it occurs exactly once, so a future re-vendor that
+    duplicates a key fails on the duplication instead of on a wrong target.
+  - **`contract/fixtures/` is documented as tracking `PINNED_SDK_TAG`, not as
+    frozen — in all SIX places that said otherwise.** `tests/parity/bootstrap_manifest_parity.py`
+    (docstring + the `DIFFERS` message), `tests/parity/README.md`,
+    `contract/README.md`, and three comment blocks in
+    `.github/workflows/parity.yml` all said a `DIFFERS` was expected-by-design
+    and never a re-vendor prompt, or called the fixture "unguarded frozen
+    data" — text written when `crates/` was the frozen tree, and the reason
+    this drift sat unactioned. The `parity.yml` one at the top of the
+    `PINNED_SDK_TAG` bump log matters most: it is what a maintainer reads at
+    the moment the fixture's tracking ref moves. Against `PINNED_SDK_TAG` a
+    `DIFFERS` is now stated to be exactly that prompt, with the re-vendor
+    steps named. "Unguarded" was already false before this change — the
+    Python field-for-field gate has stood over the fixture since tan-cli#269
+    deleted the `cargo test`.
 
 - **The tan-cli#490 installer test that reds on macOS from the Rust-oracle
   retirement onward now probes for the shell capability it needs instead of

@@ -236,27 +236,35 @@ manifest fails that test until the constants are updated too. Until
 tan-cli#269 a `cargo test` in `manifest.rs` asserted the same thing on the
 Rust side; the Python case is now the only one.
 
-**This script is no longer a CI gate.** It was removed from
-`.github/workflows/parity.yml` when the pin moved to v0.15.0-rc1, because it
-measured a frozen fixture against a moving pin — a comparison that can only
-ever fail. `contract/fixtures/bootstrap/manifest.json` is frozen at the
-v0.14.0 vendor point, and per `docs/ROADMAP.md`'s Standing
-Rules a frozen tree is measured at its OWN freeze vendor point, not at
-`PINNED_SDK_TAG`. The frozen fixture keeps its real gate:
+**This script is not a CI gate, but its verdict is actionable again.** It was
+removed from `.github/workflows/parity.yml` when the pin moved to v0.15.0-rc1,
+on the reasoning that it measured a frozen fixture against a moving pin — a
+comparison that can only ever fail. That reasoning depended on
+`contract/fixtures/bootstrap/manifest.json` being frozen at the v0.14.0 vendor
+point, and it no longer is: the fixture went stale enough to tell a customer,
+mid-onboarding, to run `tan sdk switch` — a subcommand this build REFUSES
+(`sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS`) — and tan-cli#585 re-vendored it at
+`PINNED_SDK_TAG`. Per `docs/ROADMAP.md`'s Standing Rules `contract/` is live
+shared API data, edited when the Python consumer requires it; only `crates/`
+was ever the frozen tree, and tan-cli#269 deleted that.
+
+The fixture's real gate is
 `python/tests/commands/test_bootstrap_command.py::test_the_fallback_constants_match_the_real_manifest_field_for_field`,
 which asserts the hand-ported fallback constants equal the fixture
-field-for-field and runs in `python/tests`. (Its Rust twin in `manifest.rs`
-went with `crates/` in tan-cli#269.)
+field-for-field — every field, with no exemption, since #585. (Its Rust twin
+in `manifest.rs` went with `crates/` in tan-cli#269.) A sibling case,
+`test_no_instruction_in_the_vendored_manifest_names_a_refused_subcommand`,
+stops a future re-vendor bringing back guidance for a refused subcommand.
 
 There is no shipped Python vendored copy for this to guard: `tan/core/
 bootstrap.py` reads `metadata/bootstrap.json` LIVE off the bound SDK root, so
 nothing in the released artefact can drift from it.
 
-The script is kept as a manual tool, not deleted. Pointed at `--sdk` = the
-v0.14.0 checkout it re-verifies the frozen fixture has not bit-rotted (`MATCH`,
-exit 0); pointed at anything newer it reports what alp-sdk's bootstrap facts
-have moved on to, and a `DIFFERS` there is EXPECTED rather than a re-vendor
-prompt — re-vendoring `contract/` would violate the freeze.
+The script is kept as a manual tool, not deleted. Pointed at `--sdk` =
+`PINNED_SDK_TAG` a `DIFFERS` IS a re-vendor prompt: copy upstream over the
+fixture, then update the fallback constants the field-for-field test holds
+against it. Pointed at any other ref it only reports how far that ref has
+moved.
 
 ```
 python3 tests/parity/bootstrap_manifest_parity.py --sdk /path/to/an/alp-sdk/checkout
