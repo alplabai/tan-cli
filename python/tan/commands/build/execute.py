@@ -21,8 +21,16 @@ root than this run resolved, then re-stamp it -- see
 the Zephyr-boilerplate-loaded guard -- an `os: zephyr` slice that exits 0
 without ever loading Zephyr's CMake boilerplate (`tan.commands.build.
 manifest.zephyr_boilerplate_loaded`) is reported `failed`, not `ok`, since a
-real exit code alone is not evidence the build produced firmware -- and (see
-[`last_manifest_write`]) the post-build `system-manifest.yaml` write.
+real exit code alone is not evidence the build produced firmware -- (see
+[`last_manifest_write`]) the post-build `system-manifest.yaml` write, and
+(tan-cli#550) the plan's per-slice `postCommands` plus the matching
+baremetal-evidence guard: an `os: baremetal` slice's `command` is a `cmake -S
+... -B .` that only CONFIGURES, so its `cmake --build .` arrives as a post
+command ([`_run_post_commands`], with skip-vs-fail taken from the plan's own
+`executionPolicy` per the SDK schema and ADR-0001 -- see
+[`_missing_post_tool`]) and its linked output is checked against the plan's own
+`artifacts.outputDir` ([`_baremetal_artefact_refusal`], whose three
+NON-coverages are enumerated there) before the slice may be called built.
 
 **tan-cli#307, a DELIBERATE divergence from the frozen Rust oracle.**
 `crates/` is frozen (`docs/ROADMAP.md`'s standing rule), and the oracle's own
@@ -98,6 +106,7 @@ from tan.commands.build.manifest import (
 )
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.core.plan_exec import (
+    ExecutionPolicy,
     PolicyAction,
     SdkStampAction,
     assemble_slice_env,
@@ -442,6 +451,73 @@ _ToolResolution = ToolResolution
 _resolve_tool = resolve_tool
 
 
+@dataclass(frozen=True)
+class _StepResult:
+    """One spawned process's outcome, with its three shapes kept apart.
+
+    Exactly one is ever populated: `exit_code` (the process ran to completion and
+    this is its real exit status, negative on a POSIX signal death),
+    `cancelled` (the caller's `cancelled()` went true mid-stream and the
+    process tree was terminated), or `launch_error` (the spawn itself raised
+    `OSError` -- the tool vanished between the availability check and here,
+    is a directory, lacks the executable bit, or is not a valid executable
+    format). A bare `int | None` return could not tell the second from the
+    third."""
+
+    exit_code: int | None = None
+    cancelled: bool = False
+    launch_error: str | None = None
+
+
+def _spawn_step(
+    program: str, args: Sequence[str], cwd: Path, env: dict[str, str],
+    on_line: Callable[[str], None], cancelled: Callable[[], bool],
+) -> _StepResult:
+    """Spawn ONE already-resolved program, stream its output, and report how
+    it ended -- the single spawn implementation shared by a slice's own
+    `command` and by each of its `postCommands` steps (tan-cli#550).
+
+    Extracted rather than duplicated for the post-build steps: the fd hygiene,
+    the process-group setup and the cancellation handshake below are all
+    load-bearing and subtly easy to get wrong a second time -- a post-build
+    `cmake --build` that ignored `cancelled()` would keep compiling after the
+    user pressed Ctrl-C, with tan already reporting the slice cancelled.
+
+    `program` is always the RESOLVED absolute path (tan-cli#510), never a
+    bare identity -- resolution happens in the caller, which is also the only
+    place that can report a miss against the right execution policy.
+
+    A context manager, not a bare `Popen(...)`: it closes stdout/stderr/stdin
+    on every exit path (success, cancellation, exception) -- a bare `Popen`
+    here leaked the pipe's file object (a `ResourceWarning` under
+    `-W error::ResourceWarning`, and a real fd leak across a long run).
+
+    `start_new_session=True` (POSIX: setsid) puts the child in its own process
+    group so `_terminate` can `killpg` the whole tree instead of only the
+    direct child; a documented no-op on Windows (subprocess.py's Windows
+    `_execute_child` takes and ignores it), where `_terminate` uses
+    `taskkill /T` instead."""
+    try:
+        with subprocess.Popen(
+            [program, *args],
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            start_new_session=True,
+        ) as proc:
+            if _drain_output(proc, on_line, cancelled):
+                _terminate(proc)
+                return _StepResult(cancelled=True)
+            return _StepResult(exit_code=proc.wait())
+    except OSError as err:
+        return _StepResult(launch_error=str(err))
+
+
 def _cwd_under_build_root(raw_cwd: str | None) -> bool:
     """`Path::new(&cmd.cwd).components().next() == CONSUMER_BUILD_ROOT` (Rust
     oracle): checked against the slice's PLAN-supplied relative `cwd` string,
@@ -567,6 +643,230 @@ def _pin_west_workspace(
     if workspace_dir is None or not args or args[0] != "build" or build_dir_overridden(args):
         return cwd, list(args)
     return workspace_dir, [args[0], "-d", str(cwd / "build"), *args[1:]]
+
+
+@dataclass(frozen=True)
+class _PostOutcome:
+    """How a slice's `postCommands` ended, when they did not all exit 0.
+
+    `manifest_message` is the short form persisted as `system-manifest.yaml`
+    `slices[].reason` when it must differ from `message` -- the same split, for
+    the same reason, as [`SliceOutcome.manifest_message`]: the missing-tool
+    refusal's `-- searched PATH: <every entry>` belongs in this run's terminal
+    and envelope, never in a build ARTEFACT that outlives the run and gets
+    forwarded with a support ticket (tan-cli#615 review, MAJOR 1)."""
+
+    status: str
+    exit_code: int | None
+    message: str
+    manifest_message: str | None = None
+
+
+def _missing_post_tool(
+    where: str, tool: str, searched: str, policy: ExecutionPolicy | None
+) -> _PostOutcome:
+    """The refusal for a post-build step whose tool is not on this host.
+
+    Routed through `executionPolicy.missingTool`, exactly like the slice's own
+    `command` (tan-cli#615 review, MAJOR 3). An earlier round hardcoded
+    `failed` here, arguing that a slice whose command has already run and
+    rewritten the build tree cannot honestly be called "skipped". That
+    argument loses to two documents this port is bound by, neither of which it
+    cited: alp-sdk's `metadata/schemas/build-plan-v1.schema.json` AT THE PINNED
+    COMMIT says, in `postCommands`' own description, "`executionPolicy` applies
+    to each step exactly as it does to `command`"; and this repo's
+    `docs/adr/0001-pmt-contract-decoupling.md` says "`tan` applies the policy
+    the plan declares; it does not hardcode a copy of the planner's skip
+    rules". A hardcoded disposition here is the exact coupling ADR-0001 exists
+    to prevent.
+
+    tan-cli#550 is not reopened by honouring it: `skipped` is not `built`
+    either -- the slice is absent from the `N of M slice(s) built` count and
+    carries a reason naming the missing tool. What the safety argument DOES
+    buy is kept: the message says the configure already ran, so a `skipped`
+    here cannot be misread as "never attempted".
+
+    Only `missingTool` is reachable per step. `nullCommand` cannot be (a null
+    step is refused at parse time, `tan.core.build_plan._post_commands`) and
+    `unknownBackend` is a per-slice fact decided before any step runs."""
+    action = resolve_action(policy, "missing_tool", PolicyAction.SKIP)
+    short = f"{where} cannot run: tool `{tool}` not found"
+    return _PostOutcome(
+        "skipped" if action is PolicyAction.SKIP else "failed",
+        None,
+        f"{short} -- searched {searched}. The slice's own configure already ran.",
+        manifest_message=short,
+    )
+
+
+def _run_post_commands(
+    core_id: str, post_commands: Sequence, build_root: Path, env: dict[str, str],
+    on_output: Callable[[str], None], cancelled: Callable[[], bool],
+    policy: ExecutionPolicy | None,
+) -> _PostOutcome | None:
+    """Run a slice's `postCommands` in order; `None` when every one of them
+    exited 0, else the [`_PostOutcome`] the slice must report.
+
+    The CONSUMER half of alp-sdk #1344 (tan-cli#550). The planner half landed
+    in `tan/planner/` with the #608 re-sync and already emits the step --
+    `{"tool": "cmake", "args": ["--build", "."]}` for every `os: baremetal`
+    slice -- but nothing here read the key, so such a slice ran only its
+    `cmake -S ... -B .` CONFIGURE and reported `ok` over a build tree holding
+    `CMakeCache.txt` and no object file, archive or executable.
+
+    Skip-vs-fail for a missing step tool is the plan's call, not this
+    function's -- see [`_missing_post_tool`]. A `cwd` that escapes the build
+    root and a spawn that raises stay hard failures, matching what the slice's
+    own `command` does with the same two conditions."""
+    total = len(post_commands)
+    for n, step in enumerate(post_commands, start=1):
+        label = " ".join([step.tool, *step.args])
+        where = f"slice `{core_id}` post-build step {n} of {total} (`{label}`)"
+        try:
+            # Same confinement the slice's own `command.cwd` gets: a plan is
+            # trusted input, never trusted enough to run a process outside
+            # the build root.
+            cwd = confine_to_build_root(build_root, step.cwd) if step.cwd else build_root
+        except MaterialiseError as err:
+            return _PostOutcome("failed", None, f"{where} was refused: {err.message}")
+        resolution = _resolve_tool(step.tool, env)
+        if resolution.resolved is None:
+            return _missing_post_tool(where, step.tool, resolution.searched, policy)
+        result = _spawn_step(resolution.resolved, step.args, cwd, env, on_output, cancelled)
+        if result.cancelled:
+            # Deliberately the same message the slice's own command produces:
+            # one Ctrl-C cancelled one slice, and which step was in flight is
+            # not what the caller asked.
+            return _PostOutcome("cancelled", None, f"slice `{core_id}` cancelled")
+        if result.launch_error is not None:
+            # Both "the tool vanished since the check above" and "this step's
+            # `cwd` does not exist"; the OSError text names which.
+            return _PostOutcome("failed", None, f"{where} could not run: {result.launch_error}")
+        if result.exit_code != 0:
+            return _PostOutcome(
+                "failed", result.exit_code,
+                f"{where} terminated with exit code: {result.exit_code}",
+            )
+    return None
+
+
+#: MEASURED, and the reason the guard below is PRESENCE-based rather than
+#: freshness-based (tan-cli#615 review, MAJOR 2 -- answered by disclosure, with
+#: the measurement, rather than by the requested mtime check).
+#:
+#: A "the artefact must be newer than this run started" rule was implemented
+#: and then withdrawn, because it cannot tell the two cases apart:
+#:
+#:   * ORPHANED -- the app's CMakeLists.txt stopped defining the executable
+#:     target, so a previous run's binary lingers in `outputDir` and nothing
+#:     rewrites it. This is the case worth catching.
+#:   * UP TO DATE -- nothing changed, so `cmake --build .` correctly relinks
+#:     nothing and the (still valid, still current) binary keeps its old mtime.
+#:     This is the ordinary incremental rebuild, and it is the common case.
+#:
+#: In BOTH the artefact is untouched by this run, so any "newer than the run"
+#: rule refuses both. Measured end to end: with the freshness check in place, a
+#: second `tan build` with NO source change at all reported
+#: `failed: m55_hp [baremetal]` -- a false failure on the commonest workflow
+#: there is, strictly worse than the defect it was closing.
+#:
+#: The other candidate discriminators were measured too, and none separates
+#: the cases: `CMakeCache.txt`'s mtime is PRESERVED across all three runs
+#: (fresh / no-op / orphaned) and `Makefile`'s is REWRITTEN in all three, so
+#: neither is a signal. Comparing the artefact against the app's own source
+#: tree (make's own out-of-date rule) does separate them, but false-refuses
+#: whenever any file under `appDir` is touched without triggering a relink --
+#: a `git checkout`, a README edit, an editor swap file -- and re-deriving
+#: when an artefact is current is the build system's job, not tan's
+#: (`docs/adr/0001-pmt-contract-decoupling.md`).
+#:
+#: So `cmake --build .` exiting 0 is taken as the build system's own statement
+#: that the artefact is current, and STALENESS ACROSS A REMOVED TARGET IS A
+#: DISCLOSED LIMIT of this guard -- see [`_baremetal_artefact_refusal`], where
+#: it is listed beside the other two.
+
+
+def _output_dir_has_a_file(out_dir: Path) -> bool:
+    """Whether a slice's output directory holds at least one regular FILE.
+
+    Files only: `rglob` walks directories too, and an empty `CMakeFiles/`
+    left behind by the configure is not an artefact.
+
+    An `OSError` on a single entry (a broken symlink, a file deleted between
+    the walk and the `stat`, a permission hole) skips that entry rather than
+    taking the guard down -- one unreadable file is not evidence either way.
+
+    Presence, not freshness -- see the block comment above this function for
+    the measurement that ruled freshness out."""
+    if not out_dir.is_dir():
+        return False
+    for path in out_dir.rglob("*"):
+        try:
+            if path.is_file():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _baremetal_artefact_refusal(sl, build_root: Path) -> str | None:
+    """Why an `os: baremetal` slice whose tools all exited 0 must still be
+    reported `failed` -- `None` when there is nothing to refuse.
+
+    The second half of tan-cli#550. Running `postCommands` makes a COMPILE or
+    LINK error fail the slice honestly, but it does not close the issue's own
+    headline: an exit code is still not evidence that firmware exists. An app
+    defining no executable target configures, "builds", and exits 0 with an
+    empty output directory -- the issue's "green build and an empty output
+    directory", verbatim.
+
+    The evidence is the plan's own `artifacts.outputDir`, which alp-sdk #1344
+    added alongside `postCommands` and which the baremetal configure pins as
+    `CMAKE_RUNTIME_OUTPUT_DIRECTORY` -- where the SDK itself says the slice's
+    linked executables land, not a convention invented here.
+
+    THREE KNOWN LIMITS, all deliberate, none worked around:
+
+    1. Silent (`None`) when the plan names no `outputDir`. A plan from an
+       alp-sdk predating #1344 gives this guard nothing to judge by, and
+       inventing a location would fail slices that build fine. Those plans get
+       the `postCommands` half of the fix and not this half.
+    2. A baremetal slice whose app intentionally links no executable (a pure
+       `add_library` tree) is refused. Same trade the `os: zephyr` boilerplate
+       guard takes -- a core in `cores:` is firmware for that core, and a slice
+       producing nothing flashable has nothing for `tan flash`/`size`/`image`
+       to consume.
+    3. **A previous run's binary satisfies this guard.** Edit an app's
+       CMakeLists.txt to stop defining its executable target and rebuild IN
+       PLACE, and the orphaned binary from the earlier run is still sitting in
+       `outputDir`; the slice is reported `ok` and `tan flash` would write that
+       stale image as though it were current. Deleting the build directory (or
+       `tan clean`) is the only thing that surfaces it today. This one is a
+       DISCLOSURE, not a design preference: a freshness check was implemented
+       and withdrawn after measurement -- see the block comment above
+       [`_output_dir_has_a_file`] for what was tried and why every candidate
+       either false-failed the ordinary incremental rebuild or duplicated the
+       build system's own out-of-date rule."""
+    rel = sl.artifacts.get("outputDir") if isinstance(sl.artifacts, dict) else None
+    if not isinstance(rel, str) or not rel:
+        return None
+    try:
+        out_dir = confine_to_build_root(build_root, rel)
+    except MaterialiseError as err:
+        return (
+            f"core `{sl.core_id}` is declared `os: baremetal`, but the output directory "
+            f"its plan names cannot be checked: {err.message}"
+        )
+    if _output_dir_has_a_file(out_dir):
+        return None
+    return (
+        f"core `{sl.core_id}` is declared `os: baremetal`, but its build produced no "
+        f"artefact in `{rel}` -- the configure and every post-build step exited 0, yet "
+        f"nothing was linked there. tan pins `CMAKE_RUNTIME_OUTPUT_DIRECTORY` at that "
+        f"directory so `tan flash`/`size`/`image` can find the firmware, so an app whose "
+        f"CMakeLists.txt defines no executable target (`add_executable(...)`) builds "
+        f"nothing this core can run."
+    )
 
 
 def execute_slices(
@@ -855,6 +1155,11 @@ def execute_slices(
         # never reads a previous one's leftover.
         saw_no_workspace = False
         saw_no_zephyr_sdk = False
+        # `None` means "persist `message` verbatim" -- only a post-build
+        # refusal that carries host detail sets it (tan-cli#615 review,
+        # MAJOR 1). Re-bound per iteration so one slice's redaction can never
+        # be persisted as the next slice's reason.
+        manifest_message: str | None = None
 
         def _watch_for_no_workspace(line: str) -> None:
             nonlocal saw_no_workspace, saw_no_zephyr_sdk
@@ -864,66 +1169,49 @@ def execute_slices(
                 saw_no_zephyr_sdk = True
             on_output(line)
 
-        try:
-            # A context manager: closes stdout/stderr/stdin on every exit
-            # path (success, cancellation, exception) -- a bare `Popen(...)`
-            # here leaked the pipe's file object (a `ResourceWarning` under
-            # `-W error::ResourceWarning`, and a real fd leak across a long
-            # multi-slice run).
-            #
-            # start_new_session=True (POSIX: setsid) puts the child in its
-            # own process group so `_terminate` can `killpg` the whole tree
-            # instead of only the direct child; a documented no-op on
-            # Windows (subprocess.py's Windows `_execute_child` takes and
-            # ignores it), where `_terminate` uses `taskkill /T` instead.
-            with subprocess.Popen(
-                # tan-cli#510: the RESOLVED absolute path, never the bare
-                # `tool` identity -- see [`_resolve_tool`]'s docstring for
-                # why the availability check above and this spawn must
-                # share one resolution rather than two.
-                [resolved_tool, *spawn_args],
-                cwd=str(spawn_cwd),
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                start_new_session=True,
-            ) as proc:
-                if _drain_output(proc, _watch_for_no_workspace, cancelled):
-                    _terminate(proc)
-                    outcomes.append(
-                        SliceOutcome(
-                            sl.core_id,
-                            "cancelled",
-                            None,
-                            f"slice `{sl.core_id}` cancelled",
-                            resolved_tool=outcome_resolved_tool,
-                        )
-                    )
-                    continue
-                code = proc.wait()
-        except OSError as err:
+        # tan-cli#550: the spawn itself lives in [`_spawn_step`] so the
+        # post-build steps below run through the SAME Popen/drain/terminate
+        # path as the slice's own command -- one spawn implementation, not
+        # two that can drift on cancellation handling or fd hygiene.
+        step = _spawn_step(
+            resolved_tool, spawn_args, spawn_cwd, env, _watch_for_no_workspace, cancelled
+        )
+        if step.cancelled:
+            outcomes.append(
+                SliceOutcome(
+                    sl.core_id,
+                    "cancelled",
+                    None,
+                    f"slice `{sl.core_id}` cancelled",
+                    resolved_tool=outcome_resolved_tool,
+                )
+            )
+            continue
+        if step.launch_error is not None:
             # The tool vanished between the availability check above and
             # here, is a directory, lacks the executable bit, or is not a
-            # valid executable format -- any of these raise here rather than
-            # at the `_resolve_tool` precheck. A failed slice, never a
-            # crash. The base message already names both `tool` and
-            # `resolved_tool` explicitly (it IS the substance of what failed,
-            # not a redundant echo of it) -- `resolved_tool=` below still
-            # carries the SAME fact in the dedicated structured field.
+            # valid executable format -- any of these raise inside
+            # `_spawn_step` rather than at the `_resolve_tool` precheck. A
+            # failed slice, never a crash. The base message already names
+            # both `tool` and `resolved_tool` explicitly (it IS the substance
+            # of what failed, not a redundant echo of it) -- `resolved_tool=`
+            # below still carries the SAME fact in the dedicated structured
+            # field.
             outcomes.append(
                 SliceOutcome(
                     sl.core_id,
                     "failed",
                     None,
-                    f"failed to launch `{tool}` resolved to `{resolved_tool}`: {err}",
+                    f"failed to launch `{tool}` resolved to `{resolved_tool}`: "
+                    f"{step.launch_error}",
                     resolved_tool=outcome_resolved_tool,
                 )
             )
             continue
+        # Neither cancelled nor a launch failure, so `_spawn_step` reached
+        # `proc.wait()` and `code` is a real integer -- the only two shapes
+        # that leave it `None` are the two `continue`d above.
+        code = step.exit_code
 
         status = "succeeded" if code == 0 else "failed"
         if code == 0:
@@ -992,6 +1280,47 @@ def execute_slices(
                 f"that does."
             )
 
+        # tan-cli#550, half 1: run the plan's `postCommands`. `west build` and
+        # `bitbake` configure AND build in one invocation and carry none; a
+        # baremetal slice's `cmake -S ... -B .` only CONFIGURES, so its
+        # `cmake --build .` arrives here and MUST run before the slice can be
+        # called built. Gated on the slice's own command having succeeded --
+        # there is nothing to build on top of a failed configure -- and on the
+        # zephyr-evidence guard above, for the same reason.
+        if status == "succeeded" and sl.post_commands:
+            post = _run_post_commands(
+                sl.core_id, sl.post_commands, build_root, env, on_output, cancelled, policy
+            )
+            if post is not None:
+                # The failing step's own exit code becomes the slice's `rc`:
+                # unlike the evidence guards, this is not tan refusing a
+                # result, it is a real process that really failed. A step that
+                # never reached a process at all carries `None`, which the
+                # single `SliceOutcome` construction below already renders as
+                # a null `rc`.
+                #
+                # No early `continue` for the `cancelled`/`skipped` shapes:
+                # every path from here to that construction is gated on
+                # `status == "succeeded"`, so a non-succeeded post outcome
+                # already reaches it untouched. A second append site would be
+                # an untestable duplicate of the first (proven: a mutant that
+                # removed the `skipped` case from such a branch changed no
+                # observable field).
+                status, code, message = post.status, post.exit_code, post.message
+                # tan-cli#615 review, MAJOR 1: the missing-tool refusal's
+                # searched-PATH text must not reach the persisted
+                # `system-manifest.yaml` -- see [`SliceOutcome.manifest_message`].
+                manifest_message = post.manifest_message
+
+        # tan-cli#550, half 2: an exit code is not evidence that firmware
+        # exists. See [`_baremetal_artefact_refusal`] -- the same shape as the
+        # zephyr guard above, keyed on the plan's own `artifacts.outputDir`.
+        if status == "succeeded" and sl.backend == "baremetal":
+            refusal = _baremetal_artefact_refusal(sl, build_root)
+            if refusal is not None:
+                status = "failed"
+                message = refusal
+
         # On success, resolve the real on-disk artefact west produced so the
         # post-build manifest points downstream consumers (`run`/`size`/
         # `flash`/`image`) at the elf that exists, not a plan-time guess.
@@ -1012,11 +1341,19 @@ def execute_slices(
                 # the tool's REAL exit code even when the guard above
                 # overrode `status` to "failed" -- `west build` really did
                 # exit 0, the guard is refusing the RESULT, not the exit.
-                None if code < 0 else code,
+                #
+                # `code` is also `None` when a post-build step (tan-cli#550)
+                # never reached a process at all -- its tool was missing, its
+                # `cwd` escaped the build root, or the spawn raised -- which
+                # is the same "no single-integer exit code" case the signal
+                # death above is, and reaches the envelope's `rc` as null the
+                # same way.
+                None if code is None or code < 0 else code,
                 message,
                 output_artefact,
                 slice_build_dir,
                 resolved_tool=outcome_resolved_tool,
+                manifest_message=manifest_message,
             )
         )
 
