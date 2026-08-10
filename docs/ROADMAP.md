@@ -72,15 +72,19 @@ validly exercises this chain; `RSetType 2; r; g` mis-boots it.
 
 **Target 2 — a v0.4.1 user upgrades with no manual migration.** Their existing
 project, their existing `.alp/sdk-path`, their existing scripts and exit codes.
-Established by RUNNING the v0.4.1 oracle, never by reading `crates/`.
+Established by RUNNING the v0.4.1 oracle while one existed; `crates/` is now
+deleted (tan-cli#269), so what remains of that measurement is the frozen
+capture store at `python/tests/fixtures/oracle_captures/` and the
+`contract/envelopes/*` goldens. Cite those; do not reconstruct an answer from
+memory or from a doc.
 
 ## The migration
 
 One arc: **the Rust `tan` becomes a Python `tan`, and `tan` becomes the only
-planner and executor.** The release path and planner have already moved:
-`python/tan/planner/` plans in-process and the Python executor runs the plan.
-The remaining end state is to remove the frozen Rust oracle and alp-sdk's
-original planner copy once their parity roles are fully captured.
+planner and executor.** The release path, the planner and now the repo itself
+have moved: `python/tan/planner/` plans in-process, the Python executor runs
+the plan, and `crates/` is deleted. The remaining end state is alp-sdk dropping
+its original planner copy.
 
 ### tan — `v0.5.0-rc1` · opt-in release candidate
 
@@ -103,7 +107,7 @@ Gated on Target 1 green on silicon.
 `SUPPORTED_CLI_VERSION` moves; the Python `tan` becomes what customers get.
 Gated on the RC having soaked, not on a date.
 
-### tan — `v0.6.0` · known oracle divergences
+### tan — `v0.6.0` · retire the oracle, and the known divergences
 
 The command-surface work once planned for this milestone SHIPPED AS `0.5.0`
 and its issues moved to that milestone, so `v0.6.0` names the next release
@@ -113,40 +117,38 @@ and nothing already delivered. The full command surface landed inside the
 `support-bundle` — tan-cli#260, #257), `model` (#253), `new-som` (#254),
 `monitor` (#255), `faultdecode` (#256), and `renode --sim-mode` (#77) are all
 real by `v0.5.0-rc4`. What is still deferred to `v0.6.0` is narrower — the
-known oracle divergences filed during the port (see the `deferred` label).
+known oracle divergences filed during the port (see the `deferred` label) —
+and the oracle's own retirement, which landed here rather than at `v0.7.0`.
 
 Deferred is not a bug backlog — the `deferred` label means *chosen*, and each
 issue records what the oracle does so the choice can be re-read later.
 
-### tan — `v0.7.0` · retire the oracle
+**`crates/` is deleted** (tan-cli#269): the two crates, `Cargo.toml`,
+`Cargo.lock`, the Rust-oracle parity suite under `python/tests/parity/`, and
+the five cargo CI jobs. `tan` is the sole planner and executor, which is the
+end state ADR-0020 names bar one item — alp-sdk still carries its own Python
+planner copy.
 
-`crates/` deleted, `alp-sdk`'s Python planner removed, `tan` the sole planner and
-executor. The end state ADR-0020 names.
-
-The blocking question is not code deletion. `crates/` is currently the **oracle**
-for live behaviour parity, so deleting it before every required observation is
-captured would make uncaptured behaviour unrecoverable. The envelope registry no
-longer blocks deletion: Python conformance and source↔registry gates now enforce
-the shipping contract, while `contract.rs` owns only Rust-oracle entries.
-
-**Pulled forward deliberately.** The direction is to get off Rust as fast as is
-safe, so Rust's *load-bearing* roles are removed in order rather than waiting for
-the version number:
+The three-step order this was gated on, all now done:
 
 1. **Out of the release path — at `v0.5.0-rc1`.** The RC ships PyInstaller
    freezes and no cargo build at all. After that tag, nothing customers receive
    is Rust.
-2. **Out of the correctness path.** Freeze the oracle's observed behaviour into
-   committed fixtures *while a working binary still exists*. The only item that
-   gets harder the longer it waits: once `crates/` is gone, anything never
-   captured is unrecoverable. A frozen fixture also beats a live oracle, which
-   can itself drift.
-3. **Out of the repo.** Safe once 1 and 2 are done; before deletion, repoint or
-   retire the remaining registry entries owned by Rust paths.
+2. **Out of the correctness path.** The oracle's observed behaviour was frozen
+   into committed captures *while a working binary still existed* — the only
+   item that got harder the longer it waited, since anything never captured is
+   unrecoverable once the binary is gone. Those captures survive the deletion,
+   at `python/tests/fixtures/oracle_captures/`; a frozen answer also beats a
+   live oracle, which can itself drift.
+3. **Out of the repo.** `contract/` was the one thing that could have been
+   silently un-enforced by the deletion, since `crates/tan-cli/tests/
+   contract.rs` was one of its two gates. It is not: `python/tests/
+   conformance/test_contract_envelopes.py` AUTO-DISCOVERS every case via
+   `CONTRACT.iterdir()`, where the Rust side listed 17 by hand — same 17 cases,
+   and a new one is gated with nothing to remember.
 
-Issues whose fix lives in `crates/` were moved off the RC for the same reason:
-`crates/` is frozen, so they are blocked by policy, not effort. Each carries a
-comment saying what survives the port and what dies with the oracle.
+Issues whose fix lived in `crates/` and was never ported die with it. Each
+carries a comment saying what survived the port and what did not.
 
 ### Alp IDE — `v0.5.x` beta, `v0.6.x` stable
 
@@ -167,16 +169,26 @@ planning outright.
 
 Internal. Each is here because it has already cost a round.
 
-- **Measure the oracle by RUNNING it.** `target/debug/tan.exe`, never by reading
-  `crates/` or docs. Source-reading has given a wrong answer twice.
+- **The oracle is gone; cite a CAPTURE, never a recollection.** The rule used
+  to be "measure the oracle by RUNNING `target/debug/tan.exe`, never by reading
+  `crates/` or docs" — source-reading gave a wrong answer twice. `crates/` is
+  deleted (tan-cli#269), so there is nothing left to run: what an oracle
+  behaviour WAS is now answerable only from `python/tests/fixtures/
+  oracle_captures/`, `contract/envelopes/*`, or a provenance comment in
+  `python/tan/**` that records the original measurement. If none of those
+  covers the question, the answer is not recoverable — decide the behaviour on
+  its merits and say so, rather than asserting what the oracle "would have"
+  done.
 - **A conclusion is not a measurement.** Two full rounds of wrong work came from
   believing a stale comment over the adjacent example.
 - **Parity is measured against `PINNED_SDK_TAG`, on a clean LF-native clone.**
   A dirty or differently-reffed `alp-sdk` produces confident nonsense in both
   directions.
-- **Do not add product work to `crates/`** — it is the frozen oracle. `contract/`
-  is live shared API data: edit it when the Python emit-site gates and consumer
-  compatibility rules require the change.
+- **`contract/` is live shared API data** — edit it when the Python emit-site
+  gates and consumer compatibility rules require the change. Its sole enforcer
+  is now `python/tests/conformance/test_contract_envelopes.py`; keep that
+  suite's auto-discovery intact rather than replacing it with a hand-written
+  case list.
 - **A frozen tree is measured at its own freeze vendor point; a shipped
   Python surface is measured at `PINNED_SDK_TAG`.** Every parity gate has to
   pick one of the two — never compare a frozen tree against a moving pin.
@@ -187,6 +199,7 @@ Internal. Each is here because it has already cost a round.
 - **No exit codes behind pipes.** `cmd | tail` reports `tail`'s status.
 - **The bench is serial and reservation-gated.** Verify `acquired:` before every
   write and every reportable read.
-- tan-cli gates on its cargo checks plus its own pytest suite. alp-sdk gates on
-  `bash scripts/test-all.sh`. alp-sdk-vscode gates on its pnpm suite. They are
-  not interchangeable.
+- tan-cli gates on its own pytest suite (`python -m pytest tests -q` from
+  `python/`) — the cargo checks that used to sit beside it are gone with
+  `crates/`. alp-sdk gates on `bash scripts/test-all.sh`. alp-sdk-vscode gates
+  on its pnpm suite. They are not interchangeable.

@@ -2,9 +2,15 @@
 """Run the committed ``contract/envelopes`` fixtures against the PYTHON tan and
 assert byte-compatibility with the recorded expectations.
 
-These are the same goldens the Rust binary is held to by
-``crates/tan-cli/tests/contract.rs`` -- this is the cross-language conformance
-gate. The harness below mirrors that Rust one exactly; every deviation would
+**This is the ONLY gate over ``contract/envelopes``.** It used to be one of
+two: ``crates/tan-cli/tests/contract.rs`` ran the same goldens against the Rust
+binary, and tan-cli#269 deleted it. That removed a duplicate, not the
+enforcement -- ``contract.rs`` named its 17 cases in 17 hand-written
+``contract_case!`` lines, while ``FIXTURES`` below AUTO-DISCOVERS them by
+walking ``CONTRACT.iterdir()``, so this side already covered everything the
+Rust side did and a NEW case is gated here with nothing to remember to add.
+
+The harness mirrors the Rust one it replaced; every deviation would
 produce a false diff rather than a real one:
 
 * ``args.txt`` is **one argv token per line**, deliberately NOT shell-split
@@ -25,9 +31,9 @@ produce a false diff rather than a real one:
   rewrite over every string leaf would launder a real drift inside
   ``issues[].message``.
 
-Key ORDER is deliberately not asserted -- the Rust side diffs two
-``serde_json::Value``s whose map equality is order-insensitive, and Python dict
-equality is too. Pin key order in the owning module's own tests, not here.
+Key ORDER is deliberately not asserted -- Python dict equality is
+order-insensitive (as was the retired Rust side's ``serde_json::Value``
+compare). Pin key order in the owning module's own tests, not here.
 """
 import json
 import os
@@ -94,14 +100,17 @@ NOT_PORTED = {
 #: oracle, so the shared golden cannot describe both sides at once.
 #:
 #: This is the opposite direction from :data:`NOT_PORTED` above -- there the
-#: port does LESS -- and it is why these five are declared rather than simply
-#: regenerated. The golden is the CROSS-LANGUAGE contract: the same file holds
-#: the Rust binary via ``crates/tan-cli/tests/contract.rs``, and ``crates/`` is
-#: frozen. Regenerating it to match the port turns the Rust conformance run red
-#: and quietly redefines "the contract" as "whatever the port last emitted".
-#: A deliberate divergence has to be DECLARED, not written into the shared file.
-#: (Measured: regenerating these five reddened ``test (ubuntu-latest)``,
-#: ``test (macos-latest)`` and ``test (windows-latest)`` on the PR.)
+#: port does LESS.
+#:
+#: These five were declared rather than regenerated for a reason that has since
+#: EXPIRED: the golden was the CROSS-LANGUAGE contract, holding the Rust binary
+#: too via ``crates/tan-cli/tests/contract.rs``, and regenerating it reddened
+#: ``test (ubuntu-latest)``/``test (macos-latest)``/``test (windows-latest)``
+#: on the PR (measured). tan-cli#269 deleted that gate, so re-recording these
+#: five is now an ordinary change to ``contract/`` rather than something policy
+#: forbids -- tan-cli#502 is where that happens. Until it lands they stay
+#: declared here, and a declared divergence must still be DECLARED rather than
+#: silently written into the shared file.
 #:
 #: Four of the five are tan-cli#138. ``create_launch_draft`` restores the
 #: v0.3.1 ``preLaunchTask`` default for the three build target kinds, which
@@ -148,9 +157,10 @@ DELIBERATE_DIVERGENCE = {
         "`error[ALP-B001]: required key 'cores' is missing` at exit 1 (measured, alp-sdk "
         "99e47476) -- so the golden records tan calling a board clean that the SDK rejects, "
         "and the port now answers exit 2 `validate.schema-violation`. Declared rather than "
-        "re-recorded for this map's own reason: the file is the CROSS-LANGUAGE contract the "
-        "frozen Rust binary is held to by `crates/tan-cli/tests/contract.rs`, and "
-        "`crates/tan-core/src/validate.rs:282` carries the identical dead gate. The clean "
+        "re-recorded for this map's own reason: the file was the CROSS-LANGUAGE contract "
+        "the frozen Rust binary was held to by `crates/tan-cli/tests/contract.rs`, whose "
+        "`crates/tan-core/src/validate.rs:282` carried the identical dead gate (both deleted "
+        "in tan-cli#269). The clean "
         "envelope's SHAPE is covered instead by "
         "`test_validate_command.py::test_text_and_json_formats_are_unchanged`, on a board.yaml "
         "that is genuinely clean."

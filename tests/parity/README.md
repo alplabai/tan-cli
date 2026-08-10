@@ -165,11 +165,11 @@ against for build-plans).
 **It defaults to `python/tan/templates/vendored/` — the tree the shipped
 binary actually reads.** That is the point of the default: this gate measures
 a surface that tracks `PINNED_SDK_TAG`, so it must point at the tree that
-moves with the pin. The Rust wizard's copy at
-`crates/tan-core/src/wizard/vendored/` is frozen at its own v0.14.0 vendor
-point (`docs/ROADMAP.md`'s `crates/` freeze) and keeps its own SDK-free
-`cargo test` for internal consistency; pass `--vendored crates/tan-core/src/
-wizard/vendored` with a v0.14.0 checkout to check it by hand.
+moves with the pin. The Rust wizard kept a second copy, frozen at its own
+v0.14.0 vendor point with its own SDK-free `cargo test`; tan-cli#269 deleted
+it with `crates/`, so `python/tan/templates/vendored/` is now the only
+vendored scaffold tree in the repo. `--vendored <path>` still points this
+script at an arbitrary tree by hand.
 
 Unlike `seam1_field_diff.py`, it is optionally self-skipping — no reachable
 alp-sdk checkout (`--sdk` / `$ALP_SDK_ROOT` / a sibling `alp-sdk` checkout) is
@@ -187,16 +187,18 @@ python3 tests/parity/scaffold_byte_parity.py --sdk /path/to/an/alp-sdk/checkout
 
 `kconfig_fixture_parity.py` guards the same class of drift for `tan
 kconfig`'s field contract. The shipping tests in
-`python/tests/commands/test_kconfig_command.py` and the frozen Rust modules
-consume a vendored byte-copy of alp-sdk's canonical `--emit kconfig` contract anchor at
+`python/tests/commands/test_kconfig_command.py` consumes a vendored byte-copy
+of alp-sdk's canonical `--emit kconfig` contract anchor at
 `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` (same relative
-path in both repos) so `parse_kconfig`/`Envelope<KconfigData>` can be tested
-against the SDK's real field shape without a Zephyr/west workspace. This
+path in both repos) so the parse/envelope path can be tested
+against the SDK's real field shape without a Zephyr/west workspace. (The
+retired Rust oracle `include_str!`d the same file from two modules.) This
 script byte-diffs the vendored copy against the pinned alp-sdk checkout's
 own copy — wired into `seam1-plan-shape` (it reuses that job's `alp-sdk`
 checkout rather than cloning a second time). Like `scaffold_byte_parity.py`
-it self-skips with no reachable alp-sdk checkout (`tan-core`'s own `cargo
-test` already covers the vendored copy's internal consistency); unlike it,
+it self-skips with no reachable alp-sdk checkout
+(`test_kconfig_command.py` already covers the vendored copy's internal
+consistency); unlike it,
 a fixture simply absent at the *pinned* ref is ALSO not a fail (see
 `PINNED_SDK_TAG`'s comment in `.github/workflows/parity.yml` and the
 script's own docstring) — that branch only fires for a pin predating
@@ -218,33 +220,33 @@ argv, pip package sets, the `env` map, the per-OS native-lib hints); its own
 `_comment` names tan as a real reader of those facts since tan-cli PR #55.
 alp-sdk polices its *scripts*
 against it with `scripts/check_bootstrap_manifest.py` — but that gate cannot
-see a tan-cli checkout, so nothing upstream catches
-`crates/tan-core/src/bootstrap/manifest.rs` drifting from the producer. This
+see a tan-cli checkout, so nothing upstream catches this repo's own copy
+drifting from the producer. This
 script byte-diffs the vendored copy at
 `contract/fixtures/bootstrap/manifest.json` (which the consumer and its tests
 `include_str!`) against the pinned checkout's `metadata/bootstrap.json`. The
 relative paths deliberately differ between the repos — it is a test fixture
 here, SDK metadata there.
 
-Paired with `cargo test`, a failure here has a follow-on: `manifest.rs`'s
-`the_fallback_matches_the_real_manifest_field_for_field` asserts the
-hand-ported fallback constants (the path taken against any SDK predating
-#917) equal this fixture field-for-field, so re-vendoring a changed manifest
-fails that test until the constants are updated too.
+A failure here has a follow-on:
+`python/tests/commands/test_bootstrap_command.py::test_the_fallback_constants_match_the_real_manifest_field_for_field`
+asserts the hand-ported fallback constants (the path taken against any SDK
+predating #917) equal this fixture field-for-field, so re-vendoring a changed
+manifest fails that test until the constants are updated too. Until
+tan-cli#269 a `cargo test` in `manifest.rs` asserted the same thing on the
+Rust side; the Python case is now the only one.
 
 **This script is no longer a CI gate.** It was removed from
 `.github/workflows/parity.yml` when the pin moved to v0.15.0-rc1, because it
 measured a frozen fixture against a moving pin — a comparison that can only
 ever fail. `contract/fixtures/bootstrap/manifest.json` is frozen at the
-v0.14.0 vendor point alongside `crates/tan-core/src/bootstrap/manifest.rs`
-(`docs/ROADMAP.md`'s `crates/` freeze), and per that document's Standing
+v0.14.0 vendor point, and per `docs/ROADMAP.md`'s Standing
 Rules a frozen tree is measured at its OWN freeze vendor point, not at
-`PINNED_SDK_TAG`. The frozen fixture keeps its real gate: `manifest.rs`'s
-`the_fallback_matches_the_real_manifest_field_for_field` cargo test, which
-asserts the hand-ported fallback constants equal the fixture field-for-field.
-The Python side has the mirror of that check —
-`python/tests/commands/test_bootstrap_command.py::test_the_fallback_constants_match_the_real_manifest_field_for_field`
-— reading the same frozen fixture, and it runs in `python/tests`.
+`PINNED_SDK_TAG`. The frozen fixture keeps its real gate:
+`python/tests/commands/test_bootstrap_command.py::test_the_fallback_constants_match_the_real_manifest_field_for_field`,
+which asserts the hand-ported fallback constants equal the fixture
+field-for-field and runs in `python/tests`. (Its Rust twin in `manifest.rs`
+went with `crates/` in tan-cli#269.)
 
 There is no shipped Python vendored copy for this to guard: `tan/core/
 bootstrap.py` reads `metadata/bootstrap.json` LIVE off the bound SDK root, so
@@ -269,17 +271,18 @@ version `tan doctor`'s `zephyrSdk` check names in its `west sdk install
 the alp-sdk side by `scripts/check_toolchain_lock.py` — but that gate's scope
 is CI *workflows* (`.github/workflows/*.yml`); it cannot see a tan-cli
 checkout, so nothing upstream caught
-`crates/tan-core/src/host_env.rs`'s `ZEPHYR_SDK_INSTALL_VERSION` holding a
+`tan/commands/doctor_cmd.py`'s `ZEPHYR_SDK_INSTALL_VERSION` holding a
 hand-ported copy of the same fact on the side that gate cannot reach. This
 script byte-diffs the vendored copy at
-`contract/fixtures/toolchains/toolchains.json` (which `host_env.rs`
-`include_str!`s) against the pinned checkout's `metadata/toolchains.json`.
+`contract/fixtures/toolchains/toolchains.json` against the pinned checkout's
+`metadata/toolchains.json`.
 
-Paired with `cargo test`, a failure here has a follow-on:
-`host_env.rs`'s `zephyr_sdk_install_version_matches_the_real_toolchain_lock`
+A failure here has a follow-on:
+`python/tests/commands/test_doctor_command.py::test_zephyr_sdk_install_version_matches_the_real_toolchain_lock`
 asserts `ZEPHYR_SDK_INSTALL_VERSION` equals this fixture's `zephyrSdk.version`
 field, so re-vendoring a bumped lock fails that test until the constant is
-updated too.
+updated too. (Its Rust twin in `host_env.rs` went with `crates/` in
+tan-cli#269.)
 
 Self-skips with no reachable alp-sdk checkout, like the gates above. Unlike
 the bootstrap/kconfig gates, there is no "predates the feature" branch:

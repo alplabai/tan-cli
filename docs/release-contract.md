@@ -50,11 +50,12 @@ v<major>.<minor>.<patch>-<pre>        e.g. v0.4.0-rc1 pre-release
     body is sliced from — checked here, at PR time, because `release.yml` only
     discovers it missing after four freezes, under a tag that is already
     immutable.
-- **`Cargo.toml` is deliberately NOT read.** It versions the frozen Rust
-  crates on their own cadence and no release asset comes from them. Bumping it
-  for a release achieves nothing; leaving it behind breaks nothing. It used to
-  be the gate (`grep -m1 '^version = ' Cargo.toml`), and that is precisely how
-  a correct `v0.5.0` tag failed before a single asset was built.
+- **`Cargo.toml` is not read, and since tan-cli#269 does not exist.** It
+  versioned the Rust crates on their own cadence and no release asset came from
+  them. It used to be the gate (`grep -m1 '^version = ' Cargo.toml`), and that
+  is precisely how a correct `v0.5.0` tag failed before a single asset was
+  built. Recorded so a future reader does not go looking for a fourth version
+  file on the theory that one was overlooked.
 - The whole reconciliation lives in `python/scripts/version_check.py`, which
   `release.yml`'s `verify-version` job runs as
   `python python/scripts/version_check.py --selftest --tag "$GITHUB_REF_NAME"`.
@@ -71,9 +72,9 @@ they cannot disagree with each other or with the tag:
 | `v0.4.0` | `false` | `true` |
 | `v0.4.0-rc1` | `true` | `false` |
 
-`publish_crates` is deleted for every tag (the assets no longer come from
-`crates/`, so publishing `alp-tan-cli` would ship a different program under the
-same name). `publish_npm` is a **real job** and runs only on a FINAL tag — its
+`publish_crates` is deleted for every tag (the assets never came from the
+crates any more, and `crates/` itself is gone as of tan-cli#269, so publishing
+`alp-tan-cli` would ship a different program under the same name). `publish_npm` is a **real job** and runs only on a FINAL tag — its
 own `if` is `startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name,
 '-')`, so a pre-release skips it entirely, the same way it skips `make_latest`.
 Even on a final tag the publish itself is **opt-in and off**: the job reads

@@ -13,17 +13,15 @@
 `).
 # This line is the blanket floor under them, not a replacement for them.
 #
-# Every tracked file in this repo is text -- .py .rs .yaml .txt .md .json .c
-# .conf .exit .yml .sh .toml .h .js .zsh .ps1 .lock .fish .env .bash -- so
+# Every tracked file in this repo is text -- .py .yaml .txt .md .json .c
+# .conf .exit .yml .sh .toml .h .js .zsh .ps1 .fish .env .bash -- so
 # `text=auto` has no binary to misdetect here. Adding a binary asset later
 # needs its own `-text` line.
 * text=auto eol=lf
 
-# Vendored `alp-sdk --emit scaffold` output is baked into the binary via
-# include_str! and byte-compared against a fresh LF emit by the cross-repo
-# parity gate. Force LF so a Windows CI checkout (autocrlf=true) cannot
-# CRLF-convert these files and break byte-exactness / the vendored test.
-crates/tan-core/src/wizard/vendored/** text eol=lf
+# The cross-repo parity scripts byte-compare vendored trees against a fresh LF
+# emit from a live alp-sdk checkout. Force LF so a Windows CI checkout
+# (autocrlf=true) cannot CRLF-convert them and break byte-exactness.
 tests/parity/** text eol=lf
 
 # The Python port's copy of that same tree (it reads its own package data --
@@ -49,16 +47,6 @@ contract/fixtures/bootstrap/** text eol=lf
 # Same reason again: a Windows checkout with autocrlf=true would CRLF-convert
 # it and fail that byte-diff against the LF original.
 contract/fixtures/toolchains/** text eol=lf
-
-# The shipped shell completion scripts, baked in via include_str!. Two
-# independent reasons, either one sufficient: a CRLF bash/zsh script is
-# broken ON the target shell (a trailing `\r` rides into every command), and
-# the issue #92 clap-parity gate anchors its layout markers on bare `\n`
-# (`global_args=(\n`), so a CRLF checkout makes it panic "completion script
-# layout changed" instead of checking anything — a misleading green-to-red on
-# the windows-latest leg only, since ubuntu/macos and a `core.autocrlf=false`
-# dev box never see it.
-crates/tan-cli/src/commands/completion_scripts/** text eol=lf
 
 # The installers are fetched and executed on a customer's machine. A CRLF
 # `install.sh` fails on every POSIX host with `bad interpreter: /usr/bin/env

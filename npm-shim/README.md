@@ -105,8 +105,8 @@ swap restores the previous install rather than losing it.
    `checksums.txt` (see [How it works](#how-it-works)), which is what lets this
    shim install correctly at both a raw-asset tag and an archive tag without
    caring which one `package.json`'s version happens to be. `Cargo.toml` is
-   deliberately **not** part of this check any more: it versions the retired
-   Rust crates, not the release assets.
+   **not** part of this check, and since tan-cli#269 does not exist: it
+   versioned the retired Rust crates, never the release assets.
 2. Tag `v<version>` and push. `release.yml`:
    - freezes the four target binaries and attaches them to the GitHub release
      (`build` + `release` jobs);
@@ -115,8 +115,9 @@ swap restores the previous install rather than losing it.
      `startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')`
      (`release.yml`), so a `-rc*`/`-preN` tag skips this job entirely, the same
      way it skips `make_latest`. The crates.io job is gone entirely — the
-     assets are no longer built from `crates/`, so publishing `alp-tan-cli`
-     would ship a different program under the same name.
+     assets were never built from `crates/`, which is itself deleted
+     (tan-cli#269), so publishing `alp-tan-cli` would ship a different program
+     under the same name.
    - even on a final tag, publishing is OPT-IN and OFF by default: the job
      reads `NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}`
      (`release.yml`) and, unless that repository *variable* is set to `true`,

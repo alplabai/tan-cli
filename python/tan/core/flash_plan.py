@@ -915,8 +915,8 @@ def openocd_program_word(text: str) -> str:
     every already-recorded `program <path> verify ...` parity fixture
     byte-identical, since neither recorded case contains whitespace or a
     backslash" -- was never actually true: both frozen fixtures were captured
-    with `oracle_fixtures.CAPTURE_PLATFORM = "win32"`
-    (`tests/parity/oracle_fixtures.py:75`), so the `<ORACLE-ROOT-0>` scratch
+    with `oracle_captures.CAPTURE_PLATFORM = "win32"`
+    (`tests/oracle_captures.py`, tan-cli#269), so the `<ORACLE-ROOT-0>` scratch
     root each one interpolates is a native Windows path and carries
     backslashes UNCONDITIONALLY -- the predicate this docstring used to
     describe could never once observe the "no backslash" branch on the one

@@ -1,31 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# tan CI — the four cargo gates, the Python package job (installs the
-# declared package + runs `python/tests`, `ALP_SDK_ROOT`-gated via
-# `sdk_parity`), the npm-shim platform-mapping check, plus the two promises
-# nothing else checks: that `tan` still builds and passes on every host
-# platform it ships a release asset for, and that the declared MSRV is real.
+# tan CI — the Python package job (installs the declared package + runs
+# `python/tests`, `ALP_SDK_ROOT`-gated via `sdk_parity`), the npm-shim
+# platform-mapping check, and the sdist/wheel build-floor proof.
 #
-# WHICH OF THESE ARE ACTUALLY REQUIRED (tan-cli#392)
-# ==================================================
-# None of the Python ones. Measured 2026-08-02, `gh api
-# repos/alplabai/tan-cli/branches/<b>/protection` -- `main` and `dev` carry the
-# IDENTICAL six contexts (strict: true, enforce_admins: true):
+# BRANCH PROTECTION MUST BE REPOINTED (tan-cli#392, tan-cli#269)
+# ==============================================================
+# Measured 2026-08-02, `gh api
+# repos/alplabai/tan-cli/branches/<b>/protection` -- `main` and `dev` carried
+# the IDENTICAL six required contexts (strict: true, enforce_admins: true):
 #
 #     lint | test (ubuntu-latest) | test (windows-latest)
 #     test (macos-latest) | msrv | seam1 -- plan-shape parity
 #
-# Five are cargo jobs on the crate #269 retires. The sixth, parity.yml's
-# `seam1-plan-shape`, does run Python -- eight invocations, not the three that
-# issue's text claims (two `tests/parity/test_seam1_*` pytest files, four
-# repo-root `tests/parity/*_parity.py` scripts, and two `python/tests/gates`
-# runs) -- but not one of them is the shipping `python/tests` suite the release
-# assets are frozen from. So every merge in this repo has been gated on the
-# retired crate plus a source-scanning gate suite.
+# FIVE OF THOSE SIX NO LONGER EXIST. `lint`, the three `test (*)` legs and
+# `msrv` were cargo jobs on `crates/`, which tan-cli#269 deleted; they are
+# gone from this file. A required context that never reports does not fail --
+# it sits PENDING forever and blocks the merge, so protection has to be edited
+# before anything can land after this change. Branch protection is a repo
+# SETTING, not a file, and cannot be fixed from here.
 #
-# Branch protection is a repo SETTING, not a file, so it cannot be fixed from
-# here. What CAN live here is something worth requiring, and two jobs already
-# produce one. The exact context strings to add to protection:
+# The exact context strings to require INSTEAD, all of which run today:
 #
 #   `python`
 #       this file's own job below. One OS, whole suite INCLUDING tests/gates --
@@ -74,52 +69,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  # Platform-independent gates — run once, not per-OS.
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-          # The action otherwise exports RUSTFLAGS=-D warnings, which would also
-          # deny warnings in registry deps and diverge from the local gates. The
-          # clippy step below denies warnings explicitly, where it belongs.
-          rustflags: ""
-      - name: fmt
-        run: cargo fmt --all --check
-      - name: clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-  # tan is a cross-platform CLI whose path handling (os.pathsep env append,
-  # .venv discovery, `.exe` suffixes) differs per host — test all three.
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          rustflags: "" # keep parity with the local gates (see the lint job)
-      - name: build
-        run: cargo build --all-targets --locked
-      - name: test
-        run: cargo test --locked
-
-  # The PYTHON package is what the 0.5.0 release assets are frozen from, and
-  # until this job existed NOTHING in CI ran it: release.yml's `gates` job calls
-  # this workflow, so a tag published a PyInstaller freeze of code no CI step had
-  # ever imported, let alone tested. The cargo jobs above cannot see it -- they
-  # compile a different language in a different directory.
+  # The PYTHON package is what the release assets are frozen from, and until
+  # this job existed NOTHING in CI ran it: release.yml's `gates` job calls this
+  # workflow, so a tag published a PyInstaller freeze of code no CI step had
+  # ever imported, let alone tested. The cargo jobs that used to sit above it
+  # could not see it -- they compiled a different language in a different
+  # directory -- and tan-cli#269 has since deleted them outright. THIS job and
+  # parity.yml's `python-tests` matrix are now the whole of the correctness
+  # gate; there is nothing else left to hide behind.
   #
   # Zero failures is the gate, not a count. The suite is still growing as ports
   # land (~1149 passed / 81 skipped / 4 xfailed at the time of writing), and
@@ -233,9 +191,10 @@ jobs:
       # duplicate-key refusal before reaching its intended "unresolvable
       # preset" assertion), is FIXED in the same tan-cli#485 change -- the
       # fixture now substitutes the existing `preset:` value instead of
-      # appending a second one. `python/tests/parity/` carries no repo-level
-      # freeze (that applies to `crates/`, `contract/`, and `test_oracle_
-      # parity.py`'s `CASES` table specifically), so this was in scope to fix
+      # appending a second one. `python/tests/parity/` carried no repo-level
+      # freeze (that applied to `crates/`, `contract/`, and `test_oracle_
+      # parity.py`'s `CASES` table specifically -- of those three only
+      # `contract/` still exists, tan-cli#269), so this was in scope to fix
       # directly rather than route around.
       #
       # Not a tag -- alp-sdk had not cut one past v0.15.0-rc1 at the time of
@@ -409,26 +368,3 @@ jobs:
             exit 1
           }
           echo "setuptools 68.1.2 rejects project.license, as it must"
-
-  # `rust-version` in Cargo.toml is a promise to anyone building from source;
-  # a dependency bump can silently break it. Check, don't hope.
-  msrv:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: read rust-version from Cargo.toml
-        id: msrv
-        shell: bash
-        run: |
-          v="$(grep -m1 '^rust-version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          # An unmatched grep exits 0 through the pipe; without this the job would
-          # silently fall back to stable and report green having checked no MSRV.
-          [ -n "$v" ] || { echo "::error::no rust-version found in Cargo.toml"; exit 1; }
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "declared MSRV: $v"
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.msrv.outputs.version }}
-          rustflags: "" # keep parity with the local gates (see the lint job)
-      - name: check on MSRV
-        run: cargo check --workspace --all-targets --locked

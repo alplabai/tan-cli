@@ -471,6 +471,36 @@ def test_an_unset_path_resolves_from_the_default_path_never_the_cwd(monkeypatch,
     assert resolved is None or Path(resolved).is_absolute()
 
 
+def test_as_f64_answers_none_for_an_integer_too_large_for_an_f64():
+    """tan-cli#499 defect 8, the arm the first pass left open (REVIEW round).
+
+    `core/size.py`'s three casts were guarded and this one -- the reader that
+    supplies `mram_mb` / `soc_flash_mb` / `tcm_kb` -- was not, so the SAME input
+    class still reached the SAME exit-5 point through a different door. Python's
+    `json` reads an arbitrarily long integer literal exactly, so a 400-digit
+    `mram_mb` in a SoC JSON arrived here as an `int` and `float()` raised
+    `OverflowError: int too large to convert to float`, escaping to `size`'s
+    catch-all: measured `exit 5 size.internal-failure`, `data.slices` EMPTY,
+    where `tan 0.4.1` answers `exit 0` with totals null and
+    `budget_note "unreadable SoM preset for E1M-AEN801"`.
+
+    `None` -- "no such number" -- for a value serde_json could never have
+    produced; the region is then left unresolved rather than guessed. Measured
+    after the fix, the same SoC JSON is `exit 0`."""
+    from tan.commands.size_cmd import _as_f64
+
+    assert _as_f64(10**400) is None
+    assert _as_f64(-(10**400)) is None
+    # Everything representable is unchanged, including the non-finite float that
+    # `json.loads` produces for a `1e400` LITERAL (a different input class -- it
+    # is resolved to "no budget" downstream, in `core.size._saturating_u64`).
+    assert _as_f64(5.5) == 5.5
+    assert _as_f64(2**63) == float(2**63)
+    assert _as_f64(float("inf")) == float("inf")
+    assert _as_f64(True) is None
+    assert _as_f64("5.5") is None
+
+
 def test_clean_str_drops_a_padded_tbd_too():
     """#276: `_clean_str` (the SoM-preset `silicon`/`silicon_variant` reader)
     already trimmed before comparing; this pins that it still does, alongside

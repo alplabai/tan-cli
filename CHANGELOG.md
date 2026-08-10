@@ -62,6 +62,50 @@ All notable changes to `tan` are documented here. Format follows
     CI: it needs a real alp-sdk checkout, an optionally-bootstrapped west
     workspace and a real build.
 
+### Removed
+
+- **The Rust oracle is retired: `crates/tan-core`, `crates/tan-cli`,
+  `Cargo.toml` and `Cargo.lock` are deleted, and with them the
+  Rust-oracle parity suite and the five cargo CI jobs.** Command-surface
+  parity is reached, so the port IS the definition and a second
+  implementation to measure against is no longer worth its cost. 193 tracked
+  files of Rust, 29 parity modules under `python/tests/parity/`, and the
+  `lint` / `test (ubuntu|windows|macos-latest)` / `msrv` jobs in `ci.yml`.
+  `parity.yml`'s `seam2` and `first blink` jobs now install the Python package
+  and drive the `tan` console script where they used to
+  `cargo build --locked --bin tan`; nothing else about what they assert
+  changed. (#269)
+  - **`contract/` is unaffected and still enforced.** `crates/tan-cli/tests/
+    contract.rs` was one of its two gates, listing 17 cases in 17 hand-written
+    `contract_case!` lines. The other,
+    `python/tests/conformance/test_contract_envelopes.py`, AUTO-DISCOVERS the
+    same 17 by walking `CONTRACT.iterdir()` -- so the deletion removes a
+    duplicate, not the enforcement, and a new case is gated with nothing to
+    remember to add. Verified by running the conformance suite after the
+    deletion.
+  - **The frozen captures survive the binary, relocated.**
+    `python/tests/parity/oracle_fixtures/` is now
+    `python/tests/fixtures/oracle_captures/`, read through the new
+    `tests.oracle_captures` module. Every byte in it was written by a real run
+    of `tan 0.4.1` and stays a valid record of what that binary printed; what
+    is gone is any way to write a new one, which is why
+    `test_oracle_fixture_capture_platform_convention.py` -- the guard against a
+    recorded value being hand-edited -- matters more now than it did.
+    `.github/workflows/capture-platform-fixtures.yml`, whose whole job was
+    re-capturing on three runners, is deleted.
+  - **`python/tests/parity/test_planner_emit_parity.py` is NOT part of this.**
+    It measures tan's relocated planner against alp-sdk's
+    `scripts/alp_orchestrate/`, an axis the Rust oracle was never on, and it
+    stays exactly where it is. It also already covers everything the deleted
+    `crates/tan-cli/tests/live_run_generate.rs` did, and more: a real
+    `tan generate --output` per `board.yaml` across all twelve relocated emit
+    targets, byte-compared against `alp_project.py`'s own front door.
+  - **Branch protection must be repointed before anything can merge.** `main`
+    and `dev` require six contexts and five of them (`lint`, the three
+    `test (*)` legs, `msrv`) no longer exist. A required context that never
+    reports does not fail -- it stays pending and blocks the merge. The exact
+    strings to require instead are in `.github/workflows/ci.yml`'s header.
+
 ### Changed
 
 - **`tan debug-config --core <id>` now refuses a `--core` matching no build
@@ -79,6 +123,48 @@ All notable changes to `tan` are documented here. Format follows
   `--target-kind` to let it infer. (#489)
 
 ### Fixed
+
+- **The tan-cli#490 installer test that reds on macOS from the Rust-oracle
+  retirement onward now probes for the shell capability it needs instead of
+  merely for `bash` on `PATH`.** `test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic`
+  proves its mechanism by making bash warn about an invalid locale — but its
+  guard was `shutil.which("bash") is None`, presence only. macOS ships bash
+  3.2.57 as `/bin/bash`, which has no setlocale warning at all (its
+  `locale.c:180` returns a bool and prints nothing; the string
+  `cannot change locale` occurs nowhere in the 3.2 sources, verified against
+  the tarball), so the guard passed and the assertion then failed with output
+  exactly `'reached'`. That had been masked for months:
+  `actions-rust-lang/setup-rust-toolchain@v1` carries an internal step named
+  "Unbork mac" that runs `brew install bash`, so every macOS job silently got
+  Homebrew bash 5.x on `PATH` as a side effect of a Rust toolchain it needed
+  for something else; dropping the action drops the bash. The guard is now a
+  behavioural probe — the invalid-locale `export` form run once — and the skip
+  names the resolved binary and its version rather than skipping silently. It
+  is deliberately not a version compare: bash 3.2 lacks the warning and 5.2
+  has it, but which release in between introduced it was never established, so
+  a version floor would be inferring the behaviour rather than measuring it.
+  Re-adding `brew install bash` to the workflow was rejected for the same
+  reason — it pins CI to a host detail the test never intended to depend on
+  and leaves the guard wrong for every other bash-3.2 host. Verified against a
+  locally built GNU bash 3.2.0: the pre-fix test fails with `'reached'`, the
+  fixed one skips. (#269)
+  - **The half of that test that needs no special shell is now its own test
+    and runs everywhere.** `test_install_sh_pins_lc_all_as_an_export_inside_the_subshell`
+    pins `install.sh:465-492`'s actual line
+    (`verify_out="$(export LC_ALL=C; "$1" --version 2>&1)"`) and refuses the
+    command-prefix shape. It reads text and spawns nothing, yet it sat behind
+    the mechanism assertions and so never ran on any host whose bash could not
+    warn — losing the real #490 regression guard exactly where the shell was
+    least ordinary.
+  - **The other live-`bash` call sites were re-measured, not assumed.**
+    `tests/commands/test_completion_command.py` drives the emitted
+    `BASH_SCRIPT` in a real `bash -c` at three places, all of which had been
+    running on Homebrew bash 5 on macOS until now. Run under a locally built
+    bash 3.2.0 and under bash 5.2.21, every `COMPREPLY` they assert on came
+    back identical, rc 0, empty stderr: the script uses indexed arrays,
+    `[[ ]]`, `local`, `$(( ))` and `compgen` and nothing newer than 3.2. No
+    change needed; `_bash_available`'s docstring now records the measurement
+    so the next reader does not have to redo it.
 
 - **`tan/planner/` re-synced against alp-sdk `ccd34f06`, closing nine planner
   defects that were already fixed upstream.** `tan/planner/` is a hash-audited
@@ -226,6 +312,68 @@ All notable changes to `tan` are documented here. Format follows
     that answered, so a regression that silently picks whichever variant
     serialises first still goes red. Verified green bound to BOTH `f30f4d4b`
     (one value) and `ccd34f06` (two).
+
+- **`tan debug-config` wrote a launch configuration for a project it had no
+  evidence of, and accepted a `--core` no such project has.** The two
+  survivors their merging PRs recorded as `Refs`, not `Closes`.
+  - **An omitted `--target-kind` on a directory with no signal at all now
+    refuses instead of defaulting to `native-host`.** With no
+    `build/system-manifest.yaml` and no `board.yaml` declaring `som.sku`,
+    `parse_target_kind(None)`'s `native-host` default wrote an `Alp: Native
+    Sim Debug` entry into `.vscode/launch.json` and reported `exitCode 0`
+    with `issues: []` — the "ran it from the wrong cwd" case #476 names in
+    its own words. #508 fixed only the half where `--project` did not exist
+    (the directory was CREATED); a directory that already exists still got
+    the file. Now `debug-config.target-kind-unresolved` at
+    `ValidationFailure` (2), naming the four kinds to pass instead, checked
+    before anything can write. `native-host` is unchanged where the project
+    says so — `infer_target_kind` still answers it outright when every slice
+    a build produced is `native_sim` — and `--target-kind native-host` still
+    asks for that draft on purpose. A deliberate divergence from the Rust
+    oracle, which exits 0 with the native-host draft (measured); no frozen
+    parity case or conformance golden pins it, since all five frozen
+    `debug-config` argvs pass `--target-kind` explicitly. Closes #476.
+  - **A `--core` naming a core the SoM does not have is refused pre-build,
+    not silently ignored.** #489 gave the explicit-`--target-kind` path its
+    own `--core`-vs-manifest guard, but only where a manifest EXISTS. With no
+    build yet, `--target-kind zephyr-mcu --server jlink --core no_such_core`
+    exited 0 and left `device` as the literal `<resolved-device>` — a
+    launch.json that looks valid and fails later in the debugger with nothing
+    connecting the failure back to this command. Worse off the J-Link path,
+    measured: `--server openocd` reported only
+    `debug-config.sdk-identity-key-absent` (silent about the core) and
+    `--server pyocd` reported `issues: []`. #508 left this half open because
+    `--core` pre-build also selects which core's SDK-published debug-probe
+    identity to resolve (alp-sdk#1026), which "a guard keyed only on 'does a
+    manifest exist' cannot tell apart from a typo without also consulting the
+    SDK's own published core list". It now consults it: the SoC JSON's
+    `cores[].id`, unioned with the `variants[].debug.jlink_device` keys. Same
+    `debug-config.core-unknown` code and exit 2 as the with-manifest arm,
+    naming the cores it could have meant — and naming the alp-sdk checkout the
+    core list came from, plus the tier that chose it, since `debug-config`
+    publishes no `sdk` envelope block to look it up in. Two ordered
+    authorities, never merged: a real build decides whenever a manifest
+    exists, and both arms refuse only what they can PROVE unknown — no slices
+    and no resolvable SDK core list means "cannot be asked", which stays
+    silent, so a legitimate pre-build `--core m55_hp` still resolves exactly
+    as before. That same rule decides WHICH checkout may refuse: with no
+    `--sdk-root` and no project pin, tan falls through to the machine-global
+    default, which `tan bootstrap` may have last pointed at an unrelated
+    project — measured, one project and one `--core m55_hp` flipped between
+    exit 0 and exit 2 on two checkouts differing only in `e8.json`'s
+    `cores[]`. A global default another project's bootstrap set cannot prove
+    anything about this project's SoM, so it does not refuse; every other tier
+    does. Closes #477.
+  - Two tests were INVERTED rather than deleted, since each pinned one of
+    these defects as intended behaviour:
+    `test_an_omitted_target_kind_still_defaults_to_native_host_with_no_project_signal`
+    and `test_an_unknown_core_with_no_manifest_at_all_is_a_known_open_gap`. A
+    third,
+    `test_jlink_device_names_the_known_cores_for_a_core_the_map_has_no_entry_for`,
+    now drives the `sdk-identity-core-unresolved` arm with `a32_cluster` —
+    a core alp-sdk's own `e8.json` really has and publishes no
+    `jlink_device` entry for — instead of the `m55_typo` that is now refused
+    outright.
 
 - **`tan flash` no longer claims `swd_probe`'s J-Link write landed when
   JLinkExe's own transcript shows it did not -- and no longer doubts one it
@@ -527,7 +675,9 @@ All notable changes to `tan` are documented here. Format follows
   open; `test_an_omitted_target_kind_still_defaults_to_native_host_with_no_
   project_signal` protects that default on purpose, and tan-cli#456 scoped
   its own inference fix to projects whose `board.yaml` DECLARES hardware.
-  (#476)
+  (#476) **Superseded later in this same release:** that half is now
+  `debug-config.target-kind-unresolved` and the test named here was inverted
+  — see the first entry in this section.
 
 - **`tan debug-config` reported a bad flag VALUE as a tan crash.**
   `--target-kind`, `--server`, an unsupported target+server pairing, `--svd`
@@ -553,7 +703,9 @@ All notable changes to `tan` are documented here. Format follows
   second, legitimate pre-build job here -- selecting which core's
   SDK-published debug-probe identity to resolve (alp-sdk#1026) -- that a
   manifest-existence guard alone cannot tell apart from a typo. That half
-  stays open; tracked in the linked issue. (#477)
+  stays open; tracked in the linked issue. (#477) **Superseded later in this
+  same release:** it is refused now, against the SDK's published core list —
+  see the first entry in this section.
 
 - **`tan debug-config` could destroy a customer's hand-authored
   `.vscode/launch.json`, in three separate ways, plus two smaller merge

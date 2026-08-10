@@ -2608,7 +2608,7 @@ def test_resolve_dev_root_rejects_dev_itself():
 
 def test_plan_yocto_wic_refuses_the_traversal_target_with_the_original_wording():
     """The refusal MESSAGE is oracle-parity-pinned for a plain out-of-`/dev/`
-    target (`./oops`, `tests/parity/oracle_fixtures/test_flash_oracle_parity.
+    target (`./oops`, `tests/fixtures/oracle_captures/test_flash_oracle_parity.
     json`'s `yocto-target-must-be-a-device` case) -- this proves the
     traversal shape gets the IDENTICAL wording, not a new one: the fix only
     tightens the CONDITION `plan_yocto_wic` checks, never the text."""
