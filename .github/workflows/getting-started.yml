@@ -78,6 +78,13 @@ concurrency:
   group: getting-started-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  # Least privilege by default (tan-cli#435). The install step's own comment
+  # already states the requirement verbatim -- "`contents: read` is enough to
+  # list public releases" -- it just had no block to say it in. The token is
+  # there to lift the UNAUTHENTICATED per-IP rate limit, not to write.
+  contents: read
+
 jobs:
   first-install:
     name: "first install -- install.sh -> bootstrap -> init -> build"
@@ -87,7 +94,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # ---- 1. the installer, as a shell script ----------------------------
 
@@ -133,7 +142,7 @@ jobs:
       # about the documented path working on a realistic host; "does Zephyr
       # v4.4.1 support the newest CPython released this month" is a different
       # question and does not belong on this job's critical path.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -315,8 +324,9 @@ jobs:
       # bootstrap's real work. A dedicated parent is also what the guard's own
       # remedy tells a customer to create.
       - name: clone alp-sdk into a dedicated workspace parent
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-workspace/alp-sdk
@@ -792,7 +802,7 @@ jobs:
 
       - name: upload first-install logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: first-install-logs
           path: |
