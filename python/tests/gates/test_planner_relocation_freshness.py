@@ -206,10 +206,30 @@ from tests.conftest import sdk_root
 #:     CHOICE-symbol form `CONFIG_<MOD>_LOG_LEVEL_<LEVEL>=y` (the old int form
 #:     was promptless and could not build for ANY key).
 #:
-#: alp-sdk#1344 is deliberately NOT in this range: it is still OPEN and
-#: CONFLICTING upstream, so tan-cli#550/#551 stay open and are NOT claimed by
-#: this bump.
-PINNED_SDK_COMMIT = "ccd34f0648cc4f26a3230f337935050cd999d8a0"  # alp-sdk origin/dev
+#: `ccd34f06` -> `7d58ef32` (tan-cli#493/#591). Three upstream commits are in
+#: this range and only two touch a tracked file:
+#:   - `e85ba808` (alp-sdk#1246, `metadata/libraries/**` pin repairs) -- no
+#:     `scripts/` file at all.
+#:   - `a712a275` (alp-sdk#1344) -> `__init__.py`, `buildplan.py`,
+#:     `orchestrator.py`. An `os: baremetal` slice planned one
+#:     `cmake -S <app> -B <buildDir>` step, which only CONFIGURES: the PLANNER
+#:     half is re-synced here (a `postCommands` step per baremetal slice, the
+#:     configure's `-B` relative to its own cwd, the `-DALP_*` settings in
+#:     both shapes CMake accepts, and `alp-baremetal.cmake` as the baremetal
+#:     `_slice_config_artefact`). It had to move: `7d58ef32` is its child, and
+#:     `metadata/socs/alif/ensemble/e8.json`'s new `zephyr_peripherals_dtsi`
+#:     (which the re-synced `zephyr_board.py` REQUIRES) exists only in trees
+#:     that also contain `a712a275`, so the emit-parity oracle cannot be
+#:     pinned between the two. The CONSUMER half is NOT ported and is not
+#:     claimed: `tan`'s executor still does not run a plan's `postCommands`,
+#:     so a baremetal slice still only configures -- tan-cli#550/#551 stay
+#:     OPEN, and the freshness hashes below say nothing about them.
+#:   - `7d58ef32` (alp-sdk#1352) -> `scripts/gen_zephyr_board.py` only, a
+#:     HAND_PORT file; see HAND_PORT_PINNED_SDK_COMMIT below.
+#: Every other file in both tables is byte-identical between `ccd34f06` and
+#: `7d58ef32` -- re-hashed one by one, not assumed -- so this bump re-freezes
+#: nothing unaudited.
+PINNED_SDK_COMMIT = "7d58ef32d0a730c902e335adfd7764c2ec500ba5"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -218,8 +238,8 @@ PINNED_SDK_COMMIT = "ccd34f0648cc4f26a3230f337935050cd999d8a0"  # alp-sdk origin
 #: single upstream file to pin and are out of scope for this hash check).
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
-    "__init__.py": "739a0288487997d6f1be7dc1f47fcf05b34a16386c0c81e8fe4eaadcfb84e3f0",
-    "buildplan.py": "65542fca35c7fa960192fe8245539d9ea47192072d5c00747db7517b9d1bc66f",
+    "__init__.py": "03b610ce02d1819d09ad3d5d233bbbd46b950bdc09448748b17ebc5a1b57f272",
+    "buildplan.py": "1b4bed7e0d64b824feced1a482271ecb397ca8afa5d6fc1a48ea688413280059",
     "carveout.py": "23e7920110c333a1f3cbf51ce186c4c2cebdb3ef1573c06df64ca1e9a80be478",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
@@ -230,7 +250,7 @@ PINNED_HASHES: dict[str, str] = {
     "manifest.py": "930aa9c453fd86b487f66ec84be8f074a53f22a6077b0310390e176fee7918ba",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
     "models.py": "6d33258874d6f732d66668d30c22fd644e02de2fb9f35e7b497ddd2d81164109",
-    "orchestrator.py": "01c7d90fc50bf85974fdbd228fac8319d687a121f45bc64c9528dd1fed3debff",
+    "orchestrator.py": "ef28eb5d256b83e1f6f00486809edbd7b0115e03accf5fc40c0b3376b075aec0",
     "partition.py": "7f37224ff1aa05dd6d943424a664bc4d115dc05853762072854d43ea3628591c",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
@@ -313,7 +333,29 @@ PINNED_HASHES: dict[str, str] = {
 #:     `_m33_sm` `west flash --host <board-ip>` rule. Both change
 #:     `--emit scaffold` bytes, which is why `python/tan/templates/vendored/`
 #:     is re-vendored in this same change.
-HAND_PORT_PINNED_SDK_COMMIT = "ccd34f0648cc4f26a3230f337935050cd999d8a0"  # alp-sdk origin/dev
+#:
+#: `ccd34f06` -> `7d58ef32` (tan-cli#493/#591). ONE file in this table moved:
+#: `scripts/gen_zephyr_board.py`, by alp-sdk#1352 -- the upstream fix for both
+#: issues, reported against this hand-port and fixed at the source. The other
+#: eight are byte-identical between the two commits (re-hashed one by one, not
+#: assumed), so nothing else is re-frozen past an unaudited delta. What the
+#: re-sync carries: the Ensemble part designator, the family display string and
+#: the peripherals-overlay include now come from the SoC JSON (`part`,
+#: `family`, the new `zephyr_peripherals_dtsi`) instead of being E8 generator
+#: constants applied to every `E1M-AEN*` SKU; a SoC declaring no overlay is
+#: REFUSED rather than inheriting the E8's; four fail-open paths raise (a
+#: half-authored per-core `<role>_slot0` map, a `silicon_variant:` matching no
+#: `order_code`, partition extents/overlaps, and an `mcuboot` base off the App
+#: MRAM window); the `atoc`-absent message names the alp-sdk vintage
+#: (alp-sdk#1289) instead of the consumer's SoM preset; and the `_defconfig`
+#: console pads come from `metadata/pinmux/aen.yaml`.
+#:
+#: This re-sync REQUIRES a bound SDK whose `metadata/socs/alif/ensemble/e8.json`
+#: declares `zephyr_peripherals_dtsi` -- measured: against `ccd34f06` the AEN
+#: board emit now refuses, and `test_tan_generate_writes_a_zephyr_board_tree_
+#: byte_for_byte` fails. That is why PINNED_SDK_COMMIT and `parity.yml`'s
+#: PINNED_SDK_TAG move to the same commit rather than staying behind.
+HAND_PORT_PINNED_SDK_COMMIT = "7d58ef32d0a730c902e335adfd7764c2ec500ba5"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -322,7 +364,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "ccd34f0648cc4f26a3230f337935050cd999d8a0"  # alp-
 #: `scripts/alp_project_loader.py`, so a filename-keyed table (like
 #: PINNED_HASHES above, where the relocation is 1:1) cannot hold this.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "351d20dee0499605b9015f982edc7793f3a321109886ac762578ab79e3ad1af3",
+    "scripts/gen_zephyr_board.py": "75958a138c4fc24d39815edcc6a2a009a8f1d31360aae4b8fc3e5a82f05e0d77",
     "scripts/alp_project_loader.py": "d5f142173a13cfac9e130ef8fde90d35d6bb92d21d152925a275b3e8bdaa49db",
     "scripts/alp_template.py": "6e62ac385154cef4decb8bb54eb9fae27e45f9797faffe8159cedca770f1f352",
     "scripts/alp_project_emit/__init__.py": "62c4742bc373e7fafcd8aa864ad7692d3c05b610c6d7457023aeb82c98847d88",

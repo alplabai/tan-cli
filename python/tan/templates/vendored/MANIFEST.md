@@ -20,6 +20,14 @@ from an un-revendored SDK change.
   unchanged. So the vendor point below stays where it is, and the two refs are
   allowed to differ for exactly this reason.
 
+  The tan-cli#493/#591 re-sync moved both refs again, `ccd34f06` →
+  `7d58ef32`, and again needed **no re-vendoring**. Six `examples/**` files
+  did move in this range (five `board.yaml`s and
+  `power-timing/littlefs-keyvalue/src/main.c`), but none is a scaffold
+  template or a catalog entry. Verified, not assumed: `scaffold_byte_parity.py
+  --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
+  tree unchanged.
+
 - **Current vendor point (all templates):** **`f30f4d4b`** (alp-sdk `dev`,
   the commit `parity.yml`'s `PINNED_SDK_TAG` named when this was captured) —
   re-vendored by the tan-cli#543/#544/#545 planner re-sync. **Eleven** files
