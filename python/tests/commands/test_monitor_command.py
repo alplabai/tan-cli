@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -412,6 +413,30 @@ def test_text_mode_still_inherits_stdout(monkeypatch):
     `tan monitor > board.log`."""
     kwargs = _spawn_kwargs(monkeypatch, ["--port", "COM7"])
     assert kwargs.get("stdout") is None, kwargs
+
+
+def test_child_stdout_is_the_real_stderr_stream_when_it_is_healthy(monkeypatch):
+    """The DEVNULL fallback above is only reachable when `sys.__stderr__` is
+    absent or closed. On the ordinary path -- a real, open, fd-backed stream
+    -- `_child_stdout(True)` must hand back THAT stream, not DEVNULL: a
+    mutant that collapses the healthy branch straight to `return
+    subprocess.DEVNULL` (i.e. `_child_stdout = lambda json_mode: None if not
+    json_mode else subprocess.DEVNULL`) silently drops every board byte
+    under `--format json` while still returning *something* falsy-adjacent
+    for `stdout=`, and neither test above catches it: the None-stderr and
+    closed-stderr cases both already expect DEVNULL, and the d6 stdout test
+    only asserts `is not sys.stdout`, which DEVNULL also satisfies. Built and
+    confirmed RED against exactly that mutant before this test was kept (see
+    the PR receipt)."""
+    fd = os.open(os.devnull, os.O_WRONLY)
+    stream = os.fdopen(fd, "w")
+    try:
+        monkeypatch.setattr(monitor_cmd.sys, "__stderr__", stream, raising=False)
+        assert monitor_cmd._child_stdout(True) is sys.__stderr__
+        assert monitor_cmd._child_stdout(True) is stream
+        assert monitor_cmd._child_stdout(True) is not monitor_cmd.subprocess.DEVNULL
+    finally:
+        stream.close()
 
 
 def test_child_stdout_falls_back_to_devnull_when_there_is_no_real_stderr(monkeypatch):

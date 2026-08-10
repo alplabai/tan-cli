@@ -1728,19 +1728,35 @@ class Outcome:
 
 
 def _refusal(
-    exit_code: ExitCode, code: str, lines: list[str], data: dict[str, object]
+    exit_code: ExitCode,
+    code: str,
+    lines: list[str],
+    data: dict[str, object],
+    issues: list[Issue] | None = None,
 ) -> Outcome:
-    """A refusal before any step ran: ONE `bootstrap.<code>` issue whose message
-    is `" ".join(lines)`, and those same lines as the text output (which is what
+    """A refusal before any LATER step ran: the `bootstrap.<code>` issue whose
+    message is `" ".join(lines)`, ON TOP of whatever warnings the run had
+    already recorded -- those same lines as the text output (which is what
     `doctor --build --fix` and `build`'s auto-bootstrap surface).
 
     The join is why `data.missingPrerequisites` has to exist: an install command
     contains the same spaces the join used, so the split is not recoverable.
+
+    `issues` mirrors `_fatal`'s own parameter and the same reasoning applies:
+    it is ALWAYS `log.take_issues()` at a call site reachable after a
+    `log.warn(...)` (tan-cli#491 defect 10 fixed exactly this loss on `_fatal`;
+    the `host_python is None` refusal below is the one `_refusal` call site
+    that comes after `log.warn("yocto-host", ...)` / `log.warn(*skew)`, and
+    would otherwise discard both silently, the same way the relocation refusal
+    once did). It defaults to `None` because most `_refusal` call sites in this
+    file run before `log` has recorded anything, so passing nothing there is a
+    correct no-op, not an oversight -- unlike `_fatal`, where `issues` has no
+    default and every call site must say so explicitly.
     """
     return Outcome(
         exit_code,
         data,
-        [Issue(f"bootstrap.{code}", "error", " ".join(lines))],
+        [*(issues or []), Issue(f"bootstrap.{code}", "error", " ".join(lines))],
         list(lines),
     )
 
@@ -2464,12 +2480,18 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # Unreachable: `check_prerequisites` sets exactly one of the two. Stated
         # as a refusal rather than an `assert` (stripped under `-O`) or a bare
         # fall-through, because the alternative is spawning `None -m venv`.
+        # `issues=log.take_issues()`: this refusal is reached AFTER the
+        # `yocto-host` and `python-floor-skew` warnings above may have fired,
+        # so dropping the log here would be the same tan-cli#491 defect 10
+        # `_fatal` was fixed for -- the "Unreachable:" note above is the only
+        # thing that has kept it from mattering in practice.
         return (
             _refusal(
                 ExitCode.INTERNAL_FAILURE,
                 "internal-failure",
                 ["the prerequisite gate returned neither an interpreter nor a refusal"],
                 payload(),
+                issues=log.take_issues(),
             ),
             reported_project,
             sdk,

@@ -692,9 +692,8 @@
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
-      "emittedBy": "crates/tan-cli/src/commands/pinmux.rs",
-      "literal": "code: \"pinmux.sdk-root-unresolved\"",
-      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "emittedBy": "python/tan/commands/pinmux_cmd.py",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. `crates/` was deleted by tan-cli#601; the real emit site is now `pinmux_cmd.py`'s pinmux-context resolution, fixed by this PR (tan-cli#497 defect 7) to name the rejected `--sdk-root` value via `rejected_sdk_root_message` rather than the old bare string. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "pinmux.table-empty",

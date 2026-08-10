@@ -1088,17 +1088,17 @@ def test_every_init_outcome_carries_the_sdk_block(tmp_path):
     expected = {"root": sdk.as_posix(), "sourceTier": "sdkRootFlag"}
 
     preview = envelope(run_tan(*_init_sdk_argv(sdk, "--preview"), cwd=tmp_path))
-    assert preview["sdk"] == expected, preview
+    assert preview.get("sdk") == expected, preview
 
     written = envelope(run_tan(*_init_sdk_argv(sdk), cwd=tmp_path))
-    assert written["sdk"] == expected, written
+    assert written.get("sdk") == expected, written
     assert written["data"]["sdkPinned"] == sdk.as_posix()
 
     (tmp_path / "board.yaml").write_text("# local edit\n", encoding="utf-8")
     refused = envelope(run_tan(*_init_sdk_argv(sdk), cwd=tmp_path))
     assert refused["exitCode"] == 3, refused
     assert [i["code"] for i in refused["issues"]] == ["init.would-overwrite"]
-    assert refused["sdk"] == expected, refused
+    assert refused.get("sdk") == expected, refused
 
     failed = envelope(
         run_tan(
@@ -1107,7 +1107,7 @@ def test_every_init_outcome_carries_the_sdk_block(tmp_path):
         )
     )
     assert [i["code"] for i in failed["issues"]] == ["init.invalid-template"]
-    assert failed["sdk"] == expected, failed
+    assert failed.get("sdk") == expected, failed
 
 
 def test_the_sdk_block_reports_the_discovery_tier_too(tmp_path):

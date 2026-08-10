@@ -61,14 +61,17 @@ def rejected_sdk_root_message(sdk_root: str, consequence: str) -> str:
     loader-marker check REJECTED, naming the value the caller typed.
 
     `--sdk-root` is TERMINAL (I-31), so a path without `scripts/alp_project.py`
-    resolves to nothing rather than falling through to a lower tier. Seven
-    commands answered that with the SAME string they use when no flag was given
-    at all -- "Use --sdk-root, place the project near an alp-sdk checkout, ...",
+    resolves to nothing rather than falling through to a lower tier. Five
+    commands (`generate`, `model build`, `new-som`, `pinmux`, `validate`) still
+    dropped the rejected path on the floor, and four of those (all but
+    `pinmux`) answered with the SAME string they use when no flag was given at
+    all -- "Use --sdk-root, place the project near an alp-sdk checkout, ...",
     i.e. recommending the flag the caller had just passed -- with the failing
-    value nowhere in the envelope and nowhere in the stderr text either
-    (tan-cli#497 defect 7). A user who typos `--sdk-root ~/alp-sdk-typo` was
-    told to pass `--sdk-root`, and could not see WHICH path had been rejected or
-    why, on the one surface that knew both.
+    value nowhere in the envelope and nowhere in the stderr text either.
+    `pinmux` used a message of its own with the same gap (tan-cli#497 defect
+    7). A user who typos `--sdk-root ~/alp-sdk-typo` was told to pass
+    `--sdk-root`, and could not see WHICH path had been rejected or why, on the
+    one surface that knew both.
 
     `consequence` is the caller's own "and so this is what you got instead"
     clause, because it differs per command (no pinmux table read, nothing
