@@ -656,6 +656,136 @@ def test_fish_target_completion_lists_every_valid_generate_target():
     assert "ipc-contract-h" in listed
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#503: bash's OTHER two fixed-index reads. The `--format` value list
+# above was the first consumer of the subcommand scan; the `$cword -eq 1`
+# subcommand gate and the per-command flag `case` still read
+# `${COMP_WORDS[1]}`, so a leading global flag made both miss entirely. These
+# were the frozen oracle's own bytes -- `crates/` was deleted in tan-cli#269,
+# so this port owns them now.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_offers_subcommands_past_a_leading_global_flag():
+    """`tan --sdk-root /x <TAB>` used to offer not one of the 32 subcommand
+    names: the gate that emits them was `[[ $cword -eq 1 ]]`, and `--sdk-root
+    /x` puts the cursor at word 3."""
+    reply = _bash_complete(["tan", "--sdk-root", "/x", ""])
+    assert "validate" in reply
+    assert "size" in reply
+    assert "faultdecode" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_offers_per_command_flags_past_a_leading_global_flag():
+    """`tan --sdk-root /x size --<TAB>` used to fall to the `*)` arm, because
+    `${COMP_WORDS[1]}` was `--sdk-root` rather than `size`, so none of
+    `size`'s own three flags were offered."""
+    reply = _bash_complete(["tan", "--sdk-root", "/x", "size", "--"])
+    assert "--build-root" in reply
+    assert "--board" in reply
+    assert "--fail-over-budget" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_still_offers_subcommands_at_the_first_word():
+    """Regression guard for the shape that already worked: replacing `[[
+    $cword -eq 1 ]]` with the scan must not lose the ordinary `tan <TAB>`."""
+    reply = _bash_complete(["tan", ""])
+    assert "validate" in reply
+    assert "faultdecode" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_offers_subcommands_past_a_valueless_global_flag():
+    """`tan --verbose <TAB>`: a boolean global flag consumes no following
+    word, so the very next word IS the subcommand slot. This shape was broken
+    the same way (`$cword` is 2, not 1) and is fixed by the same scan."""
+    reply = _bash_complete(["tan", "--verbose", ""])
+    assert "validate" in reply
+    assert "size" in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_does_not_offer_subcommands_in_a_flag_value_slot():
+    """`tan --sdk-root <TAB>` is completing `--sdk-root`'s VALUE -- a path --
+    not a subcommand. The scan steps past the cursor word there, and that
+    overshoot is what `at_value` detects: without it, the empty `$subcmd`
+    would be read as "no subcommand typed yet" and the completion would start
+    offering 32 command names where a directory belongs."""
+    reply = _bash_complete(["tan", "--sdk-root", ""])
+    assert "validate" not in reply
+    assert "size" not in reply
+
+
+@pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
+def test_bash_completion_offers_version_at_the_root_only():
+    """`--version` is root-only: all 32 subcommands refuse it (29 with
+    Click's `No such option: --version (Possible options: --verbose)`, and
+    `quality`/`lock`/`migrate` by forwarding it to `west`, which answers
+    `unexpected arguments: ['--version']`). The capture had it in the
+    always-offered set, so tab-completion taught an argv every subcommand
+    rejects at exit 2."""
+    assert "--version" in _bash_complete(["tan", ""])
+    assert "--version" not in _bash_complete(["tan", "size", "--"])
+    assert "--version" not in _bash_complete(["tan", "doctor", "--"])
+    assert "--version" not in _bash_complete(["tan", "--sdk-root", "/x", "validate", "--"])
+    # The control: `--verbose`, the flag Click suggests in its own rejection
+    # message, IS accepted everywhere and must still be offered.
+    assert "--verbose" in _bash_complete(["tan", "size", "--"])
+
+
+def test_bash_subcommand_flag_list_matches_the_declared_global_surface():
+    """The bash script's per-subcommand `$global_flags` must equal the one
+    table the parser itself reads (`tan.core.global_flags.GLOBAL_FLAGS`) plus
+    `--format` and `--help`, which are declared separately -- and `$root_flags`
+    must add exactly `--version` on top. Pinning it to `GLOBAL_FLAGS` rather
+    than to a retyped literal is what stops the script and the parser drifting
+    a second time."""
+    from tan.core.global_flags import GLOBAL_FLAGS
+
+    def _list(name: str) -> list[str]:
+        line = next(
+            line for line in BASH_SCRIPT.splitlines()
+            if line.strip().startswith(f"local {name}=")
+        )
+        return line.split('="', 1)[1].rstrip('"').split()
+
+    global_flags = _list("global_flags")
+    assert set(global_flags) == set(GLOBAL_FLAGS) | {"--format", "--help"}
+    assert "--version" not in global_flags
+    assert _list("root_flags") == ["$global_flags", "--version"]
+
+
+def test_zsh_offers_version_at_the_root_only():
+    """zsh's `$global_args` is spliced into every per-subcommand `_arguments`
+    arm, so an entry there is offered on all 32. `--version` is now spliced
+    into the root `_arguments -C` call instead, and appears nowhere else."""
+    lines = ZSH_SCRIPT.splitlines()
+    carriers = [line for line in lines if "--version[Show version]" in line]
+    assert len(carriers) == 1, carriers
+    assert carriers[0].strip().startswith("_arguments -C")
+    assert carriers[0].rstrip().endswith("'--version[Show version]'")
+    # Control: `--help` IS accepted on every subcommand and must stay in the
+    # per-arm set.
+    assert any(line.strip() == "'--help[Show help]'" for line in lines)
+
+
+def test_fish_offers_version_at_the_root_only():
+    """fish's flag completions are unconditional unless given an `-n`
+    condition; `--version` now carries `__fish_use_subcommand`, the same
+    condition the script's own subcommand list on line 2 uses."""
+    line = next(
+        line for line in FISH_SCRIPT.splitlines() if line.endswith("-l version -d 'Show version'")
+    )
+    assert line == (
+        "complete -c tan -n '__fish_use_subcommand' -l version -d 'Show version'"
+    )
+    # Control: `--help` is accepted everywhere and stays unconditional.
+    assert "complete -c tan -l help -d 'Show help'" in FISH_SCRIPT
+
+
 def test_subcommand_format_overrides_a_leading_root_format():
     """`--format` declared after the subcommand name still wins over a
     leading root-position value, matching `debug_config_cmd.debug_config`'s

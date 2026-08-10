@@ -188,6 +188,33 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **A global flag before the subcommand made bash tab-completion go blank, and
+  all three shells offered a `--version` every subcommand refuses.** Two
+  remaining defects from the tan-cli#503 report, both in the emitted
+  completion scripts. bash decided everything from `${COMP_WORDS[1]}`, which
+  is the subcommand only when nothing precedes it — measured on the emitted
+  script, `tan --sdk-root /x <TAB>` offered not one of the 32 subcommand
+  names, and `tan --sdk-root /x size --<TAB>` offered none of `--build-root`
+  / `--board` / `--fail-over-budget`. Both now read the one `$subcmd` the
+  script already scans for its `--format` value list; the word in a flag's
+  value slot (`tan --sdk-root <TAB>`, a path) is detected separately and keeps
+  its pre-existing fall-through, so the scan cannot start offering command
+  names where a directory belongs. `--version` was in the always-offered flag
+  set of all three scripts but is root-only: all 32 subcommands refuse it — 29
+  with Click's `No such option: --version (Possible options: --verbose)`, and
+  `quality`/`lock`/`migrate` by forwarding it to `west`, which answers
+  `unexpected arguments: ['--version']`. It now completes at the root only
+  (bash splits `root_flags` out of `global_flags`, pinned by a test to
+  `tan.core.global_flags.GLOBAL_FLAGS` so the script and the parser cannot
+  drift again; zsh splices it into the root `_arguments -C` call; fish gates
+  it on `__fish_use_subcommand`). Both were the frozen oracle's own captured
+  bytes, which is why they were left alone before; `crates/` was deleted in
+  tan-cli#269, so this port owns them and they are fixed rather than
+  preserved. **zsh's `case $words[2]` in the `args` state is deliberately NOT
+  touched:** `_arguments` reindexes `words` there, no `zsh` was available to
+  measure it, and an unverified edit to a working script is not an
+  improvement. Refs #503.
+
 - **A `swd_probe` write whose core stayed busy after the load now says so,
   instead of nothing at all.** #575 made halt-marker detection positional and
   correctly dropped a post-load marker from the *write* verdict — a marker
