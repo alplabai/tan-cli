@@ -9,6 +9,23 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Added
 
+- **`ALP_FLASH_REQUIRE_DPIDR=1` makes an unarmed `swd_probe` write refuse
+  instead of warn.** `flash_args.expect_dpidr` is the only thing between a
+  cloned probe serial and a write to the wrong board, and no shipped alp-sdk
+  preset carries a SW-DP ID — so every `swd_probe` write runs unguarded, with
+  at most the `flash.dpidr-preflight-unarmed` warning that an unattended bench
+  never reads. With this variable exported, a real write whose DPIDR preflight
+  would not run fails the entry (`flash.entry-failed`) **before anything is
+  spawned**. Default (unset) behaviour is byte-for-byte unchanged, `--dry-run`
+  is unaffected, and `expect_dpidr` stays optional in metadata: the switch is a
+  host policy for a factory/bench machine, not a new manifest requirement — a
+  customer recovering a bricked bridge must not be refused for a field alp-sdk
+  has not populated yet. A `swd_probe` entry on the openocd/pyocd arm refuses
+  unconditionally under the switch, because the SW-DP ID read is a
+  JLinkExe-only primitive and that arm cannot be armed at all;
+  `openocd_usb_location` selects a probe but never confirms which board is on
+  the other end of the cable. Documented in `docs/setools.md`. Closes #589.
+
 - **`scripts/tan-surface/` — a command-surface walk that drives every `tan`
   command, in dependency order, against a real project.** `scripts/e2e-full.sh`
   is a release *regression* harness: it hijacks `$HOME`, wipes its tree every
@@ -123,6 +140,25 @@ All notable changes to `tan` are documented here. Format follows
   `--target-kind` to let it infer. (#489)
 
 ### Fixed
+
+- **A `swd_probe` write whose post-load reset was refused now says the reset
+  did not happen, instead of nothing at all.** #575 made halt-marker detection
+  positional and correctly dropped a post-load marker from the *write* verdict
+  — a marker printed after the load completed says nothing about whether the
+  bytes landed. But it then dropped the marker entirely, so the commonest real
+  outcome (the post-write `r`/`g` is on by default, and a freshly-written
+  resident image is exactly what refuses it) reported the bare
+  `GD32G553MEY7TR flashed and verified via J-Link @ 0x08000000` with no
+  qualification: the operator was told the write succeeded, and told nothing
+  about the target possibly still running its old firmware. Such a run now
+  appends Flow D's own clause — `; reset requested, core was busy and did not
+  halt (J-Link reported "…") -- the target may still be running the firmware
+  it had. Power-cycle it and confirm the new firmware answers.` — on both the
+  `.bin` and ELF/HEX arms. The write claim is untouched in both, and
+  `flash.swd-probe-write-unconfirmed` deliberately does **not** fire: the write
+  IS confirmed, and reusing that advisory would undo #575. The pre-load wording
+  is unchanged, and a marker on both sides of the load still gets the
+  write-scoped sentence alone. Closes #590.
 
 - **The five `debug-config-preview-*` goldens are re-recorded against the
   shipping CLI and are real gates again.** They described the frozen Rust
