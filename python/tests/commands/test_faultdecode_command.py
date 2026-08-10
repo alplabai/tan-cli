@@ -198,6 +198,119 @@ def test_bad_hex_value_is_exit_2():
     assert result.exit_code == 2
 
 
+# --------------------------------------------------------------------------
+# tan-cli#616 defect B: a negative register value is refused, not decoded
+# --------------------------------------------------------------------------
+#
+# `int(text, 16)` accepts a leading `-`, and everything downstream then treated
+# the result as a register word: `--cfsr=-8200` rendered `"0x-0008200"` (not a
+# hex integer in any sense), decoded TWELVE flags that are not set out of
+# Python's infinite two's-complement sign extension, concluded "Stack
+# overflow", and exited 0. A register is unsigned by construction. The strings
+# below are pinned verbatim because they are what a firmware engineer reads
+# instead of a diagnosis.
+
+#: The exact refusal for `--cfsr=-8200`, naming the offending value.
+_NEGATIVE_CFSR_MESSAGE = (
+    "--cfsr: '-8200' is negative -- a fault register value is unsigned, so there is "
+    "nothing to decode. Pass the value exactly as the dump printed it (hex, with or "
+    "without a 0x prefix)."
+)
+
+
+def test_a_negative_register_is_refused_on_the_text_surface():
+    result = runner.invoke(app, ["--cfsr=-8200"])
+    assert result.exit_code == 2
+    assert result.output.strip() == f"Error: {_NEGATIVE_CFSR_MESSAGE}"
+    # The whole point: no decode happened, so none of it can be quoted back.
+    assert "0x-0008200" not in result.output
+    assert "Stack overflow" not in result.output
+
+
+def test_a_negative_register_is_refused_with_a_coded_envelope():
+    """`--format json` gets the same refusal as an envelope carrying a
+    REGISTERED issue code, so a consumer can branch on it -- the shape
+    `faultdecode.no-registers` already has (tan-cli#399). A `typer.BadParameter`
+    would instead land on `cli.main`'s generic `command: "cli"` /
+    `cli.parse-error` fallback, i.e. the two-paths-of-one-verb disagreement
+    that issue closed."""
+    result = runner.invoke(app, ["--format", "json", "--cfsr=-8200"])
+    assert result.exit_code == 2
+    # Asserted before parsing, so a refusal that fell back to the plain-text
+    # surface fails HERE, on this test's own claim, rather than as an incidental
+    # `JSONDecodeError` from the line below.
+    assert result.stdout.lstrip().startswith("{"), result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "faultdecode"
+    assert payload["ok"] is False
+    assert payload["exitCode"] == 2
+    assert payload["data"] is None
+    assert payload["issues"] == [
+        {
+            "code": "faultdecode.invalid-register-value",
+            "severity": "error",
+            "message": _NEGATIVE_CFSR_MESSAGE,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["cfsr", "hfsr", "dfsr", "bfar", "mmfar", "mmfsr", "bfsr", "ufsr", "pc", "lr"],
+)
+def test_every_register_flag_refuses_a_negative_value_and_names_itself(option):
+    """All ten go through `_parse_hexint`, addresses (`--bfar`/`--mmfar`/
+    `--pc`/`--lr`) included -- an address is no more signed than a status
+    register. The message names the FLAG that was wrong, not just "a
+    register", so a caller passing several knows which one to fix."""
+    result = runner.invoke(app, [f"--{option}=-1"])
+    assert result.exit_code == 2
+    assert result.output.strip() == (
+        f"Error: --{option}: '-1' is negative -- a fault register value is unsigned, so "
+        "there is nothing to decode. Pass the value exactly as the dump printed it "
+        "(hex, with or without a 0x prefix)."
+    )
+
+
+def test_a_negative_register_is_refused_before_a_valid_one_is_decoded():
+    """The refusal is a refusal, not a warning: a good `--hfsr` alongside a bad
+    `--cfsr` does not buy a partial decode at exit 0."""
+    result = runner.invoke(app, ["--hfsr", "0x40000000", "--cfsr=-8200"])
+    assert result.exit_code == 2
+    assert "Forced HardFault" not in result.output
+
+
+def test_the_json_flag_surface_also_refuses_a_negative_register():
+    """`--json` is the unwrapped SDK report surface, so its refusal stays the
+    plain stderr line (envelope-free), exactly as the no-registers refusal and
+    the bad-hex refusal already do on that surface -- but it is still a
+    refusal, and still exit 2."""
+    result = runner.invoke(app, ["--cfsr=-8200", "--json"])
+    assert result.exit_code == 2
+    assert result.output.strip() == f"Error: {_NEGATIVE_CFSR_MESSAGE}"
+
+
+def test_the_sdk_original_decodes_a_negative_cfsr_and_tan_deliberately_does_not():
+    """The DIVERGENCE, pinned against the live original rather than described.
+
+    alp-sdk's `scripts/alp_cli/faultdecode.py` accepts `--cfsr=-8200` and exits
+    0 having printed a decode. tan refuses at exit 2. This asserts BOTH halves,
+    so the day upstream adopts the refusal this test goes red and is deleted
+    with a note, rather than the divergence quietly persisting in prose only.
+    Skips (never fails) with no alp-sdk checkout reachable, same as its
+    neighbours."""
+    from click.testing import CliRunner as ClickRunner
+
+    oracle_cmd = _load_oracle_command()
+    oracle_result = ClickRunner().invoke(oracle_cmd, ["--cfsr=-8200"])
+    assert oracle_result.exit_code == 0, "upstream no longer decodes a negative CFSR"
+    assert "0x-0008200" in oracle_result.output
+
+    port_result = runner.invoke(app, ["--cfsr=-8200"])
+    assert port_result.exit_code == 2
+    assert port_result.output.strip() == f"Error: {_NEGATIVE_CFSR_MESSAGE}"
+
+
 def test_missing_elf_path_is_exit_2():
     result = runner.invoke(app, ["--cfsr", "0x8200", "--elf", "does-not-exist.elf"])
     assert result.exit_code == 2
