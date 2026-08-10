@@ -40,7 +40,7 @@ no-op.
 
 ## This module's own enforcement was zero, until `tests/gates/conftest.py`
 
-Every runner this suite has ever run on genuinely lacks all fourteen
+Every runner this suite has ever run on genuinely lacks all ten
 [`PROBE_TOOLS`] identities -- that is the premise this whole file exists to
 protect. Which means, without help, the fixture under test never has
 anything real to farm away here: `test_no_probe_tool_resolves_from_the_
@@ -171,7 +171,16 @@ def test_a_test_that_wants_a_probe_tool_seeds_its_own(tmp_path, monkeypatch):
     present says so itself, by seeding one and pointing PATH at it -- the
     shape `test_flash_command.py::_stub_flow_d_probe` already uses. The
     inventory is then a property of the test, readable in the test, and
-    identical on every host."""
+    identical on every host.
+
+    Compared case-insensitively, deliberately: `doctor_cmd.on_path` builds
+    its Windows candidate as `command + ext`, `ext` drawn literally from
+    `%PATHEXT%` (`.COM;.EXE;.BAT;.CMD`, uppercase) -- so it returns
+    `...\\openocd.EXE`, the CONSTRUCTED casing, even though the file on disk
+    (and the `seeded` path this test built) is `openocd.exe`. NTFS resolves
+    both to the same file; a case-SENSITIVE `==` does not, and was exactly
+    this test failing on windows-latest for a reason that has nothing to do
+    with what it is checking (tan-cli#625 review)."""
     tools = tmp_path / "seeded"
     tools.mkdir()
     seeded = tools / ("openocd.exe" if os.name == "nt" else "openocd")
@@ -181,7 +190,8 @@ def test_a_test_that_wants_a_probe_tool_seeds_its_own(tmp_path, monkeypatch):
 
     assert doctor_cmd.on_path("openocd") is None  # absent until the test says otherwise
     monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])
-    assert doctor_cmd.on_path("openocd") == str(seeded)
+    resolved = doctor_cmd.on_path("openocd")
+    assert resolved is not None and resolved.lower() == str(seeded).lower()
 
 
 def test_the_probe_tool_list_covers_what_the_600_regression_named():

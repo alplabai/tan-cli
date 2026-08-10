@@ -169,7 +169,15 @@ def _probe_free_path(path: str, scratch_factory: Callable[[], Path]) -> str | No
             if link.exists() or link.is_symlink():
                 continue
             source = os.path.join(entry, name)
-            is_dir = os.path.isdir(source) and not os.path.islink(source)
+            # `os.path.isdir` already follows symlinks -- a SOURCE that is
+            # itself a symlink pointing (transitively) at a directory must
+            # still be treated as a directory here. An earlier draft excluded
+            # `os.path.islink(source)` sources from this check, which handed
+            # `target_is_directory=False` to exactly the case the paragraph
+            # above says this exists to get right: a symlink recreated as a
+            # FILE-type symlink over a directory target is the same broken
+            # shape on Windows, one level of indirection later.
+            is_dir = os.path.isdir(source)
             try:
                 os.symlink(source, link, target_is_directory=is_dir)
                 continue

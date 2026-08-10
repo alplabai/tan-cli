@@ -167,12 +167,56 @@ def test_non_probe_tools_survive_in_the_farm(tmp_path):
     assert (farm / "some-subdir" / "nested").is_file()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs elevation/dev mode on Windows CI")
+def test_a_symlink_to_a_directory_is_still_target_is_directory_true(tmp_path, monkeypatch):
+    """A PATH entry can hold a symlink whose TARGET is a directory (a stray
+    `__pycache__`-adjacent link, a vendored tool's own symlinked support
+    tree). `os.path.isdir(source)` already follows that symlink -- an
+    earlier draft additionally excluded `os.path.islink(source)` sources from
+    the directory check, which handed `target_is_directory=False` to exactly
+    this case: the broken file-type symlink the directory branch exists to
+    prevent, one level of indirection later (tan-cli#625 review). Verified by
+    spying on the real `os.symlink` call rather than by the resulting
+    behaviour, because `target_is_directory` is a silent no-op on POSIX --
+    only the ARGUMENT proves the fix, not what the symlink does once made."""
+    real_dir = tmp_path / "real_subdir"
+    real_dir.mkdir()
+    _mkfile(real_dir / "inner")
+    linked_dir = tmp_path / "linked_subdir"
+    os.symlink(real_dir, linked_dir, target_is_directory=True)
+
+    dirty = tmp_path / "dirty"
+    dirty.mkdir()
+    tool = _one_probe_tool()
+    _mkfile(dirty / tool)
+    # The entry under test: a SYMLINK, sitting in a PATH directory that also
+    # needs farming (the probe tool forces that), whose target is a
+    # directory.
+    os.symlink(linked_dir, dirty / "link_to_a_dir", target_is_directory=True)
+
+    calls: dict[str, bool] = {}
+    real_symlink = os.symlink
+
+    def spy_symlink(source, link, *, target_is_directory=False):
+        calls[Path(link).name] = target_is_directory
+        return real_symlink(source, link, target_is_directory=target_is_directory)
+
+    monkeypatch.setattr(os, "symlink", spy_symlink)
+
+    result = _probe_free_path(str(dirty), lambda: tmp_path / "scratch")
+    assert result is not None
+    assert calls.get("link_to_a_dir") is True, (
+        f"a symlink whose target is a directory must be recreated with "
+        f"target_is_directory=True; recorded calls: {calls}"
+    )
+
+
 @pytest.mark.parametrize("tool", sorted(PROBE_TOOLS))
 def test_every_probe_tool_becomes_unresolvable_in_the_farm(tmp_path, tool):
     """Direct, per-identity proof that farming actually REMOVES the probe
     tool -- not just that it changes the PATH string. Every stem in
     [`PROBE_TOOLS`], one at a time, so a single identity silently surviving a
-    future refactor cannot hide behind the other thirteen."""
+    future refactor cannot hide behind the other nine."""
     dirty = tmp_path / f"dirty-{tool}"
     dirty.mkdir()
     _mkfile(dirty / tool)
@@ -200,6 +244,37 @@ def test_a_windows_style_extension_still_matches_by_stem(tmp_path):
     assert result is not None
     farm = Path(result)
     assert not any(p.stem.lower() == tool.lower() for p in farm.iterdir())
+    assert (farm / "sh").is_file()
+
+
+def test_the_temurin_jlink_collision_is_caught_by_a_lowercase_stem(tmp_path):
+    """The literal windows-latest sighting (tan-cli#625 review), not a
+    hypothetical: the pre-installed Temurin JDK ships `jlink.exe` -- its own
+    module-linker tool, nothing to do with a debug probe -- ALL LOWERCASE,
+    which collides with the bare `"JLink"` identity only because the match
+    lowercases BOTH sides (`os.path.splitext(n)[0].lower() in lowered`,
+    `lowered` itself built from `t.lower() for t in PROBE_TOOLS`).
+
+    `test_a_windows_style_extension_still_matches_by_stem` above varies only
+    the EXTENSION's case on a stem that already matches `"JLink"`'s own
+    casing (`JLink` + `.EXE`); it does not exercise the STEM casing at all,
+    which is what the real collision needed. A mutant that drops the
+    `.lower()` normalisation (`os.path.splitext(...)[0] in PROBE_TOOLS`
+    verbatim) passes every other test in this file and in
+    `test_probe_tool_inventory.py` -- this is the one that catches it."""
+    dirty = tmp_path / "dirty"
+    dirty.mkdir()
+    _mkfile(dirty / "jlink.exe")
+    _mkfile(dirty / "sh")
+
+    result = _probe_free_path(str(dirty), lambda: tmp_path / "scratch")
+    assert result is not None, (
+        "a lowercase 'jlink.exe' must still be recognised as the bare "
+        "'JLink' PROBE_TOOLS identity -- this is the Temurin JDK collision "
+        "measured directly on windows-latest"
+    )
+    farm = Path(result)
+    assert not (farm / "jlink.exe").exists()
     assert (farm / "sh").is_file()
 
 

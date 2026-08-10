@@ -115,7 +115,19 @@ def _measured_live_readers() -> dict[str, set[str]]:
     textually at all: `test_each_declared_supersession_is_still_real` below
     reads `_CAPTURES / f"{stem}.json"` for every key of `_SUPERSEDED`, an
     f-string built from a loop variable rather than a literal. That one is
-    measured directly off the `_SUPERSEDED` mapping instead of regexed."""
+    measured directly off the `_SUPERSEDED` mapping instead of regexed.
+
+    This module is excluded from the walk, not just `oracle_captures.py`:
+    its own doc comments illustrate both call shapes with a literal
+    `"<name>"` placeholder (immediately above, and in `test_the_readme_
+    live_reader_table_matches_the_measured_tree`'s docstring below), and a
+    naive regex over its own source matches those examples -- a spurious
+    `<name>.json` key that never corresponds to a real capture file, but
+    still the same self-corruption class the run-time-joined `load` pattern
+    above exists to avoid for CODE. Skipping this file removes it for
+    COMMENTS too, rather than relying on every future example staying
+    unmatchable by construction."""
+    this_file = Path(__file__).resolve()
     readers: dict[str, set[str]] = {}
 
     def record(name: str, module_rel: str) -> None:
@@ -124,7 +136,7 @@ def _measured_live_readers() -> dict[str, set[str]]:
         readers.setdefault(name, set()).add(module_rel)
 
     for module in sorted(_TESTS_ROOT.rglob("*.py")):
-        if module.name == "oracle_captures.py":
+        if module.name == "oracle_captures.py" or module.resolve() == this_file:
             continue
         text = module.read_text(encoding="utf-8")
         module_rel = module.relative_to(_TESTS_ROOT.parent).as_posix()

@@ -11,7 +11,7 @@ Every runner this suite has ever executed on genuinely lacks JLinkExe /
 openocd / pyocd / west / etc -- that is the entire premise of tan-cli#603.
 Which means `tests/conftest.py::_probe_free_path` is a documented NO-OP on
 every one of them: nothing on the real PATH ever matches, so nothing is ever
-farmed. `test_probe_tool_inventory.py`'s fourteen `test_no_probe_tool_
+farmed. `test_probe_tool_inventory.py`'s ten `test_no_probe_tool_
 resolves_from_the_inherited_path` cases (one per identity) therefore passed
 identically whether the farming logic worked, was broken, or did not exist at
 all -- there was never a real probe tool on PATH for it to have farmed away.
