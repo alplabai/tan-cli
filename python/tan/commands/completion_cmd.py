@@ -37,41 +37,58 @@ Completing a flag `tan doctor` rejects at exit 2 is worse than not offering
 it, so the three `doctor` arms had the two flags (and, in zsh/fish, their
 value lists) removed by hand.
 
-**A fourth, hand-edited exception, tan-cli#503: bash's subcommand detection
-now scans for the real subcommand instead of assuming it sits at a fixed word
-index.** `${COMP_WORDS[1]}` is only the subcommand when nothing precedes it,
-but every global flag is typeable BEFORE the subcommand (`tan --sdk-root /x
-validate ...`), so a leading global flag made all three of bash's decisions
-key off `--sdk-root`. Measured on the emitted script, before the fix:
-`tan --sdk-root /x <TAB>` offered not one of the 32 subcommand names (the
-`$cword -eq 1` gate missed), `tan --sdk-root /x size --<TAB>` offered no
-`--build-root`/`--board`/`--fail-over-budget` (the per-command `case` missed),
-and `tan --sdk-root /x validate --format <TAB>` offered the narrow value list
-(fixed first, in the change that introduced the scan). All three now read one
-`$subcmd` computed once at the top of `_tan_complete`. The word being
-completed in a flag's VALUE slot (`tan --sdk-root <TAB>`) is detected
-separately and keeps the pre-existing fall-through, so the scan cannot start
-offering command names where a path belongs. The `$cword -eq 1` gate and the
-per-command `case` were the oracle's own bytes; `crates/` was deleted in
-tan-cli#269, so this port owns them now and they are fixed rather than
-preserved. zsh's own `case $words[2]` in the `args` state is NOT touched:
-`_arguments` reindexes `words` there, no `zsh` was available to measure it,
-and an unverified edit to a working script is not an improvement.
+**A fourth, hand-edited exception, tan-cli#503: none of the three scripts
+found the subcommand reliably.** All three defects are the same shape -- a
+positional or state assumption that a real invocation breaks -- and all three
+were measured in a real shell (bash 5.2.21, zsh 5.9 under a pty, fish 3.7.0
+via `complete -C`), before and after.
+
+- **bash keyed every decision off `${COMP_WORDS[1]}`**, which is the
+  subcommand only when nothing precedes it. Before: `tan --sdk-root /x <TAB>`
+  offered not one of the 32 command names (the `$cword -eq 1` gate missed) and
+  `tan --sdk-root /x size --<TAB>` offered no
+  `--build-root`/`--board`/`--fail-over-budget` (the per-command `case`
+  missed). Both now read one `$subcmd` scanned once at the top of
+  `_tan_complete`. That scan also has to survive `$COMP_WORDBREAKS`: bash
+  re-splits argv on `=` and `:`, so `--sdk-root=/x` reaches the function as
+  three words and `C:/proj` as three more -- see the scan's own comment.
+- **zsh's `args`-state `case $words[2]` never matched anything.** In that
+  state `_arguments` has REINDEXED `words`, so `words[1]` is the subcommand
+  and `words[2]` is the word being completed: instrumented in zsh 5.9,
+  `tan size --<TAB>` arrived with `words=(size --)`, `CURRENT=2`. All 21 arms
+  were unreachable and every subcommand fell to `*)` -- `tan size --<TAB>`
+  offered the 12 global flags and none of `size`'s own three, `tan doctor
+  --<TAB>` offered neither `--build` nor `--fix`. Now `case $subcmd`, the same
+  value bash uses, which that probe confirmed is in scope and correct there
+  (`subcmd_scan=size`).
+- **fish's command list was gated on `__fish_use_subcommand`**, which returns
+  false at the first non-switch token -- and a global flag's VALUE is one. So
+  `complete -C 'tan --sdk-root /x '` returned NOTHING at all: no command
+  names, and no flags either, because fish offers options only when the
+  current token starts with `-`. Now gated on `not
+  __fish_seen_subcommand_from <the 32>`, which ignores flag values. (fish's
+  per-command flags were already correct -- `__fish_seen_subcommand_from`
+  scans every word -- so only the command-list half was broken.)
+
+The `$cword -eq 1` gate, the per-command `case`es and the fish condition were
+all the oracle's own captured bytes; `crates/` was deleted in tan-cli#269, so
+this port owns them now and they are fixed rather than preserved.
 
 **A fifth, hand-edited exception, tan-cli#503: `--version` is offered at the
 root only.** All three captures listed it in the always-available flag set, so
-it was offered on all 32 subcommands and refused by all 32 -- 29 with Click's
-`No such option: --version (Possible options: --verbose)`, and the three
-`west` forwarders (`quality`/`lock`/`migrate`) by forwarding it to `west`,
-which answers `unexpected arguments: ['--version']`. It is root-only by
-design (`cli.py`: "it lives on `Cli` directly in clap, not `GlobalArgs`, and
-is root-only on both sides already"), and `tan.core.global_flags.GLOBAL_FLAGS`
--- the one table the parser and `accept_global_flags` both read -- does not
+it was offered on all 32 subcommands, and no subcommand prints a version for
+it: measured, 29 answer Click's `No such option: --version (Possible options:
+--verbose)`, `lock` forwards it to `west` (`unexpected arguments:
+['--version']`), and `quality`/`migrate` refuse earlier on their own required
+flag and only reach `west` once that is supplied. It is root-only by design
+(`cli.py`: "it lives on `Cli` directly in clap, not `GlobalArgs`, and is
+root-only on both sides already"), and `tan.core.global_flags.GLOBAL_FLAGS` --
+the one table the parser and `accept_global_flags` both read -- does not
 contain it. bash splits `root_flags` out of `global_flags`; zsh splices it
-into the root `_arguments -C` call and no arm; fish gates it on
-`__fish_use_subcommand`, its own idiom, already used by the script's command
-list. Inherited from the oracle's capture, same as the two reads above, and
-owned here for the same reason.
+into the root `_arguments -C` call and no arm; fish gates it on the same
+`not __fish_seen_subcommand_from` condition as the command list. Inherited
+from the oracle's capture, same as the reads above, and owned here for the
+same reason.
 
 **Why hand-captured and not Typer/Click's own shell-completion machinery.**
 Typer ships one (`click.shell_completion`, gated off here via `app =
@@ -152,6 +169,20 @@ _TARGETS_MARK = "@TARGETS@"
 _TARGET_VALUES = " ".join(
     (*ALL_EMIT_MODES, ZEPHYR_BOARD, COMPOSED_ROUTE_TABLE, IPC_CONTRACT_H)
 )
+#: The 32 subcommand names, in the captured scripts' own order (tan-cli#503).
+#: fish needs them TWICE -- once as the command list it offers, and once as
+#: the `not __fish_seen_subcommand_from ...` condition that decides whether a
+#: subcommand has been typed yet -- so they are spliced rather than written
+#: out a second time. `tests/commands/test_completion_command.py` diffs this
+#: against `tan.cli._SUBCOMMAND_NAMES`; the module itself cannot import
+#: `tan.cli` (import cycle -- see the docstring), the test can.
+_COMMANDS_MARK = "@COMMANDS@"
+_COMMAND_NAMES = (
+    "validate generate init scaffold examples doctor completion diff presets "
+    "pinmux explain inspect trace debug-config support-bundle sdk bootstrap "
+    "build kconfig image flash run clean renode size migrate lock quality "
+    "model monitor new-som faultdecode"
+)
 
 
 def _fill_formats(template: str) -> str:
@@ -173,6 +204,7 @@ def _fill_formats(template: str) -> str:
         .replace(_WIDE_COMMANDS_ALT_MARK, "|".join(WIDE_FORMAT_COMMANDS))
         .replace(_WIDE_COMMANDS_LIST_MARK, " ".join(WIDE_FORMAT_COMMANDS))
         .replace(_TARGETS_MARK, _TARGET_VALUES)
+        .replace(_COMMANDS_MARK, _COMMAND_NAMES)
     )
 
 
@@ -187,14 +219,16 @@ _tan_complete() {
   cword=${COMP_CWORD}
 
   local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode"
-  # `--version` is deliberately NOT in `global_flags` (tan-cli#503): it is
-  # root-only, and every one of the 32 subcommands refuses it -- 29 with
-  # Click's `No such option: --version (Possible options: --verbose)`, and the
-  # three `west` forwarders (`quality`/`lock`/`migrate`) by handing it
-  # straight to `west`, which answers `unexpected arguments: ['--version']`.
-  # `cli.py` says the same thing from the parser side ("it lives on `Cli`
-  # directly in clap, not `GlobalArgs`, and is root-only on both sides
-  # already"), so it belongs to the ROOT word list alone.
+  # `--version` is deliberately NOT in `global_flags` but IS in `root_flags`
+  # (tan-cli#503): it is root-only, and no subcommand prints a version for it
+  # -- see the module docstring's fifth exception for the measurement on all
+  # 32. Known and NOT fixed here: the root list is offered wherever no
+  # subcommand has been typed, yet the bare root command accepts far less than
+  # it offers (`tan --sdk-root /x --version`, `tan --verbose --version` and
+  # `tan --ci --version` all exit 2 -- `cli._reorder_global_flags` relocates a
+  # global flag ONTO the subcommand, and there is none here). Narrowing that
+  # list changes what `tan <TAB>` offers, which is beyond tan-cli#503's
+  # report, and it behaves identically before and after this change.
   local global_flags="--project --board-yaml --sdk-root --target --all --format --verbose --quiet --no-color --non-interactive --ci --help"
   local root_flags="$global_flags --version"
 
@@ -210,26 +244,55 @@ _tan_complete() {
   # Scan for the real subcommand instead of assuming its position: skip every
   # global flag that consumes a following value, and the first bare word left
   # is the subcommand (or "" if none was typed yet).
+  #
+  # bash does NOT hand this function argv: it hands it argv re-split on
+  # `$COMP_WORDBREAKS`, which contains `=` and `:` by default. Measured in
+  # bash 5.2.21 under a pty, `tan --sdk-root=/x size --<TAB>` arrives as
+  # `(tan --sdk-root = /x size --)` with `COMP_CWORD=5`, and
+  # `tan --sdk-root C:/proj size --<TAB>` as `(tan --sdk-root C : /proj size
+  # --)` with `COMP_CWORD=6`. Plain skip-N arithmetic lands on `=` or `:` in
+  # both, so the scan has to step over a `=` that follows a value flag, and
+  # to treat a bare word as the subcommand only when it IS one of the 32.
+  # `--sdk-root=/x` is a supported argv (`tan --sdk-root=/nonexistent
+  # validate` parses and runs), so this is not a hypothetical shape.
   local value_flags="--project --board-yaml --sdk-root --target --format"
-  local subcmd="" at_value=0 i=1 w skip vf
+  local subcmd="" at_value=0 i=1 w skip vf c
   while [[ $i -lt $cword ]]; do
     w="${COMP_WORDS[$i]}"
+    if [[ "$w" == --*=* ]]; then
+      # Self-contained; only reachable with a `$COMP_WORDBREAKS` that drops
+      # `=`, since the default splits this into three words instead.
+      i=$((i + 1))
+      continue
+    fi
     if [[ "$w" == --* ]]; then
       skip=0
       for vf in $value_flags; do
         [[ "$w" == "$vf" ]] && skip=1 && break
       done
+      # `--flag` `=` `value`: step over the separator as well as the value.
+      [[ $skip -eq 1 && "${COMP_WORDS[$((i + 1))]}" == "=" ]] && skip=2
       i=$((i + 1 + skip))
       continue
     fi
-    subcmd="$w"
-    break
+    for c in $commands; do
+      [[ "$w" == "$c" ]] && subcmd="$w" && break
+    done
+    [[ -n "$subcmd" ]] && break
+    # A bare word that is not a command name is a wordbreak fragment of some
+    # value (`C`, `:`, `/proj`); step over it rather than mistake it for the
+    # subcommand. The positional skip above still protects a value that
+    # happens to BE a command name (`tan --sdk-root size validate`).
+    i=$((i + 1))
   done
-  # The scan stepped PAST the word being completed, so that word is a
-  # preceding flag's value (`tan --sdk-root <TAB>` -- a path), not the
-  # subcommand slot. Offering command names there would be a new wrong answer,
-  # so this shape keeps the pre-existing fall-through instead.
-  [[ -z "$subcmd" && $i -gt $cword ]] && at_value=1
+  # The word being completed sits in a flag's VALUE slot (`tan --sdk-root
+  # <TAB>` -- a path, and `tan --sdk-root=<TAB>`, whose `prev` is the split-off
+  # `=`), not the subcommand slot. Offering 32 command names there would be a
+  # new wrong answer, so this shape keeps the pre-existing fall-through.
+  for vf in $value_flags; do
+    [[ "$prev" == "$vf" ]] && at_value=1 && break
+  done
+  [[ "$prev" == "=" ]] && at_value=1
 
   if [[ "$prev" == "--format" ]]; then
     local formats="@FORMATS@"
@@ -434,7 +497,18 @@ _tan() {
       _describe 'command' commands
       ;;
     args)
-      case $words[2] in
+      # `$subcmd`, not `$words[2]` (tan-cli#503). In this state `_arguments`
+      # has REINDEXED `words` so that `words[1]` is the subcommand and
+      # `words[2]` is the word being completed -- measured in zsh 5.9 under a
+      # pty, `tan size --<TAB>` reaches here with `words=(size --)` and
+      # `CURRENT=2`, so `$words[2]` was `--`. It never matched a subcommand
+      # name, so all 21 arms below were unreachable and every command fell to
+      # `*)`: `tan size --<TAB>` offered the 12 global flags and none of
+      # `--build-root`/`--board`/`--fail-over-budget`. `$subcmd` is computed
+      # from the ORIGINAL `words` at the top of this function and is still in
+      # scope here (same probe: `subcmd_scan=size`), so it is right both for
+      # this reindexing and for a leading global flag.
+      case $subcmd in
         validate)
           _arguments '--offline[Offline structural validation only]' "${global_args[@]}"
           ;;
@@ -517,7 +591,7 @@ compdef _tan tan
 
 #: Verbatim fish completion script, captured from the reference oracle.
 _FISH_TEMPLATE = """complete -c tan -f
-complete -c tan -n '__fish_use_subcommand' -a 'validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode'
+complete -c tan -n 'not __fish_seen_subcommand_from @COMMANDS@' -a '@COMMANDS@'
 complete -c tan -l project -d 'Project root'
 complete -c tan -l board-yaml -d 'board.yaml path'
 complete -c tan -l sdk-root -d 'SDK root path'
@@ -531,7 +605,7 @@ complete -c tan -l no-color -d 'Disable color output'
 complete -c tan -l non-interactive -d 'Disable prompts'
 complete -c tan -l ci -d 'CI mode'
 complete -c tan -l help -d 'Show help'
-complete -c tan -n '__fish_use_subcommand' -l version -d 'Show version'
+complete -c tan -n 'not __fish_seen_subcommand_from @COMMANDS@' -l version -d 'Show version'
 complete -c tan -n '__fish_seen_subcommand_from validate' -l offline -d 'Offline structural validation only'
 complete -c tan -n '__fish_seen_subcommand_from generate' -l force -d 'Overwrite existing files'
 complete -c tan -n '__fish_seen_subcommand_from generate' -l core -d 'Core id (zephyr-board target)'
