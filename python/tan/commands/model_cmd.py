@@ -62,6 +62,7 @@ from tan.commands.build_output import (
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
+from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -327,11 +328,18 @@ def _run_build(
     if resolved_sdk is None:
         raise ModelError(
             "model.sdk-root-unresolved",
+            # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the value.
+            # The no-flag message below opens with "Use --sdk-root" -- exactly
+            # the flag the caller just typed -- and the rejected path appeared
+            # nowhere else in the envelope, since `resolve_metadata_sdk_root`
+            # returning `None` is also what leaves the `sdk` block absent.
+            rejected_sdk_root_message(sdk_root, "No models were built.")
+            if sdk_root
             # `tan sdk switch` refuses in this build (tan-cli#305) -- kept the
             # two mechanisms that actually work here (`--sdk-root`, placing
             # the project near a checkout) and swapped the third for
             # NO_SDK_NEXT_STEPS's honest "how to get one at all".
-            "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+            else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
             f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
             ExitCode.VALIDATION_FAILURE,
         )

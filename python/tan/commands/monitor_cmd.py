@@ -148,7 +148,46 @@ def _refuse_listing_ports(reason: str) -> MonitorError:
     )
 
 
-def _run_monitor(port: str | None, baud: int) -> tuple[dict, list[Issue], ExitCode]:
+def _child_stdout(json_mode: bool):
+    """What miniterm's stdout is wired to (tan-cli#491 defect 6).
+
+    TEXT mode: `None`, i.e. inherit -- board traffic on tan's stdout is the
+    whole point of an interactive console, and redirecting it would break
+    `tan monitor > board.log`.
+
+    `--format json`: the board's bytes must NOT land on stdout. pyserial's
+    miniterm writes every received byte through `Console.write` to its own
+    `sys.stdout`, so an inherited stdout puts board traffic AHEAD of the
+    envelope and a consumer's whole-stdout `JSON.parse` fails on an `ok: true`,
+    exit-0 run -- reproduced end to end against a real pty. Same rule
+    `flash_cmd` states for itself: nothing but the single JSON envelope may
+    reach stdout under `--format json`. The traffic is kept, on stderr, where
+    this command's own `monitor: <port> @ <baud>` banner and miniterm's own
+    banner already go.
+
+    `sys.__stderr__`, not `sys.stderr`: under `--format json` `cli.main` binds
+    `sys.stderr` to a `_TeeStderr`, which implements only `write`/`flush`/
+    `getvalue` -- it has no `fileno()`, and `subprocess` needs a real one to
+    hand the child. `sys.__stderr__` is the interpreter's original stream and
+    is unaffected by that rebinding. It can still be `None` (pythonw, an
+    embedded interpreter) or closed, hence the guard; `DEVNULL` is the last
+    resort, because dropping the board's bytes is bad and putting them on
+    stdout is the defect.
+    """
+    if not json_mode:
+        return None
+    stream = sys.__stderr__
+    try:
+        if stream is not None and stream.fileno() >= 0:
+            return stream
+    except (AttributeError, OSError, ValueError):
+        pass
+    return subprocess.DEVNULL
+
+
+def _run_monitor(
+    port: str | None, baud: int, json_mode: bool
+) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
     # `build_cmd._planner_python` -- NOT `sys.executable`, which under a
@@ -178,7 +217,8 @@ def _run_monitor(port: str | None, baud: int) -> tuple[dict, list[Issue], ExitCo
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
     try:
         rc = subprocess.run(
-            [python, "-m", "serial.tools.miniterm", port, str(baud)]
+            [python, "-m", "serial.tools.miniterm", port, str(baud)],
+            stdout=_child_stdout(json_mode),
         ).returncode
     except OSError as err:
         raise MonitorError(
@@ -257,7 +297,7 @@ def monitor(
         raise typer.Exit(int(exit_code))
 
     try:
-        data, issues, exit_code = _run_monitor(port, baud)
+        data, issues, exit_code = _run_monitor(port, baud, json_mode)
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)
         return
