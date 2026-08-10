@@ -124,6 +124,46 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **The vendored bootstrap manifest no longer tells a customer, mid-onboarding,
+  to run a subcommand this build refuses.**
+  `contract/fixtures/bootstrap/manifest.json` ended its Zephyr-SDK guidance on
+  "the `tan sdk switch` step that pins it per project", but `switch` is in
+  `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS` and exits 1 — a dead end at exactly the
+  point the reader is told how to pin their SDK. The fixture is re-vendored
+  from alp-sdk at `PINNED_SDK_TAG` `ccd34f06` (byte-identical to alp-sdk
+  `origin/dev` for this file), where the sentence already reads "select the
+  checkout with `tan build --sdk-root <path>` or `.alp/sdk-path`" — both real
+  mechanisms in this build. Refs #585, closes the workaround #583 left behind.
+  - **Four other fields moved with the refresh**, none of them a behaviour
+    change for `tan`: `_comment` now names Python Tan instead of the retired
+    Rust reader; `zephyr.pythonMinVersion: "3.12"` and a `verdict` block are
+    new upstream keys no tan consumer parses; and the same posix note gained an
+    Intel-Mac paragraph (the pinned Zephyr SDK ships `macos-aarch64` only, so
+    real-silicon builds there need a Linux host). The one field that does reach
+    tan is `prerequisites.install.windows.7zip`, added to
+    `_fallback_install_commands` to keep the fallback equal to the manifest.
+  - **#583's exemption is gone, not widened.** `manual_install_posix` is no
+    longer skipped by
+    `test_the_fallback_constants_match_the_real_manifest_field_for_field`, and
+    the test that pinned the one-clause divergence is deleted. Replacing it,
+    `test_no_instruction_in_the_vendored_manifest_names_a_refused_subcommand`
+    scans the whole fixture against `NOT_PORTED_SDK_SUBCOMMANDS` rather than a
+    literal, so a future re-vendor cannot re-acquire guidance for `install`
+    either, and a subcommand added to that frozenset is covered the day it
+    lands.
+  - **The refresh exposed a mutation test that had stopped testing anything.**
+    `test_a_present_but_unusable_manifest_is_fatal_never_a_silent_fallback`
+    located its target by key alone and took the first match; with two
+    `pythonMinVersion` keys in the file it would have mutated `zephyr`'s, which
+    no consumer reads, and passed while refusing nothing. Each case now names
+    its original text and asserts it occurs exactly once.
+  - **`contract/fixtures/` is documented as tracking `PINNED_SDK_TAG`, not as
+    frozen.** `tests/parity/bootstrap_manifest_parity.py`, its README section
+    and `contract/README.md` all said a `DIFFERS` was expected-by-design and
+    never a re-vendor prompt — text written when `crates/` was the frozen tree,
+    and the reason this drift sat unactioned. Against `PINNED_SDK_TAG` a
+    `DIFFERS` is now stated to be exactly that prompt.
+
 - **The tan-cli#490 installer test that reds on macOS from the Rust-oracle
   retirement onward now probes for the shell capability it needs instead of
   merely for `bash` on `PATH`.** `test_sh_lc_all_c_reaches_the_shells_own_exec_failure_diagnostic`
