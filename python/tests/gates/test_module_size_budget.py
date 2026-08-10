@@ -1298,7 +1298,22 @@ _MODULE_BUDGET: dict[str, int] = {
     # MEASURED by this gate's own walk on the final tree (`len(read_text()
     # .splitlines())`), not by adding a diff stat to 727.
     "tan/commands/explain_cmd.py": 1020,
-    "tan/commands/sdk_cmd.py": 1274,
+    # 1274 -> 1403 (MEASURED on the rebased tree), as of tan-cli#497 defects
+    # 1 and 8. `_run_current` gained the wide-walk fall-through the other
+    # twelve narrow-ladder commands already take, so the command whose whole
+    # job is "which SDK am I on?" stops answering `none` in the README
+    # Quickstart cwd; `_fetch_releases` gained the explicit `ProxyHandler`
+    # urllib's env-derived one could not supply for `ALL_PROXY`, split across
+    # `_unroutable_proxy_refusal`/`_releases_opener` so no function crossed 50
+    # lines and `_FUNCTION_COUNT_BUDGET` did not have to move. Most of the
+    # delta is the measurement record for both -- which env var the oracle
+    # really honours, and on which port the connection was observed landing.
+    # 1403 -> 1415 on the #620 review round: the SOCKS refusal named
+    # `HTTPS_PROXY` as the remedy, which cannot take effect while `ALL_PROXY`
+    # outranks it -- measured, both set, identical refusal and NEITHER socket
+    # touched. It now names the variable that actually won, and the docstring
+    # records that measurement so the next edit cannot re-hardcode it.
+    "tan/commands/sdk_cmd.py": 1415,
     # 1093 -> 1108: tan-cli#478 wired `sdk_resolution_issues` through the
     # spawn path, so a `globalDefault` written for ANOTHER project stops
     # being silent here. Raised rather than absorbed by cutting the
@@ -1358,7 +1373,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
     # and `clean` appends `sdk.global-default-foreign-project` beside
     # `sdk.project-pin-unresolved`.
-    "tan/commands/clean_cmd.py": 1013,
+    # 1013 -> 1098 (MEASURED), as of tan-cli#499 defects 3 and 4. The rmtree
+    # error hook stopped ending in a bare `func(path)` (a `TypeError` on the
+    # POSIX fd walk that escaped the caller's guard and took the whole command
+    # to exit 5), and `is_unsafe_removal_target` gained the resolved re-test
+    # that a symlinked PARENT used to defeat -- the arm that deleted a
+    # customer's sources at exit 0 with `issues: []`. Both are destructive
+    # paths, so the reasoning stays in the file rather than in a commit
+    # message nobody reads next to the code.
+    "tan/commands/clean_cmd.py": 1098,
     # 1015, not 996, as of tan-cli#485: `_load_yaml`/`_load_json` route
     # through the new `strict_loaders.strict_yaml_load`/`strict_json_loads`
     # (alp-sdk #1127, a duplicate-mapping-key refusal), and the IPC-entry
@@ -1587,7 +1610,21 @@ _MODULE_BUDGET: dict[str, int] = {
     # report out of `doctor_cmd.Check`, so its nine construction sites each
     # declare the new required `scope=`. Seven of the nine needed their own
     # line; the other two fitted on an existing one. No logic changed here.
-    "tan/commands/support_bundle_cmd.py": 939,
+    # 939 -> 1038 (MEASURED), as of tan-cli#499 defect 5. `_redact` is now
+    # path-boundary anchored (a bare `str.replace` rewrote any path the home
+    # merely prefixed into a silently wrong one) and refuses outright for a
+    # filesystem-root `$HOME`, which `HOME=/` in a container really is --
+    # plus the `support-bundle.redaction-skipped` warning that says the file
+    # went out unscrubbed. A redaction rule with no stated boundary is how
+    # this defect shipped, so the boundary is written down.
+    # 1038 -> 1066 on the #620 review round: the leading boundary excluded
+    # separators for EVERY home, so a drive-anchored `%USERPROFILE%` behind
+    # an extended-length prefix kept the account name (measured). Plus a
+    # correction: the old comment justified that exclusion with
+    # `/srv/home/dev/proj`, which is decided by the name character before the
+    # match, not by the separator rule -- the shape it really decides is
+    # `/srv//home/dev/proj`, and the test now pins THAT one.
+    "tan/commands/support_bundle_cmd.py": 1066,
     # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
     # `_every_declared_format()` -- the same single source `_format_callback`
     # reads -- instead of a second, driftable tuple, and the docstring
