@@ -90,6 +90,12 @@ from typing import Any
 import typer
 
 from tan.core.global_flags import accept_global_flags
+from tan.core.proxy import (
+    HTTPS_PROXY_ENV_VARS,
+    host_of,
+    select_https_proxy,
+    unsupported_proxy_scheme,
+)
 from tan.core.text_layout import wrap_lines
 from tan.env import wrap_width
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -146,7 +152,10 @@ NO_SDK_NEXT_STEPS = (
 #: `sdk list`'s proxy/CA hint, verbatim from `tan_core::sdk::describe_network_error`.
 #: Names only the variables that actually steer an `https://` request -- neither
 #: tan nor git applies `HTTP_PROXY` to one, so naming it sent users to edit a
-#: variable that changes nothing.
+#: variable that changes nothing. That claim was FALSE for `ALL_PROXY` until
+#: tan-cli#497: `urllib` mapped it to a key its `https` dispatch never consulted,
+#: so this hint named a variable that really did change nothing. `tan/core/proxy.py`
+#: is what makes all three names accurate.
 _PROXY_HINT = (
     "Check ALL_PROXY/HTTPS_PROXY/NO_PROXY — the configured proxy refused or "
     "could not complete the connection."
@@ -605,6 +614,32 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
     return ActiveSdk(None, "none", broken_project_pin)
 
 
+def rejected_sdk_root_message(sdk_root: str, consequence: str) -> str:
+    """The `<command>.sdk-root-unresolved` message for a `--sdk-root` the
+    loader-marker check REJECTED, naming the value the caller typed.
+
+    `--sdk-root` is TERMINAL (I-31), so a path without `scripts/alp_project.py`
+    resolves to nothing rather than falling through. The messages on that branch
+    used to be the same string as the no-flag one -- "pass `--sdk-root <path>` to
+    name the checkout", the flag the user had just passed -- with the failing
+    value nowhere in the envelope or the stderr text (tan-cli#497 defect 7). So
+    the reader had no way to see WHICH path was rejected or why, on the one
+    surface that knew both.
+
+    `consequence` is the caller's own "and so you got this instead" clause,
+    because it differs per command (an empty example catalogue, built-in preset
+    defaults) and is the half a reader acts on. The no-flag message is
+    deliberately NOT routed through here: it is byte-pinned for `presets` by the
+    `presets-no-sdk` golden envelope and the oracle-parity case, and there is no
+    typed value to name on that branch anyway.
+    """
+    marker = "/".join(SDK_MARKER)
+    return (
+        f'alp-sdk root is unresolved: --sdk-root "{sdk_root}" is not an alp-sdk '
+        f"checkout ({marker} not found under it). {consequence}"
+    )
+
+
 def project_pin_issue(broken_project_pin: str | None, tier: str) -> Issue | None:
     """The tan-cli#263 warning for an unresolvable `.alp/sdk-path` project pin
     -- shared by EVERY caller of `resolve_sdk_tiered` (directly, or through
@@ -777,18 +812,19 @@ def format_release_table(releases: list[dict[str, Any]]) -> list[str]:
 # ── sdk list: the one network path, opt-in and timed out ─────────────────────
 
 
-def _proxy_configured() -> bool:
-    """Whether a proxy steers an `https://` request -- the one bit the transport
-    error string cannot carry. An unreachable or refused proxy fails as a plain
-    connect error that never contains the word "proxy", and it is the single
-    most common misconfiguration behind a corporate network."""
-    return any(
-        os.environ.get(name)
-        for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy")
-    )
+def _proxy_variable_name() -> str:
+    """The env var [`select_https_proxy`] actually read the winning proxy from,
+    for a message that sends the reader to the right line of their shell
+    profile. `ALL_PROXY` by default -- the head of the precedence list -- when
+    none is set, which only happens if a caller asks outside a proxied run."""
+    for name in HTTPS_PROXY_ENV_VARS:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return name
+    return HTTPS_PROXY_ENV_VARS[0]
 
 
-def describe_network_error(error: str) -> str:
+def describe_network_error(error: str, *, proxy_used: bool) -> str:
     """Append the likely environmental cause to a raw transport error.
 
     A middlebox-signed certificate and an unreachable proxy both read to a user
@@ -799,13 +835,22 @@ def describe_network_error(error: str) -> str:
     reachable; it is its CA that is untrusted, and the proxy vars are the wrong
     knob there), and only then a bare connect failure -- and only when there is
     a proxy to blame.
+
+    `proxy_used` is the caller's own POST-`NO_PROXY` answer -- whether the
+    request that just failed actually went through a proxy -- not a bare env
+    scan. The bare scan was a second wrong-blame case (tan-cli#497 defect 8):
+    `NO_PROXY=api.github.com` beside a `HTTPS_PROXY` correctly sends this
+    request DIRECT (measured: rc 0, 13 releases), yet a failure on that direct
+    connection was still hinted at the proxy, which had no part in it. The Rust
+    this ports (`http.rs:115`, `proxy_configured() -> env_proxy().is_some()`)
+    is post-bypass too.
     """
     lower = error.lower()
     if "proxy" in lower:
         hint = _PROXY_HINT
     elif "certificate" in lower or "tls" in lower:
         hint = _TLS_HINT
-    elif _proxy_configured() and "connect" in lower:
+    elif proxy_used and "connect" in lower:
         hint = _PROXY_HINT
     else:
         return error
@@ -855,6 +900,61 @@ def parse_remote_sdk_releases(payload: Any) -> list[dict[str, Any]] | None:
     return releases
 
 
+def _unroutable_proxy_refusal(proxy: str | None, url: str) -> str | None:
+    """Why this request must not be attempted at all, or `None`.
+
+    REFUSES rather than falling back to a direct connection when the selected
+    proxy uses a scheme urllib cannot carry (`unsupported_proxy_scheme`). A host
+    that exports a SOCKS proxy is telling tan it has no other egress, or that
+    direct egress is not permitted; quietly ignoring it is exactly the
+    silent-bypass defect this path was fixed for (tan-cli#497 defect 8). The
+    oracle CAN dial SOCKS -- `crates/tan-cli/src/http.rs` compiles ureq's
+    `socks-proxy` feature, measured -- so this names the limitation instead of
+    hiding it.
+
+    **The remediation names the variable that actually WON, and offers unsetting
+    it first.** The first cut said "Set `HTTPS_PROXY` to an http:// or https://
+    proxy", which cannot take effect: `HTTPS_PROXY_ENV_VARS` puts `ALL_PROXY`
+    ahead of `HTTPS_PROXY`, so the selection never reaches the variable the
+    reader was told to set. Measured --
+    `ALL_PROXY=socks5://127.0.0.1:45997 HTTPS_PROXY=http://127.0.0.1:45996` gave
+    the identical refusal at rc 1 with NEITHER socket touched. That is the same
+    self-defeating-remediation class as tan-cli#497 defect 7, which this branch
+    fixed two commands away: an instruction the user can follow exactly and be
+    no better off.
+    """
+    if proxy is None:
+        return None
+    scheme = unsupported_proxy_scheme(proxy)
+    if scheme is None:
+        return None
+    variable = _proxy_variable_name()
+    return (
+        f"Alp SDK: {variable} names a {scheme}:// proxy, which this "
+        f"build of tan cannot route through (its HTTP client has no {scheme} "
+        f"transport). Unset {variable}, or point it at an http:// or https:// "
+        f"proxy, or add {host_of(url)} to NO_PROXY to allow a direct connection."
+    )
+
+
+def _releases_opener(proxy: str | None) -> urllib.request.OpenerDirector:
+    """An opener carrying OUR proxy decision, never urllib's own.
+
+    `urlopen` derives its handler from `getproxies_environment()`, which maps
+    `ALL_PROXY` to the key `all` -- and `OpenerDirector._open` dispatches on
+    `req.type` (`"https"`), so the `all_open` method that installs is never
+    called and the proxy is silently bypassed (tan-cli#497 defect 8). Both keys
+    carry the same value because a proxy chosen for an `https://` request is
+    what `ALL_PROXY` means, and an EMPTY mapping means DIRECT -- not "fall back
+    to the environment", which would re-open the `NO_PROXY` half of the same
+    defect.
+    """
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({} if proxy is None else {"http": proxy, "https": proxy}),
+        urllib.request.HTTPSHandler(context=default_ssl_context()),
+    )
+
+
 def _fetch_releases(url: str = GITHUB_RELEASES_URL) -> tuple[list[dict[str, Any]], str | None]:
     """GET the releases API and parse it. Returns `(releases, error_message)`;
     exactly one side is meaningful.
@@ -874,14 +974,17 @@ def _fetch_releases(url: str = GITHUB_RELEASES_URL) -> tuple[list[dict[str, Any]
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
+    proxy = select_https_proxy(url)
+    refusal = _unroutable_proxy_refusal(proxy, url)
+    if refusal is not None:
+        return [], refusal
+    opener = _releases_opener(proxy)
     try:
-        with urllib.request.urlopen(  # noqa: S310 -- as above
-            request, timeout=NETWORK_TIMEOUT_SECONDS, context=default_ssl_context()
-        ) as response:
+        with opener.open(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
             raw = response.read().decode("utf-8", errors="replace")
     except Exception as err:  # noqa: BLE001 -- see the docstring
         detail = str(err) or type(err).__name__
-        return [], describe_network_error(detail)
+        return [], describe_network_error(detail, proxy_used=proxy is not None)
 
     try:
         payload = json.loads(raw)
@@ -971,6 +1074,44 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
     question asked, and the `sdk-current-no-sdk` golden pins it.
     """
     active = resolve_sdk_tiered(sdk_root, workspace_root)
+    if active.path is None:
+        # tan-cli#497 defect 1. `resolve_sdk_tiered` alone has NO candidate for
+        # a CHILD `<ws>/alp-sdk` -- the README Quickstart cwd, straight after
+        # `git clone https://github.com/alplabai/alp-sdk`. Measured there: this
+        # command answered `sdkPath: null`, `sourceTier: "none"`, `issues: []`
+        # and printed "get an alp-sdk checkout (`git clone ...`)", while
+        # `doctor`, `build`, `validate`, `inspect` and `trace` in that SAME cwd
+        # all reported `<ws>/alp-sdk` at `sourceTier: "discovery"` through
+        # `build_cmd.resolve_sdk_root_ladder` -- whose own docstring names `sdk
+        # current` as one of its thirteen callers, and whose wide-walk TAIL is
+        # the tier missing here. `discover_workspace_sdk`'s docstring states the
+        # invariant this broke: "the tier it reports has to be what
+        # build/validate/doctor would actually resolve here."
+        #
+        # An intentional divergence from the oracle, which has the identical
+        # split (`sdk.rs::run_current` also calls the narrow `resolve_sdk_tiered`
+        # while `util::resolve_sdk_root` falls through to `discover_sdk_root`).
+        # `sdk current` is the one command whose entire job is answering "which
+        # SDK am I on?", so answering it differently from every command that
+        # ACTS on that SDK is the defect, not the parity.
+        #
+        # Consulted ONLY when the narrow ladder resolved nothing, and the ladder
+        # itself is reused rather than its tail re-implemented: this can add an
+        # answer where there was none, never change one that already existed
+        # (which would move the SDK root under a live workspace), and there is
+        # no third copy of the tier rule to keep true. Function-level import for
+        # the same one-way dependency `build_cmd` -> this module documented at
+        # `sdk_ladder_divergence_issue`'s call site below.
+        from tan.commands.build_cmd import resolve_sdk_root_ladder
+
+        ladder = resolve_sdk_root_ladder(sdk_root, workspace_root)
+        if ladder.path is not None:
+            active = ActiveSdk(
+                str(ladder.path),
+                ladder.tier,
+                ladder.broken_project_pin,
+                ladder.foreign_global_default_for,
+            )
     readiness = check_sdk_readiness(active.path) if active.path is not None else None
     text = (
         format_readiness_block("Active SDK", readiness)
