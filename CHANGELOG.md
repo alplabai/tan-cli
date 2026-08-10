@@ -9,16 +9,18 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Added
 
-- **`ALP_FLASH_REQUIRE_DPIDR=1` makes an unarmed `swd_probe` write refuse
-  instead of warn.** `flash_args.expect_dpidr` is the only thing between a
-  cloned probe serial and a write to the wrong board, and no shipped alp-sdk
-  preset carries a SW-DP ID — so every `swd_probe` write runs unguarded, with
-  at most the `flash.dpidr-preflight-unarmed` warning that an unattended bench
-  never reads — and on the openocd/pyocd arm, which the shipped V2N/V2M
-  manifests select on a host with no J-Link, not even that: the advisory is
-  derived from the J-Link arm having run, so that path has no guard *and* no
+- **`ALP_FLASH_REQUIRE_DPIDR=1` makes an unarmed write refuse instead of warn,
+  on every flash method whose probe session `tan` composes itself —
+  `swd_probe` and Flow D (`alif_mram_jlink`).** `flash_args.expect_dpidr` is
+  the only thing between a cloned probe serial and a write to the wrong board,
+  and no shipped alp-sdk preset carries a SW-DP ID — so such a write runs
+  unguarded, with at most the `flash.dpidr-preflight-unarmed` warning that an
+  unattended bench never reads — and on `swd_probe`'s openocd/pyocd arm, which
+  the shipped V2N/V2M manifests select on a host with no J-Link, not even that:
+  an armed preflight is impossible there, so that path has no guard *and* no
   signal. With this variable exported, a real write whose DPIDR preflight would
-  not run fails the entry (`flash.entry-failed`) **before anything is spawned**.
+  not run fails the entry (`flash.entry-failed`) **before anything is spawned**
+  — and on Flow D, before the SETOOLS auto-sign can mutate anything.
   Default (unset) behaviour is byte-for-byte unchanged, `--dry-run` is
   unaffected, and `expect_dpidr` stays optional in metadata: the switch is a
   host policy for a factory/bench machine, not a new manifest requirement — a
@@ -27,9 +29,9 @@ All notable changes to `tan` are documented here. Format follows
   unconditionally under the switch, because the SW-DP ID read is a
   JLinkExe-only primitive and that arm cannot be armed at all;
   `openocd_usb_location` selects a probe but never confirms which board is on
-  the other end of the cable. Shipped scoped to `swd_probe`; widened to Flow D
-  in the same release by #609 below. Documented in `docs/setools.md`.
-  Closes #589.
+  the other end of the cable. Which methods the switch covers is one table,
+  `DPIDR_GUARD_COVERAGE`, shared with the advisory and pinned to the backend
+  registry by a gate (#609). Documented in `docs/setools.md`. Closes #589.
 
 - **Every `tan doctor` check now carries a `scope` — `host` or `project` — so a
   consumer stops hand-maintaining a list of tan's own check names.** The

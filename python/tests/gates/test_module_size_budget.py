@@ -2033,7 +2033,11 @@ _MIRRORED = ("tan/planner/",)
 # how the number was obtained.
 # 244, not 243, as of tan-cli#589 + tan-cli#590. EXACTLY ONE new crossing, and
 # it is a new function rather than an existing one growing:
-# `flash_cmd.py:_swd_probe_require_dpidr_refusal`, measured at 83 lines after
+# `flash_cmd.py:_swd_probe_require_dpidr_refusal` -- RENAMED to
+# `_require_dpidr_refusal` by tan-cli#609, which took the switch past
+# `swd_probe`; same function, same crossing, and the count is unmoved by that
+# PR (its two new functions are both under the cap) --
+# measured at 83 lines after
 # the review round (59 before it), nearly all of it the docstring weighing the
 # THREE available defaults for the wrong-board guard -- advisory, refuse-always,
 # and refuse-with-override -- and recording why the shipped one is the advisory.
