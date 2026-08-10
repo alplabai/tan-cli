@@ -189,6 +189,54 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **The test suite no longer means two different things on two machines: the
+  debug/flash probe inventory is now a property of the test, not of the host.**
+  A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
+  installed and a CI runner has none of them, so every which()-gated branch
+  answered differently in the two places, silently. #600 is what that cost:
+  seven `test_flow_d_preflight_*` cases green locally and red on
+  ubuntu-latest, windows-latest **and** macos-latest at once — a false negative
+  that does not merely fail to warn, it points the next hour of debugging at
+  "a CI problem". Measured on the fixed tip by instrumenting tan's three
+  resolution seams across two full runs, **34 tests took a different branch**
+  on the two PATHs — every `_collect` case in `test_doctor_command.py`, three
+  in `test_doctor_check_scope.py`, one in `test_support_bundle_command.py` —
+  with an identical outcome (3710 passed either way) and a different meaning;
+  those runs also really spawned `/usr/bin/JLinkExe -?` and `west --version`.
+  `tests/conftest.py` now rebuilds `PATH` once per session so no probe
+  identity resolves, matching what CI already exercises, and covering spawned
+  children as well as in-process calls. Surgical, not a blanket empty `PATH`:
+  the same suite under a `PATH` holding only `sh bash git which env ls cat
+  uname` fails 36 tests that need real `python3`/`sleep`/`mktemp`/`sed`/
+  `curl`/`tar`/`sha256sum` — tools a runner has — so only the identities a
+  runner lacks are removed. A no-op on a host that has no probe tooling, which
+  is every runner. `tests/gates/test_probe_tool_inventory.py` holds all of
+  that in place, including the over-reach direction. Documented in `README.md`,
+  so "I ran the gates locally" has one meaning. Closes #603.
+
+- **The frozen oracle captures now say they are history, and a gate keeps that
+  label true.** #269 deleted `crates/` and the ~13 parity modules that replayed
+  `python/tests/fixtures/oracle_captures/`; five of the seven
+  `test_*_oracle_parity.json` lost their only reader and were left behind, so
+  `test_command_surface_oracle_parity.json` sat there holding a byte-for-byte
+  copy of the completion script #614 has since rewritten, with nothing in the
+  tree to say which was authoritative. The store is **kept**: it is
+  unrecapturable (no binary, no capture workflow) and is cited as the record of
+  oracle behaviour by `docs/ROADMAP.md`, `docs/ux-polish-sweep-plan.md`,
+  `README.md` and four modules under `tan/` — deleting evidence that cannot be
+  regenerated, to fix a labelling problem, is the wrong trade. Instead the
+  directory gets a `README.md` whose first sentence is that nothing in it
+  describes what `tan` does today, a per-file table of which two captures still
+  have live readers and which nine are history only, and the #614 supersession
+  named explicitly. `tests/gates/test_oracle_capture_store_is_labelled.py`
+  re-measures the live-reader column from the tree on every run, refuses an
+  unlabelled file, and holds each declared supersession to being still true of
+  the capture *and* still false of the shipped source — so neither a laundered
+  capture (#511's failure mode) nor a stale claim survives. One correction to
+  the issue: of the four substrings it names, `cword -eq 1` is **not**
+  superseded — it is still in the shipped `completion_cmd.py` — so it is
+  deliberately absent from the table. Closes #617.
+
 - **`tan init --from-example` no longer copies an example's `out/` build
   directory into the customer's new project.** The build-output prune list
   added in #583 transcribed five of the seven directory patterns alp-sdk's

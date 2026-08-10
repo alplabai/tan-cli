@@ -87,6 +87,103 @@ def sdk_root() -> Path | None:
 REAL_ENVIRON: dict[str, str] = dict(os.environ)
 
 
+def _probe_free_path(path: str, scratch: Path) -> str | None:
+    """`path` with every [`PROBE_TOOLS`] identity unresolvable, or `None`
+    when it already is.
+
+    Rebuilds only the PATH ENTRIES that actually carry a probe tool, each as
+    its own link farm of that directory's other contents, spliced back at the
+    SAME position -- so ordering, shadowing and duplicate entries all survive.
+    Dropping the offending directory outright is not an option: on this bench
+    host `JLinkExe` and `openocd` live in `/usr/bin`, alongside every
+    coreutil the installer-script tests execute.
+
+    `None` when nothing matched, which is the CI case on all three runners:
+    no filesystem work, no rebuilt PATH, nothing to go wrong on a machine
+    that never had the defect.
+
+    Links rather than copies: a symlink first, a hardlink second (Windows
+    refuses symlinks without developer mode or elevation, but `os.link` works
+    within a volume). A directory that yields to neither RAISES -- an entry
+    silently left out would remove tools the suite needs, and an entry
+    silently left in would restore the exact host-dependence this exists to
+    close. Loud beats either."""
+    entries = path.split(os.pathsep)
+    lowered = {t.lower() for t in PROBE_TOOLS}
+    rebuilt: list[str] = []
+    changed = False
+    for index, entry in enumerate(entries):
+        if not entry or not os.path.isdir(entry):
+            rebuilt.append(entry)
+            continue
+        try:
+            names = os.listdir(entry)
+        except OSError:
+            rebuilt.append(entry)
+            continue
+        # Windows matches by STEM, case-insensitively: `JLinkExe.exe` and
+        # `west.cmd` are the same identities as their POSIX bare names, and
+        # `%PATHEXT%` is what makes them resolvable.
+        if not any(os.path.splitext(n)[0].lower() in lowered for n in names):
+            rebuilt.append(entry)
+            continue
+        farm = scratch / f"probe-free-{index}"
+        farm.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            if os.path.splitext(name)[0].lower() in lowered:
+                continue
+            link = farm / name
+            if link.exists() or link.is_symlink():
+                continue
+            source = os.path.join(entry, name)
+            try:
+                os.symlink(source, link)
+            except OSError:
+                try:
+                    os.link(source, link)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"cannot neutralise the debug/flash probe tooling in {entry!r}: "
+                        f"neither a symlink nor a hardlink of {name!r} could be made "
+                        f"({exc}). This suite would otherwise run against whatever probe "
+                        "tools this host happens to have installed and disagree with CI "
+                        "silently (tan-cli#603). Remove the probe tooling from PATH for "
+                        "this run, or run the suite somewhere links can be created."
+                    ) from exc
+        rebuilt.append(str(farm))
+        changed = True
+    return os.pathsep.join(rebuilt) if changed else None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _probe_tools_are_a_property_of_the_test(tmp_path_factory) -> None:
+    """Make no [`PROBE_TOOLS`] identity resolve for the whole session, so
+    every which()-gated branch answers the way it answers on CI (tan-cli#603).
+
+    Mutates `os.environ` rather than using `monkeypatch`, for two reasons:
+    `monkeypatch` is function-scoped and this is a session-wide property, and
+    the 26 test modules that spawn `[sys.executable, "-m", "tan", ...]` build
+    their child environment from `os.environ` -- an in-process patch would
+    leave every one of those spawns host-dependent. Session-scoped autouse
+    fixtures resolve before function-scoped ones, so
+    `_scrub_sdk_discovery_env` below and any test's own `monkeypatch.setenv
+    ("PATH", ...)` both still win over this, which is exactly right: a test
+    that seeds a fake probe tool is DECLARING its inventory, and that
+    declaration is the point.
+
+    A no-op on a host that has no probe tooling -- see `_probe_free_path`."""
+    original = os.environ.get("PATH", "")
+    rebuilt = _probe_free_path(original, tmp_path_factory.mktemp("probe-free-path"))
+    if rebuilt is None:
+        yield
+        return
+    os.environ["PATH"] = rebuilt
+    try:
+        yield
+    finally:
+        os.environ["PATH"] = original
+
+
 @pytest.fixture(autouse=True)
 def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     monkeypatch.delenv("ALP_SDK_ROOT", raising=False)
@@ -187,6 +284,65 @@ def tan_under_test() -> None:
         "of exactly this (tan-cli#423). Run pytest from `python/`, or "
         "`pip uninstall alp-tan`, or set PYTHONPATH to this repo's `python/`."
     )
+
+
+# ---------------------------------------------------------------------------
+# The DEBUG/FLASH PROBE INVENTORY, made a property of the test rather than of
+# the host (tan-cli#603).
+#
+# A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
+# installed; a CI runner has none of them. Every which()-gated branch that
+# turns on one of those identities therefore answers DIFFERENTLY in the two
+# places, silently. tan-cli#600 is what that costs: seven
+# `test_flow_d_preflight_*` cases green on the bench host and red on
+# ubuntu-latest, windows-latest AND macos-latest at once -- a false negative
+# that does not merely fail to warn, it points the next hour of debugging at
+# "a CI problem".
+#
+# Measured on the tip this landed at, by instrumenting tan's three resolution
+# seams (`doctor_cmd.on_path`, `tool_lookup.resolve_tool`, `shutil.which`)
+# across two full suite runs: 34 tests took a DIFFERENT BRANCH on the two
+# PATHs -- every `_collect` case in `tests/commands/test_doctor_command.py`,
+# three in `tests/gates/test_doctor_check_scope.py`, and one in
+# `tests/commands/test_support_bundle_command.py`. Identical outcome (3710
+# passed either way), different meaning; and on the bench host those runs
+# really do spawn `/usr/bin/JLinkExe -?` and `west --version`.
+#
+# SURGICAL, deliberately. `empty_tool_inventory` below removes EVERYTHING,
+# which is right for one test and wrong for the suite: measured, a full run
+# under a PATH holding only `sh bash git which env ls cat uname` fails 36
+# tests that need real `python3`/`sleep`/`mktemp`/`sed`/`curl`/`tar`/
+# `sha256sum` -- tools a CI runner has. So only the identities a runner
+# genuinely lacks are removed, and `tests/gates/test_probe_tool_inventory.py::
+# test_ordinary_host_tooling_is_untouched` holds this to that.
+# ---------------------------------------------------------------------------
+#: The probe/flash/Zephyr-meta identities tan resolves through `on_path` /
+#: `resolve_tool` / `shutil.which` that a GitHub runner never has installed.
+#: Deliberately NOT `git`/`cmake`/`ninja`/`python3`/`xz`/`wget`/`dd`/`gzip`/
+#: `addr2line`/`7z`: a runner HAS those, so removing them would invent a new
+#: divergence in the opposite direction rather than close this one.
+PROBE_TOOLS: frozenset[str] = frozenset(
+    {
+        # J-Link, all three names `doctor_cmd._collect` tries in order.
+        "JLinkExe",
+        "JLink",
+        "JLinkGDBServerCL",
+        "JLinkGDBServer",
+        # The other two flash back-ends `flash_cmd` probes for.
+        "openocd",
+        "pyocd",
+        # Zephyr's meta-tool: the single biggest divergence measured (74
+        # resolutions across the suite on the bench host, none on CI).
+        "west",
+        # Emulator + image writer, same class: probed by `renode_cmd` /
+        # `flash_cmd`, absent from every runner.
+        "renode",
+        "bmaptool",
+        # Zephyr-SDK-only; `faultdecode_cmd` tries it ahead of the ordinary
+        # `llvm-addr2line`/`addr2line` pair, which are NOT listed here.
+        "arm-zephyr-eabi-addr2line",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
