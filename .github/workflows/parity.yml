@@ -345,9 +345,38 @@ env:
   #     stays at its `f30f4d4b` vendor point -- see that tree's `MANIFEST.md`.
   #   - seam1_field_diff PASS, rc 0
   #
+  # `ccd34f06` -> `7d58ef32` (tan-cli#493/#591). Three upstream commits:
+  # alp-sdk#1246 (`metadata/libraries/**` pin repairs, no `scripts/` file),
+  # #1344 (the baremetal slice's `postCommands` / `-B .` / `-DALP_*` /
+  # `alp-baremetal.cmake` -- PLANNER half re-synced into `tan/planner/`, the
+  # executor half NOT ported, so tan-cli#550/#551 stay OPEN and are not
+  # claimed) and #1352 (the tan-cli#493/#591 fix in
+  # `scripts/gen_zephyr_board.py`). This pin CANNOT stay behind: #1352's
+  # generator reads a new `zephyr_peripherals_dtsi` on the SoC JSON, which
+  # only exists in trees that also contain #1344, so an oracle pinned at
+  # `ccd34f06` makes `test_tan_generate_writes_a_zephyr_board_tree_byte_for_
+  # byte` fail (measured: `generate.emit-failed`, exit 3).
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `7d58ef32` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8345 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, NO re-vendor: the six
+  #     `examples/**` files that moved in this range are `board.yaml`s and one
+  #     `main.c` outside every scaffold template, so
+  #     `python/tan/templates/vendored/` stays at its `f30f4d4b` vendor point
+  #     -- see that tree's `MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0 -- but only after `tests/parity/
+  #     seam1_field_diff.py` + `test_seam1_field_diff.py` were re-synced with
+  #     alp-sdk's copies at this commit (#1344 added the `postCommands` /
+  #     `artifacts.outputDir` allowance for the two keys the frozen 97ad481b
+  #     oracle predates). Without that re-sync this step reports `FAIL
+  #     multicore_rpmsg-v2n: 4 disallowed diff(s)`.
+  #
   # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
   # predates every commit this bump exists to pick up.
-  PINNED_SDK_TAG: ccd34f0648cc4f26a3230f337935050cd999d8a0
+  PINNED_SDK_TAG: 7d58ef32d0a730c902e335adfd7764c2ec500ba5
 
 jobs:
   seam1-plan-shape:

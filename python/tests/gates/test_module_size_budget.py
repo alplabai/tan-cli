@@ -1430,7 +1430,19 @@ _MODULE_BUDGET: dict[str, int] = {
     # 32 KiB and not less, and a paraphrase of those is worth nothing on a
     # bench. Raised, not extracted -- same mirrored-generator reasoning as the
     # tan-cli#432 entry above.
-    "tan/planner/zephyr_board.py": 1027,
+    # 1370, not 1027, as of tan-cli#493/#591: the alp-sdk#1352 re-sync. Three
+    # accessors replace the `_AEN_FAMILY_DISPLAY = "Alif Ensemble E8"`
+    # constant (`_aen_part` / `_aen_family_display` / `_aen_peripherals_dtsi`,
+    # each with the refusal it exists to raise), three new validators
+    # (`_aen_check_extents`, `_aen_check_map_overlaps`,
+    # `_aen_missing_region_message`), `_aen_slot0_sizes_display`, and the
+    # half-authored-map branch inside `_aen_role_slot0_map`. MEASURED with
+    # this gate's own walk on the ported tree, not derived from alp-sdk's
+    # +440-line diff. Raised, not extracted, for the same reason as every
+    # entry above it: this file mirrors an upstream generator, and splitting
+    # it here would make the next re-sync a hand-merge instead of a diff --
+    # this very change is that diff, and it applied cleanly.
+    "tan/planner/zephyr_board.py": 1370,
     # 834 -> 842: tan-cli#478, same reason as `validate_cmd.py` above --
     # the bundle is the one artefact that never carried the foreign-default
     # warning, and its embedded doctor set could not have supplied it.
@@ -2026,7 +2038,29 @@ _MIRRORED = ("tan/planner/",)
 # `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
 # `bootstrap_cmd.py:_run`, measured at 704 on this tree, and nothing here is
 # within 600 lines of it.
-_FUNCTION_COUNT_BUDGET = 244
+#
+# 244 as of tan-cli#493/#591 (the alp-sdk#1352 + #1344-planner-half re-sync).
+# EXACTLY ONE function crosses 50 lines that did not before:
+# `tan/planner/buildplan.py:_slice_artifacts` at 86, alp-sdk#1344's new
+# per-slice artifacts helper -- a mirror-file function, upstream's to split.
+# Six already-over functions grew and move nothing
+# (`buildplan.py:emit_build_plan` 255->281, `orchestrator.py:_slice_command`
+# 177->233, `zephyr_board.py:_aen_flash_partitions` 89->106, `_aen_dts`
+# 311->322, `emit_zephyr_board` 60->71, `_aen_pinctrl_dtsi` 52->53), and
+# nothing dropped off. MEASURED by walking the ported tree with this gate's
+# own `_long_functions` and diffing the NAMED sets against the same walk of a
+# clean `a9062ea` worktree -- not 243 + 1 by arithmetic; the +1 agreeing with
+# the named set is a check on this paragraph, not how it was obtained.
+# `_FUNCTION_WORST_BUDGET` is untouched: the worst is still
+# `bootstrap_cmd.py:_run` at 704, and the longest thing this change adds is
+# 86 lines.
+#
+# MERGED VALUE, tan-cli#608 merged with dev carrying tan-cli#589/#590: the two
+# paragraphs above describe DISJOINT crossing sets -- one `flash_cmd.py`
+# function, one `buildplan.py` mirror function -- so both survive the merge and
+# NEITHER side's 244 does. Re-walked with this file's own `_long_functions` on
+# the merged tree; the value below is that walk's answer, not 244 + 1.
+_FUNCTION_COUNT_BUDGET = 245
 _FUNCTION_WORST_BUDGET = 707
 
 

@@ -23,7 +23,8 @@ gate did exactly that and so had never once compared a value; its sibling
 `tan/planner/` drifted eleven alp-sdk commits unnoticed (tan-cli#275).
 
 Upstream has since made that oracle AMBIGUOUS on purpose. alp-sdk#1300
-(`ccd34f06`, the commit this repo's SDK pins moved to) populated the BS0
+(`ccd34f06`; this repo's SDK pins have since moved on to `7d58ef32`, which
+still carries it) populated the BS0
 package variant's `debug.jlink_flash_device` as well, so `e8.json` now
 declares TWO distinct values -- `AE822FA0E5597BS0_M55_HE` and
 `AE822FA0E5597LS0_M55_HE`. `doctor_cmd.jlink_flash_device` answers that with
