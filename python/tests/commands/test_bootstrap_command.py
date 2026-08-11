@@ -883,6 +883,96 @@ def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_pa
     assert str(proj_b).replace("\\", "/") in message
 
 
+def test_a_relocating_bootstrap_updates_the_project_pin_it_resolved_through(tmp_path):
+    """tan-cli#644: `bootstrap` used to leave a project's OWN `.alp/sdk-path`
+    naming the vacated checkout after relocating it -- reachable on the very
+    first documented `tan init` then `tan bootstrap --workspace <dir>`
+    sequence, since `init` is exactly what writes this pin. Every later
+    command that resolves the SDK through it (`build`, `sdk current`, ...)
+    then read a pin the checkout no longer sat under.
+
+    Deliberately DIFFERENT from the case pinned two tests above (a bootstrap
+    run from the workspace PARENT with `--sdk-root`, no project pin in play,
+    tier `sdkRootFlag`): here `--sdk-root` is NOT passed, so the SDK resolves
+    through the project's own EXISTING `.alp/sdk-path` pin (tier
+    `projectPin`) -- the narrow condition this fix actually rewrites, chosen
+    over writing a NEW pin unconditionally (the idea tried and reverted at
+    tan-cli#464, cited in that same test) for exactly the reason that revert
+    gives: THIS cwd genuinely is a project, with a pin `tan init` already
+    wrote and this very run already resolved through -- not an arbitrary
+    workspace-parent directory that may not be a project at all.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(sdk), "updatedAt": "2026-01-01T00:00:00Z"}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "new-home"
+
+    env = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--workspace", str(workspace), cwd=proj,
+        )
+    )
+    assert env["exitCode"] == 0
+    assert env["sdk"]["sourceTier"] == "projectPin"
+    new_sdk = workspace / sdk.name
+    assert env["sdk"]["root"] == str(new_sdk).replace("\\", "/")
+    assert "bootstrap.workspace-relocated" in codes(env)
+
+    pin = json.loads((proj / ".alp" / "sdk-path").read_text(encoding="utf-8"))
+    assert pin["sdkPath"] == str(new_sdk)
+
+    # A FRESH process, same cwd -- exactly the customer's next command --
+    # resolves the SAME checkout through the SAME tier, with no
+    # `sdk.project-pin-unresolved` warning: the pin this run rewrote is what
+    # a later `sdk current`/`build`/`inspect`/`validate` reads.
+    later = envelope(run_tan("sdk", "current", "--format", "json", cwd=proj))
+    assert later["data"]["sourceTier"] == "projectPin"
+    assert later["sdk"]["root"] == str(new_sdk).replace("\\", "/")
+    assert "sdk.project-pin-unresolved" not in codes(later)
+
+
+def test_a_relocation_rollback_restores_the_project_pin_it_rewrote(tmp_path):
+    """tan-cli#644 review: the project-pin rewrite proven above must roll back
+    exactly like the global default pointer already does (tan-cli#284) when a
+    LATER step -- here, venv creation -- fails after a successful relocation.
+    Leaving the rewritten pin in place would name a checkout that just moved
+    BACK to its original location -- the exact stale-pin defect this fix
+    exists to close, just introduced by the rollback instead of by a
+    completed run.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    original_pin = (
+        json.dumps({"sdkPath": str(sdk), "updatedAt": "2026-01-01T00:00:00Z"}, indent=2) + "\n"
+    )
+    (proj / ".alp" / "sdk-path").write_text(original_pin, encoding="utf-8")
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    # Blocks `python -m venv`, the same deterministic, network-free failure
+    # `test_a_relocation_is_rolled_back_when_a_later_step_fails` uses.
+    (workspace / ".venv").write_text("not a directory", encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "bootstrap", "--format", "json", "--workspace", str(workspace), cwd=proj,
+        )
+    )
+    assert env["exitCode"] != 0
+    issue_codes = codes(env)
+    assert "bootstrap.workspace-relocated" in issue_codes
+    assert "bootstrap.workspace-relocation-rolled-back" in issue_codes
+    # The checkout is back at its original location; the project pin must say
+    # so too, byte-for-byte -- not merely "some path that resolves".
+    assert sdk.exists()
+    assert (proj / ".alp" / "sdk-path").read_text(encoding="utf-8") == original_pin
+
+
 def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_path):
     """tan-cli#302 non-negotiable: auto-relocating into
     `default_relocation_target`'s own `alp-workspace` choice is safe only into

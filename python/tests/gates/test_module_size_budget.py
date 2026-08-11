@@ -247,7 +247,23 @@ _MODULE_BUDGET: dict[str, int] = {
     # Two functions LEFT this file in the same change (`_manifest_points_at`,
     # `_same_directory`, both moved down to `tan/core/bootstrap.py`), so the
     # figure is net of that removal.
-    "tan/commands/bootstrap_cmd.py": 3070,
+    # 3217, not 3070, as of tan-cli#644: `bootstrap --workspace` relocated a
+    # checkout without updating the PROJECT's own `.alp/sdk-path` pin (only
+    # `~/.alp/sdk-default` got repointed), leaving `init` then `bootstrap` --
+    # the documented order -- an unresolvable pin on the very first run.
+    # Rewriting the pin is gated on `active_tier == "projectPin"` (the
+    # project already had a working pin naming exactly the checkout that just
+    # moved), never written where none existed -- `tan init`'s `_pin_sdk`
+    # stays the only writer of a NEW one. Most of the growth is two new,
+    # small, unit-testable functions and their docstrings --
+    # `_relocate_project_pin` (the write side, called once from `_run`) and
+    # `_restore_project_pin` (the rollback side, called once from
+    # `_undo_relocation`) -- deliberately pulled OUT of both instead of
+    # inlined, which is what kept `_run`'s own growth to +17 lines rather
+    # than the +27 an inline version measured at, and kept `_undo_relocation`
+    # itself under the 50-line function cap entirely (34 -> 54 inline vs.
+    # 34 -> 48 pulled out).
+    "tan/commands/bootstrap_cmd.py": 3217,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
     # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
@@ -2276,8 +2292,18 @@ _MIRRORED = ("tan/planner/",)
 # 707 -> 711, MEASURED by this gate's own `_long_functions` walk on the final
 # tree -- `bootstrap_cmd.py:_run` is still the package's single longest
 # function.
+#
+# tan-cli#644: `_run` moves again, 711 -> 728, for the call site described
+# above the `_MODULE_BUDGET` entry (`previous_project_pin, project_pin_root =
+# _relocate_project_pin(...)` plus the comment explaining why it is gated on
+# `active_tier == "projectPin"`). `_FUNCTION_COUNT_BUDGET` is UNTOUCHED: the
+# naive inline version pushed `_undo_relocation` (34 -> 54) over the 50-line
+# cap and would have moved this to 247, which is exactly why the rollback
+# side was pulled into its own `_restore_project_pin` function instead --
+# `_undo_relocation` measures 48 here, still under the cap, so the count of
+# over-cap functions in the package is unchanged at 246.
 _FUNCTION_COUNT_BUDGET = 246
-_FUNCTION_WORST_BUDGET = 711
+_FUNCTION_WORST_BUDGET = 728
 
 
 def _modules() -> list[Path]:
