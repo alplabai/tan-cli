@@ -89,6 +89,7 @@ from tan.commands.build.execute import (
     KNOWN_BACKENDS,
     SliceOutcome,
     execute_slices,
+    last_configure_cache_issues,
     last_manifest_write_failure,
     last_sdk_switch_issues,
     reset_last_manifest_write,
@@ -664,6 +665,27 @@ def sdk_ladder_divergence_issue(
     )
 
 
+def _planner_python_resolution(start: str, sdk_root: str | None) -> tuple[str, bool]:
+    """Like [`_planner_python`], but also reports whether it resolved a
+    `tan bootstrap` workspace venv (`True`) or fell back to a bare PATH name
+    (`False`).
+
+    tan-cli#652: `validate_cmd`/`diff_cmd` need this flag to tell "this
+    interpreter is missing a dependency because no workspace venv exists yet
+    -- run `tan bootstrap`" from "this interpreter is missing a dependency
+    for some other reason" when a spawned SDK script dies importing one. A
+    bare fallback interpreter that HAPPENS to already have the SDK's
+    dependencies (the common from-source-install shape: `jsonschema` is also
+    one of tan's own declared dependencies, so it lands on the same
+    interpreter `pip install` used) must not be refused pre-emptively --
+    only a run that actually fails gets the remedy attached, and only when
+    this flag says there was no venv to blame instead.
+    """
+    resolved = venv_python(start, sdk_root)
+    fallback = "python" if os.name == "nt" else "python3"
+    return resolved or fallback, resolved is not None
+
+
 def _planner_python(start: str, sdk_root: str | None) -> str:
     """The interpreter a SPAWNED build step runs under.
 
@@ -686,8 +708,13 @@ def _planner_python(start: str, sdk_root: str | None) -> str:
     `sys.executable` is `tan` itself, so spawning it would just re-enter this
     CLI; and this value is also the `${PYTHON}` substituted into the plan, so
     it has to name an interpreter the slice can find, not this process.
+
+    A thin wrapper over [`_planner_python_resolution`] -- kept as its own
+    name because every existing caller wants only the interpreter path, not
+    the venv flag, and a second copy of the resolution logic is exactly the
+    kind of drift this repo's conventions warn against.
     """
-    return venv_python(start, sdk_root) or ("python" if os.name == "nt" else "python3")
+    return _planner_python_resolution(start, sdk_root)[0]
 
 
 def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
@@ -1570,6 +1597,10 @@ def _build(
     # `build.sdk-switch-pristine` for the wipe itself, `-failed` when the
     # wipe could not fully land.
     issues.extend(last_sdk_switch_issues())
+    # tan-cli#655: the stale-configure-cache reset must not be stderr-only in
+    # JSON mode either -- same reasoning as the sdk-switch-pristine wipe
+    # immediately above.
+    issues.extend(last_configure_cache_issues())
 
     manifest_reason = last_manifest_write_failure()
     if manifest_reason is not None:

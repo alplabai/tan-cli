@@ -346,6 +346,21 @@ All notable changes to `tan` are documented here. Format follows
   #661, #662 (unblocks all three: each asserted an alp-sdk fact newer than
   the stale pin, which the parity oracle then reported as a disallowed
   diff).
+- **`tan validate` and `tan diff` name `tan bootstrap` as the remedy for a
+  missing-module crash, instead of surfacing a raw `ModuleNotFoundError`,
+  when no workspace venv has been created yet for the project.** Both
+  commands spawn the SDK's own `scripts/validate_board_yaml.py` under
+  `_planner_python_resolution`, which falls back to the bare system
+  interpreter when no `tan bootstrap` venv resolves; that interpreter lacks
+  `jsonschema`, and the crash used to be reclassified into the generic
+  "Validation ended with outcome 'failed'. Last line of validator output:
+  ModuleNotFoundError: No module named 'jsonschema'" message with no
+  actionable next step. `_spawn_validator`/`_reject_if_sdk_validator_disagrees`
+  now thread the `used_workspace_venv` flag through to
+  `_synthesised_finding`, so this specific, identifiable cause names the real
+  fix — a present-but-independently-broken workspace venv still gets the
+  generic message. (#652)
+
 - **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
   PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
   any time `tan bootstrap` relocates a checkout inside a project that already
