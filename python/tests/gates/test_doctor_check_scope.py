@@ -76,6 +76,7 @@ _PINNED_SCOPES = {
     # resolved alp-sdk checkout, or the Zephyr workspace built for it.
     "boardYaml": "project",
     "bootstrapManifest": "project",
+    "libraries": "project",
     "pythonFloor": "project",
     "sdk": "project",
     "sdkProvenance": "project",

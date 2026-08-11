@@ -141,6 +141,7 @@ from tan.core.bootstrap import (
     reported_missing,
 )
 from tan.core.consent import can_prompt
+from tan.core.doctor_libraries import LibraryReport, inspect_selection
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
@@ -1826,6 +1827,58 @@ def board_yaml_preflight_check(present: bool, project_selected: bool) -> Check:
     )
 
 
+def libraries_check(report: LibraryReport | None) -> Check | None:
+    """`libraries` -- the ADR-0018 curated-library verdict for the selected
+    project: tier, licence, and whether each selection can actually be wired
+    on this target.
+
+    Ported from alp-sdk's `scripts/alp_cli/doctor.py::_check_libraries`
+    (ADR-0020 end-state B -- a user-facing check belongs on the user command
+    surface, which is `tan`; alp-sdk keeps the library LAYER, not a second CLI
+    reporting on it). `tan.core.doctor_libraries` owns the resolution, the
+    outcome vocabulary and the defect the port fixed; this is the mapping.
+
+    `None` -- no row at all -- for no project in scope and for one selecting
+    no libraries; a permanent "0 selected" line would sit in front of every
+    customer not using the feature, and `venv_provenance_check` is precedent
+    for declining to speak over speaking emptily.
+
+    Never `fail`: `tan build` refuses an unwireable selection outright, so the
+    hard gate exists already and is the emit, and a `fail` here would also
+    cost exit 4 -- making "you picked a library this board cannot run" read
+    identically to "you have no toolchain". alp-sdk's original call, kept.
+    `scope="project"` because the subject is that board.yaml against that
+    checkout, which answers identically on every host (`doctor_scope`)."""
+    if report is None:
+        return None
+    joined = ", ".join(report.labels)
+    count = len(report.names)
+    if report.outcome == "ok":
+        return Check(
+            "libraries", "pass", f"{count} selected, all compatible: {joined}", scope="project"
+        )
+    if report.outcome == "unreadable":
+        return Check("libraries", "warn", report.detail, scope="project")
+    if report.outcome == "unverifiable":
+        return Check(
+            "libraries",
+            "warn",
+            f"{count} selected, none verified ({joined}) -- {report.detail}",
+            # `NO_SDK_NEXT_STEPS`, never a hand-written `tan sdk switch` --
+            # that verb is refused (test_sdk_onboarding_dead_end.py).
+            f"{NO_SDK_NEXT_STEPS}, then re-run `tan doctor`.",
+            scope="project",
+        )
+    return Check(
+        "libraries",
+        "warn",
+        f"{count} selected: {joined} -- INCOMPATIBLE: {report.detail}",
+        "Fix or remove the offending `libraries:` entry in board.yaml; `tan build` "
+        "rejects it as a hard error.",
+        scope="project",
+    )
+
+
 def workspace_preflight_check(workspace_dir: str | None) -> Check:
     """`workspace` -- is a Zephyr WORKSPACE (a directory holding `.west/`)
     resolved at all? Mirrors `build_preflight_checks`'s check of the same
@@ -3088,6 +3141,19 @@ def _collect(
             board_yaml is not None and Path(board_yaml).is_file(), project_selected
         )
     )
+    # Immediately after `boardYaml`, and reading the SAME two facts `sdk` and
+    # `boardYaml` just reported on -- the selection is a fact ABOUT that file,
+    # resolved against THAT checkout, so a report where the two disagree would
+    # be incoherent. Emits nothing at all for a project that selects no
+    # curated libraries (see `libraries_check`).
+    libraries = libraries_check(
+        inspect_selection(
+            Path(board_yaml) if board_yaml is not None else None,
+            Path(sdk_root) if sdk_root is not None else None,
+        )
+    )
+    if libraries is not None:
+        _add(libraries)
     workspace_path = west_workspace_dir(
         workspace_root, Path(sdk_root) if sdk_root is not None else None
     )
