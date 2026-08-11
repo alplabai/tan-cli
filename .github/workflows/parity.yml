@@ -891,6 +891,49 @@ jobs:
           fi
           exit 0
 
+      # The HAND-PORT half of the same alarm, which did not exist (tan-cli#500).
+      #
+      # `test_hand_ported_planner_modules_match_their_pinned_sdk_source` is
+      # structurally incapable of detecting upstream drift as wired: the
+      # `resolve hand-port audit commit` step greps HAND_PORT_PINNED_SDK_COMMIT
+      # out of the gate file and clones alp-sdk at exactly that SHA, so the
+      # always-run job compares the pin's tree against hashes taken FROM the
+      # pin's tree. It can fail on table self-inconsistency and on nothing else.
+      # Measured at the time this was written: three of the nine pinned sources
+      # had moved by alp-sdk HEAD and the gate was green.
+      #
+      # Its sibling above already has the missing half -- a live-oracle arm --
+      # and was scoped to exclude this test precisely because THIS step's root
+      # was not bound there. So bind it here, to the LIVE checkout rather than
+      # the frozen audit one, and the comparison finally has two different
+      # trees in it.
+      #
+      # Same three deliberate constraints as its sibling, and for the same
+      # reasons argued above: dispatch ONLY (on a `pull_request` run `alp-sdk`
+      # is PINNED_SDK_TAG, which may legitimately sit behind the audit commit,
+      # so the comparison would answer nothing and fire on every PR),
+      # `continue-on-error`, and a `::warning::` rather than a red X. The
+      # blocking question belongs to tan-cli#509, not to this step.
+      #
+      # NOT a replacement for the always-run job's version of this test: that
+      # one still proves the table is internally consistent, which is the check
+      # that catches a mis-typed hash. This one catches the other side.
+      - name: hand-port freshness vs live alp-sdk (alarm, warn only)
+        if: github.event_name == 'repository_dispatch'
+        continue-on-error: true
+        working-directory: python
+        env:
+          ALP_SDK_HAND_PORT_ROOT: ${{ github.workspace }}/alp-sdk
+        run: |
+          set +e
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_hand_ported_planner_modules_match_their_pinned_sdk_source -q
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::the HAND-PORTED planner modules no longer match their sources at alp-sdk ${{ steps.sdk_ref.outputs.ref }} -- one or more of the nine pinned sources moved upstream (see the pytest output above for which). The always-run job cannot see this: it binds ALP_SDK_HAND_PORT_ROOT to HAND_PORT_PINNED_SDK_COMMIT, so it compares the pin against itself. Non-blocking by design: port the delta, then re-pin HAND_PORT_PINNED_SDK_COMMIT/HAND_PORT_HASHES in python/tests/gates/test_planner_relocation_freshness.py. NOTE tan's copy may be AHEAD of the pin rather than behind -- tan-cli e1d657f forward-ported alp-sdk#1069 without moving the pin -- so read the diff before assuming which side owes the change."
+          fi
+          exit 0
+
   # seam2 -- the half of ADR-0020's parity contract seam1 cannot reach.
   #
   # seam1 proves the PLAN's SHAPE is stable. It never runs tan and never
@@ -1644,6 +1687,26 @@ jobs:
           set -euo pipefail
           if [ ! -f "${ALP_SDK_ROOT}/scripts/alp_project.py" ]; then
             echo "::error::ALP_SDK_ROOT is bound to ${ALP_SDK_ROOT}, which has no scripts/alp_project.py -- tests/conftest.py::sdk_root() would return None and every SDK-gated module would SKIP while this job still reported green. Fix the 'clone alp-sdk' step above."
+            exit 1
+          fi
+          # ...and that guard is NOT sufficient, which is what the node-id
+          # assertion below is for (tan-cli#500). It checks `alp_project.py`,
+          # while `test_planner_emit_parity.py`'s own skip mark reads a
+          # DIFFERENT file -- `scripts/alp_orchestrate/__init__.py`. A checkout
+          # satisfying this guard and shipping no `scripts/alp_orchestrate/`
+          # drops all 775 of that module's cases to SKIP at exit 0, taking its
+          # in-module canary with them, and this job stays green having
+          # compared nothing. alp-sdk retiring that package is the relocation's
+          # STATED end state, so this is a scheduled event, not a hypothetical.
+          #
+          # Run FIRST and by node id, for the same reason seam1 asserts PASSED
+          # by node id: a SKIP does not fail pytest's exit code, so neither
+          # `set -e` nor pipefail is the enforcement here. Running it ahead of
+          # the suite also fails in seconds rather than after the full round.
+          GUARD=tests/parity/test_planner_parity_actually_ran.py::test_a_bound_sdk_root_still_ships_the_planner_oracle
+          python -m pytest -v "${GUARD}" | tee /tmp/parity-guard.log
+          if ! grep -qF "${GUARD#tests/parity/} PASSED" /tmp/parity-guard.log; then
+            echo "::error::${GUARD} did not PASS in this job. ALP_SDK_ROOT is bound here, so a SKIP means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/) or the guard itself regressed to fail-open -- either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
             exit 1
           fi
           python -m pytest -q --ignore=tests/gates

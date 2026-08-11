@@ -2630,7 +2630,48 @@ All notable changes to `tan` are documented here. Format follows
   three freshness tests PASSED, precisely because "a skip does not fail
   pytest's exit code" -- the new guard added here gets no such assertion, so a
   `pytestmark` added to its module later would re-open the same hole silently.
-  All three follow in one workflow-side change.
+  All three are in the entry below.
+
+- **The three workflow-side gates that could not fail either.** The tail of
+  the same sweep, held back only until #435 stopped editing these two files.
+  (#500)
+
+  - **`python-binaries.yml`'s macOS `arch` step was `run: file
+    "python/dist/tan/tan"`** -- no comparison, no non-zero path, so it could
+    not fail on the wrong-architecture darwin build its own comment says it
+    exists to refuse. PyInstaller cannot cross-compile: it always freezes the
+    host's arch, so a wrong runner label yields a correctly NAMED binary of the
+    wrong architecture, and the extension selects assets by name without ever
+    inspecting the file -- the failure lands on a customer's Intel Mac as `Bad
+    CPU type in executable`. The Windows leg had the right shape all along
+    (parse the PE COFF machine word, refuse on mismatch against
+    `matrix.machine`); the macOS legs now read the Mach-O header and compare
+    against a new `matrix.cputype` (`0x01000007` CPU_TYPE_X86_64,
+    `0x0100000c` CPU_TYPE_ARM64), refusing a universal (fat) binary explicitly
+    rather than mis-parsing one -- a fat binary would satisfy BOTH asset names
+    at once, which is the opposite of what per-architecture assets are for.
+
+  - **`parity.yml`'s hand-port freshness test could only fail on table
+    self-inconsistency.** The `resolve hand-port audit commit` step greps
+    `HAND_PORT_PINNED_SDK_COMMIT` out of the gate file and clones alp-sdk at
+    exactly that SHA, so `test_hand_ported_planner_modules_match_their_pinned_sdk_source`
+    compares the pin's tree against hashes taken FROM the pin's tree -- it can
+    catch a mistyped hash and nothing else. Three of the nine pinned sources
+    had moved by alp-sdk HEAD while the gate was green. Its sibling already had
+    the missing half, a live-oracle arm, and was scoped to EXCLUDE this test
+    precisely because its root was not bound there; that root is now bound, to
+    the live checkout rather than the frozen audit one, in a second
+    dispatch-only warn-only arm. The always-run job keeps its self-consistency
+    version -- the two catch different sides.
+
+  - **The new byte-parity guard had no node-id assertion.** `parity.yml`
+    asserts three freshness tests PASSED by full node id rather than trusting
+    the summary, because a SKIP does not fail pytest's exit code -- so `set -e`
+    and `pipefail` are not the enforcement. The guard added for the item above
+    got no such treatment, meaning a `pytestmark` added to its module later
+    would re-open exactly the hole it was written to close. It now runs first,
+    by node id, in `python-tests`: a SKIP there is a hard job failure, and the
+    job fails in seconds rather than after the full parity round.
 
 ### Security
 
