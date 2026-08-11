@@ -1202,6 +1202,25 @@ def test_zephyr_sdk_install_version_matches_the_real_toolchain_lock():
     assert doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION == doc["zephyrSdk"]["version"]
 
 
+def test_readme_quickstart_names_the_current_zephyr_sdk_install_command():
+    """tan-cli#651. The root README's quickstart embeds `west sdk install
+    --version <N> -t arm-zephyr-eabi` as a literal, copy-pasteable command --
+    a NEW consumer of the pin `contract/fixtures/toolchains/toolchains.json`
+    owns, per that fixture's own `_comment`: "A NEW consumer of this pin
+    needs its own parity assertion; widening this scan will not reach it."
+    Without this, a version bump updates `ZEPHYR_SDK_INSTALL_VERSION` (already
+    guarded above by `test_zephyr_sdk_install_version_matches_the_real_
+    toolchain_lock`) while the README goes silently stale, sending a customer
+    to install a toolchain version alp-sdk no longer pins."""
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    command = doctor_cmd.zephyr_sdk_install_command()
+    assert command in text, (
+        f"README.md's quickstart must contain the literal `{command}` -- not "
+        "found. Either the quickstart step was dropped, or its hardcoded "
+        "version pin has drifted from ZEPHYR_SDK_INSTALL_VERSION."
+    )
+
+
 # --------------------------------------------------------------------------
 # sevenZip (tan-cli#286 second pass, finding 3) -- the `zephyrSdk` Fail names
 # `west sdk install` as the whole remedy, but on native Windows that command

@@ -46,11 +46,19 @@ Install from source on those hosts.
 
 ### From source
 
-Python 3.12 or newer is required:
+Python 3.12 or newer is required. Install into a virtual environment, not the
+system interpreter: on a PEP 668 host (Debian/Ubuntu, including stock
+`ubuntu:24.04`) a bare `python3 -m pip install ./python` refuses with
+`error: externally-managed-environment` instead of installing anywhere.
+Debian/Ubuntu's `python3` package also does not include `venv` itself --
+`python3 -m venv` fails there until `python3-venv` is installed:
 
 ```sh
+sudo apt-get install -y python3-venv   # Debian/Ubuntu only
 git clone https://github.com/alplabai/tan-cli
 cd tan-cli
+python3 -m venv .venv
+source .venv/bin/activate              # Windows: .venv\Scripts\Activate.ps1
 python3 -m pip install ./python
 tan --version
 ```
@@ -73,6 +81,9 @@ Start in an empty working directory:
 ```sh
 git clone https://github.com/alplabai/alp-sdk
 tan bootstrap --sdk-root ./alp-sdk
+source alp-workspace/.venv/bin/activate    # Windows: alp-workspace\.venv\Scripts\Activate.ps1
+export ZEPHYR_BASE="$PWD/alp-workspace/zephyr"
+west sdk install --version 1.0.1 -t arm-zephyr-eabi
 tan init --name my-app
 cd my-app
 
@@ -85,17 +96,27 @@ tan run --flash
 What those commands do:
 
 1. `bootstrap` prepares west, Zephyr, the Python environment, and SDK
-   dependencies.
-2. `init` creates a Zephyr application and pins the SDK checkout in
+   dependencies, into a workspace venv at `alp-workspace/.venv` (next to the
+   SDK checkout by default).
+2. `west` lives only inside that venv, so activate it and point `ZEPHYR_BASE`
+   at the workspace before running `west sdk install` -- it installs the
+   Zephyr SDK cross-toolchain (`arm-zephyr-eabi`) that `tan build` needs;
+   `bootstrap` does not install it, and `tan doctor --fix` does not either.
+   On a minimal Linux host this step also needs `file` on PATH
+   (Debian/Ubuntu: `sudo apt-get install -y file`); without it the SDK's own
+   host-tools step fails with "Host tools installation failed" and names
+   nothing.
+3. `init` creates a Zephyr application and pins the SDK checkout in
    `.alp/sdk-path`.
-3. `validate` checks `board.yaml` and related metadata.
-4. `build` plans, materialises, and builds every core slice.
-5. `size` reports firmware use against the SoM memory budget.
-6. `run --flash` builds and then runs or programs the selected target.
+4. `validate` checks `board.yaml` and related metadata.
+5. `build` plans, materialises, and builds every core slice.
+6. `size` reports firmware use against the SoM memory budget.
+7. `run --flash` builds and then runs or programs the selected target.
 
-Run `tan doctor` if setup or toolchain discovery fails. `tan doctor --fix`
-installs missing user-level prerequisites interactively; it never invokes
-`sudo` for you.
+Run `tan doctor` if setup or toolchain discovery fails; its `zephyrSdk` check
+names the exact `west sdk install` command above too, so it stays correct if
+that pin ever moves. `tan doctor --fix` installs missing user-level
+prerequisites interactively; it never invokes `sudo` for you.
 
 If you do not want the west workspace next to the SDK checkout, choose it
 explicitly:
