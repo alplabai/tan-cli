@@ -2337,8 +2337,8 @@ _MIRRORED = ("tan/planner/",)
 # tree -- `bootstrap_cmd.py:_run` is still the package's single longest
 # function.
 #
-# 246 -> 248, tan-cli#652: `diff_cmd.py`'s `_spawn_validator` (48 -> 52) and
-# `_reject_if_sdk_validator_disagrees` (49 -> 53) each cross the 50-line cap
+# 246 -> 248, tan-cli#652: `diff_cmd.py`'s `_spawn_validator` (42 -> 52) and
+# `_reject_if_sdk_validator_disagrees` (46 -> 53) each cross the 50-line cap
 # for the first time, both from the same addition -- threading a
 # `used_workspace_venv` flag (plus the docstring saying why) from
 # `_planner_python_resolution` through to `validate_cmd._synthesised_finding`,

@@ -310,6 +310,21 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan validate` and `tan diff` name `tan bootstrap` as the remedy for a
+  missing-module crash, instead of surfacing a raw `ModuleNotFoundError`,
+  when no workspace venv has been created yet for the project.** Both
+  commands spawn the SDK's own `scripts/validate_board_yaml.py` under
+  `_planner_python_resolution`, which falls back to the bare system
+  interpreter when no `tan bootstrap` venv resolves; that interpreter lacks
+  `jsonschema`, and the crash used to be reclassified into the generic
+  "Validation ended with outcome 'failed'. Last line of validator output:
+  ModuleNotFoundError: No module named 'jsonschema'" message with no
+  actionable next step. `_spawn_validator`/`_reject_if_sdk_validator_disagrees`
+  now thread the `used_workspace_venv` flag through to
+  `_synthesised_finding`, so this specific, identifiable cause names the real
+  fix — a present-but-independently-broken workspace venv still gets the
+  generic message. (#652)
+
 - **`tan doctor` and `tan bootstrap` now read alp-sdk's own Zephyr-scoped
   Python floor (`zephyr.pythonMinVersion`) instead of a hardcoded constant
   when no `$ZEPHYR_BASE` workspace resolves to read `python.cmake` from
