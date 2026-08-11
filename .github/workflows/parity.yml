@@ -390,7 +390,25 @@ env:
   #
   # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
   # predates every commit this bump exists to pick up.
-  PINNED_SDK_TAG: 7d58ef32d0a730c902e335adfd7764c2ec500ba5
+  #
+  # `7d58ef32` -> `1a9f753c` (tan-cli#657/#661/#662): moves in lockstep with
+  # `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` in
+  # `tests/gates/test_planner_relocation_freshness.py` -- see that file's
+  # comment for the ported behavioural delta (the SW-DP IDR preflight pair,
+  # the helper_mcu three-axis projection, `flash_args.slot0_load_address`).
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `1a9f753c` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8345 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, NO re-vendor: none of
+  #     the three drifted commits touch `examples/**`, `metadata/catalog*` or
+  #     the scaffold templates, so `python/tan/templates/vendored/` stays at
+  #     its `f30f4d4b` vendor point.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, including
+  #     `multicore_rpmsg-imx93` (alp-sdk and tan both still refuse it)
+  PINNED_SDK_TAG: 1a9f753c13e5ab5d444e2dc39d7065a352f1b777
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
