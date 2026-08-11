@@ -308,6 +308,28 @@ All notable changes to `tan` are documented here. Format follows
   (`init.invalid-cores`, naming both core ids) rather than silently rendered.
   (#642, #643)
 
+- **`tan doctor` and `tan bootstrap` now read alp-sdk's own Zephyr-scoped
+  Python floor (`zephyr.pythonMinVersion`) instead of a hardcoded constant
+  when no `$ZEPHYR_BASE` workspace resolves to read `python.cmake` from
+  directly — the every-host-at-`tan bootstrap`-time case.** alp-sdk#1078
+  deliberately split this from the pre-existing, host-universal
+  `prerequisites.pythonMinVersion` (which stays lower, so a Yocto-only or
+  metadata-only host is not refused over a Zephyr-only constraint) and chose
+  the option that makes tan a consumer of it (Option A, recorded on that
+  issue). tan-cli#585's re-vendor of `contract/fixtures/bootstrap/manifest.json`
+  surfaced that the field had landed upstream with no reader here:
+  `parse_bootstrap_manifest` never parsed `zephyr.pythonMinVersion`, and
+  `zephyr_python_floor`'s no-workspace fallback fell straight to the
+  `ZEPHYR_PYTHON_FLOOR = (3, 12)` constant regardless. No customer saw a
+  wrong number from this — both are `3.12` today — but the constant was
+  stale-by-default the moment alp-sdk's pinned Zephyr moves again, the exact
+  gap `zephyr_python_floor`'s `python.cmake` read already closes one level
+  up. `BootstrapFacts` gains an optional `zephyr_python_min_version` field
+  (`None` for any manifest predating the key), and `zephyr_python_floor`
+  takes it as a keyword-only `manifest_zephyr_floor` argument that now
+  outranks the constant; `ZEPHYR_PYTHON_FLOOR` is the last resort, not the
+  routine case. Closes #606.
+
 - **The test suite no longer means two different things on two machines: the
   debug/flash probe inventory is now a property of the test, not of the host.**
   A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`

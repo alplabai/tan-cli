@@ -195,7 +195,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # the docstring paragraph recording why the field is required and
     # keyword-only. The two definitions and the judgement calls did NOT land
     # here: they are in `tan/core/doctor_scope.py`, well under its own cap.
-    "tan/commands/doctor_cmd.py": 3696,
+    # 3747, not 3696, as of tan-cli#606: alp-sdk's manifest-declared
+    # `zephyr.pythonMinVersion` (alp-sdk#1078) now beats the hardcoded
+    # `ZEPHYR_PYTHON_FLOOR` pin as `zephyr_python_floor`'s no-workspace
+    # fallback -- the extra lines are the new `manifest_zephyr_floor`
+    # parameter, the fallback/label derivation it needs, the `_load_manifest`
+    # injection of `_zephyrPythonMinVersion` (mirroring `_pipSpec`'s existing
+    # pattern), and the new `_zephyr_manifest_floor_from_facts` reader.
+    # Re-measured with this gate's own `len(read_text().splitlines())`, not
+    # estimated from the diff.
+    "tan/commands/doctor_cmd.py": 3747,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -247,7 +256,11 @@ _MODULE_BUDGET: dict[str, int] = {
     # Two functions LEFT this file in the same change (`_manifest_points_at`,
     # `_same_directory`, both moved down to `tan/core/bootstrap.py`), so the
     # figure is net of that removal.
-    "tan/commands/bootstrap_cmd.py": 3070,
+    # 3072, not 3070, as of tan-cli#606: `resolve_python_floor` now passes
+    # `facts.zephyr_python_min_version` into `zephyr_python_floor` and its
+    # docstring gained the extra sentence explaining why. Re-measured with
+    # this gate's own walk.
+    "tan/commands/bootstrap_cmd.py": 3072,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
     # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
@@ -266,7 +279,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # gained a `7zip` entry (+1, with the comment recording why a command exists
     # for a tool `prerequisites.windows` does not list). Held down by the
     # departure comment shrinking, since the exemption it documented is gone.
-    "tan/core/bootstrap.py": 2055,
+    # 2094, not 2055, as of tan-cli#606: the new `zephyr_python_min_version`
+    # field on `BootstrapFacts`, its OPTIONAL parse arm in
+    # `parse_bootstrap_manifest` (distinct from `prerequisites.
+    # pythonMinVersion`'s required one), and the transcribed literal in
+    # `fallback_facts`. Re-measured with this gate's own walk.
+    "tan/core/bootstrap.py": 2094,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
     # newline/`"`-injection hole on the artefact/atoc/serial interpolations,
