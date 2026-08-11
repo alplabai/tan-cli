@@ -576,10 +576,16 @@ def test_strict_loaders_matches_its_pinned_sdk_source():
 
 
 #: `tan/planner/`-relative paths with no alp-sdk source at all -- original tan
-#: code, not a port. Empty today: every current file traces to PINNED_HASHES
-#: or HAND_PORT_SOURCES. A file belongs here only if it genuinely has no
-#: alp-sdk counterpart; a real hand-port belongs in HAND_PORT_SOURCES instead.
-EXEMPT_FROM_RELOCATION_TRACKING: frozenset[str] = frozenset()
+#: code, not a port. A file belongs here only if it genuinely has no alp-sdk
+#: counterpart; a real hand-port belongs in HAND_PORT_SOURCES instead.
+EXEMPT_FROM_RELOCATION_TRACKING: frozenset[str] = frozenset({
+    # tan-cli#591: the general "does the bound alp-sdk checkout carry
+    # capability X" floor `zephyr_board.py` calls into. Tan-native --
+    # alp-sdk has no such module to drift against; the thing this file
+    # tracks is a REGISTRY of alp-sdk facts (a schema property, a
+    # metadata/quality-tasks-v1.json task id), not a port of alp-sdk code.
+    "sdk_capability.py",
+})
 
 
 #: Resolved at import time -- see the module docstring on why that matters.
