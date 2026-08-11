@@ -422,12 +422,13 @@ def resolve_python_floor(facts: BootstrapFacts, *, zephyr_base_adopts: bool) -> 
     enforces.
 
     `zephyr_python_floor` is imported from `tan.commands.doctor_cmd` and called
-    with the SAME argument doctor passes it (`$ZEPHYR_BASE`, else tan's built-in
-    `PYTHON_MINIMUM_REQUIRED` pin) -- not re-derived here. That is the whole
-    mechanism keeping the two commands' verdicts identical: a second reader with
-    its own rule is exactly the drift this port keeps hitting, and `doctor`
-    reporting Pass on a host `bootstrap` refuses (or the reverse) is worse than
-    either verdict alone.
+    with the SAME argument doctor passes it (`$ZEPHYR_BASE`, else the manifest's
+    own `zephyr.pythonMinVersion` when `facts` carries one (tan-cli#606), else
+    tan's built-in `PYTHON_MINIMUM_REQUIRED` pin) -- not re-derived here. That
+    is the whole mechanism keeping the two commands' verdicts identical: a
+    second reader with its own rule is exactly the drift this port keeps
+    hitting, and `doctor` reporting Pass on a host `bootstrap` refuses (or the
+    reverse) is worse than either verdict alone.
 
     `zephyr_base_adopts` (tan-cli#495 defect 2) gates whether `$ZEPHYR_BASE` is
     consulted AT ALL: the caller passes `_zephyr_base_will_adopt`'s own verdict,
@@ -451,7 +452,8 @@ def resolve_python_floor(facts: BootstrapFacts, *, zephyr_base_adopts: bool) -> 
     """
     manifest_floor = facts.python_min_version
     zephyr_floor, zephyr_source = zephyr_python_floor(
-        _env("ZEPHYR_BASE") if zephyr_base_adopts else None
+        _env("ZEPHYR_BASE") if zephyr_base_adopts else None,
+        manifest_zephyr_floor=facts.zephyr_python_min_version,
     )
     effective = max(manifest_floor, zephyr_floor)
     source = (
