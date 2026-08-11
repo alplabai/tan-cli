@@ -919,6 +919,75 @@ def test_the_internal_failure_catch_all_reaches_kconfig_text_mode_too(
     assert "kconfig: kconfig failed unexpectedly" in result.stderr
 
 
+def _broken_pin_no_fallback_project(tmp_path: Path) -> Path:
+    """Same broken `.alp/sdk-path` shape as `_broken_pin_project`, but with NO
+    sibling `alp-sdk` (or any other tier) to fall through to -- so
+    `resolve_sdk_tiered` collapses all the way to `ActiveSdk(None, "none",
+    broken_project_pin=...)` and `presets_cmd.resolve_sdk` -- which discards
+    that fact on its `None`-collapsing path, per its own docstring -- reports
+    `kconfig.no-sdk-root`. Distinct from `_broken_pin_project`'s "resolved to
+    a DIFFERENT checkout" shape: this is the "resolved to nothing at all"
+    branch that function's docstring names as a separate, unfixed gap.
+    `conftest.py`'s autouse fixture has already repointed HOME, so
+    `~/.alp/sdk-default` cannot interfere."""
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    (proj / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_he:\n    os: zephyr\n", encoding="utf-8"
+    )
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}), encoding="utf-8"
+    )
+    return proj
+
+
+def test_a_broken_pin_with_no_fallback_is_reported_on_kconfig_no_sdk_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tan-cli#497 defect 2, the site #578's own comment left explicitly
+    unfixed ("NOT fixed here: the `sdk is None` branch above ... That branch
+    is `presets_cmd.py`'s to fix"). `resolve_sdk` collapses to a bare `None`
+    when NOTHING resolves to a usable checkout, which drops
+    `broken_project_pin` on the floor even though `resolve_sdk_tiered` -- the
+    function it wraps -- had already computed it. So a workspace whose own
+    `.alp/sdk-path` pin is broken, with no other tier resolving anything
+    either, answered `kconfig.no-sdk-root` alone: the ladder had already
+    diagnosed the pin and this branch threw the diagnosis away a second time.
+
+    Fails before this fix: `issues` is `["kconfig.no-sdk-root"]` alone."""
+    proj = _broken_pin_no_fallback_project(tmp_path)
+    monkeypatch.chdir(proj)
+    result = runner.invoke(app, ["--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert [i["code"] for i in envelope["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "kconfig.no-sdk-root",
+    ]
+    assert envelope["issues"][0]["severity"] == "warning"
+    assert "gone-checkout" in envelope["issues"][0]["message"]
+    # Genuinely nothing resolved -- no `sdk` key, matching the oracle and the
+    # existing no-pin-at-all case (`test_no_sdk_root_reports_kconfig_no_sdk_
+    # root`); what changed is `issues`, never the (absent) `sdk` block.
+    assert "sdk" not in envelope
+
+
+def test_a_broken_pin_with_no_fallback_reaches_kconfig_text_mode_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The DEFAULT mode, same site.
+
+    Fails before this fix: stderr carries only the `kconfig:` refusal, with
+    nothing about the pin."""
+    proj = _broken_pin_no_fallback_project(tmp_path)
+    monkeypatch.chdir(proj)
+    result = runner.invoke(app, [])
+    assert result.exit_code == 2
+    assert "warning: .alp/sdk-path names" in result.stderr
+    assert "gone-checkout" in result.stderr
+    assert "kconfig: no alp-sdk checkout found" in result.stderr
+
+
 def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
