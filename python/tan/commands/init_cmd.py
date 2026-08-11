@@ -675,12 +675,12 @@ def _apply_cores(
             )
 
     # tan-cli#643: a --cores entry naming a DIFFERENT core than the plan's
-    # app core, requesting `zephyr`, is the app-core-swap request this
-    # mechanism cannot honor -- `splice_companion_cores` only ever adds an
-    # `os:` child to a companion, never an `app:` (that source directory does
-    # not exist for anything but the template's own app core), so the result
-    # would be a second Cortex-M core silently declared `os: zephyr` with
-    # nothing to build there, next to a REQUESTED core-id/os pair that
+    # app core, requesting `zephyr` or `baremetal`, is the app-core-swap
+    # request this mechanism cannot honor -- `splice_companion_cores` only
+    # ever adds an `os:` child to a companion, never an `app:` (that source
+    # directory does not exist for anything but the template's own app
+    # core), so the result would be a second core silently declared with no
+    # source to build there, next to a REQUESTED core-id/os pair that
     # `board.yaml` never actually honors. Before this fix that shape reached
     # `splice_companion_cores` unrejected: `--cores m55_he:zephyr` on a
     # single-core `--som E1M-AEN301` request left the app pinned to the
@@ -688,19 +688,28 @@ def _apply_cores(
     # spliced an unrequested default RPMsg carve-out between the two -- all
     # at `ok:true`/`issues:[]` (the AEN bench e2e that filed the issue: an
     # operator asking for one core got a two-core project on the wrong one).
-    # Refuse instead of guessing which core the caller actually meant.
+    # `baremetal` reaches the identical dead end via a different door: the
+    # planner's own `_enforce_loader_rules` (tan/planner/validate.py) refuses
+    # an app-less `os: baremetal` slice just as hard as an app-less `os:
+    # zephyr` one -- `--cores <id>:baremetal` would still plan to `ok:true`
+    # here and only fail two commands later, at `tan build`, against a
+    # board.yaml the customer never edited by hand. Only `yocto` (which
+    # `splice_companion_cores` backs with a stock `image:`) and `off` are
+    # app-less companions the loader actually accepts, so those are the only
+    # two named in the message below. Refuse instead of guessing which core
+    # the caller actually meant.
     for core_id, os_value in cores:
-        if core_id != app_core and os_value == "zephyr":
+        if core_id != app_core and os_value in ("zephyr", "baremetal"):
             raise InitError(
                 "init.invalid-cores",
-                f"Core '{core_id}' requests zephyr, but this plan's app core "
-                f"is '{app_core}' -- --cores can only splice '{core_id}' in "
-                f"as an app-less companion (yocto/baremetal/off), which is "
-                f"not what a zephyr request means. If '{core_id}' is meant "
-                f"to host the app instead of '{app_core}', pick a "
-                f"--template/--som combination whose app core is "
-                f"'{core_id}', or scaffold with --board-yaml to declare it "
-                f"yourself.",
+                f"Core '{core_id}' requests {os_value}, but this plan's app "
+                f"core is '{app_core}' -- --cores can only splice "
+                f"'{core_id}' in as an app-less companion (yocto/off), "
+                f"which is not what a {os_value} request means. If "
+                f"'{core_id}' is meant to host the app instead of "
+                f"'{app_core}', pick a --template/--som combination whose "
+                f"app core is '{core_id}', or scaffold with --board-yaml to "
+                f"declare it yourself.",
                 ExitCode.VALIDATION_FAILURE,
             )
 

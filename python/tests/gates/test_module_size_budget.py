@@ -1449,7 +1449,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # `init()`, and `_apply_cores`'s new zephyr-companion refusal (tan-cli#643)
     # plus its own docstring explaining why the collision check above it must
     # run first. Re-measured: exactly `wc -l` on this branch.
-    "tan/commands/init_cmd.py": 1210,
+    # 1219, not 1210, as of the #645 round-2 review: the #643 refusal now also
+    # catches an app-less `os: baremetal` companion (not just `zephyr`) --
+    # `--cores <id>:baremetal` reached the identical dead end as the zephyr
+    # case (an app-less slice `_enforce_loader_rules` refuses downstream, at
+    # `tan build`, against a board.yaml the customer never touched) through a
+    # door the original #643 fix left open, and the remediation string had
+    # advertised it as valid. Re-measured: exactly `wc -l` on this branch.
+    "tan/commands/init_cmd.py": 1219,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself

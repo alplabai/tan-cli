@@ -433,6 +433,29 @@ def test_cores_rejects_a_zephyr_companion_that_is_not_the_app_core(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_cores_rejects_a_baremetal_companion_that_is_not_the_app_core(tmp_path):
+    """tan-cli#643 follow-up: `--cores m55_he:baremetal` reaches the same
+    dead end as the `zephyr` case above by a different door.
+    `splice_companion_cores` cannot give a companion an `app:` either way, so
+    an app-less `os: baremetal` slice would plan to `ok:true`/`issues:[]`
+    here and only fail later, at `tan build`, against
+    `_enforce_loader_rules` ("os: baremetal requires `app:`") -- against a
+    board.yaml the customer never edited by hand. Refuse it at `init` time
+    like the `zephyr` case, not two commands downstream."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_he:baremetal",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.invalid-cores"
+    assert "m55_he" in issue(env)["message"]
+    assert "m55_hp" in issue(env)["message"]
+    assert "requests baremetal" in issue(env)["message"]
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_cores_still_accepts_the_app_core_itself_at_zephyr(tmp_path):
     """The companion-zephyr refusal must not catch the app core naming
     itself: `--cores m55_hp:zephyr` on `zephyr-app` (app core `m55_hp`) is

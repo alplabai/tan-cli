@@ -325,9 +325,11 @@ All notable changes to `tan` are documented here. Format follows
   to a core the caller never named, plus an unrequested default RPMsg
   carve-out. `--cores` can only ever add a companion (it has no source
   directory to give one an `app:`), so a companion entry requesting `zephyr`
-  — indistinguishable from "make this the app core instead" — is now refused
-  (`init.invalid-cores`, naming both core ids) rather than silently rendered.
-  (#642, #643)
+  or `baremetal` — both need an `app:` the splice cannot supply, and the
+  latter would otherwise plan to `ok:true` here only to be refused two
+  commands later at `tan build` — is now refused (`init.invalid-cores`,
+  naming both core ids) rather than silently rendered or deferred to a
+  confusing downstream failure. (#642, #643)
 
 - **`tan doctor` and `tan bootstrap` now read alp-sdk's own Zephyr-scoped
   Python floor (`zephyr.pythonMinVersion`) instead of a hardcoded constant
