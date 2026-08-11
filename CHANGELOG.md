@@ -2702,6 +2702,26 @@ All notable changes to `tan` are documented here. Format follows
   `github-actions` weekly against `dev`, one PR per action; the Python
   dependency lock stays with #437 rather than being half-done here. (#435)
 
+- **`release-combination.yml`: a scheduled gate for the one combination
+  nothing else tests -- the latest RELEASED `tan` against alp-sdk's latest
+  RELEASE TAG.** Every existing gate binds a pinned commit (`parity.yml`'s
+  `PINNED_SDK_TAG`, `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`), which is the one axis the two repos can never
+  disagree on by construction. Two real defects shipped through that gap in
+  opposite directions: #320/#485/#639 ("too old" -- a released tan predates
+  an alp-sdk release's planner fix) and #591 ("too new" -- a `tan/planner/`
+  re-sync ports a requirement no published alp-sdk tag satisfies yet). The
+  new workflow runs the documented customer journey -- `install.sh` (real
+  release download) -> clone alp-sdk @ its latest release tag -> `tan init`
+  -> `tan generate` -> `tan build` -- for one SKU per SoM family
+  (E1M-AEN801, E1M-V2N101; E1M-NX9101 is matrixed `expect-refuse`, since its
+  `hw_rev: r1` is genuinely `status: tbd` and correctly refuses at
+  `tan generate`). `schedule` + `workflow_dispatch`, not a required PR
+  check -- it depends on release timing neither repo's PR CI controls.
+  Provably not vacuous: dispatched against today's real released pair (tan
+  v0.5.1, alp-sdk v0.15.0) the E1M-V2N101 leg reproduces #639 exactly, live,
+  with no synthetic input needed. (#639)
+
 
 
 ## [0.5.1] — 2026-08-04

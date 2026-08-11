@@ -1,0 +1,411 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The released-tan x released-alp-sdk gate (tan-cli#639).
+#
+# THE HOLE THIS CLOSES. Every other gate in this repo binds a PINNED COMMIT:
+# `parity.yml`'s `PINNED_SDK_TAG`, `python/tests/gates/
+# test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`. A pinned commit
+# is the one axis tan and alp-sdk can never disagree on -- each repo tests
+# itself against a fixed point it fully controls. What a customer actually
+# runs is `install.sh`'s LATEST tan RELEASE against alp-sdk's LATEST RELEASE
+# TAG, and nothing anywhere tested that combination. Three real defects
+# shipped through the gap:
+#
+#   * tan-cli#320 / #485 / #639 ("too old"): `tan/planner/` falls behind
+#     `scripts/alp_orchestrate/`, alp-sdk cuts a release carrying the fix, tan
+#     does not. #639 is LIVE right now: tan v0.5.1 (2026-08-05) predates the
+#     alp-sdk e6928625 driver-status fix that v0.15.0 (2026-08-04) carries, so
+#     `tan build` aborts Zephyr's Kconfig configure on every Renesas SKU with
+#     `CONFIG_ALP_SDK_CHIP_NONE=y` -- a symbol that does not exist.
+#   * tan-cli#591 ("too new"): a `tan/planner/` re-sync ports a requirement
+#     (the AEN `zephyr_peripherals_dtsi` SoC-JSON key) that only EXISTS on
+#     alp-sdk `dev`, past `7d58ef32`. No published alp-sdk tag contains it
+#     (`git tag --contains 7d58ef32` is empty against v0.15.0), so a tan built
+#     from that `dev` would refuse every AEN board against every release that
+#     exists. Not shipped today (the released tan predates the re-sync), but
+#     the class recurs and needs a gate, not a diary entry.
+#
+# `test_planner_relocation_freshness.py` cannot see either: it SKIPS without
+# `ALP_SDK_ROOT` (never bound in a release context) and even bound, it compares
+# against its own pinned commit -- never "has alp-sdk's latest RELEASE moved
+# past what tan shipped".
+#
+# WHAT THIS RUNS. The documented customer journey, verbatim, on stock
+# ubuntu-latest, for one SKU per SoM family:
+#
+#   install.sh (latest tan release)  ->  clone alp-sdk @ latest release tag
+#     ->  tan init  ->  tan generate  ->  tan build
+#
+#   * E1M-AEN801  (Alif Ensemble)  -- full journey, ELF asserted.
+#   * E1M-V2N101  (Renesas RZ/V2N) -- full journey, ELF asserted. This is the
+#     leg tan-cli#639 reddens TODAY -- see "how to prove this gate can fail"
+#     below for what a green run here would mean once the fix ships.
+#   * E1M-NX9101  (NXP i.MX 93)    -- genuinely a placeholder right now
+#     (`silicon_variant: TBD`, `hw_revisions.r1.status: tbd`) and CORRECTLY
+#     refuses at `tan generate` (`SdkRevisionNotBuildable`, alp-sdk#1025).
+#     Matrixed as `expect-refuse`, not excluded: an unexpected `ok:true` here
+#     is itself a signal (the SoM went live and this gate's matrix is stale),
+#     and so is a crash where a controlled refusal belongs.
+#
+# NOT a required PR check -- it depends on tags neither repo controls the
+# timing of, and a red run here is often "alp-sdk cut a release tan has not
+# caught up to yet", not a bug in the PR under review. VISIBLE regardless:
+# `schedule` (daily) + `workflow_dispatch`, both of which show up in the
+# Actions tab and can page/notify independently of branch protection.
+#
+# HOW TO PROVE THIS GATE CAN FAIL (superpowers:verification-before-completion
+# -- a gate never observed to go red is not a gate). Two ways, no edit needed:
+#
+#   1. Today, for real: dispatch this workflow with both inputs empty. The
+#      E1M-V2N101 leg reproduces tan-cli#639 exactly -- `tan build` aborts
+#      Zephyr's configure on the undefined `ALP_SDK_CHIP_NONE` symbol. This is
+#      not a drill; it is the live bug the workflow header above describes.
+#   2. Once #639 ships and that leg goes green, prove the MECHANISM still
+#      works by dispatching with `alp_sdk_ref` pinned to a release that
+#      predates the fix (e.g. `v0.15.0`) while installing the fixed tan (the
+#      default `tan_version`, i.e. whatever install.sh resolves as latest) --
+#      or the mirror image, pinning `tan_version` to `v0.5.1` against a future
+#      alp-sdk release. Either direction reproduces one of the two polarities
+#      this gate exists to catch.
+
+name: release-combination
+
+on:
+  schedule:
+    # Daily, offset from planner-resync.yml's 05:23 UTC cron so the two don't
+    # contend for the same runner minute.
+    - cron: "40 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tan_version:
+        description: >-
+          tan release to install via install.sh's --version (e.g. v0.5.1).
+          Empty = install.sh's own default (the latest release).
+        required: false
+        default: ""
+      alp_sdk_ref:
+        description: >-
+          alp-sdk ref to clone (tag, branch, or SHA). Empty = alp-sdk's
+          latest release tag, resolved live via the GitHub API. Set this to a
+          deliberately old tag to prove this gate can still fail (see the
+          file header).
+        required: false
+        default: ""
+
+# Not ref-scoped: this workflow only ever runs from the default branch's own
+# copy (GitHub's rule for `schedule`), so every trigger already targets the
+# same ref. A scheduled run and a manual proof-dispatch should not cancel
+# each other -- losing the scheduled run's evidence to a manual one (or vice
+# versa) is a worse outcome than two runs overlapping.
+concurrency:
+  group: release-combination
+  cancel-in-progress: false
+
+permissions:
+  # Least privilege (tan-cli#435). The token is used only to lift the
+  # unauthenticated per-IP rate limit on two public-repo GitHub API reads
+  # (alp-sdk's latest release, `west sdk install`'s release listing) -- never
+  # to write anything.
+  contents: read
+
+jobs:
+  resolve-refs:
+    name: resolve the alp-sdk ref under test
+    runs-on: ubuntu-latest
+    outputs:
+      alp_sdk_ref: ${{ steps.resolve.outputs.alp_sdk_ref }}
+    steps:
+      # `env:` indirection for the workflow_dispatch input rather than
+      # interpolating `${{ github.event.inputs.alp_sdk_ref }}` straight into
+      # the script -- zizmor's template-injection audit flags the latter even
+      # for a write-gated trigger like workflow_dispatch.
+      - name: resolve alp-sdk ref (dispatch override, else latest release tag)
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OVERRIDE_REF: ${{ github.event.inputs.alp_sdk_ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "${OVERRIDE_REF}" ]; then
+            echo "alp_sdk_ref=${OVERRIDE_REF}" >> "$GITHUB_OUTPUT"
+            echo "::notice::alp-sdk ref OVERRIDDEN via workflow_dispatch input: ${OVERRIDE_REF} -- this run is not testing the real released combination unless that happens to equal the latest release tag."
+            exit 0
+          fi
+          ref="$(gh api repos/alplabai/alp-sdk/releases/latest -q .tag_name)"
+          if [ -z "${ref}" ]; then
+            echo "::error::could not resolve alp-sdk's latest release tag via the GitHub API."
+            exit 1
+          fi
+          echo "alp_sdk_ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "::notice::alp-sdk latest release tag: ${ref}"
+
+  journey:
+    needs: resolve-refs
+    name: "${{ matrix.sku }} -- released tan x alp-sdk@${{ needs.resolve-refs.outputs.alp_sdk_ref }}"
+    runs-on: ubuntu-latest
+    # `fail-fast: false` -- the whole point is that these three legs can
+    # disagree (AEN green, V2N red) and each verdict must be visible on its
+    # own, not cancelled because a sibling leg failed first.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sku: E1M-AEN801
+            template: zephyr-app
+            core: m55_hp
+            expect_refuse: false
+          - sku: E1M-V2N101
+            template: zephyr-app
+            core: m33_sm
+            expect_refuse: false
+          - sku: E1M-NX9101
+            # `zephyr-app`'s vendored scaffold only covers the E1M-AEN* /
+            # E1M-V2N* families (tan's own `init.som-unsupported` refusal) --
+            # unrelated to the hw_rev refusal this leg exists to prove.
+            # `minimal-app` is vendor-neutral and scaffolds any SoM, which is
+            # what actually reaches `tan generate` far enough to hit
+            # `SdkRevisionNotBuildable`.
+            template: minimal-app
+            core: m33
+            expect_refuse: true
+    # The full legs pay for a real `tan bootstrap` + `west sdk install` +
+    # ARM Zephyr build (getting-started.yml's own budget is 60 minutes for
+    # one SKU); the expect-refuse leg never reaches a toolchain at all.
+    timeout-minutes: 60
+    env:
+      SKU: ${{ matrix.sku }}
+      CORE: ${{ matrix.core }}
+    steps:
+      - name: checkout tan-cli (install.sh only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Skipped for the expect-refuse leg: `tan generate`'s in-process
+      # planner needs no system toolchain at all (tan.planner_emit runs
+      # in-process inside the frozen tan binary), and NX9101 never reaches
+      # `tan build`.
+      - name: host prerequisites (ninja/dtc/gperf for the Zephyr configure+build)
+        if: ${{ !matrix.expect_refuse }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              ninja-build device-tree-compiler gperf xz-utils
+
+      - name: python (west needs it; the released tan binary does not)
+        if: ${{ !matrix.expect_refuse }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # THE COMBINATION UNDER TEST, half one: a real release download +
+      # sha256 verify, exactly like a customer's shell -- not a source build
+      # of this checkout. `--version` is empty by default (install.sh's own
+      # "latest" resolution); a workflow_dispatch can override it to prove
+      # this gate's mechanism (see the file header).
+      - name: install tan via install.sh (released binary)
+        env:
+          TAN_VERSION_OVERRIDE: ${{ github.event.inputs.tan_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${TAN_VERSION_OVERRIDE}" ]; then
+            ./install.sh --version "${TAN_VERSION_OVERRIDE}"
+          else
+            ./install.sh
+          fi
+          if [ ! -x "$HOME/.local/bin/tan" ]; then
+            echo "::error::[${SKU}] install.sh reported success but \$HOME/.local/bin/tan is missing or not executable."
+            ls -la "$HOME/.local/bin" || true
+            exit 1
+          fi
+          "$HOME/.local/bin/tan" --version
+
+      - name: put the installed tan on PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # THE COMBINATION UNDER TEST, half two: alp-sdk at its latest RELEASE
+      # TAG (resolved in the job above), not a `dev`/`main` tip and not a
+      # commit pin.
+      - name: clone alp-sdk @ ${{ needs.resolve-refs.outputs.alp_sdk_ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ needs.resolve-refs.outputs.alp_sdk_ref }}
+          path: release-workspace/alp-sdk
+          persist-credentials: false
+
+      # ---- tan bootstrap + the Zephyr SDK (full legs only) -----------------
+
+      - name: tan bootstrap (venv + west workspace + SDK python deps)
+        if: ${{ !matrix.expect_refuse }}
+        working-directory: release-workspace
+        run: |
+          set -euo pipefail
+          tan bootstrap --sdk-root ./alp-sdk --format json > /tmp/rc-bootstrap-${SKU}.json
+          python3 - "$SKU" <<'PY'
+          import json, os, sys
+          sku = sys.argv[1]
+          e = json.load(open(f"/tmp/rc-bootstrap-{sku}.json"))
+          if not e.get("ok"):
+              print(f"::error::[{sku}] 'tan bootstrap' reported not-ok:",
+                    json.dumps(e.get("issues"), indent=2))
+              sys.exit(1)
+          d = e.get("data") or {}
+          for key in ("venvDir", "zephyrBase"):
+              if not d.get(key) or not os.path.isdir(d[key]):
+                  print(f"::error::[{sku}] 'tan bootstrap' reported ok but data.{key}={d.get(key)!r} does not exist.")
+                  sys.exit(1)
+          with open(os.environ["GITHUB_ENV"], "a") as fh:
+              fh.write("ZEPHYR_BASE=%s\n" % d["zephyrBase"])
+          with open(os.environ["GITHUB_PATH"], "a") as fh:
+              fh.write(os.path.join(d["venvDir"], "bin") + "\n")
+          print(f"[{sku}] bootstrap ok -- zephyrBase", d["zephyrBase"])
+          PY
+
+      # tan's own build-readiness check prints this exact command as the
+      # remedy for a missing toolchain; running it here is what a customer
+      # who followed that remedy actually does. Version comes from alp-sdk's
+      # own `metadata/toolchains.json` -- the single source `tan doctor`'s
+      # hardcoded fallback is measured against elsewhere (parity.yml) -- not
+      # a second hand-typed pin here.
+      - name: install the Zephyr SDK (west sdk install, arm-zephyr-eabi)
+        if: ${{ !matrix.expect_refuse }}
+        working-directory: release-workspace
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
+          echo "Zephyr SDK pin (alp-sdk metadata/toolchains.json): ${version}"
+          west sdk install --version "${version}" -t arm-zephyr-eabi \
+              --personal-access-token "${GH_TOKEN}"
+
+      # ---- init -> generate -> build ---------------------------------------
+
+      - name: "tan init --som ${{ matrix.sku }}"
+        working-directory: release-workspace
+        run: |
+          set -euo pipefail
+          tan init --name my-app --template "${{ matrix.template }}" --som "${SKU}" \
+              --sdk-root ./alp-sdk --format json > /tmp/rc-init-${SKU}.json
+          python3 - "$SKU" <<'PY'
+          import json, sys
+          sku = sys.argv[1]
+          e = json.load(open(f"/tmp/rc-init-{sku}.json"))
+          if not e.get("ok"):
+              print(f"::error::[{sku}] 'tan init' exited {e.get('exitCode')}:",
+                    json.dumps(e.get("issues"), indent=2))
+              sys.exit(e.get("exitCode") or 1)
+          if not e.get("data", {}).get("written"):
+              print(f"::error::[{sku}] 'tan init' reported ok but wrote no files -- the silent-pass shape this gate exists to catch.")
+              sys.exit(1)
+          print(f"[{sku}] init ok -- wrote", e["data"]["written"])
+          PY
+
+      # Bare `tan generate` -- the documented command (README's own table:
+      # "Generate configuration files | `tan generate`"), not a diagnostic
+      # invocation aimed at one target. It renders the default target set
+      # (zephyr-conf among them), which is exactly where tan-cli#639's bad
+      # `CONFIG_ALP_SDK_CHIP_NONE=y` line lands, and exactly where
+      # E1M-NX9101's `SdkRevisionNotBuildable` refusal fires.
+      - name: "tan generate"
+        working-directory: release-workspace/my-app
+        run: |
+          set -euo pipefail
+          set +e
+          tan generate --format json > /tmp/rc-generate-${SKU}.json
+          rc=$?
+          set -e
+          cat /tmp/rc-generate-${SKU}.json
+          python3 - "$SKU" "$rc" "${{ matrix.expect_refuse }}" <<'PY'
+          import json, sys
+          sku, rc, expect_refuse = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "true"
+          e = json.load(open(f"/tmp/rc-generate-{sku}.json"))
+          ok = e.get("ok")
+          issues = e.get("issues") or []
+
+          if expect_refuse:
+              # E1M-NX9101 is a genuine placeholder (silicon_variant: TBD) --
+              # a CONTROLLED refusal is the pass condition here, and an
+              # unexpected `ok:true` is itself news: either the SoM went
+              # live and this matrix entry is stale, or the refusal broke.
+              if ok:
+                  print(f"::error::[{sku}] expected a controlled refusal (this SKU's hw_rev is `status: tbd`) but 'tan generate' reported ok:true -- either the SoM shipped for real (update this matrix's `expect_refuse`) or the SdkRevisionNotBuildable refusal regressed.")
+                  sys.exit(1)
+              messages = " ".join(i.get("message", "") for i in issues)
+              if "not buildable" not in messages or "tbd" not in messages.lower():
+                  print(f"::error::[{sku}] 'tan generate' refused, but not with the expected SdkRevisionNotBuildable reason (hw_rev exists but is not buildable / status tbd). Got:", json.dumps(issues, indent=2))
+                  sys.exit(1)
+              print(f"[{sku}] expected refusal confirmed:", json.dumps(issues, indent=2))
+              sys.exit(0)
+
+          if not ok:
+              print(f"::error::[{sku}] 'tan generate' exited {rc}:", json.dumps(issues, indent=2))
+              sys.exit(rc or 1)
+          print(f"[{sku}] generate ok -- targets:", e.get("data", {}).get("targets"))
+          PY
+
+      # NX9101 stops here (matches the docs contract: buildable SKUs get the
+      # full journey, this genuine placeholder is exercised only up to its
+      # own documented refusal).
+      - name: "tan build"
+        if: ${{ !matrix.expect_refuse }}
+        working-directory: release-workspace/my-app
+        run: |
+          set -euo pipefail
+          set +e
+          tan build --format json > /tmp/rc-build-${SKU}.json
+          rc=$?
+          set -e
+          cat /tmp/rc-build-${SKU}.json
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::[${SKU}] 'tan build' exited ${rc} -- see /tmp/rc-build-${SKU}.json above for the envelope (tan-cli#639's exact failure mode: a Kconfig configure abort on an undefined symbol)."
+            exit "$rc"
+          fi
+          python3 - "$SKU" <<'PY'
+          import json, sys
+          sku = sys.argv[1]
+          e = json.load(open(f"/tmp/rc-build-{sku}.json"))
+          if not e.get("ok"):
+              print(f"::error::[{sku}] 'tan build' exited 0 but the envelope reports ok:false:", json.dumps(e.get("issues"), indent=2))
+              sys.exit(1)
+          print(f"[{sku}] build ok")
+          PY
+
+      # `tan build` reporting ok while producing no ELF is the tan-cli#97
+      # defect class. Located by CORE rather than a hardcoded
+      # `<core>-zephyr/...` path: that directory-naming convention is an
+      # implementation detail this gate should not have to track a second
+      # copy of (getting-started.yml's own hardcoded m55_hp path is the
+      # thing to keep in sync if this ever needs tightening, not duplicate).
+      - name: the built ELF exists and is ARM
+        if: ${{ !matrix.expect_refuse }}
+        working-directory: release-workspace/my-app
+        run: |
+          set -euo pipefail
+          ELF="$(find build -type f -name zephyr.elf -path "*${CORE}*" | head -1)"
+          if [ -z "${ELF}" ]; then
+            echo "::error::[${SKU}] 'tan build' reported success but no zephyr.elf under a '*${CORE}*' build directory exists. Tree:"
+            find build -maxdepth 3 -type d || true
+            find build -name 'zephyr.elf' || true
+            exit 1
+          fi
+          file "${ELF}"
+          if ! file "${ELF}" | grep -q "ARM"; then
+            echo "::error::[${SKU}] ${ELF} is not an ARM image -- a Zephyr slice produced a host binary."
+            exit 1
+          fi
+          echo "[${SKU}] confirmed: ${ELF}"
+
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-combination-${{ matrix.sku }}
+          path: |
+            /tmp/rc-bootstrap-*.json
+            /tmp/rc-init-*.json
+            /tmp/rc-generate-*.json
+            /tmp/rc-build-*.json
+          if-no-files-found: warn
