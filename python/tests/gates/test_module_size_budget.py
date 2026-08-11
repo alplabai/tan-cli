@@ -1609,7 +1609,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # entry above it: this file mirrors an upstream generator, and splitting
     # it here would make the next re-sync a hand-merge instead of a diff --
     # this very change is that diff, and it applied cleanly.
-    "tan/planner/zephyr_board.py": 1370,
+    # 1372, not 1370, as of tan-cli#591 part 2: `_aen_missing_region_message`
+    # (a heuristic that inferred the checkout's vintage from the SHAPE of
+    # one board's memory_map) is replaced by `_aen_raise_missing_region`,
+    # which asks `tan/planner/sdk_capability.py`'s `require_capability`
+    # directly -- and the same floor now also covers the `atoc` region's
+    # sibling gap, `zephyr_peripherals_dtsi` (alp-sdk#1352), which had no
+    # vintage detection at all before this change. The new capability
+    # registry itself lives in the new `sdk_capability.py` (188 lines, well
+    # under the 800-line default cap, no entry needed here) precisely so
+    # this file's own growth is two call sites, not a second heuristic.
+    "tan/planner/zephyr_board.py": 1372,
     # 834 -> 842: tan-cli#478, same reason as `validate_cmd.py` above --
     # the bundle is the one artefact that never carried the foreign-default
     # warning, and its embedded doctor set could not have supplied it.
