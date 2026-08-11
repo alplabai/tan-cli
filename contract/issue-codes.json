@@ -455,6 +455,14 @@
       "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "build.configure-cache-reset",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/execute.py",
+      "note": "Added by tan-cli#655: `tan build` was reporting success while silently ignoring a newly-added `app.overlay` (or a removed one, or a new `boards/<board>.conf` fragment) on an already-configured project -- CMake's own `DTC_OVERLAY_FILE`/`CONF_FILE` cache (set the first time Zephyr's `configuration_files.cmake` auto-discovery ran, `if(NOT DEFINED ...)`) never re-discovers a file that did not exist at that first configure, no matter how many times tan reconfigures afterward. `execute._maybe_reset_stale_configure_cache` detects the discoverable set changing (a same-process fingerprint, not a plan field) and appends `-UDTC_OVERLAY_FILE -UCONF_FILE` to the next configure; this code carries that reset into the JSON envelope (mirroring `build.sdk-switch-pristine`'s own reasoning) so a `--format json` caller sees it too, not only the `on_output` stream. Python-only: no `crates/` equivalent exists or ever will (crates/ is frozen). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "build.slice-failed",
       "status": "reserved",
       "severity": "error",
