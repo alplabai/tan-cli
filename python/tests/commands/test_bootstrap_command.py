@@ -1035,6 +1035,14 @@ def test_a_relocation_rollback_restores_the_pin_of_a_project_nested_inside_the_c
     itself -- letting the checkout's own relocation drag the fake HOME (and
     the machine-global pointer under it) along for the ride, which is a
     second, unrelated confound this test does not exist to cover.
+
+    `--project <proj>` with `cwd=tmp_path`, rather than `cwd=proj` directly,
+    for the same reason: a subprocess's OWN current working directory sitting
+    INSIDE the checkout being relocated makes the rename fail outright on
+    Windows (a directory that is any process's cwd cannot be moved there),
+    which is a Windows platform limitation this test does not exist to prove
+    -- `--project` reaches the identical nested-pin codepath without pinning
+    the subprocess's cwd under the checkout at all.
     """
     home = tmp_path / "shared-home"
     env_extra = {"HOME": str(home), "USERPROFILE": str(home)}
@@ -1054,7 +1062,8 @@ def test_a_relocation_rollback_restores_the_pin_of_a_project_nested_inside_the_c
 
     env = envelope(
         run_tan(
-            "bootstrap", "--format", "json", "--workspace", str(workspace), cwd=proj,
+            "bootstrap", "--format", "json", "--project", str(proj),
+            "--workspace", str(workspace), cwd=tmp_path,
             env_extra=env_extra,
         )
     )
