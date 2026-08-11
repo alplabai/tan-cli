@@ -67,6 +67,20 @@ on:
   # body on every send. Do not "tidy" it onto a feature branch only.
   repository_dispatch:
     types: [alp-sdk-planner-change]
+  # A `dev` merge queue is coming online: without this
+  # trigger, a queued PR would wait forever on the three required contexts
+  # this file produces (`python -- pytest across python/ (ubuntu-latest|
+  # windows-latest|macos-latest)`) and on `seam1 -- plan-shape parity`, none
+  # of which GitHub raises a `merge_group` event for otherwise. Checked every
+  # `if:` in this file against a `merge_group` event before adding this:
+  # `seam1-plan-shape` carries no job-level `if:` (always runs); its
+  # emit/kconfig/bootstrap/toolchain/scaffold steps gate on
+  # `!inputs.python_only`, which is `null`/falsy outside a `workflow_call`
+  # run, same as it already is on `pull_request` today, so they still run;
+  # `python-tests-shard`/`python-tests` carry no `pull_request`-specific
+  # gating either. `seam2`/`first-blink` (not required contexts) share the
+  # same `!inputs.python_only` gate and also run unchanged.
+  merge_group:
   # release.yml's `python-gates` job calls this workflow so a release tag is
   # gated on the Python suite too, not just ci.yml's own `python` job -- a release tag
   # can be cut from any green-on-main commit, and until this existed the Python
@@ -1615,12 +1629,45 @@ jobs:
   # `test` job gave: `tan`'s path handling (os.pathsep env append, `.venv`
   # discovery, `.exe` suffixes) differs per host. With that job gone
   # (tan-cli#269) this matrix is the ONLY cross-platform check in the repo.
-  python-tests:
-    name: "python -- pytest across python/ (${{ matrix.os }})"
+  #
+  # SHARDED four ways per OS. Measured on a real green run
+  # (31532426909): the pytest step alone is 1550s/1353s/1010s of a
+  # 26m/22m/17m job on windows/ubuntu/macos respectively -- ~97% of the wall
+  # clock is this one step, and everything else in the job (checkout, SDK
+  # clone, pip install) is 12-41s, i.e. negligible per-shard overhead. Root
+  # cause (not fixed here, sharding is parallelisation only): ~4300 tests
+  # spawn a fresh interpreter via subprocess.run/Popen at ~150 call sites to
+  # re-exercise `tan` as a customer would invoke it, and process creation is
+  # far more expensive on windows-latest than on the other two runners.
+  #
+  # This job is renamed to `python-tests-shard` and carries `shard` in its
+  # matrix -- deliberately NOT the job branch protection requires. GitHub
+  # appends every matrix dimension to a job's evaluated `name:`, so adding
+  # `shard` to the job protection already pins by string
+  # ("python -- pytest across python/ (<os>)", see ci.yml's header, tan-cli#392)
+  # would silently rename all three required contexts to something like
+  # "python -- pytest across python/ (ubuntu-latest, 1)" -- three phantom
+  # contexts protection would wait on FOREVER, since nothing produces the old
+  # strings any more. tan-cli#392 already lived through exactly this once
+  # (the cargo-job rename at tan-cli#269); this job is named apart from that
+  # trap on purpose. The `python-tests` job below reproduces the three pinned
+  # strings byte-for-byte and is what protection stays pointed at.
+  python-tests-shard:
+    name: "python -- pytest shard (${{ matrix.os }} ${{ matrix.shard }}/4)"
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # pytest-shard is 0-INDEXED (--shard-id runs 0..num-shards-1). The
+        # matrix values here ARE the --shard-id args passed below, unmodified
+        # -- deliberately NOT [1,2,3,4] with a subtraction applied later,
+        # which is exactly the shape that makes an off-by-one easy to
+        # introduce and easy to miss (one shard would run nothing, another
+        # would never run, and the suite would still report green). The job
+        # `name:` above therefore shows "0/4".."3/4", not "1/4".."4/4" --
+        # a 0-based label that matches the flag it comes from, not a
+        # human-friendly renumbering.
+        shard: [0, 1, 2, 3]
     runs-on: ${{ matrix.os }}
     steps:
       - name: checkout tan-cli
@@ -1674,16 +1721,19 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --quiet --upgrade pip
-          python -m pip install --quiet -e ".[monitor]" pytest
+          python -m pip install --quiet -e ".[monitor]" pytest pytest-shard
 
-      # THE context worth adding to branch protection for the Python suite --
+      # The `python-tests` job below (the one wired into branch protection --
       # see .github/workflows/ci.yml's header for the full tan-cli#392 note and
-      # the exact three strings this matrix produces. That note stopped being
-      # advisory at tan-cli#269, which deleted the five cargo contexts
-      # protection actually requires; this matrix HAS to be wired in before
-      # anything can merge. Nothing in this file can change branch protection;
-      # it can only make sure the job is worth requiring, which is what the
-      # guard below is for.
+      # the exact three strings that job's matrix reproduces) only rolls up
+      # THIS job's per-shard result; it runs no pytest itself. That note
+      # stopped being advisory at tan-cli#269, which deleted the five cargo
+      # contexts protection actually requires; this shard matrix (via its
+      # aggregate) HAS to be wired in before anything can merge. Nothing in
+      # this file can change branch protection; it can only make sure the
+      # aggregate is worth requiring, which is what the guard below is for --
+      # a shard that silently checked nothing would make the aggregate's
+      # "success" meaningless too.
       #
       # The binding is ASSERTED before pytest runs, against the variable
       # actually exported rather than a re-derived path. This job's whole value
@@ -1735,7 +1785,83 @@ jobs:
             echo "::error::${GUARD} did not PASS in this job. ALP_SDK_ROOT is bound here, so this is one of two things, and the pytest output above says which: a FAIL means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/); a SKIP means the guard itself regressed to fail-open. Either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
             exit 1
           fi
-          python -m pytest -q --ignore=tests/gates
+          # The guard run above is NOT sharded (a bare node-id invocation,
+          # no --shard-id/--num-shards) -- it is one fast canary and every
+          # shard should independently prove ALP_SDK_ROOT resolves here, not
+          # just whichever shard happens to collect that one test. The suite
+          # itself IS sharded: pytest-shard partitions the collected test set
+          # before running, so each of the 4 (os, shard) legs below covers a
+          # disjoint quarter and the 4 legs' union is the full collection --
+          # verified locally with --collect-only across all
+          # four --shard-id values before this landed.
+          python -m pytest -q --ignore=tests/gates \
+              --shard-id=${{ matrix.shard }} --num-shards=4
+
+  # THE required context. `python-tests-shard` above is NOT
+  # wired into branch protection -- its `name:` carries `shard`, so it moves
+  # every time the shard count does, and GitHub required-context strings are
+  # matched literally (tan-cli#392). This job runs no pytest itself; its only
+  # job is to reproduce, byte-for-byte, the three strings protection on `dev`
+  # already pins (see ci.yml's header):
+  #
+  #   python -- pytest across python/ (ubuntu-latest)
+  #   python -- pytest across python/ (windows-latest)
+  #   python -- pytest across python/ (macos-latest)
+  #
+  # A trailing-space or dash difference here silently orphans a required
+  # context forever -- verify the evaluated `name:` against the list above
+  # before trusting this job, don't just read the template string.
+  #
+  # `needs: python-tests-shard` alone is NOT a verdict: GitHub SKIPS a
+  # dependent job when its upstream fails, it does not fail it, so a bare
+  # `needs:` with no `if:` would leave this job PENDING/skipped rather than
+  # red on a shard failure -- a skipped required context does not block a
+  # merge the way a red one does, so that shape is silently worse than no
+  # gate. `if: always()` forces this job to run regardless of the shard
+  # matrix's outcome, and the step below then reads
+  # `needs.python-tests-shard.result` explicitly and `exit 1`s on anything
+  # that is not `success` (failure, cancelled, OR skipped) -- so this job can
+  # never report green off the back of a shard job that did not cleanly pass.
+  #
+  # `needs.<job>.result` for a MATRIX job is ONE rolled-up result across the
+  # WHOLE matrix (12 legs: 3 os x 4 shards), not per-os -- GitHub exposes no
+  # per-leg `needs` result. DELIBERATE CHOICE, spelled out rather than left
+  # for a reader to guess: accept that a shard failure on ANY os reds all
+  # THREE aggregate legs below, rather than build a per-os signal (e.g. one
+  # intermediate rollup job per os, or a status artefact written by each
+  # shard and read back here by os). This is imprecise -- a windows-only
+  # shard failure will also red the macos/ubuntu required contexts -- but it
+  # is the simplest shape that cannot silently pass, which is the one
+  # invariant that actually matters: the aggregate must never be green while
+  # any shard was not green. Revisit only if the imprecision itself becomes
+  # the complaint (PRs redded on an os they didn't touch often enough that
+  # per-os attribution earns the added machinery).
+  python-tests:
+    name: "python -- pytest across python/ (${{ matrix.os }})"
+    needs: python-tests-shard
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    # Always ubuntu-latest regardless of `matrix.os`: this job does no
+    # OS-specific work (no checkout, no pytest, no pip install) -- `matrix.os`
+    # exists ONLY to reproduce the three required `name:` strings above, one
+    # job instance per string. Running it on `matrix.os` itself would pay for
+    # a windows/macos runner just to evaluate one `if` and would leave the
+    # three legs racing three different runner queues for zero benefit.
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify every python-tests-shard leg succeeded
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="${{ needs.python-tests-shard.result }}"
+          echo "python-tests-shard rolled-up result: ${result}"
+          if [ "${result}" != "success" ]; then
+            echo "::error::python-tests-shard did not report success (result: ${result}) -- at least one (os, shard) leg failed, was cancelled, or the whole matrix was skipped. This job exists only to reproduce the required-context name; treating anything but 'success' here as green would report a passing gate for a Python suite that did not fully pass."
+            exit 1
+          fi
 
   # tan-cli#485 (#320 recurred): the ONE signal that actually catches
   # tan/planner/ drift -- this `python-tests` job, dispatched by an alp-sdk
