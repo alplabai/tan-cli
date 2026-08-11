@@ -289,6 +289,119 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **The test suite no longer means two different things on two machines: the
+  debug/flash probe inventory is now a property of the test, not of the host.**
+  A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
+  installed and a CI runner has none of them, so every which()-gated branch
+  answered differently in the two places, silently. #600 is what that cost:
+  seven `test_flow_d_preflight_*` cases green locally and red on
+  ubuntu-latest, windows-latest **and** macos-latest at once — a false negative
+  that does not merely fail to warn, it points the next hour of debugging at
+  "a CI problem". Measured on the fixed tip by instrumenting tan's three
+  resolution seams across two full runs, **34 tests took a different branch**
+  on the two PATHs — every `_collect` case in `test_doctor_command.py`, three
+  in `test_doctor_check_scope.py`, one in `test_support_bundle_command.py` —
+  with an identical outcome (3710 passed either way) and a different meaning;
+  those runs also really spawned `/usr/bin/JLinkExe -?` and `west --version`.
+  `tests/conftest.py` now rebuilds `PATH` once per session so no probe
+  identity resolves, matching what CI already exercises, and covering spawned
+  children as well as in-process calls. Surgical, not a blanket empty `PATH`:
+  the same suite under a `PATH` holding only `sh bash git which env ls cat
+  uname` fails 36 tests that need real `python3`/`sleep`/`mktemp`/`sed`/
+  `curl`/`tar`/`sha256sum` — tools a runner has — so only the identities a
+  runner lacks are removed. A no-op whenever nothing on `PATH` matches — but
+  measured directly, that is not every runner: windows-latest carries the
+  pre-installed Temurin JDK's `jlink.exe`, a stem collision with the bare
+  `"JLink"` identity that has nothing to do with a debug probe, and the
+  fixture farms that (harmless, unrelated) directory for real there.
+  `tests/gates/test_probe_tool_inventory.py` holds all of that in place,
+  including the over-reach direction, seeded so the check is falsifiable on
+  every host that runs it rather than passing vacuously (that seed also
+  surfaced its own windows-only defect: `on_path`'s Windows candidate is
+  built from `%PATHEXT%` literally, so it answers `...\openocd.EXE` for a
+  file seeded as `openocd.exe` — a case-sensitive `==` against that answer
+  failed on windows-latest for a reason unrelated to what the test checks;
+  now compared case-insensitively). Documented in `README.md`, so "I ran the
+  gates locally" has one meaning. Closes #603.
+
+- **`test_the_spawn_probe_can_see_a_spawn` failed on windows-latest, which made
+  twelve no-spawn assertions in `test_flash_command.py` vacuous there — two
+  conditions together, and the PATH-rebuild above is one of them, not an
+  innocent bystander.** The latent defect: `_SPAWN_PROBE`'s fake J-Link/
+  openocd/pyocd files have always been seeded with bare names, the one
+  fake-tool seed in that file that never got the `.exe` every other seed
+  already carries on Windows, and `tool_lookup.resolve_tool`'s Windows walk
+  never tries a bare, extensionless identity (a deliberate, separately-landed
+  behaviour change, #567/#600) — so the required-tool gate refuses that bare
+  file outright, on any branch. The proximate trigger, measured end to end:
+  `test_flash_command.py` is byte-identical between dev and this PR's
+  pre-fix head, so the control test passed on dev for an unrelated reason —
+  windows-latest's runner image happens to carry the pre-installed Temurin
+  JDK's `jlink.exe` on `PATH`, a stem collision that resolves the bare
+  `"JLink"` identity by coincidence, not by design. This PR's session-wide
+  PATH-rebuild farms that one PATH entry away, removing the accidental
+  resolution and exposing the seed that was always wrong. Consequence stated
+  plainly: on dev, the twelve `_TBD_SHAPES` no-spawn assertions were
+  non-vacuous only because Temurin happened to be on the runner image — had
+  it not been, they would have been silently vacuous there too, with nothing
+  red to say so. Fixed by adding the missing conditional `.exe` suffix to
+  `_SPAWN_PROBE`, closing the latent defect instead of leaving it standing on
+  a coincidence. `tests/conftest.py::_probe_free_path` is separately hardened
+  for Windows shapes that had never actually run: explicit
+  `target_is_directory` on `os.symlink`, a `shutil.copy2`/`copytree` third tier
+  under the symlink/hardlink pair (`os.link` refuses directories and raises
+  across volumes — routine on a GitHub Windows runner), and a lazily-created
+  scratch directory so the documented no-op path really does no filesystem
+  work. New host-independent unit tests cover `_probe_free_path` directly
+  (`tests/test_probe_free_path.py`, 19 cases, including the literal
+  lowercase `jlink.exe` collision and a spied-on `os.symlink` call proving a
+  symlink-to-a-directory source still gets `target_is_directory=True`) —
+  nothing exercised it before.
+
+- **The frozen oracle captures now say they are history, and a gate keeps that
+  label true.** #269 deleted `crates/` and the ~13 parity modules that replayed
+  `python/tests/fixtures/oracle_captures/`; five of the seven
+  `test_*_oracle_parity.json` lost their only reader and were left behind, so
+  `test_command_surface_oracle_parity.json` sat there holding a byte-for-byte
+  copy of the completion script #614 has since rewritten, with nothing in the
+  tree to say which was authoritative. The store is **kept**: it is
+  unrecapturable (no binary, no capture workflow) and is cited as the record of
+  oracle behaviour by `docs/ROADMAP.md`, `docs/ux-polish-sweep-plan.md`,
+  `README.md` and four modules under `tan/` — deleting evidence that cannot be
+  regenerated, to fix a labelling problem, is the wrong trade. Instead the
+  directory gets a `README.md` whose first sentence is that nothing in it
+  describes what `tan` does today, a per-file table of which two captures still
+  have live readers and which nine are history only, and the #614 supersession
+  named explicitly. `tests/gates/test_oracle_capture_store_is_labelled.py`
+  re-measures the live-reader column from the tree on every run, refuses an
+  unlabelled file, and holds each declared supersession to being still true of
+  the capture *and* still false of the shipped source — so neither a laundered
+  capture (#511's failure mode) nor a stale claim survives. One correction to
+  the issue: of the four substrings it names, `cword -eq 1` is **not**
+  superseded — it is still in the shipped `completion_cmd.py` — so it is
+  deliberately absent from the table. Closes #617.
+
+  Two follow-up defects in the live-reader measurement itself, found and
+  reproduced against real mutants: the regex saw only `CAPTURES_DIR /
+  "<name>"`, so a reader going through `oracle_captures.load(...)` (a
+  second, equally documented accessor) or through this gate's own
+  supersession check (`_CAPTURES / f"{stem}.json"`, an f-string built from a
+  loop variable — not matchable by any regex) was invisible, and a capture
+  the README still called history-only passed the drift check regardless
+  (reproduced: `4 passed`, README unchanged, before the fix; `1 failed`
+  after). Both are now measured, and `test_command_surface_oracle_parity.json`'s
+  README row now names its real reader instead of `none`. Separately, this
+  file's OWN doc comments illustrating the call shapes (`"<name>"`) were
+  matched by its own regex during the tree walk, injecting a spurious key —
+  the file now excludes itself from the walk, not just `oracle_captures.py`.
+
+- **`test_ordinary_host_tooling_is_untouched` no longer fails a host that
+  genuinely never had `git`/`python3` on `PATH`.** It checked only the
+  post-neutralisation state, so a minimal image missing either tool read as
+  the probe-tool over-reach this test exists to catch. Now checked against
+  `REAL_ENVIRON` (this session's PATH captured before neutralisation ran)
+  first, and skips when the host never had it either way.
+
 - **A rejected `--sdk-root` is now named in the diagnostic that refuses it, on
   the five commands still dropping it.** `--sdk-root` is terminal, so a
   path without `scripts/alp_project.py` resolves to nothing — and `pinmux`,
