@@ -18,9 +18,11 @@ what the AEN family's `ethernet_phy: dp83825` did (`driver_status: none`, no
 This module is the dedicated, GENERIC regression alp-sdk#1380 asked for: it
 does not hardcode "dp83825" as the only chip the rule must reject (that
 would leave the next undriven chip free to repeat #320 / #485 / this one) --
-`test_the_rule_rejects_every_undriven_chip_generically` sweeps every chip
-manifest under the bound SDK's `metadata/chips/` and asserts the rule holds
-for whichever of them currently lack a driver, whatever their name.
+`test_the_rule_rejects_every_undriven_chip_generically` feeds every chip
+manifest under the bound SDK's `metadata/chips/` that currently lacks a
+`chips/<x>/` driver through `_emit_chips` via a synthetic `on_module:` block
+and asserts none of their `CONFIG_ALP_SDK_CHIP_<X>` symbols come out the
+other end, whatever their name.
 
 Importing `tan.planner.*` needs a bound alp-sdk root (same requirement as
 `tests/core/test_planner_relocation_fixes.py`, whose `planner`/`_sdk_root`
@@ -128,19 +130,60 @@ def test_an_aen_project_emits_no_dp83825_kconfig_line(planner) -> None:
         assert expected in text, f"{expected} missing -- fix must not remove driven chips"
 
 
-@pytest.mark.parametrize("cid", _chip_ids(), ids=lambda c: c)
-def test_the_rule_rejects_every_undriven_chip_generically(planner, cid: str) -> None:
-    """The GENERIC direction (tan-cli#654's requirement 1): not scoped to
-    "dp83825" by name. For every chip manifest the bound SDK ships, if it
-    has no `chips/<cid>/` driver directory, `_chip_has_driver` must say so
-    -- whichever chip that happens to be, today or after the next metadata
-    field lands one that isn't `dp83825`."""
-    from tan.planner.kconfig import _chip_has_driver
+def _driverless_chip_ids() -> list[str]:
+    """Every chip manifest the bound SDK ships that has no `chips/<cid>/`
+    driver directory behind it -- the set `_emit_chips` must never print a
+    `CONFIG_ALP_SDK_CHIP_<X>` line for. Computed the same way `_chip_ids`
+    is, so it stays in sync with whatever the bound checkout currently
+    carries."""
+    return [cid for cid in _chip_ids() if not (SDK / "chips" / cid).is_dir()]
 
-    has_dir = (SDK / "chips" / cid).is_dir()
-    assert _chip_has_driver(cid) == has_dir, (
-        f"{cid}: _chip_has_driver()={_chip_has_driver(cid)} disagrees with "
-        f"the actual chips/{cid}/ directory presence ({has_dir})"
+
+def test_the_rule_rejects_every_undriven_chip_generically(planner) -> None:
+    """The GENERIC direction (tan-cli#654's requirement 1): not scoped to
+    "dp83825" by name. Asserted at the layer that actually matters --
+    `_emit_chips`'s OUTPUT, not `_chip_has_driver`'s own definition (an
+    assertion of the form `_chip_has_driver(cid) == (SDK/"chips"/cid).is_dir()`
+    is true by construction, since that IS `_chip_has_driver`'s body, and
+    cannot fail no matter how the filter that calls it is wired or removed
+    -- see the PR body for the measured proof).
+
+    Every driverless chip manifest the bound SDK ships is fed through a
+    synthetic `on_module:` block -- the same path `ethernet_phy: dp83825`
+    took to reach `_emit_chips` in the real regression, generalised to an
+    arbitrary field name so this does not itself hardcode which on_module
+    key carries a chip -- and the emitted lines must carry NONE of their
+    `CONFIG_ALP_SDK_CHIP_<X>` symbols, whichever chip that happens to be,
+    today or after the next metadata field lands one that isn't dp83825."""
+    from tan.planner import kconfig
+
+    driverless = _driverless_chip_ids()
+    assert driverless, "no undriven chip manifest found in the bound SDK -- sweep covers nothing"
+
+    om = {f"_generic_sweep_field_{i}": cid for i, cid in enumerate(driverless)}
+    project = planner.BoardProject(
+        sku="TEST-GENERIC-SWEEP",
+        hw_rev=None,
+        board_name=None,
+        board_hw_rev=None,
+        cores={},
+        ipc=[],
+        soc_spec={},
+        som_preset={"on_module": om, "helper_firmware": []},
+        board_preset=None,
+    )
+
+    lines, _subsystems, _resolved = kconfig._emit_chips(project, {})
+    text = "\n".join(lines)
+
+    emitted_undriven = {
+        cid for cid in driverless if f"CONFIG_ALP_SDK_CHIP_{cid.upper()}" in text
+    }
+    assert emitted_undriven == set(), (
+        f"_emit_chips wrote a Kconfig line for undriven chip(s) "
+        f"{sorted(emitted_undriven)} -- {driverless} were fed in via a "
+        f"synthetic on_module: block and none of them have a chips/<x>/ "
+        f"driver directory"
     )
 
 
