@@ -290,10 +290,20 @@ _MODULE_BUDGET: dict[str, int] = {
     # Two functions LEFT this file in the same change (`_manifest_points_at`,
     # `_same_directory`, both moved down to `tan/core/bootstrap.py`), so the
     # figure is net of that removal.
-    # 3072, not 3070, as of tan-cli#606: `resolve_python_floor` now passes
-    # `facts.zephyr_python_min_version` into `zephyr_python_floor` and its
-    # docstring gained the extra sentence explaining why. Re-measured with
-    # this gate's own walk.
+    # 3219, not 3217 (this branch alone) and not 3072 (dev alone): both
+    # landed. tan-cli#644's project-pin authority work and #640's
+    # zephyr.pythonMinVersion floor are independent additions to the same
+    # file. Re-measured after the merge with this gate's own
+    # `len(read_text().splitlines())` -- never carried across from either
+    # side, because a padded pin passes this ratchet silently.
+    # 3236, not 3219, as of tan-cli#644 review round 2: the nested-project
+    # rollback regression fix. `_relocate_project_pin` gained a second
+    # `restore_root` parameter (the PRE-relocation project root) so
+    # `_undo_relocation` restores the pin under the location the checkout
+    # actually moves BACK to, not the post-relocation path it already
+    # vacated by the time the restore runs -- plus the docstring explaining
+    # why `root` and `restore_root` must differ. Re-measured with this
+    # gate's own walk.
     "tan/commands/bootstrap_cmd.py": 3236,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
@@ -1073,13 +1083,6 @@ _MODULE_BUDGET: dict[str, int] = {
     # check, so a guard inside the materialise branch would refuse only after
     # the other slices' files had landed) and why the build-root one is scoped
     # to `_MODE_NATIVE`. Measured `wc -l`, not arithmetic.
-    #
-    # 2069, not 2043, as of tan-cli#652: `_planner_python_resolution` is a new
-    # function beside `_planner_python` (now a one-line wrapper over it) --
-    # the flag `validate_cmd`/`diff_cmd` need to tell "no `tan bootstrap`
-    # workspace venv resolved" from "a workspace venv resolved and is
-    # independently broken" when a spawned SDK script dies importing a
-    # dependency. Measured `wc -l`, not arithmetic.
     "tan/commands/build_cmd.py": 2074,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
@@ -1324,12 +1327,6 @@ _MODULE_BUDGET: dict[str, int] = {
     # the `_spawn_validator` return annotation and the one-sentence fold in
     # `_reject_if_sdk_validator_disagrees` all followed the shape. MEASURED on
     # the rebased tree, not 812 + this branch's pre-rebase delta.
-    # 822 -> 839, tan-cli#652: `_spawn_validator`/`_reject_if_sdk_validator_
-    # disagrees` now thread a `used_workspace_venv` flag through to
-    # `validate_cmd._synthesised_finding`, reused wholesale rather than
-    # re-derived (same reasoning as the #498 entry above) -- a missing-module
-    # crash on a bare-PATH interpreter now names `tan bootstrap` instead of a
-    # raw `ModuleNotFoundError`. Measured `wc -l`, not arithmetic.
     "tan/commands/diff_cmd.py": 839,
     # NEW ENTRY: 727 -> 934 -> 1020, the diagnostic-code lookup (`tan explain
     # --code`, ADR-0020 end-state B -- alp-sdk's `scripts/alp_cli/explain.py`
@@ -1427,13 +1424,6 @@ _MODULE_BUDGET: dict[str, int] = {
     # overlap inside `_emit`: #478's `sdk.*` filter and #498's `_Finding`
     # pairing collapse into one `reportable`/`reported` pair rather than
     # stacking, so the union is smaller than either side's sum implies.
-    # 1490 -> 1571, tan-cli#652: the module docstring gained a section on the
-    # bare-interpreter-crash collision, `_MISSING_MODULE_RE` +
-    # `_synthesised_finding`'s new `used_workspace_venv` branch replace a raw
-    # `ModuleNotFoundError` with a `tan bootstrap` remedy when
-    # `_planner_python_resolution` (imported in place of `_planner_python`)
-    # found no workspace venv, and the spawn call site now threads that flag
-    # through. Measured `wc -l`, not arithmetic.
     "tan/commands/validate_cmd.py": 1571,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
@@ -1464,7 +1454,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # outright) and replaces it with the five-line comment recording that
     # measurement -- a net +1. Despite the `docs(accuracy)` subject line, this
     # is a behavioural change, which is why it was ported rather than skipped.
-    "tan/planner/loader.py": 1016,
+    # 1251, not 1016, as of the tan-cli#657/#661/#662 re-pin to alp-sdk
+    # `1a9f753c`: `_resolve_jlink_flash_device` splits into
+    # `_resolve_variant_debug` + `_resolve_jlink_flash_device(debug)` (alp-sdk
+    # #1362), plus new `_resolve_flow_d_preflight` /
+    # `_enforce_flow_d_preflight_pair` (the `expect_dpidr`/`jlink_device`
+    # wrong-board preflight pair, alp-sdk #1355), `_resolve_slot0_load_address`
+    # (`flash_args.slot0_load_address`, alp-sdk #1374/tan-cli#353), and
+    # `_enforce_slot0_disjoint_across_roles` (the #1069 HE/HP collision guard,
+    # alp-sdk #1384).
+    "tan/planner/loader.py": 1251,
     # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
     # carries `foreign_global_default_for` through into `_Sdk`, and `init`
     # surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk` writes
@@ -2359,19 +2358,28 @@ _MIRRORED = ("tan/planner/",)
 # tree -- `bootstrap_cmd.py:_run` is still the package's single longest
 # function.
 #
-# 246 -> 248, tan-cli#652: `diff_cmd.py`'s `_spawn_validator` (42 -> 52) and
-# `_reject_if_sdk_validator_disagrees` (46 -> 53) each cross the 50-line cap
-# for the first time, both from the same addition -- threading a
-# `used_workspace_venv` flag (plus the docstring saying why) from
-# `_planner_python_resolution` through to `validate_cmd._synthesised_finding`,
-# so a missing-module crash on a bare-PATH interpreter names `tan bootstrap`
-# instead of a raw `ModuleNotFoundError`. No existing function in this table
-# grew past it, so `_FUNCTION_WORST_BUDGET` is untouched. MEASURED by diffing
-# this gate's own `_long_functions` walk against the same walk of the
-# pre-change tree -- base 246 / new 248, added
-# {`diff_cmd.py:_spawn_validator`, `diff_cmd.py:_reject_if_sdk_validator_disagrees`},
-# removed {}.
-_FUNCTION_COUNT_BUDGET = 249
+# tan-cli#644: `_run` moves again, 711 -> 728, for the call site described
+# above the `_MODULE_BUDGET` entry (`previous_project_pin, project_pin_root =
+# _relocate_project_pin(...)` plus the comment explaining why it is gated on
+# `active_tier == "projectPin"`). `_FUNCTION_COUNT_BUDGET` is UNTOUCHED: the
+# naive inline version pushed `_undo_relocation` (34 -> 54) over the 50-line
+# cap and would have moved this to 247, which is exactly why the rollback
+# side was pulled into its own `_restore_project_pin` function instead --
+# `_undo_relocation` measures 48 here, still under the cap, so the count of
+# over-cap functions in the package is unchanged at 246.
+#
+# tan-cli#657/#661/#662 re-pin to alp-sdk `1a9f753c`: 246 -> 248, MEASURED
+# on the final tree, not assumed from the diff. `tan/planner/loader.py`'s
+# `_resolve_jlink_flash_device` (55 lines) is split into
+# `_resolve_variant_debug` + a short `_resolve_jlink_flash_device(debug)`,
+# dropping it off the long-function list, but the same file gains
+# `_resolve_slot0_load_address` (67 lines, new) and pushes
+# `_slice_from_resolved` (54 lines) over the cap for the first time -- net
+# +1 there. `tan/planner/orchestrator.py`'s `_slice_flash_recipe` grows past
+# 50 lines for the first time (59) emitting the `expect_dpidr`/
+# `jlink_device`/`slot0_load_address` args -- +1 more. `_FUNCTION_WORST_BUDGET`
+# is untouched: `bootstrap_cmd.py:_run` (728) is still the package's longest.
+_FUNCTION_COUNT_BUDGET = 251
 _FUNCTION_WORST_BUDGET = 728
 
 

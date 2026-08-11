@@ -266,7 +266,69 @@ from tests.conftest import sdk_root
 #: Every other file in both tables is byte-identical between `ccd34f06` and
 #: `7d58ef32` -- re-hashed one by one, not assumed -- so this bump re-freezes
 #: nothing unaudited.
-PINNED_SDK_COMMIT = "7d58ef32d0a730c902e335adfd7764c2ec500ba5"  # alp-sdk origin/dev
+#:
+#: `7d58ef32` -> `1a9f753c` (tan-cli#657/#661/#662, unblocking all three).
+#: Three upstream commits touch `scripts/alp_orchestrate/` in this range, all
+#: three BEHAVIOURAL, ported into the four files this bump moves (`loader.py`,
+#: `manifest.py`, `models.py`, `orchestrator.py`; the other 16 tracked modules
+#: re-hashed byte-identical, not assumed):
+#:
+#:   - `c3de155a` (alp-sdk#1362) the read-only SW-DP IDR (DPIDR) wrong-board
+#:     preflight. `loader.py` splits `_resolve_jlink_flash_device`'s variant
+#:     match out into its own `_resolve_variant_debug` (so a future `debug:`
+#:     fact cannot resolve against a different variant than its siblings),
+#:     adds `_resolve_flow_d_preflight` (`expect_dpidr` +
+#:     `jlink_device[core_id]`, both-or-neither, never one of the two) and
+#:     `_enforce_flow_d_preflight_pair` (refuses a Flow-D-armed slice whose
+#:     variant publishes `expect_dpidr` with no matching `jlink_device` for
+#:     that core -- an unarmed guard is recoverable, a guard silently
+#:     dropped is not). `models.Slice` gains `expect_dpidr`/`jlink_device`.
+#:     `orchestrator._slice_flash_recipe` emits both into `flash_args` as
+#:     one inseparable pair (a downstream flasher refuses a half-armed one).
+#:     tan's consumer side (`tan.core.flash_plan.validate_flow_d_preflight_
+#:     args`, `tan flash`'s `swd_probe`/Flow D arms) already read this shape
+#:     -- landed ahead of the planner re-pin, per tan-cli#661/#662.
+#:   - `496e32ad` (alp-sdk#1364) the helper_mcu three-axis projection.
+#:     `manifest._helper_mcus` stops treating `update_channel` as mutually
+#:     exclusive with `flash_method`/`flash_args`: a helper (the GD32 bridge)
+#:     can declare an OTA channel for normal field updates AND a
+#:     `flash_policy: recovery_only` swd_probe method for a bricked board,
+#:     and dropping the flash keys because a channel exists would delete
+#:     that recovery path from the manifest instead of letting `tan flash`
+#:     decline it on `flash_policy`. Every declared key
+#:     (`firmware_path`/`flash_method`/`flash_args`/`flash_policy`/
+#:     `update_channel`) is now projected independently. tan's consumer side
+#:     (`tan.core.flash_plan`'s `HelperMcu.flash_policy` field, `flash_cmd.py`'s
+#:     recovery-only gate) already reads `flash_policy` -- landed ahead of
+#:     this re-pin, per tan-cli#611.
+#:   - `1a9f753c` (alp-sdk#1374) `flash_args.slot0_load_address` (tan-cli#353):
+#:     the AEN MRAM slot0-XIP load address Flow D's auto-sign-via-SETOOLS
+#:     path needs, which alp-sdk never emitted before this. `loader.py` adds
+#:     `_resolve_slot0_load_address` (sourced from the SoM preset's
+#:     `memory_map:`, NOT the SoC JSON -- this is SDK/module build policy,
+#:     not a silicon fact; reuses `zephyr_board.py`'s own
+#:     `_aen_role_slot0_map` via a LAZY import -- `zephyr_board.py` imports
+#:     `_load_yaml` from `loader.py` at module scope, so a module-level
+#:     import back would be circular) and
+#:     `_enforce_slot0_disjoint_across_roles` (refuses a dual-M55 AEN SoM
+#:     whose `m55_he`/`m55_hp` slices resolve to the SAME address -- not
+#:     reachable today, kept as a guard against re-introducing #1069's
+#:     HE/HP MRAM collision). `models.Slice` gains `slot0_load_address`;
+#:     `orchestrator._slice_flash_recipe` emits it into `flash_args`. tan's
+#:     consumer side (`tan.core.flash_plan`'s `slot0_load_address` handling,
+#:     `plan_alif_mram_jlink`) already reads this key -- landed ahead of
+#:     this re-pin, per tan-cli#657.
+#:
+#: `HAND_PORT_PINNED_SDK_COMMIT` moves to the same commit in this same
+#: change (see that pin's own comment) -- re-hashed, not a bare bump: all
+#: ten `HAND_PORT_HASHES` source files are byte-identical between `7d58ef32`
+#: and `1a9f753c`, so nothing is re-frozen past an unaudited delta.
+#: `STRICT_LOADERS_PINNED_SDK_COMMIT` does NOT move -- it names the alp-sdk
+#: commit that INTRODUCED `strict_loaders.py`'s known read-escape gap (see
+#: that pin's own comment), not merely "the last audit point"; moving it
+#: would erase that meaning even though `scripts/strict_loaders.py` is also
+#: byte-identical between `26b0040e` and `1a9f753c` (re-hashed, confirmed).
+PINNED_SDK_COMMIT = "1a9f753c13e5ab5d444e2dc39d7065a352f1b777"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -283,11 +345,11 @@ PINNED_HASHES: dict[str, str] = {
     "kconfig.py": "7d68f6d739f280c72b8cf20165385c474aed96bff38f82b21a97bdde7563744b",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "d3970c0a1b8bba1bf647a6383f668e0a46ceb83b1f235c438e5a228b4cb1c202",
-    "loader.py": "bd051f509d04e1920263c13670e2b6b0a30c0bdf0d1d93f11ee620c026b9d7d0",
-    "manifest.py": "930aa9c453fd86b487f66ec84be8f074a53f22a6077b0310390e176fee7918ba",
+    "loader.py": "e871dedab4aa21746fab8a5e57f863d11986b5a604f02d48c9b92852f8a4f417",
+    "manifest.py": "f38de96a9626672bc08f181e09b3a545d8dc846c0423cc6e9dd08c3b96a87d1d",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
-    "models.py": "6d33258874d6f732d66668d30c22fd644e02de2fb9f35e7b497ddd2d81164109",
-    "orchestrator.py": "ef28eb5d256b83e1f6f00486809edbd7b0115e03accf5fc40c0b3376b075aec0",
+    "models.py": "edf04000c361838b1523eff1a3fd1a5d7b60a5e95583c9acf5d587b8d379ea32",
+    "orchestrator.py": "6fe4c4836dc01b26543939923d12a7e394a6c4e6df7cf1e2c502cf2a53f873fa",
     "partition.py": "7f37224ff1aa05dd6d943424a664bc4d115dc05853762072854d43ea3628591c",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
@@ -392,7 +454,18 @@ PINNED_HASHES: dict[str, str] = {
 #: board emit now refuses, and `test_tan_generate_writes_a_zephyr_board_tree_
 #: byte_for_byte` fails. That is why PINNED_SDK_COMMIT and `parity.yml`'s
 #: PINNED_SDK_TAG move to the same commit rather than staying behind.
-HAND_PORT_PINNED_SDK_COMMIT = "7d58ef32d0a730c902e335adfd7764c2ec500ba5"  # alp-sdk origin/dev
+#:
+#: `7d58ef32` -> `1a9f753c` (tan-cli#657/#661/#662, moved alongside
+#: PINNED_SDK_COMMIT above): a PURE re-pin, not a bare bump -- all ten
+#: `HAND_PORT_HASHES` source files below (`scripts/gen_zephyr_board.py`
+#: through `scripts/alp_project_emit/west_libs.py`) were re-hashed one by
+#: one against `1a9f753c` and are byte-identical to their `7d58ef32`
+#: hashes; `git diff --stat 7d58ef32..1a9f753c -- <each path>` confirms
+#: empty for every one. Moved to the same commit as PINNED_SDK_COMMIT only
+#: because it costs nothing to audit and keeps the two pins from silently
+#: drifting apart on a future bump that touches one bundle but not the
+#: other.
+HAND_PORT_PINNED_SDK_COMMIT = "1a9f753c13e5ab5d444e2dc39d7065a352f1b777"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
