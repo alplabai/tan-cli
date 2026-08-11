@@ -8,10 +8,13 @@ its own test in `tests/core/test_project_loader.py`, alongside the sibling
 
 Also covers tan-cli#639 -- the SAME Defect 1 leak (`_slugs_from_on_module`
 missing the `_DRIVER_STATUS_SUFFIX` filter), recurring a third time not in
-`tan/planner/` itself but in the SHIPPED COMBINATION: `tan v0.5.1` (cut
-2026-08-05, vendoring a pre-fix planner) against `alp-sdk v0.15.0` (cut
-2026-08-04, already carrying the `nor_flash_driver_status`/
-`emmc_driver_status` fields the fix guards against). The two unit tests
+`tan/planner/` itself but in the SHIPPED COMBINATION: `tan v0.5.1`
+(released 2026-08-05, vendoring a pre-fix planner) against `alp-sdk
+v0.15.0` (released 2026-08-07 -- two days AFTER tan v0.5.1, not before
+it; alp-sdk#1169's own fix, commit e6928625, added the
+`nor_flash_driver_status`/`emmc_driver_status` fields to the tree on
+2026-08-04, and v0.15.0, tagged at 3769febe, is the first alp-sdk release
+that carries them). The two unit tests
 below `test_the_driver_status_suffix_filter_is_generic_not_enumerated`
 already proved `_slugs_from_on_module` itself; what shipped broken was the
 released tan binary, which no test here exercises directly -- the two new
@@ -45,6 +48,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 def _sdk_root() -> Path | None:
@@ -129,12 +133,52 @@ def test_the_driver_status_suffix_filter_is_generic_not_enumerated(planner):
 # opposed to `_slugs_from_on_module` itself -- would pass both of them
 # while still shipping the same customer-visible abort. These two tests
 # close that gap: they render the real `zephyr-conf` Kconfig fragment (the
-# artefact `west build` reads as `alp.conf`) for a real, in-tree
-# E1M-V2N101 example against the real bound SoM preset
-# (`metadata/e1m_modules/E1M-V2N101.yaml`, which carries
-# `nor_flash_driver_status: none` / `emmc_driver_status: none` today), the
-# same path `tan generate --target zephyr-conf` / `tan build` take.
+# artefact `west build` reads as `alp.conf`) for real, in-tree V2N-family
+# examples against the real bound SoM preset (`metadata/e1m_modules/
+# E1M-V2N101.yaml` / `E1M-V2M101.yaml`, which carry `nor_flash_driver_
+# status: none` / `emmc_driver_status: none` today), the same path
+# `tan generate --target zephyr-conf` / `tan build` take.
+#
+# ALP_SDK_ROOT is bound whenever these run at all (the `planner` fixture
+# above already proved that by importing `tan.planner`), so a missing
+# example board.yaml under that checkout is a hard failure below, not a
+# skip -- tan-cli#639's own root cause was a check that skipped instead of
+# failing, and re-creating that shape in the test that closes #639 would
+# just reopen it under a different name.
 # --------------------------------------------------------------------------
+
+
+def _bound_som_preset(board_yaml: Path) -> dict:
+    """Load the `metadata/e1m_modules/<SKU>.yaml` preset `board_yaml`
+    resolves to -- the same file `_slugs_from_on_module` reads at build
+    time, not a guess about what it contains."""
+    board = yaml.safe_load(board_yaml.read_text(encoding="utf-8"))
+    sku = board["som"]["sku"]
+    preset_path = SDK / "metadata" / "e1m_modules" / f"{sku}.yaml"
+    assert preset_path.is_file(), (
+        f"{preset_path} not present in this alp-sdk checkout"
+    )
+    return yaml.safe_load(preset_path.read_text(encoding="utf-8"))
+
+
+def _assert_driver_status_hazard_present(board_yaml: Path) -> None:
+    """Positive control: without this, both `does_not_leak_chip_none` tests
+    below assert pure absence -- if alp-sdk ever drops every `*_driver_
+    status: none` field from the bound preset, they would keep passing
+    while measuring nothing. Fail loudly instead if the hazard this file
+    exists to guard is gone."""
+    on_module = _bound_som_preset(board_yaml).get("on_module") or {}
+    hazard_fields = sorted(
+        key for key, value in on_module.items()
+        if key.endswith("_driver_status") and value == "none"
+    )
+    assert hazard_fields, (
+        f"{board_yaml}'s bound SoM preset carries no `*_driver_status: "
+        "none` field any more -- the tan-cli#639 hazard "
+        "_slugs_from_on_module has to filter is gone, so a passing "
+        "does_not_leak_chip_none test below would not be measuring "
+        "anything real"
+    )
 
 
 def test_zephyr_conf_for_a_real_v2n101_project_does_not_leak_chip_none(planner):
@@ -148,8 +192,8 @@ def test_zephyr_conf_for_a_real_v2n101_project_does_not_leak_chip_none(planner):
     from tan import planner_emit
 
     board = SDK / "examples" / "v2n" / "v2n-temp-sensor" / "board.yaml"
-    if not board.is_file():
-        pytest.skip(f"{board} not present in this alp-sdk checkout")
+    assert board.is_file(), f"{board} not present in this alp-sdk checkout"
+    _assert_driver_status_hazard_present(board)
 
     text = planner_emit.render(
         "zephyr-conf", sdk_root=SDK, board_yaml=board, core="m33_sm"
@@ -165,20 +209,22 @@ def test_zephyr_conf_for_a_real_v2n101_project_does_not_leak_chip_none(planner):
 @pytest.mark.parametrize(
     "board_rel",
     [
-        "examples/v2n/v2n-temp-sensor/board.yaml",
-        "examples/v2n/v2n-pwm-fan-control/board.yaml",
-        "examples/v2n/v2n-rtc-multi-alarm/board.yaml",
+        "examples/v2n/v2n-temp-sensor/board.yaml",         # E1M-V2N101
+        "examples/v2n/v2n-pwm-fan-control/board.yaml",     # E1M-V2N101
+        "examples/v2n/v2n-m1-deepx-inference/board.yaml",  # E1M-V2M101 -- a second SoM preset
     ],
 )
 def test_no_v2n_zephyr_slice_leaks_chip_none(planner, board_rel):
-    """Breadth check across more than one E1M-V2N101 example/core pairing --
-    the leak is a property of the SoM preset's `on_module:` block, so it
-    fires identically regardless of which project reads it."""
+    """Breadth check across more than one V2N-family example/core pairing,
+    including a second SoM preset (E1M-V2M101, not just E1M-V2N101) so this
+    is not three runs of the same `on_module:` block under different
+    filenames -- the leak is a property of that block, so it fires
+    identically regardless of which project or preset reads it."""
     from tan import planner_emit
 
     board = SDK / board_rel
-    if not board.is_file():
-        pytest.skip(f"{board} not present in this alp-sdk checkout")
+    assert board.is_file(), f"{board} not present in this alp-sdk checkout"
+    _assert_driver_status_hazard_present(board)
 
     project = planner.load_board_yaml(Path(board))
     zephyr_cores = [
