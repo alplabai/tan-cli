@@ -14,7 +14,7 @@
 #   * tan-cli#320 / #485 / #639 ("too old"): `tan/planner/` falls behind
 #     `scripts/alp_orchestrate/`, alp-sdk cuts a release carrying the fix, tan
 #     does not. #639 is LIVE right now: tan v0.5.1 (2026-08-05) predates the
-#     alp-sdk e6928625 driver-status fix that v0.15.0 (2026-08-04) carries, so
+#     alp-sdk e6928625 driver-status fix that v0.15.0 (2026-08-07) carries, so
 #     `tan build` aborts Zephyr's Kconfig configure on every Renesas SKU with
 #     `CONFIG_ALP_SDK_CHIP_NONE=y` -- a symbol that does not exist.
 #   * tan-cli#591 ("too new"): a `tan/planner/` re-sync ports a requirement
@@ -159,12 +159,14 @@ jobs:
             core: m33_sm
             expect_refuse: false
           - sku: E1M-NX9101
-            # `zephyr-app`'s vendored scaffold only covers the E1M-AEN* /
-            # E1M-V2N* families (tan's own `init.som-unsupported` refusal) --
-            # unrelated to the hw_rev refusal this leg exists to prove.
-            # `minimal-app` is vendor-neutral and scaffolds any SoM, which is
-            # what actually reaches `tan generate` far enough to hit
-            # `SdkRevisionNotBuildable`.
+            # `zephyr-app`'s vendored scaffold only has AEN and V2N/V2M
+            # trees; at the RELEASED tan under test here (v0.5.1) an
+            # unrecognised family such as E1M-NX9* silently falls back to
+            # the Alif tree instead of refusing (`scaffold._family_bucket`)
+            # -- a mismatched scaffold, not the hw_rev refusal this leg
+            # exists to prove. `minimal-app` is vendor-neutral and scaffolds
+            # any SoM, which is what actually reaches `tan generate` far
+            # enough to hit `SdkRevisionNotBuildable`.
             template: minimal-app
             core: m33
             expect_refuse: true
@@ -242,7 +244,21 @@ jobs:
         working-directory: release-workspace
         run: |
           set -euo pipefail
-          tan bootstrap --sdk-root ./alp-sdk --format json > /tmp/rc-bootstrap-${SKU}.json
+          # stderr is captured AND echoed (getting-started.yml's own bootstrap
+          # step does the same): in `--format json` the envelope is the only
+          # thing on stdout, so when the process dies before it can write one,
+          # the reason is on stderr or nowhere.
+          set +e
+          tan bootstrap --sdk-root ./alp-sdk --format json \
+              > /tmp/rc-bootstrap-${SKU}.json 2> >(tee /tmp/rc-bootstrap-${SKU}.stderr >&2)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::[${SKU}] 'tan bootstrap' exited ${rc} -- see the stderr tee above for the reason."
+            cat /tmp/rc-bootstrap-${SKU}.json 2>/dev/null || true
+            exit "$rc"
+          fi
+          cat /tmp/rc-bootstrap-${SKU}.json
           python3 - "$SKU" <<'PY'
           import json, os, sys
           sku = sys.argv[1]
@@ -287,8 +303,17 @@ jobs:
         working-directory: release-workspace
         run: |
           set -euo pipefail
+          set +e
           tan init --name my-app --template "${{ matrix.template }}" --som "${SKU}" \
               --sdk-root ./alp-sdk --format json > /tmp/rc-init-${SKU}.json
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::[${SKU}] 'tan init' exited ${rc} -- see /tmp/rc-init-${SKU}.json above for the envelope."
+            cat /tmp/rc-init-${SKU}.json 2>/dev/null || true
+            exit "$rc"
+          fi
+          cat /tmp/rc-init-${SKU}.json
           python3 - "$SKU" <<'PY'
           import json, sys
           sku = sys.argv[1]
@@ -318,6 +343,10 @@ jobs:
           rc=$?
           set -e
           cat /tmp/rc-generate-${SKU}.json
+          if [ ! -s /tmp/rc-generate-${SKU}.json ]; then
+            echo "::error::[${SKU}] 'tan generate' exited ${rc} without writing an envelope at all (nothing on stdout)."
+            exit "$(( rc == 0 ? 1 : rc ))"
+          fi
           python3 - "$SKU" "$rc" "${{ matrix.expect_refuse }}" <<'PY'
           import json, sys
           sku, rc, expect_refuse = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "true"

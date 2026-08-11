@@ -2761,9 +2761,11 @@ All notable changes to `tan` are documented here. Format follows
   `hw_rev: r1` is genuinely `status: tbd` and correctly refuses at
   `tan generate`). `schedule` + `workflow_dispatch`, not a required PR
   check -- it depends on release timing neither repo's PR CI controls.
-  Provably not vacuous: dispatched against today's real released pair (tan
-  v0.5.1, alp-sdk v0.15.0) the E1M-V2N101 leg reproduces #639 exactly, live,
-  with no synthetic input needed. (#639)
+  Provably not vacuous: reproduced locally, step for step, against today's
+  real released pair (tan v0.5.1 installed from source at that tag, real
+  alp-sdk v0.15.0 clone) -- the E1M-V2N101 leg reproduces #639 exactly, with
+  no synthetic input needed. The first *live* dispatch happens once this
+  workflow registers on `dev`. (#639)
 
 
 
