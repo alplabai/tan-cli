@@ -2052,6 +2052,14 @@
       "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "doctor.libraries",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "note": "The ADR-0018 curated-library verdict for the selected project (tier + licence + whether each selection can be wired on this target), ported out of alp-sdk's `scripts/alp_cli/doctor.py::_check_libraries` under ADR-0020 end-state B -- a user-facing check belongs on the user command surface, which is `tan`. `severity` is `warning` and only ever `warning`: `libraries_check` never returns a `fail` status, because `tan build` already refuses an unwireable selection outright and a `fail` here would additionally cost exit 4. Emitted only when a project selects at least one curated library; a project selecting none produces no check and therefore no issue at all. The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "doctor.long-paths",
       "status": "reserved",
       "severity": "error",

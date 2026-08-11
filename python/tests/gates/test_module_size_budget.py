@@ -195,16 +195,28 @@ _MODULE_BUDGET: dict[str, int] = {
     # the docstring paragraph recording why the field is required and
     # keyword-only. The two definitions and the judgement calls did NOT land
     # here: they are in `tan/core/doctor_scope.py`, well under its own cap.
-    # 3747, not 3696, as of tan-cli#606: alp-sdk's manifest-declared
-    # `zephyr.pythonMinVersion` (alp-sdk#1078) now beats the hardcoded
-    # `ZEPHYR_PYTHON_FLOOR` pin as `zephyr_python_floor`'s no-workspace
-    # fallback -- the extra lines are the new `manifest_zephyr_floor`
-    # parameter, the fallback/label derivation it needs, the `_load_manifest`
-    # injection of `_zephyrPythonMinVersion` (mirroring `_pipSpec`'s existing
-    # pattern), and the new `_zephyr_manifest_floor_from_facts` reader.
-    # Re-measured with this gate's own `len(read_text().splitlines())`, not
-    # estimated from the diff.
-    "tan/commands/doctor_cmd.py": 3747,
+    # 3813, not 3762 (this branch alone) and not 3747 (dev alone): both
+    # landed. tan-cli#606's manifest-declared `zephyr.pythonMinVersion`
+    # fallback (alp-sdk#1078) and the alp-sdk `_check_libraries` port are
+    # independent additions to the same file, so the merged length is neither
+    # side's pin. Re-measured after the merge with this gate's own
+    # `len(read_text().splitlines())` -- never carried across from either
+    # branch, because a padded pin passes this ratchet silently.
+    #
+    # The #606 half: the new `manifest_zephyr_floor` parameter, its
+    # fallback/label derivation, the `_load_manifest` injection of
+    # `_zephyrPythonMinVersion` (mirroring `_pipSpec`), and
+    # `_zephyr_manifest_floor_from_facts`.
+    #
+    # The libraries half (ADR-0020 end-state B -- the user command surface is
+    # `tan`, so alp-sdk does not keep a second CLI reporting on its library
+    # layer): only `libraries_check` (the outcome -> `Check` mapping, trimmed
+    # to exactly 50 lines rather than moving the function ratchet) and its
+    # thirteen-line `_collect` wiring. The resolution -- the raw `libraries:`
+    # peek, the planner bind, `scoped_names`/`resolve_selection` and the two
+    # defects the port fixed -- lives in `tan/core/doctor_libraries.py`, for
+    # the same reason `doctor_scope.py` took the #549 half.
+    "tan/commands/doctor_cmd.py": 3813,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
