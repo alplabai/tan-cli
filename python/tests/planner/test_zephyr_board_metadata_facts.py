@@ -92,6 +92,12 @@ def _emit_error():
     return ZephyrBoardEmitError
 
 
+def _sdk_too_old_error():
+    from tan.planner.sdk_capability import SdkTooOldError
+
+    return SdkTooOldError
+
+
 class _MutatedMetadata:
     """Copy the bound checkout's `metadata/` to a temp dir so a test can
     mutate one fact. Same shape as alp-sdk's own
@@ -140,6 +146,29 @@ class _MutatedMetadata:
                 break
         else:  # pragma: no cover -- a typo'd core id is a broken test, not a finding
             raise AssertionError(f"{relpath} declares no core {core_id!r}")
+        path.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
+
+    def drop_quality_task(self, task_id: str) -> None:
+        """Simulate an alp-sdk checkout that predates the commit which
+        registered *task_id* in `metadata/quality-tasks-v1.json` --
+        `tan.planner.sdk_capability.quality_task_declared`'s probe."""
+        path = self.root / "quality-tasks-v1.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        before = len(doc["tasks"])
+        doc["tasks"] = [t for t in doc["tasks"] if t.get("id") != task_id]
+        assert len(doc["tasks"]) == before - 1, (
+            f"quality-tasks-v1.json declares no task {task_id!r}")
+        path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+    def drop_schema_property(self, schema_relpath: str, prop: str) -> None:
+        """Simulate an alp-sdk checkout that predates the commit which added
+        *prop* to `metadata/schemas/<schema_relpath>` --
+        `tan.planner.sdk_capability.schema_declares_property`'s probe."""
+        path = self.root / "schemas" / schema_relpath
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        assert prop in spec.get("properties", {}), (
+            f"{schema_relpath} does not declare property {prop!r}")
+        spec["properties"].pop(prop)
         path.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
 
 
@@ -230,7 +259,12 @@ def test_the_peripherals_overlay_is_read_from_the_soc_json():
 def test_a_soc_declaring_no_peripherals_overlay_is_refused():
     """The fail-open path becoming a real refusal. Inheriting a sibling
     part's overlay produces a board that builds and then misbehaves on
-    silicon, so a SoC that declares none is refused rather than defaulted."""
+    silicon, so a SoC that declares none is refused rather than defaulted.
+
+    The bound checkout's OWN schema still declares `zephyr_peripherals_dtsi`
+    here (only this SoC's JSON omits it), so `require_capability` sees the
+    capability and this stays the plain authoring-gap message -- the
+    vintage case below is what fires when the SCHEMA doesn't have it."""
     with _MutatedMetadata() as mm:
         mm.json_del(E8_SOC, "zephyr_peripherals_dtsi")
         with pytest.raises(_emit_error()) as excinfo:
@@ -238,6 +272,33 @@ def test_a_soc_declaring_no_peripherals_overlay_is_refused():
     message = str(excinfo.value)
     assert "zephyr_peripherals_dtsi" in message
     assert "alif:ensemble:e8" in message
+    assert "predates" not in message
+
+
+def test_a_missing_peripherals_overlay_names_the_alp_sdk_vintage_when_the_checkout_predates_it():
+    """tan-cli#591 part 2. Every released alp-sdk (measured against v0.15.0,
+    the newest tag as of this writing) predates alp-sdk#1352, which added
+    `zephyr_peripherals_dtsi` to `soc-spec-v1.schema.json` -- so on a real
+    checkout `_aen_peripherals_dtsi` is where `tan generate --target
+    zephyr-board` fails on EVERY E1M-AEN801 board today, not the `atoc`
+    branch below (`d639e777` predates `7d58ef32`, but is not what a v0.15.0
+    checkout is missing when it also lacks `7d58ef32`).
+
+    Dropping the schema property (not just the SoC JSON's own value)
+    reproduces that vintage shape directly, rather than inferring it from
+    the SoC JSON alone -- the schema is the checkout-level fact; the SoC
+    JSON's own omission is a red herring an old checkout ALSO exhibits, but
+    is not what the refusal should be blaming.
+    """
+    with _MutatedMetadata() as mm:
+        mm.drop_schema_property("soc-spec-v1.schema.json", "zephyr_peripherals_dtsi")
+        mm.json_del(E8_SOC, "zephyr_peripherals_dtsi")
+        with pytest.raises(_sdk_too_old_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    message = str(excinfo.value)
+    assert "this alp-sdk predates" in message
+    assert "alp-sdk#1352" in message
+    assert "upgrade alp-sdk" in message
 
 
 def test_the_part_designator_is_read_from_the_soc_json():
@@ -274,22 +335,27 @@ def test_the_defconfig_console_pads_come_from_the_pinmux():
 # ======================================================================
 
 
-def test_a_missing_atoc_names_the_alp_sdk_vintage_not_the_som():
-    """tan-cli#591. An alp-sdk checkout from before alp-sdk#1289 has an
-    otherwise-complete `memory_map:` and no `atoc`; `tan generate` then failed
-    on every AEN board with *"AEN disjoint-slot0 memory_map is missing an
-    integer-`base` region named 'atoc'"*, which reads as a defect in the
-    consumer's own SoM metadata. The `storage` region is widened back to the
-    128 KiB it carried before alp-sdk#1289 shaved 32 KiB off it for the ATOC,
-    so the mutated map is exactly the shape of a pre-#1289 checkout -- an
-    otherwise-complete, non-overlapping, exactly-fitting layout.
+def test_a_missing_atoc_names_the_alp_sdk_vintage_when_the_checkout_predates_it():
+    """tan-cli#591. An alp-sdk checkout from before alp-sdk#1289 does not
+    list `atoc-reservation` in `metadata/quality-tasks-v1.json` -- the
+    checkout-level fact `require_capability` actually checks -- and
+    (consistent with that vintage) has no `atoc` region in this SoM's own
+    `memory_map:` either. `tan generate` used to fail on every AEN board
+    with *"AEN disjoint-slot0 memory_map is missing an integer-`base` region
+    named 'atoc'"*, which reads as a defect in the consumer's own SoM
+    metadata; it must now name the real cause instead.
+
+    Before this change the vintage message fired off a HEURISTIC over the
+    SoM preset's own shape ("every other region is present, so this one
+    must be a vintage checkout") -- see
+    `test_a_missing_atoc_reads_as_an_authoring_gap_when_the_checkout_has_the_capability`
+    below for why that was imprecise, and is not what this test exercises
+    any more.
     """
     with _MutatedMetadata() as mm:
+        mm.drop_quality_task("atoc-reservation")
         mm.drop_lines(AEN801_PRESET, "name: atoc")
-        mm.sub(AEN801_PRESET,
-               "name: storage,   base: 0x80560000, size_kib: 96",
-               "name: storage,   base: 0x80560000, size_kib: 128")
-        with pytest.raises(_emit_error()) as excinfo:
+        with pytest.raises(_sdk_too_old_error()) as excinfo:
             _emit("E1M-AEN801", "m55_hp", mm.root)
     message = str(excinfo.value)
     assert "this alp-sdk predates the SE-owned ATOC reservation" in message
@@ -297,9 +363,33 @@ def test_a_missing_atoc_names_the_alp_sdk_vintage_not_the_som():
     assert "upgrade alp-sdk" in message
 
 
+def test_a_missing_atoc_reads_as_an_authoring_gap_when_the_checkout_has_the_capability():
+    """The other half of tan-cli#591's fix. When the bound checkout's own
+    `metadata/quality-tasks-v1.json` DOES list `atoc-reservation` --
+    unmodified here, so this is the checkout's real, current state -- an
+    `atoc`-less SoM preset is a genuine authoring gap, not a vintage
+    checkout, and must not borrow the vintage wording.
+
+    Before this change, dropping `atoc` from an otherwise-complete map hit
+    the vintage message REGARDLESS of whether the bound checkout was
+    actually old -- a heuristic inferred from the SoM preset's own shape,
+    not from the checkout. This test is the case that heuristic got wrong:
+    an author editing a fresh preset who simply hasn't added `atoc` yet was
+    told their alp-sdk predates a commit it does not predate.
+    """
+    with _MutatedMetadata() as mm:
+        mm.drop_lines(AEN801_PRESET, "name: atoc")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    message = str(excinfo.value)
+    assert "'atoc'" in message
+    assert "predates" not in message
+
+
 def test_a_missing_non_atoc_region_still_reads_as_an_authoring_gap():
-    """The other half of the same message: only `atoc`'s absence is a vintage
-    problem, so nothing else may claim to be one."""
+    """The other half of the same message: only `atoc`'s absence is ever
+    checked against the SDK floor, so nothing else may claim to be a
+    vintage problem."""
     with _MutatedMetadata() as mm:
         mm.drop_lines(AEN801_PRESET, "name: reserved")
         with pytest.raises(_emit_error()) as excinfo:

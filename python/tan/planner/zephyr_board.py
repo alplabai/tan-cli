@@ -86,10 +86,15 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from .loader import _load_yaml
 from .project_loader import _resolve_sku
+from .sdk_capability import (
+    AEN_ATOC_RESERVATION,
+    AEN_ZEPHYR_PERIPHERALS_DTSI,
+    require_capability,
+)
 from .som_metadata import resolve_soc_path
 
 
@@ -451,7 +456,7 @@ def _aen_family_display(soc_spec: dict[str, Any]) -> str:
     return f"Alif {family} {_aen_part(soc_spec)}"
 
 
-def _aen_peripherals_dtsi(soc_spec: dict[str, Any]) -> str:
+def _aen_peripherals_dtsi(soc_spec: dict[str, Any], metadata_root: Path) -> str:
     """The `#include <...>` path of THIS SoC's Zephyr peripherals overlay.
 
     Read from the SoC JSON's `zephyr_peripherals_dtsi`, never derived
@@ -462,9 +467,17 @@ def _aen_peripherals_dtsi(soc_spec: dict[str, Any]) -> str:
     today (`zephyr/dts/alif/ensemble_e8_peripherals.dtsi`), so every
     other Ensemble part must add its own and declare it here rather than
     inherit the E8's.
+
+    `zephyr_peripherals_dtsi` is itself a ported requirement (alp-sdk#1352,
+    tan-cli#591) that no released alp-sdk carries yet: an absent value
+    checks `require_capability` FIRST, so a checkout that predates the
+    field raises `SdkTooOldError` naming that, rather than the generic
+    authoring-gap message below, which only fires once the checkout is
+    proven new enough to know the field at all.
     """
     dtsi = soc_spec.get("zephyr_peripherals_dtsi")
     if not dtsi or _is_tbd(dtsi):
+        require_capability(metadata_root, AEN_ZEPHYR_PERIPHERALS_DTSI)
         raise ZephyrBoardEmitError(
             f"SoC spec {soc_spec.get('ref')} "
             f"({_aen_part(soc_spec)}) has no `zephyr_peripherals_dtsi` -- "
@@ -627,47 +640,30 @@ def _aen_slot0_sizes_display(memory_map: "list[dict[str, Any]]") -> str:
     return " + ".join(parts)
 
 
-def _aen_missing_region_message(
-    region_name: str, label: str, by_name: "dict[str, Any]", role: "str | None",
-) -> str:
-    """Explain a missing disjoint-slot0 region in terms of its REAL cause.
+def _aen_raise_missing_region(
+    region_name: str, label: str, metadata_root: Path,
+) -> NoReturn:
+    """Raise the right refusal for a missing disjoint-slot0 region.
 
-    `atoc` is the one region the disjoint layout gained late (#1289), so
-    its absence is overwhelmingly a VINTAGE problem, not an authoring
-    one: an alp-sdk checkout from before that commit has a SoM preset
-    whose `memory_map:` is complete in every other respect.  The old
-    wording ("memory_map is missing an integer-`base` region named
-    'atoc'") read as a defect in the consumer's own SoM metadata, and a
-    consumer who went looking at their `board.yaml` and their SoM preset
-    found both fine and had no route to the real cause -- the message
-    named the wrong culprit for the only way it actually fires.
+    `atoc` is a ported requirement (alp-sdk#1289, tan-cli#591) that no
+    released alp-sdk carries yet: checked FIRST, via `require_capability`
+    against the bound checkout's OWN `metadata/quality-tasks-v1.json`
+    registry -- never against the shape of THIS SoM preset's map.  A
+    checkout that doesn't know the concept raises `SdkTooOldError` naming
+    it; only once the checkout is proven new enough does an absent `atoc`
+    region fall through to the generic authoring-gap message below, same as
+    every other region name.
 
-    Distinguishing the two cases is only possible for `atoc`, and only
-    from the shape of the map: when EVERY other required region is
-    present and placed, the map is a complete pre-#1289 layout and the
-    checkout is the thing that is old; when other regions are missing
-    too, the map is genuinely half-authored.  Both readings are covered
-    below, in that order, because a SoM author editing a fresh preset
-    hits the same string.
+    This used to be a heuristic instead: "every OTHER required region is
+    present and placed, so this preset is a complete pre-#1289 layout" --
+    inferring the checkout's vintage from the shape of one board's map.
+    Imprecise by construction (a hand-edited preset that merely LOOKS
+    pre-#1289-shaped hit the same wording as a genuinely old checkout);
+    `require_capability` answers the real question directly instead.
     """
-    others = [n for n in ("mcuboot", f"{role}_slot0", "reserved", "storage")
-              if n != region_name]
-    otherwise_complete = all(
-        isinstance((by_name.get(n) or {}).get("base"), int) for n in others)
-    if region_name == "atoc" and otherwise_complete:
-        return (
-            "this alp-sdk predates the SE-owned ATOC reservation "
-            "(alp-sdk#1289): metadata/e1m_modules/<SKU>.yaml declares a "
-            "complete disjoint-slot0 `memory_map:` but no `atoc` region, "
-            "which is the shape of every alp-sdk checkout before that "
-            "commit.  The AEN board emit needs a checkout that contains it "
-            "-- upgrade alp-sdk to a release that includes alp-sdk#1289.  "
-            "(If you are AUTHORING this preset rather than consuming a "
-            "released alp-sdk, add the `atoc` region: the SE-owned band "
-            "SETOOLS top-anchors the ATOC application table into, flush "
-            "against the App MRAM window top.  It is declared so no app "
-            "can mount NVS or a filesystem over the boot table.)")
-    return (
+    if region_name == "atoc":
+        require_capability(metadata_root, AEN_ATOC_RESERVATION)
+    raise ZephyrBoardEmitError(
         f"AEN disjoint-slot0 memory_map is missing an integer-`base` "
         f"region named {region_name!r} (needed for {label!r}) -- this SoM "
         "preset's `memory_map:` is incomplete; add the region, or drop the "
@@ -676,10 +672,15 @@ def _aen_missing_region_message(
 
 
 def _aen_flash_partitions(
-    total_kib: int, role: str | None = None,
+    total_kib: int, metadata_root: Path, role: str | None = None,
     memory_map: "list[dict[str, Any]] | None" = None,
 ) -> "tuple[int, list[tuple[str, int, int]]]":
     """Return (mram_base, [(label, offset_bytes, size_kib), ...]).
+
+    *metadata_root* is threaded through to `_aen_raise_missing_region`,
+    which needs it to answer "does the bound alp-sdk checkout know about
+    `atoc` at all" before blaming this SoM preset for omitting it
+    (tan-cli#591).
 
     *mram_base* is the absolute address the emitted `mram_storage`
     soc-nv-flash child is anchored at, i.e. the origin every returned
@@ -746,8 +747,7 @@ def _aen_flash_partitions(
         ):
             region = by_name.get(region_name)
             if region is None or not isinstance(region.get("base"), int):
-                raise ZephyrBoardEmitError(
-                    _aen_missing_region_message(region_name, label, by_name, role))
+                _aen_raise_missing_region(region_name, label, metadata_root)
             out.append((label, region["base"] - mram_base, region["size_kib"]))
         _aen_check_extents(out, total_kib, "AEN disjoint-slot0 memory_map")
         return mram_base, out
@@ -971,6 +971,7 @@ def _aen_kconfig_defconfig(dir_name: str, role: str, part: str) -> str:
 def _aen_dts(
     sku: str, core_id: str, soc_spec: dict[str, Any], variant: dict[str, Any],
     dir_name: str, basename: str, rx_row: dict[str, Any], tx_row: dict[str, Any],
+    metadata_root: Path,
     ethos_u: tuple[str, str] | None = None,
     memory_map: "list[dict[str, Any]] | None" = None,
 ) -> str:
@@ -994,10 +995,11 @@ def _aen_dts(
 
     part = _aen_part(soc_spec)
     family_display = _aen_family_display(soc_spec)
-    peripherals_dtsi = _aen_peripherals_dtsi(soc_spec)
+    peripherals_dtsi = _aen_peripherals_dtsi(soc_spec, metadata_root)
 
     total_kib = round(float(variant["mram_mb"]) * 1024)
-    mram_base, partitions = _aen_flash_partitions(total_kib, role, memory_map)
+    mram_base, partitions = _aen_flash_partitions(
+        total_kib, metadata_root, role, memory_map)
     image_kib = dict((label, size) for label, _off, size in partitions)["image-0"]
     disjoint_slot0 = _aen_role_slot0_map(memory_map, role) is not None
 
@@ -1352,7 +1354,7 @@ def emit_zephyr_board(
             dir_name, role, _aen_part(soc_spec))
         files[f"{dir_name}/{basename}.dts"] = _aen_dts(
             sku, core_id, soc_spec, variant, dir_name, basename, rx_row, tx_row,
-            _aen_ethos_u(soc_spec), memory_map)
+            metadata_root, _aen_ethos_u(soc_spec), memory_map)
 
     # `_load_soc_spec()` above already raised ZephyrBoardEmitError if
     # `sku_preset["silicon"]` didn't resolve, so `soc_path` can't be None
