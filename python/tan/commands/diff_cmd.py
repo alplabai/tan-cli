@@ -150,7 +150,7 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import _planner_python
+from tan.commands.build_cmd import _planner_python_resolution
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.generate_cmd import _python_too_old
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
@@ -563,13 +563,19 @@ def _emit_failure(
 
 
 def _spawn_validator(
-    python_binary: str, script: str, board_path: str
+    python_binary: str, script: str, board_path: str, *, used_workspace_venv: bool = True
 ) -> tuple[str, tuple[Any, ...]]:
     """`(outcome, findings)` for one run of the SDK's own validator, or a
     `ParseFailure("spawn-failed", ...)` when the subprocess could not even be
     started -- `validate_cmd`'s own split (tan-cli#262/#455 review round),
     reused rather than re-derived: a launch that never happened is not a
-    verdict, and must not be swallowed into a silent "nothing to report"."""
+    verdict, and must not be swallowed into a silent "nothing to report".
+
+    `used_workspace_venv` (tan-cli#652) is forwarded verbatim to
+    `_synthesised_finding`: `False` means `python_binary` is a bare PATH
+    fallback (no `tan bootstrap` workspace venv resolved for this project),
+    which is what lets a missing-module crash there name `tan bootstrap` as
+    the remedy instead of surfacing a raw `ModuleNotFoundError`."""
     command_line = f"{python_binary} {script} --input {board_path}"
     try:
         out = subprocess.run(
@@ -602,7 +608,11 @@ def _spawn_validator(
     if result.outcome != OUTCOME_CLEAN and not result.findings:
         # A non-clean run must never reach a consumer as "zero issues",
         # which reads as no problem -- `to_cli_issues`' own synthesis.
-        return result.outcome, (_synthesised_finding(result.outcome, out.stderr),)
+        return result.outcome, (
+            _synthesised_finding(
+                result.outcome, out.stderr, used_workspace_venv=used_workspace_venv
+            ),
+        )
     return result.outcome, result.findings
 
 
@@ -625,7 +635,12 @@ def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path:
     script = os.path.join(sdk_info.root, *VALIDATOR_SCRIPT)
     if not os.path.isfile(script):
         return
-    python_binary = _planner_python(os.path.abspath(root), sdk_info.root)
+    # tan-cli#652: `used_workspace_venv` is threaded through to
+    # `_spawn_validator`/`_synthesised_finding` so a missing-module crash on
+    # the bare-PATH fallback names `tan bootstrap` as the remedy.
+    python_binary, used_workspace_venv = _planner_python_resolution(
+        os.path.abspath(root), sdk_info.root
+    )
 
     # Guard 3 (validate_cmd.py:1013-1015's own): a spawned interpreter below
     # the SDK's declared pythonMinVersion dies inside alp-sdk's
@@ -636,7 +651,9 @@ def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path:
     if (too_old := _python_too_old(python_binary, floor)) is not None:
         raise ParseFailure("python-too-old", too_old)
 
-    outcome, findings = _spawn_validator(python_binary, script, board_path)
+    outcome, findings = _spawn_validator(
+        python_binary, script, board_path, used_workspace_venv=used_workspace_venv
+    )
     if outcome == OUTCOME_CLEAN:
         return
     # `finding.message`, not a `(severity, message)` unpack: tan-cli#498
