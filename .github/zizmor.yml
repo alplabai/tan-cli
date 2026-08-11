@@ -76,4 +76,9 @@ rules:
       # explicit `cache:` input at all when `npm-shim/package.json` carries a
       # `packageManager` field, so this ignore holds only as long as that file
       # has none -- add one and re-argue this entry before merging.
-      - release.yml:790:9
+      #
+      # 790 -> 850 (tan-cli#500): the `arch (darwin assets)` step added to the
+      # `build` job pushed this one down. Re-derived by running the gate, which
+      # is what the note above prescribes -- the entry rotted LOUDLY, red, in
+      # the direction this file says to prefer, rather than silently widening.
+      - release.yml:850:9

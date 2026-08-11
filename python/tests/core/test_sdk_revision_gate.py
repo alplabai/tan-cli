@@ -377,7 +377,14 @@ def test_an_aen_zephyr_slice_publishes_its_jlink_flash_device(planner, tmp_path)
     method, args = _slice_flash_recipe(project.cores["m55_hp"])
 
     assert method == "zephyr_west_flash"
-    assert args == {"jlink_flash_device": "AE822FA0E5597LS0_M55_HE"}
+    # alp-sdk#1374 added slot0_load_address to the same published block; both
+    # are sourced facts, so assert the whole contract rather than one key.
+    assert args == {
+        "jlink_flash_device": "AE822FA0E5597LS0_M55_HE",
+        "slot0_load_address": "0x802b0000",
+        "expect_dpidr": "0x4C013477",
+        "jlink_device": "Cortex-M55",
+    }
 
 
 def test_a_slice_whose_variant_publishes_no_profile_keeps_empty_flash_args(planner):
