@@ -66,10 +66,14 @@ rules:
       # confidence, not an observed cache. There is also nothing to poison:
       # the job's two steps are `npm pack --dry-run` and `npm publish`, and it
       # installs no dependencies. The action itself is pinned to
-      # 49933ea5288caeca8642d1e84afbd3f7d6820020 (v4.4.0).
+      # 820762786026740c76f36085b0efc47a31fe5020 (v7.0.0).
       #
       # WHAT WOULD CHANGE THIS. Add a `cache:` input here, or an install step
       # ahead of `npm publish`, and this entry must be re-argued rather than
       # carried: at that point a restored cache really would reach the one job
-      # in this repository that publishes to a registry.
+      # in this repository that publishes to a registry. THE SAME IS TRUE
+      # IMPLICITLY: `actions/setup-node` v5+ auto-restores an npm cache with no
+      # explicit `cache:` input at all when `npm-shim/package.json` carries a
+      # `packageManager` field, so this ignore holds only as long as that file
+      # has none -- add one and re-argue this entry before merging.
       - release.yml:790:9
