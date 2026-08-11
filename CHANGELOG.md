@@ -310,6 +310,39 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
+  PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
+  any time `tan bootstrap` relocates a checkout inside a project that already
+  has a working pin (written by an earlier `tan init`, per the documented
+  `bootstrap` then `init` quickstart) -- i.e. a project being re-bootstrapped,
+  not only a first run. Rewriting it is gated on this run's SDK having
+  resolved through the `projectPin` tier (the project already had a
+  working pin naming exactly the checkout that just moved); `tan init` remains
+  the only place that writes a NEW pin where none existed, so a bootstrap run
+  from an arbitrary workspace-parent directory still writes nothing there. A
+  relocation later rolled back (a failed venv/west step) restores the project
+  pin byte-for-byte, mirroring the existing `~/.alp/sdk-default` rollback.
+  Known residual: a bootstrap run with an explicit `--sdk-root` naming the
+  same checkout a project pin already resolves through still leaves that pin
+  stale -- only the `projectPin`-tier path (no `--sdk-root`) is covered here.
+  (#644)
+- **`tan doctor` no longer reports two false negatives on the flash-readiness
+  question a bench operator asks it before an MRAM write.** `setools_check`
+  stopped inferring an AEN MRAM flash failure from `fdt` importability under
+  any interpreter — `app-gen-toc` is a spawned SETOOLS subprocess, never a
+  Python import, and SETOOLS ships its own dependencies, so the inference was
+  false on real silicon even after tan-cli#488 defect 6 pointed it at the
+  workspace venv's own interpreter. The J-Link version probe used to pass
+  `[jlink_exe, "-?"]`, a flag JLinkExe does not have (`Unknown command line
+  option -?.`), so it never once reached the version banner JLinkExe prints
+  unprompted on every real invocation; a new `jlink_banner` helper reads that
+  banner directly (spawned with `-NoGui 1`, matching every other J-Link spawn
+  in this repo), regardless of exit code — except against the
+  `JLinkGDBServerCL` fallback name, which never quits on the probe's `exit\n`
+  stdin and would otherwise hold a GDB port for the full 15 s timeout on
+  every `tan doctor` run on such a host, so `_collect` excludes it from the
+  banner probe. Closes #641.
+
 - **`tan doctor` and `tan bootstrap` now read alp-sdk's own Zephyr-scoped
   Python floor (`zephyr.pythonMinVersion`) instead of a hardcoded constant
   when no `$ZEPHYR_BASE` workspace resolves to read `python.cmake` from
@@ -331,7 +364,6 @@ All notable changes to `tan` are documented here. Format follows
   takes it as a keyword-only `manifest_zephyr_floor` argument that now
   outranks the constant; `ZEPHYR_PYTHON_FLOOR` is the last resort, not the
   routine case. Closes #606.
-
 - **The test suite no longer means two different things on two machines: the
   debug/flash probe inventory is now a property of the test, not of the host.**
   A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
