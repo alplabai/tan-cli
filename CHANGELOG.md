@@ -324,7 +324,22 @@ All notable changes to `tan` are documented here. Format follows
   `_synthesised_finding`, so this specific, identifiable cause names the real
   fix — a present-but-independently-broken workspace venv still gets the
   generic message. (#652)
-
+- **The `tan_under_test` refusal (tan-cli#423) had never been exercised itself
+  -- every existing consumer of it is an ordinary test run where it is
+  expected to pass silently, so a green suite said nothing about whether the
+  refusal would actually fire the day it needs to** (tan-cli#665). Measured
+  on the shared dev box: a bare `pip install -e ./python` run outside a venv
+  wrote an editable install into user site-packages, and a full `pytest tests
+  -q` on an unrelated branch reported `681 failed, 3298 passed, ..., 17
+  errors` for reasons that had nothing to do with that branch -- reproduced
+  identically against unmodified `dev`. `tests/gates/test_tan_under_test_
+  guard.py` now plants a decoy `tan` package outside this repo's `python/`,
+  puts it ahead of the real one on `sys.path` (the same externally observable
+  shape a hijacked editable install produces), and proves `tan_under_test`
+  refuses loudly with its own named message -- and proves it stays silent for
+  this repo's own, correctly-resolved `tan`. `README.md`'s Development
+  section now says plainly: install into a venv you create, never a bare or
+  `--user` `pip install -e ./python`.
 - **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
   PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
   any time `tan bootstrap` relocates a checkout inside a project that already
