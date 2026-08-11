@@ -5580,11 +5580,23 @@ def test_a_pending_helper_still_skips_rather_than_failing_the_run(tmp_path):
 #: which is what makes this a measurement of "did tan try to flash" rather than
 #: "did the host happen to have a flasher".
 #:
-#: The fake tool dir exists to get PAST the required-tool gate: `on_path` only
-#: asks `is_file()` + `X_OK`, so a bare file named `JLinkExe` satisfies it while
-#: being entirely inert. Nothing here can reach hardware -- and the positive
-#: control proves the hook can see a spawn at all, so a `spawns == []` result is
-#: never vacuous.
+#: The fake tool dir exists to get PAST the required-tool gate. That gate is
+#: `_tool_available` -> `tool_lookup.resolve_tool`, not `doctor_cmd.on_path` --
+#: consolidated onto the SAME resolver the spawn itself uses (tan-cli#567/#600,
+#: "the check and the spawn can never again disagree about what ran"). On
+#: Windows that resolver's candidate-name walk NEVER tries a bare,
+#: extension-less identity (`tool_lookup.windows_candidate_names`) -- a
+#: deliberate behaviour change, oracle parity, and the one safe shape once the
+#: resolved path is SPAWNED rather than reduced to a bool. A bare file named
+#: `JLinkExe` therefore satisfies POSIX (`is_file()` + the mode bit) but
+#: resolves to NOTHING on Windows, so the gate refuses before `_execute` is
+#: ever reached -- a real spawn never happens, and every `spawns == []` result
+#: below stops meaning "refused" and starts meaning "never got that far",
+#: silently. Measured directly (tan-cli#625 review): windows-latest,
+#: `test_the_spawn_probe_can_see_a_spawn`, `spawns == []`. `.exe` is
+#: conditional on `os.name` for exactly the reason every OTHER fake-tool seed
+#: in this file already is (`_stub_flow_d_probe` and the dozen inline seeds
+#: above) -- this one was the last bare holdout.
 _SPAWN_PROBE = r'''
 import json, os, sys
 from pathlib import Path
@@ -5613,9 +5625,10 @@ sys.addaudithook(hook)
 tools = work / "faketools"
 tools.mkdir(exist_ok=True)
 for name in ("JLinkExe", "JLink", "openocd", "pyocd", "west", "cmake", "dd", "bmaptool"):
-    path = tools / name
+    path = tools / (f"{name}.exe" if os.name == "nt" else name)
     path.write_text("", encoding="utf-8")
-    os.chmod(path, 0o755)
+    if os.name != "nt":
+        os.chmod(path, 0o755)
 os.environ["PATH"] = str(tools) + os.pathsep + os.environ.get("PATH", "")
 os.environ.pop("ALP_FLASH_FORCE", None)
 
