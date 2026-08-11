@@ -29,6 +29,17 @@ row from it costs exit 4, which would make an unbuildable-library selection
 indistinguishable from a missing toolchain. Same posture alp-sdk's original
 took, kept deliberately.
 
+alp-sdk's `alp doctor` had a second lever this port does not carry: `--strict`,
+which folded a WARN row into a nonzero exit (`n_warn` counted the libraries
+row same as any other). `tan doctor` has no `--strict` flag AT ALL -- it is
+not a libraries-specific gap, every WARN-worthy check in this module is
+already exit-0-only (`exit_code_for` above only inspects `fail`). Adding
+`--strict` scoped to just this one row would make it behave differently from
+every other check `tan doctor` reports; that is a real, pre-existing capability
+difference from `alp doctor`, not something this port introduces or reverses,
+and it is accepted deliberately: `tan build`'s own refusal is the actual gate
+a CI pipeline should script against, not a doctor exit code.
+
 ## The defect fixed in the port, not carried across
 
 alp-sdk's version read the RAW `libraries:` list out of the YAML and passed
