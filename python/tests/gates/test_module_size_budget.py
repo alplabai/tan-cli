@@ -238,7 +238,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # Commander decides how to exit -- except against the `JLinkGDBServerCL`
     # fallback name, which never quits on the banner probe's `exit\n` and is
     # excluded from the call at `_collect`'s call site instead.
-    "tan/commands/doctor_cmd.py": 3849,
+    # 3920, not 3849, as of tan-cli#650: `run_fix` refused every
+    # `sudo`-prefixed manifest install command unconditionally, even for an
+    # already-root caller with nothing left to elevate to (measured against a
+    # real `geteuid() == 0` process). Added `_running_as_root`, threaded an
+    # `effective_command`/`elevation_skipped` pair through the loop and into
+    # `fix_installed_check`, and expanded three docstrings that documented
+    # the now-superseded unconditional-refusal behaviour.
+    "tan/commands/doctor_cmd.py": 3920,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -318,7 +325,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # `parse_bootstrap_manifest` (distinct from `prerequisites.
     # pythonMinVersion`'s required one), and the transcribed literal in
     # `fallback_facts`. Re-measured with this gate's own walk.
-    "tan/core/bootstrap.py": 2094,
+    # 2111, not 2094, as of tan-cli#650: `_DOCTOR_FIX_HINT` and
+    # `_DOCTOR_FIX_HINT_NEEDS_ELEVATION` both gained an "interactive
+    # terminal" caveat -- `--fix` mutates the host and is a no-op with no TTY,
+    # a fact the hint recommending it used to omit -- and the elevation
+    # variant's surrounding comment was rewritten for the tan-cli#650
+    # root-aware `--fix` behaviour it now documents.
+    "tan/core/bootstrap.py": 2111,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
     # newline/`"`-injection hole on the artefact/atoc/serial interpolations,

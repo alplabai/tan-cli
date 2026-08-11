@@ -325,6 +325,26 @@ All notable changes to `tan` are documented here. Format follows
   fix — a present-but-independently-broken workspace venv still gets the
   generic message. (#652)
 
+- **`tan doctor --fix` refused every `sudo`-prefixed manifest install command
+  unconditionally, even when the caller already had root -- the exact host a
+  Docker `RUN`, most CI base images, or a fresh cloud VM run as.** Measured
+  against a real `geteuid() == 0` process (`unshare --user --map-root-user`):
+  `run_fix` still reported `doctor.fix-needs-sudo` and installed nothing.
+  There is no elevation left to acquire once the caller is root, so `--fix`
+  now strips the manifest's literal `sudo ` prefix and runs the rest of the
+  line directly -- it still never spawns the `sudo` PROGRAM itself (the
+  tan-cli#91 decision is about the program, not the elevation it grants); a
+  non-root caller is refused exactly as before. `fix_installed_check` gained
+  an `elevation_skipped` flag so the resulting `doctor.fix-installed` check
+  reads as the root-aware outcome it is, not an ordinary no-elevation-needed
+  one. Also disclosed the OTHER way `--fix` goes quiet: it is a no-op (exit
+  4) with no TTY on `stdin`/`stderr` -- piped, redirected, or CI -- per the
+  `can_prompt` consent gate; measured in a clean `ubuntu:24.04` container.
+  The README and both `tan bootstrap` prerequisite-refusal hints
+  (`_DOCTOR_FIX_HINT` / `_DOCTOR_FIX_HINT_NEEDS_ELEVATION`) now say so in the
+  same breath as recommending `--fix`, instead of recommending a remedy that
+  is silently inert for the scripted-onboarding callers most likely to reach
+  for it. (#650)
 - **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
   PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
   any time `tan bootstrap` relocates a checkout inside a project that already
