@@ -94,8 +94,11 @@ What those commands do:
 6. `run --flash` builds and then runs or programs the selected target.
 
 Run `tan doctor` if setup or toolchain discovery fails. `tan doctor --fix`
-installs missing user-level prerequisites interactively; it never invokes
-`sudo` for you.
+installs missing prerequisites, but only at a real, interactive terminal --
+it is a no-op (exit 4) under a pipe, a redirect, or CI, so it is not a
+scripted-onboarding remedy. It never spawns `sudo` itself: it runs a
+prerequisite's manifest install command directly when already root, and
+otherwise prints the exact command to run by hand.
 
 If you do not want the west workspace next to the SDK checkout, choose it
 explicitly:
