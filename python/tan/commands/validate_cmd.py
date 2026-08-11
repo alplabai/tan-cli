@@ -167,13 +167,33 @@ path reports an SDK" but "the envelope reports whatever SDK this run
 resolved", and ``--offline`` resolves none by construction -- it has no
 subprocess to point anywhere.
 
-The interpreter is [`_planner_python`], NOT the bare ``python3``/``python``
-the oracle hardcodes: the child imports ``jsonschema``/``PyYAML``/
-``colorama``, which live in the workspace venv `tan bootstrap` creates, and
-a bare PATH interpreter without them exits 1 with a traceback -- the exact
-collision `is_interpreter_crash` exists to disambiguate. Preferring the venv
-does not remove that guard (the venv can still be broken), it just stops the
-common case from taking it.
+The interpreter is [`_planner_python_resolution`] (wrapped by
+[`_planner_python`]), NOT the bare ``python3``/``python`` the oracle
+hardcodes: the child imports ``jsonschema``/``PyYAML``/``colorama``, which
+live in the workspace venv `tan bootstrap` creates, and a bare PATH
+interpreter without them exits 1 with a traceback -- the exact collision
+`is_interpreter_crash` exists to disambiguate. Preferring the venv does not
+remove that guard (the venv can still be broken), it just stops the common
+case from taking it.
+
+**tan-cli#652: a bare-interpreter crash names the real remedy.** On the
+released, frozen `tan`, `sys.executable` is `tan` itself (unusable -- see
+`_planner_python`'s own docstring), so before a successful `tan bootstrap`
+has created a workspace venv there is nothing for `_planner_python` to
+prefer and it falls back to the SYSTEM `python3`/`python`, which almost
+never has `jsonschema` installed. That reproduces `is_interpreter_crash`'s
+collision on every out-of-order invocation of a released binary, and used to
+surface as a raw `ModuleNotFoundError: No module named 'jsonschema'` quoted
+inside "Validation ended with outcome 'failed'." -- true, but naming a
+Python module instead of the actual, fixable condition. A pip/from-source
+install never reproduces this: `jsonschema` is one of `tan`'s OWN declared
+dependencies (see `pyproject.toml`'s comment on it), so it lands on the
+SAME interpreter a source install's `python3` already is. `_synthesised_
+finding`'s `used_workspace_venv` flag is what tells the two apart: `False`
+only when [`_planner_python_resolution`] itself found no workspace venv to
+prefer, so a venv that resolved but is independently broken (a corrupted
+`tan bootstrap`, not a missing one) still gets the generic message rather
+than being told to re-run a bootstrap that already ran.
 
 Two hardenings the oracle does not have, both load-bearing:
 
@@ -256,7 +276,11 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import _is_sdk_root, _planner_python, resolve_sdk_root_ladder
+from tan.commands.build_cmd import (
+    _is_sdk_root,
+    _planner_python_resolution,
+    resolve_sdk_root_ladder,
+)
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 
 # `_python_too_old` is IMPORTED, not re-spelled: `generate_cmd` and `model_cmd`
@@ -432,6 +456,15 @@ _HINT_RE = re.compile(r"^\s*(?:hint|suggestion|suggest):", re.IGNORECASE)
 #: `jsonschema`, so this is the only thing that tells a broken validator
 #: environment from a real "board.yaml is invalid" verdict (issue #38).
 _TRACEBACK_HEADER = "Traceback (most recent call last):"
+
+#: `ModuleNotFoundError: No module named 'jsonschema'` -- the exact line a
+#: spawned SDK script dies on when it runs under the bare system interpreter
+#: `_planner_python` falls back to before `tan bootstrap` has ever created a
+#: workspace venv (tan-cli#652). Quotes may be single or double depending on
+#: the interpreter/repr; the module name is matched generically (not pinned
+#: to `jsonschema`) because the same collision reproduces for any of the
+#: SDK's other declared imports (`yaml`, `colorama`, ...).
+_MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]")
 
 #: Severity of a rich block, by its own header keyword. `note` is the oracle's
 #: `Severity::Suggestion` arm.
@@ -766,13 +799,44 @@ def analyze_validator_output(status: int | None, stderr: str) -> _Result:
     return _Result(outcome, parse_validator_stderr(stderr, _severity_for_outcome(outcome)))
 
 
-def _synthesised_finding(outcome: str, stderr: str) -> _Finding:
+def _synthesised_finding(
+    outcome: str, stderr: str, *, used_workspace_venv: bool = True
+) -> _Finding:
     """The one finding a non-clean run with NOTHING parseable still owes the
     wire -- `to_cli_issues`' own synthesis, plus the last non-empty stderr
     line. The oracle stops at "Validation ended with outcome 'failed'.", which
     on the case that reaches this most often (a validator whose environment
     lacks `jsonschema`, so its whole stderr is a traceback the parser drops)
-    tells the user nothing at all about what went wrong."""
+    tells the user nothing at all about what went wrong.
+
+    tan-cli#652: when `used_workspace_venv` is `False` -- `_planner_python`
+    fell back to a bare PATH interpreter because no `tan bootstrap` workspace
+    venv resolved for this project -- and the traceback names a missing
+    module, the generic "Last line of validator output" message is replaced
+    with one naming the actual, fixable cause (no workspace venv yet) instead
+    of a raw `ModuleNotFoundError`. `used_workspace_venv` defaults to `True`
+    so a caller that does not pass it (and every pre-#652 test) keeps
+    today's generic message: this is opt-in enrichment of one specific,
+    identifiable cause, not a new default finding for every crash.
+
+    A workspace venv that ITSELF lacks the module (a corrupted `tan
+    bootstrap` run, not a missing one) does NOT take this branch --
+    `used_workspace_venv` is `True` there, and the customer gets the generic
+    message rather than being told to re-run a `tan bootstrap` that already
+    ran. Telling those two apart is the whole reason this is a caller-supplied
+    flag instead of a guess from the stderr text alone.
+    """
+    if not used_workspace_venv:
+        missing = _MISSING_MODULE_RE.search(stderr)
+        if missing is not None:
+            return _Finding(
+                "error",
+                f"the SDK validator's interpreter has no `{missing.group(1)}` "
+                "module, because no `tan bootstrap` workspace venv was found "
+                "for this project -- tan ran it under the system interpreter "
+                "instead, which does not have it. Run `tan bootstrap` first, "
+                "then re-run this command.",
+            )
     message = f"Validation ended with outcome '{outcome}'."
     tail = [line.strip() for line in _ANSI_RE.sub("", stderr).splitlines() if line.strip()]
     if tail:
@@ -1371,7 +1435,14 @@ def validate(
                 return
 
             script = os.path.join(str(resolved_sdk), *VALIDATOR_SCRIPT)
-            python_binary = _planner_python(os.path.abspath(root), str(resolved_sdk))
+            # tan-cli#652: also captures whether this resolved a `tan
+            # bootstrap` workspace venv or fell back to a bare PATH name --
+            # the flag `_synthesised_finding` below needs to tell "this
+            # interpreter is missing a dependency because no workspace venv
+            # exists yet" apart from any other interpreter defect.
+            python_binary, used_workspace_venv = _planner_python_resolution(
+                os.path.abspath(root), str(resolved_sdk)
+            )
 
             # The oracle's guard 3 (`validate.rs:124-129`), the one #376 left out.
             # AFTER the SDK guard because both of its inputs come from the resolved
@@ -1432,8 +1503,18 @@ def validate(
                 if result.outcome != OUTCOME_CLEAN and not result.findings:
                     # `to_cli_issues`' synthesis: a non-clean run must never reach a
                     # consumer as "exit 2, zero issues", which reads as no problem.
+                    # `used_workspace_venv=used_workspace_venv` (tan-cli#652) is what
+                    # lets this become "run `tan bootstrap` first" instead of a raw
+                    # `ModuleNotFoundError` when that is the actual cause.
                     result = _Result(
-                        result.outcome, (_synthesised_finding(result.outcome, out.stderr),)
+                        result.outcome,
+                        (
+                            _synthesised_finding(
+                                result.outcome,
+                                out.stderr,
+                                used_workspace_venv=used_workspace_venv,
+                            ),
+                        ),
                     )
 
         issues = [

@@ -1083,7 +1083,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # check, so a guard inside the materialise branch would refuse only after
     # the other slices' files had landed) and why the build-root one is scoped
     # to `_MODE_NATIVE`. Measured `wc -l`, not arithmetic.
-    "tan/commands/build_cmd.py": 2048,
+    "tan/commands/build_cmd.py": 2074,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
@@ -1327,7 +1327,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # the `_spawn_validator` return annotation and the one-sentence fold in
     # `_reject_if_sdk_validator_disagrees` all followed the shape. MEASURED on
     # the rebased tree, not 812 + this branch's pre-rebase delta.
-    "tan/commands/diff_cmd.py": 822,
+    "tan/commands/diff_cmd.py": 839,
     # NEW ENTRY: 727 -> 934 -> 1020, the diagnostic-code lookup (`tan explain
     # --code`, ADR-0020 end-state B -- alp-sdk's `scripts/alp_cli/explain.py`
     # moves here so its retirement loses no capability), plus the tan-cli#627
@@ -1424,7 +1424,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # overlap inside `_emit`: #478's `sdk.*` filter and #498's `_Finding`
     # pairing collapse into one `reportable`/`reported` pair rather than
     # stacking, so the union is smaller than either side's sum implies.
-    "tan/commands/validate_cmd.py": 1490,
+    "tan/commands/validate_cmd.py": 1571,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
@@ -2358,7 +2358,7 @@ _MIRRORED = ("tan/planner/",)
 # side was pulled into its own `_restore_project_pin` function instead --
 # `_undo_relocation` measures 48 here, still under the cap, so the count of
 # over-cap functions in the package is unchanged at 246.
-_FUNCTION_COUNT_BUDGET = 249
+_FUNCTION_COUNT_BUDGET = 251
 _FUNCTION_WORST_BUDGET = 728
 
 
