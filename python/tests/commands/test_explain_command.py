@@ -302,7 +302,8 @@ def test_json_mode_writes_one_envelope_and_nothing_else():
     doc = json.loads(result.stdout)
     assert doc["command"] == "explain"
     assert doc["project"] == {"root": None, "boardYaml": None}
-    # explain resolves no checkout, so `sdk` is absent -- never null.
+    # `--template` resolves no checkout (only `--code` does), so `sdk` is
+    # absent -- never null.
     assert "sdk" not in doc
     assert list(doc["data"]) == [
         "schemaVersion",
@@ -335,6 +336,34 @@ def test_text_mode_error_line_carries_its_own_prefix():
     assert result.stderr.strip() == (
         "explain: unknown template 'nope'. Run tan explain without selectors to "
         "list available topics."
+    )
+
+
+@pytest.mark.parametrize("code_shaped", ["ALP-B003", "ALP_ERR_NO_BACKEND", "alp_err_not_ready"])
+def test_a_code_shaped_positional_names_the_code_flag(code_shaped):
+    """`tan explain ALP-B003` (the alp-sdk spelling minus the flag) refuses
+    like any other unknown template, but names `--code` in the refusal --
+    the overview deliberately omits `--code` (it would break the golden), so
+    `--help` was otherwise the only way to discover it."""
+    result = runner.invoke(app, ["explain", code_shaped])
+    assert result.exit_code == 1
+    assert result.stderr.strip() == (
+        f"explain: unknown template '{code_shaped}'. Run tan explain without "
+        f"selectors to list available topics. Looking for a diagnostic code? "
+        f"Use --code {code_shaped} instead."
+    )
+
+
+def test_an_ordinary_unknown_template_gets_no_code_hint():
+    """The hint is additive and SHAPE-gated: an unknown id that merely
+    contains one of the diagnostic-code substrings mid-string, or matches
+    neither shape at all, keeps the existing wording verbatim -- this is the
+    regression the anchored regex (`^...$`, not a bare `search`) exists for."""
+    result = runner.invoke(app, ["explain", "--template", "my-ALP-B003-app"])
+    assert result.exit_code == 1
+    assert result.stderr.strip() == (
+        "explain: unknown template 'my-ALP-B003-app'. Run tan explain without "
+        "selectors to list available topics."
     )
 
 

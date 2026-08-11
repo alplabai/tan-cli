@@ -108,6 +108,7 @@ from tan.commands.sdk_cmd import (
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
+from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -1121,11 +1122,19 @@ def generate(
         if resolved is None:
             raise GenerateError(
                 "generate.sdk-root-unresolved",
+                # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the
+                # value. This refusal carries NO `sdk` block (see `refuse`'s
+                # own comment above -- `sdk_info` is still `None` here), so
+                # before this the typed path appeared nowhere in the envelope
+                # at all, and the message opened by recommending the very flag
+                # it had just rejected.
+                rejected_sdk_root_message(sdk_root, "Nothing was generated.")
+                if sdk_root
                 # `tan sdk switch` refuses in this build (tan-cli#305) -- kept
                 # the two mechanisms that actually work here (`--sdk-root`,
                 # placing the project near a checkout) and swapped the third
                 # for NO_SDK_NEXT_STEPS's honest "how to get one at all".
-                "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+                else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
                 f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
                 ExitCode.VALIDATION_FAILURE,
             )

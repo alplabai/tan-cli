@@ -30,6 +30,20 @@ All notable changes to `tan` are documented here. Format follows
     `scoped_names(project)`, which also dedupes one library declared on both the
     project-wide and core-scoped channels (schema-valid, and reported twice by a
     raw read).
+- **`tan explain --code <ALP-Bxxx|ALP_ERR_*>` — diagnostic-code lookup, ported
+  from alp-sdk.** `scripts/alp_cli/explain.py` was the only reader of the SDK's
+  generated `metadata/error-catalog.json`, so retiring it under ADR-0020
+  end-state B would have made every `ALP-Bxxx` landing page and every
+  `ALP_ERR_*` enum comment unreachable from any CLI. The verb moves here
+  instead: same case-insensitive lookup over both code shapes, same `summary` /
+  `cause` / `fix` / `doc` field order, same `difflib` shortlist on a miss, and
+  `data.diagnostic` carries the catalogue entry byte-for-byte as `alp explain
+  <code> --json` printed it. A flag on the existing verb, not a new command —
+  `--template` / `--target` and the overview are unchanged byte for byte, and
+  `--code` is the one mode that resolves a checkout. With none resolvable it
+  refuses (`explain.sdk-root-unresolved`, exit 1) rather than answering from a
+  vendored copy: the code list is alp-sdk's fact (I-26/ADR-0017). This ENABLES
+  the alp-sdk-side removal; it does not perform it.
 
 - **A re-sync PROPOSER for `tan/planner/`: `python/scripts/planner_resync.py` +
   `.github/workflows/planner-resync.yml`.** ADR-0020's remediation asked for an
@@ -295,6 +309,151 @@ All notable changes to `tan` are documented here. Format follows
   `--target-kind` to let it infer. (#489)
 
 ### Fixed
+
+- **The test suite no longer means two different things on two machines: the
+  debug/flash probe inventory is now a property of the test, not of the host.**
+  A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
+  installed and a CI runner has none of them, so every which()-gated branch
+  answered differently in the two places, silently. #600 is what that cost:
+  seven `test_flow_d_preflight_*` cases green locally and red on
+  ubuntu-latest, windows-latest **and** macos-latest at once — a false negative
+  that does not merely fail to warn, it points the next hour of debugging at
+  "a CI problem". Measured on the fixed tip by instrumenting tan's three
+  resolution seams across two full runs, **34 tests took a different branch**
+  on the two PATHs — every `_collect` case in `test_doctor_command.py`, three
+  in `test_doctor_check_scope.py`, one in `test_support_bundle_command.py` —
+  with an identical outcome (3710 passed either way) and a different meaning;
+  those runs also really spawned `/usr/bin/JLinkExe -?` and `west --version`.
+  `tests/conftest.py` now rebuilds `PATH` once per session so no probe
+  identity resolves, matching what CI already exercises, and covering spawned
+  children as well as in-process calls. Surgical, not a blanket empty `PATH`:
+  the same suite under a `PATH` holding only `sh bash git which env ls cat
+  uname` fails 36 tests that need real `python3`/`sleep`/`mktemp`/`sed`/
+  `curl`/`tar`/`sha256sum` — tools a runner has — so only the identities a
+  runner lacks are removed. A no-op whenever nothing on `PATH` matches — but
+  measured directly, that is not every runner: windows-latest carries the
+  pre-installed Temurin JDK's `jlink.exe`, a stem collision with the bare
+  `"JLink"` identity that has nothing to do with a debug probe, and the
+  fixture farms that (harmless, unrelated) directory for real there.
+  `tests/gates/test_probe_tool_inventory.py` holds all of that in place,
+  including the over-reach direction, seeded so the check is falsifiable on
+  every host that runs it rather than passing vacuously (that seed also
+  surfaced its own windows-only defect: `on_path`'s Windows candidate is
+  built from `%PATHEXT%` literally, so it answers `...\openocd.EXE` for a
+  file seeded as `openocd.exe` — a case-sensitive `==` against that answer
+  failed on windows-latest for a reason unrelated to what the test checks;
+  now compared case-insensitively). Documented in `README.md`, so "I ran the
+  gates locally" has one meaning. Closes #603.
+
+- **`test_the_spawn_probe_can_see_a_spawn` failed on windows-latest, which made
+  twelve no-spawn assertions in `test_flash_command.py` vacuous there — two
+  conditions together, and the PATH-rebuild above is one of them, not an
+  innocent bystander.** The latent defect: `_SPAWN_PROBE`'s fake J-Link/
+  openocd/pyocd files have always been seeded with bare names, the one
+  fake-tool seed in that file that never got the `.exe` every other seed
+  already carries on Windows, and `tool_lookup.resolve_tool`'s Windows walk
+  never tries a bare, extensionless identity (a deliberate, separately-landed
+  behaviour change, #567/#600) — so the required-tool gate refuses that bare
+  file outright, on any branch. The proximate trigger, measured end to end:
+  `test_flash_command.py` is byte-identical between dev and this PR's
+  pre-fix head, so the control test passed on dev for an unrelated reason —
+  windows-latest's runner image happens to carry the pre-installed Temurin
+  JDK's `jlink.exe` on `PATH`, a stem collision that resolves the bare
+  `"JLink"` identity by coincidence, not by design. This PR's session-wide
+  PATH-rebuild farms that one PATH entry away, removing the accidental
+  resolution and exposing the seed that was always wrong. Consequence stated
+  plainly: on dev, the twelve `_TBD_SHAPES` no-spawn assertions were
+  non-vacuous only because Temurin happened to be on the runner image — had
+  it not been, they would have been silently vacuous there too, with nothing
+  red to say so. Fixed by adding the missing conditional `.exe` suffix to
+  `_SPAWN_PROBE`, closing the latent defect instead of leaving it standing on
+  a coincidence. `tests/conftest.py::_probe_free_path` is separately hardened
+  for Windows shapes that had never actually run: explicit
+  `target_is_directory` on `os.symlink`, a `shutil.copy2`/`copytree` third tier
+  under the symlink/hardlink pair (`os.link` refuses directories and raises
+  across volumes — routine on a GitHub Windows runner), and a lazily-created
+  scratch directory so the documented no-op path really does no filesystem
+  work. New host-independent unit tests cover `_probe_free_path` directly
+  (`tests/test_probe_free_path.py`, 19 cases, including the literal
+  lowercase `jlink.exe` collision and a spied-on `os.symlink` call proving a
+  symlink-to-a-directory source still gets `target_is_directory=True`) —
+  nothing exercised it before.
+
+- **The frozen oracle captures now say they are history, and a gate keeps that
+  label true.** #269 deleted `crates/` and the ~13 parity modules that replayed
+  `python/tests/fixtures/oracle_captures/`; five of the seven
+  `test_*_oracle_parity.json` lost their only reader and were left behind, so
+  `test_command_surface_oracle_parity.json` sat there holding a byte-for-byte
+  copy of the completion script #614 has since rewritten, with nothing in the
+  tree to say which was authoritative. The store is **kept**: it is
+  unrecapturable (no binary, no capture workflow) and is cited as the record of
+  oracle behaviour by `docs/ROADMAP.md`, `docs/ux-polish-sweep-plan.md`,
+  `README.md` and four modules under `tan/` — deleting evidence that cannot be
+  regenerated, to fix a labelling problem, is the wrong trade. Instead the
+  directory gets a `README.md` whose first sentence is that nothing in it
+  describes what `tan` does today, a per-file table of which two captures still
+  have live readers and which nine are history only, and the #614 supersession
+  named explicitly. `tests/gates/test_oracle_capture_store_is_labelled.py`
+  re-measures the live-reader column from the tree on every run, refuses an
+  unlabelled file, and holds each declared supersession to being still true of
+  the capture *and* still false of the shipped source — so neither a laundered
+  capture (#511's failure mode) nor a stale claim survives. One correction to
+  the issue: of the four substrings it names, `cword -eq 1` is **not**
+  superseded — it is still in the shipped `completion_cmd.py` — so it is
+  deliberately absent from the table. Closes #617.
+
+  Two follow-up defects in the live-reader measurement itself, found and
+  reproduced against real mutants: the regex saw only `CAPTURES_DIR /
+  "<name>"`, so a reader going through `oracle_captures.load(...)` (a
+  second, equally documented accessor) or through this gate's own
+  supersession check (`_CAPTURES / f"{stem}.json"`, an f-string built from a
+  loop variable — not matchable by any regex) was invisible, and a capture
+  the README still called history-only passed the drift check regardless
+  (reproduced: `4 passed`, README unchanged, before the fix; `1 failed`
+  after). Both are now measured, and `test_command_surface_oracle_parity.json`'s
+  README row now names its real reader instead of `none`. Separately, this
+  file's OWN doc comments illustrating the call shapes (`"<name>"`) were
+  matched by its own regex during the tree walk, injecting a spurious key —
+  the file now excludes itself from the walk, not just `oracle_captures.py`.
+
+- **`test_ordinary_host_tooling_is_untouched` no longer fails a host that
+  genuinely never had `git`/`python3` on `PATH`.** It checked only the
+  post-neutralisation state, so a minimal image missing either tool read as
+  the probe-tool over-reach this test exists to catch. Now checked against
+  `REAL_ENVIRON` (this session's PATH captured before neutralisation ran)
+  first, and skips when the host never had it either way.
+
+- **A rejected `--sdk-root` is now named in the diagnostic that refuses it, on
+  the five commands still dropping it.** `--sdk-root` is terminal, so a
+  path without `scripts/alp_project.py` resolves to nothing — and `pinmux`,
+  `model build`, `generate`, `validate` and `new-som` answered that with the
+  same string they use when no flag was given, telling the caller to "Use
+  `--sdk-root`", the flag they had just typed, with the failing value nowhere
+  in the envelope or the stderr text. All five now report which path was
+  rejected and which marker was looked for. `init` and `trace` were measured
+  and needed no change — `init` has named the value since it was ported, and
+  `trace`'s guard cannot be reached with the flag given at all. Refs #497
+  (defect 7); §§1–6 and 8 remain.
+
+- **`tan init --format json` emits the `sdk` block again, on all four
+  outcomes.** Preview, successful write, overwrite-guard refusal and every
+  error path omitted `sdk:{root,sourceTier}` entirely, at both resolution
+  tiers, where the frozen v0.4.1 oracle emits it — losing the only field
+  naming which checkout a run is about to permanently pin (`data.sdkPinned`
+  is `null` on three of the four). Refs #491 (defect 5).
+
+- **`tan monitor --format json` keeps the board's bytes off stdout.** miniterm
+  inherited tan's stdout, so a successful session put serial traffic ahead of
+  the envelope and a whole-stdout `JSON.parse` failed on an `ok: true`, exit-0
+  run. Under `--format json` the traffic now goes to stderr, alongside the
+  banners already there; text mode still inherits stdout, so `tan monitor >
+  board.log` is unchanged. Refs #491 (defect 6).
+
+- **A `tan bootstrap` relocation refusal no longer discards the warnings the
+  run had already recorded.** The failure return passed an empty issue list, so
+  `bootstrap.python-floor-skew` — which fires on every run against the shipped
+  alp-sdk manifest — vanished from the envelope and the refusal carried
+  `bootstrap.failed` alone. Refs #491 (defect 10).
 
 - **`tan init --from-example` no longer copies an example's `out/` build
   directory into the customer's new project.** The build-output prune list
@@ -2371,6 +2530,118 @@ All notable changes to `tan` are documented here. Format follows
     this change.
   (Refs #503, #537)
 
+### Security
+
+- **`parity.yml` interpolated an attacker-controlled `repository_dispatch`
+  payload straight into four `run:` shells.** This one is not a hardening
+  nicety, it is a code-execution path, and it is the more serious half of what
+  #435 turned up. `parity.yml` listens on `repository_dispatch: types:
+  [alp-sdk-planner-change]`, and every one of its four `resolve alp-sdk ref`
+  steps expanded `${{ github.event.client_payload.sdk_ref }}` into the script
+  GitHub then hands to `bash`. Three wrapped it in SINGLE quotes, which is not
+  a defence -- a payload containing one closes the string -- and the twin in
+  `first-blink` used DOUBLE quotes, where `$(...)` and backticks simply run.
+  The unvalidated value was then written to `$GITHUB_OUTPUT` (a newline
+  injects further keys) and passed as `ref:` to `actions/checkout`. Anyone who
+  can POST a `repository_dispatch` to this repository picks every field, so a
+  leaked dispatch token -- or a compromise on the alp-sdk side that fires
+  these dispatches -- became command execution on tan-cli's runner. `zizmor
+  1.29.0` reports all six sites as high-confidence `template-injection`.
+
+  Fixed by adopting the pattern `planner-resync.yml` has used since it was
+  written -- the OTHER consumer of this same dispatch, whose own comment names
+  the attack (`sdk_ref: "x; curl ... | sh"`): carry the field in as an `env:`
+  var, never interpolate it into the shell, and match it against an allow-list
+  before it reaches `git` or `$GITHUB_OUTPUT`. The correct defence already
+  existed in this repository; it had simply never been applied to the workflow
+  that receives the same event. (#435)
+
+- **That allow-list was itself line-oriented, and let a newline through.**
+  Found while proving the fix above rather than after shipping it, and it is
+  the reason `planner-resync.yml`'s guard is edited here too: both spelled the
+  check `printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$'`,
+  and `grep` returns 0 when ANY line matches. Measured: a payload of
+  `dev\nref=attacker` PASSES -- `dev` matches on line one, and `ref=attacker`
+  then lands in `$GITHUB_OUTPUT` as its own key, which is precisely the
+  injection the guard exists to refuse. The regex was right; the tool applying
+  it was not.
+
+  Both now use a POSIX `case`, which tests the whole string, newline included:
+
+  ```sh
+  case "${ref}" in
+    ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*) ...refuse... ;;
+  esac
+  [ "${#ref}" -le 201 ] || ...refuse...
+  ```
+
+  Verified to accept `7d58ef32d0a730c902e335adfd7764c2ec500ba5`, `origin/dev`,
+  `v0.15.0-rc1`, `dev` and `main`, and to refuse the newline payload, an
+  embedded `'`, `$(...)`, a backtick, a leading `-` (`--upload-pack=evil`), a
+  leading `.`, the empty string, and 202 characters while accepting 201 --
+  the same bound the regex expressed. (#435)
+
+- **Every `uses:` in `.github/workflows/` is pinned to a full commit SHA.**
+  All 63 external references resolved through mutable major tags -- 30 x
+  `actions/checkout@v4`, 14 x `actions/setup-python@v5`, 9 x
+  `actions/upload-artifact@v4`, 3 x `actions/download-artifact@v4`, 2 x
+  `actions/setup-node@v4`, 2 x `actions/checkout@v6`, plus
+  `actions/attest-build-provenance@v2` and the third-party
+  `softprops/action-gh-release@v2`, the last of which runs in the one job
+  holding `contents: write`. A retagged `@v4` executes on the next run with no
+  diff anywhere. Each is now pinned with a trailing `# vX.Y.Z` comment so the
+  human-readable version survives the pin. (#435)
+
+- **`persist-credentials: false` on 31 of 32 checkouts.** Only `release.yml`
+  had it (four sites, from #444); every checkout in the other seven workflows
+  left a usable git credential in `.git/config` for the rest of the job. The
+  one exception is deliberate and now says so in place: `planner-resync.yml`'s
+  tan-cli `dev` checkout, whose `propose` step pushes `auto/planner-resync`
+  through exactly that credential. Setting it there would not fail at
+  checkout -- it fails minutes later at the push, after the re-sync is already
+  computed, and the PR is then never opened. (#435)
+
+- **`contents: read` declared in the four workflows that had no `permissions:`
+  block at all** -- `ci.yml`, `clean-host.yml`, `getting-started.yml`,
+  `parity.yml` -- so they ran on whatever the repository default happened to
+  be. `getting-started.yml`'s own step comment already stated the requirement
+  verbatim ("`contents: read` is enough to list public releases"); it just had
+  no block to say it in. (#435)
+
+### Added — CI
+
+- **A `zizmor` gate, and a Dependabot config to keep the pins from rotting.**
+  Nothing in this repository read `.github/workflows/`, so a security
+  regression there landed green. `ci.yml`'s new `workflow-security` job runs
+  `zizmor==1.29.0 --min-severity medium --no-online-audits`, with the reviewed
+  baseline in `.github/zizmor.yml`.
+
+  Three choices in it are measured rather than assumed. `--min-confidence
+  medium` was tried and **rejected**: all 26 `artipacked` findings are Low
+  confidence, so that flag silently drops the entire credential-persistence
+  audit -- a gate that cannot fail on the defect it was written for is
+  decoration. `--no-online-audits` keeps the verdict independent of the GitHub
+  API, verified to match a networked run. And the gate is falsifiable, which
+  is the only thing that makes its green bar mean anything -- same invocation,
+  `dev` at `01374d4` versus this branch:
+
+  ```text
+  dev @ 01374d4   rc=14   165 findings: 63 unpinned-uses, 26 artipacked,
+                          12 excessive-permissions, 6 template-injection
+  this branch     rc=0    no finding at or above medium
+  ```
+
+  The baseline holds two entries, each carrying its argument in full: the
+  `planner-resync.yml` checkout that must keep its credential, and
+  `setup-node` in the npm job, which zizmor flags for a caching capability the
+  step never enables (it passes no `cache:` input and installs nothing).
+  `softprops/action-gh-release` is kept and pinned rather than replaced with
+  `gh release`, which #435 explicitly allows: the step sets
+  `fail_on_unmatched_files: true` and `gh release create` has no equivalent --
+  a glob matching nothing yields a Release with zero assets at exit 0, which
+  is #450's spent `v0.5.0` tag exactly. `.github/dependabot.yml` covers
+  `github-actions` weekly against `dev`, one PR per action; the Python
+  dependency lock stays with #437 rather than being half-done here. (#435)
 
 
 ## [0.5.1] — 2026-08-04

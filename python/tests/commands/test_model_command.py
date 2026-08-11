@@ -650,3 +650,46 @@ def test_the_internal_failure_catch_all_reaches_model_text_mode_too(
     lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
     assert lines[0].startswith("warning: .alp/sdk-path names")
     assert any("model build failed unexpectedly" in ln for ln in lines)
+
+
+def test_a_rejected_sdk_root_flag_is_named_in_the_refusal(tmp_path):
+    """tan-cli#497 defect 7. `model build` refuses with NO `sdk` block (the
+    same `resolve_metadata_sdk_root` returning `None` is what leaves it
+    absent), so before this fix the path the caller typed left no trace at all
+    -- and the message opened with "Use --sdk-root", the flag they had just
+    passed.
+
+    The rejected root is a real directory missing only the loader marker, so
+    this exercises the marker check rather than a nonexistent path."""
+    board_yaml(tmp_path)
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    result = runner.invoke(
+        app,
+        ["build", "--project", str(tmp_path), "--sdk-root", str(typo), "--format", "json"],
+    )
+    assert result.exit_code == 2
+    doc = envelope(result)
+    assert "sdk" not in doc
+    assert doc["issues"][0]["code"] == "model.sdk-root-unresolved"
+    assert doc["issues"][0]["message"] == (
+        f'alp-sdk root is unresolved: --sdk-root "{typo}" is not an alp-sdk '
+        "checkout (scripts/alp_project.py not found under it). No models were built."
+    )
+
+
+def test_the_no_flag_refusal_still_offers_the_flag(tmp_path):
+    """The other branch: with no `--sdk-root` given there IS no typed value to
+    name, and recommending the flag is the right advice. Pinned so the #497
+    fix cannot rewrite the branch it was not about."""
+    board_yaml(tmp_path)
+    result = runner.invoke(
+        app, ["build", "--project", str(tmp_path), "--format", "json"]
+    )
+    assert result.exit_code == 2
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "model.sdk-root-unresolved"
+    assert doc["issues"][0]["message"].startswith(
+        "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+        "alp-sdk checkout, or "
+    )
