@@ -882,12 +882,21 @@ jobs:
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
         run: |
+          # KEYED ON `<nodeid> PASSED`, NOT ON rc (tan-cli#500 review). Both
+          # freshness tests SKIP rather than fail when their root does not
+          # resolve -- the resolver accepts a root only if
+          # `<root>/scripts/alp_project.py` is a file, and the test's own
+          # comment says "Skip, not fail" -- and a skip leaves pytest at rc=0.
+          # Keying on rc therefore made this alarm silent for any path or
+          # marker change: no ::warning::, step exits 0, nothing in the log.
+          # That is the fail-open shape this file's other steps exist to close,
+          # inside the alarm itself. Same cure the `python/tests/gates` step
+          # above already uses.
           set +e
-          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit -q
-          rc=$?
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit -v 2>&1 | tee /tmp/relocation-alarm.log
           set -e
-          if [ "$rc" -ne 0 ]; then
-            echo "::warning::tan/planner/ has not been re-audited against alp-sdk ${{ steps.sdk_ref.outputs.ref }} -- scripts/alp_orchestrate DIFFERS from the pinned audit commit (see the pytest output above for which file(s)) -- the gate compares hashes, not history, so it does not tell you which side moved. Non-blocking by design: diff and port the delta, then re-pin PINNED_HASHES/PINNED_SDK_COMMIT in python/tests/gates/test_planner_relocation_freshness.py."
+          if ! grep -qF "test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit PASSED" /tmp/relocation-alarm.log; then
+            echo "::warning::tan/planner/ has not been re-audited against alp-sdk ${{ steps.sdk_ref.outputs.ref }}, OR this alarm could not run at all -- either scripts/alp_orchestrate DIFFERS from the pinned audit commit, or ALP_SDK_ROOT did not resolve and the test SKIPPED. Read the pytest output above to tell which. The gate compares hashes, not history, so it does not say which side moved. Non-blocking by design: diff and port the delta, then re-pin PINNED_HASHES/PINNED_SDK_COMMIT in python/tests/gates/test_planner_relocation_freshness.py."
           fi
           exit 0
 
@@ -899,8 +908,14 @@ jobs:
       # out of the gate file and clones alp-sdk at exactly that SHA, so the
       # always-run job compares the pin's tree against hashes taken FROM the
       # pin's tree. It can fail on table self-inconsistency and on nothing else.
-      # Measured at the time this was written: three of the nine pinned sources
-      # had moved by alp-sdk HEAD and the gate was green.
+      # NO DRIFT COUNT IS QUOTED HERE ON PURPOSE. An earlier revision said
+      # "three of the nine pinned sources had moved" -- both numbers taken from
+      # tan-cli#500's report and both already wrong when this landed:
+      # HAND_PORT_HASHES held TEN entries by then (`da72634` added
+      # `scripts/alp_template.py`), and the same commit re-pinned to
+      # `7d58ef32`, which zeroed the drift the "three" described. A count in a
+      # comment measures the day it was typed and nothing after it. The test
+      # names the files that actually moved; read that instead.
       #
       # Its sibling above already has the missing half -- a live-oracle arm --
       # and was scoped to exclude this test precisely because THIS step's root
@@ -925,12 +940,15 @@ jobs:
         env:
           ALP_SDK_HAND_PORT_ROOT: ${{ github.workspace }}/alp-sdk
         run: |
+          # `<nodeid> PASSED`, not rc -- see the sibling step above for why.
+          # `_resolve_hand_port_sdk_root()` skips when ALP_SDK_HAND_PORT_ROOT
+          # does not resolve, and a skip is rc=0: keying on rc made this alarm
+          # report nothing at all in exactly the case it must shout about.
           set +e
-          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_hand_ported_planner_modules_match_their_pinned_sdk_source -q
-          rc=$?
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_hand_ported_planner_modules_match_their_pinned_sdk_source -v 2>&1 | tee /tmp/hand-port-alarm.log
           set -e
-          if [ "$rc" -ne 0 ]; then
-            echo "::warning::the HAND-PORTED planner modules no longer match their sources at alp-sdk ${{ steps.sdk_ref.outputs.ref }} -- one or more of the nine pinned sources moved upstream (see the pytest output above for which). The always-run job cannot see this: it binds ALP_SDK_HAND_PORT_ROOT to HAND_PORT_PINNED_SDK_COMMIT, so it compares the pin against itself. Non-blocking by design: port the delta, then re-pin HAND_PORT_PINNED_SDK_COMMIT/HAND_PORT_HASHES in python/tests/gates/test_planner_relocation_freshness.py. NOTE tan's copy may be AHEAD of the pin rather than behind -- tan-cli e1d657f forward-ported alp-sdk#1069 without moving the pin -- so read the diff before assuming which side owes the change."
+          if ! grep -qF "test_planner_relocation_freshness.py::test_hand_ported_planner_modules_match_their_pinned_sdk_source PASSED" /tmp/hand-port-alarm.log; then
+            echo "::warning::the HAND-PORTED planner modules no longer match their sources at alp-sdk ${{ steps.sdk_ref.outputs.ref }}, OR this alarm could not run -- either a source listed in HAND_PORT_HASHES moved upstream, or ALP_SDK_HAND_PORT_ROOT did not resolve and the test SKIPPED. Read the pytest output above to tell which; it names the file(s). The always-run job cannot see the drift case: it binds ALP_SDK_HAND_PORT_ROOT to HAND_PORT_PINNED_SDK_COMMIT, so it compares the pin against itself. Non-blocking by design: port the delta, then re-pin HAND_PORT_PINNED_SDK_COMMIT/HAND_PORT_HASHES in python/tests/gates/test_planner_relocation_freshness.py. NOTE tan's copy may be AHEAD of the pin rather than behind -- a forward-port that lands in tan before the pin moves reads identically to upstream drift here -- so diff before assuming which side owes the change."
           fi
           exit 0
 
@@ -1704,9 +1722,17 @@ jobs:
           # `set -e` nor pipefail is the enforcement here. Running it ahead of
           # the suite also fails in seconds rather than after the full round.
           GUARD=tests/parity/test_planner_parity_actually_ran.py::test_a_bound_sdk_root_still_ships_the_planner_oracle
-          python -m pytest -v "${GUARD}" | tee /tmp/parity-guard.log
+          # `set +e` around the run, so the tailored message below is REACHABLE.
+          # With `set -e` still armed, the package-less case -- where the guard
+          # FAILS rather than skips -- killed the step at this pipeline and the
+          # branch below never executed: correct verdict, raw traceback, and
+          # none of the explanation an operator needs at 2am (tan-cli#500
+          # review). The message now covers both outcomes it can see.
+          set +e
+          python -m pytest -v "${GUARD}" 2>&1 | tee /tmp/parity-guard.log
+          set -e
           if ! grep -qF "${GUARD#tests/parity/} PASSED" /tmp/parity-guard.log; then
-            echo "::error::${GUARD} did not PASS in this job. ALP_SDK_ROOT is bound here, so a SKIP means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/) or the guard itself regressed to fail-open -- either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
+            echo "::error::${GUARD} did not PASS in this job. ALP_SDK_ROOT is bound here, so this is one of two things, and the pytest output above says which: a FAIL means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/); a SKIP means the guard itself regressed to fail-open. Either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
             exit 1
           fi
           python -m pytest -q --ignore=tests/gates
