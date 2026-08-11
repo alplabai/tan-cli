@@ -23,6 +23,7 @@ in the real environment.
 import os
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,173 @@ def sdk_root() -> Path | None:
 #: `_scrub_sdk_discovery_env` has by then already repointed `HOME`/
 #: `USERPROFILE` at a pytest tmp dir and deleted `ALP_SDK_ROOT`.
 REAL_ENVIRON: dict[str, str] = dict(os.environ)
+
+
+def _probe_free_path(path: str, scratch_factory: Callable[[], Path]) -> str | None:
+    """`path` with every [`PROBE_TOOLS`] identity unresolvable, or `None`
+    when it already is.
+
+    Rebuilds only the PATH ENTRIES that actually carry a probe tool, each as
+    its own link farm of that directory's other contents, spliced back at the
+    SAME position -- so ordering, shadowing and duplicate entries all survive.
+    Dropping the offending directory outright is not an option: on this bench
+    host `JLinkExe` and `openocd` live in `/usr/bin`, alongside every
+    coreutil the installer-script tests execute.
+
+    `None` when nothing matched -- measured, this is NOT guaranteed to be
+    "every runner": a runner can carry an unrelated tool whose STEM happens to
+    match a [`PROBE_TOOLS`] identity (a pip-installed `west`, say), and this
+    function cannot know that in advance. What IS true on the no-match path:
+    no filesystem work, no rebuilt PATH, nothing to go wrong -- which is why
+    `scratch_factory` is a THUNK rather than an already-created directory.
+    Calling `tmp_path_factory.mktemp(...)` eagerly, as a plain argument, would
+    create the scratch dir on every session regardless of whether anything
+    ever matched -- contradicting exactly this claim. It is called at most
+    once, lazily, on the first entry that actually needs farming.
+
+    Links rather than copies where a link is possible, because a copy of a
+    live tool binary changes what `file`/codesigning/AV scanning sees and can
+    be materially slower for a large directory: a symlink first, a hardlink
+    second (Windows refuses a symlink without Developer Mode or elevation,
+    but `os.link` works within a volume). Both are tried per FILE, not per
+    directory -- `entry`'s directory may itself contain sub-directories (a
+    stray `__pycache__`, a vendored tool's own support tree) that neither
+    linking call can target correctly with the file-only handling below, so
+    those are recursed into with `shutil.copytree` instead of linked, and
+    `os.symlink` is always given `target_is_directory=` explicitly rather
+    than left to guess -- omitting it is silently correct on POSIX and
+    silently WRONG on Windows, where a directory symlink created without it
+    is a broken file-type symlink that resolves to nothing.
+
+    A THIRD tier, `shutil.copy2`/`shutil.copytree`, sits below the hardlink:
+    `os.link` fails not only for lack of privilege but for two conditions a
+    single bench host never exercises and a GitHub Windows runner always
+    might -- a source and destination on DIFFERENT VOLUMES (`C:\\hostedtoolcache`
+    vs a `D:\\a\\_temp` scratch dir, both real GitHub Windows runner paths,
+    raise `OSError` cross-device), and a source that is itself a DIRECTORY
+    (`os.link` refuses those unconditionally on every OS). Copying is
+    correctness-first, not performance-first, and is the reason a symlink is
+    always tried first: the fast, cheap path still wins whenever it is legal.
+
+    Only a directory that yields to NONE of the three still RAISES -- an
+    entry silently left out would remove tools the suite needs, and an entry
+    silently left in would restore the exact host-dependence this exists to
+    close. Loud beats either."""
+    entries = path.split(os.pathsep)
+    lowered = {t.lower() for t in PROBE_TOOLS}
+    rebuilt: list[str] = []
+    changed = False
+    scratch: Path | None = None
+    for index, entry in enumerate(entries):
+        if not entry or not os.path.isdir(entry):
+            rebuilt.append(entry)
+            continue
+        try:
+            names = os.listdir(entry)
+        except OSError:
+            rebuilt.append(entry)
+            continue
+        # Windows matches by STEM, case-insensitively: `JLinkExe.exe` and
+        # `west.cmd` are the same identities as their POSIX bare names, and
+        # `%PATHEXT%` is what makes them resolvable.
+        if not any(os.path.splitext(n)[0].lower() in lowered for n in names):
+            rebuilt.append(entry)
+            continue
+        if scratch is None:
+            scratch = scratch_factory()
+        farm = scratch / f"probe-free-{index}"
+        farm.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            if os.path.splitext(name)[0].lower() in lowered:
+                continue
+            link = farm / name
+            if link.exists() or link.is_symlink():
+                continue
+            source = os.path.join(entry, name)
+            # `os.path.isdir` already follows symlinks -- a SOURCE that is
+            # itself a symlink pointing (transitively) at a directory must
+            # still be treated as a directory here. An earlier draft excluded
+            # `os.path.islink(source)` sources from this check, which handed
+            # `target_is_directory=False` to exactly the case the paragraph
+            # above says this exists to get right: a symlink recreated as a
+            # FILE-type symlink over a directory target is the same broken
+            # shape on Windows, one level of indirection later.
+            is_dir = os.path.isdir(source)
+            try:
+                os.symlink(source, link, target_is_directory=is_dir)
+                continue
+            except OSError:
+                pass
+            if not is_dir:
+                try:
+                    os.link(source, link)
+                    continue
+                except OSError:
+                    pass
+            try:
+                if is_dir:
+                    shutil.copytree(source, link)
+                else:
+                    shutil.copy2(source, link)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot neutralise the debug/flash probe tooling in {entry!r}: "
+                    f"neither a symlink, a hardlink nor a copy of {name!r} could be "
+                    f"made ({exc}). This suite would otherwise run against whatever "
+                    "probe tools this host happens to have installed and disagree "
+                    "with CI silently (tan-cli#603). Remove the probe tooling from "
+                    "PATH for this run, or run the suite somewhere this directory "
+                    "is writable."
+                ) from exc
+        rebuilt.append(str(farm))
+        changed = True
+    return os.pathsep.join(rebuilt) if changed else None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _probe_tools_are_a_property_of_the_test(tmp_path_factory) -> None:
+    """Make no [`PROBE_TOOLS`] identity resolve for the whole session, so
+    every which()-gated branch answers the way it answers on CI (tan-cli#603).
+
+    Mutates `os.environ` rather than using `monkeypatch`, for two reasons:
+    `monkeypatch` is function-scoped and this is a session-wide property, and
+    the 26 test modules that spawn `[sys.executable, "-m", "tan", ...]` build
+    their child environment from `os.environ` -- an in-process patch would
+    leave every one of those spawns host-dependent. Session-scoped autouse
+    fixtures resolve before function-scoped ones, so
+    `_scrub_sdk_discovery_env` below and any test's own `monkeypatch.setenv
+    ("PATH", ...)` both still win over this, which is exactly right: a test
+    that seeds a fake probe tool is DECLARING its inventory, and that
+    declaration is the point.
+
+    A no-op on a host with nothing matching -- see `_probe_free_path`, and do
+    not assume that is every runner: measured directly on windows-latest
+    (tan-cli#625 review, a throwaway diagnostic CI step), it is NOT.
+    `C:\\hostedtoolcache\\windows\\Java_Temurin-Hotspot_jdk\\<ver>\\x64\\bin`
+    -- on `PATH` for the pre-installed Temurin JDK, nothing to do with this
+    suite -- carries `jlink.exe`, the JDK's own module-linker tool. That is a
+    STEM collision, not a debug-probe sighting: [`PROBE_TOOLS`] matches
+    case-insensitively by extension-stripped stem so it can also catch
+    `JLink.cmd`/`JLink.EXE`, and `"JLink"` (the bare identity
+    `doctor_cmd._collect` tries second, no `Exe` suffix) collides with Java's
+    `jlink` by coincidence of naming, not by anything actually resembling a
+    debug probe. Farmed like any other match -- correctly, since the function
+    cannot tell "real J-Link" from "same stem, different tool" apart, and
+    farming is safe either way -- but it means this fixture is exercised for
+    real on windows-latest, working around a directory that was never the
+    hazard tan-cli#603 was written against."""
+    original = os.environ.get("PATH", "")
+    rebuilt = _probe_free_path(
+        original, lambda: tmp_path_factory.mktemp("probe-free-path")
+    )
+    if rebuilt is None:
+        yield
+        return
+    os.environ["PATH"] = rebuilt
+    try:
+        yield
+    finally:
+        os.environ["PATH"] = original
 
 
 @pytest.fixture(autouse=True)
@@ -187,6 +355,65 @@ def tan_under_test() -> None:
         "of exactly this (tan-cli#423). Run pytest from `python/`, or "
         "`pip uninstall alp-tan`, or set PYTHONPATH to this repo's `python/`."
     )
+
+
+# ---------------------------------------------------------------------------
+# The DEBUG/FLASH PROBE INVENTORY, made a property of the test rather than of
+# the host (tan-cli#603).
+#
+# A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
+# installed; a CI runner has none of them. Every which()-gated branch that
+# turns on one of those identities therefore answers DIFFERENTLY in the two
+# places, silently. tan-cli#600 is what that costs: seven
+# `test_flow_d_preflight_*` cases green on the bench host and red on
+# ubuntu-latest, windows-latest AND macos-latest at once -- a false negative
+# that does not merely fail to warn, it points the next hour of debugging at
+# "a CI problem".
+#
+# Measured on the tip this landed at, by instrumenting tan's three resolution
+# seams (`doctor_cmd.on_path`, `tool_lookup.resolve_tool`, `shutil.which`)
+# across two full suite runs: 34 tests took a DIFFERENT BRANCH on the two
+# PATHs -- every `_collect` case in `tests/commands/test_doctor_command.py`,
+# three in `tests/gates/test_doctor_check_scope.py`, and one in
+# `tests/commands/test_support_bundle_command.py`. Identical outcome (3710
+# passed either way), different meaning; and on the bench host those runs
+# really do spawn `/usr/bin/JLinkExe -?` and `west --version`.
+#
+# SURGICAL, deliberately. `empty_tool_inventory` below removes EVERYTHING,
+# which is right for one test and wrong for the suite: measured, a full run
+# under a PATH holding only `sh bash git which env ls cat uname` fails 36
+# tests that need real `python3`/`sleep`/`mktemp`/`sed`/`curl`/`tar`/
+# `sha256sum` -- tools a CI runner has. So only the identities a runner
+# genuinely lacks are removed, and `tests/gates/test_probe_tool_inventory.py::
+# test_ordinary_host_tooling_is_untouched` holds this to that.
+# ---------------------------------------------------------------------------
+#: The probe/flash/Zephyr-meta identities tan resolves through `on_path` /
+#: `resolve_tool` / `shutil.which` that a GitHub runner never has installed.
+#: Deliberately NOT `git`/`cmake`/`ninja`/`python3`/`xz`/`wget`/`dd`/`gzip`/
+#: `addr2line`/`7z`: a runner HAS those, so removing them would invent a new
+#: divergence in the opposite direction rather than close this one.
+PROBE_TOOLS: frozenset[str] = frozenset(
+    {
+        # J-Link, all three names `doctor_cmd._collect` tries in order.
+        "JLinkExe",
+        "JLink",
+        "JLinkGDBServerCL",
+        "JLinkGDBServer",
+        # The other two flash back-ends `flash_cmd` probes for.
+        "openocd",
+        "pyocd",
+        # Zephyr's meta-tool: the single biggest divergence measured (74
+        # resolutions across the suite on the bench host, none on CI).
+        "west",
+        # Emulator + image writer, same class: probed by `renode_cmd` /
+        # `flash_cmd`, absent from every runner.
+        "renode",
+        "bmaptool",
+        # Zephyr-SDK-only; `faultdecode_cmd` tries it ahead of the ordinary
+        # `llvm-addr2line`/`addr2line` pair, which are NOT listed here.
+        "arm-zephyr-eabi-addr2line",
+    }
+)
 
 
 # ---------------------------------------------------------------------------

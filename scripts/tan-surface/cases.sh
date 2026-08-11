@@ -107,6 +107,12 @@ phase_discovery() {
 
   step "explain a target"              0 -- explain --target zephyr-conf --sdk-root "$SDK"
 
+  # The one `explain` mode that reads the checkout. ALP-B001 is the oldest
+  # entry in the SDK's generated metadata/error-catalog.json; a build whose
+  # bound SDK cannot answer it has either lost the catalogue or lost the
+  # generator that writes it, and neither shows up in any of the steps above.
+  step "explain a diagnostic code"     0 -- explain --code ALP-B001 --sdk-root "$SDK"
+
   # Every template the --help text advertises must actually explain. A template
   # that ships in the id list but has no catalog entry is a real break.
   local t
