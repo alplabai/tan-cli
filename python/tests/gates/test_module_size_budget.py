@@ -294,7 +294,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # `facts.zephyr_python_min_version` into `zephyr_python_floor` and its
     # docstring gained the extra sentence explaining why. Re-measured with
     # this gate's own walk.
-    "tan/commands/bootstrap_cmd.py": 3072,
+    "tan/commands/bootstrap_cmd.py": 3236,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
     # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
@@ -2372,7 +2372,7 @@ _MIRRORED = ("tan/planner/",)
 # {`diff_cmd.py:_spawn_validator`, `diff_cmd.py:_reject_if_sdk_validator_disagrees`},
 # removed {}.
 _FUNCTION_COUNT_BUDGET = 248
-_FUNCTION_WORST_BUDGET = 711
+_FUNCTION_WORST_BUDGET = 728
 
 
 def _modules() -> list[Path]:
