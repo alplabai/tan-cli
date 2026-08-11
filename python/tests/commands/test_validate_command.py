@@ -561,7 +561,9 @@ def _spawn(tmp_path, monkeypatch, validator_body: str, fmt: str = "json"):
     (project / "board.yaml").write_text(_BOARD, encoding="utf-8")
     sdk = _make_sdk(tmp_path / "alp-sdk", validator_body)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(validate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     result = runner.invoke(app, ["validate", "--sdk-root", str(sdk), "--format", fmt])
     return result, sdk
 
@@ -680,7 +682,9 @@ def test_offline_still_never_spawns_the_sdk_validator(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.chdir(project)
-    monkeypatch.setattr(validate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
 
     result = runner.invoke(
         app, ["validate", "--offline", "--sdk-root", str(sdk), "--format", "json"]
@@ -717,6 +721,52 @@ def test_a_crashed_validator_is_failed_not_a_board_verdict(tmp_path, monkeypatch
     assert "No module named 'jsonschema'" in envelope["issues"][0]["message"]
 
 
+def test_a_missing_module_crash_without_a_workspace_venv_names_bootstrap(tmp_path, monkeypatch):
+    """tan-cli#652, the exact defect the issue reports: `tan validate` run
+    before a successful `tan bootstrap` shells the SYSTEM interpreter (no
+    workspace venv exists yet for `_planner_python_resolution` to prefer),
+    which has no `jsonschema` -- and used to surface a raw
+    `ModuleNotFoundError` instead of naming the real remedy. Invisible to a
+    from-source install, because `jsonschema` is one of tan's own declared
+    dependencies and lands on the SAME interpreter there.
+
+    Reproduced without a real frozen binary or a genuinely dependency-less
+    interpreter: `_planner_python_resolution` is monkeypatched to report
+    exactly what it reports on a fresh project with no workspace venv
+    (`used_workspace_venv=False`, the second element of its return), driving
+    the identical traceback a bare interpreter without `jsonschema` produces
+    (the sibling test above pins that same traceback with the flag left
+    `True`, i.e. a workspace venv WAS found and is independently broken --
+    the two must not collapse to the same message)."""
+    stderr = (
+        "Traceback (most recent call last):\n"
+        '  File "/sdk/scripts/validate_board_yaml.py", line 7, in <module>\n'
+        "    import jsonschema\n"
+        "ModuleNotFoundError: No module named 'jsonschema'\n"
+    )
+    project = tmp_path / "project"
+    project.mkdir(parents=True)
+    (project / "board.yaml").write_text(_BOARD, encoding="utf-8")
+    sdk = _make_sdk(tmp_path / "alp-sdk", _stub(stderr=stderr, code=1))
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        validate_cmd,
+        "_planner_python_resolution",
+        lambda *_a, **_k: (sys.executable, False),
+    )
+    result = runner.invoke(app, ["validate", "--sdk-root", str(sdk), "--format", "json"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert envelope["data"]["outcome"] == "failed"
+    assert [i["code"] for i in envelope["issues"]] == ["validate.failed"]
+    message = envelope["issues"][0]["message"]
+    # The real remedy, named -- not a raw ModuleNotFoundError quoted at the
+    # user with no actionable next step.
+    assert "tan bootstrap" in message
+    assert "jsonschema" in message
+    assert "Last line of validator output" not in message
+
+
 def test_a_wedged_validator_times_out_into_a_failed_verdict(tmp_path, monkeypatch):
     """The oracle's `Command::output()` has no timeout, so a wedged validator
     wedges `tan` -- and under `--format json` the consumer gets no envelope at
@@ -743,7 +793,9 @@ def test_a_validator_that_cannot_be_started_is_runtime_failure(tmp_path, monkeyp
     sdk = _make_sdk(tmp_path / "alp-sdk", _stub())
     monkeypatch.chdir(project)
     absent = str(tmp_path / "no-such-interpreter")
-    monkeypatch.setattr(validate_cmd, "_planner_python", lambda *_a, **_k: absent)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (absent, True)
+    )
 
     result = runner.invoke(
         app, ["validate", "--sdk-root", str(sdk), "--format", "json"]
@@ -879,7 +931,9 @@ def test_an_interpreter_below_the_sdks_own_floor_is_refused_before_the_spawn(
         _stub(code=0, extra=f"open({str(marker)!r}, 'w').close()\n"),
     )
     monkeypatch.chdir(project)
-    monkeypatch.setattr(validate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     monkeypatch.setattr(
         validate_cmd,
         "_python_too_old",
@@ -919,7 +973,9 @@ def test_the_sdk_block_is_reported_exactly_where_the_oracle_reports_it(
     (project / "board.yaml").write_text(_BOARD, encoding="utf-8")
     sdk = _make_sdk(tmp_path / "alp-sdk", _stub(code=0))
     monkeypatch.chdir(project)
-    monkeypatch.setattr(validate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
 
     spawned = json.loads(
         runner.invoke(
@@ -1116,7 +1172,9 @@ def test_a_real_sdk_backed_board_passes_without_offline(tmp_path, monkeypatch):
     assert (project / "board.yaml").is_file()
 
     monkeypatch.chdir(project)
-    monkeypatch.setattr(validate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     result = runner.invoke(app, ["validate", "--sdk-root", str(SDK), "--format", "json"])
 
     assert result.exit_code == int(ExitCode.SUCCESS), result.output
