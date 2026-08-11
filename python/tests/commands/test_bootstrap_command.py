@@ -259,6 +259,27 @@ def test_bootstrap_and_doctor_derive_the_effective_floor_from_one_reader(monkeyp
     assert floor.manifest == (3, 10)
 
 
+def test_bootstrap_reads_the_manifests_zephyr_floor_with_no_workspace_to_adopt():
+    """tan-cli#606: `zephyr_base_adopts=False` is the shape every host has at
+    `tan bootstrap` time -- nothing has run `west update` yet, so there is no
+    `python.cmake` to read. Before this fix that always landed on the
+    hardcoded `ZEPHYR_PYTHON_FLOOR` pin even though `facts` already carries
+    the same fact, live, as `zephyr_python_min_version`. `REAL_MANIFEST`
+    declares `zephyr.pythonMinVersion: "3.12"` -- the SAME number as the pin
+    today -- so this asserts on PROVENANCE, not a value the two happen to
+    share: a manifest bump to the Zephyr floor must reach this without a tan
+    release, which "coincidentally equal" cannot prove.
+    """
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    assert facts.zephyr_python_min_version == (3, 12)
+
+    floor = resolve_python_floor(facts, zephyr_base_adopts=False)
+
+    assert floor.effective == (3, 12)
+    assert "zephyr.pythonMinVersion" in floor.source
+    assert "tan's built-in pin" not in floor.source
+
+
 def test_the_effective_floor_refuses_a_host_the_manifest_would_accept():
     """**The fix.** A 3.10 host clears the manifest's own floor and is refused
     anyway, with the frozen `python-too-old` code, because 3.12 is what Zephyr's
@@ -597,10 +618,22 @@ def test_print_env_and_workspace_are_refused_together(tmp_path):
         ('"schemaVersion": 1', '"schemaVersion": 99', "schemaVersion 99"),
         # The PREREQUISITES floor, spelled with its value: tan-cli#585's
         # re-vendor gave the fixture a SECOND `pythonMinVersion` (`zephyr`'s,
-        # `3.12`, which no consumer here reads), and a key-only match took the
-        # first line in the file -- mutating an unread field, so nothing
-        # refused and this case passed while testing nothing.
+        # `3.12`) -- a key-only match would have taken the first line in the
+        # file, mutating whichever field happens to come first rather than
+        # the one this row names. Both are read now (tan-cli#606), and each
+        # has its own row below, so a key-only match can no longer silently
+        # test the wrong field.
         ('"pythonMinVersion": "3.10"', '"pythonMinVersion": "three.ten"', "is not MAJOR.MINOR"),
+        # tan-cli#606: the ZEPHYR-scoped floor, previously the field "no
+        # consumer here reads" -- now read by `zephyr_python_floor`'s
+        # manifest fallback, so a malformed value must refuse the same way
+        # `prerequisites.pythonMinVersion` above does, not silently fall
+        # through.
+        (
+            '"pythonMinVersion": "3.12"',
+            '"pythonMinVersion": "twelve.oh"',
+            "zephyr.pythonMinVersion `twelve.oh` is not MAJOR.MINOR",
+        ),
         ('"dirName": ".venv"', '"dirName": "../escape"', "is not a plain relative path"),
     ],
 )

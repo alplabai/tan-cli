@@ -365,6 +365,16 @@ class BootstrapFacts:
     prerequisites_macos: tuple[str, ...]
     prerequisites_windows: tuple[str, ...]
     python_min_version: tuple[int, int]
+    #: `zephyr.pythonMinVersion` -- tan-cli#606: alp-sdk#1078 (Option A, the
+    #: chosen path) added this Zephyr-SCOPED floor alongside the pre-existing
+    #: host-universal `prerequisites.pythonMinVersion` above; the two are
+    #: deliberately different numbers ("3.12" vs "3.10" as of this writing),
+    #: not a duplicate. `None` when the manifest predates the key (every SDK
+    #: before alp-sdk's zephyr-scoped-floor change) -- callers fall back to
+    #: `doctor_cmd.ZEPHYR_PYTHON_FLOOR` in that case, same as before this field
+    #: existed. Not `_require`d: unlike `prerequisites.pythonMinVersion`, an
+    #: absent key here is a normal, expected shape, not a malformed manifest.
+    zephyr_python_min_version: tuple[int, int] | None
     #: `prerequisites.install`, keyed `linux`/`macos`/`windows` -> tool ->
     #: command. NOT the `posix`/`windows` split the tool LISTS use: an
     #: apt-shaped command and a brew-shaped one cannot share one `posix` key.
@@ -561,6 +571,25 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
             f"prerequisites.pythonMinVersion `{min_raw}` is not MAJOR.MINOR"
         )
 
+    # OPTIONAL, unlike `prerequisites.pythonMinVersion` above: absent is the
+    # normal shape for any manifest predating alp-sdk#1078's zephyr-scoped
+    # floor, not a malformed one -- so a present-but-unparseable value still
+    # hard-fails (it was deliberately authored), but a missing key does not.
+    zephyr_min_raw = zephyr.get("pythonMinVersion") if isinstance(zephyr, dict) else None
+    zephyr_python_min_version: tuple[int, int] | None = None
+    if zephyr_min_raw is not None:
+        if not isinstance(zephyr_min_raw, str):
+            raise BootstrapManifestError(
+                f"{BOOTSTRAP_MANIFEST_REL_PATH} could not be read: "
+                f"zephyr.pythonMinVersion is not a string"
+            )
+        zephyr_python_min_version = parse_min_version(zephyr_min_raw)
+        if zephyr_python_min_version is None:
+            raise BootstrapManifestError(
+                f"{BOOTSTRAP_MANIFEST_REL_PATH} could not be read: "
+                f"zephyr.pythonMinVersion `{zephyr_min_raw}` is not MAJOR.MINOR"
+            )
+
     dir_name = _require(venv, "dirName", str, "venv")
     # `venv.dirName` joins straight onto `workspace_dir` and the join's result is
     # later handed to `rmtree` when a stale venv is recreated -- an unvalidated
@@ -600,6 +629,7 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
             prerequisites.get("windows"), "prerequisites.windows"
         ),
         python_min_version=python_min_version,
+        zephyr_python_min_version=zephyr_python_min_version,
         install=_resolve_install_commands(prerequisites.get("install")),
         west_pip_spec=_require(west, "pipSpec", str, "west"),
         west_init_args=_str_list(_require(west, "initArgs", list, "west"), "west.initArgs"),
@@ -738,6 +768,15 @@ def fallback_facts(min_python: tuple[int, int]) -> BootstrapFacts:
         prerequisites_macos=("git", "cmake", "python3", "ninja"),
         prerequisites_windows=("git", "cmake", "python", "ninja"),
         python_min_version=min_python,
+        # Transcribed from `contract/fixtures/bootstrap/manifest.json`'s
+        # `zephyr.pythonMinVersion`, same as `zephyr_version` above -- held to
+        # the vendored fixture by
+        # `test_the_fallback_constants_match_the_real_manifest_field_for_field`,
+        # NOT derived from `min_python` (the caller's `prerequisites.
+        # pythonMinVersion`): the two keys are independently-declared numbers
+        # in the real manifest ("3.12" vs "3.10" as of this writing) and must
+        # not be conflated here either.
+        zephyr_python_min_version=(3, 12),
         install=_fallback_install_commands(),
         west_pip_spec=WEST_REQUIREMENT,
         west_init_args=("init", "-l"),
