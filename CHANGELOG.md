@@ -310,7 +310,22 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
-- **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
+- **`tan faultdecode` silently dropped a piped/pasted fault dump whenever ANY
+  register flag was also given, contradicting its own documented contract
+  ("Explicit flags win over a parsed dump" -- only true if the dump is still
+  read when a flag is present too).** `_read_dump`'s implicit stdin read is
+  no longer gated on `not registers_given`; it is attempted unconditionally
+  (still bounded by `_stdin_offers_input`'s `_STDIN_READY_TIMEOUT_S`, so a
+  held-open pipe cannot reopen tan-cli#388's unbounded hang -- measured, a
+  real held-open OS pipe with `--cfsr` given still returns in well under a
+  second). Two reachable failures, both closed: a piped CFSR/BFAR was
+  discarded in favour of an unrelated explicit flag (e.g. `--hfsr
+  0x40000000` reported "Forced HardFault ... its own status bits are clear"
+  while the piped `CFSR=0x00008200`/`BFAR=0xdeadbeef` it never read said the
+  opposite -- a precise bus fault), and `--bfar`/`--mmfar` alone counted
+  toward suppressing the dump read without counting toward the
+  cfsr/hfsr/dfsr "something to analyse" gate, so the dump was skipped AND the
+  command still refused with `faultdecode.no-registers`. (#503)
   PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
   any time `tan bootstrap` relocates a checkout inside a project that already
   has a working pin (written by an earlier `tan init`, per the documented
