@@ -350,7 +350,18 @@ jobs:
           python3 - "$SKU" "$rc" "${{ matrix.expect_refuse }}" <<'PY'
           import json, sys
           sku, rc, expect_refuse = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "true"
-          e = json.load(open(f"/tmp/rc-generate-{sku}.json"))
+          path = f"/tmp/rc-generate-{sku}.json"
+          try:
+              e = json.load(open(path))
+          except json.JSONDecodeError as exc:
+              # The file is non-empty (the `-s` check above already ruled out
+              # "wrote nothing"), but what landed on stdout isn't a JSON
+              # envelope at all -- e.g. a raw Python/Rust crash trace. Without
+              # this guard `json.load` throws and the step still fails the
+              # job, but with an unhandled traceback instead of the
+              # ::error:: this gate promises for every 'tan' invocation.
+              print(f"::error::[{sku}] 'tan generate' exited {rc} but did not write a valid JSON envelope ({exc}).")
+              sys.exit(rc or 1)
           ok = e.get("ok")
           issues = e.get("issues") or []
 
@@ -434,6 +445,7 @@ jobs:
           name: release-combination-${{ matrix.sku }}
           path: |
             /tmp/rc-bootstrap-*.json
+            /tmp/rc-bootstrap-*.stderr
             /tmp/rc-init-*.json
             /tmp/rc-generate-*.json
             /tmp/rc-build-*.json
