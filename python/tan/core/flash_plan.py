@@ -69,8 +69,8 @@ _DEFAULT_BASE = "0x08000000"
 #: it here would make the port disagree with the oracle on every `swd_probe`
 #: entry whose `flash_args` omits `jlink_device`. Kept byte-identical and
 #: quarantined to this one constant; the correct fix is for the SoM preset to
-#: always supply `flash_args.jlink_device` (E1M-V2N101 already does not), after
-#: which this default becomes unreachable and can be deleted on BOTH sides.
+#: always supply `flash_args.jlink_device` (true again of the four shipped
+#: V2N/V2M presets as of alp-sdk#1364 / tan-cli#612), after which unreachable.
 _DEFAULT_JLINK_DEVICE = "GD32G553MEY7TR"
 _DEFAULT_JLINK_SPEED = 4000
 _JLINK_BINARIES = ("JLinkExe", "JLink")
