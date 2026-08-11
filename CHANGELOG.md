@@ -329,7 +329,15 @@ All notable changes to `tan` are documented here. Format follows
   latter would otherwise plan to `ok:true` here only to be refused two
   commands later at `tan build` — is now refused (`init.invalid-cores`,
   naming both core ids) rather than silently rendered or deferred to a
-  confusing downstream failure. (#642, #643)
+  confusing downstream failure. A `yocto` companion reaches the identical
+  dead end through a fourth door — the planner refuses a Cortex-M core
+  running Yocto exactly as hard as a Cortex-A core running Zephyr — and
+  `--cores <id>:yocto` is now refused too when `<id>` is not one of the
+  `a`-prefixed Cortex-A ids every SoM topology uses (`a32_cluster`,
+  `a55_cluster`); `<id>:off` stays honored unconditionally, and now
+  round-trips as the schema's string `"off"` instead of an unquoted `off`
+  that YAML parses as the boolean `False` and the schema then rejects.
+  (#642, #643)
 - **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
   PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
   any time `tan bootstrap` relocates a checkout inside a project that already

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 import typer
+import yaml
 
 from tan.commands.init_cmd import overwrite_refusal_message
 from tan.core.scaffold import TEMPLATE_IDS
@@ -454,6 +455,66 @@ def test_cores_rejects_a_baremetal_companion_that_is_not_the_app_core(tmp_path):
     assert "m55_hp" in issue(env)["message"]
     assert "requests baremetal" in issue(env)["message"]
     assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_rejects_a_yocto_companion_on_a_cortex_m_id(tmp_path):
+    """tan-cli#645 round-3: `--cores m55_he:yocto` reaches the identical
+    #643 dead end as the `zephyr`/`baremetal` cases above by a FOURTH door.
+    `m55_he` is a Cortex-M id (per every SoM topology's `m`-prefix
+    convention); the planner's `_enforce_os_matches_core_class` refuses a
+    Cortex-M core running Yocto exactly as hard as it refuses a Cortex-A
+    core running Zephyr. Measured before this refusal existed: `tan init`
+    planned this to `ok:true`/`issues:[]`, and `tan validate` on the result
+    then raised `validate.schema-violation` ("its runtime is determined by
+    the core class ... got os: 'yocto'"). Refuse at `init` time instead."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_he:yocto",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.invalid-cores"
+    assert "m55_he" in issue(env)["message"]
+    assert "m55_hp" in issue(env)["message"]
+    assert "requests yocto" in issue(env)["message"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_still_accepts_a_yocto_companion_on_a_cortex_a_id(tmp_path):
+    """The new Cortex-M/yocto refusal must not catch the Cortex-A case that
+    was always the genuinely-honored one: `a55_cluster` (an `a`-prefixed id)
+    requesting `yocto` still splices in cleanly."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "a55_cluster:yocto",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert "  a55_cluster:\n    os: yocto\n    image: alp-image-edge\n" in board
+
+
+def test_cores_off_companion_round_trips_as_a_yaml_string(tmp_path):
+    """tan-cli#645 round-3: an unquoted `os: off` is a YAML 1.1 boolean
+    keyword (`yaml.safe_load("os: off")` -> `{"os": False}`), so a companion
+    spliced in at `:off` used to write a bool where the schema requires the
+    string `"off"` -- `ok:true` at `init`, then a
+    `validate.schema-violation` ("False is not of type 'string'") on the
+    very next command. `splice_companion_cores` now quotes it like every
+    vendored scaffold already does."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_he:off",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    board_text = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert '  m55_he:\n    os: "off"\n' in board_text
+    parsed = yaml.safe_load(board_text)
+    assert parsed["cores"]["m55_he"]["os"] == "off"
 
 
 def test_cores_still_accepts_the_app_core_itself_at_zephyr(tmp_path):

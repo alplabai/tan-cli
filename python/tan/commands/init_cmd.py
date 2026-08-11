@@ -693,25 +693,49 @@ def _apply_cores(
     # an app-less `os: baremetal` slice just as hard as an app-less `os:
     # zephyr` one -- `--cores <id>:baremetal` would still plan to `ok:true`
     # here and only fail two commands later, at `tan build`, against a
-    # board.yaml the customer never edited by hand. Only `yocto` (which
-    # `splice_companion_cores` backs with a stock `image:`) and `off` are
-    # app-less companions the loader actually accepts, so those are the only
-    # two named in the message below. Refuse instead of guessing which core
-    # the caller actually meant.
+    # board.yaml the customer never edited by hand.
+    #
+    # `yocto` is NOT unconditionally safe either -- it reaches the identical
+    # dead end on a Cortex-M companion through a THIRD door: the planner's
+    # `_enforce_os_matches_core_class` (tan/planner/validate.py) rejects a
+    # Cortex-M core running Yocto exactly as hard as it rejects a Cortex-A
+    # core running Zephyr. Measured against `E1M-AEN801` (a Cortex-M
+    # `m55_he` companion, app core `m55_hp`): `--cores m55_he:yocto` planned
+    # to `ok:true`/`issues:[]` here, and `tan validate` on the result then
+    # raised `validate.schema-violation` ("its runtime is determined by the
+    # core class ... got os: 'yocto'") -- the exact #643 shape, just reached
+    # through the one os: value the original fix left unchecked. `tan init`
+    # is deliberately SDK-free (module docstring above) and cannot resolve a
+    # companion's real `topology.<core>.type`, so this reads the same `a`- vs
+    # `m`-prefix convention every SoM topology already follows
+    # (`a32_cluster`/`a55_cluster` are Cortex-A; `m33`/`m33_sm`/`m55_hp`/
+    # `m55_he` are Cortex-M -- true across all 11 `metadata/e1m_modules/
+    # *.yaml` topologies, measured, and the same heuristic
+    # `tan/planner/project_emit/hw_info.py` already relies on) to accept
+    # `yocto` only for an `a`-prefixed companion id. `off` is the one os:
+    # value `_enforce_loader_rules` accepts app-less on ANY core class, so it
+    # is unconditionally allowed regardless of prefix (and
+    # `splice_companion_cores` now quotes it `"off"` so it round-trips as the
+    # schema's string, not YAML 1.1's bareword boolean). Refuse instead of
+    # guessing which core the caller actually meant.
     for core_id, os_value in cores:
-        if core_id != app_core and os_value in ("zephyr", "baremetal"):
-            raise InitError(
-                "init.invalid-cores",
-                f"Core '{core_id}' requests {os_value}, but this plan's app "
-                f"core is '{app_core}' -- --cores can only splice "
-                f"'{core_id}' in as an app-less companion (yocto/off), "
-                f"which is not what a {os_value} request means. If "
-                f"'{core_id}' is meant to host the app instead of "
-                f"'{app_core}', pick a --template/--som combination whose "
-                f"app core is '{core_id}', or scaffold with --board-yaml to "
-                f"declare it yourself.",
-                ExitCode.VALIDATION_FAILURE,
-            )
+        if core_id == app_core or os_value == "off":
+            continue
+        if os_value == "yocto" and core_id.startswith("a"):
+            continue
+        raise InitError(
+            "init.invalid-cores",
+            f"Core '{core_id}' requests {os_value}, but this plan's app "
+            f"core is '{app_core}' -- --cores can only splice '{core_id}' "
+            f"in as an app-less companion, and the only os: values a "
+            f"companion can honor app-less are 'off' (always) or 'yocto' "
+            f"(only when '{core_id}' is a Cortex-A core, i.e. its id starts "
+            f"with 'a') -- {os_value} is not one of those. If '{core_id}' "
+            f"is meant to host the app instead of '{app_core}', pick a "
+            f"--template/--som combination whose app core is '{core_id}', "
+            f"or scaffold with --board-yaml to declare it yourself.",
+            ExitCode.VALIDATION_FAILURE,
+        )
 
     spliced = splice_companion_cores(board.content, cores)
     return [
@@ -1037,8 +1061,12 @@ def init(
         metavar="CORES",
         help=(
             "Comma-separated cores for a heterogeneous project, `id[:os]` "
-            "(e.g. `m33_sm:zephyr,a55_cluster:yocto`); OS is inferred from "
-            "the id when omitted."
+            "(e.g. `m33_sm:zephyr,a55_cluster:yocto`). OS is inferred from "
+            "the id when omitted, but that inference is only honored for "
+            "the plan's app core -- any other id can only be spliced in "
+            "app-less, as `:off` or (on a Cortex-A id) `:yocto`, so a bare "
+            "companion id like `m55_he` infers `:zephyr` and is refused "
+            "unless `m55_he` is the app core."
         ),
     ),
     preview: bool = typer.Option(
