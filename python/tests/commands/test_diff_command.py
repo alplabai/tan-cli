@@ -392,7 +392,9 @@ def test_sdk_schema_violation_refuses_the_diff_instead_of_reporting_clean(
             "sys.exit(1)\n"
         ),
     )
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
     )
@@ -417,7 +419,9 @@ def test_sdk_clean_verdict_leaves_a_real_comparison_untouched(
     sdk = _stub_sdk(
         tmp_path, validator_body="import sys\nsys.stdout.write('board.yaml: clean\\n')\n"
     )
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
     )
@@ -452,7 +456,9 @@ def test_sdk_validator_timeout_refuses_instead_of_reporting_clean(
     tan-cli#262 shape (exit 2, not a launch failure)."""
     proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
     sdk = _stub_sdk(tmp_path, validator_body="import time\ntime.sleep(30)\n")
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     monkeypatch.setattr(diff_cmd, "VALIDATOR_TIMEOUT_S", 1)
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
@@ -476,7 +482,9 @@ def test_sdk_validator_unstartable_interpreter_refuses_instead_of_reporting_clea
     proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
     sdk = _stub_sdk(tmp_path, validator_body="import sys\nsys.exit(0)\n")
     absent = str(tmp_path / "no-such-interpreter")
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: absent)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (absent, True)
+    )
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
     )
@@ -508,7 +516,9 @@ def test_sdk_validator_crash_is_reported_as_failed_not_schema_violation(
             "'slots'\")\n"
         ),
     )
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
     )
@@ -534,7 +544,9 @@ def test_sdk_validator_below_the_floor_refuses_before_spawning(
     proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
     marker = tmp_path / "validator-ran"
     sdk = _stub_sdk(tmp_path, validator_body=f"open({str(marker)!r}, 'w').close()\n")
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     monkeypatch.setattr(
         diff_cmd,
         "_python_too_old",

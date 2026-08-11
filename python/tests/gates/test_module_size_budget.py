@@ -1051,7 +1051,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # check, so a guard inside the materialise branch would refuse only after
     # the other slices' files had landed) and why the build-root one is scoped
     # to `_MODE_NATIVE`. Measured `wc -l`, not arithmetic.
-    "tan/commands/build_cmd.py": 2043,
+    #
+    # 2069, not 2043, as of tan-cli#652: `_planner_python_resolution` is a new
+    # function beside `_planner_python` (now a one-line wrapper over it) --
+    # the flag `validate_cmd`/`diff_cmd` need to tell "no `tan bootstrap`
+    # workspace venv resolved" from "a workspace venv resolved and is
+    # independently broken" when a spawned SDK script dies importing a
+    # dependency. Measured `wc -l`, not arithmetic.
+    "tan/commands/build_cmd.py": 2069,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
@@ -1295,7 +1302,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # the `_spawn_validator` return annotation and the one-sentence fold in
     # `_reject_if_sdk_validator_disagrees` all followed the shape. MEASURED on
     # the rebased tree, not 812 + this branch's pre-rebase delta.
-    "tan/commands/diff_cmd.py": 822,
+    # 822 -> 839, tan-cli#652: `_spawn_validator`/`_reject_if_sdk_validator_
+    # disagrees` now thread a `used_workspace_venv` flag through to
+    # `validate_cmd._synthesised_finding`, reused wholesale rather than
+    # re-derived (same reasoning as the #498 entry above) -- a missing-module
+    # crash on a bare-PATH interpreter now names `tan bootstrap` instead of a
+    # raw `ModuleNotFoundError`. Measured `wc -l`, not arithmetic.
+    "tan/commands/diff_cmd.py": 839,
     # NEW ENTRY: 727 -> 934 -> 1020, the diagnostic-code lookup (`tan explain
     # --code`, ADR-0020 end-state B -- alp-sdk's `scripts/alp_cli/explain.py`
     # moves here so its retirement loses no capability), plus the tan-cli#627
@@ -1392,7 +1405,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # overlap inside `_emit`: #478's `sdk.*` filter and #498's `_Finding`
     # pairing collapse into one `reportable`/`reported` pair rather than
     # stacking, so the union is smaller than either side's sum implies.
-    "tan/commands/validate_cmd.py": 1490,
+    # 1490 -> 1571, tan-cli#652: the module docstring gained a section on the
+    # bare-interpreter-crash collision, `_MISSING_MODULE_RE` +
+    # `_synthesised_finding`'s new `used_workspace_venv` branch replace a raw
+    # `ModuleNotFoundError` with a `tan bootstrap` remedy when
+    # `_planner_python_resolution` (imported in place of `_planner_python`)
+    # found no workspace venv, and the spawn call site now threads that flag
+    # through. Measured `wc -l`, not arithmetic.
+    "tan/commands/validate_cmd.py": 1571,
     # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
     # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
     # -- this command writes metadata skeletons into whichever checkout
@@ -2306,7 +2326,20 @@ _MIRRORED = ("tan/planner/",)
 # 707 -> 711, MEASURED by this gate's own `_long_functions` walk on the final
 # tree -- `bootstrap_cmd.py:_run` is still the package's single longest
 # function.
-_FUNCTION_COUNT_BUDGET = 246
+#
+# 246 -> 248, tan-cli#652: `diff_cmd.py`'s `_spawn_validator` (48 -> 52) and
+# `_reject_if_sdk_validator_disagrees` (49 -> 53) each cross the 50-line cap
+# for the first time, both from the same addition -- threading a
+# `used_workspace_venv` flag (plus the docstring saying why) from
+# `_planner_python_resolution` through to `validate_cmd._synthesised_finding`,
+# so a missing-module crash on a bare-PATH interpreter names `tan bootstrap`
+# instead of a raw `ModuleNotFoundError`. No existing function in this table
+# grew past it, so `_FUNCTION_WORST_BUDGET` is untouched. MEASURED by diffing
+# this gate's own `_long_functions` walk against the same walk of the
+# pre-change tree -- base 246 / new 248, added
+# {`diff_cmd.py:_spawn_validator`, `diff_cmd.py:_reject_if_sdk_validator_disagrees`},
+# removed {}.
+_FUNCTION_COUNT_BUDGET = 248
 _FUNCTION_WORST_BUDGET = 711
 
 
