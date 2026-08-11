@@ -95,6 +95,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.commands.build.configure_inputs import (
+    discover_configure_inputs,
+    read_configure_inputs_stamp,
+    write_configure_inputs_stamp,
+)
 from tan.commands.build.manifest import (
     build_dir_overridden,
     cmake_cache_configured,
@@ -328,6 +333,22 @@ def last_sdk_switch_issues() -> list[Issue]:
     so a build with nothing to wipe reads back the honest empty list rather
     than a previous invocation's leftover."""
     return list(_last_sdk_switch_issues)
+
+
+#: Coded envelope issues from the stale-configure-cache guard (tan-cli#655),
+#: one call's worth -- same same-process-recorder pattern as
+#: `_last_sdk_switch_issues`, for the same reason: the VS Code extension only
+#: ever sees the envelope, not `on_output`'s stream, and a `-U` reset that
+#: only ever showed up in stderr would be invisible there.
+_last_configure_cache_issues: list[Issue] = []
+
+
+def last_configure_cache_issues() -> list[Issue]:
+    """The `build.configure-cache-reset` issues recorded by the most recent
+    [`execute_slices`] call in this process -- always freshly OVERWRITTEN
+    (never appended-to), so a build with nothing to reset reads back the
+    honest empty list rather than a previous invocation's leftover."""
+    return list(_last_configure_cache_issues)
 
 
 def _drain_output(
@@ -603,6 +624,130 @@ def _maybe_pristine_stale_sdk_build_dir(
         except OSError:
             pass  # best-effort -- see this function's docstring
     return issues
+
+
+#: cmake cache-var reset applied by [`_maybe_reset_stale_configure_cache`] --
+#: see that function's docstring for why exactly these two and no others.
+_CONFIGURE_CACHE_RESET_ARGS = ["-UDTC_OVERLAY_FILE", "-UCONF_FILE"]
+
+
+def _maybe_reset_stale_configure_cache(
+    core_id: str,
+    cwd: Path,
+    app_dir: str | None,
+    backend: str,
+    on_output: Callable[[str], None],
+) -> tuple[list[str], list[Issue]]:
+    """tan-cli#655: a newly-added (or removed) devicetree overlay or Kconfig
+    fragment at one of Zephyr's own auto-discovery locations (`app.overlay`,
+    `boards/*.overlay`, `socs/*.overlay`, `prj*.conf`, `boards/*.conf`,
+    `socs/*.conf`) was silently IGNORED by an already-configured build dir --
+    `tan build` reported `ok`, but the generated `zephyr.dts`/`.config` still
+    reflected the PREVIOUS overlay/fragment set, and only `tan clean` (a full
+    wipe) picked the change up.
+
+    This was NOT a "CMake never reconfigures" bug -- every zephyr slice's
+    command already carries at least one `-D` after `--` (`_slice_command`'s
+    `-DPython3_EXECUTABLE=${PYTHON}`, always present), so `west build`'s own
+    `cmake_opts`-non-empty check (`scripts/west_commands/build.py::do_run`)
+    already sets `run_cmake = True` and reconfigures on every `tan build`,
+    measured on a real Zephyr 4.4.1 tree, not inferred. The reconfigure was
+    ALREADY happening; it just produced a stale result.
+
+    Root cause, also measured against that same tree: Zephyr's own
+    `cmake/modules/configuration_files.cmake` resolves `DTC_OVERLAY_FILE`/
+    `CONF_FILE` by auto-discovery ONLY `if(NOT DEFINED ...)`, then
+    unconditionally CACHES whatever it found -- including "found nothing" --
+    as an ordinary CMake cache entry. Every later configure of the SAME
+    build dir sees the var already `DEFINED` from the cache and skips
+    discovery entirely, so a file that did not exist at the FIRST configure
+    stays invisible to every configure after, no matter how many times
+    reconfigure runs, until that one cache entry is cleared. An EDIT to an
+    already-discovered file is a different, already-solved case: Zephyr ties
+    every file it DID discover into `CMAKE_CONFIGURE_DEPENDS`
+    (`dts.cmake`/`kconfig.cmake`), so its own mtime bump alone triggers a
+    correct reconfigure -- only the SET of discoverable files changing
+    defeats the cache.
+
+    The reset is `-UDTC_OVERLAY_FILE -UCONF_FILE` on the configure that
+    follows a set change -- deliberately NOT `-UEXTRA_DTC_OVERLAY_FILE`/
+    `-UEXTRA_CONF_FILE`: those two are re-resolved via `zephyr_get(...
+    MERGE REVERSE)` on every configure regardless of the cache (no `NOT
+    DEFINED` guard gates them), and this slice's own command already ends
+    with `-DEXTRA_CONF_FILE=<build_dir>/alp.conf` (`_slice_command`'s
+    per-core Kconfig wiring) -- appending `-UEXTRA_CONF_FILE` AFTER that in
+    the same argv would UNSET it instead (measured: `-D`/`-U` on the same
+    cache key apply in argv order), silently dropping the per-core fragment
+    tan itself wires in on every reset. Verified this narrower pair alone is
+    sufficient AND leaves `-DEXTRA_CONF_FILE` intact: reproduced the #655
+    bug against a real Zephyr 4.4.1 `west build` (new `app.overlay`, new
+    `boards/<board>.conf`, and a removed overlay all silently/fatally
+    ignored pre-fix), then confirmed `-UDTC_OVERLAY_FILE -UCONF_FILE`
+    appended after an existing `-DEXTRA_CONF_FILE=...` recovers all three
+    while the `-DEXTRA_CONF_FILE` fragment's own content still lands.
+
+    Scoped to `os: zephyr` slices (`DTC_OVERLAY_FILE`/`CONF_FILE` are
+    Zephyr-CMake-specific; a yocto/baremetal slice has neither -- and
+    `_slice_command`'s zephyr branch is the ONLY place that ever emits one,
+    always with `tool: "west"`, so checking `backend` alone is exactly as
+    precise as also checking the tool identity, mirroring
+    `_maybe_pristine_stale_sdk_build_dir`'s own choice not to gate on tool
+    either), and to a build dir CMake has already configured at least once
+    (`cmake_cache_configured` -- nothing is cached yet on a first build, so
+    there is nothing to reset; this call only lays down the baseline stamp).
+    Comparison uses [`tan.commands.build.configure_inputs`]'s existence-only
+    fingerprint of `app_dir`'s auto-discovery locations, stamped inside
+    west's own nested build dir (mirrors the SDK-identity stamp above) --
+    NOT the plan's `command.args`, which name every EXTRA_/-D flag tan
+    itself controls but say nothing about a file the CUSTOMER added by hand.
+
+    Returns `(extra_cmake_args, issues)`, mirroring
+    [`_maybe_pristine_stale_sdk_build_dir`]'s own return shape: append
+    `extra_cmake_args` to the spawn argv (empty when nothing changed);
+    `issues` carries the coded `build.configure-cache-reset` note at `info`
+    severity so a JSON-mode caller (the VS Code extension, envelope-only)
+    can see a reset happened, not just a `text`-mode `on_output` line. Best-
+    effort throughout: a stamp read/write failure is "no signal" (read) or
+    silently skipped (write), never raised -- fails toward one spurious
+    extra reset, never toward trusting a cache this function cannot
+    actually verify."""
+    if backend != "zephyr" or not app_dir:
+        return [], []
+    app_dir_path = Path(app_dir)
+    if not cmake_cache_configured(cwd):
+        # Nothing cached yet to poison -- lay down this configure's own
+        # baseline so the NEXT build has something to compare against.
+        try:
+            write_configure_inputs_stamp(cwd, discover_configure_inputs(app_dir_path))
+        except OSError:
+            pass
+        return [], []
+
+    current = discover_configure_inputs(app_dir_path)
+    previous = read_configure_inputs_stamp(cwd)
+    try:
+        write_configure_inputs_stamp(cwd, current)
+    except OSError:
+        pass  # best-effort -- see this function's docstring
+    if previous is not None and previous == current:
+        return [], []
+
+    added = sorted(current - (previous or frozenset()))
+    removed = sorted((previous or frozenset()) - current)
+    detail = "; ".join(
+        part
+        for part in (f"added {added}" if added else "", f"removed {removed}" if removed else "")
+        if part
+    ) or "no prior record"
+    message = (
+        f"{core_id}: devicetree overlay/Kconfig fragment set changed ({detail}) -- "
+        f"resetting Zephyr's cached DTC_OVERLAY_FILE/CONF_FILE so the configure that "
+        f"follows re-discovers it (tan-cli#655)"
+    )
+    on_output(f"note: {message}")
+    return list(_CONFIGURE_CACHE_RESET_ARGS), [
+        Issue("build.configure-cache-reset", "info", message)
+    ]
 
 
 def _pin_west_workspace(
@@ -912,6 +1057,7 @@ def execute_slices(
     policy = plan.execution_policy
     outcomes: list[SliceOutcome] = []
     sdk_switch_issues: list[Issue] = []
+    configure_cache_issues: list[Issue] = []
     # Computed once per build (not per slice): the plan's `sdkCommit` reflects
     # THIS run's freshly emitted plan, not a per-slice fact. `None` when
     # `sdk_root` itself is unresolved -- see `sdk_stamp_key`'s docstring.
@@ -1088,6 +1234,19 @@ def execute_slices(
             )
         )
 
+        # tan-cli#655: AFTER the sdk-switch-pristine guard, not before -- a
+        # wipe there removes `cwd/build` wholesale (this stamp lives inside
+        # it, same as the SDK stamp), so this call must see the POST-wipe
+        # state to correctly treat a just-wiped dir as "nothing cached yet"
+        # rather than comparing against a stamp that no longer describes
+        # anything on disk.
+        configure_cache_reset_args, new_configure_cache_issues = (
+            _maybe_reset_stale_configure_cache(
+                sl.core_id, cwd, sl.app_dir, sl.backend, on_output
+            )
+        )
+        configure_cache_issues.extend(new_configure_cache_issues)
+
         if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in slice_env:
             # tan-cli#336: a dangling `$ZEPHYR_BASE` inherited from the
             # ambient shell (seeded above by `dict(os.environ)`) OUTRANKS the
@@ -1144,6 +1303,15 @@ def execute_slices(
             if is_west
             else (cwd, list(sl.command.args))
         )
+        # Appended to the SPAWN argv only -- `sl.command.args` (read again
+        # below by `resolve_zephyr_artefact`/`build_dir_overridden`) stays
+        # exactly what the plan named, so those checks never see a flag tan
+        # itself injected. Order matters: this must land AFTER the plan's
+        # own `-DEXTRA_CONF_FILE=...` (already inside `spawn_args`), never
+        # before -- see `_maybe_reset_stale_configure_cache`'s docstring for
+        # why an `-U`/`-D` pair on the same key is order-sensitive and why
+        # `EXTRA_CONF_FILE` itself is deliberately excluded from the reset.
+        spawn_args = spawn_args + configure_cache_reset_args
 
         # tan-cli#336: watch the slice's own stdout for west's literal
         # "could not find a workspace" message so a failure carrying it can
@@ -1357,8 +1525,9 @@ def execute_slices(
             )
         )
 
-    global _last_sdk_switch_issues
+    global _last_sdk_switch_issues, _last_configure_cache_issues
     _last_sdk_switch_issues = sdk_switch_issues
+    _last_configure_cache_issues = configure_cache_issues
 
     _write_manifest_after_dispatch(plan, build_root, [*outcomes, *held_outcomes], on_output, sdk_root)
     return outcomes
