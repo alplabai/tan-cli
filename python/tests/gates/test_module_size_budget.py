@@ -195,19 +195,28 @@ _MODULE_BUDGET: dict[str, int] = {
     # the docstring paragraph recording why the field is required and
     # keyword-only. The two definitions and the judgement calls did NOT land
     # here: they are in `tan/core/doctor_scope.py`, well under its own cap.
-    # 3762, not 3696, as of the alp-sdk `_check_libraries` port: the `libraries`
-    # check moves alp-sdk's own doctor line onto tan (ADR-0020 end-state B --
-    # the user command surface is `tan`, so alp-sdk does not keep a second CLI
-    # reporting on its library layer). Only `libraries_check` (the outcome ->
-    # `Check` mapping, trimmed to exactly 50 lines rather than moving the
-    # function ratchet -- same call `_print_stream_lines` made) and its
-    # thirteen-line `_collect` wiring landed here; the resolution -- the raw
-    # `libraries:` peek, the planner bind, `scoped_names`/`resolve_selection`
-    # and the two defects the port fixed in the original -- is in
-    # `tan/core/doctor_libraries.py`, a new module well under the 800-line cap,
-    # for the same reason `doctor_scope.py` took the #549 half that would
-    # otherwise have grown this file.
-    "tan/commands/doctor_cmd.py": 3762,
+    # 3813, not 3762 (this branch alone) and not 3747 (dev alone): both
+    # landed. tan-cli#606's manifest-declared `zephyr.pythonMinVersion`
+    # fallback (alp-sdk#1078) and the alp-sdk `_check_libraries` port are
+    # independent additions to the same file, so the merged length is neither
+    # side's pin. Re-measured after the merge with this gate's own
+    # `len(read_text().splitlines())` -- never carried across from either
+    # branch, because a padded pin passes this ratchet silently.
+    #
+    # The #606 half: the new `manifest_zephyr_floor` parameter, its
+    # fallback/label derivation, the `_load_manifest` injection of
+    # `_zephyrPythonMinVersion` (mirroring `_pipSpec`), and
+    # `_zephyr_manifest_floor_from_facts`.
+    #
+    # The libraries half (ADR-0020 end-state B -- the user command surface is
+    # `tan`, so alp-sdk does not keep a second CLI reporting on its library
+    # layer): only `libraries_check` (the outcome -> `Check` mapping, trimmed
+    # to exactly 50 lines rather than moving the function ratchet) and its
+    # thirteen-line `_collect` wiring. The resolution -- the raw `libraries:`
+    # peek, the planner bind, `scoped_names`/`resolve_selection` and the two
+    # defects the port fixed -- lives in `tan/core/doctor_libraries.py`, for
+    # the same reason `doctor_scope.py` took the #549 half.
+    "tan/commands/doctor_cmd.py": 3813,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -259,7 +268,11 @@ _MODULE_BUDGET: dict[str, int] = {
     # Two functions LEFT this file in the same change (`_manifest_points_at`,
     # `_same_directory`, both moved down to `tan/core/bootstrap.py`), so the
     # figure is net of that removal.
-    "tan/commands/bootstrap_cmd.py": 3070,
+    # 3072, not 3070, as of tan-cli#606: `resolve_python_floor` now passes
+    # `facts.zephyr_python_min_version` into `zephyr_python_floor` and its
+    # docstring gained the extra sentence explaining why. Re-measured with
+    # this gate's own walk.
+    "tan/commands/bootstrap_cmd.py": 3072,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
     # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
@@ -278,7 +291,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # gained a `7zip` entry (+1, with the comment recording why a command exists
     # for a tool `prerequisites.windows` does not list). Held down by the
     # departure comment shrinking, since the exemption it documented is gone.
-    "tan/core/bootstrap.py": 2055,
+    # 2094, not 2055, as of tan-cli#606: the new `zephyr_python_min_version`
+    # field on `BootstrapFacts`, its OPTIONAL parse arm in
+    # `parse_bootstrap_manifest` (distinct from `prerequisites.
+    # pythonMinVersion`'s required one), and the transcribed literal in
+    # `fallback_facts`. Re-measured with this gate's own walk.
+    "tan/core/bootstrap.py": 2094,
     # 1987, not 1808, as of tan-cli#486 and its review round: two guard
     # functions (`validate_commander_path`, closing the J-Link Commander
     # newline/`"`-injection hole on the artefact/atoc/serial interpolations,

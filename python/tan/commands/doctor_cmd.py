@@ -153,9 +153,13 @@ from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: Zephyr's own floor, from `<zephyr>/cmake/modules/python.cmake`'s
-#: `set(PYTHON_MINIMUM_REQUIRED 3.12)`. Only the FALLBACK -- `zephyr_python_floor`
-#: reads the real file when a workspace resolves, so a Zephyr bump raises this
-#: floor on the customer's machine without waiting for a tan release.
+#: `set(PYTHON_MINIMUM_REQUIRED 3.12)`. The LAST-resort fallback --
+#: `zephyr_python_floor` reads the real file when a workspace resolves, and
+#: (tan-cli#606) prefers alp-sdk's own manifest-declared
+#: `zephyr.pythonMinVersion` over this constant when no workspace resolves but
+#: a manifest does; this is what is left once BOTH are unavailable, so a
+#: Zephyr bump raises the floor on the customer's machine without waiting for
+#: a tan release only via one of those two live reads, never this one.
 ZEPHYR_PYTHON_FLOOR = (3, 12)
 
 #: The floor `metadata/bootstrap.json` is assumed to declare when no manifest
@@ -430,15 +434,25 @@ def _parse_two(raw: str) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2)))
 
 
-def zephyr_python_floor(zephyr_base: str | None) -> tuple[tuple[int, int], str]:
+def zephyr_python_floor(
+    zephyr_base: str | None, *, manifest_zephyr_floor: tuple[int, int] | None = None
+) -> tuple[tuple[int, int], str]:
     """The floor Zephyr's CMake will actually enforce, and where it came from.
 
     Read from `<zephyr_base>/cmake/modules/python.cmake` when that resolves,
     because THAT is the file whose `PYTHON_MINIMUM_REQUIRED` aborts the build --
     a constant compiled into tan goes stale the moment Zephyr bumps it, and a
     stale floor here reintroduces exactly the silent gap this command exists to
-    close. `ZEPHYR_PYTHON_FLOOR` is the fallback for a host with no workspace
-    yet, which is every host at `tan bootstrap` time.
+    close.
+
+    When it does NOT resolve, `manifest_zephyr_floor` -- alp-sdk's OWN declared
+    `zephyr.pythonMinVersion` (tan-cli#606), when the caller's manifest read
+    found one -- is now preferred over `ZEPHYR_PYTHON_FLOOR`: a fact alp-sdk
+    already publishes beats a constant compiled into tan, the same reasoning
+    that prefers `python.cmake` itself one level up. `ZEPHYR_PYTHON_FLOOR`
+    remains the LAST resort, for an SDK whose manifest predates that key (or
+    when no manifest resolves at all) -- every host at `tan bootstrap` time
+    used to land here unconditionally; now only a manifest-less one does.
 
     `zephyr_base` is a plain path in, not necessarily `$ZEPHYR_BASE` itself --
     THIS function has no opinion on where it came from, only `_collect` (this
@@ -466,6 +480,16 @@ def zephyr_python_floor(zephyr_base: str | None) -> tuple[tuple[int, int], str]:
     workspace resolves -- see above). `jlink_flash_device` fixed the identical
     shape for its own three-cause fallback in tan-cli#310; this mirrors it.
     """
+    if manifest_zephyr_floor is not None:
+        fallback_floor = manifest_zephyr_floor
+        fallback_label = (
+            f"alp-sdk metadata/bootstrap.json zephyr.pythonMinVersion "
+            f"{fallback_floor[0]}.{fallback_floor[1]}"
+        )
+    else:
+        fallback_floor = ZEPHYR_PYTHON_FLOOR
+        fallback_label = f"tan's built-in pin {fallback_floor[0]}.{fallback_floor[1]}"
+
     if zephyr_base:
         path = Path(zephyr_base) / "cmake" / "modules" / "python.cmake"
         text = _read_text(path)
@@ -473,20 +497,17 @@ def zephyr_python_floor(zephyr_base: str | None) -> tuple[tuple[int, int], str]:
             match = re.search(r"PYTHON_MINIMUM_REQUIRED\s+(\d+)\.(\d+)", text)
             if match is not None:
                 return (int(match.group(1)), int(match.group(2))), str(path)
-            return ZEPHYR_PYTHON_FLOOR, (
-                f"Zephyr's PYTHON_MINIMUM_REQUIRED, from tan's built-in pin "
-                f"{ZEPHYR_PYTHON_FLOOR[0]}.{ZEPHYR_PYTHON_FLOOR[1]} -- {path} was "
+            return fallback_floor, (
+                f"Zephyr's PYTHON_MINIMUM_REQUIRED, from {fallback_label} -- {path} was "
                 f"read but did not declare a parseable PYTHON_MINIMUM_REQUIRED"
             )
-        return ZEPHYR_PYTHON_FLOOR, (
-            f"Zephyr's PYTHON_MINIMUM_REQUIRED, from tan's built-in pin "
-            f"{ZEPHYR_PYTHON_FLOOR[0]}.{ZEPHYR_PYTHON_FLOOR[1]} -- {path} could not "
+        return fallback_floor, (
+            f"Zephyr's PYTHON_MINIMUM_REQUIRED, from {fallback_label} -- {path} could not "
             f"be read (a `.west` workspace mid-`west update` is a legitimate, "
             f"working-in-progress host state, not a broken one)"
         )
-    return ZEPHYR_PYTHON_FLOOR, (
-        f"Zephyr's PYTHON_MINIMUM_REQUIRED, from tan's built-in pin "
-        f"{ZEPHYR_PYTHON_FLOOR[0]}.{ZEPHYR_PYTHON_FLOOR[1]} -- no $ZEPHYR_BASE "
+    return fallback_floor, (
+        f"Zephyr's PYTHON_MINIMUM_REQUIRED, from {fallback_label} -- no $ZEPHYR_BASE "
         f"workspace on this host to read `cmake/modules/python.cmake` from"
     )
 
@@ -2538,6 +2559,17 @@ def _load_manifest(sdk_root: str | None) -> ManifestLoad:
     west = facts.get("west")
     if isinstance(west, dict):
         prerequisites = {**prerequisites, "_pipSpec": west.get("pipSpec")}
+    # tan-cli#606: `zephyr.pythonMinVersion` is a SEPARATE, Zephyr-scoped
+    # floor from `prerequisites.pythonMinVersion` above (alp-sdk#1078) -- not
+    # a duplicate of it. Injected onto the returned `prerequisites` dict the
+    # same way `_pipSpec` is, so `_zephyr_manifest_floor_from_facts` has one
+    # place to read it from without a second manifest parse.
+    zephyr = facts.get("zephyr")
+    if isinstance(zephyr, dict) and isinstance(zephyr.get("pythonMinVersion"), str):
+        prerequisites = {
+            **prerequisites,
+            "_zephyrPythonMinVersion": zephyr["pythonMinVersion"],
+        }
     return ManifestLoad(prerequisites, f"facts from alp-sdk {path}", None, is_real=True)
 
 
@@ -2546,6 +2578,18 @@ def _manifest_floor_from_facts(facts: dict) -> tuple[int, int]:
     absent/unparseable -- shared by `_collect` and `resolve_manifest_python_floor`
     so the two never parse the same field two different ways."""
     return _parse_two(str(facts.get("pythonMinVersion") or "")) or FALLBACK_PYTHON_FLOOR
+
+
+def _zephyr_manifest_floor_from_facts(facts: dict) -> tuple[int, int] | None:
+    """The `zephyr.pythonMinVersion` `facts` declares (tan-cli#606), or `None`
+    when absent/unparseable/no manifest resolved at all -- callers fall back
+    to `ZEPHYR_PYTHON_FLOOR` in that case, same as before this field existed.
+    Unlike `_manifest_floor_from_facts`, `None` is a normal result, not a
+    degraded one: most manifests on disk today predate this key."""
+    raw = facts.get("_zephyrPythonMinVersion")
+    if not isinstance(raw, str):
+        return None
+    return _parse_two(raw)
 
 
 def resolve_manifest_python_floor(sdk_root: str | None) -> tuple[tuple[int, int], str]:
@@ -3220,7 +3264,14 @@ def _collect(
         if workspace_path is not None
         else os.environ.get("ZEPHYR_BASE")
     )
-    zephyr_floor, zephyr_source = zephyr_python_floor(zephyr_source_base)
+    # tan-cli#606: when no workspace resolves, prefer alp-sdk's OWN declared
+    # `zephyr.pythonMinVersion` over `ZEPHYR_PYTHON_FLOOR` -- same `facts`
+    # dict `manifest_floor` above already reads, so this is not a second
+    # manifest parse.
+    zephyr_manifest_floor = _zephyr_manifest_floor_from_facts(facts)
+    zephyr_floor, zephyr_source = zephyr_python_floor(
+        zephyr_source_base, manifest_zephyr_floor=zephyr_manifest_floor
+    )
     # The EFFECTIVE floor: the highest anything in the build chain enforces. The
     # manifest is not the authority here -- it is one of two claimants.
     effective_floor = max(manifest_floor, zephyr_floor)
