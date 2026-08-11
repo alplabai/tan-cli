@@ -415,6 +415,41 @@ All notable changes to `tan` are documented here. Format follows
   takes it as a keyword-only `manifest_zephyr_floor` argument that now
   outranks the constant; `ZEPHYR_PYTHON_FLOOR` is the last resort, not the
   routine case. Closes #606.
+
+- **New regression test for the SoM chip-driver Kconfig rule
+  (`_chip_has_driver`, alp-sdk#1241) tan already carries.** alp-sdk#1380's
+  on-silicon runbook reported (tan-cli#654) that `tan build` aborted every AEN
+  Zephyr slice at Kconfig with `attempt to assign the value 'y' to the
+  undefined symbol ALP_SDK_CHIP_DP83825` -- `metadata/e1m_modules/E1M-AEN*`
+  gained `ethernet_phy: dp83825` (`driver_status: none`, no `chips/dp83825/`
+  directory) upstream, and the AEN example's emitted `alp.conf` carried the
+  line while alp-sdk's own `--emit zephyr-conf` did not. Measured against
+  this tree: the fix already landed here via the tan-cli#582/#593 planner
+  re-syncs (`kconfig.py::_chip_has_driver`, ported verbatim from alp-sdk
+  bc73b66c, itself alp-sdk#1241) -- `tan.planner`'s `--emit zephyr-conf` is
+  byte-identical to alp-sdk's own emitter for every `examples/aen/*`
+  `board.yaml`, no `CONFIG_ALP_SDK_CHIP_DP83825` line anywhere, confirmed
+  against alp-sdk `origin/dev` `496e32ad`.
+  `tests/core/test_chip_kconfig_needs_a_driver.py` is the dedicated
+  regression this needed and did not have: a hermetic, GENERIC assertion
+  (not scoped to "dp83825" by name) that feeds every driverless chip
+  manifest the bound SDK ships through `_emit_chips` via a synthetic
+  `on_module:` block and checks the OUTPUT -- not an earlier parametrized
+  form that asserted `_chip_has_driver`'s own body against itself and could
+  not fail -- plus the concrete AEN case end to end through the same
+  function. Verified against the unfixed shape (the `_chip_has_driver`
+  filter line removed from `_emit_chips`) before landing: 2 failed / 3
+  passed -> 5 passed, with the generic assertion itself now among the
+  failures (it names all five driverless chips, not just dp83825).
+  Freshness-pin note, measured rather than assumed: `kconfig.py` and
+  `slugs.py` (the two files this rule lives in) are byte-identical between
+  the pinned SDK audit commit and current alp-sdk `origin/dev` -- no re-pin
+  needed for this fix. Four OTHER `tan/planner/` mirror files (`loader.py`,
+  `manifest.py`, `models.py`, `orchestrator.py`) HAVE drifted since the pin,
+  from two unrelated alp-sdk commits (`c3de155a`, `496e32ad`, both
+  `swd_probe`/`jlink_device` metadata) -- out of scope here; it is the same
+  seam tan-cli#353 already tracks. Closes #654.
+
 - **The test suite no longer means two different things on two machines: the
   debug/flash probe inventory is now a property of the test, not of the host.**
   A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
