@@ -89,6 +89,7 @@ from tan.commands.build.execute import (
     KNOWN_BACKENDS,
     SliceOutcome,
     execute_slices,
+    last_configure_cache_issues,
     last_manifest_write_failure,
     last_sdk_switch_issues,
     reset_last_manifest_write,
@@ -1596,6 +1597,10 @@ def _build(
     # `build.sdk-switch-pristine` for the wipe itself, `-failed` when the
     # wipe could not fully land.
     issues.extend(last_sdk_switch_issues())
+    # tan-cli#655: the stale-configure-cache reset must not be stderr-only in
+    # JSON mode either -- same reasoning as the sdk-switch-pristine wipe
+    # immediately above.
+    issues.extend(last_configure_cache_issues())
 
     manifest_reason = last_manifest_write_failure()
     if manifest_reason is not None:
