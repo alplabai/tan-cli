@@ -154,6 +154,58 @@ def test_zephyr_floor_falls_back_to_the_pinned_constant_with_no_workspace():
     assert "built-in" in source
 
 
+def test_zephyr_floor_prefers_the_manifest_declared_value_over_the_pinned_constant():
+    """tan-cli#606: alp-sdk's own `zephyr.pythonMinVersion` -- a live fact
+    already resolved out of the manifest, not a constant compiled into tan --
+    now outranks `ZEPHYR_PYTHON_FLOOR` when no workspace resolves to read
+    `python.cmake` from directly (every host at `tan bootstrap` time, and any
+    `tan doctor` run against an unbootstrapped host). `(3, 99)` cannot have
+    come from anywhere else, so this proves the value is READ, not
+    coincidentally equal to the pin (today both are `3.12`)."""
+    floor, source = doctor_cmd.zephyr_python_floor(None, manifest_zephyr_floor=(3, 99))
+    assert floor == (3, 99)
+    assert "zephyr.pythonMinVersion" in source
+    assert "built-in" not in source
+
+
+def test_load_manifest_surfaces_the_zephyr_scoped_floor_distinct_from_prerequisites(tmp_path):
+    """tan-cli#606: `metadata/bootstrap.json` carries TWO independently
+    declared `pythonMinVersion` keys -- `prerequisites.pythonMinVersion`
+    (host-universal, read by `_manifest_floor_from_facts`) and
+    `zephyr.pythonMinVersion` (Zephyr-scoped, alp-sdk#1078, read by
+    `_zephyr_manifest_floor_from_facts`). `_load_manifest` must surface both,
+    distinctly -- not silently drop the second, and not conflate the two into
+    one number."""
+    sdk_root = tmp_path / "sdk"
+    (sdk_root / "metadata").mkdir(parents=True)
+    manifest = {
+        "schemaVersion": 1,
+        "zephyr": {
+            "version": "v4.4.1",
+            "requirementsPath": "zephyr/scripts/requirements.txt",
+            "pythonMinVersion": "3.14",
+        },
+        "venv": {"dirName": ".venv", "posixBinDir": "bin", "windowsBinDir": "Scripts"},
+        "prerequisites": {
+            "posix": ["git"],
+            "windows": ["git"],
+            "pythonMinVersion": "3.10",
+            "install": {},
+        },
+        "west": {"pipSpec": "west==1.2.0"},
+        "env": {},
+        "nativeLibHints": {},
+        "manualInstallHints": {"windows": {"note": []}},
+    }
+    (sdk_root / "metadata" / "bootstrap.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = doctor_cmd._load_manifest(str(sdk_root))
+
+    assert loaded.is_real
+    assert doctor_cmd._manifest_floor_from_facts(loaded.facts) == (3, 10)
+    assert doctor_cmd._zephyr_manifest_floor_from_facts(loaded.facts) == (3, 14)
+
+
 def test_zephyr_floor_survives_an_unreadable_cmake_file(tmp_path):
     """A directory where a file is expected, undecodable bytes, no match at all
     -- every one is a fallback, never an exception."""
