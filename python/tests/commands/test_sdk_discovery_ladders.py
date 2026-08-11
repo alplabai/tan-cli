@@ -139,6 +139,18 @@ def test_the_narrow_side_names_the_checkout_the_wide_ladder_would_have_taken(tmp
     assert str(lateral).replace("\\", "/") in issue.message
 
 
+#: The exact sentence `scripts/e2e-full.sh`'s two #407 assertions grep for --
+#: one positive, one negative control. Pinned here because NOTHING else pins
+#: it: the unit suite keys on `DIVERGENCE_CODE`, and no workflow runs
+#: `e2e-full.sh` at all (`grep -rn e2e-full.sh .github/workflows/` finds
+#: nothing), so a reword of `doctor_cmd.py`'s message would leave every CI job
+#: green while the harness's positive assertion fabricates a product defect and
+#: its negative control silently reverts to un-fireable. That second half is
+#: exactly the tan-cli#500 defect the harness was just fixed for, one string
+#: over. Reword the message and this fails, naming the file to update.
+E2E_DIVERGENCE_PHRASE = "resolve a DIFFERENT checkout"
+
+
 def test_the_wide_side_names_the_checkout_the_narrow_ladder_would_have_taken(tmp_path):
     workspace, child, lateral = _divergent_layout(tmp_path)
 
@@ -471,6 +483,21 @@ def test_doctor_reports_the_divergence_as_a_check_not_as_a_single_root(tmp_path)
     assert "doctor.sdk" not in codes, (
         "the check must carry the shared code, not the derived `doctor.<name>` "
         "one -- a consumer correlating two envelopes matches on the code"
+    )
+
+    # A FOURTH thing that can regress independently, and the only one nothing
+    # else covers (tan-cli#500). `scripts/e2e-full.sh` greps this sentence in
+    # both its #407 assertions -- the positive one and the negative control --
+    # and no workflow runs that harness at all, so a reword here would leave
+    # every CI job green while the positive assertion fabricates a product
+    # defect and the control silently reverts to un-fireable. The control being
+    # un-fireable is the defect #500 was opened for, one string over.
+    assert E2E_DIVERGENCE_PHRASE in check["detail"], (
+        f"scripts/e2e-full.sh greps {E2E_DIVERGENCE_PHRASE!r} in both its #407 "
+        f"assertions and nothing else pins it -- the rest of this suite keys on "
+        f"{DIVERGENCE_CODE!r}. Reword doctor's message and that harness starts "
+        f"lying in both directions, silently. Update scripts/e2e-full.sh in the "
+        f"same change.\n\ndetail was: {check['detail']!r}"
     )
 
 
