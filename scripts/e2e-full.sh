@@ -1140,9 +1140,28 @@ fi
 # (plain POSIX), $D407 is already in that form, so the fallback is a no-op.
 divpath() { command -v cygpath >/dev/null 2>&1 && cygpath -m "$1" || printf '%s\n' "$1"; }
 D407_WS_ALP_SDK="$(divpath "$D407/ws/alp-sdk")"
-if grep -q "resolve a DIFFERENT checkout" "$WORK/div-doctor.txt"    && grep -qF "$D407_WS_ALP_SDK" "$WORK/div-doctor.txt"; then
+# NEVER grep doctor's PROSE line by line (tan-cli#500). doctor's text renderer
+# wraps every check block at `shutil.get_terminal_size(fallback=(100,24)).columns`
+# UNCONDITIONALLY -- unlike `tan.env.wrap_width` it does not consult isatty, so
+# a redirected stream still wraps at 100 -- and the two absolute paths
+# interpolated ahead of this sentence move the wrap point with the harness's own
+# $WORK length. Measured: at len($WORK) >= 40 the sentence straddles a line
+# break (non-monotonic -- 53-55 happens to re-match, 56+ fails again), `grep -q`
+# misses, and this assertion scored a FABRICATED product defect against a report
+# that named both checkouts plainly, then exited 1. Flatten the wrapping first.
+#
+# The PATH half deliberately keeps grepping the unflattened file: `wrap_block`
+# passes `break_long_words=False`, so a path token always survives intact on its
+# own line, and `grep -qF` on the raw text is the stricter check of the two.
+flatprose() { tr '\n' ' ' < "$1" | tr -s ' '; }
+if flatprose "$WORK/div-doctor.txt" | grep -q "resolve a DIFFERENT checkout"    && grep -qF "$D407_WS_ALP_SDK" "$WORK/div-doctor.txt"; then
   ok "#407: doctor's text report names the second checkout"
-  note "$(grep -o "warn\] sdk: .*resolve a DIFFERENT checkout" "$WORK/div-doctor.txt" | head -1)"
+  # `[^[]*`, not `.*`: flattening puts the whole report on ONE line, where a
+  # greedy `.*` runs past the `sdk` check into every later one that happens to
+  # contain the phrase. Measured on a three-check sample: 210 chars greedy vs
+  # 107 bounded, the greedy match swallowing an unrelated `[   ok] zephyr`
+  # block. Stopping at the next `[` keeps the note inside its own check.
+  note "$(flatprose "$WORK/div-doctor.txt" | grep -o "warn\] sdk: [^[]*resolve a DIFFERENT checkout" | head -1)"
 else
   bad "#407: doctor's text report is silent about the second checkout"
   note "$(grep -E "^\[.*\] sdk:" "$WORK/div-doctor.txt" | head -1)"
@@ -1155,7 +1174,14 @@ mkdir -p "$D407B/alp-sdk/scripts" "$D407B/ws"
 : > "$D407B/alp-sdk/scripts/alp_project.py"
 cd "$D407B/ws" >/dev/null 2>&1 || true
 "$TAN" doctor >"$WORK/div-single.txt" 2>&1
-if grep -q "sdkDiscoveryDivergent" "$WORK/div-single.txt"; then
+# Keyed on the SAME sentence the positive assertion above uses, and for the same
+# reason its comment gives. This control was still grepping `sdkDiscoveryDivergent`
+# -- the check name that reconciliation deleted -- so it matched nothing on any
+# host and scored a PASS unconditionally (tan-cli#500). Measured: the string
+# exists nowhere in `python/` or `contract/`, only in this file. A negative
+# control that cannot fire is not a control; it is the thing it was written to
+# catch, one assertion later.
+if flatprose "$WORK/div-single.txt" | grep -q "resolve a DIFFERENT checkout"; then
   bad "#407: divergence reported on a host with ONE checkout"
 else
   ok "#407: silent on a host with one checkout"
