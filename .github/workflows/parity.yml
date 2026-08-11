@@ -407,7 +407,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # On a `repository_dispatch` the workflow FILE has to come from the
@@ -478,7 +478,7 @@ jobs:
           fi
 
       - name: clone alp-sdk
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
@@ -665,7 +665,7 @@ jobs:
           echo "::notice::planner-relocation-freshness audited against alp-sdk ${commit}"
 
       - name: clone alp-sdk at the planner audit commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
@@ -707,7 +707,7 @@ jobs:
           echo "::notice::hand-port-relocation-freshness audited against alp-sdk ${commit}"
 
       - name: clone alp-sdk at the hand-port audit commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
@@ -738,7 +738,7 @@ jobs:
           echo "::notice::strict-loaders-relocation-freshness audited against alp-sdk ${commit}"
 
       - name: clone alp-sdk at the strict-loaders audit commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
@@ -917,7 +917,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # On a `repository_dispatch` the workflow FILE has to come from the
@@ -970,7 +970,7 @@ jobs:
           fi
 
       - name: clone alp-sdk
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
@@ -1244,7 +1244,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
@@ -1286,7 +1286,7 @@ jobs:
       # 2 by design. A dedicated parent is what the guard asks for and what
       # README tells customers to do -- this job runs the documented layout.
       - name: clone alp-sdk into a dedicated workspace parent
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
@@ -1563,7 +1563,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # Same rule as every other job in this file -- see seam1's comment.
@@ -1596,7 +1596,7 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: clone alp-sdk
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
