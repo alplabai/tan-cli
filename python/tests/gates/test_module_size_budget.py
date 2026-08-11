@@ -195,28 +195,50 @@ _MODULE_BUDGET: dict[str, int] = {
     # the docstring paragraph recording why the field is required and
     # keyword-only. The two definitions and the judgement calls did NOT land
     # here: they are in `tan/core/doctor_scope.py`, well under its own cap.
-    # 3813, not 3762 (this branch alone) and not 3747 (dev alone): both
-    # landed. tan-cli#606's manifest-declared `zephyr.pythonMinVersion`
-    # fallback (alp-sdk#1078) and the alp-sdk `_check_libraries` port are
-    # independent additions to the same file, so the merged length is neither
-    # side's pin. Re-measured after the merge with this gate's own
-    # `len(read_text().splitlines())` -- never carried across from either
-    # branch, because a padded pin passes this ratchet silently.
+    # 3849, not 3813 (dev alone, #606 + the libraries port) and not 3758
+    # (this branch alone, tan-cli#641): all three landed. #606's
+    # manifest-declared `zephyr.pythonMinVersion` fallback, the alp-sdk
+    # `_check_libraries` port, and #641's two false-negative fixes are
+    # independent additions to the same file, so the merged length is none
+    # of the three sides' pins. Re-measured after the merge with this
+    # gate's own `len(read_text().splitlines())` -- never carried across
+    # from any branch, because a padded pin passes this ratchet silently.
     #
-    # The #606 half: the new `manifest_zephyr_floor` parameter, its
+    # The #606 slice: the new `manifest_zephyr_floor` parameter, its
     # fallback/label derivation, the `_load_manifest` injection of
     # `_zephyrPythonMinVersion` (mirroring `_pipSpec`), and
     # `_zephyr_manifest_floor_from_facts`.
     #
-    # The libraries half (ADR-0020 end-state B -- the user command surface is
-    # `tan`, so alp-sdk does not keep a second CLI reporting on its library
-    # layer): only `libraries_check` (the outcome -> `Check` mapping, trimmed
-    # to exactly 50 lines rather than moving the function ratchet) and its
-    # thirteen-line `_collect` wiring. The resolution -- the raw `libraries:`
-    # peek, the planner bind, `scoped_names`/`resolve_selection` and the two
-    # defects the port fixed -- lives in `tan/core/doctor_libraries.py`, for
-    # the same reason `doctor_scope.py` took the #549 half.
-    "tan/commands/doctor_cmd.py": 3813,
+    # The libraries slice (ADR-0020 end-state B -- the user command surface
+    # is `tan`, so alp-sdk does not keep a second CLI reporting on its
+    # library layer): only `libraries_check` (the outcome -> `Check`
+    # mapping, trimmed to exactly 50 lines rather than moving the function
+    # ratchet) and its thirteen-line `_collect` wiring. The resolution --
+    # the raw `libraries:` peek, the planner bind, `scoped_names`/
+    # `resolve_selection` and the two defects the port fixed -- lives in
+    # `tan/core/doctor_libraries.py`, for the same reason `doctor_scope.py`
+    # took the #549 slice.
+    #
+    # The #641 slice: two false negatives fixed on the same host-readiness
+    # question a bench operator asks doctor before an MRAM write.
+    # `setools_check` no longer infers a flash failure from ANY
+    # interpreter's `fdt` importability -- `app-gen-toc` is a spawned
+    # subprocess, never a Python import, and SETOOLS ships its own
+    # dependencies, so that inference was false on real AEN silicon even
+    # after tan-cli#488 defect 6 pointed it at the workspace venv's own
+    # interpreter (removed the `has_fdt` parameter/branch, plus the
+    # now-dead `_has_module`/`_module_importable` helpers -- a net line
+    # DROP on their own). The J-Link version probe used to pass
+    # `[jlink_exe, "-?"]`, a flag JLinkExe does not have (`Unknown command
+    # line option -?.`), so it never once reached the version banner
+    # JLinkExe prints unprompted on every real invocation; the new
+    # `jlink_banner` helper reads that banner instead (spawned with
+    # `-NoGui 1`, matching every other J-Link spawn in this repo), regardless
+    # of exit code, since the banner is already printed by the time
+    # Commander decides how to exit -- except against the `JLinkGDBServerCL`
+    # fallback name, which never quits on the banner probe's `exit\n` and is
+    # excluded from the call at `_collect`'s call site instead.
+    "tan/commands/doctor_cmd.py": 3849,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
