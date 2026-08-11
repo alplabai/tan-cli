@@ -290,11 +290,21 @@ _MODULE_BUDGET: dict[str, int] = {
     # Two functions LEFT this file in the same change (`_manifest_points_at`,
     # `_same_directory`, both moved down to `tan/core/bootstrap.py`), so the
     # figure is net of that removal.
-    # 3072, not 3070, as of tan-cli#606: `resolve_python_floor` now passes
-    # `facts.zephyr_python_min_version` into `zephyr_python_floor` and its
-    # docstring gained the extra sentence explaining why. Re-measured with
-    # this gate's own walk.
-    "tan/commands/bootstrap_cmd.py": 3072,
+    # 3219, not 3217 (this branch alone) and not 3072 (dev alone): both
+    # landed. tan-cli#644's project-pin authority work and #640's
+    # zephyr.pythonMinVersion floor are independent additions to the same
+    # file. Re-measured after the merge with this gate's own
+    # `len(read_text().splitlines())` -- never carried across from either
+    # side, because a padded pin passes this ratchet silently.
+    # 3236, not 3219, as of tan-cli#644 review round 2: the nested-project
+    # rollback regression fix. `_relocate_project_pin` gained a second
+    # `restore_root` parameter (the PRE-relocation project root) so
+    # `_undo_relocation` restores the pin under the location the checkout
+    # actually moves BACK to, not the post-relocation path it already
+    # vacated by the time the restore runs -- plus the docstring explaining
+    # why `root` and `restore_root` must differ. Re-measured with this
+    # gate's own walk.
+    "tan/commands/bootstrap_cmd.py": 3236,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
     # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
@@ -2338,8 +2348,18 @@ _MIRRORED = ("tan/planner/",)
 # 707 -> 711, MEASURED by this gate's own `_long_functions` walk on the final
 # tree -- `bootstrap_cmd.py:_run` is still the package's single longest
 # function.
+#
+# tan-cli#644: `_run` moves again, 711 -> 728, for the call site described
+# above the `_MODULE_BUDGET` entry (`previous_project_pin, project_pin_root =
+# _relocate_project_pin(...)` plus the comment explaining why it is gated on
+# `active_tier == "projectPin"`). `_FUNCTION_COUNT_BUDGET` is UNTOUCHED: the
+# naive inline version pushed `_undo_relocation` (34 -> 54) over the 50-line
+# cap and would have moved this to 247, which is exactly why the rollback
+# side was pulled into its own `_restore_project_pin` function instead --
+# `_undo_relocation` measures 48 here, still under the cap, so the count of
+# over-cap functions in the package is unchanged at 246.
 _FUNCTION_COUNT_BUDGET = 246
-_FUNCTION_WORST_BUDGET = 711
+_FUNCTION_WORST_BUDGET = 728
 
 
 def _modules() -> list[Path]:
