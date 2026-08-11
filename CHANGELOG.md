@@ -310,6 +310,34 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **An AEN Flow D flash no longer needs a hand-edited `system-manifest.yaml`
+  for `flash_args.expect_dpidr`, `jlink_device`, or `slot0_load_address` --
+  tan's OWN in-process planner resolves and emits all three now, not just
+  `jlink_flash_device`.** tan-cli#353, reopened by a bench run on real
+  E1M-AEN801 silicon: the planner (`tan/planner/loader.py` +
+  `tan/planner/orchestrator.py`) was relocated from an alp-sdk commit that
+  predates both alp-sdk #1362 (the `expect_dpidr`/`jlink_device` wrong-board
+  preflight pair) and alp-sdk PR #1374 (`slot0_load_address`, the Flow D
+  auto-sign address) -- so once alp-sdk's OWN emitter started publishing
+  those keys, a project built end-to-end through `tan alone` (which plans
+  in-process, never shelling `alp_project.py`) still never carried them.
+  Measured, not assumed: alp-sdk's emitter and tan's `system-manifest.yaml`
+  were diffed over the identical `board.yaml`, and the delta was exactly
+  these three keys. `loader.py` gains `_resolve_variant_debug` (the SoC
+  `debug:` block match, shared by `jlink_flash_device` and the new facts so
+  a third one cannot drift onto a differently-resolved variant),
+  `_resolve_flow_d_preflight` + `_enforce_flow_d_preflight_pair` (ported
+  from alp-sdk #1362 -- a half-armed `expect_dpidr`/`jlink_device` pair is a
+  CODED refusal naming the core id and the remedy, never a silent unguarded
+  write), and `_resolve_slot0_load_address` (ported from alp-sdk PR #1374,
+  open as of this fix -- see that PR for the upstream half; reuses tan's own
+  already-relocated `zephyr_board._aen_role_slot0_map` so the two paths
+  cannot resolve a disjoint-slot0 override differently, and re-raises a
+  half-authored `memory_map:` override as a coded refusal naming the core
+  rather than guessing the stock address). Non-AEN and non-Flow-D slices are
+  unaffected -- `flash_args` stays exactly as before for every slice whose
+  SoC variant publishes no `jlink_flash_device`.
+
 - **`tan doctor` and `tan bootstrap` now read alp-sdk's own Zephyr-scoped
   Python floor (`zephyr.pythonMinVersion`) instead of a hardcoded constant
   when no `$ZEPHYR_BASE` workspace resolves to read `python.cmake` from

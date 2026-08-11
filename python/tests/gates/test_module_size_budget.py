@@ -1422,7 +1422,20 @@ _MODULE_BUDGET: dict[str, int] = {
     # outright) and replaces it with the five-line comment recording that
     # measurement -- a net +1. Despite the `docs(accuracy)` subject line, this
     # is a behavioural change, which is why it was ported rather than skipped.
-    "tan/planner/loader.py": 1016,
+    # 1228, not 1016, as of tan-cli#353 (reopened): tan's OWN in-process
+    # planner never resolved `flash_args.expect_dpidr` / `jlink_device` /
+    # `slot0_load_address` for an AEN Flow D slice (it was ported from an
+    # alp-sdk commit that predates both alp-sdk #1362 and #1374), so a
+    # project built end-to-end through `tan` alone silently dropped all
+    # three even once alp-sdk's own emitter started publishing them. Ported
+    # `_resolve_variant_debug` / `_resolve_flow_d_preflight` /
+    # `_enforce_flow_d_preflight_pair` (alp-sdk #1362) and
+    # `_resolve_slot0_load_address` (alp-sdk #1374) in, and wired all three
+    # into `_slice_from_resolved` + `_validate_topology_cores` -- a net
+    # +212 lines, most of it the same behaviour-critical prose alp-sdk
+    # itself carries next to this logic (why a half-armed preflight pair or
+    # a half-authored `memory_map:` override must refuse rather than guess).
+    "tan/planner/loader.py": 1228,
     # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
     # carries `foreign_global_default_for` through into `_Sdk`, and `init`
     # surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk` writes
@@ -2306,7 +2319,22 @@ _MIRRORED = ("tan/planner/",)
 # 707 -> 711, MEASURED by this gate's own `_long_functions` walk on the final
 # tree -- `bootstrap_cmd.py:_run` is still the package's single longest
 # function.
-_FUNCTION_COUNT_BUDGET = 246
+#
+# 246 -> 248, as of tan-cli#353 (reopened): porting alp-sdk #1362 /
+# `loader.py`'s `_resolve_jlink_flash_device(som_preset, soc_spec)` (55
+# lines) split into a NEW `_resolve_variant_debug` (the shared variant
+# match, 50 lines -- not over the cap) and a shrunk
+# `_resolve_jlink_flash_device(debug)` (18 lines, drops OUT of the long-
+# function set, -1); `_slice_from_resolved` grows a docstring paragraph plus
+# three new parameters, 39 -> 54 (+1, newly over); `orchestrator.py`'s
+# `_slice_flash_recipe` grows the `expect_dpidr`/`jlink_device`/
+# `slot0_load_address` arms plus the comment explaining each, 37 -> 58 (+1,
+# newly over); and the wholly new `_resolve_slot0_load_address` (62 lines,
+# +1) ports alp-sdk #1374. Net -1 + 1 + 1 + 1 = +2, MEASURED by this gate's
+# own `_long_functions` walk, not computed. `_FUNCTION_WORST_BUDGET` is
+# untouched -- `bootstrap_cmd.py:_run` at 711 is still the package's single
+# longest function; nothing this change touched comes close.
+_FUNCTION_COUNT_BUDGET = 248
 _FUNCTION_WORST_BUDGET = 711
 
 

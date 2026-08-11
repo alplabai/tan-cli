@@ -68,9 +68,30 @@ def _slice_flash_recipe(
         # downstream consumer (tan) needs to pick that path over the
         # SETOOLS/SE-UART fallback. Absent for every non-AEN slice today,
         # so the args dict stays `{}` -- no shape change for them.
+        #
+        # `expect_dpidr` / `jlink_device` (tan-cli#353, porting alp-sdk
+        # #1362) are the wrong-board SW-DP IDR preflight PAIR --
+        # `loader._resolve_flow_d_preflight` guarantees the both-or-neither
+        # shape upstream; the `and` here makes that guarantee locally
+        # readable rather than assumed at a distance.
+        #
+        # `slot0_load_address` (tan-cli#353) is the AEN MRAM slot0-XIP
+        # address the slice's application blob is linked at -- the fact
+        # Flow D's auto-sign-via-SETOOLS path needs and, before this, tan's
+        # OWN planner never resolved, so tan correctly armed Flow D and
+        # then refused (`flash_args.slot0_load_address is required`),
+        # forcing a customer to hand-edit `system-manifest.yaml` even after
+        # alp-sdk started emitting it. Independent of the `expect_dpidr`/
+        # `jlink_device` pair above -- see
+        # `loader._resolve_slot0_load_address` for where it comes from.
         args: dict[str, Any] = {}
         if slice_.jlink_flash_device:
             args["jlink_flash_device"] = slice_.jlink_flash_device
+        if slice_.expect_dpidr and slice_.jlink_device:
+            args["expect_dpidr"] = slice_.expect_dpidr
+            args["jlink_device"] = slice_.jlink_device
+        if slice_.slot0_load_address:
+            args["slot0_load_address"] = slice_.slot0_load_address
         return ("zephyr_west_flash", args)
     if slice_.os == "baremetal":
         return ("baremetal_cmake_flash", {})
