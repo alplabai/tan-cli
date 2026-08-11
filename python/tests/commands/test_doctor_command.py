@@ -1355,19 +1355,38 @@ def test_zephyr_workspace_now_runs_unconditionally_not_only_under_build(tmp_path
 # --------------------------------------------------------------------------
 
 
-def test_setools_check_names_both_env_vars_the_fdt_package_and_the_alif_download():
-    check = doctor_cmd.setools_check(
-        setools_dir=None, se_uart=None, has_fdt=False, is_linux=True
-    )
+def test_setools_check_names_both_env_vars_and_the_alif_download():
+    check = doctor_cmd.setools_check(setools_dir=None, se_uart=None, is_linux=True)
     assert check.status == "warn"
     blob = f"{check.detail} {check.fix}"
-    for token in ("SETOOLS_DIR", "SE_UART", "fdt", "app-release-exec-linux"):
+    for token in ("SETOOLS_DIR", "SE_UART", "app-release-exec-linux"):
         assert token in blob, f"the SETOOLS check never mentions {token}"
+
+
+def test_setools_check_no_longer_infers_anything_from_a_hosts_fdt_importability(tmp_path):
+    """tan-cli#641: `fdt` was genuinely unimportable on a real AEN bench host
+    that flashed MRAM fine, even after tan-cli#488 defect 6 pointed the probe
+    at the workspace venv's own interpreter -- `app-gen-toc` is a spawned
+    subprocess, never a Python import under any interpreter, and SETOOLS
+    ships its own dependencies. A fully-provisioned host (SETOOLS_DIR +
+    SE_UART, both real) must pass -- there is no parameter left to fail it
+    over ANY interpreter's `fdt` importability, and reverting `setools_check`
+    to take one back (as `has_fdt=`) must fail this call outright."""
+    import inspect
+
+    assert "has_fdt" not in inspect.signature(doctor_cmd.setools_check).parameters
+    (tmp_path / "app-gen-toc").write_text("", encoding="utf-8")
+    (tmp_path / "app-write-mram").write_text("", encoding="utf-8")
+    check = doctor_cmd.setools_check(
+        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", is_linux=True
+    )
+    assert check.status == "pass"
+    assert "fdt" not in check.detail
 
 
 def test_setools_dir_pointing_somewhere_without_app_gen_toc_is_reported(tmp_path):
     check = doctor_cmd.setools_check(
-        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", has_fdt=True, is_linux=True
+        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", is_linux=True
     )
     assert check.status == "warn"
     assert "app-gen-toc" in check.detail
@@ -1377,7 +1396,7 @@ def test_a_fully_provisioned_setools_host_passes(tmp_path):
     (tmp_path / "app-gen-toc").write_text("", encoding="utf-8")
     (tmp_path / "app-write-mram").write_text("", encoding="utf-8")
     check = doctor_cmd.setools_check(
-        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", has_fdt=True, is_linux=True
+        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", is_linux=True
     )
     assert check.status == "pass"
 
@@ -1385,56 +1404,18 @@ def test_a_fully_provisioned_setools_host_passes(tmp_path):
 def test_setools_is_unknown_not_warn_off_linux():
     """`alif_flash.py` hard-codes `app-release-exec-linux`; there is no verdict
     to give a Windows/macOS host, and `unknown` counts in no summary bucket."""
-    check = doctor_cmd.setools_check(
-        setools_dir=None, se_uart=None, has_fdt=False, is_linux=False
-    )
+    check = doctor_cmd.setools_check(setools_dir=None, se_uart=None, is_linux=False)
     assert check.status == "unknown"
     assert "app-release-exec-linux" in check.detail
 
 
-def test_module_importable_asks_the_given_interpreter_not_tans_own():
-    """tan-cli#488 defect 6: `_module_importable(python_exe, name)` must
-    probe `python_exe` -- a REAL subprocess spawn, `os` (always importable)
-    vs a name that certainly is not, both under `sys.executable` standing in
-    for "some other interpreter"."""
-    assert doctor_cmd._module_importable(sys.executable, "os") is True
-    assert (
-        doctor_cmd._module_importable(sys.executable, "tan_cli_488_no_such_module")
-        is False
-    )
-
-
-def test_module_importable_falls_back_to_tans_own_interpreter_with_no_venv():
-    """`python_exe is None` (no workspace venv resolved yet, e.g. before `tan
-    bootstrap` has run) falls back to `_has_module`, against tan's own
-    interpreter -- the best available signal before there is anything else
-    to ask."""
-    assert doctor_cmd._module_importable(None, "os") == doctor_cmd._has_module("os")
-
-
-def test_collect_asks_the_workspace_venvs_python_for_fdt_not_tans_own(
-    tmp_path, monkeypatch
-):
-    """The `_collect` wiring: `setools_check`'s `has_fdt` argument must come
-    from `_module_importable(venv_python(workspace_root, sdk_root), "fdt")`
-    -- the interpreter `west flash` actually runs `app-gen-toc` under -- never
-    a bare `_has_module("fdt")` against tan's own interpreter. Proven by
-    substituting a sentinel `venv_python` and recording what
-    `_module_importable` was actually called with, rather than asserting on
-    `has_fdt`'s boolean value alone (which cannot distinguish "asked the
-    right interpreter and got False" from "asked the wrong one entirely").
-    """
-    sentinel = "/some/workspace/.venv/bin/python"
-    monkeypatch.setattr(doctor_cmd, "venv_python", lambda *_a, **_k: sentinel)
-    calls: list[tuple[str | None, str]] = []
-
-    def _record(python_exe, name):
-        calls.append((python_exe, name))
-        return True
-
-    monkeypatch.setattr(doctor_cmd, "_module_importable", _record)
-    doctor_cmd._collect(None, workspace_root=str(tmp_path))
-    assert (sentinel, "fdt") in calls, calls
+def test_module_importable_and_has_module_no_longer_exist():
+    """tan-cli#641 removed both -- `_module_importable`/`_has_module` existed
+    only to feed `setools_check`'s now-deleted `fdt` probe (tan-cli#488
+    defect 6); nothing else in this module reads a host or venv interpreter's
+    `sys.path`."""
+    assert not hasattr(doctor_cmd, "_module_importable")
+    assert not hasattr(doctor_cmd, "_has_module")
 
 
 # --------------------------------------------------------------------------
@@ -1464,6 +1445,129 @@ def test_jlink_present_with_an_unreadable_version_still_reports_the_requirements
     check = doctor_cmd.jlink_check(found="/usr/bin/JLinkExe", version=None)
     assert check.status == "warn"
     assert "AE822FA0E5597LS0_M55_HE" in f"{check.detail} {check.fix or ''}"
+
+
+def test_jlink_unreadable_version_fix_names_a_command_that_actually_exists():
+    """tan-cli#641: `JLinkExe -?` -- the old fix hint -- answers `Unknown
+    command line option -?.`; it is not a real flag. The fix text must not
+    send an operator to try it again."""
+    check = doctor_cmd.jlink_check(found="/usr/bin/JLinkExe", version=None)
+    assert "-?" not in (check.fix or "")
+    assert "JLinkExe" in (check.fix or "")
+
+
+# --------------------------------------------------------------------------
+# jlink_banner -- reading the version banner JLinkExe prints unprompted
+# --------------------------------------------------------------------------
+
+
+def test_jlink_banner_reads_the_version_from_a_real_invocation(monkeypatch):
+    """The banner is what a real JLinkExe prints, unprompted, before anything
+    else -- this is what `_collect` must actually parse. `-?` (the old probe
+    argv) is never passed; `-NoGui 1` IS, matching every other J-Link spawn
+    in this repo (flash_plan.py, flash_cmd.py) -- without it a GUI-capable
+    install can raise a modal dialog that `exit\\n` on stdin does not
+    dismiss."""
+    seen_argv = []
+
+    def _fake_run(argv, **kwargs):
+        seen_argv.append(argv)
+        assert kwargs.get("input") == "exit\n"
+        return subprocess.CompletedProcess(
+            argv,
+            returncode=0,
+            stdout=(
+                "SEGGER J-Link Commander V9.50 (Compiled Jun 10 2026 12:27:02)\n"
+                "DLL version V9.50, compiled Jun 10 2026 12:20:00\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _fake_run)
+    banner = doctor_cmd.jlink_banner("/usr/bin/JLinkExe")
+    assert seen_argv == [["/usr/bin/JLinkExe", "-NoGui", "1"]]
+    assert "-?" not in seen_argv[0]
+    assert doctor_cmd._parse_two(banner) == (9, 50)
+
+
+def test_jlink_banner_is_read_even_on_a_non_zero_exit(monkeypatch):
+    """A no-emulator-attached host is still expected to print the banner
+    before it decides how to exit; that text must not be discarded just
+    because the exit code is non-zero (unlike `probe()`)."""
+
+    def _fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            returncode=1,
+            stdout="SEGGER J-Link Commander V9.50 (Compiled Jun 10 2026 12:27:02)\n",
+            stderr="No emulator found.\n",
+        )
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _fake_run)
+    banner = doctor_cmd.jlink_banner("/usr/bin/JLinkExe")
+    assert doctor_cmd._parse_two(banner) == (9, 50)
+
+
+def test_jlink_banner_survives_a_spawn_failure(monkeypatch):
+    def _raise(argv, **kwargs):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _raise)
+    assert doctor_cmd.jlink_banner("/usr/bin/JLinkExe") is None
+
+
+def test_jlink_banner_survives_a_timeout(monkeypatch):
+    def _raise(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 15))
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _raise)
+    assert doctor_cmd.jlink_banner("/usr/bin/JLinkExe") is None
+
+
+def test_collect_reads_the_jlink_version_from_the_banner_not_a_dash_question_flag(
+    monkeypatch,
+):
+    """Reverting `_collect` to `_parse_two(probe([jlink_exe, "-?"]) or "")`
+    must fail THIS test: it is the only coverage of the production call site,
+    not just `jlink_banner`/`jlink_check` in isolation."""
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: "/usr/bin/JLinkExe" if name == "JLinkExe" else None
+    )
+    monkeypatch.setattr(
+        doctor_cmd,
+        "jlink_banner",
+        lambda exe, timeout=doctor_cmd.PROBE_TIMEOUT_S: (
+            "SEGGER J-Link Commander V9.50 (Compiled Jun 10 2026 12:27:02)\n"
+            "DLL version V9.50\n"
+        ),
+    )
+    checks = doctor_cmd._collect(None)
+    jlink = next(c for c in checks if c.name == "jlink")
+    assert jlink.status == "pass"
+    assert "V9.50" in jlink.detail
+
+
+def test_collect_never_spawns_jlink_banner_against_the_gdb_server_fallback(monkeypatch):
+    """`JLinkGDBServerCL` is the third fallback name in `_collect`'s lookup
+    tuple, but it never reads stdin and never quits on `jlink_banner`'s
+    `exit\\n` -- it waits for a GDB connection and holds the port for the
+    full `PROBE_TIMEOUT_S`. `_collect` must not spawn `jlink_banner` against
+    it; a call proves the timeout-holding regression, not just a wrong
+    version string."""
+    monkeypatch.setattr(
+        doctor_cmd,
+        "on_path",
+        lambda name: "/usr/bin/JLinkGDBServerCL" if name == "JLinkGDBServerCL" else None,
+    )
+
+    def _fail_if_called(exe, timeout=doctor_cmd.PROBE_TIMEOUT_S):
+        raise AssertionError("jlink_banner must not be spawned against JLinkGDBServerCL")
+
+    monkeypatch.setattr(doctor_cmd, "jlink_banner", _fail_if_called)
+    checks = doctor_cmd._collect(None)
+    jlink = next(c for c in checks if c.name == "jlink")
+    assert jlink.status == "warn"
+    assert "version could not be read" in jlink.detail
 
 
 def test_jlink_check_names_a_caller_supplied_device_not_only_the_fallback():
