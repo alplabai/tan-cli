@@ -1454,7 +1454,16 @@ _MODULE_BUDGET: dict[str, int] = {
     # outright) and replaces it with the five-line comment recording that
     # measurement -- a net +1. Despite the `docs(accuracy)` subject line, this
     # is a behavioural change, which is why it was ported rather than skipped.
-    "tan/planner/loader.py": 1016,
+    # 1251, not 1016, as of the tan-cli#657/#661/#662 re-pin to alp-sdk
+    # `1a9f753c`: `_resolve_jlink_flash_device` splits into
+    # `_resolve_variant_debug` + `_resolve_jlink_flash_device(debug)` (alp-sdk
+    # #1362), plus new `_resolve_flow_d_preflight` /
+    # `_enforce_flow_d_preflight_pair` (the `expect_dpidr`/`jlink_device`
+    # wrong-board preflight pair, alp-sdk #1355), `_resolve_slot0_load_address`
+    # (`flash_args.slot0_load_address`, alp-sdk #1374/tan-cli#353), and
+    # `_enforce_slot0_disjoint_across_roles` (the #1069 HE/HP collision guard,
+    # alp-sdk #1384).
+    "tan/planner/loader.py": 1251,
     # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
     # carries `foreign_global_default_for` through into `_Sdk`, and `init`
     # surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk` writes
@@ -2358,7 +2367,19 @@ _MIRRORED = ("tan/planner/",)
 # side was pulled into its own `_restore_project_pin` function instead --
 # `_undo_relocation` measures 48 here, still under the cap, so the count of
 # over-cap functions in the package is unchanged at 246.
-_FUNCTION_COUNT_BUDGET = 246
+#
+# tan-cli#657/#661/#662 re-pin to alp-sdk `1a9f753c`: 246 -> 248, MEASURED
+# on the final tree, not assumed from the diff. `tan/planner/loader.py`'s
+# `_resolve_jlink_flash_device` (55 lines) is split into
+# `_resolve_variant_debug` + a short `_resolve_jlink_flash_device(debug)`,
+# dropping it off the long-function list, but the same file gains
+# `_resolve_slot0_load_address` (67 lines, new) and pushes
+# `_slice_from_resolved` (54 lines) over the cap for the first time -- net
+# +1 there. `tan/planner/orchestrator.py`'s `_slice_flash_recipe` grows past
+# 50 lines for the first time (59) emitting the `expect_dpidr`/
+# `jlink_device`/`slot0_load_address` args -- +1 more. `_FUNCTION_WORST_BUDGET`
+# is untouched: `bootstrap_cmd.py:_run` (728) is still the package's longest.
+_FUNCTION_COUNT_BUDGET = 248
 _FUNCTION_WORST_BUDGET = 728
 
 

@@ -310,6 +310,42 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **Re-pinned the vendored-planner staleness audit to alp-sdk `1a9f753c`
+  (from `7d58ef32`), and ported the behavioural delta the pin was measuring
+  against.** `tan/planner/loader.py`, `manifest.py`, `models.py`, and
+  `orchestrator.py` had drifted behind three alp-sdk commits:
+  `_resolve_jlink_flash_device` splits into `_resolve_variant_debug` + a
+  per-fact reader, and gains `_resolve_flow_d_preflight` /
+  `_enforce_flow_d_preflight_pair` (alp-sdk#1362/#1355 — the read-only SW-DP
+  IDR wrong-board preflight pair, `flash_args.expect_dpidr` +
+  `flash_args.jlink_device`, refused half-armed rather than silently
+  unguarded); `_resolve_slot0_load_address` +
+  `_enforce_slot0_disjoint_across_roles` are new (alp-sdk#1374/tan-cli#353 —
+  `flash_args.slot0_load_address`, the AEN MRAM slot0-XIP address Flow D's
+  auto-sign-via-SETOOLS path needs, plus a guard against a future dual-M55
+  SoM re-introducing the #1069 HE/HP MRAM collision); `manifest._helper_mcus`
+  stops treating `update_channel` as mutually exclusive with
+  `flash_method`/`flash_args` and projects every declared key
+  (`firmware_path`/`flash_method`/`flash_args`/`flash_policy`/
+  `update_channel`) independently (alp-sdk#1364/#1357 — a helper like the
+  GD32 bridge can declare an OTA channel for normal field updates AND a
+  `flash_policy: recovery_only` swd_probe method for a bricked board, and the
+  old either/or projection would have deleted the recovery path). This is the
+  producer side; tan's consumer side (`tan.core.flash_plan`'s
+  `validate_flow_d_preflight_args`, `slot0_load_address` handling, and
+  `HelperMcu.flash_policy`) already read this shape. `PINNED_SDK_COMMIT` and
+  `HAND_PORT_PINNED_SDK_COMMIT` (`test_planner_relocation_freshness.py`),
+  `parity.yml`'s `PINNED_SDK_TAG`, and `ci.yml`'s `gates` job SDK checkout
+  `ref:` all move together, per this repo's own "bumped in one commit" rule;
+  `HAND_PORT_PINNED_SDK_COMMIT` moved as a pure re-pin (all ten
+  `HAND_PORT_HASHES` source files re-hashed byte-identical across the range).
+  `STRICT_LOADERS_PINNED_SDK_COMMIT` deliberately did NOT move — it names the
+  alp-sdk commit that introduced `strict_loaders.py`'s known read-escape gap,
+  not merely "the last audit point" — even though `scripts/strict_loaders.py`
+  is also byte-identical across the range (re-hashed, confirmed). Refs #657,
+  #661, #662 (unblocks all three: each asserted an alp-sdk fact newer than
+  the stale pin, which the parity oracle then reported as a disallowed
+  diff).
 - **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
   PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
   any time `tan bootstrap` relocates a checkout inside a project that already
