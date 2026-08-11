@@ -1748,6 +1748,14 @@
       "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "init.sdk-root-invalid",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "note": "tan-cli#642. EMISSION CONDITION: an explicit `--sdk-root` was given AND the path it resolves to has no `scripts/alp_project.py` under it (`_is_sdk_checkout`) -- a typo'd path, or (the more realistic route) a previously-valid `--sdk-root` that `tan bootstrap` has since relocated. Fires on the TEMPLATE path only (`_sdk_root_flag_unresolved_issue`, called from `init()` alongside the other two SDK-resolution warnings); the `--from-example` path already hard-refuses the identical condition as `init.sdk-root-unresolved` (error, exit 2) before this could ever run, because an SDK checkout is not optional there. Severity `warning`, `ok:true`, `exitCode:0` -- the project still scaffolds; only `.alp/sdk-path` is not written, mirroring `_pin_sdk`'s own silent-skip for an invalid checkout. Before this code existed, `--sdk-root <bad path>` on the template path produced `ok:true`, `issues:[]`, `sdkPinned:null`, and no `.alp/sdk-path` -- indistinguishable on the wire from the ordinary case of no `--sdk-root` given at all, even though the README promises `init` pins the checkout in `.alp/sdk-path`. A LATER command then silently fell through to `~/.alp/sdk-default` -- some other project's last `bootstrap`, in a shared or multi-project setup. Constructed as the whole literal at a direct `Issue(...)` call (not an `InitError`, since this is a warning appended to a successful outcome, not a raised failure) in `init_cmd.py` (`_FULL_CODE_CALLABLES` need not cover this one -- it is a shape-1 literal site). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "init.sdk-root-unresolved",
       "status": "reserved",
       "severity": "error",

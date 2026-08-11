@@ -1413,7 +1413,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # something else: "this TEMPLATE supports one SKU", not "tan has no
     # scaffold for this SoM family"). Re-measured: exactly `wc -l` on this
     # branch.
-    "tan/commands/init_cmd.py": 1121,
+    # 1210, not 1121, as of tan-cli#642/#643: `_sdk_root_flag_unresolved_issue`
+    # (a new function, tan-cli#642's warning for an explicit `--sdk-root` that
+    # does not resolve to a real checkout) plus its call site and docstring in
+    # `init()`, and `_apply_cores`'s new zephyr-companion refusal (tan-cli#643)
+    # plus its own docstring explaining why the collision check above it must
+    # run first. Re-measured: exactly `wc -l` on this branch.
+    "tan/commands/init_cmd.py": 1210,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself

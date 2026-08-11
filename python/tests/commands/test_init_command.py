@@ -410,6 +410,44 @@ def test_cores_rejects_a_core_id_already_declared_by_the_scaffold(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_cores_rejects_a_zephyr_companion_that_is_not_the_app_core(tmp_path):
+    """tan-cli#643: `--cores m55_he:zephyr` on the default `zephyr-app`
+    template (whose app core is `m55_hp`) used to be silently accepted as a
+    COMPANION addition -- an app-less `m55_he` spliced in beside the app the
+    caller never asked to keep, plus an unrequested default RPMsg carve-out
+    -- at `ok:true`/`issues:[]`. A single-core request became a two-core
+    project on the wrong core with no signal at all. It must now refuse:
+    `splice_companion_cores` cannot give a companion an `app:`, so a `zephyr`
+    companion is always inert, and inert-but-accepted is exactly the shape
+    that misread the caller's intent here."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_he:zephyr",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.invalid-cores"
+    assert "m55_he" in issue(env)["message"]
+    assert "m55_hp" in issue(env)["message"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_still_accepts_the_app_core_itself_at_zephyr(tmp_path):
+    """The companion-zephyr refusal must not catch the app core naming
+    itself: `--cores m55_hp:zephyr` on `zephyr-app` (app core `m55_hp`) is
+    the documented no-op/reinforcement case, not a conflict."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_hp:zephyr",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert "m55_he" not in board
+
+
 def test_cores_is_ignored_on_the_from_example_path(tmp_path):
     """`--som`/`--cores` are ignored for `--from-example`: the example ships
     its own board.yaml."""
@@ -1141,7 +1179,12 @@ def test_an_sdk_root_that_is_not_a_checkout_reports_no_sdk_block(tmp_path):
     `build_output.resolve_project_context` ("only what core's own loader-marker
     check accepted"). `_pin_sdk` silently declines to pin a non-checkout, so
     reporting `sdk` here would advertise a checkout that is about to be pinned
-    and is not -- and `data.sdkPinned` proves it was not."""
+    and is not -- and `data.sdkPinned` proves it was not.
+
+    tan-cli#642: this is the exact repro -- an unresolvable `--sdk-root` --
+    and it must no longer be silent about it: `ok:true`/`exitCode:0` (the
+    project still scaffolds), but a coded warning names the path that failed
+    to resolve, and the project is still written with no `.alp/sdk-path`."""
     typo = tmp_path / "alp-sdk-typo"
     typo.mkdir()
     home = tmp_path / "home"
@@ -1156,6 +1199,56 @@ def test_an_sdk_root_that_is_not_a_checkout_reports_no_sdk_block(tmp_path):
     assert env["exitCode"] == 0, env
     assert "sdk" not in env, env
     assert env["data"]["sdkPinned"] is None
+    assert not (tmp_path / ".alp" / "sdk-path").exists()
+    assert [i["code"] for i in env["issues"]] == ["init.sdk-root-invalid"]
+    warning = env["issues"][0]
+    assert warning["severity"] == "warning"
+    assert str(typo) in warning["message"]
+    assert "sdkPinned" not in warning["message"]  # sanity: the path, not the field name
+
+
+def test_sdk_root_unresolved_is_silent_when_no_sdk_root_was_passed_at_all(tmp_path):
+    """`init.sdk-root-invalid` is scoped to an EXPLICIT `--sdk-root` that
+    failed to resolve -- not to the ordinary case of no `--sdk-root` at all,
+    which every other ladder tier already handles on its own terms (or not,
+    by design: `minimal-app` scaffolds with no SDK reachable at all)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            "init", "--template", "minimal-app", "--format", "json",
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert env["data"]["sdkPinned"] is None
+    assert env["issues"] == []
+
+
+def test_sdk_root_invalid_fires_for_an_sdk_root_a_bootstrap_relocation_broke(tmp_path):
+    """tan-cli#642's more realistic route: nobody types a nonsense path, but a
+    previously-valid `--sdk-root` can stop resolving between calls -- e.g.
+    once `tan bootstrap` has relocated it. Simulated here by pointing
+    `--sdk-root` at a directory that was NEVER a checkout to begin with (the
+    observable shape -- 'the marker file is not there right now' -- is
+    identical either way; `_is_sdk_checkout` cannot distinguish 'never was'
+    from 'moved out from under this run')."""
+    relocated_away = tmp_path / "sdk-relocated-elsewhere"
+    relocated_away.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            *_init_sdk_argv(relocated_away),
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert env["data"]["sdkPinned"] is None
+    codes = [i["code"] for i in env["issues"]]
+    assert "init.sdk-root-invalid" in codes, env["issues"]
 
 
 def test_an_error_before_the_sdk_resolves_leaves_the_key_absent(tmp_path):

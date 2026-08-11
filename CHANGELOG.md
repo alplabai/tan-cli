@@ -289,6 +289,25 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan init` no longer reports `ok:true`/`issues:[]` while silently
+  discarding what `--sdk-root` or `--cores` asked for.** Two sites, same
+  shape: (1) an unresolvable `--sdk-root` (a typo, or the more realistic
+  route — a previously-valid one that `tan bootstrap` has since relocated)
+  scaffolded the whole project with no `.alp/sdk-path` written and
+  `sdkPinned: null`, with nothing in the envelope saying why, though the
+  README promises `init` pins the checkout there — a later command then
+  silently fell through to `~/.alp/sdk-default`, some OTHER project's last
+  `bootstrap` on a shared host. Now warns `init.sdk-root-invalid`, naming the
+  path. (2) `--cores m55_he:zephyr` on a template whose app core the SoM
+  guess had already fixed to `m55_hp` was spliced in as an app-less
+  COMPANION instead — a single-core request became a two-core project bound
+  to a core the caller never named, plus an unrequested default RPMsg
+  carve-out. `--cores` can only ever add a companion (it has no source
+  directory to give one an `app:`), so a companion entry requesting `zephyr`
+  — indistinguishable from "make this the app core instead" — is now refused
+  (`init.invalid-cores`, naming both core ids) rather than silently rendered.
+  (#642, #643)
+
 - **The test suite no longer means two different things on two machines: the
   debug/flash probe inventory is now a property of the test, not of the host.**
   A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
