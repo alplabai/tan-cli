@@ -60,8 +60,12 @@ SYSTEM_MANIFEST_SCHEMA_VERSION = 1
 #: dropping it here would make the port place a raw `.bin` somewhere else than
 #: the oracle on every `swd_probe` entry whose `flash_args` omits `base`. Only
 #: ever reached when the manifest supplied nothing; the correct fix is for the
-#: SoM preset to always supply `flash_args.base`, after which this default
-#: becomes unreachable and can be deleted on BOTH sides.
+#: SoM preset to always supply `flash_args.base`. alp-sdk#1357/#1364 (measured
+#: against `origin/dev` `496e32ad`) did exactly that for the four V2N/V2M
+#: presets -- `E1M-V2N101`/`E1M-V2N102`/`E1M-V2M101`/`E1M-V2M102` all now carry
+#: an explicit `base: "0x08000000"` -- so this default is unreachable for THOSE
+#: four today; it stays live for any other `swd_probe` entry (present or
+#: future) that omits `base`, and is not yet deleted on either side.
 _DEFAULT_BASE = "0x08000000"
 #: INHERITED HARDWARE FACT, not a new one. `builders.rs:15`'s
 #: `DEFAULT_JLINK_DEVICE`. This is a part number in tan, which ADR-0017 / I-26
@@ -69,8 +73,12 @@ _DEFAULT_BASE = "0x08000000"
 #: it here would make the port disagree with the oracle on every `swd_probe`
 #: entry whose `flash_args` omits `jlink_device`. Kept byte-identical and
 #: quarantined to this one constant; the correct fix is for the SoM preset to
-#: always supply `flash_args.jlink_device` (E1M-V2N101 already does not), after
-#: which this default becomes unreachable and can be deleted on BOTH sides.
+#: always supply `flash_args.jlink_device`. alp-sdk#1357/#1364 did exactly that
+#: (tan-cli#612) -- all four V2N/V2M presets now supply
+#: `jlink_device: GD32G553MEY7TR` explicitly, the SAME value as this default,
+#: so this default is unreachable for those four today; it stays live for any
+#: other `swd_probe` entry (present or future) that omits `jlink_device`, and
+#: is not yet deleted on either side.
 _DEFAULT_JLINK_DEVICE = "GD32G553MEY7TR"
 _DEFAULT_JLINK_SPEED = 4000
 _JLINK_BINARIES = ("JLinkExe", "JLink")
