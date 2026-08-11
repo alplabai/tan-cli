@@ -71,7 +71,7 @@ import typer
 import yaml
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, resolve_sdk_tiered, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit
@@ -404,10 +404,32 @@ def _run_kconfig(
     # never a spawn attempt with half-resolved inputs (mirrors kconfig.rs).
     sdk = resolve_sdk(sdk_root, root)
     if sdk is None:
-        # No `sdk=` here -- there is nothing resolved to report, matching the
-        # oracle (which likewise omits the `sdk` envelope key on this one
-        # failure; every OTHER `_fail` below runs after `sdk` resolved and
-        # threads it through).
+        # tan-cli#497 defect 2, the branch #578 explicitly left open (its own
+        # comment here used to read "there is nothing resolved to report").
+        # `presets_cmd.resolve_sdk` deliberately collapses to a bare `None`
+        # whenever nothing resolves to a USABLE checkout, and its docstring
+        # documents that this drops `broken_project_pin`/
+        # `foreign_global_default_for` on the floor -- so a workspace whose
+        # own `.alp/sdk-path` pin is broken, with no OTHER tier resolving
+        # anything either, answered `kconfig.no-sdk-root` alone: the ladder
+        # had already computed the pin warning and this branch threw it away
+        # a second time. `resolve_sdk_tiered` is called again here, directly
+        # -- NOT through `resolve_sdk`, which is what discards the facts --
+        # to recover them: it is a pure four-tier filesystem walk with no
+        # side effects, so a second call costs a few stats, not a changed
+        # return contract for `presets_cmd`/`clean_cmd`, the other two
+        # callers of `resolve_sdk` that still share its `None`-collapsing
+        # shape and are unaffected by this fix.
+        #
+        # Still no `sdk=` -- there is genuinely no root to report, matching
+        # the oracle -- but `sdk_issues` now carries whatever the ladder
+        # found before giving up, in both JSON and text (`_fail` prepends
+        # and prints them), so the workspace's own diagnosis reaches the
+        # user instead of being computed and silently discarded.
+        active = resolve_sdk_tiered(sdk_root, Path(root))
+        sdk_issues = sdk_resolution_issues(
+            active.broken_project_pin, active.tier, active.foreign_global_default_for
+        )
         _fail(
             root=root,
             board_path=board_path,
@@ -422,6 +444,7 @@ def _run_kconfig(
             f"{NO_SDK_NEXT_STEPS}.",
             core=None,
             json_mode=json_mode,
+            sdk_issues=sdk_issues,
         )
         return
     # tan-cli#504's blessed constructor: it carries `foreign_global_default_for`
@@ -439,13 +462,14 @@ def _run_kconfig(
     # success emit -- and, via `disclosure` just below, into the eighth site
     # this function cannot reach: `kconfig`'s own `kconfig.internal-failure`
     # catch-all. Ten `_fail` calls exist; the tenth is the `sdk is None` branch
-    # above, which by construction has nothing to report.
+    # above, which now recovers the same two facts through a second,
+    # independent `resolve_sdk_tiered` call rather than through `resolve_sdk`
+    # (see that branch for why).
     #
-    # NOT fixed here: the `sdk is None` branch above. `resolve_sdk` returns a
-    # bare `None` when nothing resolves, discarding both facts before this
-    # function ever sees them (`presets_cmd.resolve_sdk`'s own docstring
-    # records that gap and why closing it changes its return contract for
-    # `presets` and `clean` too). That branch is `presets_cmd.py`'s to fix.
+    # `presets_cmd.resolve_sdk`'s OWN return contract is unchanged by that --
+    # it still collapses to a bare `None` and still drops both facts for its
+    # other two callers, `presets_cmd.py`'s own `presets()` and
+    # `clean_cmd._run`, which is theirs to fix, not this module's.
     #
     # Kept alongside #504's envelope-seam advisory rather than deleted in
     # favour of it: the seam appends its pair at the END and dedupes BY CODE

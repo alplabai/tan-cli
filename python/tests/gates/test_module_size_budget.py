@@ -195,28 +195,50 @@ _MODULE_BUDGET: dict[str, int] = {
     # the docstring paragraph recording why the field is required and
     # keyword-only. The two definitions and the judgement calls did NOT land
     # here: they are in `tan/core/doctor_scope.py`, well under its own cap.
-    # 3813, not 3762 (this branch alone) and not 3747 (dev alone): both
-    # landed. tan-cli#606's manifest-declared `zephyr.pythonMinVersion`
-    # fallback (alp-sdk#1078) and the alp-sdk `_check_libraries` port are
-    # independent additions to the same file, so the merged length is neither
-    # side's pin. Re-measured after the merge with this gate's own
-    # `len(read_text().splitlines())` -- never carried across from either
-    # branch, because a padded pin passes this ratchet silently.
+    # 3849, not 3813 (dev alone, #606 + the libraries port) and not 3758
+    # (this branch alone, tan-cli#641): all three landed. #606's
+    # manifest-declared `zephyr.pythonMinVersion` fallback, the alp-sdk
+    # `_check_libraries` port, and #641's two false-negative fixes are
+    # independent additions to the same file, so the merged length is none
+    # of the three sides' pins. Re-measured after the merge with this
+    # gate's own `len(read_text().splitlines())` -- never carried across
+    # from any branch, because a padded pin passes this ratchet silently.
     #
-    # The #606 half: the new `manifest_zephyr_floor` parameter, its
+    # The #606 slice: the new `manifest_zephyr_floor` parameter, its
     # fallback/label derivation, the `_load_manifest` injection of
     # `_zephyrPythonMinVersion` (mirroring `_pipSpec`), and
     # `_zephyr_manifest_floor_from_facts`.
     #
-    # The libraries half (ADR-0020 end-state B -- the user command surface is
-    # `tan`, so alp-sdk does not keep a second CLI reporting on its library
-    # layer): only `libraries_check` (the outcome -> `Check` mapping, trimmed
-    # to exactly 50 lines rather than moving the function ratchet) and its
-    # thirteen-line `_collect` wiring. The resolution -- the raw `libraries:`
-    # peek, the planner bind, `scoped_names`/`resolve_selection` and the two
-    # defects the port fixed -- lives in `tan/core/doctor_libraries.py`, for
-    # the same reason `doctor_scope.py` took the #549 half.
-    "tan/commands/doctor_cmd.py": 3813,
+    # The libraries slice (ADR-0020 end-state B -- the user command surface
+    # is `tan`, so alp-sdk does not keep a second CLI reporting on its
+    # library layer): only `libraries_check` (the outcome -> `Check`
+    # mapping, trimmed to exactly 50 lines rather than moving the function
+    # ratchet) and its thirteen-line `_collect` wiring. The resolution --
+    # the raw `libraries:` peek, the planner bind, `scoped_names`/
+    # `resolve_selection` and the two defects the port fixed -- lives in
+    # `tan/core/doctor_libraries.py`, for the same reason `doctor_scope.py`
+    # took the #549 slice.
+    #
+    # The #641 slice: two false negatives fixed on the same host-readiness
+    # question a bench operator asks doctor before an MRAM write.
+    # `setools_check` no longer infers a flash failure from ANY
+    # interpreter's `fdt` importability -- `app-gen-toc` is a spawned
+    # subprocess, never a Python import, and SETOOLS ships its own
+    # dependencies, so that inference was false on real AEN silicon even
+    # after tan-cli#488 defect 6 pointed it at the workspace venv's own
+    # interpreter (removed the `has_fdt` parameter/branch, plus the
+    # now-dead `_has_module`/`_module_importable` helpers -- a net line
+    # DROP on their own). The J-Link version probe used to pass
+    # `[jlink_exe, "-?"]`, a flag JLinkExe does not have (`Unknown command
+    # line option -?.`), so it never once reached the version banner
+    # JLinkExe prints unprompted on every real invocation; the new
+    # `jlink_banner` helper reads that banner instead (spawned with
+    # `-NoGui 1`, matching every other J-Link spawn in this repo), regardless
+    # of exit code, since the banner is already printed by the time
+    # Commander decides how to exit -- except against the `JLinkGDBServerCL`
+    # fallback name, which never quits on the banner probe's `exit\n` and is
+    # excluded from the call at `_collect`'s call site instead.
+    "tan/commands/doctor_cmd.py": 3849,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
@@ -268,11 +290,21 @@ _MODULE_BUDGET: dict[str, int] = {
     # Two functions LEFT this file in the same change (`_manifest_points_at`,
     # `_same_directory`, both moved down to `tan/core/bootstrap.py`), so the
     # figure is net of that removal.
-    # 3072, not 3070, as of tan-cli#606: `resolve_python_floor` now passes
-    # `facts.zephyr_python_min_version` into `zephyr_python_floor` and its
-    # docstring gained the extra sentence explaining why. Re-measured with
-    # this gate's own walk.
-    "tan/commands/bootstrap_cmd.py": 3072,
+    # 3219, not 3217 (this branch alone) and not 3072 (dev alone): both
+    # landed. tan-cli#644's project-pin authority work and #640's
+    # zephyr.pythonMinVersion floor are independent additions to the same
+    # file. Re-measured after the merge with this gate's own
+    # `len(read_text().splitlines())` -- never carried across from either
+    # side, because a padded pin passes this ratchet silently.
+    # 3236, not 3219, as of tan-cli#644 review round 2: the nested-project
+    # rollback regression fix. `_relocate_project_pin` gained a second
+    # `restore_root` parameter (the PRE-relocation project root) so
+    # `_undo_relocation` restores the pin under the location the checkout
+    # actually moves BACK to, not the post-relocation path it already
+    # vacated by the time the restore runs -- plus the docstring explaining
+    # why `root` and `restore_root` must differ. Re-measured with this
+    # gate's own walk.
+    "tan/commands/bootstrap_cmd.py": 3236,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
     # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
@@ -1051,12 +1083,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # check, so a guard inside the materialise branch would refuse only after
     # the other slices' files had landed) and why the build-root one is scoped
     # to `_MODE_NATIVE`. Measured `wc -l`, not arithmetic.
-    # 2048, not 2043, as of tan-cli#655: the new `build.configure-cache-reset`
-    # issue import + one `issues.extend(last_configure_cache_issues())` call
-    # (mirroring the sdk-switch-pristine wiring immediately above it) so a
-    # JSON-mode caller sees the stale-DTC_OVERLAY_FILE/CONF_FILE reset too,
-    # not only `execute.py`'s own `on_output` stream. Measured `wc -l`.
-    "tan/commands/build_cmd.py": 2048,
+    "tan/commands/build_cmd.py": 2043,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
@@ -1582,29 +1609,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # `test_bare_argv0_spawn.py::test_terminate_spawns_the_resolved_taskkill`
     # monkeypatches. That is a bigger, riskier blast radius through the cancel
     # path than the growth it saves.
-    # 1598, not 1429, as of tan-cli#655: `_maybe_reset_stale_configure_cache`
-    # plus its `_CONFIGURE_CACHE_RESET_ARGS` constant, the call site in the
-    # dispatch loop (placed AFTER the sdk-switch-pristine guard so a pristine
-    # wipe is seen as "nothing cached yet", not compared against a stamp for a
-    # build dir that no longer exists), and the `_last_configure_cache_issues`/
-    # `last_configure_cache_issues` same-process recorder mirroring the
-    # sdk-switch guard's own `_last_sdk_switch_issues` pattern. MOST of the
-    # growth is the docstring recording the actual measured Zephyr-CMake root
-    # cause (`configuration_files.cmake`'s `DTC_OVERLAY_FILE`/`CONF_FILE`
-    # auto-discovery is cached `if(NOT DEFINED ...)`, so a file that did not
-    # exist at the FIRST configure stays invisible to every later one even
-    # though `tan build` already reconfigures every time) and why the reset is
-    # deliberately narrower than the sdk-switch guard's full wipe
-    # (`-UDTC_OVERLAY_FILE -UCONF_FILE` only -- NOT `-UEXTRA_CONF_FILE`, which
-    # would unset the slice's own `-DEXTRA_CONF_FILE=<alp.conf>` appended
-    # earlier in the same argv). Not extracted to its own module: the function
-    # reads `cmake_cache_configured` from THIS module's own `manifest.py`
-    # import and follows the exact same shape/placement as the neighbouring
-    # `_maybe_pristine_stale_sdk_build_dir` it is modelled on -- splitting one
-    # guard out while leaving its sibling in would separate two call sites a
-    # reader needs to see together (both run back-to-back on every slice,
-    # in a documented order). Measured with `wc -l`, not summed from the diff.
-    "tan/commands/build/execute.py": 1598,
+    "tan/commands/build/execute.py": 1429,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather
@@ -2344,16 +2349,17 @@ _MIRRORED = ("tan/planner/",)
 # tree -- `bootstrap_cmd.py:_run` is still the package's single longest
 # function.
 #
-# 246 -> 247, tan-cli#655: one new function over the cap,
-# `execute.py:_maybe_reset_stale_configure_cache` at 117 lines (MEASURED with
-# this gate's own `_long_functions` walk), the stale-configure-cache reset
-# modelled on its neighbour `_maybe_pristine_stale_sdk_build_dir` -- most of
-# the span is the docstring recording the measured Zephyr-CMake root cause
-# (see the `build/execute.py` entry in `_MODULE_BUDGET` above for the same
-# citation) rather than trimmable control flow. `_FUNCTION_WORST_BUDGET` is
-# untouched: 117 is nowhere near `bootstrap_cmd.py:_run`'s 711.
-_FUNCTION_COUNT_BUDGET = 247
-_FUNCTION_WORST_BUDGET = 711
+# tan-cli#644: `_run` moves again, 711 -> 728, for the call site described
+# above the `_MODULE_BUDGET` entry (`previous_project_pin, project_pin_root =
+# _relocate_project_pin(...)` plus the comment explaining why it is gated on
+# `active_tier == "projectPin"`). `_FUNCTION_COUNT_BUDGET` is UNTOUCHED: the
+# naive inline version pushed `_undo_relocation` (34 -> 54) over the 50-line
+# cap and would have moved this to 247, which is exactly why the rollback
+# side was pulled into its own `_restore_project_pin` function instead --
+# `_undo_relocation` measures 48 here, still under the cap, so the count of
+# over-cap functions in the package is unchanged at 246.
+_FUNCTION_COUNT_BUDGET = 246
+_FUNCTION_WORST_BUDGET = 728
 
 
 def _modules() -> list[Path]:
