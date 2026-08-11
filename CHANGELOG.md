@@ -310,6 +310,42 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **Re-pinned the vendored-planner staleness audit to alp-sdk `1a9f753c`
+  (from `7d58ef32`), and ported the behavioural delta the pin was measuring
+  against.** `tan/planner/loader.py`, `manifest.py`, `models.py`, and
+  `orchestrator.py` had drifted behind three alp-sdk commits:
+  `_resolve_jlink_flash_device` splits into `_resolve_variant_debug` + a
+  per-fact reader, and gains `_resolve_flow_d_preflight` /
+  `_enforce_flow_d_preflight_pair` (alp-sdk#1362/#1355 — the read-only SW-DP
+  IDR wrong-board preflight pair, `flash_args.expect_dpidr` +
+  `flash_args.jlink_device`, refused half-armed rather than silently
+  unguarded); `_resolve_slot0_load_address` +
+  `_enforce_slot0_disjoint_across_roles` are new (alp-sdk#1374/tan-cli#353 —
+  `flash_args.slot0_load_address`, the AEN MRAM slot0-XIP address Flow D's
+  auto-sign-via-SETOOLS path needs, plus a guard against a future dual-M55
+  SoM re-introducing the #1069 HE/HP MRAM collision); `manifest._helper_mcus`
+  stops treating `update_channel` as mutually exclusive with
+  `flash_method`/`flash_args` and projects every declared key
+  (`firmware_path`/`flash_method`/`flash_args`/`flash_policy`/
+  `update_channel`) independently (alp-sdk#1364/#1357 — a helper like the
+  GD32 bridge can declare an OTA channel for normal field updates AND a
+  `flash_policy: recovery_only` swd_probe method for a bricked board, and the
+  old either/or projection would have deleted the recovery path). This is the
+  producer side; tan's consumer side (`tan.core.flash_plan`'s
+  `validate_flow_d_preflight_args`, `slot0_load_address` handling, and
+  `HelperMcu.flash_policy`) already read this shape. `PINNED_SDK_COMMIT` and
+  `HAND_PORT_PINNED_SDK_COMMIT` (`test_planner_relocation_freshness.py`),
+  `parity.yml`'s `PINNED_SDK_TAG`, and `ci.yml`'s `gates` job SDK checkout
+  `ref:` all move together, per this repo's own "bumped in one commit" rule;
+  `HAND_PORT_PINNED_SDK_COMMIT` moved as a pure re-pin (all ten
+  `HAND_PORT_HASHES` source files re-hashed byte-identical across the range).
+  `STRICT_LOADERS_PINNED_SDK_COMMIT` deliberately did NOT move — it names the
+  alp-sdk commit that introduced `strict_loaders.py`'s known read-escape gap,
+  not merely "the last audit point" — even though `scripts/strict_loaders.py`
+  is also byte-identical across the range (re-hashed, confirmed). Refs #657,
+  #661, #662 (unblocks all three: each asserted an alp-sdk fact newer than
+  the stale pin, which the parity oracle then reported as a disallowed
+  diff).
 - **`tan validate` and `tan diff` name `tan bootstrap` as the remedy for a
   missing-module crash, instead of surfacing a raw `ModuleNotFoundError`,
   when no workspace venv has been created yet for the project.** Both
@@ -2677,7 +2713,77 @@ All notable changes to `tan` are documented here. Format follows
   three freshness tests PASSED, precisely because "a skip does not fail
   pytest's exit code" -- the new guard added here gets no such assertion, so a
   `pytestmark` added to its module later would re-open the same hole silently.
-  All three follow in one workflow-side change.
+  All three are in the entry below.
+
+- **The three workflow-side gates that could not fail either.** The tail of
+  the same sweep, held back only until #435 stopped editing these two files.
+  (#500)
+
+  - **`python-binaries.yml`'s macOS `arch` step was `run: file
+    "python/dist/tan/tan"`** -- no comparison, no non-zero path, so it could
+    not fail on the wrong-architecture darwin build its own comment says it
+    exists to refuse. PyInstaller cannot cross-compile: it always freezes the
+    host's arch, so a wrong runner label yields a correctly NAMED binary of the
+    wrong architecture.
+
+    **And the workflow that actually ships had no such check at all.**
+    `python-binaries.yml` is `workflow_dispatch`-only and every leg ends in
+    `actions/upload-artifact`, so nothing it builds can reach a customer -- a
+    vacuous step there costs false assurance, not a bad binary.
+    `release.yml`'s `build` job is the one a `v*` push runs, it carries the
+    same two darwin rows (`macos-15-intel` / `macos-15`), and it had no `arch`
+    step whatsoever. That is where `Bad CPU type in executable` on a
+    customer's Intel Mac would actually come from, after a tag that cannot be
+    un-pushed. Both now carry the check, and a darwin row added without a
+    `cputype` FAILS rather than skipping it. The first draft of this entry
+    attached the customer consequence to the proof-only workflow; review
+    measured that and it was wrong. The Windows leg had the right shape all
+    along
+    (parse the PE COFF machine word, refuse on mismatch against
+    `matrix.machine`); the macOS legs now read the Mach-O header and compare
+    against a new `matrix.cputype` (`0x01000007` CPU_TYPE_X86_64,
+    `0x0100000c` CPU_TYPE_ARM64), refusing a universal (fat) binary explicitly
+    rather than mis-parsing one -- a fat binary would satisfy BOTH asset names
+    at once, which is the opposite of what per-architecture assets are for.
+
+  - **`parity.yml`'s hand-port freshness test could only fail on table
+    self-inconsistency.** The `resolve hand-port audit commit` step greps
+    `HAND_PORT_PINNED_SDK_COMMIT` out of the gate file and clones alp-sdk at
+    exactly that SHA, so `test_hand_ported_planner_modules_match_their_pinned_sdk_source`
+    compares the pin's tree against hashes taken FROM the pin's tree -- it can
+    catch a mistyped hash and nothing else. Its sibling already had the missing
+    half, a live-oracle arm, and was scoped to EXCLUDE this test precisely
+    because its root was not bound there; that root is now bound, to the live
+    checkout rather than the frozen audit one, in a second dispatch-only
+    warn-only arm. The always-run job keeps its self-consistency version -- the
+    two catch different sides.
+
+    **Both arms now key on `<nodeid> PASSED`, not on pytest's exit code**, and
+    that correction came out of review of the fix itself. The freshness tests
+    SKIP rather than fail when their root does not resolve -- the test's own
+    comment says "Skip, not fail" -- and a skip leaves pytest at `rc=0`. Keyed
+    on `rc`, the new alarm printed no warning and exited 0 for any path or
+    marker change: the fail-open shape this whole entry is about, inside the
+    thing written to close it. The pre-existing sibling had the identical
+    defect and is fixed with it, because fixing only the new one would have
+    made the asymmetry its own trap.
+
+    No drift COUNT is quoted here or in the workflow. An earlier draft said
+    "three of the nine pinned sources had moved" -- both numbers were taken
+    from the issue report and both were already wrong by the time this landed:
+    `HAND_PORT_HASHES` holds TEN entries (`da72634` added
+    `scripts/alp_template.py`), and the same commit re-pinned to `7d58ef32`,
+    which zeroed the drift the "three" described. A count in a comment measures
+    the day it was typed; the test names the files that actually moved.
+
+  - **The new byte-parity guard had no node-id assertion.** `parity.yml`
+    asserts three freshness tests PASSED by full node id rather than trusting
+    the summary, because a SKIP does not fail pytest's exit code -- so `set -e`
+    and `pipefail` are not the enforcement. The guard added for the item above
+    got no such treatment, meaning a `pytestmark` added to its module later
+    would re-open exactly the hole it was written to close. It now runs first,
+    by node id, in `python-tests`: a SKIP there is a hard job failure, and the
+    job fails in seconds rather than after the full parity round.
 
 ### Security
 
