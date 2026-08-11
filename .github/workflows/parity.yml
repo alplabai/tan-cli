@@ -532,7 +532,7 @@ jobs:
           fi
           echo "::warning::PINNED_SDK_TAG is ${behind} contract-surface commit(s) behind alp-sdk dev (${head}). Both seams are green against a pin that no longer reflects the planner. Re-bump PINNED_SDK_TAG in .github/workflows/parity.yml."
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
 
@@ -981,7 +981,7 @@ jobs:
       # `tan` under test IS this interpreter now (tan-cli#269 retired the
       # self-contained cargo binary), so a floating newest-3.x would decide
       # what the seam executes.
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -1296,7 +1296,7 @@ jobs:
       # Pinned, NOT `3.x`, for the same reason seam2 pins it: `tan` IS this
       # interpreter now (tan-cli#269), and `python/pyproject.toml` floors at
       # 3.12.
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -1603,7 +1603,7 @@ jobs:
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
