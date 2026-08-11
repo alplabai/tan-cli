@@ -2583,7 +2583,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             # the issue's own reasoning, rather than silently ceding to
             # whichever project's `globalDefault` write happens to win last.
             previous_project_pin, project_pin_root = _relocate_project_pin(
-                active_tier, root, sdk_root, dry_run
+                active_tier, root, old_project.root, sdk_root, dry_run
             )
             relocation_undo = RelocationUndo(
                 old_root=old_root,
@@ -2960,7 +2960,7 @@ def _write_project_sdk_pointer(project_root: str, sdk_root: str) -> bool:
 
 
 def _relocate_project_pin(
-    active_tier: str, root: str, sdk_root: str, dry_run: bool
+    active_tier: str, root: str, restore_root: str, sdk_root: str, dry_run: bool
 ) -> tuple[bytes | None, str | None]:
     """`_run`'s own call site for the tan-cli#644 fix, pulled out of the
     relocation block itself so that block stays readable and this stays unit-
@@ -2969,12 +2969,29 @@ def _relocate_project_pin(
     discipline for the global default, just above in `_run`), then -- for a
     `dry_run` or a tier other than `projectPin` -- rewrite nothing.
 
+    `root` and `restore_root` are deliberately DIFFERENT paths when the
+    project lives INSIDE the checkout being relocated: by the time `_run`
+    calls this, `root` has already been rebased onto the NEW (post-
+    relocation) checkout location -- the pin must be READ and WRITTEN there,
+    since that is where the project (and any existing pin file) actually sits
+    on disk right now. `restore_root`, in contrast, is the PRE-relocation
+    project root (`old_project.root`, captured before the rebase, mirroring
+    how `old_root`/`old_project` are already snapshotted before their own
+    mutations) -- the location `_undo_relocation` moves the checkout BACK to
+    FIRST, before it ever calls `_restore_project_pin`. Recording `root`
+    itself as `project_pin_root` (tried and reverted on review) made a
+    rolled-back relocation write the restored pin at a path the checkout had
+    already vacated, raising ENOENT and reproducing the exact stale-pin
+    defect tan-cli#644 exists to close -- just via the rollback path instead
+    of a completed run.
+
     Returns `(previous_project_pin, project_pin_root)`: the bytes a rollback
-    should restore, and the project root a write actually landed under.
-    `project_pin_root` is `None` whenever nothing was written (wrong tier,
-    `dry_run`, or `_write_project_sdk_pointer` itself failed) -- exactly the
-    signal `_undo_relocation` needs to skip a project pin this run never
-    touched, the same way `relocation_undo.project_pin_root` already gates it.
+    should restore, and the PRE-relocation project root a rollback should
+    restore them under. `project_pin_root` is `None` whenever nothing was
+    written (wrong tier, `dry_run`, or `_write_project_sdk_pointer` itself
+    failed) -- exactly the signal `_undo_relocation` needs to skip a project
+    pin this run never touched, the same way `relocation_undo.project_pin_root`
+    already gates it.
     """
     if active_tier != "projectPin":
         return None, None
@@ -2982,7 +2999,7 @@ def _relocate_project_pin(
     if dry_run:
         return previous_project_pin, None
     if _write_project_sdk_pointer(root, sdk_root):
-        return previous_project_pin, root
+        return previous_project_pin, restore_root
     return previous_project_pin, None
 
 

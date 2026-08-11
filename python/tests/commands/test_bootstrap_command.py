@@ -918,11 +918,13 @@ def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_pa
 
 def test_a_relocating_bootstrap_updates_the_project_pin_it_resolved_through(tmp_path):
     """tan-cli#644: `bootstrap` used to leave a project's OWN `.alp/sdk-path`
-    naming the vacated checkout after relocating it -- reachable on the very
-    first documented `tan init` then `tan bootstrap --workspace <dir>`
-    sequence, since `init` is exactly what writes this pin. Every later
-    command that resolves the SDK through it (`build`, `sdk current`, ...)
-    then read a pin the checkout no longer sat under.
+    naming the vacated checkout after relocating it -- reachable any time
+    `tan bootstrap --workspace <dir>` relocates a checkout inside a project
+    that already has a working pin (written by an earlier `tan init`, per the
+    documented `bootstrap` then `init` quickstart order), i.e. a project being
+    re-bootstrapped rather than only a first run. Every later command that
+    resolves the SDK through it (`build`, `sdk current`, ...) then read a pin
+    the checkout no longer sat under.
 
     Deliberately DIFFERENT from the case pinned two tests above (a bootstrap
     run from the workspace PARENT with `--sdk-root`, no project pin in play,
@@ -1004,6 +1006,75 @@ def test_a_relocation_rollback_restores_the_project_pin_it_rewrote(tmp_path):
     # so too, byte-for-byte -- not merely "some path that resolves".
     assert sdk.exists()
     assert (proj / ".alp" / "sdk-path").read_text(encoding="utf-8") == original_pin
+
+
+def test_a_relocation_rollback_restores_the_pin_of_a_project_nested_inside_the_checkout(
+    tmp_path,
+):
+    """tan-cli#644 review: `test_a_relocation_rollback_restores_the_project_pin_it_rewrote`
+    above places `proj` OUTSIDE the checkout, so `_rebase` never touches its
+    `root` and cannot catch a restore-path bug that only a NESTED project
+    triggers. Here `proj` lives INSIDE the checkout being relocated (`sdk /
+    "myproj"`), so `_run` rebases `root` onto the NEW checkout path before
+    `_relocate_project_pin` runs, and that rebased (post-relocation) path is
+    what a naive implementation would record as `project_pin_root` for the
+    later restore.
+
+    That is wrong: `_undo_relocation` moves the checkout BACK to `old_root`
+    FIRST, so by the time it calls `_restore_project_pin` the post-relocation
+    path has already been vacated -- writing there raises ENOENT and the
+    restore is reported as failed, exactly the stale/unresolvable pin
+    tan-cli#644 exists to eliminate, just reintroduced by the rollback path
+    this time. `project_pin_root` must record the PRE-relocation project root
+    (mirroring how `old_project` is captured before the rebase), not the
+    rebased one.
+
+    `env_extra`'s explicit `HOME` (the `test_a_second_projects_relocation...`
+    pattern above) is required here, not optional: `run_tan`'s default fake
+    HOME is `cwd.parent`, which for a NESTED project sits INSIDE the checkout
+    itself -- letting the checkout's own relocation drag the fake HOME (and
+    the machine-global pointer under it) along for the ride, which is a
+    second, unrelated confound this test does not exist to cover.
+    """
+    home = tmp_path / "shared-home"
+    env_extra = {"HOME": str(home), "USERPROFILE": str(home)}
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    proj = sdk / "myproj"
+    proj.mkdir()
+    (proj / ".alp").mkdir()
+    original_pin = (
+        json.dumps({"sdkPath": str(sdk), "updatedAt": "2026-01-01T00:00:00Z"}, indent=2) + "\n"
+    )
+    (proj / ".alp" / "sdk-path").write_text(original_pin, encoding="utf-8")
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    # Blocks `python -m venv`, the same deterministic, network-free failure
+    # `test_a_relocation_is_rolled_back_when_a_later_step_fails` uses.
+    (workspace / ".venv").write_text("not a directory", encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "bootstrap", "--format", "json", "--workspace", str(workspace), cwd=proj,
+            env_extra=env_extra,
+        )
+    )
+    assert env["exitCode"] != 0
+    issue_codes = codes(env)
+    assert "bootstrap.workspace-relocated" in issue_codes
+    assert "bootstrap.workspace-relocation-rolled-back" in issue_codes
+    # The checkout (and the nested project inside it) is back at its original
+    # location; the project pin must say so too, byte-for-byte -- not merely
+    # "some path that resolves", and not silently left unrestored because the
+    # write targeted a path the rollback had already vacated.
+    assert sdk.exists()
+    assert proj.exists()
+    restored_pin = (proj / ".alp" / "sdk-path").read_text(encoding="utf-8")
+    assert restored_pin == original_pin, (
+        f"project pin was not restored byte-for-byte: {restored_pin!r}"
+    )
+    assert "the project's .alp/sdk-path pin could not be restored" not in "".join(
+        i["message"] for i in env["issues"]
+    )
 
 
 def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_path):

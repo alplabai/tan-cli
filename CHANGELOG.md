@@ -311,15 +311,20 @@ All notable changes to `tan` are documented here. Format follows
 ### Fixed
 
 - **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
-  PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable on
-  the very first documented `tan init` then `tan bootstrap` sequence, since
-  `init` is exactly what writes that pin. Rewriting it is gated on this run's
-  SDK having resolved through the `projectPin` tier (the project already had a
+  PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
+  any time `tan bootstrap` relocates a checkout inside a project that already
+  has a working pin (written by an earlier `tan init`, per the documented
+  `bootstrap` then `init` quickstart) -- i.e. a project being re-bootstrapped,
+  not only a first run. Rewriting it is gated on this run's SDK having
+  resolved through the `projectPin` tier (the project already had a
   working pin naming exactly the checkout that just moved); `tan init` remains
   the only place that writes a NEW pin where none existed, so a bootstrap run
   from an arbitrary workspace-parent directory still writes nothing there. A
   relocation later rolled back (a failed venv/west step) restores the project
   pin byte-for-byte, mirroring the existing `~/.alp/sdk-default` rollback.
+  Known residual: a bootstrap run with an explicit `--sdk-root` naming the
+  same checkout a project pin already resolves through still leaves that pin
+  stale -- only the `projectPin`-tier path (no `--sdk-root`) is covered here.
   (#644)
 
 - **`tan doctor` and `tan bootstrap` now read alp-sdk's own Zephyr-scoped

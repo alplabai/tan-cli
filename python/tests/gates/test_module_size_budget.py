@@ -274,7 +274,15 @@ _MODULE_BUDGET: dict[str, int] = {
     # file. Re-measured after the merge with this gate's own
     # `len(read_text().splitlines())` -- never carried across from either
     # side, because a padded pin passes this ratchet silently.
-    "tan/commands/bootstrap_cmd.py": 3219,
+    # 3236, not 3219, as of tan-cli#644 review round 2: the nested-project
+    # rollback regression fix. `_relocate_project_pin` gained a second
+    # `restore_root` parameter (the PRE-relocation project root) so
+    # `_undo_relocation` restores the pin under the location the checkout
+    # actually moves BACK to, not the post-relocation path it already
+    # vacated by the time the restore runs -- plus the docstring explaining
+    # why `root` and `restore_root` must differ. Re-measured with this
+    # gate's own walk.
+    "tan/commands/bootstrap_cmd.py": 3236,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
     # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
