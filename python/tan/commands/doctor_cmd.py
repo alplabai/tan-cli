@@ -158,6 +158,7 @@ from tan.core.bootstrap import (
     reported_missing,
 )
 from tan.core.consent import can_prompt
+from tan.core.doctor_libraries import LibraryReport, inspect_selection
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
@@ -1372,10 +1373,21 @@ def jlink_banner(jlink_exe: str, timeout: int = PROBE_TIMEOUT_S) -> str | None:
     by the time Commander decides how it exits (e.g. because no emulator is
     attached), and that text must not be discarded along with a non-zero
     status that says nothing about whether the banner itself was readable.
+
+    Commander-only contract: this assumes `jlink_exe` is `JLinkExe`/`JLink`,
+    which quit on the `exit\\n` fed to them. `JLinkGDBServerCL` does not read
+    stdin at all -- it waits for a GDB connection and holds its port for the
+    full `timeout` regardless of what is piped in. The caller (`_collect`)
+    must not spawn this against that binary; see its comment there.
+
+    `-NoGui 1` matches every other J-Link spawn in this repo
+    (`flash_plan.py`, `flash_cmd.py`) -- without it a GUI-capable install can
+    raise a modal dialog (firmware-update / device-select) that `exit\\n` on
+    stdin does not dismiss, blocking for the full `timeout` regardless.
     """
     try:
         completed = subprocess.run(
-            [jlink_exe],
+            [jlink_exe, "-NoGui", "1"],
             input="exit\n",
             capture_output=True,
             text=True,
@@ -1882,6 +1894,58 @@ def board_yaml_preflight_check(present: bool, project_selected: bool) -> Check:
         "warn",
         "no project selected -- no board.yaml found",
         "Select a project with `--project <dir>` (or `--board-yaml <path>`) to check one.",
+        scope="project",
+    )
+
+
+def libraries_check(report: LibraryReport | None) -> Check | None:
+    """`libraries` -- the ADR-0018 curated-library verdict for the selected
+    project: tier, licence, and whether each selection can actually be wired
+    on this target.
+
+    Ported from alp-sdk's `scripts/alp_cli/doctor.py::_check_libraries`
+    (ADR-0020 end-state B -- a user-facing check belongs on the user command
+    surface, which is `tan`; alp-sdk keeps the library LAYER, not a second CLI
+    reporting on it). `tan.core.doctor_libraries` owns the resolution, the
+    outcome vocabulary and the defect the port fixed; this is the mapping.
+
+    `None` -- no row at all -- for no project in scope and for one selecting
+    no libraries; a permanent "0 selected" line would sit in front of every
+    customer not using the feature, and `venv_provenance_check` is precedent
+    for declining to speak over speaking emptily.
+
+    Never `fail`: `tan build` refuses an unwireable selection outright, so the
+    hard gate exists already and is the emit, and a `fail` here would also
+    cost exit 4 -- making "you picked a library this board cannot run" read
+    identically to "you have no toolchain". alp-sdk's original call, kept.
+    `scope="project"` because the subject is that board.yaml against that
+    checkout, which answers identically on every host (`doctor_scope`)."""
+    if report is None:
+        return None
+    joined = ", ".join(report.labels)
+    count = len(report.names)
+    if report.outcome == "ok":
+        return Check(
+            "libraries", "pass", f"{count} selected, all compatible: {joined}", scope="project"
+        )
+    if report.outcome == "unreadable":
+        return Check("libraries", "warn", report.detail, scope="project")
+    if report.outcome == "unverifiable":
+        return Check(
+            "libraries",
+            "warn",
+            f"{count} selected, none verified ({joined}) -- {report.detail}",
+            # `NO_SDK_NEXT_STEPS`, never a hand-written `tan sdk switch` --
+            # that verb is refused (test_sdk_onboarding_dead_end.py).
+            f"{NO_SDK_NEXT_STEPS}, then re-run `tan doctor`.",
+            scope="project",
+        )
+    return Check(
+        "libraries",
+        "warn",
+        f"{count} selected: {joined} -- INCOMPATIBLE: {report.detail}",
+        "Fix or remove the offending `libraries:` entry in board.yaml; `tan build` "
+        "rejects it as a hard error.",
         scope="project",
     )
 
@@ -3148,6 +3212,19 @@ def _collect(
             board_yaml is not None and Path(board_yaml).is_file(), project_selected
         )
     )
+    # Immediately after `boardYaml`, and reading the SAME two facts `sdk` and
+    # `boardYaml` just reported on -- the selection is a fact ABOUT that file,
+    # resolved against THAT checkout, so a report where the two disagree would
+    # be incoherent. Emits nothing at all for a project that selects no
+    # curated libraries (see `libraries_check`).
+    libraries = libraries_check(
+        inspect_selection(
+            Path(board_yaml) if board_yaml is not None else None,
+            Path(sdk_root) if sdk_root is not None else None,
+        )
+    )
+    if libraries is not None:
+        _add(libraries)
     workspace_path = west_workspace_dir(
         workspace_root, Path(sdk_root) if sdk_root is not None else None
     )
@@ -3381,14 +3458,28 @@ def _collect(
         )
     )
 
-    jlink_exe = next(
-        (found for name in ("JLinkExe", "JLink", "JLinkGDBServerCL") if (found := on_path(name))),
-        None,
+    jlink_name, jlink_exe = next(
+        (
+            (name, found)
+            for name in ("JLinkExe", "JLink", "JLinkGDBServerCL")
+            if (found := on_path(name))
+        ),
+        (None, None),
     )
     # JLinkExe has no `-?` flag (`Unknown command line option -?.`); the
     # version banner it prints unprompted at the top of every real invocation
-    # is what `jlink_banner` reads instead. See its docstring.
-    jlink_version = _parse_two(jlink_banner(jlink_exe) or "") if jlink_exe else None
+    # is what `jlink_banner` reads instead. See its docstring. NOT spawned
+    # against `JLinkGDBServerCL` (the third fallback name): that binary never
+    # reads stdin and never quits on `jlink_banner`'s `exit\n`, so it would
+    # hold a GDB port for the full `PROBE_TIMEOUT_S` on every `tan doctor`
+    # run on a host where only the GDB server is on PATH. `jlink_check`
+    # already reports "found but version could not be read" for a `None`
+    # version, which is the correct outcome here too.
+    jlink_version = (
+        _parse_two(jlink_banner(jlink_exe) or "")
+        if jlink_exe and jlink_name != "JLinkGDBServerCL"
+        else None
+    )
     resolved_device, device_source = jlink_flash_device(sdk_root)
     _add(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
 

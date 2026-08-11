@@ -1464,7 +1464,10 @@ def test_jlink_unreadable_version_fix_names_a_command_that_actually_exists():
 def test_jlink_banner_reads_the_version_from_a_real_invocation(monkeypatch):
     """The banner is what a real JLinkExe prints, unprompted, before anything
     else -- this is what `_collect` must actually parse. `-?` (the old probe
-    argv) is never passed."""
+    argv) is never passed; `-NoGui 1` IS, matching every other J-Link spawn
+    in this repo (flash_plan.py, flash_cmd.py) -- without it a GUI-capable
+    install can raise a modal dialog that `exit\\n` on stdin does not
+    dismiss."""
     seen_argv = []
 
     def _fake_run(argv, **kwargs):
@@ -1482,7 +1485,7 @@ def test_jlink_banner_reads_the_version_from_a_real_invocation(monkeypatch):
 
     monkeypatch.setattr(doctor_cmd.subprocess, "run", _fake_run)
     banner = doctor_cmd.jlink_banner("/usr/bin/JLinkExe")
-    assert seen_argv == [["/usr/bin/JLinkExe"]]
+    assert seen_argv == [["/usr/bin/JLinkExe", "-NoGui", "1"]]
     assert "-?" not in seen_argv[0]
     assert doctor_cmd._parse_two(banner) == (9, 50)
 
@@ -1542,6 +1545,29 @@ def test_collect_reads_the_jlink_version_from_the_banner_not_a_dash_question_fla
     jlink = next(c for c in checks if c.name == "jlink")
     assert jlink.status == "pass"
     assert "V9.50" in jlink.detail
+
+
+def test_collect_never_spawns_jlink_banner_against_the_gdb_server_fallback(monkeypatch):
+    """`JLinkGDBServerCL` is the third fallback name in `_collect`'s lookup
+    tuple, but it never reads stdin and never quits on `jlink_banner`'s
+    `exit\\n` -- it waits for a GDB connection and holds the port for the
+    full `PROBE_TIMEOUT_S`. `_collect` must not spawn `jlink_banner` against
+    it; a call proves the timeout-holding regression, not just a wrong
+    version string."""
+    monkeypatch.setattr(
+        doctor_cmd,
+        "on_path",
+        lambda name: "/usr/bin/JLinkGDBServerCL" if name == "JLinkGDBServerCL" else None,
+    )
+
+    def _fail_if_called(exe, timeout=doctor_cmd.PROBE_TIMEOUT_S):
+        raise AssertionError("jlink_banner must not be spawned against JLinkGDBServerCL")
+
+    monkeypatch.setattr(doctor_cmd, "jlink_banner", _fail_if_called)
+    checks = doctor_cmd._collect(None)
+    jlink = next(c for c in checks if c.name == "jlink")
+    assert jlink.status == "warn"
+    assert "version could not be read" in jlink.detail
 
 
 def test_jlink_check_names_a_caller_supplied_device_not_only_the_fallback():

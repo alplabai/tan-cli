@@ -9,6 +9,27 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Added
 
+- **`tan doctor` reports the project's curated-library selection: a `libraries`
+  row carrying each entry's tier, licence and whether it can be wired on the
+  target.** Ported from alp-sdk's `scripts/alp_cli/doctor.py::_check_libraries`
+  under ADR-0020 end-state B — `tan` is the whole user command surface, so a
+  verdict about the customer's own project does not stay behind in alp-sdk as a
+  second CLI. Resolution runs through `tan.planner.libraries.resolve_selection`,
+  the same function the build plan is rendered with, so the report and the build
+  cannot disagree about a selection. `scope: "project"`, WARN-only (`tan build`
+  refuses an unwireable selection outright — that is the hard gate, and a `fail`
+  here would additionally cost exit 4); no row at all for a project that selects
+  no libraries. New issue code `doctor.libraries`, registered `reserved`.
+  - **The check being ported crashed on every shipped project, and that is
+    fixed here rather than carried across.** It labelled its output from the RAW
+    `libraries:` document while resolving from the loader's normalised names, so
+    a `- {name: fmt, cores: [m55_hp]}` entry reached `load_manifest` as a dict
+    and raised `OrchestratorError` out of `_all_checks()` — exit 1, whole command
+    down, measured in `examples/peripheral-io/fmt-formatting`. All 42 in-tree
+    alp-sdk examples that select libraries use that shape. Names now come from
+    `scoped_names(project)`, which also dedupes one library declared on both the
+    project-wide and core-scoped channels (schema-valid, and reported twice by a
+    raw read).
 - **`tan explain --code <ALP-Bxxx|ALP_ERR_*>` — diagnostic-code lookup, ported
   from alp-sdk.** `scripts/alp_cli/explain.py` was the only reader of the SDK's
   generated `metadata/error-catalog.json`, so retiring it under ADR-0020
@@ -288,6 +309,23 @@ All notable changes to `tan` are documented here. Format follows
   `--target-kind` to let it infer. (#489)
 
 ### Fixed
+
+- **`tan doctor` no longer reports two false negatives on the flash-readiness
+  question a bench operator asks it before an MRAM write.** `setools_check`
+  stopped inferring an AEN MRAM flash failure from `fdt` importability under
+  any interpreter — `app-gen-toc` is a spawned SETOOLS subprocess, never a
+  Python import, and SETOOLS ships its own dependencies, so the inference was
+  false on real silicon even after tan-cli#488 defect 6 pointed it at the
+  workspace venv's own interpreter. The J-Link version probe used to pass
+  `[jlink_exe, "-?"]`, a flag JLinkExe does not have (`Unknown command line
+  option -?.`), so it never once reached the version banner JLinkExe prints
+  unprompted on every real invocation; a new `jlink_banner` helper reads that
+  banner directly (spawned with `-NoGui 1`, matching every other J-Link spawn
+  in this repo), regardless of exit code — except against the
+  `JLinkGDBServerCL` fallback name, which never quits on the probe's `exit\n`
+  stdin and would otherwise hold a GDB port for the full 15 s timeout on
+  every `tan doctor` run on such a host, so `_collect` excludes it from the
+  banner probe. Closes #641.
 
 - **`tan doctor` and `tan bootstrap` now read alp-sdk's own Zephyr-scoped
   Python floor (`zephyr.pythonMinVersion`) instead of a hardcoded constant
