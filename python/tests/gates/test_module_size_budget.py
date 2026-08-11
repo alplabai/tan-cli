@@ -1051,7 +1051,12 @@ _MODULE_BUDGET: dict[str, int] = {
     # check, so a guard inside the materialise branch would refuse only after
     # the other slices' files had landed) and why the build-root one is scoped
     # to `_MODE_NATIVE`. Measured `wc -l`, not arithmetic.
-    "tan/commands/build_cmd.py": 2043,
+    # 2048, not 2043, as of tan-cli#655: the new `build.configure-cache-reset`
+    # issue import + one `issues.extend(last_configure_cache_issues())` call
+    # (mirroring the sdk-switch-pristine wiring immediately above it) so a
+    # JSON-mode caller sees the stale-DTC_OVERLAY_FILE/CONF_FILE reset too,
+    # not only `execute.py`'s own `on_output` stream. Measured `wc -l`.
+    "tan/commands/build_cmd.py": 2048,
 
     # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
     # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
@@ -1577,7 +1582,29 @@ _MODULE_BUDGET: dict[str, int] = {
     # `test_bare_argv0_spawn.py::test_terminate_spawns_the_resolved_taskkill`
     # monkeypatches. That is a bigger, riskier blast radius through the cancel
     # path than the growth it saves.
-    "tan/commands/build/execute.py": 1429,
+    # 1598, not 1429, as of tan-cli#655: `_maybe_reset_stale_configure_cache`
+    # plus its `_CONFIGURE_CACHE_RESET_ARGS` constant, the call site in the
+    # dispatch loop (placed AFTER the sdk-switch-pristine guard so a pristine
+    # wipe is seen as "nothing cached yet", not compared against a stamp for a
+    # build dir that no longer exists), and the `_last_configure_cache_issues`/
+    # `last_configure_cache_issues` same-process recorder mirroring the
+    # sdk-switch guard's own `_last_sdk_switch_issues` pattern. MOST of the
+    # growth is the docstring recording the actual measured Zephyr-CMake root
+    # cause (`configuration_files.cmake`'s `DTC_OVERLAY_FILE`/`CONF_FILE`
+    # auto-discovery is cached `if(NOT DEFINED ...)`, so a file that did not
+    # exist at the FIRST configure stays invisible to every later one even
+    # though `tan build` already reconfigures every time) and why the reset is
+    # deliberately narrower than the sdk-switch guard's full wipe
+    # (`-UDTC_OVERLAY_FILE -UCONF_FILE` only -- NOT `-UEXTRA_CONF_FILE`, which
+    # would unset the slice's own `-DEXTRA_CONF_FILE=<alp.conf>` appended
+    # earlier in the same argv). Not extracted to its own module: the function
+    # reads `cmake_cache_configured` from THIS module's own `manifest.py`
+    # import and follows the exact same shape/placement as the neighbouring
+    # `_maybe_pristine_stale_sdk_build_dir` it is modelled on -- splitting one
+    # guard out while leaving its sibling in would separate two call sites a
+    # reader needs to see together (both run back-to-back on every slice,
+    # in a documented order). Measured with `wc -l`, not summed from the diff.
+    "tan/commands/build/execute.py": 1598,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
     # delta in scripts/gen_zephyr_board.py line for line). Raised rather
@@ -2306,7 +2333,16 @@ _MIRRORED = ("tan/planner/",)
 # 707 -> 711, MEASURED by this gate's own `_long_functions` walk on the final
 # tree -- `bootstrap_cmd.py:_run` is still the package's single longest
 # function.
-_FUNCTION_COUNT_BUDGET = 246
+#
+# 246 -> 247, tan-cli#655: one new function over the cap,
+# `execute.py:_maybe_reset_stale_configure_cache` at 117 lines (MEASURED with
+# this gate's own `_long_functions` walk), the stale-configure-cache reset
+# modelled on its neighbour `_maybe_pristine_stale_sdk_build_dir` -- most of
+# the span is the docstring recording the measured Zephyr-CMake root cause
+# (see the `build/execute.py` entry in `_MODULE_BUDGET` above for the same
+# citation) rather than trimmable control flow. `_FUNCTION_WORST_BUDGET` is
+# untouched: 117 is nowhere near `bootstrap_cmd.py:_run`'s 711.
+_FUNCTION_COUNT_BUDGET = 247
 _FUNCTION_WORST_BUDGET = 711
 
 
