@@ -204,7 +204,24 @@ _MODULE_BUDGET: dict[str, int] = {
     # pattern), and the new `_zephyr_manifest_floor_from_facts` reader.
     # Re-measured with this gate's own `len(read_text().splitlines())`, not
     # estimated from the diff.
-    "tan/commands/doctor_cmd.py": 3747,
+    #
+    # 3757, not 3747, as of tan-cli#641: two false negatives fixed on the same
+    # host-readiness question a bench operator asks doctor before an MRAM
+    # write. `setools_check` no longer infers a flash failure from ANY
+    # interpreter's `fdt` importability -- `app-gen-toc` is a spawned
+    # subprocess, never a Python import, and SETOOLS ships its own
+    # dependencies, so that inference was false on real AEN silicon even
+    # after tan-cli#488 defect 6 pointed it at the workspace venv's own
+    # interpreter (removed the `has_fdt` parameter/branch, plus the
+    # now-dead `_has_module`/`_module_importable` helpers -- a net line
+    # DROP on their own). The J-Link version probe used to pass
+    # `[jlink_exe, "-?"]`, a flag JLinkExe does not have (`Unknown command
+    # line option -?.`), so it never once reached the version banner
+    # JLinkExe prints unprompted on every real invocation; the new
+    # `jlink_banner` helper reads that banner instead, regardless of exit
+    # code, since the banner is already printed by the time Commander
+    # decides how to exit. Re-measured with this gate's own walk.
+    "tan/commands/doctor_cmd.py": 3758,
     # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
     # `--dry-run` about which workspace a real run would build, on both the
     # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
