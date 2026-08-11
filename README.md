@@ -209,6 +209,18 @@ python3.12 -m venv .venv
 python3 python/scripts/version_check.py --selftest --self
 ```
 
+That run means the same thing on every machine, including a bench host with
+real debug tooling installed. The suite neutralises the debug/flash probe
+identities — `JLinkExe`, `openocd`, `pyocd`, `west`, `renode` and friends —
+for its own duration (`python/tests/conftest.py`, `PROBE_TOOLS`), so a
+which()-gated branch answers the way it answers on a CI runner rather than the
+way this host happens to be provisioned. Before that (tan-cli#603) seven
+`test_flow_d_preflight_*` cases passed locally and failed on ubuntu, windows
+and macos at once. Ordinary host tooling — `git`, `python3`, `sleep`, the
+coreutils the installer-script tests execute — is left alone. A test that
+needs a probe tool present seeds its own and points `PATH` at it, which is
+what makes the inventory readable in the test.
+
 Useful directories:
 
 ```text

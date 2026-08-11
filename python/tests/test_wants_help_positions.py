@@ -82,8 +82,10 @@ _VALUE_FLAG_CASES = [("explain", "--template"), ("scaffold", "--name"), ("init",
 
 
 def _argv_for(subcommand: str, flag: str, destination: Path) -> list[str]:
-    """`explain` reads nothing from disk and writes nothing; the two write
-    commands need somewhere to put their output."""
+    """`explain --template` (the one case exercised here) reads nothing from
+    disk and writes nothing -- unlike `--code`, which reads a checkout, this
+    case never reaches that path; the two write commands need somewhere to
+    put their output."""
     tail = [] if subcommand == "explain" else ["--destination", str(destination)]
     return [subcommand, flag, "--help", *tail]
 
