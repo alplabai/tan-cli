@@ -289,6 +289,17 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
+  PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable on
+  the very first documented `tan init` then `tan bootstrap` sequence, since
+  `init` is exactly what writes that pin. Rewriting it is gated on this run's
+  SDK having resolved through the `projectPin` tier (the project already had a
+  working pin naming exactly the checkout that just moved); `tan init` remains
+  the only place that writes a NEW pin where none existed, so a bootstrap run
+  from an arbitrary workspace-parent directory still writes nothing there. A
+  relocation later rolled back (a failed venv/west step) restores the project
+  pin byte-for-byte, mirroring the existing `~/.alp/sdk-default` rollback.
+  (#644)
 - **The test suite no longer means two different things on two machines: the
   debug/flash probe inventory is now a property of the test, not of the host.**
   A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
