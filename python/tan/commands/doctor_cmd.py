@@ -41,11 +41,29 @@ which is worse than either verdict alone.
 **SETOOLS was never mentioned by any doctor.** Neither `alp doctor`
 (`scripts/alp_cli/doctor.py` -- it has `_check_python`, `_check_west`,
 `_check_jlink`, and nothing for this) nor the shipped `tan doctor` says a word
-about `SETOOLS_DIR`, `SE_UART`, or the `fdt` pip package. A customer therefore
-gets a clean bill of health and then meets a bare `RuntimeError` out of
+about `SETOOLS_DIR` or `SE_UART`. A customer therefore gets a clean bill of
+health and then meets a bare `RuntimeError` out of
 `scripts/west_commands/runners/alif_flash.py` at the moment they try to flash an
-AEN part. The `setools` check names all three, plus the Alif developer download
+AEN part. The `setools` check names both, plus the Alif developer download
 (`app-release-exec-linux-SE_FW_x.y.z`) it cannot redistribute.
+
+**This check used to ALSO gate on `fdt` being importable under some Python
+interpreter, and that was a false negative even after tan-cli#488 defect 6
+picked the "right" interpreter to ask (tan-cli#641).** Measured on real AEN
+silicon, on a host where Flow D had just succeeded three times in the same
+session: `fdt` genuinely was not importable in the workspace venv, yet
+`app-gen-toc` ran fine, produced
+`app-package-map.txt`, and the MRAM write it fed survived a cold power cycle.
+Whatever `alif_flash.py`'s own `fdt` need is for the SE-UART `west flash`
+path, this check's own wording bundled it into one verdict alongside
+`app-gen-toc` -- which `tan.core.setools.sign_slot0` spawns as its own
+subprocess (`./app-gen-toc -f build/config/...`), never as a Python import
+under any interpreter this command could probe -- and SETOOLS ships whatever
+dependencies IT needs regardless. Dropped rather than reworded again: probing
+one interpreter's `sys.path` was never going to answer "will a flash that
+spawns a separate, license-gated binary succeed," and the false alarm this
+produced trains an operator to stop trusting doctor on the one question they
+ask it before a write.
 
 **Nothing that probes may throw.** Four Criticals in this port were uncaught
 exceptions escaping the error contract: a raw traceback instead of an envelope,
@@ -97,7 +115,6 @@ without error.
 the oracle's `--build --fix` auto-repairs a missing Zephyr workspace by
 running `tan bootstrap`, and nothing here does that yet.
 """
-import importlib.util
 import json
 import os
 import platform
@@ -146,7 +163,7 @@ from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
-from tan.core.venv import find_workspace_venv, venv_python, west_program, west_workspace_dir
+from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -1249,9 +1266,7 @@ def zephyr_workspace_check(workspace_dir: str, version_text: str | None) -> Chec
     )
 
 
-def setools_check(
-    setools_dir: str | None, se_uart: str | None, has_fdt: bool, is_linux: bool
-) -> Check:
+def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) -> Check:
     """`setools` -- can this host flash an Alif AEN part's MRAM at all?
 
     Nothing else in either doctor asks. `scripts/west_commands/runners/
@@ -1263,6 +1278,19 @@ def setools_check(
     perfectly healthy host. `unknown` off Linux -- `alif_flash.py` hard-codes
     `app-release-exec-linux`, so there is no verdict to give a native
     Windows/macOS host, and `unknown` is counted in no summary bucket.
+
+    **No longer probes any interpreter for `fdt` (tan-cli#641).** It used to,
+    most recently against the workspace venv's own Python (tan-cli#488 defect
+    6). Measured on real AEN silicon: `fdt` was genuinely unimportable in the
+    workspace venv while `app-gen-toc` -- which `tan.core.setools.sign_slot0`
+    spawns as its own subprocess, never as a Python import under any
+    interpreter this command could probe, and which SETOOLS ships its own
+    dependencies for regardless -- signed successfully, and the resulting MRAM
+    write persisted a cold power cycle. Probing one interpreter's `sys.path`
+    was never going to answer whether a flash that spawns a separate,
+    license-gated binary will succeed, and the false alarm it produced here
+    trains an operator to stop trusting doctor on the one question they ask it
+    before a write.
     """
     if not is_linux and not setools_dir and not se_uart:
         return Check(
@@ -1302,18 +1330,13 @@ def setools_check(
             "$SE_UART is unset (the SE-UART device: Linux /dev/ttyUSB*, macOS "
             "/dev/cu.usbserial-*, a passed-through COM under WSL)"
         )
-    if not has_fdt:
-        problems.append(
-            "the `fdt` Python package is not importable (app-gen-toc needs it; it "
-            "is not a Zephyr requirement, so bootstrap never installs it)"
-        )
 
     if not problems:
         return Check(
             "setools",
             "pass",
             f"SETOOLS ready: $SETOOLS_DIR=`{setools_dir}` has "
-            f"{'/'.join(SETOOLS_EXECUTABLES)}, $SE_UART=`{se_uart}`, `fdt` importable.",
+            f"{'/'.join(SETOOLS_EXECUTABLES)}, $SE_UART=`{se_uart}`.",
             scope="host",
         )
     return Check(
@@ -1324,11 +1347,58 @@ def setools_check(
         + ".",
         f"Download the Alif Security Toolkit (`{SETOOLS_BUNDLE}`) from the Alif "
         f"developer portal -- it is license-gated and alp-sdk does not "
-        f"redistribute it -- then `export SETOOLS_DIR=<...>/app-release-exec-linux`, "
-        f"`export SE_UART=/dev/ttyUSB0` (your SE-UART device), and `pip install fdt` "
-        f"into the workspace venv. See docs/aen-bench-bringup.md.",
+        f"redistribute it -- then `export SETOOLS_DIR=<...>/app-release-exec-linux` "
+        f"and `export SE_UART=/dev/ttyUSB0` (your SE-UART device). "
+        f"See docs/aen-bench-bringup.md.",
         scope="host",
     )
+
+
+def jlink_banner(jlink_exe: str, timeout: int = PROBE_TIMEOUT_S) -> str | None:
+    """The version banner JLinkExe prints, unprompted, at the top of EVERY
+    invocation -- `SEGGER J-Link Commander V9.50 (Compiled ...)` / `DLL
+    version V9.50` -- before it ever tries to reach a probe or a target.
+
+    **Not `[jlink_exe, "-?"]` (tan-cli#641).** JLinkExe has no such flag:
+    `JLinkExe -?` answers `Unknown command line option -?.` and exits
+    non-zero, so the old probe never once reached the banner it was trying to
+    read -- measured on real AEN silicon, this was the whole reason a J-Link
+    tool that answers `V9.50` unprompted on every run still reported "version
+    could not be read".
+
+    Feeds `exit\\n` on stdin so Commander quits at its own interactive prompt
+    rather than sitting there waiting for input or a probe that may not be
+    plugged in; `timeout` still bounds it regardless. Unlike `probe()`, this
+    reads stdout REGARDLESS of the exit code -- the banner is already printed
+    by the time Commander decides how it exits (e.g. because no emulator is
+    attached), and that text must not be discarded along with a non-zero
+    status that says nothing about whether the banner itself was readable.
+
+    Commander-only contract: this assumes `jlink_exe` is `JLinkExe`/`JLink`,
+    which quit on the `exit\\n` fed to them. `JLinkGDBServerCL` does not read
+    stdin at all -- it waits for a GDB connection and holds its port for the
+    full `timeout` regardless of what is piped in. The caller (`_collect`)
+    must not spawn this against that binary; see its comment there.
+
+    `-NoGui 1` matches every other J-Link spawn in this repo
+    (`flash_plan.py`, `flash_cmd.py`) -- without it a GUI-capable install can
+    raise a modal dialog (firmware-update / device-select) that `exit\\n` on
+    stdin does not dismiss, blocking for the full `timeout` regardless.
+    """
+    try:
+        completed = subprocess.run(
+            [jlink_exe, "-NoGui", "1"],
+            input="exit\n",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return completed.stdout or None
 
 
 def jlink_check(
@@ -1383,7 +1453,8 @@ def jlink_check(
             "warn",
             f"J-Link tools found at {found} but their version could not be read, so "
             f"the Flow D MRAM loader could not be confirmed. " + requirements,
-            "Run `JLinkExe -?` by hand and confirm the banner reports "
+            "Run `JLinkExe` by hand (it prints the banner unprompted, then type "
+            "`exit`) and confirm it reports "
             f"V{_fmt(JLINK_MIN_DLL)} or newer.",
             scope="host",
         )
@@ -3383,21 +3454,32 @@ def _collect(
         setools_check(
             os.environ.get("SETOOLS_DIR"),
             os.environ.get("SE_UART"),
-            # tan-cli#488 defect 6: the WORKSPACE VENV's interpreter -- the one
-            # `west flash` actually runs `app-gen-toc` under -- never tan's
-            # own. See `_module_importable`'s docstring.
-            _module_importable(venv_python(workspace_root, sdk_root), "fdt"),
             sys.platform.startswith("linux"),
         )
     )
 
-    jlink_exe = next(
-        (found for name in ("JLinkExe", "JLink", "JLinkGDBServerCL") if (found := on_path(name))),
-        None,
+    jlink_name, jlink_exe = next(
+        (
+            (name, found)
+            for name in ("JLinkExe", "JLink", "JLinkGDBServerCL")
+            if (found := on_path(name))
+        ),
+        (None, None),
     )
-    # `-?` prints the banner and exits; with stdin closed it cannot sit waiting
-    # for a probe that is not plugged in, and the timeout bounds it regardless.
-    jlink_version = _parse_two(probe([jlink_exe, "-?"]) or "") if jlink_exe else None
+    # JLinkExe has no `-?` flag (`Unknown command line option -?.`); the
+    # version banner it prints unprompted at the top of every real invocation
+    # is what `jlink_banner` reads instead. See its docstring. NOT spawned
+    # against `JLinkGDBServerCL` (the third fallback name): that binary never
+    # reads stdin and never quits on `jlink_banner`'s `exit\n`, so it would
+    # hold a GDB port for the full `PROBE_TIMEOUT_S` on every `tan doctor`
+    # run on a host where only the GDB server is on PATH. `jlink_check`
+    # already reports "found but version could not be read" for a `None`
+    # version, which is the correct outcome here too.
+    jlink_version = (
+        _parse_two(jlink_banner(jlink_exe) or "")
+        if jlink_exe and jlink_name != "JLinkGDBServerCL"
+        else None
+    )
     resolved_device, device_source = jlink_flash_device(sdk_root)
     _add(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
 
@@ -3407,52 +3489,6 @@ def _collect(
         _add(sdk_provenance_check(sdk_root))
 
     return checks
-
-
-def _has_module(name: str) -> bool:
-    """Importability without importing, in TAN'S OWN interpreter. `find_spec`
-    raises on a half-installed package (`ValueError`) or a broken meta-path
-    finder, which must read as 'absent', not as a doctor crash.
-
-    Only the right question when there is no other interpreter to ask --
-    see `_module_importable`, which is what `setools_check`'s `fdt` clause
-    actually wants (tan-cli#488 defect 6)."""
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError, AttributeError):
-        return False
-
-
-def _module_importable(python_exe: str | None, name: str) -> bool:
-    """Whether `name` imports cleanly under `python_exe` -- the interpreter
-    that will ACTUALLY run it, not tan's own (tan-cli#488 defect 6).
-
-    `setools_check`'s `fdt` clause names what `west flash` -> `alif_flash.py`
-    imports at flash time, and that import happens inside the WORKSPACE VENV
-    (`tan flash` prepends its `bin`/`Scripts` directory to PATH before
-    spawning `west`), never inside tan's own interpreter. Probing tan's own
-    interpreter instead is wrong in two directions at once: a FALSE GREEN
-    when something merely NAMED `fdt` is reachable from tan's own `sys.path`
-    (under `python -m tan`, that includes the cwd) while the workspace venv
-    still lacks it -- the customer then meets the bare `RuntimeError`
-    `alif_flash.py` raises at the bench, the exact failure this check exists
-    to pre-empt -- and a PERMANENT FALSE RED for the released binary: a
-    PyInstaller freeze's `sys.path` is bundle-only, `fdt` is not among its
-    declared runtime deps, so `find_spec` can never succeed there, yet the
-    check's own remedy ("`pip install fdt` into the workspace venv") can
-    never clear it. alp-sdk's own runner does this correctly
-    (`scripts/west_commands/runners/alif_flash.py` runs the identical
-    `find_spec('fdt')` inside the process that actually invokes
-    `app-gen-toc`); this asks the same interpreter that process will be.
-
-    `python_exe is None` (no workspace venv resolved yet, e.g. before `tan
-    bootstrap` has run) falls back to `_has_module`, against tan's own
-    interpreter -- the best available signal before there is anything else
-    to ask.
-    """
-    if python_exe is None:
-        return _has_module(name)
-    return probe([python_exe, "-c", f"import {name}"]) is not None
 
 
 def _generated_at() -> str:
