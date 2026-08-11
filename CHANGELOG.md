@@ -310,6 +310,23 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan doctor` no longer reports two false negatives on the flash-readiness
+  question a bench operator asks it before an MRAM write.** `setools_check`
+  stopped inferring an AEN MRAM flash failure from `fdt` importability under
+  any interpreter — `app-gen-toc` is a spawned SETOOLS subprocess, never a
+  Python import, and SETOOLS ships its own dependencies, so the inference was
+  false on real silicon even after tan-cli#488 defect 6 pointed it at the
+  workspace venv's own interpreter. The J-Link version probe used to pass
+  `[jlink_exe, "-?"]`, a flag JLinkExe does not have (`Unknown command line
+  option -?.`), so it never once reached the version banner JLinkExe prints
+  unprompted on every real invocation; a new `jlink_banner` helper reads that
+  banner directly (spawned with `-NoGui 1`, matching every other J-Link spawn
+  in this repo), regardless of exit code — except against the
+  `JLinkGDBServerCL` fallback name, which never quits on the probe's `exit\n`
+  stdin and would otherwise hold a GDB port for the full 15 s timeout on
+  every `tan doctor` run on such a host, so `_collect` excludes it from the
+  banner probe. Closes #641.
+
 - **`tan doctor` and `tan bootstrap` now read alp-sdk's own Zephyr-scoped
   Python floor (`zephyr.pythonMinVersion`) instead of a hardcoded constant
   when no `$ZEPHYR_BASE` workspace resolves to read `python.cmake` from
