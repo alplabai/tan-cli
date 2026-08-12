@@ -4,7 +4,7 @@
   "function_cap": 50,
   "modules": {
     "tan/cli.py": 1008,
-    "tan/commands/bootstrap_cmd.py": 3236,
+    "tan/commands/bootstrap_cmd.py": 3255,
     "tan/commands/build/execute.py": 1598,
     "tan/commands/build_cmd.py": 2074,
     "tan/commands/clean_cmd.py": 1098,
@@ -22,7 +22,7 @@
     "tan/commands/validate_cmd.py": 1571,
     "tan/core/bootstrap.py": 2111,
     "tan/core/debug_launch.py": 1275,
-    "tan/core/flash_plan.py": 3071,
+    "tan/core/flash_plan.py": 3079,
     "tan/core/scaffold.py": 1510,
     "tan/planner/kconfig.py": 2014,
     "tan/planner/loader.py": 1251,
@@ -30,5 +30,5 @@
     "tan/planner/zephyr_board.py": 1372
   },
   "function_count_budget": 251,
-  "function_worst_budget": 728
+  "function_worst_budget": 747
 }
