@@ -404,6 +404,28 @@ All notable changes to `tan` are documented here. Format follows
   `_synthesised_finding`, so this specific, identifiable cause names the real
   fix — a present-but-independently-broken workspace venv still gets the
   generic message. (#652)
+- **README's quickstart never named the Zephyr SDK toolchain install, and its
+  "From source" instructions failed on stock Ubuntu 24.04.** Both measured in
+  a clean `ubuntu:24.04` container (#651). The quickstart's command list took
+  a customer straight to `tan build` without ever running
+  `west sdk install --version 1.0.1 -t arm-zephyr-eabi` -- the exact command
+  `tan doctor`'s `zephyrSdk` check already names, but neither `tan bootstrap`
+  nor `tan doctor --fix` runs it for you. The quickstart now runs it in
+  sequence, after activating the workspace venv `west` lives in (nothing else
+  puts `west` on `PATH`) and pointing `ZEPHYR_BASE` at the workspace, and
+  names the `file(1)` prerequisite the SDK's own host-tools step needs on a
+  minimal Linux host (#424) but that step's own failure never names. A new
+  test (`test_readme_quickstart_names_the_current_zephyr_sdk_install_command`)
+  keeps the README's embedded version pin from silently drifting from
+  `ZEPHYR_SDK_INSTALL_VERSION`. Separately, `python3 -m pip install ./python`
+  failed with `No module named pip` on Ubuntu 24.04's bare `python3` package,
+  and -- once `python3-pip` is added -- fails again with PEP 668's
+  `externally-managed-environment` (`/usr/lib/python3.12/EXTERNALLY-MANAGED`).
+  The "From source" sections in `README.md` and `python/README.md` now
+  install into a virtual environment instead (which needs only
+  `python3-venv` on Debian/Ubuntu -- its bundled `ensurepip` supplies the
+  venv's own `pip`, so `python3-pip` is not a separate prerequisite at all).
+  Closes #651.
 - **The `tan_under_test` refusal (tan-cli#423) had never been exercised itself
   -- every existing consumer of it is an ordinary test run where it is
   expected to pass silently, so a green suite said nothing about whether the
