@@ -613,6 +613,75 @@ def test_exited_nonzero_before_timeout_is_a_coded_refusal(tmp_path: Path):
     assert "exit code 3" in envelope["issues"][0]["message"]
 
 
+def test_timeout_zero_never_classifies_a_line_so_it_cannot_report_a_pass(tmp_path: Path):
+    """tan-cli#568: the literal repro. `--timeout 0` makes `run_renode`'s
+    deadline already past when the read loop starts, so it breaks before
+    dequeuing a single line -- even though the fake Renode below actually
+    prints a real `CPU was halted` line. FAILS against pre-fix code: the
+    deadline being in the past broke the loop before either the halt latch
+    or `natural_exit` ever saw the line, and with no `--expect` the command
+    fell through to `ExitCode.SUCCESS` -- `ok: true`, exit 0, `issues: []`,
+    an EMPTY `renode.log` -- exactly the report the fake binary's own halt
+    line contradicts."""
+    _scaffold(tmp_path, with_elf=True, with_descriptors=True)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_renode(
+        fake_bin,
+        ["cpu: PC does not lay in memory or PC and SP are equal to zero. CPU was halted."],
+        exit_code=0,
+    )
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path, "--format", "json", "--timeout", "0", path_override=str(fake_bin)
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1, envelope
+    assert envelope["ok"] is False
+    assert envelope["issues"][0]["code"] == "renode.no-console-output"
+    # Never classified the halt line, so it must not be misreported as the
+    # (unrelated, unearned) `renode.cpu-halted` code either.
+    assert "renode.cpu-halted" not in [i["code"] for i in envelope["issues"]]
+    log_path = Path(envelope["data"]["logPath"])
+    assert log_path.read_text(encoding="utf-8") == ""
+
+
+def test_silent_clean_exit_is_not_a_pass_even_at_a_normal_timeout(tmp_path: Path):
+    """The general shape of tan-cli#568, not just the `--timeout 0` special
+    case: a Renode that exits 0 having printed NOTHING must not report a
+    pass either, at any timeout. Deterministic (no sleep, no race on the
+    deadline) -- proves the fix keys off `lines_seen`, not off `timeout == 0`
+    specifically."""
+    _scaffold(tmp_path, with_elf=True, with_descriptors=True)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_renode(fake_bin, [], exit_code=0)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path, "--format", "json", "--timeout", "5", path_override=str(fake_bin)
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1, envelope
+    assert envelope["ok"] is False
+    assert envelope["issues"][0]["code"] == "renode.no-console-output"
+    log_path = Path(envelope["data"]["logPath"])
+    assert log_path.read_text(encoding="utf-8") == ""
+
+
+def test_output_observed_before_the_deadline_still_passes(tmp_path: Path):
+    """The positive control for tan-cli#568's fix: a run that DOES classify
+    console lines must still report a plain success -- otherwise the fix
+    could pass by making every run fail, which is the mirror-image bug."""
+    _scaffold(tmp_path, with_elf=True, with_descriptors=True)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_renode(fake_bin, ["renode: booting", "*** Booting Zephyr OS ***"])
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path, "--format", "json", "--timeout", "5", path_override=str(fake_bin)
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 0, envelope
+    assert envelope["ok"] is True
+    assert envelope["issues"] == []
+    log_path = Path(envelope["data"]["logPath"])
+    assert "*** Booting Zephyr OS ***" in log_path.read_text(encoding="utf-8")
+
+
 def test_expect_hit_stops_early_and_reports_success(tmp_path: Path):
     _scaffold(tmp_path, with_elf=True, with_descriptors=True)
     fake_bin = tmp_path / "fakebin"

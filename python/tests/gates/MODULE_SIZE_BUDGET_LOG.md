@@ -48,4 +48,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_worst_budget: 728 -> 747
 - 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/clean_cmd.py: 1098 -> 1110
+    - tan/commands/renode_cmd.py: 1501 -> 1533
     - tan/commands/diff_cmd.py: 839 -> 882
