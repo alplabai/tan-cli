@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`load_board_yaml(..., metadata_root=...)` reads ONE tree (tan-cli#573).
+"""`load_board_yaml(..., metadata_root=...)` threads through storage/partition
+/carveout/capability resolution (tan-cli#573) -- NOT every reader downstream
+of a loaded project. See "Still bound-root-only" below for what this module
+does NOT cover.
 
 The override is documented and used (`tests/core/test_sdk_revision_gate.py`,
 `tan/core/doctor_libraries.py::_resolve`), but two of `load_board_yaml`'s five
@@ -23,6 +26,23 @@ the resolvers the loader hands the project to (`resolve_storage_partitions`,
 too, so a loader-only fix makes the loader ACCEPT a device the resolver then
 BLOCKS.  The root therefore travels on `BoardProject.metadata_root`, and
 those resolvers read it back via `effective_metadata_root()`.
+
+Still bound-root-only, and NOT exercised by this module: any reader that
+takes the project (or a name) but not the root and reads `paths.METADATA_ROOT`
+or `paths.REPO` itself. `tan.planner.kconfig._chip_has_driver` and
+`_emit_extra_library_profile` are direct examples (`kconfig.py:706`, `:91`
+read the module-level `REPO` even with a project in hand). The library-manifest
+layer is a mixed case, not a clean "no project in hand" one: `libraries.py`'s
+`resolve_selection` / `zephyr_kconfig_lines` / `_check_requires` all accept
+`project` and default `metadata_root` to the bound `METADATA_ROOT`, and
+`kconfig.py`'s three calls into that layer (its three `resolve_capabilities`
+call sites are threaded; the `_library_layer.resolve_selection` /
+`zephyr_kconfig_lines` calls in `_emit_libraries` are not) don't pass
+`project.effective_metadata_root()` through, so they still resolve against
+the bound tree. A handful of other constants are frozen at import against the
+bound root regardless of any project (`slugs.py`'s
+`PERIPHERAL_KCONFIG_REGISTRY`, `som_metadata.py`'s `SILICON_KCONFIG_REGISTRY`,
+`validate.py`'s `_CURATED_LIBRARIES`). None of that is covered here.
 
 Every test here needs a real metadata tree AND a bound root -- same
 requirement, and the same env vars, as `tests/core/test_sdk_revision_gate.py`
