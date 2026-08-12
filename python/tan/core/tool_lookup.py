@@ -28,10 +28,11 @@ is that walk.
 **The Windows candidate set -- the one deliberate behaviour change here.**
 For a bare, extension-less identity this walk tries `tool` + each `%PATHEXT%`
 suffix and NEVER `tool` itself ([`windows_candidate_names`]). That is a
-Windows-arm behaviour change relative to `doctor_cmd.on_path`, one of the five
-hand-rolled lookups #532 consolidates, whose extension list is `[""] + PATHEXT`
--- it accepts an extension-less `%PATH%` file, and accepts it AHEAD of every
-suffixed sibling. Three reasons the oracle's shape is the one to consolidate on:
+Windows-arm behaviour change relative to `doctor_cmd.on_path`'s OWN private
+walk before #532 finished consolidating it (now `on_path` delegates here
+too): its extension list was `[""] + PATHEXT` -- it accepted an
+extension-less `%PATH%` file, and accepted it AHEAD of every suffixed
+sibling. Three reasons the oracle's shape is the one to consolidate on:
 
 * **Oracle parity.** `crates/tan-cli/src/util.rs::find_on_path` is
   `if has_ext { dir.join(command) } else { for ext in &exts { ... } }` -- no

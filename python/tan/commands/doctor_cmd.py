@@ -163,6 +163,7 @@ from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
+from tan.core.tool_lookup import resolve_tool
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -400,35 +401,39 @@ def probe(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> str | None:
 def on_path(command: str) -> str | None:
     """Resolve `command` against `$PATH` ONLY, returning its full path.
 
+    tan-cli#532: no longer a private walk -- delegates to
+    `tan.core.tool_lookup.resolve_tool`, the ONE copy the build path
+    (`execute._resolve_tool`), the flash path (`flash_cmd._tool_available`/
+    `_execute`) and `tan size` (`size_cmd._find_on_path`) already share
+    (tan-cli#510/#567/#600). `faultdecode_cmd` imports THIS function rather
+    than calling `tool_lookup` itself, so it is consolidated by this same
+    change without a separate edit there.
+
     NOT `shutil.which`: on Windows that inserts `os.curdir` ahead of PATH
     (documented Windows search order), so a project checked out with its own
     `west.exe`/`openocd.exe` at its root would be reported as this host's
     tooling -- and a later flow would spawn exactly that project-controlled
     binary. `crate::util::command_on_path` walks PATH by hand for this reason;
-    so does this.
+    so does `tool_lookup.resolve_tool`.
+
+    **Behaviour change (tan-cli#532).** The private walk this replaces tried
+    a bare, extension-less `command` on Windows AHEAD of every `%PATHEXT%`
+    suffix (`exts = [""] + PATHEXT`); `resolve_tool` never considers the bare
+    name at all -- see `tool_lookup`'s own module docstring, "The Windows
+    candidate set", for why that leniency is unsafe once the resolved value
+    is spawned rather than only reported. Pinned already by
+    `tests/commands/test_bare_argv0_spawn.py::
+    test_the_windows_walk_never_considers_the_bare_extensionless_name` and
+    exercised end to end by `tests/gates/test_probe_tool_inventory.py::
+    test_a_test_that_wants_a_probe_tool_seeds_its_own`, whose seeded
+    `openocd.exe` is still found via the `.EXE` suffix candidate either way.
+    The explicit `os.access(..., os.X_OK)` check drops too: on POSIX
+    `resolve_tool` enforces it already (`shutil.which`'s own `_access_check`);
+    on Windows `os.access(path, os.X_OK)` never distinguished anything
+    `is_file()` did not, since Windows carries no separate execute-permission
+    bit for an arbitrary file the way POSIX does.
     """
-    raw = os.environ.get("PATH") or ""
-    if os.name == "nt":
-        exts = [""] + [
-            e
-            for e in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
-            if e
-        ]
-    else:
-        exts = [""]
-    for directory in raw.split(os.pathsep):
-        if not directory:
-            continue
-        for ext in exts:
-            candidate = Path(directory) / (command + ext)
-            try:
-                if candidate.is_file() and os.access(candidate, os.X_OK):
-                    return str(candidate)
-            except OSError:
-                # A PATH entry on a dead network share, a name too long for the
-                # filesystem: skip the entry, never fail the command.
-                continue
-    return None
+    return resolve_tool(command, os.environ).resolved
 
 
 def _read_text(path: Path) -> str | None:

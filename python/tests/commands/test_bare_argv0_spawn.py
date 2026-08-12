@@ -481,17 +481,18 @@ def test_the_windows_walk_never_considers_the_bare_extensionless_name(tool, expe
     """The ONE deliberate Windows-arm behaviour change tan-cli#567 makes,
     pinned so the next reader cannot mistake it for an accident.
 
-    `doctor_cmd.on_path`, one of the five hand-rolled lookups #532
-    consolidates, tries `exts = [""] + PATHEXT` -- the bare, EXTENSIONLESS
+    `doctor_cmd.on_path`'s OWN private walk, before #532 consolidated it onto
+    this module too, tried `exts = [""] + PATHEXT` -- the bare, EXTENSIONLESS
     name first, ahead of every suffixed sibling. `tool_lookup` does not, and
-    that is not an oversight in the consolidation:
+    that was not an oversight in the consolidation:
 
     * It is what the ORACLE does. `crates/tan-cli/src/util.rs::find_on_path`
       is `if has_ext { dir.join(command) } else { for ext in &exts { ... } }`
       -- no bare candidate anywhere. The oracle is the fixed point; a port
       that is more permissive than it, on the one arm nobody here can run, is
       drift. `build/execute.py::_resolve_tool`, the copy this module IS,
-      agreed with the oracle already; only `on_path` did not.
+      agreed with the oracle already; only `on_path` did not, until #532
+      moved it onto this same walk.
     * It is what WINDOWS does. `CreateProcess` with `lpApplicationName=NULL`
       appends only `.exe` to an unqualified name and never reads `%PATHEXT%`
       at all, so a bare-name hit is a file the platform's own resolver would

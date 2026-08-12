@@ -49,3 +49,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/renode_cmd.py: 1501 -> 1533
     - tan/commands/diff_cmd.py: 839 -> 882
+- 2026-08-12 -- tan-cli#532: doctor_cmd.on_path delegates to tool_lookup.resolve_tool; docstrings in doctor_cmd.py and flash_cmd.py grew to record the consolidation and its one behaviour change
+    - tan/commands/doctor_cmd.py: 3920 -> 3925
+    - tan/commands/flash_cmd.py: 3922 -> 3925

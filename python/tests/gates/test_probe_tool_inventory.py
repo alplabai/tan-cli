@@ -173,14 +173,15 @@ def test_a_test_that_wants_a_probe_tool_seeds_its_own(tmp_path, monkeypatch):
     inventory is then a property of the test, readable in the test, and
     identical on every host.
 
-    Compared case-insensitively, deliberately: `doctor_cmd.on_path` builds
-    its Windows candidate as `command + ext`, `ext` drawn literally from
-    `%PATHEXT%` (`.COM;.EXE;.BAT;.CMD`, uppercase) -- so it returns
-    `...\\openocd.EXE`, the CONSTRUCTED casing, even though the file on disk
-    (and the `seeded` path this test built) is `openocd.exe`. NTFS resolves
-    both to the same file; a case-SENSITIVE `==` does not, and was exactly
-    this test failing on windows-latest for a reason that has nothing to do
-    with what it is checking (tan-cli#625 review)."""
+    Compared case-insensitively, deliberately: `doctor_cmd.on_path` (via
+    `tool_lookup.resolve_tool` since tan-cli#532) builds its Windows candidate
+    as `command + ext`, `ext` drawn literally from `%PATHEXT%`
+    (`.COM;.EXE;.BAT;.CMD`, uppercase) -- so it returns `...\\openocd.EXE`,
+    the CONSTRUCTED casing, even though the file on disk (and the `seeded`
+    path this test built) is `openocd.exe`. NTFS resolves both to the same
+    file; a case-SENSITIVE `==` does not, and was exactly this test failing on
+    windows-latest for a reason that has nothing to do with what it is
+    checking (tan-cli#625 review)."""
     tools = tmp_path / "seeded"
     tools.mkdir()
     seeded = tools / ("openocd.exe" if os.name == "nt" else "openocd")

@@ -436,9 +436,12 @@ def _tool_available(tool: str, venv_bin: Path | None = None) -> bool:
     `tool_lookup` module, so the two can no longer disagree about what runs.
     See [`_execute`], which does that resolution.
 
-    tan-cli#532: the walk itself is no longer `doctor_cmd.on_path`'s private
-    copy but the shared one -- three of the five hand-rolled implementations
-    that issue enumerates now share a single definition."""
+    tan-cli#532: the walk itself is no longer a private copy but the shared
+    `tool_lookup.resolve_tool` -- now all five hand-rolled implementations
+    that issue enumerated share a single definition (`doctor_cmd.on_path`
+    delegates to it too, which is what carries `faultdecode_cmd` along, since
+    that module resolves through `doctor_cmd.on_path` rather than calling
+    `tool_lookup` directly)."""
     try:
         if resolve_tool(tool, os.environ).resolved is not None:
             return True

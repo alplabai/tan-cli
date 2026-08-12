@@ -1804,6 +1804,33 @@ def test_path_lookup_never_consults_the_current_directory(tmp_path, monkeypatch)
     assert doctor_cmd.on_path("west") is None
 
 
+def test_on_path_delegates_to_the_shared_tool_lookup(monkeypatch):
+    """tan-cli#532: `on_path` is no longer its own hand-rolled `%PATH%` walk --
+    it answers whatever `tool_lookup.resolve_tool` finds, against the SAME
+    `os.environ` a bare `on_path(command)` call has always searched.
+
+    Stubs `tool_lookup.resolve_tool` (the name `doctor_cmd` imported, so the
+    stub reaches the call this function makes) rather than the filesystem, so
+    this is a delegation pin, not a re-test of the walk itself -- the walk's
+    own behaviour (candidate set, empty-entry handling, absolute-path
+    shortcut) is `tool_lookup`'s to prove, in `tests/commands/
+    test_bare_argv0_spawn.py`. Before #532's consolidation this assertion is
+    false: the private walk never called `resolve_tool` at all, so patching it
+    left `on_path`'s answer unchanged."""
+    from tan.core.tool_lookup import ToolResolution
+
+    calls = []
+
+    def _stub(tool, env):
+        calls.append((tool, env))
+        return ToolResolution("/resolved/from/stub", "stub")
+
+    monkeypatch.setattr(doctor_cmd, "resolve_tool", _stub)
+
+    assert doctor_cmd.on_path("west") == "/resolved/from/stub"
+    assert calls == [("west", os.environ)]
+
+
 # --------------------------------------------------------------------------
 # Framing
 # --------------------------------------------------------------------------
