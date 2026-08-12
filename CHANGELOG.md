@@ -310,6 +310,33 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **The README's first install step no longer assumes `curl`, and now separates
+  what the INSTALLER needs from what a BUILD needs.** `curl -fsSL ... | sh` was
+  the recommended path's opening instruction with no prerequisites line in front
+  of it, and a pristine `docker.io/library/ubuntu:24.04` has no `curl` — nor
+  `wget`, `ca-certificates`, `python3`, `pip3`, `git`, `cmake`, `ninja`, `unzip`
+  or `file` (measured in a clean-room `podman` run; `tar`, `gzip` and
+  `sha256sum` ARE present). The reader got `bash: curl: command not found` at
+  step one, with nothing saying whether `curl` was the only thing missing or the
+  first of several, and no way to reach `tan doctor` — which draws that line
+  correctly and was never the problem. The README was also NARROWER than the
+  script it documents: `install.sh` has always probed `command -v curl` then
+  `command -v wget` and refuses only when both are absent (`install.sh: need
+  curl or wget on PATH`), with the same shape guarding `sha256sum`/`shasum`. A
+  `wget`-only install of a stock `ubuntu:24.04` — the one added package, no
+  `curl` — was run end to end while writing this and reached `staged binary
+  verified: tan 0.5.1`, so the `wget` form is now documented alongside the
+  `curl` one. A new `### What a build needs` section carries the build list
+  (`git`, `cmake`, `python3`, `ninja`, `xz`, `wget` on Linux; no `xz`/`wget` on
+  macOS), plus `file` for `west sdk install` and `python3-venv` for `tan
+  bootstrap`, and points at `tan doctor` as the live authority — verified to run
+  on that bare host and report `hostPrerequisites: missing from PATH: git,
+  cmake, python3, ninja`. `python/tests/gates/test_readme_install_prerequisites.py`
+  reads the required-any tool groups out of `install.sh` and the build list out
+  of `tan.core.bootstrap.fallback_facts()`, so neither list can drift from the
+  thing it describes, and a build tool presented as an installer prerequisite
+  fails the gate. (#687)
+
 - **`tan init` no longer reports `ok:true`/`issues:[]` while silently
   discarding what `--sdk-root` or `--cores` asked for.** Two sites, same
   shape: (1) an unresolvable `--sdk-root` (a typo, or the more realistic
