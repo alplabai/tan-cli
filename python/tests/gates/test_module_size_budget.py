@@ -1261,7 +1261,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # move. Re-measured on this branch by running this gate: exactly `wc -l`,
     # which is what it counts (`len(read_text().splitlines())` below) -- the
     # AST walk belongs to the FUNCTION-count gate, not this one.
-    "tan/core/scaffold.py": 1500,
+    # 1510, not 1500, as of the #645 round-3 review: `splice_companion_cores`
+    # now quotes an `off` companion's `os:` value (`os: "off"`, not the bare
+    # `os: off` YAML 1.1 parses as the boolean `False`) plus a docstring
+    # comment explaining why, against the schema and the vendored scaffolds'
+    # own existing `os: "off"` convention. Re-measured: exactly
+    # `len(read_text().splitlines())` on this branch.
+    "tan/core/scaffold.py": 1510,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
     # `--all` re-run fix had to become content-aware -- reading the existing
     # overlay and comparing it against the banner every tan-emitted one
@@ -1497,7 +1503,28 @@ _MODULE_BUDGET: dict[str, int] = {
     # something else: "this TEMPLATE supports one SKU", not "tan has no
     # scaffold for this SoM family"). Re-measured: exactly `wc -l` on this
     # branch.
-    "tan/commands/init_cmd.py": 1121,
+    # 1210, not 1121, as of tan-cli#642/#643: `_sdk_root_flag_unresolved_issue`
+    # (a new function, tan-cli#642's warning for an explicit `--sdk-root` that
+    # does not resolve to a real checkout) plus its call site and docstring in
+    # `init()`, and `_apply_cores`'s new zephyr-companion refusal (tan-cli#643)
+    # plus its own docstring explaining why the collision check above it must
+    # run first. Re-measured: exactly `wc -l` on this branch.
+    # 1219, not 1210, as of the #645 round-2 review: the #643 refusal now also
+    # catches an app-less `os: baremetal` companion (not just `zephyr`) --
+    # `--cores <id>:baremetal` reached the identical dead end as the zephyr
+    # case (an app-less slice `_enforce_loader_rules` refuses downstream, at
+    # `tan build`, against a board.yaml the customer never touched) through a
+    # door the original #643 fix left open, and the remediation string had
+    # advertised it as valid. Re-measured: exactly `wc -l` on this branch.
+    # 1247, not 1219, as of the #645 round-3 review: the refusal now also
+    # catches a `yocto` companion on a Cortex-M id (the fourth door to the
+    # same dead end -- `_enforce_os_matches_core_class` refuses it just as
+    # hard downstream, at `tan validate`), plus the docstring measuring and
+    # explaining it against `E1M-AEN801`; the `--cores` help string was also
+    # corrected to say a bare companion id can be refused by inference
+    # rather than "OS is inferred... " unconditionally. Re-measured: exactly
+    # `len(read_text().splitlines())` on this branch.
+    "tan/commands/init_cmd.py": 1247,
     # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
     # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
     # slice reader, and the `--target-kind` inference decision itself
