@@ -296,9 +296,18 @@ jobs:
           - os: macos-15-intel
             asset: tan-x86_64-apple-darwin.tar.gz
             archive_ext: tar.gz
+            # The Mach-O cputype the `arch` step below refuses a mismatch
+            # against (tan-cli#500). Stated beside the asset NAME because the
+            # name is the claim being checked: `macos-15-intel` is the INTEL
+            # label and it has to be -- `macos-latest`/`macos-14`/`macos-15`
+            # are all Apple silicon, and PyInstaller freezes the interpreter it
+            # RUNS, so a wrong label here builds fine and uploads an arm64
+            # binary under the x86_64 name.
+            cputype: "0x01000007" # CPU_TYPE_X86_64
           - os: macos-15
             asset: tan-aarch64-apple-darwin.tar.gz
             archive_ext: tar.gz
+            cputype: "0x0100000c" # CPU_TYPE_ARM64
           # `container` both routes this leg through the docker step below AND
           # is the single place the build image is named.
           - os: ubuntu-latest
@@ -471,6 +480,57 @@ jobs:
           name: glibc-floor
           path: python/dist/glibc-floor.txt
           if-no-files-found: error
+
+      # THE SHIPPING PATH'S ARCH CHECK (tan-cli#500). `python-binaries.yml` has
+      # had one since #500; this job -- the one a `v*` push actually runs, the
+      # one whose bytes reach a customer -- had none at all, on either darwin
+      # leg. That is the asymmetry worth naming: the proof-only workflow was
+      # guarded and the shipping one was not.
+      #
+      # PyInstaller cannot cross-compile: it freezes the interpreter it RUNS,
+      # so a wrong runner label produces a correctly NAMED asset of the wrong
+      # architecture. alp-sdk-vscode selects assets BY NAME and never inspects
+      # the file, so nothing downstream catches it either -- the failure lands
+      # on a customer's Intel Mac as `Bad CPU type in executable`, after a tag
+      # that cannot be un-pushed.
+      #
+      # Reads the pre-archive onedir binary, not the .tar.gz staged below: an
+      # archive has no Mach-O header. Runs before `stage asset` so a mismatch
+      # fails while nothing has been named yet.
+      - name: arch (darwin assets)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # An empty `cputype` FAILS rather than skipping. Without this, adding
+          # a darwin row and forgetting the field would silently restore the
+          # unguarded state this step exists to end -- a check that quietly
+          # does nothing is the defect tan-cli#500 is about.
+          if [ -z "${{ matrix.cputype }}" ]; then
+            echo "::error::this darwin matrix row declares no cputype, so its asset would ship unverified. Add cputype beside the asset name (0x01000007 CPU_TYPE_X86_64 / 0x0100000c CPU_TYPE_ARM64)."
+            exit 1
+          fi
+          python3 - "python/dist/tan/tan" "${{ matrix.cputype }}" <<'PY'
+          import struct, sys
+          path, want = sys.argv[1], int(sys.argv[2], 16)
+          with open(path, "rb") as fh:
+              head = fh.read(8)
+          if len(head) < 8:
+              raise SystemExit(f"::error::{path} is too short to hold a Mach-O header")
+          magic, cputype = struct.unpack("<II", head)
+          # Fat magic is stored BIG-endian, so it reads back byte-swapped.
+          # Refused rather than mis-parsed: a universal binary would satisfy
+          # BOTH asset names at once, the opposite of per-architecture assets.
+          if magic in (0xBEBAFECA, 0xCAFEBABE, 0xBFBAFECA, 0xCAFEBABF):
+              raise SystemExit(
+                  f"::error::{path} is a UNIVERSAL (fat) binary; these assets are "
+                  f"per-architecture and a fat one would ship under both names")
+          if magic not in (0xFEEDFACF, 0xFEEDFACE):
+              raise SystemExit(f"::error::{path} is not a Mach-O binary (magic 0x{magic:08x})")
+          print(f"{path}: Mach-O cputype 0x{cputype:08x} (want 0x{want:08x})")
+          if cputype != want:
+              raise SystemExit(f"::error::{path} is not the architecture its asset name claims")
+          PY
 
       - name: stage asset
         shell: bash

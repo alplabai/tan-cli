@@ -113,10 +113,14 @@ What those commands do:
 6. `size` reports firmware use against the SoM memory budget.
 7. `run --flash` builds and then runs or programs the selected target.
 
-Run `tan doctor` if setup or toolchain discovery fails; its `zephyrSdk` check
-names the exact `west sdk install` command above too, so it stays correct if
-that pin ever moves. `tan doctor --fix` installs missing user-level
-prerequisites interactively; it never invokes `sudo` for you.
+Run `tan doctor` if setup or toolchain discovery fails; its `zephyrSdk`
+check names the exact `west sdk install` command above too, so it stays
+correct if that pin ever moves. `tan doctor --fix` installs missing
+prerequisites, but only at a real, interactive terminal -- it is a no-op
+(exit 4) under a pipe, a redirect, or CI, so it is not a scripted-
+onboarding remedy. It never spawns `sudo` itself: it runs a prerequisite's
+manifest install command directly when already root, and otherwise prints
+the exact command to run by hand.
 
 If you do not want the west workspace next to the SDK checkout, choose it
 explicitly:
@@ -229,6 +233,20 @@ python3.12 -m venv .venv
 (cd python && ../.venv/bin/python -m pytest tests -q)
 python3 python/scripts/version_check.py --selftest --self
 ```
+
+**Always install into a venv you create — never a bare `pip install -e ./python`
+or `pip install --user -e ./python`.** Run without an active venv, that writes
+an editable install into your OS user site-packages, and from that moment
+every bare `python3` process on the machine resolves `import tan` to
+whichever checkout was installed last, regardless of which worktree it is
+actually running in — including another developer's or another agent's
+checkout, on a shared box (tan-cli#665). It costs nothing to notice while it
+is happening: `tan --version` and `which tan` keep answering normally, so a
+full `pytest tests -q` run can report hundreds of misleading failures (or,
+worse, a false green) with no other symptom. `tests/conftest.py`'s
+`tan_under_test` fixture refuses loudly at session start if `import tan`
+resolves to anything outside this checkout's own `python/` — that is the
+backstop, not a substitute for using a venv in the first place.
 
 That run means the same thing on every machine, including a bench host with
 real debug tooling installed. The suite neutralises the debug/flash probe

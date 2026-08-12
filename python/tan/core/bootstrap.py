@@ -958,27 +958,44 @@ def hint_line(tool: str, install: dict[str, str]) -> str:
 
 #: tan-cli#355, added as a SECOND line on the refusals below -- the oracle's own
 #: first line is left byte-identical. See `posix_refusal` for why.
-_DOCTOR_FIX_HINT = "Or run `tan doctor --build --fix` to install them from the SDK's manifest."
+#:
+#: tan-cli#650: both hints below now carry the SAME parenthetical --
+#: `--fix` mutates the host, so it goes through the identical `can_prompt`
+#: consent gate (`tan.core.consent`) every other host mutation in this CLI
+#: does, and that gate refuses outright with no TTY on either `stdin` or
+#: `stderr` -- piped, redirected, or CI, exactly the shape a Dockerfile `RUN`
+#: or an onboarding script has. Measured in a clean `ubuntu:24.04` container
+#: (tan-cli#650): `tan doctor --build --fix` with no TTY attached exits 4 and
+#: changes nothing. This hint is often the FIRST thing a customer reads about
+#: `--fix`, before they have tried it -- recommending it with no caveat there
+#: reads as a working remedy, which for a scripted/CI caller it is not.
+_DOCTOR_FIX_HINT = (
+    "Or run `tan doctor --build --fix` (needs a real, interactive terminal) "
+    "to install them from the SDK's manifest."
+)
 
 #: tan-cli#370. The line above is TRUE only where the manifest's own install
-#: commands need no elevation. alp-sdk's `prerequisites.install.linux` is six
-#: `sudo apt-get install -y ...` entries, and `doctor --build --fix` REFUSES to
-#: spawn anything whose first word is `sudo` (`doctor_cmd.fix_needs_sudo_check`,
-#: `doctor.fix-needs-sudo`) -- deliberately, because under `--format json` this
-#: process's stdio is captured end to end and a password prompt would hang
-#: forever rather than fail loudly. So on Linux `--fix` installs NOTHING; it
-#: prints the exact command per tool. Promising an install there trades one
-#: wrong expectation for another, which is the very thing #355 set out to stop,
-#: and it does so on the host most customers are on.
+#: commands need no elevation OR the caller is already root. alp-sdk's
+#: `prerequisites.install.linux` is six `sudo apt-get install -y ...` entries;
+#: `doctor --build --fix` never spawns the `sudo` PROGRAM itself
+#: (`doctor_cmd.fix_needs_sudo_check`, `doctor.fix-needs-sudo`) -- under
+#: `--format json` this process's stdio is captured end to end and a password
+#: prompt would hang forever rather than fail loudly -- but tan-cli#650 made
+#: it root-aware: for a caller whose effective UID is already 0 (a root
+#: container, most CI base images, a fresh cloud VM) there is no elevation
+#: left to acquire, so `--fix` strips the manifest's literal `sudo ` word and
+#: runs the rest of the line directly. A non-root Linux caller still gets
+#: NOTHING installed there, only the exact command printed per tool.
 #:
 #: Keyed on the COMMANDS, not on the platform: macOS is POSIX and its `brew
 #: install ...` needs no elevation, so it earns the plain wording, and Windows
 #: `winget` (user-scope) does too. Reading the commands is also what keeps this
 #: correct against a manifest nobody here has seen.
 _DOCTOR_FIX_HINT_NEEDS_ELEVATION = (
-    "Or run `tan doctor --build --fix`: it prints the exact command for each "
-    "tool from the SDK's manifest, and runs the ones needing no elevation "
-    "(tan never spawns `sudo` itself)."
+    "Or run `tan doctor --build --fix` (needs a real, interactive terminal): "
+    "it prints the exact command for each tool from the SDK's manifest, runs "
+    "the ones needing no elevation, and -- when already running as root -- "
+    "runs the `sudo`-prefixed ones too, without ever spawning `sudo` itself."
 )
 
 
