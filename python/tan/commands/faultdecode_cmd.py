@@ -299,9 +299,10 @@ def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
     `--file -` is the EXPLICIT opt-in and always reads stdin to EOF, whatever
     else is on the command line: the caller asked for that read by name, and a
     dump has no terminator other than EOF. `auto_consume_stdin` gates only the
-    IMPLICIT read, and the caller passes `False` once any fault register was
-    supplied as a flag -- there is nothing left for a dump to contribute, so
-    there is no reason to wait on a pipe for one (tan-cli#388).
+    IMPLICIT read; the CLI always passes `True` for it now (tan-cli#503,
+    defect 1 -- see the call site in `faultdecode()` for why); the parameter
+    itself stays (rather than inlined away) because two tests below call
+    `_read_dump` directly with it.
 
     tan-cli#488 round 5 class sweep: `sys.stdin` itself, not just the result
     of calling `.isatty()` on it, can be `None` -- a process launched with
@@ -469,14 +470,26 @@ def faultdecode(
             "faultdecode.invalid-register-value", err.message, envelope_mode=envelope_mode
         ) from None
 
-    # `--pc`/`--lr` are addresses to symbolicate, not status registers, and
-    # neither satisfies the "something to analyse" check below -- so neither
-    # counts as a reason to skip the dump.
-    registers_given = any(
-        value is not None
-        for value in (cfsr_i, hfsr_i, dfsr_i, bfar_i, mmfar_i, mmfsr_i, bfsr_i, ufsr_i)
-    )
-    dump_text = _read_dump(file_value, auto_consume_stdin=not registers_given)
+    # Read the implicit stdin dump UNCONDITIONALLY (tan-cli#503, defect 1) --
+    # not gated on whether any register flag was also given. A prior version
+    # skipped this read whenever ANY of cfsr/hfsr/dfsr/bfar/mmfar/mmfsr/bfsr/
+    # ufsr was supplied, which broke the command's own documented contract
+    # ("Explicit flags win over a parsed dump" only holds if the dump is
+    # still read when flags are present) two ways: a piped CFSR/BFAR was
+    # silently dropped in favour of the flag's registers alone (measured:
+    # `... | tan faultdecode --hfsr 0x40000000` reported a self-contradictory
+    # "Forced HardFault ... its own status bits are clear" while the piped
+    # CFSR=0x00008200/BFAR=0xdeadbeef it never read said otherwise), and
+    # --bfar/--mmfar counted as "a register was given" without satisfying the
+    # cfsr/hfsr/dfsr gate below, so the dump was skipped AND the command still
+    # refused with `faultdecode.no-registers`. `_stdin_offers_input` already
+    # bounds this read to `_STDIN_READY_TIMEOUT_S` (0.25 s) even when nothing
+    # arrives, so making it unconditional does not reopen tan-cli#388's
+    # unbounded hang -- measured,
+    # `test_registers_on_the_command_line_never_wait_for_an_open_stdin_pipe`
+    # (a real held-open OS pipe, not `CliRunner`) still returns in well under
+    # a second, not the 20 s bound it fails at.
+    dump_text = _read_dump(file_value, auto_consume_stdin=True)
     parsed: dict[str, int] = parse_dump(dump_text) if dump_text else {}
 
     def pick(name: str, flag_val: int | None) -> int | None:

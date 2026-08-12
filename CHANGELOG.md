@@ -310,6 +310,22 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan faultdecode` silently dropped a piped/pasted fault dump whenever ANY
+  register flag was also given, contradicting its own documented contract
+  ("Explicit flags win over a parsed dump" -- only true if the dump is still
+  read when a flag is present too).** `_read_dump`'s implicit stdin read is
+  no longer gated on `not registers_given`; it is attempted unconditionally
+  (still bounded by `_stdin_offers_input`'s `_STDIN_READY_TIMEOUT_S`, so a
+  held-open pipe cannot reopen tan-cli#388's unbounded hang -- measured, a
+  real held-open OS pipe with `--cfsr` given still returns in well under a
+  second). Two reachable failures, both closed: a piped CFSR/BFAR was
+  discarded in favour of an unrelated explicit flag (e.g. `--hfsr
+  0x40000000` reported "Forced HardFault ... its own status bits are clear"
+  while the piped `CFSR=0x00008200`/`BFAR=0xdeadbeef` it never read said the
+  opposite -- a precise bus fault), and `--bfar`/`--mmfar` alone counted
+  toward suppressing the dump read without counting toward the
+  cfsr/hfsr/dfsr "something to analyse" gate, so the dump was skipped AND the
+  command still refused with `faultdecode.no-registers`. (#503)
 - **Re-pinned the vendored-planner staleness audit to alp-sdk `1a9f753c`
   (from `7d58ef32`), and ported the behavioural delta the pin was measuring
   against.** `tan/planner/loader.py`, `manifest.py`, `models.py`, and
@@ -360,6 +376,22 @@ All notable changes to `tan` are documented here. Format follows
   `_synthesised_finding`, so this specific, identifiable cause names the real
   fix — a present-but-independently-broken workspace venv still gets the
   generic message. (#652)
+- **The `tan_under_test` refusal (tan-cli#423) had never been exercised itself
+  -- every existing consumer of it is an ordinary test run where it is
+  expected to pass silently, so a green suite said nothing about whether the
+  refusal would actually fire the day it needs to** (tan-cli#665). Measured
+  on the shared dev box: a bare `pip install -e ./python` run outside a venv
+  wrote an editable install into user site-packages, and a full `pytest tests
+  -q` on an unrelated branch reported `681 failed, 3298 passed, ..., 17
+  errors` for reasons that had nothing to do with that branch -- reproduced
+  identically against unmodified `dev`. `tests/gates/test_tan_under_test_
+  guard.py` now plants a decoy `tan` package outside this repo's `python/`,
+  puts it ahead of the real one on `sys.path` (the same externally observable
+  shape a hijacked editable install produces), and proves `tan_under_test`
+  refuses loudly with its own named message -- and proves it stays silent for
+  this repo's own, correctly-resolved `tan`. `README.md`'s Development
+  section now says plainly: install into a venv you create, never a bare or
+  `--user` `pip install -e ./python`.
 
 - **`tan doctor --fix` refused every `sudo`-prefixed manifest install command
   unconditionally, even when the caller already had root -- the exact host a
