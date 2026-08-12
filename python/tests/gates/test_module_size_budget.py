@@ -1346,7 +1346,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # the `_spawn_validator` return annotation and the one-sentence fold in
     # `_reject_if_sdk_validator_disagrees` all followed the shape. MEASURED on
     # the rebased tree, not 812 + this branch's pre-rebase delta.
-    "tan/commands/diff_cmd.py": 839,
+    # 839 -> 882, tan-cli#570/#571: `os`/`preset` gained the `_string_scalar_
+    # field` leniency helper (a `String`-typed field coerces any scalar,
+    # matching `inference.backend`'s existing treatment) and `schemaVersion`
+    # gained its missing `u32::MAX` ceiling. Most of the growth is the new
+    # helper's own doc comment, not new control flow -- no separable pure
+    # half exists here (the helper's ONLY caller is `_parse_fields`, already
+    # in this module).
+    "tan/commands/diff_cmd.py": 882,
     # NEW ENTRY: 727 -> 934 -> 1020, the diagnostic-code lookup (`tan explain
     # --code`, ADR-0020 end-state B -- alp-sdk's `scripts/alp_cli/explain.py`
     # moves here so its retirement loses no capability), plus the tan-cli#627
