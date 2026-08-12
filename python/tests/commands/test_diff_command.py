@@ -299,6 +299,116 @@ def test_inference_default_arena_kib_wrong_type_is_a_schema_violation(tmp_path: 
     assert envelope["issues"][0]["code"] == "diff.schema-violation"
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#570 / tan-cli#571 -- `os`/`preset` scalar leniency and the
+# `schemaVersion` u32 ceiling. Both were measured directly against
+# `target/debug/tan.exe` (tan 0.4.1) before `crates/` was deleted (tan-cli#269);
+# the exact inputs/outputs below are the recorded measurements from each
+# issue body, reproduced here as fixed points this port must keep matching.
+# ---------------------------------------------------------------------------
+
+
+def test_v2_os_boolean_scalar_is_accepted_and_stringified(tmp_path: Path) -> None:
+    """tan-cli#570: `os: true` used to refuse outright (`_typed_field` demanded
+    a Python `str`) even though the oracle's `String`-typed field coerces any
+    scalar. Measured against the oracle: `changes == [{"path": "os",
+    "kind": "removed", "before": "true"}]` at exit 0."""
+    proj = _project(tmp_path, "schemaVersion: 2\nos: true\nsom:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    assert envelope["data"]["changes"] == [{"path": "os", "kind": "removed", "before": "true"}]
+
+
+def test_v2_os_integer_scalar_is_accepted_and_stringified(tmp_path: Path) -> None:
+    """tan-cli#570, the `os: 5` case: measured `before == "5"` on the oracle."""
+    proj = _project(tmp_path, "schemaVersion: 2\nos: 5\nsom:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["changes"] == [{"path": "os", "kind": "removed", "before": "5"}]
+
+
+def test_v1_os_boolean_scalar_no_longer_refuses_the_real_libraries_change(
+    tmp_path: Path,
+) -> None:
+    """tan-cli#570's second half: at schema version 1, `os` is never read, so
+    the old false refusal did not just reject a harmless field -- it hid the
+    genuine `libraries` prune the command exists to report. Measured on the
+    oracle: `changes == [{"path": "libraries", "kind": "removed",
+    "before": []}]` at exit 0."""
+    proj = _project(tmp_path, "schemaVersion: 1\nos: true\nlibraries: []\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["changes"] == [{"path": "libraries", "kind": "removed", "before": []}]
+
+
+def test_preset_non_string_scalar_no_longer_refuses(tmp_path: Path) -> None:
+    """tan-cli#570: `preset` is checked for top-level shape only (never
+    diffed), but the old strict `str` check still refused a bare scalar like
+    `preset: 1.0` outright. `preset` never contributes a diff entry either
+    way, so the only observable effect of the fix is exit 0 instead of 2."""
+    proj = _project(tmp_path, "schemaVersion: 1\npreset: 1.0\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+
+
+def test_os_list_scalar_is_still_a_schema_violation(tmp_path: Path) -> None:
+    """The tan-cli#570 leniency is bounded: a `list`/`dict` is a shape no
+    `String` field can ever hold, so it must still refuse -- only bare
+    scalars (bool/int/float/etc.) gained the new leniency."""
+    proj = _project(tmp_path, "schemaVersion: 2\nos: [zephyr]\nsom:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "diff.schema-violation"
+
+
+def test_schema_version_above_u32_max_is_refused_not_treated_as_v2(tmp_path: Path) -> None:
+    """tan-cli#571: `schemaVersion` is `u32` in the Rust model, but the port's
+    guard only checked the lower bound, so a value above `u32::MAX` fell
+    through `schema_version_ok` (still a Python `int`) and was silently
+    treated as `>= 2`. Measured against the oracle:
+    `schemaVersion: 4294967296` is exit 2 `diff.schema-violation`; the
+    pre-fix port was exit 0 with a fabricated `os` removal entry."""
+    proj = _project(tmp_path, "schemaVersion: 4294967296\nos: zephyr\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["data"]["changes"] == []
+    assert envelope["issues"][0]["code"] == "diff.schema-violation"
+
+
+def test_schema_version_at_u32_max_is_still_accepted(tmp_path: Path) -> None:
+    """The boundary the refusal-only test above cannot prove on its own: a
+    value just INSIDE the valid range (`u32::MAX` itself) must still be
+    accepted, not rejected by an off-by-one ceiling. Measured against the
+    oracle: `schemaVersion: 4294967295` is exit 0, `changes == [{"path": "os",
+    "kind": "removed", "before": "zephyr"}]` -- identical to the port."""
+    proj = _project(tmp_path, "schemaVersion: 4294967295\nos: zephyr\nsom:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    assert envelope["data"]["changes"] == [{"path": "os", "kind": "removed", "before": "zephyr"}]
+
+
+def test_schema_version_negative_is_still_refused(tmp_path: Path) -> None:
+    """Control from tan-cli#571's own body: `schemaVersion: -1` agrees on
+    both sides at exit 2 already, before and after this fix -- the ceiling
+    added here must not disturb the existing floor check."""
+    proj = _project(tmp_path, "schemaVersion: -1\nos: zephyr\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "diff.schema-violation"
+
+
 def _stub_sdk(tmp_path: Path, *, validator_body: str | None) -> Path:
     """A stand-in alp-sdk checkout: the loader marker `resolve_sdk` (via
     `resolve_sdk_tiered`) validates a `--sdk-root` against, plus (when given)
@@ -684,4 +794,43 @@ def test_parse_fields_rejects_wrong_typed_iot():
 
 def test_parse_fields_default_document_is_v1_with_nothing_to_prune():
     assert _parse_fields(None) == (1, None, None, None, None)
+
+
+def test_parse_fields_os_boolean_and_integer_scalars_coerce_to_string():
+    """tan-cli#570 at the `_parse_fields` level, matching the CLI-level
+    fixtures above but pinning `os_value` directly rather than through the
+    `os` diff entry it feeds."""
+    assert _parse_fields({"schemaVersion": 2, "os": True})[1] == "true"
+    assert _parse_fields({"schemaVersion": 2, "os": False})[1] == "false"
+    assert _parse_fields({"schemaVersion": 2, "os": 5})[1] == "5"
+
+
+def test_parse_fields_os_list_or_dict_still_refuses():
+    for bad_os in ([1], {"a": 1}):
+        try:
+            _parse_fields({"schemaVersion": 2, "os": bad_os})
+        except ParseFailure as failure:
+            assert failure.code == "schema-violation"
+            assert "os" in failure.message
+        else:
+            raise AssertionError(f"expected a ParseFailure for os={bad_os!r}")
+
+
+def test_parse_fields_schema_version_above_u32_max_refuses():
+    """tan-cli#571: the ceiling `_parse_fields` itself must enforce, not just
+    the CLI envelope built on top of it."""
+    try:
+        _parse_fields({"schemaVersion": 4294967296, "os": "zephyr"})
+    except ParseFailure as failure:
+        assert failure.code == "schema-violation"
+        assert "schemaVersion" in failure.message
+    else:
+        raise AssertionError("expected a ParseFailure")
+
+
+def test_parse_fields_schema_version_at_u32_max_is_accepted():
+    """The boundary case: `u32::MAX` itself must still parse cleanly."""
+    effective_version, os_value, *_rest = _parse_fields({"schemaVersion": 4294967295, "os": "z"})
+    assert effective_version == 4294967295
+    assert os_value == "z"
     assert _parse_fields({}) == (1, None, None, None, None)
