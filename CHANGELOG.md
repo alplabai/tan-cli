@@ -310,6 +310,34 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan init` no longer reports `ok:true`/`issues:[]` while silently
+  discarding what `--sdk-root` or `--cores` asked for.** Two sites, same
+  shape: (1) an unresolvable `--sdk-root` (a typo, or the more realistic
+  route — a previously-valid one that `tan bootstrap` has since relocated)
+  scaffolded the whole project with no `.alp/sdk-path` written and
+  `sdkPinned: null`, with nothing in the envelope saying why, though the
+  README promises `init` pins the checkout there — a later command then
+  silently fell through to `~/.alp/sdk-default`, some OTHER project's last
+  `bootstrap` on a shared host. Now warns `init.sdk-root-invalid`, naming the
+  path. (2) `--cores m55_he:zephyr` on a template whose app core the SoM
+  guess had already fixed to `m55_hp` was spliced in as an app-less
+  COMPANION instead — a single-core request became a two-core project bound
+  to a core the caller never named, plus an unrequested default RPMsg
+  carve-out. `--cores` can only ever add a companion (it has no source
+  directory to give one an `app:`), so a companion entry requesting `zephyr`
+  or `baremetal` — both need an `app:` the splice cannot supply, and the
+  latter would otherwise plan to `ok:true` here only to be refused two
+  commands later at `tan build` — is now refused (`init.invalid-cores`,
+  naming both core ids) rather than silently rendered or deferred to a
+  confusing downstream failure. A `yocto` companion reaches the identical
+  dead end through a fourth door — the planner refuses a Cortex-M core
+  running Yocto exactly as hard as a Cortex-A core running Zephyr — and
+  `--cores <id>:yocto` is now refused too when `<id>` is not one of the
+  `a`-prefixed Cortex-A ids every SoM topology uses (`a32_cluster`,
+  `a55_cluster`); `<id>:off` stays honored unconditionally, and now
+  round-trips as the schema's string `"off"` instead of an unquoted `off`
+  that YAML parses as the boolean `False` and the schema then rejects.
+  (#642, #643)
 - **`tan faultdecode` silently dropped a piped/pasted fault dump whenever ANY
   register flag was also given, contradicting its own documented contract
   ("Explicit flags win over a parsed dump" -- only true if the dump is still
@@ -376,6 +404,28 @@ All notable changes to `tan` are documented here. Format follows
   `_synthesised_finding`, so this specific, identifiable cause names the real
   fix — a present-but-independently-broken workspace venv still gets the
   generic message. (#652)
+- **README's quickstart never named the Zephyr SDK toolchain install, and its
+  "From source" instructions failed on stock Ubuntu 24.04.** Both measured in
+  a clean `ubuntu:24.04` container (#651). The quickstart's command list took
+  a customer straight to `tan build` without ever running
+  `west sdk install --version 1.0.1 -t arm-zephyr-eabi` -- the exact command
+  `tan doctor`'s `zephyrSdk` check already names, but neither `tan bootstrap`
+  nor `tan doctor --fix` runs it for you. The quickstart now runs it in
+  sequence, after activating the workspace venv `west` lives in (nothing else
+  puts `west` on `PATH`) and pointing `ZEPHYR_BASE` at the workspace, and
+  names the `file(1)` prerequisite the SDK's own host-tools step needs on a
+  minimal Linux host (#424) but that step's own failure never names. A new
+  test (`test_readme_quickstart_names_the_current_zephyr_sdk_install_command`)
+  keeps the README's embedded version pin from silently drifting from
+  `ZEPHYR_SDK_INSTALL_VERSION`. Separately, `python3 -m pip install ./python`
+  failed with `No module named pip` on Ubuntu 24.04's bare `python3` package,
+  and -- once `python3-pip` is added -- fails again with PEP 668's
+  `externally-managed-environment` (`/usr/lib/python3.12/EXTERNALLY-MANAGED`).
+  The "From source" sections in `README.md` and `python/README.md` now
+  install into a virtual environment instead (which needs only
+  `python3-venv` on Debian/Ubuntu -- its bundled `ensurepip` supplies the
+  venv's own `pip`, so `python3-pip` is not a separate prerequisite at all).
+  Closes #651.
 - **The `tan_under_test` refusal (tan-cli#423) had never been exercised itself
   -- every existing consumer of it is an ordinary test run where it is
   expected to pass silently, so a green suite said nothing about whether the

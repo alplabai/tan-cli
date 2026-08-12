@@ -743,7 +743,17 @@ def splice_companion_cores(board_yaml: str, cores: list[tuple[str, str]]) -> str
         if core_id == app_core or core_id in existing_ids:
             continue
         companion_lines.append(f"  {core_id}:")
-        companion_lines.append(f"    os: {os_value}")
+        # `off` is a YAML 1.1 boolean keyword (`yaml.safe_load("os: off")` ->
+        # `{"os": False}`), so an unquoted companion entry writes a bool where
+        # the schema requires the string `"off"` -- confirmed against
+        # `metadata/schemas/board-v2.schema.json`'s `os` enum, which rejects
+        # `False` with "False is not of type 'string'". Every vendored
+        # scaffold already quotes it this way (e.g.
+        # `tan/templates/vendored/edge-ai/E1M-AEN801/board.yaml`); the other
+        # three enum values (`zephyr`/`yocto`/`baremetal`) are not YAML
+        # keywords and stay bare to match that same convention.
+        os_literal = '"off"' if os_value == "off" else os_value
+        companion_lines.append(f"    os: {os_literal}")
         if os_value == "yocto":
             companion_lines.append("    image: alp-image-edge")
     if not companion_lines:

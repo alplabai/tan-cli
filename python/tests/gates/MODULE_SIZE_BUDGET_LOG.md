@@ -39,3 +39,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/core/bootstrap.py: 2094 -> 2111
     - tan/planner/loader.py: 1016 -> 1251
     - function_count_budget: 249 -> 251
+- 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/init_cmd.py: 1121 -> 1247
+    - tan/core/scaffold.py: 1500 -> 1510
