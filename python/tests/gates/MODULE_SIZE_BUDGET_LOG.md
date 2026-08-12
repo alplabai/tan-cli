@@ -49,3 +49,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/renode_cmd.py: 1501 -> 1533
     - tan/commands/diff_cmd.py: 839 -> 882
+- 2026-08-12 -- tan-cli#573: load_board_yaml's metadata_root override now reaches stages 4-5 (two new parameters) and travels on BoardProject to the downstream resolvers (one new keyword argument); +3 lines in loader.py, none elsewhere.
+    - tan/planner/loader.py: 1251 -> 1254
