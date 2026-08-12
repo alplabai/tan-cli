@@ -318,17 +318,33 @@ from tests.conftest import sdk_root
 #:     consumer side (`tan.core.flash_plan`'s `slot0_load_address` handling,
 #:     `plan_alif_mram_jlink`) already reads this key -- landed ahead of
 #:     this re-pin, per tan-cli#657.
+#:   - `c07254b2` (alp-sdk#1400) `_rewrite_stale_sdk_root_comment` in
+#:     `scripts/alp_template.py`: `--emit scaffold` now rewrites the comment
+#:     paragraph ABOVE the ALP_SDK_ROOT block, not just the code below it.
+#:     The prose taught an in-tree `../../..` grandparent fallback that the
+#:     substituted block does not have, so every emitted scaffold documented
+#:     behaviour it did not carry. Ported into `tan/planner/template.py` in
+#:     this same change (`_scaffold_cmakelists` loops instead of `subn`, so
+#:     each block's own preceding comment run travels with it).
+#:
+#: `scripts/alp_orchestrate/` is UNTOUCHED across this bump: `git diff --stat
+#: a317330..c07254b2 -- scripts/alp_orchestrate/` is EMPTY, so all 21
+#: `PINNED_HASHES` entries below are unchanged and this pin moves without
+#: re-freezing anything unaudited. #1400 landed in a HAND_PORT file, which is
+#: why the emit-parity scaffold cases caught it and this table did not.
 #:
 #: `HAND_PORT_PINNED_SDK_COMMIT` moves to the same commit in this same
-#: change (see that pin's own comment) -- re-hashed, not a bare bump: all
-#: ten `HAND_PORT_HASHES` source files are byte-identical between `7d58ef32`
-#: and `1a9f753c`, so nothing is re-frozen past an unaudited delta.
+#: change (see that pin's own comment) -- re-hashed, not a bare bump:
+#: `scripts/alp_template.py` is the ONLY one of the ten `HAND_PORT_HASHES`
+#: source files that moved between `1a9f753c` and `c07254b2`, and its #1400
+#: delta is exactly the one ported here.
 #: `STRICT_LOADERS_PINNED_SDK_COMMIT` does NOT move -- it names the alp-sdk
 #: commit that INTRODUCED `strict_loaders.py`'s known read-escape gap (see
 #: that pin's own comment), not merely "the last audit point"; moving it
 #: would erase that meaning even though `scripts/strict_loaders.py` is also
-#: byte-identical between `26b0040e` and `1a9f753c` (re-hashed, confirmed).
-PINNED_SDK_COMMIT = "a317330595f744d35f4d785869517110f3678f70"  # alp-sdk origin/dev
+#: byte-identical between `26b0040e` and `c07254b2` (it does not appear in
+#: `git diff --stat 1a9f753c..c07254b2 -- scripts/`).
+PINNED_SDK_COMMIT = "c07254b2589406acb3fcb5556bf1e995395431e3"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -465,7 +481,24 @@ PINNED_HASHES: dict[str, str] = {
 #: because it costs nothing to audit and keeps the two pins from silently
 #: drifting apart on a future bump that touches one bundle but not the
 #: other.
-HAND_PORT_PINNED_SDK_COMMIT = "1a9f753c13e5ab5d444e2dc39d7065a352f1b777"  # alp-sdk origin/dev
+#:
+#: `1a9f753c` -> `c07254b2` (alp-sdk#1400, moved alongside PINNED_SDK_COMMIT
+#: above): NOT a pure re-pin this time -- the first bump of this pin that
+#: actually carries a delta. `scripts/alp_template.py` is the ONLY one of the
+#: ten source files below that moved: `git diff --stat 1a9f753c..c07254b2 --
+#: scripts/` lists it at 142 changed lines, alongside twelve files that are
+#: NOT in this table (`alp_cli/faultdecode.py`, `alp_mcp/server.py`,
+#: `alp_project.py`, `assemble_changelog.py`, `bench/aen/flash-jlink-hp.sh`,
+#: `bench/aen/flash-jlink-mramxip.sh`, `bump_version.py`,
+#: `check_changelog_fragments.py`, `check_emit_snapshots.py`,
+#: `check_example_sdk_root.py`, `check_helper_firmware_path.py`,
+#: `gen_catalog.py`). The other nine tracked files are byte-identical, so
+#: their hashes below are unchanged. `scripts/alp_template.py` moves from
+#: `6e62ac38...` to `9321c7e3...` because alp-sdk#1400's
+#: `_rewrite_stale_sdk_root_comment` has been ported into
+#: `tan/planner/template.py` in this same change -- the pin records an audit
+#: that actually happened, not a bump to silence a gate.
+HAND_PORT_PINNED_SDK_COMMIT = "c07254b2589406acb3fcb5556bf1e995395431e3"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -494,7 +527,7 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/gen_zephyr_board.py": "75958a138c4fc24d39815edcc6a2a009a8f1d31360aae4b8fc3e5a82f05e0d77",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/alp_project_loader.py": "d5f142173a13cfac9e130ef8fde90d35d6bb92d21d152925a275b3e8bdaa49db",
-    "scripts/alp_template.py": "6e62ac385154cef4decb8bb54eb9fae27e45f9797faffe8159cedca770f1f352",
+    "scripts/alp_template.py": "9321c7e31759ef4f9c03c2c750b1d7d7f4019b9a50dd2679668deaa2b0054708",
     "scripts/alp_project_emit/__init__.py": "62c4742bc373e7fafcd8aa864ad7692d3c05b610c6d7457023aeb82c98847d88",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",

@@ -49,3 +49,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/renode_cmd.py: 1501 -> 1533
     - tan/commands/diff_cmd.py: 839 -> 882
+- 2026-08-12 -- alp-sdk#1400 ported into tan/planner/template.py: _rewrite_stale_sdk_root_comment plus the loop form of _scaffold_cmakelists. The hand-port deliberately mirrors scripts/alp_template.py's structure so HAND_PORT_HASHES audits stay a readable diff; extracting here would make every future re-sync harder.
+    - tan/planner/template.py: 1329 -> 1413
+    - function_count_budget: 251 -> 253

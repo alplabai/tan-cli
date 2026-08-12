@@ -28,8 +28,42 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`f30f4d4b`** (alp-sdk `dev`,
-  the commit `parity.yml`'s `PINNED_SDK_TAG` named when this was captured) —
+- **Current vendor point (all templates):** **`c07254b2`**
+  (`c07254b2589406acb3fcb5556bf1e995395431e3`, alp-sdk `dev`) — re-vendored for
+  alp-sdk#1400, which added `_rewrite_stale_sdk_root_comment()` to
+  `scripts/alp_template.py` and so rewrites the `ALP_SDK_ROOT` comment paragraph
+  in every emitted `CMakeLists.txt`. **Four** files moved, all `CMakeLists.txt`:
+  `edge-ai`/E1M-AEN801, `edge-ai`/E1M-V2N101, `minimal`/E1M-AEN801 and
+  `minimal`/E1M-V2N101.
+
+  **Re-vendoring was necessary but not sufficient, and that distinction is the
+  lesson of this entry.** `scripts/alp_template.py` is a `HAND_PORT_HASHES`
+  file, so #1400 also had to be ported into `tan/planner/template.py`. This
+  file's own gate (`scaffold_byte_parity.py` — vendored bytes vs the SDK emit)
+  went green on the re-vendor alone, while `test_planner_emit_parity.py` (tan's
+  OWN emit vs the SDK emit) stayed RED on `[minimal]`, `[peripheral]` and
+  `[edge-ai]`. `peripheral` has no vendored tree here at all, which is the tell
+  that those three were never about vendored bytes. A future trigger naming a
+  hand-ported emitter needs BOTH halves, and only the emit-parity cases will say
+  so.
+
+  Two things worth recording, because both differ from what the trigger
+  suggested. The blast radius is **not** V2N-only — it hits E1M-AEN801 as well,
+  even though alp-sdk's own regenerated goldens for #1400 are all `-v2n101`. And
+  `iot`/E1M-AEN801's `CMakeLists.txt` also diverges at this point but was
+  **deliberately not re-vendored**: it carries the standing `DELIBERATE_EDITS`
+  entry (tan-cli#379's `list(PREPEND EXTRA_CONF_FILE ...)`), so its vendored
+  bytes are intentionally not the emit's, and the re-vendor skipped it rather
+  than silently reverting that fix.
+
+  This bump is the atomic four-gate unit this file describes, and all four were
+  re-run rather than assumed — at `c07254b2`: scaffold **9/9 PASS** (rc 0),
+  kconfig-fixture PASS (814 bytes, unchanged), toolchain-lock PASS (6592 bytes,
+  unchanged), bootstrap-manifest MATCH (8345 bytes, unchanged). `seam1_field_diff`
+  is rc 0 as well. Only this tree needed bytes.
+
+- **Prior vendor point:** **`f30f4d4b`** (alp-sdk `dev`,
+  the commit `parity.yml`'s `PINNED_SDK_TAG` named when that was captured) —
   re-vendored by the tan-cli#543/#544/#545 planner re-sync. **Eleven** files
   moved:
   - The **seven** `README.md` doc-link files (`diagnostics`, `minimal` and
