@@ -49,3 +49,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/renode_cmd.py: 1501 -> 1533
     - tan/commands/diff_cmd.py: 839 -> 882
+- 2026-08-12 -- tan-cli#564: build_cmd/doctor_cmd gained the comments explaining why the width probes measure stderr, not sys.__stdout__
+    - tan/commands/build_cmd.py: 2074 -> 2082
+    - tan/commands/doctor_cmd.py: 3920 -> 3925
