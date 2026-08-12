@@ -67,6 +67,20 @@ on:
   # body on every send. Do not "tidy" it onto a feature branch only.
   repository_dispatch:
     types: [alp-sdk-planner-change]
+  # A `dev` merge queue is coming online: without this
+  # trigger, a queued PR would wait forever on the three required contexts
+  # this file produces (`python -- pytest across python/ (ubuntu-latest|
+  # windows-latest|macos-latest)`) and on `seam1 -- plan-shape parity`, none
+  # of which GitHub raises a `merge_group` event for otherwise. Checked every
+  # `if:` in this file against a `merge_group` event before adding this:
+  # `seam1-plan-shape` carries no job-level `if:` (always runs); its
+  # emit/kconfig/bootstrap/toolchain/scaffold steps gate on
+  # `!inputs.python_only`, which is `null`/falsy outside a `workflow_call`
+  # run, same as it already is on `pull_request` today, so they still run;
+  # `python-tests-shard`/`python-tests` carry no `pull_request`-specific
+  # gating either. `seam2`/`first-blink` (not required contexts) share the
+  # same `!inputs.python_only` gate and also run unchanged.
+  merge_group:
   # release.yml's `python-gates` job calls this workflow so a release tag is
   # gated on the Python suite too, not just ci.yml's own `python` job -- a release tag
   # can be cut from any green-on-main commit, and until this existed the Python
@@ -376,7 +390,25 @@ env:
   #
   # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
   # predates every commit this bump exists to pick up.
-  PINNED_SDK_TAG: 7d58ef32d0a730c902e335adfd7764c2ec500ba5
+  #
+  # `7d58ef32` -> `1a9f753c` (tan-cli#657/#661/#662): moves in lockstep with
+  # `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` in
+  # `tests/gates/test_planner_relocation_freshness.py` -- see that file's
+  # comment for the ported behavioural delta (the SW-DP IDR preflight pair,
+  # the helper_mcu three-axis projection, `flash_args.slot0_load_address`).
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `1a9f753c` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8345 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, NO re-vendor: none of
+  #     the three drifted commits touch `examples/**`, `metadata/catalog*` or
+  #     the scaffold templates, so `python/tan/templates/vendored/` stays at
+  #     its `f30f4d4b` vendor point.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, including
+  #     `multicore_rpmsg-imx93` (alp-sdk and tan both still refuse it)
+  PINNED_SDK_TAG: 1a9f753c13e5ab5d444e2dc39d7065a352f1b777
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
@@ -882,12 +914,73 @@ jobs:
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
         run: |
+          # KEYED ON `<nodeid> PASSED`, NOT ON rc (tan-cli#500 review). Both
+          # freshness tests SKIP rather than fail when their root does not
+          # resolve -- the resolver accepts a root only if
+          # `<root>/scripts/alp_project.py` is a file, and the test's own
+          # comment says "Skip, not fail" -- and a skip leaves pytest at rc=0.
+          # Keying on rc therefore made this alarm silent for any path or
+          # marker change: no ::warning::, step exits 0, nothing in the log.
+          # That is the fail-open shape this file's other steps exist to close,
+          # inside the alarm itself. Same cure the `python/tests/gates` step
+          # above already uses.
           set +e
-          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit -q
-          rc=$?
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit -v 2>&1 | tee /tmp/relocation-alarm.log
           set -e
-          if [ "$rc" -ne 0 ]; then
-            echo "::warning::tan/planner/ has not been re-audited against alp-sdk ${{ steps.sdk_ref.outputs.ref }} -- scripts/alp_orchestrate DIFFERS from the pinned audit commit (see the pytest output above for which file(s)) -- the gate compares hashes, not history, so it does not tell you which side moved. Non-blocking by design: diff and port the delta, then re-pin PINNED_HASHES/PINNED_SDK_COMMIT in python/tests/gates/test_planner_relocation_freshness.py."
+          if ! grep -qF "test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit PASSED" /tmp/relocation-alarm.log; then
+            echo "::warning::tan/planner/ has not been re-audited against alp-sdk ${{ steps.sdk_ref.outputs.ref }}, OR this alarm could not run at all -- either scripts/alp_orchestrate DIFFERS from the pinned audit commit, or ALP_SDK_ROOT did not resolve and the test SKIPPED. Read the pytest output above to tell which. The gate compares hashes, not history, so it does not say which side moved. Non-blocking by design: diff and port the delta, then re-pin PINNED_HASHES/PINNED_SDK_COMMIT in python/tests/gates/test_planner_relocation_freshness.py."
+          fi
+          exit 0
+
+      # The HAND-PORT half of the same alarm, which did not exist (tan-cli#500).
+      #
+      # `test_hand_ported_planner_modules_match_their_pinned_sdk_source` is
+      # structurally incapable of detecting upstream drift as wired: the
+      # `resolve hand-port audit commit` step greps HAND_PORT_PINNED_SDK_COMMIT
+      # out of the gate file and clones alp-sdk at exactly that SHA, so the
+      # always-run job compares the pin's tree against hashes taken FROM the
+      # pin's tree. It can fail on table self-inconsistency and on nothing else.
+      # NO DRIFT COUNT IS QUOTED HERE ON PURPOSE. An earlier revision said
+      # "three of the nine pinned sources had moved" -- both numbers taken from
+      # tan-cli#500's report and both already wrong when this landed:
+      # HAND_PORT_HASHES held TEN entries by then (`da72634` added
+      # `scripts/alp_template.py`), and the same commit re-pinned to
+      # `7d58ef32`, which zeroed the drift the "three" described. A count in a
+      # comment measures the day it was typed and nothing after it. The test
+      # names the files that actually moved; read that instead.
+      #
+      # Its sibling above already has the missing half -- a live-oracle arm --
+      # and was scoped to exclude this test precisely because THIS step's root
+      # was not bound there. So bind it here, to the LIVE checkout rather than
+      # the frozen audit one, and the comparison finally has two different
+      # trees in it.
+      #
+      # Same three deliberate constraints as its sibling, and for the same
+      # reasons argued above: dispatch ONLY (on a `pull_request` run `alp-sdk`
+      # is PINNED_SDK_TAG, which may legitimately sit behind the audit commit,
+      # so the comparison would answer nothing and fire on every PR),
+      # `continue-on-error`, and a `::warning::` rather than a red X. The
+      # blocking question belongs to tan-cli#509, not to this step.
+      #
+      # NOT a replacement for the always-run job's version of this test: that
+      # one still proves the table is internally consistent, which is the check
+      # that catches a mis-typed hash. This one catches the other side.
+      - name: hand-port freshness vs live alp-sdk (alarm, warn only)
+        if: github.event_name == 'repository_dispatch'
+        continue-on-error: true
+        working-directory: python
+        env:
+          ALP_SDK_HAND_PORT_ROOT: ${{ github.workspace }}/alp-sdk
+        run: |
+          # `<nodeid> PASSED`, not rc -- see the sibling step above for why.
+          # `_resolve_hand_port_sdk_root()` skips when ALP_SDK_HAND_PORT_ROOT
+          # does not resolve, and a skip is rc=0: keying on rc made this alarm
+          # report nothing at all in exactly the case it must shout about.
+          set +e
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_hand_ported_planner_modules_match_their_pinned_sdk_source -v 2>&1 | tee /tmp/hand-port-alarm.log
+          set -e
+          if ! grep -qF "test_planner_relocation_freshness.py::test_hand_ported_planner_modules_match_their_pinned_sdk_source PASSED" /tmp/hand-port-alarm.log; then
+            echo "::warning::the HAND-PORTED planner modules no longer match their sources at alp-sdk ${{ steps.sdk_ref.outputs.ref }}, OR this alarm could not run -- either a source listed in HAND_PORT_HASHES moved upstream, or ALP_SDK_HAND_PORT_ROOT did not resolve and the test SKIPPED. Read the pytest output above to tell which; it names the file(s). The always-run job cannot see the drift case: it binds ALP_SDK_HAND_PORT_ROOT to HAND_PORT_PINNED_SDK_COMMIT, so it compares the pin against itself. Non-blocking by design: port the delta, then re-pin HAND_PORT_PINNED_SDK_COMMIT/HAND_PORT_HASHES in python/tests/gates/test_planner_relocation_freshness.py. NOTE tan's copy may be AHEAD of the pin rather than behind -- a forward-port that lands in tan before the pin moves reads identically to upstream drift here -- so diff before assuming which side owes the change."
           fi
           exit 0
 
@@ -1554,12 +1647,52 @@ jobs:
   # `test` job gave: `tan`'s path handling (os.pathsep env append, `.venv`
   # discovery, `.exe` suffixes) differs per host. With that job gone
   # (tan-cli#269) this matrix is the ONLY cross-platform check in the repo.
-  python-tests:
-    name: "python -- pytest across python/ (${{ matrix.os }})"
+  #
+  # SHARDED four ways per OS. Measured on a real green run
+  # (31532426909): the pytest step alone is 1550s/1353s/1010s of a
+  # 26m/22m/17m job on windows/ubuntu/macos respectively -- ~97% of the wall
+  # clock is this one step, and everything else in the job (checkout, SDK
+  # clone, pip install) is 12-41s, i.e. negligible per-shard overhead. Root
+  # cause (not fixed here, sharding is parallelisation only): ~4300 tests
+  # spawn a fresh interpreter via subprocess.run/Popen at ~150 call sites to
+  # re-exercise `tan` as a customer would invoke it, and process creation is
+  # far more expensive on windows-latest than on the other two runners.
+  #
+  # This job is renamed to `python-tests-shard` and carries `shard` in its
+  # matrix -- deliberately NOT the job branch protection requires. GitHub
+  # appends every matrix dimension to a job's evaluated `name:`, so adding
+  # `shard` to the job protection already pins by string
+  # ("python -- pytest across python/ (<os>)", see ci.yml's header, tan-cli#392)
+  # would silently rename all three required contexts to something like
+  # "python -- pytest across python/ (ubuntu-latest, 1)" -- three phantom
+  # contexts protection would wait on FOREVER, since nothing produces the old
+  # strings any more. tan-cli#392 already lived through exactly this once
+  # (the cargo-job rename at tan-cli#269); this job is named apart from that
+  # trap on purpose. The `python-tests` job below reproduces the three pinned
+  # strings byte-for-byte and is what protection stays pointed at.
+  python-tests-shard:
+    name: "python -- pytest shard (${{ matrix.os }} ${{ matrix.shard == 'parity' && 'parity, whole' || format('{0}/4', matrix.shard) }})"
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # pytest-shard is 0-INDEXED (--shard-id runs 0..num-shards-1). The
+        # matrix values here ARE the --shard-id args passed below, unmodified
+        # -- deliberately NOT [1,2,3,4] with a subtraction applied later,
+        # which is exactly the shape that makes an off-by-one easy to
+        # introduce and easy to miss (one shard would run nothing, another
+        # would never run, and the suite would still report green). The job
+        # `name:` above therefore shows "0/4".."3/4", not "1/4".."4/4" --
+        # a 0-based label that matches the flag it comes from, not a
+        # human-friendly renumbering.
+        #
+        # `parity` is a FIFTH leg, not a fifth shard: it runs `tests/parity`
+        # WHOLE while 0..3 shard everything else. It rides this matrix rather
+        # than a separate job so the aggregate below still has exactly one
+        # `needs:` to check -- adding a second job would mean a second result
+        # to roll up, and a missed one there is a required context that goes
+        # green while a whole suite did not run.
+        shard: [0, 1, 2, 3, parity]
     runs-on: ${{ matrix.os }}
     steps:
       - name: checkout tan-cli
@@ -1613,16 +1746,19 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --quiet --upgrade pip
-          python -m pip install --quiet -e ".[monitor]" pytest
+          python -m pip install --quiet -e ".[monitor]" pytest pytest-shard
 
-      # THE context worth adding to branch protection for the Python suite --
+      # The `python-tests` job below (the one wired into branch protection --
       # see .github/workflows/ci.yml's header for the full tan-cli#392 note and
-      # the exact three strings this matrix produces. That note stopped being
-      # advisory at tan-cli#269, which deleted the five cargo contexts
-      # protection actually requires; this matrix HAS to be wired in before
-      # anything can merge. Nothing in this file can change branch protection;
-      # it can only make sure the job is worth requiring, which is what the
-      # guard below is for.
+      # the exact three strings that job's matrix reproduces) only rolls up
+      # THIS job's per-shard result; it runs no pytest itself. That note
+      # stopped being advisory at tan-cli#269, which deleted the five cargo
+      # contexts protection actually requires; this shard matrix (via its
+      # aggregate) HAS to be wired in before anything can merge. Nothing in
+      # this file can change branch protection; it can only make sure the
+      # aggregate is worth requiring, which is what the guard below is for --
+      # a shard that silently checked nothing would make the aggregate's
+      # "success" meaningless too.
       #
       # The binding is ASSERTED before pytest runs, against the variable
       # actually exported rather than a re-derived path. This job's whole value
@@ -1646,7 +1782,128 @@ jobs:
             echo "::error::ALP_SDK_ROOT is bound to ${ALP_SDK_ROOT}, which has no scripts/alp_project.py -- tests/conftest.py::sdk_root() would return None and every SDK-gated module would SKIP while this job still reported green. Fix the 'clone alp-sdk' step above."
             exit 1
           fi
-          python -m pytest -q --ignore=tests/gates
+          # ...and that guard is NOT sufficient, which is what the node-id
+          # assertion below is for (tan-cli#500). It checks `alp_project.py`,
+          # while `test_planner_emit_parity.py`'s own skip mark reads a
+          # DIFFERENT file -- `scripts/alp_orchestrate/__init__.py`. A checkout
+          # satisfying this guard and shipping no `scripts/alp_orchestrate/`
+          # drops all 775 of that module's cases to SKIP at exit 0, taking its
+          # in-module canary with them, and this job stays green having
+          # compared nothing. alp-sdk retiring that package is the relocation's
+          # STATED end state, so this is a scheduled event, not a hypothetical.
+          #
+          # Run FIRST and by node id, for the same reason seam1 asserts PASSED
+          # by node id: a SKIP does not fail pytest's exit code, so neither
+          # `set -e` nor pipefail is the enforcement here. Running it ahead of
+          # the suite also fails in seconds rather than after the full round.
+          GUARD=tests/parity/test_planner_parity_actually_ran.py::test_a_bound_sdk_root_still_ships_the_planner_oracle
+          # `set +e` around the run, so the tailored message below is REACHABLE.
+          # With `set -e` still armed, the package-less case -- where the guard
+          # FAILS rather than skips -- killed the step at this pipeline and the
+          # branch below never executed: correct verdict, raw traceback, and
+          # none of the explanation an operator needs at 2am (tan-cli#500
+          # review). The message now covers both outcomes it can see.
+          set +e
+          python -m pytest -v "${GUARD}" 2>&1 | tee /tmp/parity-guard.log
+          set -e
+          if ! grep -qF "${GUARD#tests/parity/} PASSED" /tmp/parity-guard.log; then
+            echo "::error::${GUARD} did not PASS in this job. ALP_SDK_ROOT is bound here, so this is one of two things, and the pytest output above says which: a FAIL means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/); a SKIP means the guard itself regressed to fail-open. Either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
+            exit 1
+          fi
+          # The guard run above is NOT sharded (a bare node-id invocation,
+          # no --shard-id/--num-shards) -- it is one fast canary and every
+          # shard should independently prove ALP_SDK_ROOT resolves here, not
+          # just whichever shard happens to collect that one test. The suite
+          # itself IS sharded: pytest-shard partitions the collected test set
+          # before running, so each of the 4 (os, shard) legs below covers a
+          # disjoint quarter and the 4 legs' union is the full collection --
+          # verified locally with --collect-only across all
+          # four --shard-id values before this landed.
+          # `--ignore=tests/parity`: that suite CANNOT be sharded, and the
+          # reason is deliberate rather than incidental.
+          # `test_the_breadth_layer_still_covers_every_board` is a cross-test
+          # ACCUMULATOR -- the parametrised cases feed `_ARTEFACTS_COMPARED`
+          # and it then asserts `len(...) >= 90`, so it exists precisely to
+          # FAIL when the suite runs as a subset ("the floor on the total is
+          # what catches a mode disappearing from GENERATE_MODES"). Split four
+          # ways, each shard sees ~37 boards and it fails -- correctly.
+          # Lowering the floor to 90/num_shards would convert a real guard
+          # into one that cannot fail, the exact defect class this repo keeps
+          # paying for. So parity runs WHOLE, in `python-tests-parity` below.
+          if [ "${{ matrix.shard }}" = "parity" ]; then
+              # WHOLE, unsharded, and nothing else -- the accumulator needs
+              # every parametrised case in one process to reach its floor.
+              python -m pytest -q tests/parity
+          else
+              python -m pytest -q --ignore=tests/gates --ignore=tests/parity \
+                  --shard-id=${{ matrix.shard }} --num-shards=4
+          fi
+
+  # THE required context. `python-tests-shard` above is NOT
+  # wired into branch protection -- its `name:` carries `shard`, so it moves
+  # every time the shard count does, and GitHub required-context strings are
+  # matched literally (tan-cli#392). This job runs no pytest itself; its only
+  # job is to reproduce, byte-for-byte, the three strings protection on `dev`
+  # already pins (see ci.yml's header):
+  #
+  #   python -- pytest across python/ (ubuntu-latest)
+  #   python -- pytest across python/ (windows-latest)
+  #   python -- pytest across python/ (macos-latest)
+  #
+  # A trailing-space or dash difference here silently orphans a required
+  # context forever -- verify the evaluated `name:` against the list above
+  # before trusting this job, don't just read the template string.
+  #
+  # `needs: python-tests-shard` alone is NOT a verdict: GitHub SKIPS a
+  # dependent job when its upstream fails, it does not fail it, so a bare
+  # `needs:` with no `if:` would leave this job PENDING/skipped rather than
+  # red on a shard failure -- a skipped required context does not block a
+  # merge the way a red one does, so that shape is silently worse than no
+  # gate. `if: always()` forces this job to run regardless of the shard
+  # matrix's outcome, and the step below then reads
+  # `needs.python-tests-shard.result` explicitly and `exit 1`s on anything
+  # that is not `success` (failure, cancelled, OR skipped) -- so this job can
+  # never report green off the back of a shard job that did not cleanly pass.
+  #
+  # `needs.<job>.result` for a MATRIX job is ONE rolled-up result across the
+  # WHOLE matrix (12 legs: 3 os x 4 shards), not per-os -- GitHub exposes no
+  # per-leg `needs` result. DELIBERATE CHOICE, spelled out rather than left
+  # for a reader to guess: accept that a shard failure on ANY os reds all
+  # THREE aggregate legs below, rather than build a per-os signal (e.g. one
+  # intermediate rollup job per os, or a status artefact written by each
+  # shard and read back here by os). This is imprecise -- a windows-only
+  # shard failure will also red the macos/ubuntu required contexts -- but it
+  # is the simplest shape that cannot silently pass, which is the one
+  # invariant that actually matters: the aggregate must never be green while
+  # any shard was not green. Revisit only if the imprecision itself becomes
+  # the complaint (PRs redded on an os they didn't touch often enough that
+  # per-os attribution earns the added machinery).
+  python-tests:
+    name: "python -- pytest across python/ (${{ matrix.os }})"
+    needs: python-tests-shard
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    # Always ubuntu-latest regardless of `matrix.os`: this job does no
+    # OS-specific work (no checkout, no pytest, no pip install) -- `matrix.os`
+    # exists ONLY to reproduce the three required `name:` strings above, one
+    # job instance per string. Running it on `matrix.os` itself would pay for
+    # a windows/macos runner just to evaluate one `if` and would leave the
+    # three legs racing three different runner queues for zero benefit.
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify every python-tests-shard leg succeeded
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="${{ needs.python-tests-shard.result }}"
+          echo "python-tests-shard rolled-up result: ${result}"
+          if [ "${result}" != "success" ]; then
+            echo "::error::python-tests-shard did not report success (result: ${result}) -- at least one (os, shard) leg failed, was cancelled, or the whole matrix was skipped. This job exists only to reproduce the required-context name; treating anything but 'success' here as green would report a passing gate for a Python suite that did not fully pass."
+            exit 1
+          fi
 
   # tan-cli#485 (#320 recurred): the ONE signal that actually catches
   # tan/planner/ drift -- this `python-tests` job, dispatched by an alp-sdk
