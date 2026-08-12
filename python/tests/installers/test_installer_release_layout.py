@@ -2301,7 +2301,28 @@ def test_ps1_shadow_functions_detect_an_earlier_tan_on_path(tmp_path):
     )
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert f"WINNER={decoy}" in result.stdout
-    assert "SHADOWED reports=tan 0.1.0-decoy" in result.stdout
+
+    # The load-bearing assertion is SHADOWED -- the warning must fire. The
+    # version is best-effort by design (`Get-TanVersionReport` is timeout- and
+    # failure-guarded precisely so a hung or unrunnable binary cannot break an
+    # install), so both outcomes are correct and which one occurs is a property
+    # of the HOST, not of the code under test:
+    #
+    #   POSIX pwsh -- a `#!/bin/sh` file named `tan.exe` is executable, so the
+    #                 probe reads `tan 0.1.0-decoy`.
+    #   real Windows -- a shell script named `tan.exe` is NOT executable, so
+    #                 the probe correctly falls back to `could not run`.
+    #
+    # Asserting only the first spelling is what reddened windows-latest 2/4 on
+    # tan-cli#678's first CI run, on a fixture whose own docstring says these
+    # are "ordinary shell scripts, not Windows binaries". Pinning the fallback
+    # too keeps the graceful-degradation path covered rather than deleting the
+    # case on Windows.
+    assert "SHADOWED reports=" in result.stdout, result.stdout
+    assert (
+        "SHADOWED reports=tan 0.1.0-decoy" in result.stdout
+        or "SHADOWED reports=could not run" in result.stdout
+    ), result.stdout
 
 
 @pwsh_only
