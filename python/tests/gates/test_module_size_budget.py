@@ -573,7 +573,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # and the function-count ratchet caught it, so the messages were extracted
     # rather than the budget raised. Re-walked with this file's own module
     # walk, not derived by arithmetic.
-    "tan/core/flash_plan.py": 3071,
+    #
+    # 3079, not 3071, grounding #611/#612 against alp-sdk#1357/#1364 (the
+    # upstream fix landing after tan-cli#611's own consumer half): the
+    # `_DEFAULT_BASE`/`_DEFAULT_JLINK_DEVICE` comments record that all four
+    # V2N/V2M presets now supply both explicitly, so the two defaults are
+    # unreachable for those four today. No new function; re-walked with this
+    # file's own module walk.
+    "tan/core/flash_plan.py": 3079,
     # 1996, not 1829, as of tan-cli#487: `_yocto_wic_block_device_refusal`
     # (the write-time `stat.S_ISBLK` gate `_resolve_dev_root` above cannot
     # perform -- it is pure), `_timeout_stderr` (folds a killed child's
