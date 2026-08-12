@@ -338,6 +338,42 @@ All notable changes to `tan` are documented here. Format follows
   round-trips as the schema's string `"off"` instead of an unquoted `off`
   that YAML parses as the boolean `False` and the schema then rejects.
   (#642, #643)
+- **Re-pinned the vendored-planner staleness audit to alp-sdk `1a9f753c`
+  (from `7d58ef32`), and ported the behavioural delta the pin was measuring
+  against.** `tan/planner/loader.py`, `manifest.py`, `models.py`, and
+  `orchestrator.py` had drifted behind three alp-sdk commits:
+  `_resolve_jlink_flash_device` splits into `_resolve_variant_debug` + a
+  per-fact reader, and gains `_resolve_flow_d_preflight` /
+  `_enforce_flow_d_preflight_pair` (alp-sdk#1362/#1355 — the read-only SW-DP
+  IDR wrong-board preflight pair, `flash_args.expect_dpidr` +
+  `flash_args.jlink_device`, refused half-armed rather than silently
+  unguarded); `_resolve_slot0_load_address` +
+  `_enforce_slot0_disjoint_across_roles` are new (alp-sdk#1374/tan-cli#353 —
+  `flash_args.slot0_load_address`, the AEN MRAM slot0-XIP address Flow D's
+  auto-sign-via-SETOOLS path needs, plus a guard against a future dual-M55
+  SoM re-introducing the #1069 HE/HP MRAM collision); `manifest._helper_mcus`
+  stops treating `update_channel` as mutually exclusive with
+  `flash_method`/`flash_args` and projects every declared key
+  (`firmware_path`/`flash_method`/`flash_args`/`flash_policy`/
+  `update_channel`) independently (alp-sdk#1364/#1357 — a helper like the
+  GD32 bridge can declare an OTA channel for normal field updates AND a
+  `flash_policy: recovery_only` swd_probe method for a bricked board, and the
+  old either/or projection would have deleted the recovery path). This is the
+  producer side; tan's consumer side (`tan.core.flash_plan`'s
+  `validate_flow_d_preflight_args`, `slot0_load_address` handling, and
+  `HelperMcu.flash_policy`) already read this shape. `PINNED_SDK_COMMIT` and
+  `HAND_PORT_PINNED_SDK_COMMIT` (`test_planner_relocation_freshness.py`),
+  `parity.yml`'s `PINNED_SDK_TAG`, and `ci.yml`'s `gates` job SDK checkout
+  `ref:` all move together, per this repo's own "bumped in one commit" rule;
+  `HAND_PORT_PINNED_SDK_COMMIT` moved as a pure re-pin (all ten
+  `HAND_PORT_HASHES` source files re-hashed byte-identical across the range).
+  `STRICT_LOADERS_PINNED_SDK_COMMIT` deliberately did NOT move — it names the
+  alp-sdk commit that introduced `strict_loaders.py`'s known read-escape gap,
+  not merely "the last audit point" — even though `scripts/strict_loaders.py`
+  is also byte-identical across the range (re-hashed, confirmed). Refs #657,
+  #661, #662 (unblocks all three: each asserted an alp-sdk fact newer than
+  the stale pin, which the parity oracle then reported as a disallowed
+  diff).
 - **`tan validate` and `tan diff` name `tan bootstrap` as the remedy for a
   missing-module crash, instead of surfacing a raw `ModuleNotFoundError`,
   when no workspace venv has been created yet for the project.** Both
@@ -353,6 +389,26 @@ All notable changes to `tan` are documented here. Format follows
   fix — a present-but-independently-broken workspace venv still gets the
   generic message. (#652)
 
+- **`tan doctor --fix` refused every `sudo`-prefixed manifest install command
+  unconditionally, even when the caller already had root -- the exact host a
+  Docker `RUN`, most CI base images, or a fresh cloud VM run as.** Measured
+  against a real `geteuid() == 0` process (`unshare --user --map-root-user`):
+  `run_fix` still reported `doctor.fix-needs-sudo` and installed nothing.
+  There is no elevation left to acquire once the caller is root, so `--fix`
+  now strips the manifest's literal `sudo ` prefix and runs the rest of the
+  line directly -- it still never spawns the `sudo` PROGRAM itself (the
+  tan-cli#91 decision is about the program, not the elevation it grants); a
+  non-root caller is refused exactly as before. `fix_installed_check` gained
+  an `elevation_skipped` flag so the resulting `doctor.fix-installed` check
+  reads as the root-aware outcome it is, not an ordinary no-elevation-needed
+  one. Also disclosed the OTHER way `--fix` goes quiet: it is a no-op (exit
+  4) with no TTY on `stdin`/`stderr` -- piped, redirected, or CI -- per the
+  `can_prompt` consent gate; measured in a clean `ubuntu:24.04` container.
+  The README and both `tan bootstrap` prerequisite-refusal hints
+  (`_DOCTOR_FIX_HINT` / `_DOCTOR_FIX_HINT_NEEDS_ELEVATION`) now say so in the
+  same breath as recommending `--fix`, instead of recommending a remedy that
+  is silently inert for the scripted-onboarding callers most likely to reach
+  for it. (#650)
 - **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
   PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
   any time `tan bootstrap` relocates a checkout inside a project that already
@@ -407,6 +463,41 @@ All notable changes to `tan` are documented here. Format follows
   takes it as a keyword-only `manifest_zephyr_floor` argument that now
   outranks the constant; `ZEPHYR_PYTHON_FLOOR` is the last resort, not the
   routine case. Closes #606.
+
+- **New regression test for the SoM chip-driver Kconfig rule
+  (`_chip_has_driver`, alp-sdk#1241) tan already carries.** alp-sdk#1380's
+  on-silicon runbook reported (tan-cli#654) that `tan build` aborted every AEN
+  Zephyr slice at Kconfig with `attempt to assign the value 'y' to the
+  undefined symbol ALP_SDK_CHIP_DP83825` -- `metadata/e1m_modules/E1M-AEN*`
+  gained `ethernet_phy: dp83825` (`driver_status: none`, no `chips/dp83825/`
+  directory) upstream, and the AEN example's emitted `alp.conf` carried the
+  line while alp-sdk's own `--emit zephyr-conf` did not. Measured against
+  this tree: the fix already landed here via the tan-cli#582/#593 planner
+  re-syncs (`kconfig.py::_chip_has_driver`, ported verbatim from alp-sdk
+  bc73b66c, itself alp-sdk#1241) -- `tan.planner`'s `--emit zephyr-conf` is
+  byte-identical to alp-sdk's own emitter for every `examples/aen/*`
+  `board.yaml`, no `CONFIG_ALP_SDK_CHIP_DP83825` line anywhere, confirmed
+  against alp-sdk `origin/dev` `496e32ad`.
+  `tests/core/test_chip_kconfig_needs_a_driver.py` is the dedicated
+  regression this needed and did not have: a hermetic, GENERIC assertion
+  (not scoped to "dp83825" by name) that feeds every driverless chip
+  manifest the bound SDK ships through `_emit_chips` via a synthetic
+  `on_module:` block and checks the OUTPUT -- not an earlier parametrized
+  form that asserted `_chip_has_driver`'s own body against itself and could
+  not fail -- plus the concrete AEN case end to end through the same
+  function. Verified against the unfixed shape (the `_chip_has_driver`
+  filter line removed from `_emit_chips`) before landing: 2 failed / 3
+  passed -> 5 passed, with the generic assertion itself now among the
+  failures (it names all five driverless chips, not just dp83825).
+  Freshness-pin note, measured rather than assumed: `kconfig.py` and
+  `slugs.py` (the two files this rule lives in) are byte-identical between
+  the pinned SDK audit commit and current alp-sdk `origin/dev` -- no re-pin
+  needed for this fix. Four OTHER `tan/planner/` mirror files (`loader.py`,
+  `manifest.py`, `models.py`, `orchestrator.py`) HAVE drifted since the pin,
+  from two unrelated alp-sdk commits (`c3de155a`, `496e32ad`, both
+  `swd_probe`/`jlink_device` metadata) -- out of scope here; it is the same
+  seam tan-cli#353 already tracks. Closes #654.
+
 - **The test suite no longer means two different things on two machines: the
   debug/flash probe inventory is now a property of the test, not of the host.**
   A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
