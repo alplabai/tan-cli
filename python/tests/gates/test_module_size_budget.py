@@ -1462,7 +1462,18 @@ _MODULE_BUDGET: dict[str, int] = {
     # customer's sources at exit 0 with `issues: []`. Both are destructive
     # paths, so the reasoning stays in the file rather than in a commit
     # message nobody reads next to the code.
-    "tan/commands/clean_cmd.py": 1098,
+    # 1110, not 1098, as of tan-cli#574: the module header's "KNOWN GAP, for
+    # whoever owns packaging" block asserted three things that are all false
+    # against dev -- that tan declares no YAML parser, that
+    # `scripts/build_binary.sh` installs `pip install typer rich pyinstaller`,
+    # and that the shipped `tan clean` therefore always takes the no-PyYAML
+    # arm. `pyyaml>=6` is a BASE dependency and that recipe appears nowhere in
+    # the script. Correcting it costs lines rather than saving them, because
+    # the replacement has to say what IS true, why the stale text was
+    # believable, and why `parse_manifest_slices`' absent-parser arm is kept
+    # anyway (a `--no-deps` install can still lack it) -- otherwise the next
+    # reader deletes that arm as dead code. Comments only; no new control flow.
+    "tan/commands/clean_cmd.py": 1110,
     # 1015, not 996, as of tan-cli#485: `_load_yaml`/`_load_json` route
     # through the new `strict_loaders.strict_yaml_load`/`strict_json_loads`
     # (alp-sdk #1127, a duplicate-mapping-key refusal), and the IPC-entry
