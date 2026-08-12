@@ -212,6 +212,20 @@ python3.12 -m venv .venv
 python3 python/scripts/version_check.py --selftest --self
 ```
 
+**Always install into a venv you create — never a bare `pip install -e ./python`
+or `pip install --user -e ./python`.** Run without an active venv, that writes
+an editable install into your OS user site-packages, and from that moment
+every bare `python3` process on the machine resolves `import tan` to
+whichever checkout was installed last, regardless of which worktree it is
+actually running in — including another developer's or another agent's
+checkout, on a shared box (tan-cli#665). It costs nothing to notice while it
+is happening: `tan --version` and `which tan` keep answering normally, so a
+full `pytest tests -q` run can report hundreds of misleading failures (or,
+worse, a false green) with no other symptom. `tests/conftest.py`'s
+`tan_under_test` fixture refuses loudly at session start if `import tan`
+resolves to anything outside this checkout's own `python/` — that is the
+backstop, not a substitute for using a venv in the first place.
+
 That run means the same thing on every machine, including a bench host with
 real debug tooling installed. The suite neutralises the debug/flash probe
 identities — `JLinkExe`, `openocd`, `pyocd`, `west`, `renode` and friends —
