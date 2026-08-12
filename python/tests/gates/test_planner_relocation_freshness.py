@@ -465,7 +465,22 @@ PINNED_HASHES: dict[str, str] = {
 #: because it costs nothing to audit and keeps the two pins from silently
 #: drifting apart on a future bump that touches one bundle but not the
 #: other.
-HAND_PORT_PINNED_SDK_COMMIT = "1a9f753c13e5ab5d444e2dc39d7065a352f1b777"  # alp-sdk origin/dev
+#:
+#: `1a9f753c` -> `a3173305` (tan-cli#639, this re-sync): the same PURE
+#: re-pin, and left behind once already -- the first cut of this branch
+#: moved `ci.yml`'s `ref:`, `parity.yml`'s `PINNED_SDK_TAG` and
+#: `PINNED_SDK_COMMIT` to `a3173305` and left THIS constant at
+#: `1a9f753c`, which is the "two pins, one checkout" trap this file's
+#: header warns about, in its fourth variant. It passed anyway, but on a
+#: coincidence rather than on correctness: all ten `HAND_PORT_HASHES`
+#: source files below are byte-identical between `1a9f753c` and
+#: `a3173305` (sha256 compared one by one; 44 files changed across that
+#: range and not one of them is in this bundle), so a stale pin bound
+#: against a freshly-checked-out `a3173305` re-hashed to the same values
+#: and nothing went red. Had any one of the ten moved, the gate would
+#: have failed pointing at a file the branch never touched. Move all
+#: four together or the next bump lands the red instead.
+HAND_PORT_PINNED_SDK_COMMIT = "a317330595f744d35f4d785869517110f3678f70"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
