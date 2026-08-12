@@ -1,0 +1,50 @@
+# Module/function size ratchet log
+
+Append-only. `scripts/regen_module_size_budget.py` writes one entry here every
+time it raises a ceiling in `module_size_budget.generated.json` with
+`--reason`. A `--merge-resync` re-derivation (re-measuring after a merge
+conflict, where the growth was already reasoned on the branches being
+combined) also gets a line, so a stale reader can tell "somebody made a call
+here" from "a merge conflict was resolved mechanically" without diffing two
+commits.
+
+Because every entry only ever APPENDS at the end of the file, two branches
+that both grow a (different, or even the same) module produce two lines in
+a non-overlapping region -- exactly the "keep both sides" merge shape that is
+correct for `CHANGELOG.md` and was wrong for the old `_MODULE_BUDGET` dict
+(tan-cli#668), because nothing here encodes ABSOLUTE state; each line is a
+self-contained, past-tense fact.
+
+Before tan-cli#668, the ratchet's numbers lived in `test_module_size_budget.py`
+itself, as a hand-maintained dict with a paragraph of prose per entry
+recording exactly why each module grew. That history is not reproduced here
+-- it is still fully readable via `git log -p -- python/tests/gates/test_module_size_budget.py`
+up to the commit that migrated this gate to a generated file. This log starts
+a new, coarser-grained (one line per regen, not one paragraph per PR) record
+from that point on; the tradeoff is deliberate, in exchange for a file whose
+conflicts resolve by re-running a command instead of by hand-merging prose.
+
+## Entries
+
+- 2026-08-11 -- migrated the ratchet from a hand-maintained dict in
+  `test_module_size_budget.py` to a generated file (tan-cli#668). No module or
+  function budget moved in this change; `module_size_budget.generated.json`
+  was produced by running the new `regen_module_size_budget.py` against the
+  same `dev` tree the old dict already described, and matched it exactly. The
+  25 modules, the function count (249) and the worst function (728 lines) are
+  unchanged from the values `dev`@`1e929c1` already carried; only their
+  storage and the review-time record for future changes.
+- 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/doctor_cmd.py: 3849 -> 3920
+    - tan/core/bootstrap.py: 2094 -> 2111
+    - tan/planner/loader.py: 1016 -> 1251
+    - function_count_budget: 249 -> 251
+- 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/init_cmd.py: 1121 -> 1247
+    - tan/core/scaffold.py: 1500 -> 1510
+- 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3236 -> 3255
+    - tan/core/flash_plan.py: 3071 -> 3079
+    - function_worst_budget: 728 -> 747
+- 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/diff_cmd.py: 839 -> 882
