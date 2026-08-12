@@ -47,6 +47,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A `dev` merge queue is coming online: without this
+  # trigger, a queued PR would wait forever on required contexts
+  # (`python -- pytest across python/ (*)`, `zizmor · workflow security`) that
+  # `merge_group` events never fire -- this workflow only ran on `push`/
+  # `pull_request`/`workflow_call` before, none of which GitHub raises for a
+  # merge-queue entry. No job below is gated to `pull_request` specifically
+  # (`python` and `workflow-security` carry no job-level `if:` at all), so
+  # both required contexts this file produces run unchanged on a
+  # `merge_group` event -- verified by reading every `if:` in this file, not
+  # assumed.
+  merge_group:
   # Called by release.yml so a tag cannot publish binaries the gates never ran
   # against. Keep this the single definition of the gate set.
   workflow_call:
