@@ -46,3 +46,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/bootstrap_cmd.py: 3236 -> 3255
     - tan/core/flash_plan.py: 3071 -> 3079
     - function_worst_budget: 728 -> 747
+- 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/diff_cmd.py: 839 -> 882
