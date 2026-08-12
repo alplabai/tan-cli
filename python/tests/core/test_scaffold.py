@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tan.core import scaffold as scaffold_module
 from tan.core.scaffold import (
@@ -531,6 +532,25 @@ def test_splice_adds_a_companion_and_a_default_rpmsg_channel():
     assert "endpoints: [m55_hp, a55_cluster]" in out
     # The companion lands inside the `cores:` block, before the next top-level key.
     assert out.index("a55_cluster:") < out.index("libraries:")
+
+
+def test_splice_quotes_a_newly_added_off_companion_so_yaml_parses_it_as_a_string():
+    """tan-cli#645 round-3: `off` is a YAML 1.1 boolean keyword --
+    `yaml.safe_load("os: off")` -> `{"os": False}` -- so an unquoted
+    companion entry writes a bool where the schema's `os` enum requires the
+    string `"off"`. Every vendored scaffold already quotes it this way (see
+    `tan/templates/vendored/edge-ai/E1M-AEN801/board.yaml`); a NEWLY spliced
+    `off` companion must match, not just a pre-declared one (the existing
+    `test_splice_skips_a_core_already_declared_...` case never actually
+    spliced a fresh `off` entry, so this gap went uncaught)."""
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    out = splice_companion_cores(board, [("m55_he", "off")])
+
+    assert '  m55_he:\n    os: "off"\n' in out
+    parsed = yaml.safe_load(out)
+    assert parsed["cores"]["m55_he"]["os"] == "off"
+    # `off` is never the RPMsg endpoint the app core gets paired with.
+    assert "ipc:" not in out
 
 
 def test_splice_skips_a_core_already_declared_and_never_ipcs_an_off_companion():
