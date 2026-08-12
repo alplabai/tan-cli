@@ -1112,7 +1112,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # command does not POSIX-normalise its paths, unlike those two) -- the
     # extra lines are the routing plus the docstring bullet documenting the
     # divergence this fix removes.
-    "tan/commands/renode_cmd.py": 1501,
+    #
+    # 1533, not 1501, as of tan-cli#568: `run_renode` now returns a fifth
+    # `lines_seen` element (set the moment the read loop dequeues its first
+    # real console line) and `_run` gains a new `elif not lines_seen` branch
+    # -- `--timeout 0` (deadline already past when computed) or a genuinely
+    # silent clean exit used to fall through every other outcome check
+    # straight to the implicit `ExitCode.SUCCESS`, reporting `ok: true` on a
+    # run that classified zero console lines. The extra lines are the
+    # docstring explaining why the caller must not let `lines_seen is False`
+    # fall through, plus the new branch and its own explanatory comment.
+    "tan/commands/renode_cmd.py": 1533,
     # 1402, not 1296, as of tan-cli#462 (both rounds): four new `_failure`
     # callers (`_build_manifest_missing_failure`/`_core_unknown_failure`,
     # then the review round's `_target_kind_ambiguous_failure`/
