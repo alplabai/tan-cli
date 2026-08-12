@@ -45,6 +45,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import stat
 import sys
 import types
 from pathlib import Path
@@ -601,6 +602,63 @@ def test_an_unknown_url_scheme_is_still_refused(monkeypatch):
 
 @pytest.mark.skipif(
     importlib.util.find_spec("serial") is None,
+    reason="asserts real pyserial's spy:// side effect (protocol_spy.py's `file=` "
+    "option opens the target INSIDE the port setter); a stub cannot fake this "
+    "without silently hiding the exact bug this test exists to catch.",
+)
+def test_a_pre_existing_file_survives_the_gate_on_every_path(monkeypatch, tmp_path):
+    """Review finding 1 (major, data loss): the gate's probe used to truncate
+    or create whatever path a `spy://...?file=<path>` names, because
+    `serial_for_url` runs the port SETTER (which pyserial's `spy://` handler
+    uses to open `file=`) before `do_not_open` is ever consulted -- and it did
+    so even on an input the gate went on to REFUSE, because the query is
+    parsed left to right and `file=` opened the target before a later unknown
+    option raised. Reproduced pre-fix with these exact two calls against real
+    pyserial 3.5: the first TRUNCATED a pre-existing file it went on to
+    ACCEPT; the second CREATED an absent file it went on to REFUSE.
+
+    `_pyserial_accepts_url` now probes with the query stripped, so the file
+    target is never opened by the probe at all -- proven here directly,
+    rather than through the exit code, by reading the file back.
+    """
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+
+    survivor = tmp_path / "notes.log"
+    survivor.write_text("PRE-EXISTING CONTENT", encoding="utf-8")
+    accepted = monitor_cmd._port_is_openable(f"spy://loop://?file={survivor}")
+    assert accepted is True
+    assert survivor.read_text(encoding="utf-8") == "PRE-EXISTING CONTENT", (
+        "the gate touched a file on the path it ACCEPTED"
+    )
+
+    absent = tmp_path / "should-not-be-created.log"
+    # Stripping the query also means this no longer differs from the case
+    # above at the scheme/netloc pyserial actually validates, so the gate now
+    # accepts it too -- a real, intentional narrowing of what the gate can
+    # refuse in exchange for never touching a file either way (see
+    # `_pyserial_accepts_url`'s docstring). What must hold regardless of that
+    # verdict is that the file is never created.
+    monitor_cmd._port_is_openable(f"spy://loop://?file={absent}&nosuchoption=1")
+    assert not absent.exists(), "the gate created a file it was never asked to open"
+
+
+def test_a_pre_existing_file_survives_a_genuinely_refused_scheme(monkeypatch, tmp_path):
+    """The other half of review finding 1: an input the gate actually REFUSES
+    (an unknown scheme, still refused after the fix -- see
+    `test_an_unknown_url_scheme_is_still_refused`) must not touch a file
+    named anywhere in its query, on any pyserial install shape."""
+    _pyserial_with_url_support(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+
+    absent = tmp_path / "should-not-be-created.log"
+    accepted = monitor_cmd._port_is_openable(f"bogus://x?file={absent}")
+    assert accepted is False
+    assert not absent.exists()
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("serial") is None,
     reason="asserts the exception type pyserial ITSELF raises for a well-formed "
     "URL of a KNOWN scheme that resolves to nothing; a stub proving its own "
     "behaviour would prove nothing.",
@@ -655,10 +713,18 @@ def test_a_regular_file_is_not_a_port(monkeypatch, tmp_path):
 
 
 def test_an_absent_bare_com_name_still_refuses(monkeypatch):
-    """The Windows-safety argument, asserted rather than assumed: `COM9` is not
-    a stat-able node on ANY host (on POSIX it is simply absent; on Windows a COM
-    name is not a filesystem path at all), so rule 3 can never fire for it and
-    the pre-#569 refusal is reproduced byte for byte."""
+    """A genuinely absent `COM9` keeps refusing exactly as it did pre-#569:
+    on POSIX it is simply absent (`os.stat` raises); on Windows `_BARE_COM_NAME_RE`
+    skips rule 3 for it unconditionally, so absence never mattered there
+    either. (Review finding 3: the old docstring claimed rule 3 "can never
+    fire" for a COM name and offered only this absent case as proof -- true
+    but insufficient, since a *present* COM name unenumerated by `comports()`
+    would, per CPython's documented Windows `stat()` behaviour, satisfy
+    `S_ISCHR` and let rule 3 fire there. `_BARE_COM_NAME_RE` below makes the
+    "never fires" guarantee hold by construction instead of resting on that
+    unverified case; see the `test_a_com_shaped_name_skips_rule_3_...`
+    test below.)
+    """
     _stub_pyserial_if_absent(monkeypatch)
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
 
@@ -669,16 +735,89 @@ def test_an_absent_bare_com_name_still_refuses(monkeypatch):
     assert "'COM9' not found" in doc["issues"][0]["message"]
 
 
-def test_the_url_rule_reports_pyserial_missing_not_an_internal_failure(monkeypatch):
-    """The URL rule is a SECOND in-process pyserial touch point, so it carries
-    the same import guard `_available_ports` does. On a frozen build without the
-    `monitor` extra the precheck is skipped, and an unguarded `import serial`
-    here would surface as `monitor.internal-failure` at exit 5."""
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
+def test_a_com_shaped_name_skips_rule_3_even_if_it_would_stat_as_a_character_device(
+    monkeypatch, tmp_path
+):
+    """Review finding 3, proven directly rather than argued: stub `os.stat` so
+    that stat-ing `COM3` would answer "character device" (what a real, present
+    Windows COM handle reports per CPython's `stat()` docs) and confirm a
+    COM-shaped name is STILL refused -- `_BARE_COM_NAME_RE` short-circuits
+    before `os.stat` is even consulted for it, proven by asserting the stub is
+    never called for that path -- while an equally "character device" non-COM
+    path is accepted. This is the scenario this host cannot reproduce with a
+    real Windows COM handle, so the stub stands in for the one fact `os.stat`
+    behaviour that could not be bench-verified here. The stub delegates every
+    OTHER path to the real `os.stat` so it cannot disturb anything outside
+    this test (pytest's own machinery calls `os.stat` too, on the same,
+    process-global `os` module)."""
+    _stub_pyserial_if_absent(monkeypatch)
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+
+    class _CharDeviceStat:
+        st_mode = stat.S_IFCHR | 0o666
+
+    also_chardev = str(tmp_path / "not-a-com-name")
+    faked_as_chardev = {"COM3", also_chardev}
+    real_stat = os.stat
+    stat_calls: list[str] = []
+
+    def _fake_stat(path, *args, **kwargs):
+        stat_calls.append(str(path))
+        if str(path) in faked_as_chardev:
+            return _CharDeviceStat()
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(monitor_cmd.os, "stat", _fake_stat)
+
+    result = runner.invoke(app, ["--port", "COM3", "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert "'COM3' not found" in doc["issues"][0]["message"]
+    assert "COM3" not in stat_calls, "rule 3 stat-ed a bare COM name instead of skipping it"
+
+    # Sanity: the stub really does make its target look like a character
+    # device, so the COM3 refusal above is the regex, not a stub that never
+    # says True. A non-COM path hitting the same stub is accepted.
+    assert monitor_cmd._port_is_openable(also_chardev) is True
+
+
+def test_the_url_rules_import_guard_is_reachable_directly(monkeypatch):
+    """`_pyserial_accepts_url`'s own `ImportError` guard, pinned honestly.
+
+    Review finding 2: the guard is NOT reachable through the CLI today --
+    `_port_is_openable` always tries rule 1 (`_available_ports()`) first, and
+    `_available_ports` raises `monitor.pyserial-missing` itself the moment
+    pyserial is not importable, so `_pyserial_accepts_url` is only ever
+    called once `import serial` has already succeeded in this process. The
+    superseded version of this test manufactured that impossible state by
+    monkeypatching `_available_ports` to `lambda: []` while pyserial stayed
+    blocked -- a state the real code can never be in. This calls the guarded
+    function directly instead, which is a real, reachable way to exercise it.
+    """
     _block_pyserial(monkeypatch)
+    with pytest.raises(monitor_cmd.MonitorError) as excinfo:
+        monitor_cmd._pyserial_accepts_url("socket://127.0.0.1:9999")
+    assert excinfo.value.code == "monitor.pyserial-missing"
+
+
+def test_pyserial_missing_refuses_before_the_url_rule_is_ever_reached(monkeypatch):
+    """The production-reachable half of review finding 2: with pyserial
+    genuinely unimportable, `_available_ports()` (rule 1) raises before rule 2
+    (`_pyserial_accepts_url`) is ever entered -- proven by spying on the real
+    `_pyserial_accepts_url` and confirming it is never called, not merely by
+    observing the right issue code."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    _block_pyserial(monkeypatch)
+
+    calls = []
+    real = monitor_cmd._pyserial_accepts_url
+    monkeypatch.setattr(
+        monitor_cmd, "_pyserial_accepts_url", lambda port: calls.append(port) or real(port)
+    )
 
     result = runner.invoke(app, ["--port", "socket://127.0.0.1:9999", "--format", "json"])
     assert result.exit_code == 1
     doc = envelope(result)
     assert [i["code"] for i in doc["issues"]] == ["monitor.pyserial-missing"], doc
+    assert calls == [], "the URL rule was reached despite rule 1 owning the refusal"

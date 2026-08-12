@@ -79,10 +79,12 @@ wire changes and `contract/issue-codes.json` is untouched.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import typer
 
@@ -96,6 +98,11 @@ DEFAULT_BAUD = 115200
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
+
+#: A bare Windows COM device name (`COM7`, `com12`, ...), used to skip rule 3
+#: of `_port_is_openable` for it unconditionally -- see that function's
+#: docstring for why.
+_BARE_COM_NAME_RE = re.compile(r"^COM\d+$", re.IGNORECASE)
 
 
 class MonitorError(Exception):
@@ -155,22 +162,41 @@ def _pyserial_accepts_url(port: str) -> bool:
 
     Deliberately no hardcoded scheme list. pyserial is the authority on what
     `serial.serial_for_url` -- and therefore the miniterm about to be spawned --
-    accepts, and `do_not_open=True` asks it that question without opening a
-    socket, dialling an rfc2217 server, or touching any device: it returns the
-    handler's own unopened `Serial` (e.g. a
-    `serial.urlhandler.protocol_socket.Serial` with `is_open` False) and raises
-    `ValueError("invalid URL, protocol 'bogus' not known")` for a scheme it does
-    not ship. Hardcoding prefixes here would go stale the moment pyserial adds
-    or renames a handler, and would accept a scheme this installation's pyserial
-    cannot actually serve.
+    accepts. `serial_for_url` resolves the handler purely from the `scheme://`
+    prefix (its own `url_lowercase.split('://', 1)[0]` lookup in
+    `serial/__init__.py`) before it ever looks at the rest of the string, so
+    that lookup is all this rule needs to answer "does this installation's
+    pyserial ship a handler for this scheme". Hardcoding prefixes here would go
+    stale the moment pyserial adds or renames a handler, and would accept a
+    scheme this installation's pyserial cannot actually serve.
 
-    The `serial` import is guarded through `_pyserial_missing()` for the same
-    reason `_available_ports` guards its own: this is a SECOND in-process
-    pyserial touch point, and `_run_monitor`'s precheck is deliberately skipped
-    on a frozen build, so on a `--onefile` binary built without the `monitor`
-    extra an unguarded import here would escape as `monitor.internal-failure`
-    at exit 5 -- "tan has a bug" -- for an optional dependency that was never
-    installed.
+    The probe strips the query string and fragment before calling
+    `serial_for_url`, and that is NOT cosmetic. `do_not_open=True` skips the
+    handler's `.open()` call, but `serial_for_url` unconditionally runs
+    `instance.port = url` (the port SETTER) first regardless of
+    `do_not_open` (`serial/__init__.py::serial_for_url`), and at least one
+    shipped handler has a side effect inside that setter: `spy://`'s
+    `from_url` (`serial/urlhandler/protocol_spy.py`) opens -- truncating or
+    creating -- whatever path a `file=` option names, with no regard for
+    `do_not_open` at all. Verified against real pyserial 3.5: probing
+    `spy://loop://?file=<path>` with the query intact truncated a
+    pre-existing `<path>`, and did so even on an input this rule went on to
+    REFUSE, because `parse_qs` processes the query left to right and `file=`
+    ran before a later unknown option raised. The scheme-and-target validity
+    this rule exists to check never depends on the query string, so stripping
+    it before the probe answers the same question pyserial would answer
+    without executing whatever a handler's options do. Only the PROBE is
+    narrowed this way; the real, unstripped `port` string is still exactly
+    what gets handed to the miniterm child if this returns True.
+
+    The `serial` import below is guarded through `_pyserial_missing()` as
+    belt-and-suspenders, not because it is reachable today: `_port_is_openable`
+    always tries rule 1 (`_available_ports()`) first, and `_available_ports`
+    raises `_pyserial_missing()` itself the moment pyserial is not importable
+    -- so by the time this function runs, `import serial` has already
+    succeeded once in this call. This guard exists for a caller that invokes
+    `_pyserial_accepts_url` directly, not for a live path through
+    `_port_is_openable` today.
 
     Every failure from `serial_for_url` itself means the same thing (tan cannot
     vouch for this port, so refuse and list what is there), and the catch is
@@ -188,8 +214,10 @@ def _pyserial_accepts_url(port: str) -> bool:
     except ImportError as err:
         raise _pyserial_missing() from err
 
+    probe = urlunsplit(urlsplit(port)._replace(query="", fragment=""))
+
     try:
-        serial.serial_for_url(port, do_not_open=True)
+        serial.serial_for_url(probe, do_not_open=True)
     except Exception:  # noqa: BLE001 -- see above: every failure is "refuse it"
         return False
     return True
@@ -214,19 +242,41 @@ def _port_is_openable(port: str) -> bool:
        symlinks, so a `/dev/serial/by-id/...` path resolves to its node in one
        call and answers for the node, exactly as `serial.Serial()` will when
        miniterm opens it. `S_ISCHR`, not mere existence: a regular file stats
-       fine and is not a port.
+       fine and is not a port. This accepts ANY character device, not only a
+       serial one -- measured True for `/dev/null`, `/dev/zero`,
+       `/dev/urandom` and `/dev/tty` on a real host -- which is the shape
+       tan-cli#569 itself asked for ("plus any path that exists as a
+       character device"), not a serial-specific check: `tan monitor --port
+       /dev/tty` passes this gate and spawns miniterm on the operator's own
+       controlling terminal.
 
-    Windows behaviour is unchanged apart from rule 2. A COM name is not a
-    stat-able filesystem path there, so rule 3 can never fire, and a genuinely
-    absent `COM9` keeps refusing with the identical message it always did
-    (verified: `os.stat("COM9")` raises `FileNotFoundError`, as does a DANGLING
-    by-id symlink -- the unplugged-adapter case -- which therefore also stays
-    refused).
+    Rule 3 is skipped unconditionally for anything shaped like a bare Windows
+    COM name (`COM<digits>`, case-insensitive; see `_BARE_COM_NAME_RE`), on
+    every platform. On POSIX this excludes nothing real -- no POSIX device
+    node is ever named that way -- but on Windows `os.stat` opens a handle via
+    `CreateFileW` and reports `_S_IFCHR` for a non-disk handle (the same
+    reason `os.stat("NUL")` reports a character device there), so without this
+    skip a COM name that DOES exist could satisfy `S_ISCHR` and let rule 3
+    fire, opening a real serial handle during what is meant to be a read-only
+    gate -- the same DTR/RTS-asserting act rules 1 and 2 are built to avoid.
+    That costs nothing reachable: a present COM port is already accepted by
+    rule 1 (`comports()` enumerates it) before rule 3 is ever reached, so this
+    skip only forecloses the unenumerated-COM-port case rule 3 was never
+    meant to answer. This host cannot open a real Windows COM handle to prove
+    the `_S_IFCHR` claim end to end, so treat it as established from CPython's
+    documented `stat()` behaviour on Windows, not bench-verified here; what
+    IS verified on this host is the absent case -- `os.stat("COM9")` raises
+    `FileNotFoundError`, as does a DANGLING by-id symlink (the unplugged-
+    adapter case) -- so a genuinely absent `COM9` keeps refusing with the
+    identical message it always did, both via the skip and, previously, via
+    the `FileNotFoundError` alone.
     """
     if port in {device for device, _ in _available_ports()}:
         return True
     if "://" in port and _pyserial_accepts_url(port):
         return True
+    if _BARE_COM_NAME_RE.match(port):
+        return False
     try:
         return stat.S_ISCHR(os.stat(port).st_mode)
     except OSError:
