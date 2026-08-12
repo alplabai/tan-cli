@@ -310,6 +310,17 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan bootstrap`'s default text output never rendered the
+  `sdk.global-default-foreign-project` / `sdk.project-pin-unresolved`
+  warnings, though `--format json` from the identical invocation carried
+  them.** `doctor` and `init` both render these in text; `bootstrap` -- the
+  command that WRITES `~/.alp/sdk-default` in the first place -- silently
+  didn't, because `pin_issue`/`foreign_issue` are computed once, up front,
+  specifically NOT through `log.warn` (which would misname their shared,
+  unprefixed `sdk.*` code `bootstrap.*`), so they reached `bootstrap_issues`
+  (the JSON envelope) and stopped there. `_run` now also prepends
+  `{severity}: {message}` lines for both to `text`, ahead of the run's own
+  progress lines. (#677)
 - **`tan faultdecode` silently dropped a piped/pasted fault dump whenever ANY
   register flag was also given, contradicting its own documented contract
   ("Explicit flags win over a parsed dump" -- only true if the dump is still

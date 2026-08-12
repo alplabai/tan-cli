@@ -311,7 +311,7 @@ _MODULE_BUDGET: dict[str, int] = {
     # vacated by the time the restore runs -- plus the docstring explaining
     # why `root` and `restore_root` must differ. Re-measured with this
     # gate's own walk.
-    "tan/commands/bootstrap_cmd.py": 3236,
+    "tan/commands/bootstrap_cmd.py": 3255,
     # 2042, not 1890, as of tan-cli#495: defect 6's `manual_install_posix`
     # field, its parse arm, its render arm and the three-element fallback
     # tuple transcribed from the oracle (`manifest.rs:712-718`) -- the
@@ -2392,8 +2392,18 @@ _MIRRORED = ("tan/planner/",)
 # 50 lines for the first time (59) emitting the `expect_dpidr`/
 # `jlink_device`/`slot0_load_address` args -- +1 more. `_FUNCTION_WORST_BUDGET`
 # is untouched: `bootstrap_cmd.py:_run` (728) is still the package's longest.
+#
+# tan-cli#677: `bootstrap_cmd.py` 3236 -> 3255. `_run` gains the `text =
+# warning_lines + text` prepend (and its docstring explaining why `pin_issue`/
+# `foreign_issue` reach `text` here rather than through `log.warn`, which
+# already streamed every OTHER warning to stderr as it fired) so the text
+# surface renders the two SDK-resolution warnings the JSON envelope already
+# carried. `_FUNCTION_COUNT_BUDGET` is untouched (no new function).
+# `_FUNCTION_WORST_BUDGET` moves with it, MEASURED by this gate's own
+# `_long_functions` walk on the final tree: `bootstrap_cmd.py:_run` 728 -> 747,
+# still the package's single longest function.
 _FUNCTION_COUNT_BUDGET = 251
-_FUNCTION_WORST_BUDGET = 728
+_FUNCTION_WORST_BUDGET = 747
 
 
 def _modules() -> list[Path]:
