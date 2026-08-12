@@ -19,11 +19,20 @@ in-process calls (`resolve_sdk_root_ladder` et al., called directly) and the
 `run_tan` subprocess helpers (`test_build_command.py` and friends), which
 copy `os.environ` at spawn time and so inherit whatever `monkeypatch` leaves
 in the real environment.
+
+Scrubbing decides what a test OBSERVES. It says nothing about whether the
+checkout the SDK-gated tests deliberately bind against is the one this branch
+was measured against -- so the second block in this file (tan-cli#691) warns,
+once per session and never fatally, when the bound `ALP_SDK_ROOT` is not
+`PINNED_SDK_COMMIT`, or when tan's two alp-sdk pins disagree with each other.
 """
+import functools
 import os
+import re
 import shutil
+import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -70,10 +79,33 @@ def sdk_root() -> Path | None:
     before any fixture executes, which is what makes the module-level call
     see the developer's real environment.
     """
+    bound = _bound_sdk_root()
+    return None if bound is None else bound[1]
+
+
+def _bound_sdk_root(environ: Mapping[str, str] | None = None) -> tuple[str, Path] | None:
+    """`sdk_root()`'s answer, plus WHICH variable produced it -- `(var, root)`
+    for the first of ``ALP_SDK_PARITY_ROOT`` / ``ALP_SDK_ROOT`` that names a
+    real checkout, `None` when neither does.
+
+    Split out of `sdk_root()` for the warning below, which has to NAME the
+    variable it is complaining about: "the bound tree disagrees with the pin"
+    is unactionable without saying which of the two env vars bound it. The
+    acceptance test (`scripts/alp_project.py` is a file under the root) and
+    the precedence order are `sdk_root()`'s, unchanged -- there is exactly one
+    implementation of both, here, so the warning can never describe a
+    different root than the one the SDK-gated tests actually measured.
+
+    `environ` defaults to the LIVE `os.environ` because `sdk_root()`'s callers
+    are module-level and want that; the warning passes `REAL_ENVIRON` instead,
+    since it runs from a fixture/hook, after `_scrub_sdk_discovery_env` has
+    deleted `ALP_SDK_ROOT` for the first test.
+    """
+    env = os.environ if environ is None else environ
     for var in ("ALP_SDK_PARITY_ROOT", "ALP_SDK_ROOT"):
-        raw = os.environ.get(var)
+        raw = env.get(var)
         if raw and (Path(raw) / "scripts" / "alp_project.py").is_file():
-            return Path(raw).resolve()
+            return var, Path(raw).resolve()
     return None
 
 
@@ -86,6 +118,315 @@ def sdk_root() -> Path | None:
 #: `_scrub_sdk_discovery_env` has by then already repointed `HOME`/
 #: `USERPROFILE` at a pytest tmp dir and deleted `ALP_SDK_ROOT`.
 REAL_ENVIRON: dict[str, str] = dict(os.environ)
+
+
+# ---------------------------------------------------------------------------
+# THE PINS vs THE BOUND TREE, said out loud once per session (tan-cli#691).
+#
+# `sdk_root()` above answers "which alp-sdk checkout is bound?". Nothing
+# answered "is that the checkout this branch was measured against?", and the
+# two are not the same question: `ALP_SDK_ROOT` is whatever the developer's
+# shell exports, while the commit tan's own gates are pinned to is written
+# down in this repository (`PINNED_SDK_COMMIT`). When they disagree, the
+# SDK-gated tests measure a tree this branch has never been reconciled to and
+# report real-looking failures that are neither pre-existing nor caused by the
+# change under test.
+#
+# Measured, 2026-08-12, same node IDs, unmodified `origin/dev`, only
+# `ALP_SDK_ROOT` varied:
+#
+#     ALP_SDK_ROOT=a317330595f744d35f4d785869517110f3678f70  ->  30 passed
+#     ALP_SDK_ROOT=c07254b2589406acb3fcb5556bf1e995395431e3  ->   5 failed, 25 passed
+#
+# `c07254b2` is four commits ahead of the pin; alp-sdk#1389 adopted BOTH
+# halves of tan-cli#616 upstream (so `faultdecode`'s declared divergence
+# evaporates and the non-vacuity guard fires with `classes: []`) and
+# alp-sdk#1400 changed the scaffold's `ALP_SDK_ROOT` emit (so the vendored
+# CMakeLists no longer match). Both are CORRECT behaviour against a tree tan
+# has not been reconciled to yet -- which is exactly what a pin means. A full
+# suite reported `9 failed, 4986 passed` and it took a three-way comparison by
+# hand to establish that five of the nine were the bound tree, not the branch.
+#
+# WARN, NEVER FAIL, and the distinction is the point. Binding a newer tree
+# deliberately is legitimate -- it is how the next re-sync's workload is
+# discovered before the re-sync -- so failing here would forbid the very thing
+# this repository's planner-resync flow depends on. The defect is that it is
+# SILENT, not that it is done. Nor may it fire when nothing is bound, which is
+# the common case (`ci.yml`'s `python` job, a bare `pytest tests/`): a warning
+# on every ordinary run is a warning nobody reads.
+#
+# The SECOND comparison here is between the two pins THEMSELVES, and it needs
+# no bound tree at all. `PINNED_SDK_COMMIT` (the freshness gate's audit ref)
+# and `parity.yml`'s `PINNED_SDK_TAG` (what `ci.yml`'s `sdk_parity` checkout
+# `ref:` must equal, "MUST be bumped together" in that file's own words) have
+# now drifted apart twice -- mid-review of #485, and again in PR #688 -- both
+# times caught by a human reading output rather than by a gate. It is one line
+# once the machinery above exists, so it is here rather than in a fourth
+# place. A split IS sometimes deliberate (`parity.yml`: the audit commit "can
+# legitimately sit on either side" of the parity tag), which is the other
+# reason this warns instead of failing.
+# ---------------------------------------------------------------------------
+
+#: `python/tests/conftest.py` -> `tests` -> `python` -> the repository root.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The only place `PINNED_SDK_COMMIT` is written down.
+_FRESHNESS_GATE = (
+    _REPO_ROOT / "python" / "tests" / "gates" / "test_planner_relocation_freshness.py"
+)
+
+#: The only place `PINNED_SDK_TAG` is written down -- `getting-started.yml`
+#: already `sed`s it out of this same file rather than keeping a second copy.
+_PARITY_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "parity.yml"
+
+#: ANCHORED at line start, exactly as `parity.yml`'s own `resolve planner
+#: audit commit` step greps it, and for the same reason: the gate declares
+#: `HAND_PORT_PINNED_SDK_COMMIT` too, and an unanchored pattern matches that
+#: line as well because it CONTAINS the substring `PINNED_SDK_COMMIT = "..."`.
+_PINNED_SDK_COMMIT_RE = re.compile(r'^PINNED_SDK_COMMIT = "([0-9a-f]{40})"', re.MULTILINE)
+
+#: `PINNED_SDK_TAG: <sha>` as a workflow-level `env:` entry -- indented, so
+#: unlike the pin above this one cannot be anchored hard at column 0.
+_PINNED_SDK_TAG_RE = re.compile(r"^[ \t]*PINNED_SDK_TAG:[ \t]*([0-9a-f]{40})[ \t]*$", re.MULTILINE)
+
+
+def _sole_pin(path: Path, pattern: re.Pattern[str], name: str) -> tuple[str | None, str | None]:
+    """`(sha, None)` when `path` declares exactly one `name`, else
+    `(None, <what went wrong>)`.
+
+    Refuses a plural match rather than taking the first: two matches means the
+    pattern has started catching a pin it was never about, and silently
+    comparing against the wrong one of them is the same class of quiet wrong
+    answer this whole block exists to end. `parity.yml`'s own grep learned
+    this the expensive way -- an unanchored pattern returned two SHAs and
+    wrote a malformed `$GITHUB_OUTPUT` line that failed three steps later
+    with nothing naming the cause.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"could not read {name} out of {path}: {exc}"
+    found = pattern.findall(text)
+    if len(found) != 1:
+        return None, f"expected exactly ONE {name} in {path}, found {len(found)}: {found}"
+    return found[0], None
+
+
+def _git(root: Path, *args: str) -> str | None:
+    """Stripped stdout of `git -C <root> <args...>`, or `None` for ANY
+    unhappy outcome -- git absent, a non-zero exit, a hang, a decoding
+    failure.
+
+    Every caller below treats `None` as "say nothing", which is deliberate:
+    the check is an aid to interpreting a test run, so a host without git or
+    an alp-sdk delivered as a tarball rather than a checkout must be silent,
+    not noisy. `timeout` rather than an unbounded wait for the same reason --
+    a wedged git must not hold the session open.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def _git_head(root: Path) -> str | None:
+    """The 40-hex `HEAD` of the git checkout AT `root`, or `None` when `root`
+    is not itself the top of one.
+
+    `--show-toplevel` first, and it is load-bearing, not belt-and-braces:
+    `git -C <dir> rev-parse HEAD` happily answers for the ENCLOSING
+    repository when `<dir>` is merely nested inside one. An alp-sdk unpacked
+    from a tarball into a directory that happens to live under some other
+    checkout would otherwise be reported as "bound to <that repo's HEAD>",
+    warning about a disagreement between two SHAs that have nothing to do
+    with each other. `sdk_root()` only ever accepts a path with
+    `scripts/alp_project.py` directly under it -- the alp-sdk repository ROOT
+    -- so equality with the toplevel is the correct test, not an
+    over-restriction.
+    """
+    toplevel = _git(root, "rev-parse", "--show-toplevel")
+    if toplevel is None:
+        return None
+    try:
+        resolved = Path(toplevel).resolve()
+    except OSError:
+        return None
+    # normcase, because Windows path comparison is case-insensitive and git
+    # reports forward slashes there while `Path.resolve()` reports backslashes.
+    if os.path.normcase(str(resolved)) != os.path.normcase(str(root.resolve())):
+        return None
+    head = _git(root, "rev-parse", "HEAD")
+    if head is None or not re.fullmatch(r"[0-9a-f]{40}", head):
+        return None
+    return head
+
+
+def _distance(root: Path, pin: str, head: str) -> tuple[int, int] | None:
+    """`(ahead, behind)` of `head` relative to `pin`, or `None` when the two
+    are not comparable in this checkout.
+
+    Not comparable is the NORMAL case in CI, not an error: `actions/checkout`
+    clones at depth 1, so `pin` is usually not an object in the bound tree at
+    all. The SHA mismatch is still worth reporting without a count, so this
+    returns `None` rather than suppressing the whole warning.
+    """
+    counts = _git(root, "rev-list", "--left-right", "--count", f"{pin}...{head}")
+    if counts is None:
+        return None
+    parts = counts.split()
+    if len(parts) != 2:
+        return None
+    try:
+        behind, ahead = (int(part) for part in parts)
+    except ValueError:
+        return None
+    return ahead, behind
+
+
+def sdk_pin_disagreements(
+    bound: tuple[str, Path] | None,
+    *,
+    gate_path: Path = _FRESHNESS_GATE,
+    workflow_path: Path = _PARITY_WORKFLOW,
+) -> list[str]:
+    """Every way the alp-sdk pins and the bound tree currently disagree, one
+    warning per disagreement, as ready-to-print lines. Empty means agreement
+    -- which is the ordinary answer and prints nothing at all.
+
+    A pure function of `(bound, gate_path, workflow_path)` and the git state
+    at `bound`, deliberately: it takes no fixture, reads no global, and asserts
+    nothing, so the gate that proves it fires can build a REAL two-commit
+    checkout in a tmp dir and read the answer back, rather than mocking the
+    condition it is supposed to detect.
+    """
+    lines: list[str] = []
+
+    pinned_commit, commit_problem = _sole_pin(gate_path, _PINNED_SDK_COMMIT_RE, "PINNED_SDK_COMMIT")
+    pinned_tag, tag_problem = _sole_pin(workflow_path, _PINNED_SDK_TAG_RE, "PINNED_SDK_TAG")
+    for problem in (commit_problem, tag_problem):
+        if problem is not None:
+            lines.append(
+                f"WARNING (tan-cli#691): this session cannot compare tan's alp-sdk "
+                f"pins -- {problem}. A pin that moved or was reshaped leaves this "
+                f"check reading nothing while reporting nothing; point it at the "
+                f"pin's new home."
+            )
+
+    if pinned_commit is not None and pinned_tag is not None and pinned_commit != pinned_tag:
+        lines += [
+            "WARNING (tan-cli#691): tan's two alp-sdk pins disagree with EACH OTHER:",
+            f"    PINNED_SDK_COMMIT  {pinned_commit}  ({gate_path})",
+            f"    PINNED_SDK_TAG     {pinned_tag}  ({workflow_path})",
+            "    `ci.yml`'s `sdk_parity` checkout `ref:` tracks PINNED_SDK_TAG and must",
+            "    equal it too -- they 'MUST be bumped together' (ci.yml), and that pair",
+            "    has already drifted twice (mid-review of #485, and PR #688). A split is",
+            "    sometimes deliberate (the audit commit may legitimately sit on either",
+            "    side of the parity tag); a forgotten one measures tan against two",
+            "    different alp-sdks at once.",
+        ]
+
+    if bound is None or pinned_commit is None:
+        return lines
+
+    var, root = bound
+    head = _git_head(root)
+    if head is None or head == pinned_commit:
+        return lines
+
+    distance = _distance(root, pinned_commit, head)
+    if distance is None:
+        direction = (
+            "    the commit distance is unknown here (the pin is not an object in the"
+            " bound tree -- a shallow clone, or a different repository)."
+        )
+    else:
+        ahead, behind = distance
+        direction = (
+            f"    the bound tree is {ahead} commit(s) AHEAD of the pin,"
+            f" and {behind} behind."
+        )
+    return lines + [
+        "WARNING (tan-cli#691): the bound alp-sdk tree is NOT the commit tan pins.",
+        f"    {var}={root}",
+        f"        HEAD               {head}",
+        f"        PINNED_SDK_COMMIT  {pinned_commit}  ({gate_path})",
+        direction,
+        "    This does NOT fail the run, and binding a newer tree is a legitimate thing",
+        "    to do -- it is how the next re-sync's workload is discovered. But every",
+        "    failure in this run may belong to the BOUND TREE rather than to this",
+        "    branch: on 2026-08-12 five of nine did. Re-run with the pinned tree bound,",
+        "    or with the variable unset, before reading a failure as this branch's.",
+    ]
+
+
+@functools.cache
+def _sdk_pin_warning_lines() -> tuple[str, ...]:
+    """`sdk_pin_disagreements` for THIS session, computed at most once.
+
+    Cached because it is emitted from two places (see below) and it spawns
+    git; `REAL_ENVIRON` rather than `os.environ` because both of those places
+    run after `_scrub_sdk_discovery_env` has deleted `ALP_SDK_ROOT` for the
+    first test, and reading the live environment there would answer "nothing
+    bound" on exactly the runs this exists for.
+    """
+    return tuple(sdk_pin_disagreements(_bound_sdk_root(REAL_ENVIRON)))
+
+
+def _write_sdk_pin_warning(write_line: Callable[[str], None]) -> None:
+    """Emit the block through `write_line`, or emit nothing at all."""
+    lines = _sdk_pin_warning_lines()
+    if not lines:
+        return
+    write_line("")
+    for line in lines:
+        write_line(line)
+
+
+def _pin_warning_writer(config: pytest.Config) -> Callable[[str], None]:
+    """A `write_line` that is actually visible.
+
+    The terminal reporter, not `warnings.warn` and not a bare `print`: a
+    warning has to survive `-q` (which suppresses `pytest_report_header`
+    entirely -- measured), pytest's output capture (which swallows a `print`
+    from a fixture until something replays it), and `-W error` (which would
+    turn a `warnings.warn` into an ERROR and break the "never fail" rule this
+    whole block is built on). Coloured, because the point is that it is not
+    missed in a 5000-line run. `None` when the reporter is not installed
+    (`-p no:terminal`), where stderr is the only channel left.
+    """
+    reporter = config.pluginmanager.getplugin("terminalreporter")
+    if reporter is None:
+        return lambda line: print(line, file=sys.stderr)
+    return lambda line: reporter.write_line(line, yellow=True, bold=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _warn_when_the_bound_sdk_disagrees_with_the_pins(pytestconfig) -> None:
+    """Say it BEFORE the tests run, so a session bound to the wrong tree can
+    be aborted in its first second rather than its 55th minute."""
+    _write_sdk_pin_warning(_pin_warning_writer(pytestconfig))
+
+
+def pytest_terminal_summary(terminalreporter) -> None:
+    """Say it AGAIN at the end, next to the failures it explains.
+
+    Deliberately the same block twice per session, and only ever twice: the
+    fixture above catches it early, this catches it where the reader is
+    actually looking when they ask "why did these nine fail?" -- the question
+    tan-cli#691 was opened about. Both are no-ops on an agreeing session, so
+    the cost of the duplication is zero on every ordinary run.
+    """
+    _write_sdk_pin_warning(
+        lambda line: terminalreporter.write_line(line, yellow=True, bold=True)
+    )
 
 
 def _probe_free_path(path: str, scratch_factory: Callable[[], Path]) -> str | None:
