@@ -356,9 +356,15 @@ def test_numeric_build_dir_is_not_turned_into_a_delete_target():
 def test_without_pyyaml_the_sweep_is_reported_as_skipped_not_silently_dropped(
     tmp_path, monkeypatch
 ):
-    """**The FROZEN binary has no PyYAML.** `scripts/build_binary.sh` documents
-    its build environment as `pip install typer rich pyinstaller` and nothing
-    else, so this arm is not hypothetical -- it is what customers run.
+    """**The frozen binary DOES carry PyYAML** -- `pyyaml>=6` is a base entry in
+    `pyproject.toml` `[project].dependencies` and `scripts/build_binary.sh`
+    installs `-e ".[monitor]"`. This docstring used to claim the opposite,
+    citing a `pip install typer rich pyinstaller` recipe that no longer exists
+    (tan-cli#574).
+
+    The arm is still worth pinning: a `--no-deps` install or a broken venv can
+    genuinely lack the parser. It is just the degraded case, not what customers
+    run.
 
     Reported, not swallowed: without a parser this run cannot know whether the
     manifest declares an out-of-tree slice `build_dir`, so `clean` may have left
