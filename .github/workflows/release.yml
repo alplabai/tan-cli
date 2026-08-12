@@ -623,6 +623,17 @@ jobs:
                   "exitCode": int((case / "expected.exit").read_text(encoding="utf-8").strip()),
                   "envelope": json.loads((case / "expected.json").read_text(encoding="utf-8")),
               }
+          # tan-cli#664: `doctor`'s data VALUES are host facts (installed tool
+          # versions, absolute paths, which checks even apply), so it cannot be
+          # a byte golden like every entry above -- it carries `dataKeys`
+          # (the required KEY SET, never values) instead of `exitCode`/
+          # `envelope`. See contract/doctor-data-keys.json for the single
+          # source and how it was enumerated.
+          doctor_keys = json.loads((root / "doctor-data-keys.json").read_text(encoding="utf-8"))
+          envelopes["doctor"] = {
+              "args": doctor_keys["args"],
+              "dataKeys": doctor_keys["dataKeys"],
+          }
           json.dump(
               {
                   "schemaVersion": 1,
