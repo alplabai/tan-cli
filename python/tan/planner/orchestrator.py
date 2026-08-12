@@ -69,20 +69,21 @@ def _slice_flash_recipe(
         # SETOOLS/SE-UART fallback. Absent for every non-AEN slice today,
         # so the args dict stays `{}` -- no shape change for them.
         #
-        # `expect_dpidr` / `jlink_device` (tan-cli#353, porting alp-sdk
-        # #1362) are the wrong-board SW-DP IDR preflight PAIR --
+        # `expect_dpidr` + `jlink_device` are the read-only SW-DP IDR
+        # wrong-board preflight (alp-sdk #1355) and are emitted as ONE
+        # inseparable pair: the expected debug-port ID, and the live-core
+        # attach profile the read is performed with. Emitting exactly one of
+        # the two is NOT a partial win: tan's own
+        # `validate_flow_d_preflight_args` refuses a half-armed pair at plan
+        # time, so it would hard-fail every AEN flash including a dry run.
         # `loader._resolve_flow_d_preflight` guarantees the both-or-neither
         # shape upstream; the `and` here makes that guarantee locally
         # readable rather than assumed at a distance.
         #
         # `slot0_load_address` (tan-cli#353) is the AEN MRAM slot0-XIP
         # address the slice's application blob is linked at -- the fact
-        # Flow D's auto-sign-via-SETOOLS path needs and, before this, tan's
-        # OWN planner never resolved, so tan correctly armed Flow D and
-        # then refused (`flash_args.slot0_load_address is required`),
-        # forcing a customer to hand-edit `system-manifest.yaml` even after
-        # alp-sdk started emitting it. Independent of the `expect_dpidr`/
-        # `jlink_device` pair above -- see
+        # Flow D's auto-sign-via-SETOOLS path needs. Independent of the
+        # `expect_dpidr`/`jlink_device` pair above -- see
         # `loader._resolve_slot0_load_address` for where it comes from.
         args: dict[str, Any] = {}
         if slice_.jlink_flash_device:

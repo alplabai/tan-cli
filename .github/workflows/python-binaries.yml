@@ -273,8 +273,15 @@ jobs:
             # runtime (`Bad CPU type in executable`), not in CI. `file` is run on
             # the artifact below for exactly this reason.
             os: macos-15-intel
+            # CPU_TYPE_X86_64, the Mach-O header field the `arch` step below
+            # compares against. Carried in the matrix for the same reason
+            # `machine` is on the Windows leg: the expected value belongs
+            # beside the asset NAME it is a claim about, so adding a row
+            # cannot forget to state one.
+            cputype: "0x01000007"
           - asset: tan-aarch64-apple-darwin.tar.gz
             os: macos-latest
+            cputype: "0x0100000c" # CPU_TYPE_ARM64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -302,11 +309,54 @@ jobs:
           .venv-build/bin/python -m pip install --quiet -e ".[monitor]" $BUILD_DEPS
           PYTHON=.venv-build/bin/python bash scripts/build_binary.sh
           cp dist/tan.tar.gz "${{ matrix.asset }}"
-      # `file` proves the arch, because a PyInstaller build cannot: it always
+      # The arch must be PROVED, because a PyInstaller build cannot: it always
       # produces the host's arch, so a wrong runner label yields a correctly
       # NAMED binary of the wrong architecture.
+      #
+      # WHAT THAT COSTS *HERE*, stated accurately (tan-cli#500 review). This
+      # workflow is `workflow_dispatch` ONLY and every leg ends in
+      # `actions/upload-artifact` -- no release is created and no asset reaches
+      # a tag, so no customer can receive a binary from this file. What a
+      # vacuous check costs here is FALSE ASSURANCE in a proof-only workflow:
+      # this job exists to prove all eight targets can be produced, and a step
+      # that cannot fail proves nothing about two of them.
+      #
+      # The customer-facing half -- `Bad CPU type in executable` on an Intel
+      # Mac -- belongs to `release.yml`'s `build` job, which a `v*` push runs
+      # and which had NO arch check at all until tan-cli#500 added the same one
+      # there for the same two darwin rows.
+      #
+      # This step was `run: file "python/dist/tan/tan"` -- no comparison, no
+      # non-zero path, so it could not fail on the very thing the comment above
+      # says it exists to refuse (tan-cli#500). The Windows leg had it right all
+      # along: read the header field and refuse on mismatch against the matrix.
+      # Reads the Mach-O header rather than parsing `file`'s prose, for the same
+      # reason the Windows leg reads the PE COFF machine word -- `file`'s output
+      # is a human string that has changed spelling before.
       - name: arch
-        run: file "python/dist/tan/tan"
+        run: |
+          python3 - "python/dist/tan/tan" "${{ matrix.cputype }}" <<'PY'
+          import struct, sys
+          path, want = sys.argv[1], int(sys.argv[2], 16)
+          with open(path, "rb") as fh:
+              head = fh.read(8)
+          if len(head) < 8:
+              raise SystemExit(f"::error::{path} is too short to hold a Mach-O header")
+          magic, cputype = struct.unpack("<II", head)
+          # Fat magic is stored BIG-endian, so it reads back byte-swapped here.
+          # Refused explicitly rather than mis-parsed: a universal binary would
+          # satisfy both asset names at once, which is the opposite of what
+          # per-architecture assets are for.
+          if magic in (0xBEBAFECA, 0xCAFEBABE, 0xBFBAFECA, 0xCAFEBABF):
+              raise SystemExit(
+                  f"::error::{path} is a UNIVERSAL (fat) binary; these assets are "
+                  f"per-architecture and a fat one would ship under both names")
+          if magic not in (0xFEEDFACF, 0xFEEDFACE):
+              raise SystemExit(f"::error::{path} is not a Mach-O binary (magic 0x{magic:08x})")
+          print(f"{path}: Mach-O cputype 0x{cputype:08x} (want 0x{want:08x})")
+          if cputype != want:
+              raise SystemExit(f"::error::{path} is not the architecture its asset name claims")
+          PY
       - name: verify
         if: inputs.verify
         run: bash python/scripts/verify_binary.sh "$PWD/python/dist/tan/tan" "$PWD/alp-sdk"

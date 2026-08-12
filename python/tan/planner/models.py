@@ -160,33 +160,32 @@ class Slice:
     # description).  Consumed by `_slice_flash_recipe`'s `zephyr` branch to
     # arm the direct-flash path in `flash_args`.
     jlink_flash_device: Optional[str] = None
-    # Read-only SW-DP IDR preflight PAIR for THIS core (soc-spec-v1
-    # `variants[].debug.expect_dpidr` / `debug.jlink_device[core_id]`),
-    # resolved by `loader._resolve_flow_d_preflight` -- tan-cli#353/#1355.
-    # `expect_dpidr` is the DPIDR the board's debug port must answer before
-    # a host flasher writes anything; `jlink_device` is the LIVE-CORE attach
-    # profile the read is performed with, distinct from `jlink_flash_device`
-    # above (the part-number flash-ALGORITHM profile). Both-or-neither by
-    # construction (`_resolve_flow_d_preflight`'s own contract): a manifest
-    # that carries one without the other is the half-armed shape
-    # `flash_plan.py`'s `validate_flow_d_preflight_args` refuses outright.
-    # Consumed by `_slice_flash_recipe`'s `zephyr` branch, same as
-    # `jlink_flash_device`.
+    # The read-only SW-DP IDR (DPIDR) wrong-board preflight PAIR for this
+    # core (soc-spec-v1 `variants[].debug.expect_dpidr` +
+    # `variants[].debug.jlink_device[<core_id>]`), resolved together by
+    # `loader._resolve_flow_d_preflight` -- both None (preflight not armed,
+    # every variant that has not been measured) or both set; never one of
+    # the two.  `expect_dpidr` is the ID the board's debug port must answer
+    # BEFORE any write; `jlink_device` is the LIVE-CORE attach profile that
+    # read is performed with -- distinct from `jlink_flash_device` above,
+    # which is the part-number flash-algorithm profile.  Resolved SoC-variant
+    # facts like `jlink_flash_device`, NOT customer-overridable.  Consumed by
+    # `_slice_flash_recipe`'s `zephyr` branch, which emits them into
+    # `flash_args` as an inseparable pair (alp-sdk #1355).
     expect_dpidr: Optional[str] = None
     jlink_device: Optional[str] = None
     # This core's AEN MRAM slot0-XIP load address, `0x`-prefixed hex string
     # (tan-cli#353) -- where Flow D's built-in Alif MRAM loader must write
     # the slot0-linked application blob itself, distinct from
-    # `jlink_flash_device` (which only selects the loader's device PROFILE,
-    # not an address). Resolved by `loader._resolve_slot0_load_address` from
-    # the SoM preset's `memory_map:` (NOT the SoC JSON -- this is SDK/module
-    # build POLICY, not a silicon fact: metadata/e1m_modules/E1M-AEN801.yaml's
-    # own `memory_map:` comment says so explicitly, alp-sdk #1069), so like
-    # `jlink_flash_device` it is NOT customer-overridable. None when this
-    # core has no AEN slot0-XIP window (every non-AEN slice, and any AEN
-    # core whose SoC variant publishes no `jlink_flash_device`) -- a
-    # published "unknown", never a value to invent. Consumed by
-    # `_slice_flash_recipe`'s `zephyr` branch.
+    # `jlink_flash_device` above (which only selects the loader's device
+    # PROFILE, not an address).  Resolved by
+    # `loader._resolve_slot0_load_address` from the SoM preset's
+    # `memory_map:` (NOT the SoC JSON -- this is SDK/module build policy,
+    # not a silicon fact), so like `jlink_flash_device` it is NOT
+    # customer-overridable.  None when this core has no AEN slot0-XIP window
+    # (every non-AEN slice, and any AEN core whose SoC variant publishes no
+    # `jlink_flash_device`) -- a published "unknown", never a value to
+    # invent.  Consumed by `_slice_flash_recipe`'s `zephyr` branch.
     slot0_load_address: Optional[str] = None
 
     # Populated by Orchestrator.fan_out:
