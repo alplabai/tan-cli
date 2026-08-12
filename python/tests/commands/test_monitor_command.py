@@ -457,3 +457,228 @@ def test_child_stdout_falls_back_to_devnull_when_there_is_no_real_stderr(monkeyp
     assert monitor_cmd._child_stdout(True) is monitor_cmd.subprocess.DEVNULL
     # Text mode never consults the stream at all.
     assert monitor_cmd._child_stdout(False) is None
+
+
+# ---------------------------------------------------------------------------
+# the port gate is OPENABILITY, not enumeration (tan-cli#569)
+# ---------------------------------------------------------------------------
+
+
+def _spawned_argv(monkeypatch, argv: list[str]) -> list[str]:
+    """Run `tan monitor <argv>` with a stub spawn and hand back the argv the
+    command handed `subprocess.run` -- i.e. proof the port was ACCEPTED and
+    miniterm was launched on it, not refused."""
+    captured: dict = {}
+
+    class _Completed:
+        returncode = 0
+
+    def fake_run(spawn_argv, **kwargs):
+        captured["argv"] = spawn_argv
+        return _Completed()
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", fake_run)
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 0, result.stdout
+    return captured["argv"]
+
+
+def _pyserial_with_url_support(monkeypatch) -> None:
+    """Make `serial.serial_for_url` available to the URL rule in EVERY install
+    shape this suite runs in.
+
+    When pyserial is genuinely installed (the `[monitor]` extras shape that
+    `python-binaries.yml` and `parity.yml` use) this does nothing at all and the
+    tests below run against the REAL `serial.serial_for_url`, which is the
+    authority the fix delegates to. In the extras-less shape `ci.yml` runs, it
+    plants a stub that reproduces pyserial 3.5's contract for the two things
+    this rule reads: a known scheme returns an unopened `Serial`, and an unknown
+    one raises `ValueError("invalid URL, protocol 'x' not known")` (verbatim,
+    from `serial/__init__.py::serial_for_url`). The scheme list is pyserial
+    3.5's `serial/urlhandler/` plus the built-in `rfc2217`. This is the same
+    bargain `_stub_pyserial_if_absent` strikes and for the same reason: without
+    it, the coverage written for this rule would silently vanish on the one
+    install shape `ci.yml` actually runs.
+    """
+    if importlib.util.find_spec("serial") is not None:
+        return
+
+    module = types.ModuleType("serial")
+    known = {"alt", "cp2110", "hwgrep", "loop", "rfc2217", "socket", "spy"}
+
+    class _Serial:
+        is_open = False
+
+    def serial_for_url(url, *args, **kwargs):
+        scheme = url.split("://", 1)[0] if "://" in url else ""
+        if scheme and scheme not in known:
+            raise ValueError(f"invalid URL, protocol {scheme!r} not known")
+        return _Serial()
+
+    module.serial_for_url = serial_for_url
+    monkeypatch.setitem(sys.modules, "serial", module)
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="the character-device rule is POSIX-only by construction: on Windows "
+    "a COM name is not a stat-able node, so this rule can never fire there and "
+    "an absent COM9 keeps refusing exactly as before (see monitor_cmd's own "
+    "docstring). Nothing to assert on a non-POSIX host.",
+)
+def test_a_by_id_symlink_to_a_real_chardev_is_accepted_and_spawned(monkeypatch, tmp_path):
+    """tan-cli#569. `comports()` reports raw nodes (`/dev/ttyACM0`) and NEVER
+    the `/dev/serial/by-id/...` symlinks, so a set-membership gate refuses the
+    only STABLE name a bench with two identical adapters has -- a port
+    `serial.Serial()`, and therefore the miniterm tan is about to spawn, opens
+    fine (miniterm resolves its port through `serial.serial_for_url`, not
+    through `comports()`).
+
+    A `pty` slave stands in for the adapter: it is a real character device, so
+    `os.stat(...).st_mode` answers exactly what it answers for `/dev/ttyACM0`,
+    and no hardware is touched -- deliberate, because accepting a real bench
+    port asserts DTR/RTS on the node and resets some boards.
+    """
+    import pty  # noqa: PLC0415 -- POSIX-only, and this test is skipped elsewhere
+
+    master, slave = pty.openpty()
+    try:
+        by_id = tmp_path / "usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00"
+        by_id.symlink_to(os.ttyname(slave))
+
+        _stub_pyserial_if_absent(monkeypatch)
+        # The node the symlink points AT is what pyserial enumerates; the
+        # symlink itself never appears in `comports()`, which is the whole bug.
+        monkeypatch.setattr(
+            monitor_cmd, "_available_ports", lambda: [(os.ttyname(slave), "AT32 Virtual Com Port")]
+        )
+
+        argv = _spawned_argv(monkeypatch, ["--port", str(by_id), "--format", "json"])
+        assert argv[-2:] == [str(by_id), "115200"]
+        assert "serial.tools.miniterm" in argv
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_a_pyserial_url_is_accepted_and_spawned(monkeypatch):
+    """tan-cli#569. miniterm's URL handlers (`socket://`, `rfc2217://`,
+    `loop://`) can never appear in `comports()`, so the enumeration gate refused
+    every one of them with no workaround at all -- while
+    `serial.serial_for_url()` opens them."""
+    _pyserial_with_url_support(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("/dev/ttyUSB0", "")])
+
+    argv = _spawned_argv(
+        monkeypatch, ["--port", "socket://127.0.0.1:9999", "--baud", "9600", "--format", "json"]
+    )
+    assert argv[-2:] == ["socket://127.0.0.1:9999", "9600"]
+
+
+@pytest.mark.parametrize("url", ["rfc2217://localhost:4000", "loop://"])
+def test_the_other_url_handlers_are_accepted_too(monkeypatch, url):
+    """No hardcoded scheme list: pyserial IS the authority, consulted through
+    `serial_for_url(..., do_not_open=True)`, so every handler it ships works."""
+    _pyserial_with_url_support(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+    assert _spawned_argv(monkeypatch, ["--port", url, "--format", "json"])[-2] == url
+
+
+def test_an_unknown_url_scheme_is_still_refused(monkeypatch):
+    """The URL rule delegates the verdict to pyserial rather than pattern-
+    matching `://`, so a scheme pyserial does not know stays refused -- same
+    `monitor.no-port` code, same message, same port listing as before."""
+    _pyserial_with_url_support(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "USB Serial")])
+
+    result = runner.invoke(app, ["--port", "bogus://x", "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert "'bogus://x' not found" in doc["issues"][0]["message"]
+    assert doc["data"]["availablePorts"] == [{"device": "COM7", "description": "USB Serial"}]
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("serial") is None,
+    reason="asserts the exception type pyserial ITSELF raises for a well-formed "
+    "URL of a KNOWN scheme that resolves to nothing; a stub proving its own "
+    "behaviour would prove nothing.",
+)
+def test_a_known_scheme_that_pyserial_rejects_is_a_refusal_not_an_internal_failure(monkeypatch):
+    """`hwgrep://` with a regexp matching no adapter raises
+    `serial.serialutil.SerialException: no ports found matching regexp 'ZZZZ'`
+    -- NOT the `ValueError` an unknown scheme raises. Left to escape, that
+    reaches `monitor`'s catch-all and surfaces as `monitor.internal-failure` at
+    exit 5 ("tan has a bug") for what is simply a port that is not there."""
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+
+    result = runner.invoke(app, ["--port", "hwgrep://ZZZZ-no-such-adapter", "--format", "json"])
+    assert result.exit_code == 1, result.stdout
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert "monitor.internal-failure" not in result.stdout
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink semantics")
+def test_a_dangling_by_id_symlink_is_still_refused(monkeypatch, tmp_path):
+    """The unplugged-adapter case: the `by-id` name survives in a stale
+    listing but points at nothing. `os.stat` FOLLOWS the symlink, so it raises
+    `FileNotFoundError` and the refusal fires exactly as it did before."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("/dev/ttyACM0", "")])
+
+    dangling = tmp_path / "usb-FTDI_FT232R_USB_UART_AA5BY4GV-if00-port0"
+    dangling.symlink_to("/dev/nope-not-here")
+
+    result = runner.invoke(app, ["--port", str(dangling), "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert f"'{dangling}' not found" in doc["issues"][0]["message"]
+
+
+def test_a_regular_file_is_not_a_port(monkeypatch, tmp_path):
+    """The character-device rule must not decay into "any path that exists".
+    A regular file stats fine and is not openable as a serial port."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("/dev/ttyACM0", "")])
+
+    ordinary = tmp_path / "README.md"
+    ordinary.write_text("not a serial port\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--port", str(ordinary), "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert "not found" in doc["issues"][0]["message"]
+
+
+def test_an_absent_bare_com_name_still_refuses(monkeypatch):
+    """The Windows-safety argument, asserted rather than assumed: `COM9` is not
+    a stat-able node on ANY host (on POSIX it is simply absent; on Windows a COM
+    name is not a filesystem path at all), so rule 3 can never fire for it and
+    the pre-#569 refusal is reproduced byte for byte."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+
+    result = runner.invoke(app, ["--port", "COM9", "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert "'COM9' not found" in doc["issues"][0]["message"]
+
+
+def test_the_url_rule_reports_pyserial_missing_not_an_internal_failure(monkeypatch):
+    """The URL rule is a SECOND in-process pyserial touch point, so it carries
+    the same import guard `_available_ports` does. On a frozen build without the
+    `monitor` extra the precheck is skipped, and an unguarded `import serial`
+    here would surface as `monitor.internal-failure` at exit 5."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+    _block_pyserial(monkeypatch)
+
+    result = runner.invoke(app, ["--port", "socket://127.0.0.1:9999", "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert [i["code"] for i in doc["issues"]] == ["monitor.pyserial-missing"], doc

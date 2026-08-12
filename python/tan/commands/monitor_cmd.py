@@ -7,8 +7,9 @@ pyserial's `miniterm`. Port comes from `--port`; baud from `--baud` (default
 
 There is no safe cross-platform guess for the port itself (COMx vs
 `/dev/ttyUSBx` vs `/dev/cu.*`), so when no port is given -- or the requested
-one does not exist -- this command lists every serial port pyserial can see
-and refuses instead of hanging on a wrong device.
+one is not something pyserial could open (`_port_is_openable`) -- this command
+lists every serial port pyserial can see and refuses instead of hanging on a
+wrong device.
 
 Board-context port resolution -- filling in `--port` from the current project
 instead of asking for it -- is deliberately NOT implemented here, and it is
@@ -52,10 +53,33 @@ child's own exit code** -- mirroring the shipped Rust forwarder
 `ExitCode::RuntimeFailure`), which is the customer-facing contract today, NOT
 the oracle's literal `raise SystemExit(rc)` passthrough of whatever code
 miniterm returned. The actual child code still reaches the issue message.
+
+**The port gate tests OPENABILITY, not enumeration (tan-cli#569) -- a third
+deliberate divergence from the oracle.** `monitor.py` refuses any `--port` not
+in `comports()`'s set, and this port inherited that verbatim. It is not merely
+conservative, it is wrong: `comports()` ENUMERATES, and the child this command
+is about to spawn OPENS -- pyserial's own `miniterm.py:974` resolves its port
+through `serial.serial_for_url(...)`, never through `comports()`. Two whole
+classes of port that miniterm opens fine were therefore refused. (1)
+`/dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00` and its
+kin: pyserial reports the raw node (`/dev/ttyACM0`) and NEVER the by-id
+symlink, so on a bench carrying two identical adapters -- where the
+`/dev/ttyACM0` vs `/dev/ttyACM1` ordering swaps across reboots -- tan refused
+the ONLY stable name for the intended board and forced the operator back onto
+the unstable one. Confirmed against a real by-id path whose `os.stat`
+`st_rdev` is `0xa600`, the same device node as the `/dev/ttyACM0` the refusal
+message listed as available. (2) miniterm's URL handlers -- `socket://`,
+`rfc2217://`, `loop://`, `spy://`, `alt://`, `hwgrep://` -- which cannot
+appear in `comports()` by construction, so there was no workaround at all.
+`_port_is_openable` replaces the set test; the refusal itself is byte for byte
+what it was (`monitor.no-port`, same message, same listing), so nothing on the
+wire changes and `contract/issue-codes.json` is untouched.
 """
 
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -124,6 +148,89 @@ def _available_ports() -> list[tuple[str, str]]:
         raise _pyserial_missing() from err
 
     return [(p.device, p.description or "") for p in list_ports.comports()]
+
+
+def _pyserial_accepts_url(port: str) -> bool:
+    """Whether pyserial recognises `port` as one of ITS url handlers.
+
+    Deliberately no hardcoded scheme list. pyserial is the authority on what
+    `serial.serial_for_url` -- and therefore the miniterm about to be spawned --
+    accepts, and `do_not_open=True` asks it that question without opening a
+    socket, dialling an rfc2217 server, or touching any device: it returns the
+    handler's own unopened `Serial` (e.g. a
+    `serial.urlhandler.protocol_socket.Serial` with `is_open` False) and raises
+    `ValueError("invalid URL, protocol 'bogus' not known")` for a scheme it does
+    not ship. Hardcoding prefixes here would go stale the moment pyserial adds
+    or renames a handler, and would accept a scheme this installation's pyserial
+    cannot actually serve.
+
+    The `serial` import is guarded through `_pyserial_missing()` for the same
+    reason `_available_ports` guards its own: this is a SECOND in-process
+    pyserial touch point, and `_run_monitor`'s precheck is deliberately skipped
+    on a frozen build, so on a `--onefile` binary built without the `monitor`
+    extra an unguarded import here would escape as `monitor.internal-failure`
+    at exit 5 -- "tan has a bug" -- for an optional dependency that was never
+    installed.
+
+    Every failure from `serial_for_url` itself means the same thing (tan cannot
+    vouch for this port, so refuse and list what is there), and the catch is
+    broad ON PURPOSE rather than `ValueError`-only: an unknown scheme raises
+    `ValueError`, but a KNOWN scheme that resolves to nothing raises the
+    handler's own type instead -- `hwgrep://FTDI` with no matching adapter
+    raises `serial.serialutil.SerialException: no ports found matching regexp
+    'FTDI'` (verified against pyserial 3.5). Left to escape, that reaches
+    `monitor`'s catch-all and reports a tan bug for a port that is simply not
+    plugged in. `_pyserial_missing()` is raised OUTSIDE this try, so it still
+    propagates as its own coded refusal.
+    """
+    try:
+        import serial  # noqa: PLC0415 (optional at runtime)
+    except ImportError as err:
+        raise _pyserial_missing() from err
+
+    try:
+        serial.serial_for_url(port, do_not_open=True)
+    except Exception:  # noqa: BLE001 -- see above: every failure is "refuse it"
+        return False
+    return True
+
+
+def _port_is_openable(port: str) -> bool:
+    """Whether `--port <port>` names something miniterm could open.
+
+    The whole refusal decision lives here so its reasoning stays in one place.
+    Three independent rules, any one of which accepts:
+
+    1. **pyserial enumerates it.** The pre-#569 rule, kept unchanged and tried
+       first, so every invocation that works today keeps working exactly as it
+       did -- this change only ever ADDS accepted ports.
+    2. **pyserial recognises it as a URL.** Gated on a literal `"://"` because
+       `serial_for_url` treats anything WITHOUT one as a plain device name and
+       hands back a `Serial` for it unopened -- `serial_for_url("COM9",
+       do_not_open=True)` succeeds on a host with no COM9 at all -- so without
+       this guard rule 2 would accept every string ever passed and the refusal
+       would cease to exist.
+    3. **It is a character device on this filesystem.** `os.stat` FOLLOWS
+       symlinks, so a `/dev/serial/by-id/...` path resolves to its node in one
+       call and answers for the node, exactly as `serial.Serial()` will when
+       miniterm opens it. `S_ISCHR`, not mere existence: a regular file stats
+       fine and is not a port.
+
+    Windows behaviour is unchanged apart from rule 2. A COM name is not a
+    stat-able filesystem path there, so rule 3 can never fire, and a genuinely
+    absent `COM9` keeps refusing with the identical message it always did
+    (verified: `os.stat("COM9")` raises `FileNotFoundError`, as does a DANGLING
+    by-id symlink -- the unplugged-adapter case -- which therefore also stays
+    refused).
+    """
+    if port in {device for device, _ in _available_ports()}:
+        return True
+    if "://" in port and _pyserial_accepts_url(port):
+        return True
+    try:
+        return stat.S_ISCHR(os.stat(port).st_mode)
+    except OSError:
+        return False
 
 
 def _ports_data(ports: list[tuple[str, str]]) -> list[dict[str, str]]:
@@ -211,7 +318,7 @@ def _run_monitor(
 
     if port is None:
         raise _refuse_listing_ports("no --port given")
-    if port not in {device for device, _ in _available_ports()}:
+    if not _port_is_openable(port):
         raise _refuse_listing_ports(f"port '{port}' not found")
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
@@ -248,7 +355,11 @@ def monitor(
     port: str = typer.Option(
         None,
         "--port",
-        help="Serial port (COM7, /dev/ttyUSB0, /dev/cu.usbmodem...).",
+        help=(
+            "Serial port: a device name (COM7, /dev/ttyUSB0, /dev/cu.usbmodem...), "
+            "a stable /dev/serial/by-id/... symlink, or a pyserial URL "
+            "(socket://host:port, rfc2217://host:port, loop://)."
+        ),
     ),
     baud: int = typer.Option(
         DEFAULT_BAUD, "--baud", show_default=True, help="Baud rate."
