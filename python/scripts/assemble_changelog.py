@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Fold `changelog.d/` fragments into CHANGELOG.md's Unreleased section.
+
+WHY THIS EXISTS
+---------------
+`CHANGELOG.md` has one insertion point: the `###` lists under the
+`## [X.Y.Z] — Unreleased` header. Every open PR appends there, so any two PRs
+conflict on it by construction, and the conflict re-fires on every merge.
+Measured 2026-08-11 across the seven conflicted tan-cli PRs open at the time,
+`CHANGELOG.md` was conflicted in SIX, and was the ONLY conflicted file in
+THREE -- PRs otherwise ready to merge, blocked purely by list contention.
+
+One file per change makes that class of conflict impossible: disjoint files
+cannot conflict. This script is the other half -- it puts the fragments back
+into the one document the release actually slices, so `release.yml`'s
+`## [X.Y.Z]` extraction is untouched and the release contract does not change.
+
+WHAT IT DELIBERATELY DOES NOT DO
+--------------------------------
+It does not reformat, rewrap, summarise, or reorder the text INSIDE a
+fragment. The house style here is deliberately long and carries verbatim
+technical strings -- register names, error codes, flags, paths -- where a
+"helpful" rewrap can corrupt meaning. Fragment content is copied byte-for-byte.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+# The full Keep a Changelog set, in its canonical order. All six are here
+# deliberately: `### Security` and `### Deprecated` both already appear in
+# CHANGELOG.md, so a shorter list would REJECT a legitimate security fragment
+# at release time -- the worst possible moment to discover it.
+#
+# A fragment category outside this set is a hard error rather than a
+# silently-dropped entry. A changelog entry that vanishes without a word is
+# the exact "reports success while doing something else" failure this repo
+# keeps paying for, and for a security note it is worse than an inconvenience.
+CATEGORIES = ("added", "changed", "deprecated", "removed", "fixed", "security")
+
+# `## [0.5.2] — Unreleased` (em-dash U+2014, as the file actually uses) or
+# `## [Unreleased]`. Both spellings appear across Alp Lab repos; accept either
+# rather than silently matching nothing.
+UNRELEASED_RE = re.compile(
+    r"^##\s*\[(?P<version>[^\]]+)\]\s*(?:[—-]\s*Unreleased\s*)?$",
+    re.IGNORECASE,
+)
+
+
+class AssembleError(RuntimeError):
+    """A condition that must stop the release, not be worked around."""
+
+
+def repo_root(start: Path) -> Path:
+    """Walk up to the directory holding both CHANGELOG.md and changelog.d/."""
+    for candidate in (start, *start.parents):
+        if (candidate / "CHANGELOG.md").is_file() and (candidate / "changelog.d").is_dir():
+            return candidate
+    raise AssembleError(
+        "could not locate a directory containing both CHANGELOG.md and "
+        f"changelog.d/, starting from {start}"
+    )
+
+
+def load_fragments(frag_dir: Path) -> dict[str, list[tuple[str, str]]]:
+    """Return {category: [(filename, body), ...]} sorted by filename.
+
+    Sorting by filename makes assembly DETERMINISTIC. Without it the entry
+    order would follow directory iteration order, so the same fragments could
+    produce a different CHANGELOG on two machines and the diff would look like
+    a real change.
+    """
+    buckets: dict[str, list[tuple[str, str]]] = {c: [] for c in CATEGORIES}
+    bad: list[str] = []
+
+    for path in sorted(frag_dir.glob("*.md")):
+        if path.name == "README.md":
+            continue
+        parts = path.name[: -len(".md")].rsplit(".", 1)
+        if len(parts) != 2 or parts[1].lower() not in CATEGORIES:
+            bad.append(path.name)
+            continue
+        body = path.read_text(encoding="utf-8").strip("\n")
+        if not body.strip():
+            bad.append(f"{path.name} (empty)")
+            continue
+        buckets[parts[1].lower()].append((path.name, body))
+
+    if bad:
+        raise AssembleError(
+            "unusable fragment filename(s): "
+            + ", ".join(sorted(bad))
+            + f"\nexpected `<issue>.<category>.md` with category in {CATEGORIES}, "
+            "and a non-empty body. Refusing to continue rather than dropping "
+            "the entry silently."
+        )
+    return buckets
+
+
+def find_unreleased(lines: list[str]) -> tuple[int, int]:
+    """Return (header_index, end_index) for the Unreleased section.
+
+    end_index is the index of the next `## ` header, or len(lines).
+    """
+    start = None
+    for i, line in enumerate(lines):
+        if UNRELEASED_RE.match(line.rstrip()):
+            start = i
+            break
+    if start is None:
+        raise AssembleError(
+            "CHANGELOG.md has no `## [<version>] — Unreleased` (or "
+            "`## [Unreleased]`) header. Refusing to guess where entries belong."
+        )
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("## "):
+            return start, j
+    return start, len(lines)
+
+
+def splice(section: list[str], buckets: dict[str, list[tuple[str, str]]]) -> list[str]:
+    """Insert each bucket's entries under its `###` heading, creating it if absent.
+
+    Existing entries are KEPT and new ones appended after them: a fragment
+    never replaces hand-written text already in the section.
+    """
+    out = list(section)
+
+    for category in CATEGORIES:
+        entries = buckets.get(category) or []
+        if not entries:
+            continue
+        heading = f"### {category.capitalize()}"
+        block = "\n\n".join(body for _, body in entries)
+
+        idx = next(
+            (i for i, l in enumerate(out) if l.strip().lower() == heading.lower()),
+            None,
+        )
+        if idx is None:
+            # No such heading yet -- append one at the end of the section,
+            # preserving canonical order relative to headings that do exist is
+            # not attempted here; the assembler runs once at release time and
+            # the result is reviewed in the release PR.
+            while out and not out[-1].strip():
+                out.pop()
+            out.extend(["", heading, "", *block.split("\n")])
+            continue
+
+        # Find the end of this heading's body: the next `###`/`##` or section end.
+        end = len(out)
+        for j in range(idx + 1, len(out)):
+            if out[j].startswith("### ") or out[j].startswith("## "):
+                end = j
+                break
+        tail = end
+        while tail > idx + 1 and not out[tail - 1].strip():
+            tail -= 1
+        out[tail:tail] = ["", *block.split("\n")]
+
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--check", action="store_true",
+                    help="report what would be folded; change nothing; exit 0 always "
+                         "(this is informational, NOT a gate -- see --require-empty)")
+    ap.add_argument("--require-empty", action="store_true",
+                    help="exit 1 if any fragment remains unfolded (for a release gate)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the resulting CHANGELOG.md to stdout, write nothing")
+    ap.add_argument("--root", type=Path, default=None,
+                    help="repo root (default: discovered from this script's location)")
+    args = ap.parse_args(argv)
+
+    try:
+        root = args.root or repo_root(Path(__file__).resolve().parent)
+        frag_dir = root / "changelog.d"
+        changelog = root / "CHANGELOG.md"
+
+        buckets = load_fragments(frag_dir)
+        total = sum(len(v) for v in buckets.values())
+
+        if args.check or args.require_empty:
+            for category in CATEGORIES:
+                for name, _ in buckets[category]:
+                    print(f"{category:8} {name}")
+            print(f"{total} fragment(s) pending")
+            if args.require_empty and total:
+                print(
+                    "::error::unfolded changelog fragments remain -- run "
+                    "`python3 python/scripts/assemble_changelog.py` and commit "
+                    "the result before tagging",
+                    file=sys.stderr,
+                )
+                return 1
+            return 0
+
+        if not total:
+            print("no fragments to fold")
+            return 0
+
+        lines = changelog.read_text(encoding="utf-8").splitlines()
+        start, end = find_unreleased(lines)
+        merged = lines[:start + 1] + splice(lines[start + 1:end], buckets) + lines[end:]
+        text = "\n".join(merged).rstrip("\n") + "\n"
+
+        if args.dry_run:
+            sys.stdout.write(text)
+            return 0
+
+        changelog.write_text(text, encoding="utf-8")
+        for category in CATEGORIES:
+            for name, _ in buckets[category]:
+                (frag_dir / name).unlink()
+        print(f"folded {total} fragment(s) into {changelog.relative_to(root)}")
+        return 0
+
+    except AssembleError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
