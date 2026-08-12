@@ -35,6 +35,28 @@ PYTHON = json.dumps(sys.executable)
 SDK = sdk_root()
 
 
+def _sdk_shaped(tmp_path):
+    """A directory that satisfies `write_post_build_manifest`'s is-this-an-alp-sdk
+    check, for tests that stub `tan.planner_root.emit` and care about what
+    happens AFTER the emit (the manifest overlay, slice status wiring).
+
+    That check -- the `scripts/alp_project.py` marker, the same one
+    `resolve_sdk_root_ladder` uses -- exists so a non-SDK path is never bound to
+    the process-global planner root. `bind_sdk_root` is first-bind-wins, and a
+    bogus root makes `import tan.planner` die partway inside
+    `tan/planner/slugs.py`, leaving `tan.planner.paths` cached with `REPO`
+    frozen to it; the manifest writer's best-effort `except Exception` then
+    swallows the failure so nothing reports it. A bare `"/fake/sdk"` therefore
+    now short-circuits BEFORE the stubbed emit, and these tests would silently
+    stop exercising the behaviour they are named for (they would see no
+    manifest written at all).
+    """
+    root = tmp_path / "sdk-shaped"
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    return str(root)
+
+
 def _stub_manifest_write(monkeypatch) -> None:
     """The sdk-switch-pristine stamp-guard tests below pass a throwaway
     `sdk_root=` to exercise the stamp comparison -- but `execute_slices`
@@ -168,7 +190,7 @@ def test_missing_tool_reason_persisted_to_the_manifest_omits_the_searched_path(
     out = execute_slices(
         parse_build_plan(_plan(cmd, backend="baremetal")), build_root=tmp_path,
         env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
-        sdk_root="/fake/sdk",
+        sdk_root=_sdk_shaped(tmp_path),
     )
     assert out[0].status == "skipped"
     # The in-memory/envelope message still carries the full searched-PATH
@@ -1072,7 +1094,7 @@ def test_manifest_overlay_writes_ok_and_failed_status_for_the_right_slices(
 
     execute_slices(parse_build_plan(plan_json), build_root=tmp_path,
                    env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
-                   sdk_root="/fake/sdk")
+                   sdk_root=_sdk_shaped(tmp_path))
 
     written = (tmp_path / "build" / "system-manifest.yaml").read_text(encoding="utf-8")
     manifest = parse_system_manifest(written)
@@ -1121,7 +1143,7 @@ def test_held_outcomes_reach_the_manifest_overlay_with_explicit_empty_artefact(
         env_lookup=lambda k: None,
         gap_fillers=[],
         on_output=lambda s: None,
-        sdk_root="/fake/sdk",
+        sdk_root=_sdk_shaped(tmp_path),
         held_outcomes=[
             SliceOutcome(
                 "held_core", "skipped", None, "toolchain root unresolved",

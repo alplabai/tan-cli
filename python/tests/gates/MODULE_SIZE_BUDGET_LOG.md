@@ -34,3 +34,8 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
   25 modules, the function count (249) and the worst function (728 lines) are
   unchanged from the values `dev`@`1e929c1` already carried; only their
   storage and the review-time record for future changes.
+- 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/doctor_cmd.py: 3849 -> 3920
+    - tan/core/bootstrap.py: 2094 -> 2111
+    - tan/planner/loader.py: 1016 -> 1251
+    - function_count_budget: 249 -> 251
