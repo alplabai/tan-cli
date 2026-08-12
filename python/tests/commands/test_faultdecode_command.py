@@ -467,19 +467,64 @@ def test_explicit_flag_wins_over_a_parsed_dump():
 
 
 # --------------------------------------------------------------------------
-# tan-cli#503, defect 1 (a piped dump must still be READ and MERGED when a
-# register flag is also given) and defect 3 (fd 0 closed must be a coded
-# refusal, never a traceback) are DEFERRED to tan-cli#537, not fixed here:
-# both require reworking `_stdin_offers_input`/`_stdin_offers_input_by_reading`
-# (the implicit-stdin reader itself), and every rework of that reader tried so
-# far closed one shape of hang/data-loss while opening another. This file
-# reverted to `dev`'s own `_read_dump(file_, *, auto_consume_stdin=...)` gate,
-# so a register flag suppresses the implicit stdin read exactly as it does on
-# `dev` -- `test_explicit_flag_wins_over_a_parsed_dump` above and
-# `test_stdin_dump_is_auto_consumed_when_piped` below still cover that
-# register-free path; the closed-fd-0 and flag-plus-dump-merge cases are
-# tan-cli#537's to add tests for, alongside the reader fix.
+# tan-cli#503, defect 1: a piped/pasted dump must still be READ and MERGED
+# when a register flag is ALSO given -- the implicit stdin read used to be
+# suppressed entirely by `not registers_given`, silently dropping whatever
+# the dump carried (the command's own help promises "Explicit flags win over
+# a parsed dump", which is only true if the dump is still read when a flag is
+# present too).
 # --------------------------------------------------------------------------
+
+
+def test_a_piped_dump_is_still_read_and_merged_when_a_register_flag_is_also_given():
+    """Reproduces tan-cli#503 defect 1's failure scenario exactly: `--hfsr`
+    alone used to suppress the implicit stdin read, so a piped CFSR/BFAR was
+    dropped and the tool reported the opposite cause (a "Forced HardFault"
+    escalation with "its own status bits ... clear", when CFSR=0x00008200 is
+    a precise bus fault with BFAR=0xdeadbeef). Both must now show up merged
+    with the explicit HFSR."""
+    result = runner.invoke(
+        app,
+        ["--hfsr", "0x40000000"],
+        input="CFSR: 0x00008200\nBFAR: 0xdeadbeef\n",
+    )
+    assert result.exit_code == 0
+    assert "PRECISERR" in result.output
+    assert "0xdeadbeef" in result.output
+    assert "Precise data bus fault" in result.output
+    # The old bug's report -- must NOT appear now that CFSR/BFAR are read.
+    assert "its own status bits are clear" not in result.output
+
+
+def test_an_address_only_flag_does_not_suppress_the_piped_dump():
+    """`--bfar`/`--mmfar` are address registers, not one of the cfsr/hfsr/dfsr
+    "something to analyse" registers `faultdecode` gates on -- so giving one
+    alone must not (a) throw away a piped CFSR, nor (b) hit the
+    `faultdecode.no-registers` refusal, both of which happened before this
+    fix because `--bfar` counted toward suppressing the dump read without
+    counting toward the gate that read was meant to satisfy."""
+    result = runner.invoke(app, ["--bfar", "0x20001000"], input="CFSR: 0x00008200\n")
+    assert result.exit_code == 0
+    assert "PRECISERR" in result.output
+    # The explicit --bfar flag wins over the dump's own (absent) BFAR.
+    assert "0x20001000" in result.output
+
+
+def test_json_envelope_merges_a_piped_dump_with_an_explicit_flag():
+    """Same merge, `--format json`: the explicit HFSR and the piped
+    CFSR/BFAR must both land in `data.inputs`/`data.addresses`, not just one
+    or the other."""
+    result = runner.invoke(
+        app,
+        ["--hfsr", "0x40000000", "--format", "json"],
+        input="CFSR: 0x00008200\nBFAR: 0xdeadbeef\n",
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    data = payload["data"]
+    assert data["inputs"]["cfsr"] == "0x00008200"
+    assert data["inputs"]["hfsr"] == "0x40000000"
+    assert data["addresses"]["bfar"] == "0xdeadbeef"
 
 
 # --------------------------------------------------------------------------

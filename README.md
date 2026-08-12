@@ -46,11 +46,19 @@ Install from source on those hosts.
 
 ### From source
 
-Python 3.12 or newer is required:
+Python 3.12 or newer is required. Install into a virtual environment, not the
+system interpreter: on a PEP 668 host (Debian/Ubuntu, including stock
+`ubuntu:24.04`) a bare `python3 -m pip install ./python` refuses with
+`error: externally-managed-environment` instead of installing anywhere.
+Debian/Ubuntu's `python3` package also does not include `venv` itself --
+`python3 -m venv` fails there until `python3-venv` is installed:
 
 ```sh
+sudo apt-get install -y python3-venv   # Debian/Ubuntu only
 git clone https://github.com/alplabai/tan-cli
 cd tan-cli
+python3 -m venv .venv
+source .venv/bin/activate              # Windows: .venv\Scripts\Activate.ps1
 python3 -m pip install ./python
 tan --version
 ```
@@ -73,6 +81,9 @@ Start in an empty working directory:
 ```sh
 git clone https://github.com/alplabai/alp-sdk
 tan bootstrap --sdk-root ./alp-sdk
+source alp-workspace/.venv/bin/activate    # Windows: alp-workspace\.venv\Scripts\Activate.ps1
+export ZEPHYR_BASE="$PWD/alp-workspace/zephyr"
+west sdk install --version 1.0.1 -t arm-zephyr-eabi
 tan init --name my-app
 cd my-app
 
@@ -85,20 +96,31 @@ tan run --flash
 What those commands do:
 
 1. `bootstrap` prepares west, Zephyr, the Python environment, and SDK
-   dependencies.
-2. `init` creates a Zephyr application and pins the SDK checkout in
+   dependencies, into a workspace venv at `alp-workspace/.venv` (next to the
+   SDK checkout by default).
+2. `west` lives only inside that venv, so activate it and point `ZEPHYR_BASE`
+   at the workspace before running `west sdk install` -- it installs the
+   Zephyr SDK cross-toolchain (`arm-zephyr-eabi`) that `tan build` needs;
+   `bootstrap` does not install it, and `tan doctor --fix` does not either.
+   On a minimal Linux host this step also needs `file` on PATH
+   (Debian/Ubuntu: `sudo apt-get install -y file`); without it the SDK's own
+   host-tools step fails with "Host tools installation failed" and names
+   nothing.
+3. `init` creates a Zephyr application and pins the SDK checkout in
    `.alp/sdk-path`.
-3. `validate` checks `board.yaml` and related metadata.
-4. `build` plans, materialises, and builds every core slice.
-5. `size` reports firmware use against the SoM memory budget.
-6. `run --flash` builds and then runs or programs the selected target.
+4. `validate` checks `board.yaml` and related metadata.
+5. `build` plans, materialises, and builds every core slice.
+6. `size` reports firmware use against the SoM memory budget.
+7. `run --flash` builds and then runs or programs the selected target.
 
-Run `tan doctor` if setup or toolchain discovery fails. `tan doctor --fix`
-installs missing prerequisites, but only at a real, interactive terminal --
-it is a no-op (exit 4) under a pipe, a redirect, or CI, so it is not a
-scripted-onboarding remedy. It never spawns `sudo` itself: it runs a
-prerequisite's manifest install command directly when already root, and
-otherwise prints the exact command to run by hand.
+Run `tan doctor` if setup or toolchain discovery fails; its `zephyrSdk`
+check names the exact `west sdk install` command above too, so it stays
+correct if that pin ever moves. `tan doctor --fix` installs missing
+prerequisites, but only at a real, interactive terminal -- it is a no-op
+(exit 4) under a pipe, a redirect, or CI, so it is not a scripted-
+onboarding remedy. It never spawns `sudo` itself: it runs a prerequisite's
+manifest install command directly when already root, and otherwise prints
+the exact command to run by hand.
 
 If you do not want the west workspace next to the SDK checkout, choose it
 explicitly:
@@ -211,6 +233,20 @@ python3.12 -m venv .venv
 (cd python && ../.venv/bin/python -m pytest tests -q)
 python3 python/scripts/version_check.py --selftest --self
 ```
+
+**Always install into a venv you create — never a bare `pip install -e ./python`
+or `pip install --user -e ./python`.** Run without an active venv, that writes
+an editable install into your OS user site-packages, and from that moment
+every bare `python3` process on the machine resolves `import tan` to
+whichever checkout was installed last, regardless of which worktree it is
+actually running in — including another developer's or another agent's
+checkout, on a shared box (tan-cli#665). It costs nothing to notice while it
+is happening: `tan --version` and `which tan` keep answering normally, so a
+full `pytest tests -q` run can report hundreds of misleading failures (or,
+worse, a false green) with no other symptom. `tests/conftest.py`'s
+`tan_under_test` fixture refuses loudly at session start if `import tan`
+resolves to anything outside this checkout's own `python/` — that is the
+backstop, not a substitute for using a venv in the first place.
 
 That run means the same thing on every machine, including a bench host with
 real debug tooling installed. The suite neutralises the debug/flash probe
