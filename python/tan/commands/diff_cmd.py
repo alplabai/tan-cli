@@ -44,14 +44,17 @@ case) to `bool`; `serde_yaml` (YAML 1.2 core schema) resolves only the six
 canonical `true`/`True`/`TRUE`/`false`/`False`/`FALSE` spellings and leaves
 everything else a plain string -- measured against the oracle:
 `schemaVersion: 1` + `os: on` is `changes: [{"path":"libraries",...}]` at exit
-0 there (`os` is a `String` field, untouched at schema version 1), but the
-stock loader hands `_parse_fields` a Python `bool` for `os` and every
-`_typed_field(..., str, ...)` check refuses it as exit 2
-`diff.schema-violation` -- a live false-refusal for every YAML-1.1-only
-boolean spelling in ANY string-typed field (`os`, `preset`), not just this
-one example. `_load_document` therefore parses with `_Yaml12BoolLoader`, a
+0 there (`os` is a `String` field, resolved to the literal text `"on"`,
+untouched at schema version 1). The stock loader instead hands `_parse_fields`
+a Python `bool` for `os` -- and even after `_string_scalar_field` stopped
+refusing an out-of-`str` scalar outright (tan-cli#570), a `bool` there still
+coerces to the CANONICAL text `"true"`, not the original spelling `"on"`,
+which would silently corrupt the diff's `before` value rather than merely
+refuse it. `_load_document` therefore still parses with `_Yaml12BoolLoader`, a
 `SafeLoader` subclass with the YAML 1.1 bool resolver's `on`/`off`/`yes`/`no`/
-`y`/`n` patterns removed, rather than plain `yaml.safe_load`.
+`y`/`n` patterns removed, rather than plain `yaml.safe_load`, so those
+spellings reach `_parse_fields` as the plain strings `serde_yaml` would
+produce in the first place.
 
 **Scope of the structural checks below.** `_parse_fields` validates the
 TOP-LEVEL type of every known `BoardModel` field (is `cores:` a mapping, is
@@ -72,11 +75,11 @@ mis-classifies pruning and fabricates a diff entry the oracle never emits
 `{"path":"iot","kind":"removed",...}` entry; the oracle is exit 2
 `diff.schema-violation`). `iot`'s four toggles must each be `bool` or absent.
 `inference.default_arena_kib` must be a non-negative integer (`u32` range) or
-absent. `inference.backend` is the one `String` field checked here at all --
-and, matching the `os`/`preset` leniency above, it is checked only for the
-compound shapes (`list`/`dict`) no `String` field can ever hold; any other
-scalar PyYAML resolves it to (even a bare `5` or `true`) is accepted as
-non-empty, exactly as the oracle's own String-field coercion treats it
+absent. `inference.backend` is a `String` field checked the same way
+`_string_scalar_field` now checks `os`/`preset` (tan-cli#570) -- only the
+compound shapes (`list`/`dict`) no `String` field can ever hold are rejected;
+any other scalar PyYAML resolves it to (even a bare `5` or `true`) is accepted
+as non-empty, exactly as the oracle's own String-field coercion treats it
 (measured: `inference: {backend: 5}` is `unchanged: true` at exit 0 on the
 oracle, never pruned) -- only `_inference_is_empty`'s stringification needed
 fixing to stop miscounting a non-`str` truthy `backend` as blank.
@@ -292,6 +295,39 @@ def _typed_field(doc: dict, key: str, expected: type, label: str) -> Any:
     )
 
 
+def _string_scalar_field(doc: dict, key: str) -> str | None:
+    """`doc[key]` coerced the way a `serde_yaml` `String`-typed field actually
+    deserializes: ANY scalar coerces into a string (only the compound shapes
+    `list`/`dict` a `String` field can never hold are refused) -- unlike
+    `_typed_field(..., str, ...)`, which wrongly demanded the YAML node
+    already BE a Python `str` (tan-cli#570). Matches
+    `_check_inference_field_types`'s existing treatment of
+    `inference.backend`, which this module's own docstring already claimed
+    `os`/`preset` shared before the code actually did.
+
+    Measured against the oracle (tan-cli#570): `os: true` -> `"true"`,
+    `os: 5` -> `"5"`. `bool` is special-cased to lowercase text rather than
+    falling through to `str(value)` (which would yield Python's `"True"`) --
+    every canonical YAML 1.2 bool spelling this loader can produce
+    (`_Yaml12BoolLoader`) already normalizes to Python's `True`/`False`, so
+    there is no source-text case to preserve here the way there would be for
+    a number or a YAML timestamp.
+    """
+    value = doc.get(key)
+    if value is None:
+        return None
+    if isinstance(value, (list, dict)):
+        raise ParseFailure(
+            "schema-violation",
+            f"board.yaml is not valid YAML: {key}: expected a string, got {_yaml_kind(value)}",
+        )
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 #: `u32::MAX` -- the upper bound `inference.default_arena_kib` (`u32` in the
 #: Rust model) accepts. Measured against the oracle: `4294967295` is exit 0,
 #: `4294967296` is exit 2 `inference.default_arena_kib: ... expected u32`.
@@ -373,15 +409,22 @@ def _parse_fields(doc: Any) -> tuple[int, str | None, list | None, dict | None, 
 
     schema_version = doc.get("schemaVersion")
     schema_version_ok = isinstance(schema_version, int) and not isinstance(schema_version, bool)
-    if schema_version is not None and (not schema_version_ok or schema_version < 0):
+    # `schemaVersion` is `u32` in the Rust model (`model.rs:18`), so the upper
+    # bound matters just as much as the lower one -- tan-cli#571: without the
+    # `_U32_MAX` ceiling (already applied to `inference.default_arena_kib`
+    # below), a value above it silently fell through and got treated as
+    # `>= 2`, the opposite of the oracle's exit-2 refusal.
+    if schema_version is not None and (
+        not schema_version_ok or schema_version < 0 or schema_version > _U32_MAX
+    ):
         raise ParseFailure(
             "schema-violation",
-            f"board.yaml is not valid YAML: schemaVersion: expected a non-negative integer, "
-            f"got {_yaml_kind(schema_version)}",
+            f"board.yaml is not valid YAML: schemaVersion: expected a non-negative 32-bit "
+            f"integer, got {_yaml_kind(schema_version)}",
         )
     effective_version = schema_version if schema_version is not None else 1
 
-    os_value = _typed_field(doc, "os", str, "a string")
+    os_value = _string_scalar_field(doc, "os")
     libraries = _typed_field(doc, "libraries", list, "a sequence")
     iot = _typed_field(doc, "iot", dict, "a mapping")
     inference = _typed_field(doc, "inference", dict, "a mapping")
@@ -391,7 +434,7 @@ def _parse_fields(doc: Any) -> tuple[int, str | None, list | None, dict | None, 
     # Fields `diff` never reads (never touched by normalize_board_model, so
     # never contribute a diff entry either way) -- top-level shape checked
     # only, per the module docstring's scope note.
-    _typed_field(doc, "preset", str, "a string")
+    _string_scalar_field(doc, "preset")
     _typed_field(doc, "cores", dict, "a mapping")
     _typed_field(doc, "ipc", list, "a sequence")
     _typed_field(doc, "diagnostics", dict, "a mapping")

@@ -762,11 +762,99 @@ if [ "$layout" = "archive" ]; then
 else
 	echo "install.sh: installed tan -> ${dest}"
 fi
+
 case ":${PATH}:" in
-*":${INSTALL_DIR}:"*)
+*":${INSTALL_DIR}:"*) already_on_path=1 ;;
+*) already_on_path=0 ;;
+esac
+
+# ---------------------------------------------------------------------------
+# tan-cli#678: the health check above proves the STAGED binary runs; it says
+# nothing about whether it is the `tan` a NEW shell actually resolves. On a
+# host that already has a different `tan` earlier on PATH, this install is
+# real -- the checksum verified, the health check passed, ${dest} is exactly
+# what was promised -- but invisible: the next shell runs the OTHER one, and
+# this script would otherwise never say so. One warning line. This never
+# reorders PATH or removes the other binary (that would be hostile), and it
+# never fails the install over it -- the install DID succeed.
+#
+# Fires ONLY when BOTH hold:
+#   1. ${INSTALL_DIR} is ALREADY on PATH. When it is not, this run either
+#      just PREPENDED it in the rc-file line below (`PATH="${INSTALL_DIR}:
+#      $PATH"`, every shell arm), which always wins in a freshly sourced
+#      shell, or --no-modify-path left it off entirely -- and the "is not on
+#      PATH -- add it yourself" message further down already covers that
+#      case. Warning here too would be noise about a state already reported.
+#   2. `command -v tan` -- resolved against this same $PATH, the POSIX tool
+#      for "what would a new shell run" -- names something other than $dest
+#      (compared as a canonicalised, symlink-resolved path, never by
+#      version: two legitimate installs can share a version, and comparing
+#      versions would mean running the other binary just to decide whether
+#      to warn at all).
+# The whole check is non-fatal: any failure inside it -- `command -v` finding
+# nothing, a canonicalisation that cannot resolve, the shadowing binary
+# hanging or refusing to run -- must never turn an install that already
+# succeeded into a reported failure.
+# ---------------------------------------------------------------------------
+canonicalize_path() { # $1 = path; prints a best-effort resolved absolute path; never fails the script
+	if command -v realpath >/dev/null 2>&1 && resolved="$(realpath "$1" 2>/dev/null)"; then
+		printf '%s\n' "$resolved"
+		return 0
+	fi
+	# Portable fallback (no `realpath` -- e.g. a minimal image): resolve the
+	# containing directory to an absolute, symlink-free path the same way the
+	# --dir normalisation above does (`cd ... && pwd -P`), then reattach the
+	# leaf name. This does not follow a symlink AT the leaf itself, but that
+	# is the safe direction to under-resolve in: at worst two identical
+	# targets look like two different paths (a missed-dedup, not a false
+	# shadow warning).
+	cp_dir="$(dirname -- "$1")"
+	cp_base="$(basename -- "$1")"
+	if cp_resolved_dir="$(cd "$cp_dir" 2>/dev/null && pwd -P)"; then
+		printf '%s/%s\n' "$cp_resolved_dir" "$cp_base"
+	else
+		printf '%s\n' "$1"
+	fi
+}
+run_with_timeout() { # $1 = timeout seconds, $2.. = command; prints combined stdout+stderr; exits nonzero on failure/timeout
+	rwt_secs="$1"
+	shift
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$rwt_secs" "$@" 2>&1
+		return $?
+	fi
+	# Portable fallback for hosts with no `timeout` (stock macOS): race a
+	# background watchdog against the command instead.
+	rwt_out="$(mktemp)"
+	"$@" >"$rwt_out" 2>&1 &
+	rwt_cmd_pid=$!
+	(sleep "$rwt_secs" && kill -TERM "$rwt_cmd_pid" 2>/dev/null) &
+	rwt_watchdog_pid=$!
+	rwt_status=0
+	wait "$rwt_cmd_pid" 2>/dev/null || rwt_status=$?
+	kill "$rwt_watchdog_pid" 2>/dev/null || true
+	wait "$rwt_watchdog_pid" 2>/dev/null || true
+	cat "$rwt_out"
+	rm -f "$rwt_out"
+	return "$rwt_status"
+}
+if [ "$already_on_path" = "1" ]; then
+	shadow_path=""
+	shadow_path="$(command -v tan 2>/dev/null)" || shadow_path=""
+	if [ -n "$shadow_path" ] && [ "$(canonicalize_path "$shadow_path")" != "$(canonicalize_path "$dest")" ]; then
+		shadow_version="could not run"
+		if sv_out="$(run_with_timeout 5 "$shadow_path" --version 2>&1)"; then
+			[ -n "$sv_out" ] && shadow_version="$sv_out"
+		fi
+		echo "install.sh: WARNING: another tan is earlier on PATH and will shadow this install:" >&2
+		echo "  ${shadow_path}  (reports: ${shadow_version})" >&2
+		echo "  installed here: ${dest}  (${verify_out})" >&2
+	fi
+fi
+
+if [ "$already_on_path" = "1" ]; then
 	: # already on PATH -- 'tan' works from any shell
-	;;
-*)
+else
 	if [ "$MODIFY_PATH" = "1" ]; then
 		# Pick the login shell's rc file and the syntax it actually parses
 		# (idempotent append), and announce it -- never edit a dotfile
@@ -852,5 +940,4 @@ case ":${PATH}:" in
 	else
 		echo "install.sh: ${INSTALL_DIR} is not on PATH -- add:  export PATH=\"${INSTALL_DIR}:\$PATH\"  (or re-run without --no-modify-path)"
 	fi
-	;;
-esac
+fi
