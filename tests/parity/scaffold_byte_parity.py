@@ -73,7 +73,21 @@ VENDORED_ROOT = Path(__file__).resolve().parent.parent.parent / (
 # catalog example's copy, exactly as `testcase.yaml` already was. Templates with
 # no such file are unaffected -- `augment_with_example_extras` only reaches for
 # a name the vendored tree actually carries.
-NON_ENVELOPE_EXTRAS = ("testcase.yaml", "native_sim.conf")
+#
+# `boards/native_sim_native_64.{overlay,conf}` (tan-cli#501) is the same class
+# again, for `sensor` and `diagnostics`: Zephyr auto-discovers a board overlay
+# by this path convention with no CMakeLists wiring at all, so without it the
+# documented `west build -b native_sim/native/64` run has no `alp-i2c0` DT
+# alias and no `CONFIG_EMUL`/`CONFIG_I2C_EMUL`, and produces output that does
+# not match either README's own "Expected output" block. `edge-ai` ships the
+# same missing pair but is UNAFFECTED (measured identical native_sim output
+# with and without it) and is deliberately not vendored here.
+NON_ENVELOPE_EXTRAS = (
+    "testcase.yaml",
+    "native_sim.conf",
+    "boards/native_sim_native_64.overlay",
+    "boards/native_sim_native_64.conf",
+)
 
 
 #: `github.com/alplabai/alp-sdk/(blob|tree)/<ref>/` -- what the SDK's

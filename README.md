@@ -30,9 +30,20 @@ The installers download the release for your platform, verify its SHA-256
 digest, and install it for the current user. Open a new terminal if `tan` is not
 immediately on `PATH`.
 
-Use `--system` on Unix or `-System` on Windows for a system-wide install. See
-[`docs/release-contract.md`](docs/release-contract.md) for asset names, manual
-verification, and OS support.
+For a system-wide install, pass `--system` (Unix) or `-System` (Windows)
+through to the script -- piping straight into `sh` or `iex` swallows a bare
+`--system`/`-System` before the installer ever sees it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh -s -- --system
+```
+
+```powershell
+&([scriptblock]::Create((irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1))) -System
+```
+
+See [`docs/release-contract.md`](docs/release-contract.md) for asset names,
+manual verification, and OS support.
 
 The v0.5 release publishes four archives:
 
@@ -129,6 +140,15 @@ explicitly:
 tan bootstrap --sdk-root ./alp-sdk --workspace /path/to/alp-workspace
 ```
 
+`--workspace` does not simply relocate where the workspace metadata is
+written: the west topdir is always the checkout's parent, so this **moves**
+the `alp-sdk` checkout itself to `/path/to/alp-workspace/alp-sdk` and updates
+the machine-global `~/.alp/sdk-default` pointer to it. Run this before
+anything else that references `--sdk-root ./alp-sdk` by its old path, or
+those calls stop resolving; if a project's `.alp/sdk-path` already pins the
+old location, re-run `tan init`/`tan bootstrap` from that project after the
+move.
+
 ## Common commands
 
 | Task | Command |
@@ -147,7 +167,8 @@ tan bootstrap --sdk-root ./alp-sdk --workspace /path/to/alp-workspace
 | Generate debugger settings | `tan debug-config` |
 | Run with Renode | `tan renode` |
 | List examples and presets | `tan examples`, `tan presets` |
-| Explain resolved project settings | `tan explain` |
+| Explain resolved project settings | `tan inspect` |
+| Explain a template or generation target | `tan explain` |
 | Show help | `tan <command> --help` |
 
 On a multi-core SoM, `debug-config` needs `--core <name>` to pick a target;

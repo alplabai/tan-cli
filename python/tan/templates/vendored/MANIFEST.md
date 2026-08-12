@@ -9,6 +9,25 @@ from an un-revendored SDK change.
 
 ## Source
 
+- **tan-cli#501: `sensor` and `diagnostics` gained `boards/native_sim_native_64.{overlay,conf}`.**
+  Neither template's vendored tree carried the `boards/` overlay+conf pair
+  their canonical example (`examples/peripheral-io/i2c-master` for `sensor`,
+  `examples/bringup/board-selftest` for `diagnostics`) ships, even though
+  Zephyr auto-discovers that path with no CMakeLists wiring at all. Without
+  it, `west build -b native_sim/native/64` on a scaffolded project has no
+  `alp-i2c0` DT alias and no `CONFIG_EMUL`/`CONFIG_I2C_EMUL`, so the run does
+  not match either README's own "Expected output" block (measured: an
+  unaliased I2C open fails with `alp_last_error=-2` instead of the documented
+  NACK probe). `edge-ai` ships the same gap but is unaffected (measured
+  identical native_sim output with and without the pair) and is deliberately
+  left unvendored. Fixed by vendoring the pair (byte-identical, from the
+  pinned commit below) into all four `sensor`/`diagnostics` × SKU trees and
+  adding both paths to `tests/parity/scaffold_byte_parity.py`'s
+  `NON_ENVELOPE_EXTRAS` (the same mechanism `native_sim.conf`/tan-cli#379 use).
+  Verified against `PINNED_SDK_TAG` (`1a9f753c`): `scaffold_byte_parity.py
+  --sdk <1a9f753c>` is rc 0, **9/9** (template, sku) pairs PASS, `sensor` and
+  `diagnostics` now reporting 8 files each (was 6).
+
 - **`PINNED_SDK_TAG` has since moved past this vendor point, deliberately.**
   The tan-cli#552…#563 planner re-sync bumped `parity.yml`'s `PINNED_SDK_TAG`
   (and `ci.yml`'s `sdk_parity` checkout `ref:`) from `f30f4d4b` to `ccd34f06`,
