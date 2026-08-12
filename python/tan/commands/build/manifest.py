@@ -165,6 +165,37 @@ def write_post_build_manifest(
             native_sim_target=None,
         )
 
+    # Refuse to BIND a root that is not an alp-sdk checkout. `_planner_emit`
+    # calls `bind_sdk_root(root)` and then imports `tan.planner`, and that
+    # binding is process-global, first-bind-wins by design: `tan/planner/
+    # paths.py` freezes `REPO = sdk_root()` at module scope and a dozen planner
+    # functions take `metadata_root: Path = METADATA_ROOT` as a default
+    # argument, so both freeze at import time.
+    #
+    # Binding a non-SDK path can never produce a manifest, but it is far from
+    # harmless. `tan/planner/slugs.py` reads
+    # `metadata/registries/peripheral-kconfig.json` at module scope, so the
+    # import dies PARTWAY: Python evicts `tan.planner` and `tan.planner.slugs`
+    # but leaves `tan.planner.paths` cached with `REPO` frozen to the bogus
+    # root. The `except Exception` below then swallows that failure -- this
+    # write is best-effort by design and must never escape -- so the caller
+    # sees success while the process is left holding a planner frozen against
+    # a tree that is not an SDK at all.
+    #
+    # Checking first is cheaper than unwinding after, and uses the same
+    # `scripts/alp_project.py` marker `resolve_sdk_root_ladder` already treats
+    # as the definition of "this is an alp-sdk checkout".
+    if not (Path(effective_sdk_root) / "scripts" / "alp_project.py").is_file():
+        return PostBuildManifest(
+            write_failed_reason=(
+                f"resolved alp-sdk root {effective_sdk_root} has no "
+                f"scripts/alp_project.py, so it is not an alp-sdk checkout; "
+                f"skipping the post-build system-manifest emit rather than "
+                f"binding the planner to it"
+            ),
+            native_sim_target=None,
+        )
+
     try:
         from tan.planner_root import emit as _planner_emit
     except ImportError as err:  # pragma: no cover -- planner absent from this build

@@ -47,6 +47,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A `dev` merge queue is coming online: without this
+  # trigger, a queued PR would wait forever on required contexts
+  # (`python -- pytest across python/ (*)`, `zizmor · workflow security`) that
+  # `merge_group` events never fire -- this workflow only ran on `push`/
+  # `pull_request`/`workflow_call` before, none of which GitHub raises for a
+  # merge-queue entry. No job below is gated to `pull_request` specifically
+  # (`python` and `workflow-security` carry no job-level `if:` at all), so
+  # both required contexts this file produces run unchanged on a
+  # `merge_group` event -- verified by reading every `if:` in this file, not
+  # assumed.
+  merge_group:
   # Called by release.yml so a tag cannot publish binaries the gates never ran
   # against. Keep this the single definition of the gate set.
   workflow_call:
@@ -258,12 +269,24 @@ jobs:
       # ported: tan-cli#550/#551 stay open.
       #
       # Still not a tag, for the same reason as above.
+      #
+      # `7d58ef32` -> `1a9f753c` for tan-cli#657/#661/#662, again in the SAME
+      # change as `parity.yml`'s `PINNED_SDK_TAG` and both freshness pins.
+      # It carries alp-sdk#1362 (the read-only SW-DP IDR wrong-board
+      # preflight pair, `expect_dpidr`/`jlink_device`), #1364 (the
+      # helper_mcu three-axis projection -- `flash_method`/`flash_args`,
+      # `update_channel`, and `flash_policy` no longer suppress one
+      # another), and #1374 (`flash_args.slot0_load_address`, tan-cli#353) --
+      # see `tests/gates/test_planner_relocation_freshness.py`'s
+      # `PINNED_SDK_COMMIT` comment for the full per-commit breakdown of
+      # what was ported into `tan/planner/loader.py` / `manifest.py` /
+      # `models.py` / `orchestrator.py`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 7d58ef32d0a730c902e335adfd7764c2ec500ba5
+          ref: 1a9f753c13e5ab5d444e2dc39d7065a352f1b777
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
