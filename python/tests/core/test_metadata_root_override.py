@@ -32,17 +32,22 @@ takes the project (or a name) but not the root and reads `paths.METADATA_ROOT`
 or `paths.REPO` itself. `tan.planner.kconfig._chip_has_driver` and
 `_emit_extra_library_profile` are direct examples (`kconfig.py:706`, `:91`
 read the module-level `REPO` even with a project in hand). The library-manifest
-layer is a mixed case, not a clean "no project in hand" one: `libraries.py`'s
-`resolve_selection` / `zephyr_kconfig_lines` / `_check_requires` all accept
-`project` and default `metadata_root` to the bound `METADATA_ROOT`, and
-`kconfig.py`'s three calls into that layer (its three `resolve_capabilities`
-call sites are threaded; the `_library_layer.resolve_selection` /
-`zephyr_kconfig_lines` calls in `_emit_libraries` are not) don't pass
-`project.effective_metadata_root()` through, so they still resolve against
-the bound tree. A handful of other constants are frozen at import against the
-bound root regardless of any project (`slugs.py`'s
-`PERIPHERAL_KCONFIG_REGISTRY`, `som_metadata.py`'s `SILICON_KCONFIG_REGISTRY`,
-`validate.py`'s `_CURATED_LIBRARIES`). None of that is covered here.
+layer (`libraries.py`, imported into `kconfig.py` as `_library_layer`) is a
+mixed case, not a clean "no project in hand" one: `resolve_selection` and
+`zephyr_kconfig_lines` default `metadata_root` to the bound `METADATA_ROOT`
+when their caller doesn't supply one; `_check_requires` has no default at
+all (`metadata_root: Path` is a required positional, libraries.py:285-290)
+and just gets whatever `resolve_selection` was given. `kconfig.py` calls into
+`_library_layer` at six sites (:928, :947, :1873, :1931, :1935, :2012 -- five
+of the six take a `metadata_root` argument, `_emit_library_hw_backends` does
+not), and none of the six pass `project.effective_metadata_root()` through,
+so they still resolve against the bound tree. That is a separate module from
+`som_metadata.resolve_capabilities`, whose three call sites inside
+`kconfig.py` ARE threaded -- part of what this change fixes (see above). A
+handful of other constants are frozen at import against the bound root
+regardless of any project (`slugs.py`'s `PERIPHERAL_KCONFIG_REGISTRY`,
+`som_metadata.py`'s `SILICON_KCONFIG_REGISTRY`, `validate.py`'s
+`_CURATED_LIBRARIES`). None of that is covered here.
 
 Every test here needs a real metadata tree AND a bound root -- same
 requirement, and the same env vars, as `tests/core/test_sdk_revision_gate.py`
