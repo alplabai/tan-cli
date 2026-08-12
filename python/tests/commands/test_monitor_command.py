@@ -585,19 +585,63 @@ def test_the_other_url_handlers_are_accepted_too(monkeypatch, url):
     assert _spawned_argv(monkeypatch, ["--port", url, "--format", "json"])[-2] == url
 
 
-def test_an_unknown_url_scheme_is_still_refused(monkeypatch):
+@pytest.mark.parametrize(
+    "url",
+    [
+        "bogus://x",
+        # Empty netloc AND path: a probe built via
+        # `urlunsplit(urlsplit(url)._replace(query="", fragment=""))` drops
+        # the trailing `//` for exactly this shape (`urlsplit("bogus://")`
+        # round-trips to `"bogus:"`), so `serial_for_url`'s own
+        # `"://" in url_lowercase` handler lookup never fires and the probe
+        # falls through to the plain-device path instead of being
+        # scheme-validated. Measured against real pyserial 3.5 before the
+        # fix: `bogus://` probed as ACCEPTED. Review finding 1 (2nd round).
+        "bogus://",
+        "nosuchscheme://",
+        # Same drop, reached via the query instead of an empty path: stripping
+        # the query is what triggers the empty-netloc-and-path case here.
+        "zzz://?a=1",
+        "bogus://#frag",
+    ],
+)
+def test_an_unknown_url_scheme_is_still_refused(monkeypatch, url):
     """The URL rule delegates the verdict to pyserial rather than pattern-
     matching `://`, so a scheme pyserial does not know stays refused -- same
     `monitor.no-port` code, same message, same port listing as before."""
     _pyserial_with_url_support(monkeypatch)
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "USB Serial")])
 
-    result = runner.invoke(app, ["--port", "bogus://x", "--format", "json"])
+    result = runner.invoke(app, ["--port", url, "--format", "json"])
     assert result.exit_code == 1
     doc = envelope(result)
     assert doc["issues"][0]["code"] == "monitor.no-port"
-    assert "'bogus://x' not found" in doc["issues"][0]["message"]
+    assert f"'{url}' not found" in doc["issues"][0]["message"]
     assert doc["data"]["availablePorts"] == [{"device": "COM7", "description": "USB Serial"}]
+
+
+def test_a_malformed_ipv6_port_does_not_crash_the_gate(monkeypatch):
+    """Review finding 2 (2nd round, major, regression): the probe used to
+    call `urlsplit(port)` OUTSIDE the `try` in `_pyserial_accepts_url`, and
+    `urlsplit` raises `ValueError("Invalid IPv6 URL")` for a netloc with an
+    unbalanced `[...]` bracket. Reproduced end to end pre-fix:
+    `--port "socket://[::1:9999" --format json` exited 5 with
+    `monitor.internal-failure: monitor failed unexpectedly: ValueError:
+    Invalid IPv6 URL` -- the "tan has a bug" code, for a caller typo, when
+    pre-#569 the same input simply returned True and never crashed.
+
+    The probe no longer calls `urlsplit` at all (see `_pyserial_accepts_url`'s
+    docstring), so this can no longer raise from the gate itself. Asserted
+    directly against the gate function rather than through the CLI: the CLI
+    path for an ACCEPTED port reaches this module's disabled `subprocess.run`
+    stub, which is a test-harness artifact unrelated to this bug.
+    """
+    _pyserial_with_url_support(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+
+    # The assertion is that this does not raise; pre-fix it raised
+    # `ValueError` before returning anything at all.
+    monitor_cmd._port_is_openable("socket://[::1:9999")
 
 
 @pytest.mark.skipif(
@@ -780,6 +824,45 @@ def test_a_com_shaped_name_skips_rule_3_even_if_it_would_stat_as_a_character_dev
     # device, so the COM3 refusal above is the regex, not a stub that never
     # says True. A non-COM path hitting the same stub is accepted.
     assert monitor_cmd._port_is_openable(also_chardev) is True
+
+
+def test_the_windows_device_path_com_form_also_skips_rule_3(monkeypatch, tmp_path):
+    r"""Review finding 7: `_BARE_COM_NAME_RE` used to match only the bare
+    `COM<digits>` spelling, not `\\.\COM<digits>` -- the device-path form
+    Windows itself requires for COM10 and above (pyserial's own win32 backend
+    accepts it) and a caller could plausibly type. That string is COM-shaped,
+    has no `://`, and is not in `comports()` verbatim, so it still reached
+    rule 3's `os.stat` -- exactly the `CreateFileW`-on-a-serial-node case the
+    skip exists to foreclose. Proven the same way as the bare-form test
+    above: stub `os.stat` to answer "character device" for it and confirm
+    `os.stat` is never even called for that path."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+
+    device_path = "\\" * 2 + "." + "\\" + "COM12"
+
+    class _CharDeviceStat:
+        st_mode = stat.S_IFCHR | 0o666
+
+    real_stat = os.stat
+    stat_calls: list[str] = []
+
+    def _fake_stat(path, *args, **kwargs):
+        stat_calls.append(str(path))
+        if str(path) == device_path:
+            return _CharDeviceStat()
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(monitor_cmd.os, "stat", _fake_stat)
+
+    result = runner.invoke(app, ["--port", device_path, "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert f"'{device_path}' not found" in doc["issues"][0]["message"]
+    assert device_path not in stat_calls, (
+        "rule 3 stat-ed a \\\\.\\COM<n> device path instead of skipping it"
+    )
 
 
 def test_the_url_rules_import_guard_is_reachable_directly(monkeypatch):

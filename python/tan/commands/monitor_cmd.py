@@ -84,7 +84,6 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 import typer
 
@@ -99,10 +98,15 @@ DEFAULT_BAUD = 115200
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
 
-#: A bare Windows COM device name (`COM7`, `com12`, ...), used to skip rule 3
-#: of `_port_is_openable` for it unconditionally -- see that function's
-#: docstring for why.
-_BARE_COM_NAME_RE = re.compile(r"^COM\d+$", re.IGNORECASE)
+#: A Windows COM device name -- either the bare form (`COM7`, `com12`, ...) or
+#: the `\\.\COMn` device-path form Windows itself requires for COM10 and above
+#: and that pyserial's own win32 backend accepts -- used to skip rule 3 of
+#: `_port_is_openable` for it unconditionally -- see that function's docstring
+#: for why. The bare-only form used to miss `\\.\COM12`: that string is
+#: COM-shaped, has no `://`, and is not in `comports()` verbatim, so without
+#: this prefix it still reached rule 3's `os.stat` -- the exact
+#: `CreateFileW`-on-a-serial-node case the skip exists to foreclose.
+_BARE_COM_NAME_RE = re.compile(r"^(?:\\\\\.\\)?COM\d+$", re.IGNORECASE)
 
 
 class MonitorError(Exception):
@@ -189,6 +193,34 @@ def _pyserial_accepts_url(port: str) -> bool:
     narrowed this way; the real, unstripped `port` string is still exactly
     what gets handed to the miniterm child if this returns True.
 
+    The stripping itself is a plain string split on the first `?` and the
+    first `#`, NOT a `urlsplit`/`urlunsplit` round-trip -- an earlier version
+    of this probe used `urlunsplit(urlsplit(port)._replace(query="",
+    fragment=""))` and that was wrong two different ways, both reachable from
+    `--port`, not from any theoretical input:
+
+    1. `urlunsplit` drops the `//` when netloc AND path are both empty, so
+       `urlsplit("bogus://")._replace(query="")` round-trips to `"bogus:"` --
+       no `//`, so `serial_for_url`'s own `"://" in url_lowercase` handler
+       lookup never fires and the string falls through to the plain-device
+       path instead of being scheme-validated at all. Measured against real
+       pyserial 3.5: `bogus://`, `nosuchscheme://`, and `zzz://?a=1` all
+       probed as accepted even though pyserial has no handler for any of
+       them.
+    2. `urlsplit` itself raises `ValueError("Invalid IPv6 URL")` on a netloc
+       with an unbalanced `[...]` bracket -- e.g. `--port
+       "socket://[::1:9999"` -- and that call sat OUTSIDE the `try` a few
+       lines below, so the exception escaped this function entirely and
+       surfaced as `monitor.internal-failure` at exit 5, the "tan has a bug"
+       code, for a caller typo.
+
+    A literal split on `?` and `#` never calls `urlsplit`, so it cannot raise
+    on a malformed bracket, and it slices the original string in place rather
+    than reassembling one from parsed parts, so it cannot drop the `//` --
+    `"bogus://".split("?", 1)[0].split("#", 1)[0]` is `"bogus://"`, unchanged,
+    which is what makes `serial_for_url`'s own scheme lookup see it and refuse
+    it for real.
+
     The `serial` import below is guarded through `_pyserial_missing()` as
     belt-and-suspenders, not because it is reachable today: `_port_is_openable`
     always tries rule 1 (`_available_ports()`) first, and `_available_ports`
@@ -214,7 +246,7 @@ def _pyserial_accepts_url(port: str) -> bool:
     except ImportError as err:
         raise _pyserial_missing() from err
 
-    probe = urlunsplit(urlsplit(port)._replace(query="", fragment=""))
+    probe = port.split("?", 1)[0].split("#", 1)[0]
 
     try:
         serial.serial_for_url(probe, do_not_open=True)
@@ -250,13 +282,15 @@ def _port_is_openable(port: str) -> bool:
        /dev/tty` passes this gate and spawns miniterm on the operator's own
        controlling terminal.
 
-    Rule 3 is skipped unconditionally for anything shaped like a bare Windows
-    COM name (`COM<digits>`, case-insensitive; see `_BARE_COM_NAME_RE`), on
-    every platform. On POSIX this excludes nothing real -- no POSIX device
-    node is ever named that way -- but on Windows `os.stat` opens a handle via
-    `CreateFileW` and reports `_S_IFCHR` for a non-disk handle (the same
-    reason `os.stat("NUL")` reports a character device there), so without this
-    skip a COM name that DOES exist could satisfy `S_ISCHR` and let rule 3
+    Rule 3 is skipped unconditionally for anything shaped like a Windows COM
+    name -- `COM<digits>` or the `\\\\.\\COM<digits>` device-path form Windows
+    itself requires for COM10 and above, case-insensitive; see
+    `_BARE_COM_NAME_RE` -- on every platform. On POSIX this excludes nothing
+    real -- no POSIX device node is ever named that way -- but on Windows
+    `os.stat` opens a handle via `CreateFileW` and reports `_S_IFCHR` for a
+    non-disk handle (the same reason `os.stat("NUL")` reports a character
+    device there), so without this skip a COM name that DOES exist could
+    satisfy `S_ISCHR` and let rule 3
     fire, opening a real serial handle during what is meant to be a read-only
     gate -- the same DTR/RTS-asserting act rules 1 and 2 are built to avoid.
     That costs nothing reachable: a present COM port is already accepted by
