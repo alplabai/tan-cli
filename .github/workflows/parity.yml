@@ -1671,7 +1671,7 @@ jobs:
   # trap on purpose. The `python-tests` job below reproduces the three pinned
   # strings byte-for-byte and is what protection stays pointed at.
   python-tests-shard:
-    name: "python -- pytest shard (${{ matrix.os }} ${{ matrix.shard }}/4)"
+    name: "python -- pytest shard (${{ matrix.os }} ${{ matrix.shard == 'parity' && 'parity, whole' || format('{0}/4', matrix.shard) }})"
     strategy:
       fail-fast: false
       matrix:
@@ -1685,7 +1685,14 @@ jobs:
         # `name:` above therefore shows "0/4".."3/4", not "1/4".."4/4" --
         # a 0-based label that matches the flag it comes from, not a
         # human-friendly renumbering.
-        shard: [0, 1, 2, 3]
+        #
+        # `parity` is a FIFTH leg, not a fifth shard: it runs `tests/parity`
+        # WHOLE while 0..3 shard everything else. It rides this matrix rather
+        # than a separate job so the aggregate below still has exactly one
+        # `needs:` to check -- adding a second job would mean a second result
+        # to roll up, and a missed one there is a required context that goes
+        # green while a whole suite did not run.
+        shard: [0, 1, 2, 3, parity]
     runs-on: ${{ matrix.os }}
     steps:
       - name: checkout tan-cli
@@ -1812,8 +1819,25 @@ jobs:
           # disjoint quarter and the 4 legs' union is the full collection --
           # verified locally with --collect-only across all
           # four --shard-id values before this landed.
-          python -m pytest -q --ignore=tests/gates \
-              --shard-id=${{ matrix.shard }} --num-shards=4
+          # `--ignore=tests/parity`: that suite CANNOT be sharded, and the
+          # reason is deliberate rather than incidental.
+          # `test_the_breadth_layer_still_covers_every_board` is a cross-test
+          # ACCUMULATOR -- the parametrised cases feed `_ARTEFACTS_COMPARED`
+          # and it then asserts `len(...) >= 90`, so it exists precisely to
+          # FAIL when the suite runs as a subset ("the floor on the total is
+          # what catches a mode disappearing from GENERATE_MODES"). Split four
+          # ways, each shard sees ~37 boards and it fails -- correctly.
+          # Lowering the floor to 90/num_shards would convert a real guard
+          # into one that cannot fail, the exact defect class this repo keeps
+          # paying for. So parity runs WHOLE, in `python-tests-parity` below.
+          if [ "${{ matrix.shard }}" = "parity" ]; then
+              # WHOLE, unsharded, and nothing else -- the accumulator needs
+              # every parametrised case in one process to reach its floor.
+              python -m pytest -q tests/parity
+          else
+              python -m pytest -q --ignore=tests/gates --ignore=tests/parity \
+                  --shard-id=${{ matrix.shard }} --num-shards=4
+          fi
 
   # THE required context. `python-tests-shard` above is NOT
   # wired into branch protection -- its `name:` carries `shard`, so it moves
