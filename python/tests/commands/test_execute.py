@@ -11,11 +11,53 @@ from pathlib import Path
 import pytest
 
 from tan.core.build_plan import parse_build_plan
-from tan.commands.build.execute import _pin_west_workspace, _resolve_tool, execute_slices
+from tan.commands.build.execute import (
+    _pin_west_workspace,
+    _resolve_tool,
+    execute_slices,
+)
 from tan.commands.build.manifest import PostBuildManifest
 from tan.core.bootstrap import venv_layout
+from tan.core.plan_exec import CROSS_DRIVE_MSG, cross_drive_source_refusal
 from tan.core.system_manifest import parse_system_manifest
 from tests.conftest import sdk_root
+
+#: `python/` -- pinned so the oracle fixtures under `tests/parity/oracle/`
+#: (repo root, a sibling of `python/`) resolve regardless of cwd. Same
+#: convention as `test_v041_build_state_compat.py`'s own `PACKAGE_ROOT`/
+#: `REPO_ROOT`/`ORACLE_PLANS`.
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+_ORACLE_PLANS = _PACKAGE_ROOT.parent / "tests" / "parity" / "oracle"
+
+
+def _real_zephyr_build_args(source_dir: str) -> list[str]:
+    """A REAL `west build` argv, exactly as `orchestrator.py` emits it for a
+    zephyr slice -- loaded from a real, checked-in oracle plan
+    (`multicore_rpmsg-aen.build-plan.json`'s `m55_he` slice) rather than a
+    hand-rolled `["build", "-b", "board", source_dir]` guess.
+
+    tan-cli#697's own first implementation (`args[-1]`, landing on the
+    trailing `-DPython3_EXECUTABLE=...` CMake define rather than the source
+    dir) shipped past every test in this module precisely because none of
+    them carried the `--`/defines tail every real zephyr slice's command
+    ALWAYS has (`orchestrator.py`'s `cmd += ["--", *defines]`, `defines`
+    never empty) -- a hand-rolled four-element argv can never exercise that
+    bug. Only the app-dir positional (index 3, immediately after `-b`'s own
+    value) is substituted here; everything else, including the real
+    trailing `--`/defines, is the emitter's own real output, verbatim."""
+    plan = json.loads((_ORACLE_PLANS / "multicore_rpmsg-aen.build-plan.json").read_text(
+        encoding="utf-8"
+    ))
+    for slice_ in plan["slices"]:
+        if slice_["backend"] == "zephyr":
+            args = list(slice_["command"]["args"])
+            assert args[1] == "-b" and args[3] == slice_["appDir"], (
+                "oracle fixture's own argv shape moved -- update the index this "
+                "helper substitutes at"
+            )
+            args[3] = source_dir
+            return args
+    raise AssertionError("no zephyr slice in the oracle fixture")
 
 # A JSON string literal (quotes included) for the running interpreter --
 # `sys.executable` is `C:\Python311\python.exe` on Windows, and interpolating
@@ -1301,6 +1343,200 @@ def test_pin_west_workspace_redirects_cwd_and_injects_the_original_build_dir(tmp
     new_cwd, new_args = _pin_west_workspace(cwd, args, workspace)
     assert new_cwd == workspace
     assert new_args == ["build", "-d", str(cwd / "build"), "-b", "board", "/app"]
+
+
+# ---------------------------------------------------------- tan-cli#697 -----
+# `_pin_west_workspace` (above) redirects `west build`'s own cwd to the
+# resolved workspace -- but `west build`'s OWN source-directory sanity check
+# then calls `os.path.relpath(self.source_dir)` with no explicit `start`,
+# which on Windows RAISES (rather than returning a path) when its two
+# arguments live on different drive letters. `cross_drive_source_refusal`
+# (`tan.core.plan_exec`) heads that off by refusing BEFORE `west` is ever
+# spawned. See that function's own docstring for why `ntpath.splitdrive`
+# makes this exercisable here even though the crash it prevents only fires
+# on Windows.
+#
+# Every refusal-firing case below is parametrised over `_real_zephyr_build_
+# args` -- a REAL oracle argv, `--`/defines tail included -- rather than a
+# hand-rolled `["build", "-b", "board", source_dir]` guess: this module's
+# first cut of these tests used exactly that hand-rolled shape, which cannot
+# exercise the `args[-1]` bug `west_build_source_dir` replaced (see that
+# helper's own docstring) because it never carries the trailing tokens the
+# bug actually tripped over.
+
+
+def test_cross_drive_refusal_is_a_noop_when_no_workspace_resolved(tmp_path):
+    args = _real_zephyr_build_args("E:/proj/app")
+    assert cross_drive_source_refusal(None, args) is None
+
+
+def test_cross_drive_refusal_is_a_noop_for_a_non_build_verb(tmp_path):
+    args = ["flash", "--build-dir", "E:/proj/app/build"]
+    assert cross_drive_source_refusal(Path("C:/ws"), args) is None
+
+
+def test_cross_drive_refusal_is_a_noop_when_the_plan_already_overrides_build_dir(tmp_path):
+    """Matches `_pin_west_workspace`'s own no-op for this shape: an explicit
+    `-d` means the pin never rewrites `cwd`, so west's own cwd never moves
+    to the (possibly different-drive) workspace in the first place -- there
+    is nothing for this refusal to head off."""
+    args = _real_zephyr_build_args("E:/proj/app")
+    args = [args[0], "-d", "elsewhere", *args[1:]]
+    assert cross_drive_source_refusal(Path("C:/ws"), args) is None
+
+
+def test_cross_drive_refusal_is_a_noop_on_posix_paths(tmp_path):
+    """Neither side carries a Windows drive letter -- the crash this exists
+    to head off is a Windows-only fact, and a POSIX layout is never refused
+    over it."""
+    args = _real_zephyr_build_args("/proj/app")
+    assert cross_drive_source_refusal(Path("/ws"), args) is None
+
+
+def test_cross_drive_refusal_is_a_noop_when_both_sides_share_a_drive(tmp_path):
+    args = _real_zephyr_build_args("C:/proj/app")
+    assert cross_drive_source_refusal(Path("C:/ws"), args) is None
+
+
+def test_cross_drive_refusal_is_case_insensitive_on_the_drive_letter(tmp_path):
+    args = _real_zephyr_build_args("c:/proj/app")
+    assert cross_drive_source_refusal(Path("C:/ws"), args) is None
+
+
+def test_cross_drive_refusal_is_a_noop_across_a_sysbuild_slices_extra_flag(tmp_path):
+    """A sysbuild slice's command inserts `--sysbuild` BETWEEN the source dir
+    and the trailing `--`/defines (`orchestrator.py`'s zephyr command
+    builder, `is_sysbuild` branch) -- proving same-drive still no-ops here
+    guards against a parser that mistook `--sysbuild` itself for the source
+    dir (a real risk for "last positional token before `--`", which
+    `west_build_source_dir` deliberately does not do; see its docstring)."""
+    plan = json.loads(
+        (_ORACLE_PLANS / "connectivity_iot-fleet-ota.build-plan.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    slice_ = next(s for s in plan["slices"] if s["backend"] == "zephyr")
+    args = list(slice_["command"]["args"])
+    assert "--sysbuild" in args
+    args[3] = "C:/proj/app"
+    assert cross_drive_source_refusal(Path("C:/ws"), args) is None
+
+
+def test_cross_drive_refusal_names_both_mounts(tmp_path):
+    args = _real_zephyr_build_args("E:/proj/app")
+    workspace_dir = Path("C:/ws")
+    refusal = cross_drive_source_refusal(workspace_dir, args)
+    assert refusal is not None
+    assert CROSS_DRIVE_MSG in refusal.message
+    assert "`C:`" in refusal.message
+    assert "`E:`" in refusal.message
+    # `str(workspace_dir)` -- not the literal `"C:/ws"` -- since `Path`
+    # stringifies drive-letter paths with `\` on a real Windows host
+    # (`PureWindowsPath("C:/ws")` -> `"C:\\ws"`) while this box's `Path` is
+    # POSIX and never rewrites the separator: a literal-string assertion
+    # here passed on POSIX and would have FAILED on the required
+    # windows-latest CI runner the moment `workspace_dir` embeds a real
+    # `PureWindowsPath`.
+    assert str(workspace_dir) in refusal.message
+    assert "E:/proj/app" in refusal.message
+
+
+def test_cross_drive_workspace_is_refused_before_spawn(tmp_path, monkeypatch):
+    """End to end through `execute_slices`, reproducing the mechanism (not
+    the literal Windows filesystem, which this box does not have): a
+    `west_workspace_dir` resolution that lands on a different DRIVE LETTER
+    than the plan's own source directory. Proves the REFUSAL, not merely a
+    message -- `subprocess.Popen` is monkeypatched to raise if `west` is
+    ever spawned, so the west subprocess that would have hit the real
+    `ValueError` (`scripts/west_commands/build.py:534`, upstream) never gets
+    the chance to; the raw traceback the issue reports has nothing left to
+    escape from."""
+    import tan.commands.build.execute as execute_module
+
+    monkeypatch.setattr(execute_module, "west_workspace_dir", lambda *a, **k: Path("C:/ws"))
+
+    def _must_not_spawn(*args, **kwargs):
+        raise AssertionError("west must never be spawned for a refused cross-drive slice")
+
+    monkeypatch.setattr(execute_module.subprocess, "Popen", _must_not_spawn)
+
+    args = _real_zephyr_build_args("E:/proj/app")
+    cmd = json.dumps({"tool": "west", "args": args, "cwd": None})
+    out = execute_slices(
+        parse_build_plan(_plan(cmd)), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
+    )
+    assert out[0].status == "failed"
+    assert out[0].exit_code is None
+    assert CROSS_DRIVE_MSG in out[0].message
+    assert "`C:`" in out[0].message
+    assert "`E:`" in out[0].message
+    # tan-cli#697 review: the short `manifest_message` form (see
+    # [`SliceOutcome.manifest_message`]) is what reaches
+    # `system-manifest.yaml` -- must name both mounts too, without the
+    # absolute paths `message` carries for this run's own stdout/envelope.
+    assert out[0].manifest_message is not None
+    assert CROSS_DRIVE_MSG in out[0].manifest_message
+    assert "C:" in out[0].manifest_message
+    assert "E:" in out[0].manifest_message
+    assert "E:/proj/app" not in out[0].manifest_message
+
+
+def test_cross_drive_refusal_reverts_to_a_generic_exit_code_message_pre_fix(tmp_path, monkeypatch):
+    """PROOF that the specific message is what this fix adds, not something
+    an unrelated code path already produced: with the refusal itself
+    disabled (simulating the pre-fix state), the same cross-drive plan spawns
+    `west` -- which here is a real, tiny stand-in that raises the exact
+    `ValueError` west's own `_sanity_check_source_dir` raises, so the
+    outcome degrades to the generic `terminated with exit code` message the
+    issue complains an operator cannot tell apart from any other failure.
+
+    `_plant_spawnable_west` (below) -- not a POSIX-only `#!` shebang script
+    -- makes the stand-in itself spawnable on Windows too (a shebang line is
+    not honoured there: `CreateProcess` would report `WinError 193`, not
+    launch anything, and the outcome under test would be a launch error, not
+    the exit-code message this test asserts). The raising code instead lives
+    in a script literally named `build`, planted in the spawned process's own
+    cwd -- python (what `_plant_spawnable_west`'s stand-in actually is, on
+    every platform) resolves a bare positional script argument relative to
+    its cwd, so `west build ...` -> `python build ...` finds and runs it
+    regardless of host."""
+    import tan.commands.build.execute as execute_module
+
+    fake_workspace = tmp_path / "ws"
+    fake_workspace.mkdir()
+    monkeypatch.setattr(execute_module, "west_workspace_dir", lambda *a, **k: fake_workspace)
+    # `execute.py` imported the name with `from tan.core.plan_exec import
+    # cross_drive_source_refusal` -- patch it where it is LOOKED UP (this
+    # module's own namespace), not where it is defined; patching
+    # `tan.core.plan_exec.cross_drive_source_refusal` itself would leave
+    # `execute_module`'s already-bound reference untouched.
+    monkeypatch.setattr(execute_module, "cross_drive_source_refusal", lambda *a, **k: None)
+
+    (fake_workspace / "build").write_text(
+        "raise ValueError(\"path is on mount 'E:', start on mount 'C:'\")\n",
+        encoding="utf-8",
+    )
+
+    fake_west = tmp_path / "fake-west-dir" / ("west.exe" if os.name == "nt" else "west")
+    _plant_spawnable_west(fake_west)
+    monkeypatch.setattr(
+        execute_module, "west_program", lambda *a, **k: str(fake_west)
+    )
+    monkeypatch.setattr(
+        execute_module, "_resolve_tool",
+        lambda tool, env: execute_module._ToolResolution(str(fake_west), "n/a"),
+    )
+
+    args = _real_zephyr_build_args("E:/proj/app")
+    cmd = json.dumps({"tool": "west", "args": args, "cwd": None})
+    out = execute_slices(
+        parse_build_plan(_plan(cmd)), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
+    )
+    assert out[0].status == "failed"
+    assert out[0].message.startswith("slice `c1` terminated with exit code:")
+    assert CROSS_DRIVE_MSG not in out[0].message
 
 
 def _plant_spawnable_west(west_path: Path) -> None:

@@ -111,10 +111,12 @@ from tan.commands.build.manifest import (
 )
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.core.plan_exec import (
+    CROSS_DRIVE_MSG,
     ExecutionPolicy,
     PolicyAction,
     SdkStampAction,
     assemble_slice_env,
+    cross_drive_source_refusal,
     resolve_action,
     sdk_stamp_action,
     sdk_stamp_key,
@@ -750,6 +752,21 @@ def _maybe_reset_stale_configure_cache(
     ]
 
 
+# tan-cli#697. The refusal itself -- `cross_drive_source_refusal` -- is pure
+# argv/path logic with no IO, so it lives in `tan.core.plan_exec` (imported
+# above) rather than here, matching this repo's own convention of keeping
+# pure decisions out of the command/IO module. `CROSS_DRIVE_MSG` (imported
+# above as well) is matched, not imported, by `build_cmd._cross_drive_issues`
+# to promote a refused slice's `reason` into a coded top-level `issues[]`
+# entry -- same idiom as `_missing_tool_issues`' `` tool `...` not found ``
+# text match, immediately below in this same file's `_ZEPHYR_SDK_MISSING_MSG`
+# /`_WEST_NO_WORKSPACE_MSG` pattern. See `cross_drive_source_refusal`'s own
+# docstring (`tan/core/plan_exec.py`) for the no-op conditions (mirroring
+# `_pin_west_workspace`'s own guard, below) and why `args[-1]` -- this
+# function's first, wrong, implementation -- never located the real source
+# dir on a plan `orchestrator.py` actually emits.
+
+
 def _pin_west_workspace(
     cwd: Path, args: Sequence[str], workspace_dir: Path | None
 ) -> tuple[Path, list[str]]:
@@ -1141,6 +1158,34 @@ def execute_slices(
             # `"west"`) is never touched, matching the Rust oracle's own
             # `cmd.tool == "west"` exact-match precedence.
             tool = west_program(str(build_root), sdk_root)
+
+        # tan-cli#697: checked here -- right after `is_west` is known and
+        # BEFORE tool resolution -- rather than down at the `_pin_west_
+        # workspace` call site it mirrors: like the unsafe-cwd escape and
+        # `cwd.mkdir` failure above, a cross-drive layout is a plan/host
+        # defect that will crash regardless of which `west` binary this host
+        # happens to have, so it must not be silently absorbed into
+        # `executionPolicy.missingTool`'s default-skip on a host where
+        # `west` is ALSO not on PATH.
+        if is_west:
+            cross_drive_refusal = cross_drive_source_refusal(workspace_dir, sl.command.args)
+            if cross_drive_refusal is not None:
+                outcomes.append(
+                    SliceOutcome(
+                        sl.core_id,
+                        "failed",
+                        None,
+                        f"slice `{sl.core_id}` refused before build: "
+                        f"{cross_drive_refusal.message}",
+                        # tan-cli#697 review: a short form for
+                        # `system-manifest.yaml` `slices[].reason` -- see
+                        # [`SliceOutcome.manifest_message`]'s own docstring;
+                        # same split the missing-tool refusal below already
+                        # makes.
+                        manifest_message=cross_drive_refusal.manifest_message,
+                    )
+                )
+                continue
 
         # tan-cli#308: the zephyr gap-fillers are computed PER SLICE (not
         # once for the whole run, unlike `workspace_dir`/`zephyr_base`

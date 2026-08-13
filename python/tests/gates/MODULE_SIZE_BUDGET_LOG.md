@@ -58,6 +58,9 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build_cmd.py: 2074 -> 2082
     - tan/commands/doctor_cmd.py: 3920 -> 3925
+- 2026-08-13 -- tan-cli#697: cross-drive project/workspace refusal (execute.py's _cross_drive_source_refusal + build_cmd.py's _cross_drive_issues promotion)
+    - tan/commands/build/execute.py: 1598 -> 1687
+    - tan/commands/build_cmd.py: 2082 -> 2107
 - 2026-08-13 -- tan-cli#501: generate_cmd.py's native-sim-overlay guard now distinguishes an explicit --target ask from an implicit --all/bare inclusion (drop-and-report, not a whole-run refusal or a silent --force clobber of a vendored overlay)
     - tan/commands/generate_cmd.py: 1312 -> 1342
 - 2026-08-13 -- tan-cli#501 review round 5: closed findings 1-3 (false PREPEND rationale reverted, overlay-not-owned warning no longer recommends the destructive --force clobber of a vendored overlay, data.engine kept in step with a dropped target) -- the explanatory comments this needed grew the module past its prior ratchet
