@@ -653,14 +653,18 @@ def resolve_artefact_path(
     The first two candidates and the fallback are `flash/mod.rs::
     resolve_artefact_path` verbatim. The third is the consumer half of **I-18**:
     the planner emits `west build` with NO `-d`, so west's tree lands at
-    `<buildDir>/build/` while the plan's `artifacts` block still reports
-    `<buildDir>/zephyr/zephyr.elf`. Rust reconciles that at manifest-WRITE time
-    (`build/execute/manifest.rs::resolve_zephyr_artefact`, tan's only writer of
-    `output_artefact`, which stores the nested ABSOLUTE path); this port's
-    `build` does not write the manifest yet, so an artefact string that still
-    carries the planner's un-nested spelling would resolve to a file that is not
-    there and fail the entry. Probed LAST and only when the oracle's own
-    candidates all miss a real file, so it can never change a resolution the
+    `<buildDir>/build/`. Before tan-cli#560 (alp-sdk d00dbdc1) the plan's
+    `artifacts` block still reported the un-nested `<buildDir>/zephyr/
+    zephyr.elf`; as of that pin the planner's own in-process output already
+    carries the nested path, but an older cached plan, the stale-SDK alp-sdk
+    subprocess fallback, or a hand-authored manifest can still arrive
+    un-nested -- this candidate still catches those. Rust reconciles the
+    nested case at manifest-WRITE time (`build/execute/manifest.rs::
+    resolve_zephyr_artefact`, tan's only writer of `output_artefact`, which
+    stores the nested ABSOLUTE path); this port's `build` does not write the
+    manifest yet, so an un-nested artefact string would resolve to nothing
+    without this candidate. Probed LAST, only when the oracle's own
+    candidates all miss a real file, so it never changes a resolution the
     oracle already makes -- an absolute artefact never reaches it at all.
     """
     if is_rust_absolute(artefact):
