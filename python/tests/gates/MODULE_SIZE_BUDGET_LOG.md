@@ -58,6 +58,12 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build_cmd.py: 2074 -> 2082
     - tan/commands/doctor_cmd.py: 3920 -> 3925
+- 2026-08-13 -- tan-cli#699: flash_plan.py gained an os:"off" refused_skipped branch (+ docstring detail) so an off core no longer hard-fails tan flash; flash_cmd.py's matching divergence-note docstring grew by one line
+    - tan/commands/flash_cmd.py: 3922 -> 3923
+    - tan/core/flash_plan.py: 3079 -> 3112
+- 2026-08-13 -- tan-cli#699 followup: correct false operator-facing off-core claims + stale present-tense oracle references in flash_plan.py/flash_cmd.py comments
+    - tan/commands/flash_cmd.py: 3923 -> 3927
+    - tan/core/flash_plan.py: 3112 -> 3127
 - 2026-08-13 -- fix(flash): correct select_flash_method's Flow D provenance docstring + FLOW_D_KEYS comment (tan-cli#700) -- net growth from re-attributing jlink_flash_device/expect_dpidr/jlink_device (SoC debug: block) vs slot0_load_address (SoM memory_map:, alp-sdk#1069) correctly, not a new feature
     - tan/core/flash_plan.py: 3079 -> 3093
 - 2026-08-13 -- tan-cli#560: buildplan.py/orchestrator.py west build/ level port, zephyr_board.py AEN LOG_MODE_MINIMAL port (tan-cli#690), template.py pin-doc collision guard + scaffold stale-comment rewrite port (alp-sdk#1394/#1399/#1400) -- all four SDK pins moved to d00dbdc1
@@ -86,7 +92,10 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/build_cmd.py: 2082 -> 2106
     - tan/planner/loader.py: 1251 -> 1254
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/core/flash_plan.py: 3127 -> 3131
     - tan/core/flash_plan.py: 3089 -> 3093
     - tan/planner/template.py: 1329 -> 1436
     - tan/planner/zephyr_board.py: 1372 -> 1433
     - function_count_budget: 251 -> 254
+- 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/core/flash_plan.py: 3131 -> 3141

@@ -7,6 +7,20 @@
 # they make a clean leaf module that alp_orchestrate.py (and, later,
 # alp_project.py) re-exports.  Public names are unchanged — `from alp_orchestrate
 # import Slice` still works because alp_orchestrate re-exports from here.
+#
+# Relocated into tan-cli (tan/planner/) from alp-sdk's scripts/alp_orchestrate/
+# models.py -- NOT byte-identical to the upstream source; diverges in several
+# places, INCLUDING (not limited to): the import at the bottom of
+# `Slice.to_manifest_entry` is relative (`from .orchestrator import ...`, so
+# the package resolves as `tan.planner`) rather than absolute, and a few
+# exception docstrings (`SdkRevisionUnsupported` and its two siblings) were
+# reworded because the alp-sdk caller they originally named
+# (`scripts/validate_board_yaml.py`) has no tan-cli counterpart. What IS
+# guaranteed byte-identical is the `Slice.to_manifest_entry()` OUTPUT for a
+# given input -- `tests/parity/test_planner_emit_parity.py` diffs
+# `system-manifest` emits against alp-sdk's own front door byte-for-byte; a
+# module-source diff against upstream is not that guarantee and should not be
+# read as one.
 """Dataclasses for the board.yaml orchestrator."""
 
 from __future__ import annotations

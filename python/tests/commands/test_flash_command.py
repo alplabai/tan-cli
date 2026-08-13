@@ -241,6 +241,63 @@ boot_order: []
     assert len(payload["data"]["entries"]) == 1
 
 
+def test_an_off_core_does_not_fail_flash(tmp_path):
+    """tan-cli#699: a core declared `os: "off"` in `board.yaml` is never in
+    `tan build`'s `iter_buildable_slices`, so its manifest entry never leaves
+    the plan-time `status: pending` default. `tan flash` must not read that
+    as an incomplete/failed build and hard-refuse the whole run with
+    "Rebuild it first", which the core can never satisfy."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: a.elf, status: ok,
+   flash_method: zephyr_west_flash, flash_args: {}}
+- {core_id: c2, os: 'off', status: pending}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert codes(payload) == ["flash.slice-skipped"]
+    assert payload["issues"][0]["severity"] == "warning"
+    message = payload["issues"][0]["message"]
+    assert "c2" in message
+    assert 'os: "off"' in message
+    # Pinned separately from both the `refused` bucket's "stale, rebuild it"
+    # text and the policy-skip bucket's "executionPolicy" text: neither
+    # applies to a core that is off by design.
+    assert "Rebuild it first" not in message
+    assert "stale" not in message
+    assert "executionPolicy" not in message
+    assert payload["data"]["entries"][0]["id"] == "c1"
+    assert payload["data"]["entries"][0]["status"] == "ok"
+    # c2 never became a target at all -- only c1's dry-run entry is reported.
+    assert len(payload["data"]["entries"]) == 1
+
+
+def test_only_slice_off_flashes_nothing_and_fails(tmp_path):
+    """The inverted twin above: when the manifest's ONLY slice is `os: "off"`,
+    nothing ever reaches the dispatch loop, so a run where nothing was
+    flashed must not exit 0 -- the same silent-success class `status: failed`
+    guards against, reached through the `os: "off"` bucket instead."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c2, os: 'off', status: pending}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert codes(payload) == ["flash.slice-skipped", "flash.nothing-flashed"]
+    assert payload["issues"][-1]["severity"] == "error"
+    assert payload["data"]["entries"] == []
+
+
 def test_a_genuinely_failed_slice_still_fails_flash(tmp_path):
     """The opposite pin: a slice `status: failed` (a real build failure, not a
     policy skip) must still fail `tan flash` -- the fix must not swallow real

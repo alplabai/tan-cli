@@ -301,35 +301,43 @@ class TargetPlan:
     targets: tuple[FlashTarget, ...]
     warnings: tuple[str, ...]
     refused: tuple[str, ...]
-    #: The subset of "status not ok" refusals whose slice `status` is
-    #: `"skipped"` -- i.e. `tan build` itself declined to build this slice
-    #: under `executionPolicy.missingTool`/`.nullCommand` (a host with no
-    #: `bitbake`, say). That was a policy decision already made and reported
-    #: at build time; `flash` refusing to flash a never-built artefact is
-    #: still correct (there is nothing to flash), but it must not ALSO read
-    #: as a flash failure for a slice the customer's manifest already
-    #: explained away. `refused` (a `"failed"`/`"pending"`/other status) is
-    #: the opposite: `tan build` tried and the slice is broken or was never
-    #: reconciled, which must keep failing `tan flash`. Callers surface this
-    #: bucket as a WARNING and must not fold it into a failure count -- see
-    #: `refused` for the error-severity, exit-code-affecting bucket.
+    #: The subset of "status not ok" refusals that are explained away rather
+    #: than a real build problem: a slice `status: "skipped"` -- i.e. `tan
+    #: build` itself declined to build this slice under `executionPolicy.
+    #: missingTool`/`.nullCommand` (a host with no `bitbake`, say) -- or a
+    #: slice declared `os: "off"` in `board.yaml` (tan-cli#699), which `tan
+    #: build`'s `iter_buildable_slices` never touches at all, so its manifest
+    #: entry never advances off whatever status the plan-time emit left it at
+    #: (`pending`, today). Both were decisions already made before `tan
+    #: flash` ever ran; refusing to flash a never-built
+    #: artefact is still correct (there is nothing to flash), but it must not
+    #: ALSO read as a flash failure for a slice the manifest already
+    #: explained away. `refused` (a `"failed"`/`"pending"`/other status on a
+    #: slice that is NOT `os: "off"`) is the opposite: `tan build` tried and
+    #: the slice is broken or was never reconciled, which must keep failing
+    #: `tan flash`. Callers surface this bucket as a WARNING and must not
+    #: fold it into a failure count -- see `refused` for the error-severity,
+    #: exit-code-affecting bucket.
     #:
-    #: **DIVERGES from the shipped Rust oracle.** `crates/tan-core/src/
-    #: flash/mod.rs`'s `plan_flash_targets` has no `refused_skipped` bucket at
-    #: all -- a `status: skipped` slice/helper lands in the ONE `refused` list
-    #: alongside `failed`/`pending`/anything else non-`ok`, and the CLI seeds
-    #: `failed` from `refused.len()` before the dispatch loop even runs, so the
-    #: oracle FAILS the run on a `status: skipped` slice exactly like any other
-    #: bad status. This split (and the caller's warning-only, exit-0 treatment
-    #: when something else DID flash) is a deliberate product improvement on
-    #: top of the port, not a porting bug -- but the caller (`tan.commands.
-    #: flash_cmd.flash`) MUST still fail the run when every match was a
-    #: `refused_skipped` entry and nothing flashed (`flash.nothing-flashed`),
-    #: or this bucket reintroduces the exact silent-success class `refused`
-    #: exists to prevent, just inverted. `tests/parity/
-    #: test_flash_oracle_parity.py` deliberately carries no `status: skipped`
-    #: case for this reason -- the two implementations disagree there by
-    #: design and an oracle diff would only fail.
+    #: **DIVERGED from the Rust oracle, before the oracle was retired.**
+    #: `crates/tan-core/src/flash/mod.rs`'s `plan_flash_targets` had no
+    #: `refused_skipped` bucket at all -- a `status: skipped` slice/helper
+    #: landed in the ONE `refused` list alongside `failed`/`pending`/anything
+    #: else non-`ok`, and the CLI seeded `failed` from `refused.len()` before
+    #: the dispatch loop even ran, so the oracle FAILED the run on a
+    #: `status: skipped` slice exactly like any other bad status -- and had no
+    #: `os: "off"` carve-out either, so it also failed on that shape. This
+    #: split (and the caller's
+    #: warning-only, exit-0 treatment when something else DID flash) was a
+    #: deliberate product improvement on top of the port, not a porting bug --
+    #: but the caller (`tan.commands.flash_cmd.flash`) MUST still fail the run
+    #: when every match was a `refused_skipped` entry and nothing flashed
+    #: (`flash.nothing-flashed`), or this bucket reintroduces the exact
+    #: silent-success class `refused` exists to prevent, just inverted.
+    #: `crates/` and `tests/parity/test_flash_oracle_parity.py` (which
+    #: deliberately carried no `status: skipped` nor `os: "off"` case, for the
+    #: reasons above) were both deleted in 2883cdf -- there is no longer a
+    #: second implementation to diff against.
     refused_skipped: tuple[str, ...] = ()
 
 
@@ -347,13 +355,19 @@ def plan_flash_targets(
       when a later run has no artefact for that core, so a run-1 success followed
       by a run-2 failure/skip leaves run-1's elf on disk under a manifest
       reporting a broken slice. Flashing that stale elf and silently dropping the
-      slice are the same silent-failure class. A `status: skipped` refusal is
+      slice are the same silent-failure class. A `status: skipped` refusal, or
+      one for a slice declared `os: "off"` in `board.yaml` (tan-cli#699), is
       split into `refused_skipped` rather than `refused`: `tan build` already
-      decided (via `executionPolicy`) that this slice was not supposed to build
-      on this host -- e.g. no `bitbake` on an MCU-only checkout -- and that is
-      not a flash failure, it is `tan flash` agreeing with a decision already
-      made and reported. A genuinely broken slice (`status: failed`, or any
-      other non-`ok`/non-`skipped` value) stays in `refused`.
+      decided (via `executionPolicy`, or by design for an `off` core) that
+      this slice was never going to build -- e.g. no `bitbake` on an MCU-only
+      checkout, or a core that is deliberately off -- and that is not a flash
+      failure, it is `tan flash` agreeing with a decision already made.
+      `os: "off"` is checked on the slice's `os` field, not its
+      `status`: an `off` core's manifest entry never advances off whatever
+      status the plan-time emit left it at, so it must be recognised
+      regardless of that value. A genuinely broken or unbuilt slice
+      (`status: failed`, `status: pending` on an `os` that is NOT `"off"`, or
+      any other non-`ok`/non-`skipped` value) stays in `refused`.
     - Helpers always come AFTER all slices.
     - `core` flashes only that slice and skips every helper; `helper` skips every
       slice and flashes only that helper.
@@ -409,7 +423,41 @@ def plan_flash_targets(
                 )
                 continue
             if not slice_should_flash(found.status):
-                if found.status == "skipped":
+                # `found.os == "off"` is checked BEFORE `found.status ==
+                # "skipped"` below on purpose: an off core never receives a
+                # `SliceRunResult` (see the comment inside this branch), so
+                # its `status` can only ever be the plan-time `pending`
+                # default -- never `failed` -- making this ordering safe
+                # today. If that ever changed and an off core's manifest
+                # entry could carry `status: failed`, checking `os` first
+                # would silently downgrade a real failure to a warning; the
+                # `os` check would need to move after the `status` checks
+                # (or gain its own `status == "failed"` guard) at that point.
+                if found.os == "off":
+                    # tan-cli#699: `board.yaml` declares this core `os: "off"`
+                    # -- `tan build`'s `iter_buildable_slices` (`tan/planner/
+                    # orchestrator.py:36`) correctly skips it, so it never
+                    # receives a `SliceRunResult` and the manifest's plan-time
+                    # `status: pending` default is never overlaid to anything
+                    # else. That is NOT a policy skip (`executionPolicy` never
+                    # ran for this core) and NOT an incomplete/failed build --
+                    # it is the manifest correctly recording a core that is
+                    # declared off, so `tan build` never builds it. (The
+                    # manifest can still name an `app:`/`board:`/`toolchain:`
+                    # for an off core -- `board.yaml` may declare those
+                    # fields per-core independent of `os:` -- so this must
+                    # not be read as "no app, no board".)
+                    # Checked on `found.os`, not `found.status`: unlike the
+                    # `skipped` branch below, this must catch the slice
+                    # regardless of which never-advanced status the emitter
+                    # happens to have left behind.
+                    refused_skipped.append(
+                        f"flash: slice '{found.core_id}' is declared `os: \"off\"` "
+                        "in board.yaml -- tan build never builds a core "
+                        "declared off, by design. There is nothing to flash; "
+                        "this is expected, not an error."
+                    )
+                elif found.status == "skipped":
                     # A policy decision `tan build` already made and reported
                     # (`executionPolicy.missingTool`/`.nullCommand`), not a
                     # broken build -- "stale, rebuild it" is wrong on both
