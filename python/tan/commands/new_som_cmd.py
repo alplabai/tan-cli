@@ -792,7 +792,15 @@ def _rollback_write_failure(
 
 
 def new_som(
-    sku: str = typer.Option(None, "--sku", help="New SoM SKU (E1M-<UPPERCASE> shaped)."),
+    sku: str = typer.Option(
+        None,
+        "--sku",
+        # tan-cli#720: `--som` accepted as an alias, matching `tan init`'s
+        # spelling of the same value. The refusal message below keeps naming
+        # `--sku`, the canonical form for this command.
+        "--som",
+        help="New SoM SKU (E1M-<UPPERCASE> shaped) (alias: --som).",
+    ),
     soc_ref: str = typer.Option(
         None, "--soc-ref", help="Silicon triple-colon ref, e.g. nxp:imx9:imx95."
     ),

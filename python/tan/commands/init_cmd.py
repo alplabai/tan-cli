@@ -1047,7 +1047,18 @@ def init(
         None, "--destination", metavar="PATH", help="Destination directory (defaults to '.')."
     ),
     som: str = typer.Option(
-        None, "--som", metavar="SKU", help="SoM SKU to target in the generated board.yaml."
+        None,
+        "--som",
+        # tan-cli#720: `--sku` accepted as an alias. The value IS a SKU string
+        # -- `tan presets` prints it under `skus=`, `board.yaml` nests it as
+        # `som.sku`, and `tan pinmux`/`tan new-som` spell the same value
+        # `--sku`. A customer who scaffolds with `--som` and then runs
+        # `tan pinmux --som ...` was rejected for the flag `init` had just
+        # taught them. Each command keeps its existing name FIRST, so help
+        # text and every existing script are unchanged; only an alias is added.
+        "--sku",
+        metavar="SKU",
+        help="SoM SKU to target in the generated board.yaml (alias: --sku).",
     ),
     board_yaml: str = typer.Option(
         None,
