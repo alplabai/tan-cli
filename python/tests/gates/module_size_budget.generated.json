@@ -22,7 +22,7 @@
     "tan/commands/validate_cmd.py": 1571,
     "tan/core/bootstrap.py": 2111,
     "tan/core/debug_launch.py": 1275,
-    "tan/core/flash_plan.py": 3106,
+    "tan/core/flash_plan.py": 3116,
     "tan/core/scaffold.py": 1510,
     "tan/planner/kconfig.py": 2012,
     "tan/planner/loader.py": 1254,
