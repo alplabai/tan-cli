@@ -290,25 +290,18 @@ def test_the_json_flag_surface_also_refuses_a_negative_register():
     assert result.output.strip() == f"Error: {_NEGATIVE_CFSR_MESSAGE}"
 
 
-def test_the_sdk_original_decodes_a_negative_cfsr_and_tan_deliberately_does_not():
-    """The DIVERGENCE, pinned against the live original rather than described.
-
-    alp-sdk's `scripts/alp_cli/faultdecode.py` accepts `--cfsr=-8200` and exits
-    0 having printed a decode. tan refuses at exit 2. This asserts BOTH halves,
-    so the day upstream adopts the refusal this test goes red and is deleted
-    with a note, rather than the divergence quietly persisting in prose only.
-    Skips (never fails) with no alp-sdk checkout reachable, same as its
-    neighbours."""
-    from click.testing import CliRunner as ClickRunner
-
-    oracle_cmd = _load_oracle_command()
-    oracle_result = ClickRunner().invoke(oracle_cmd, ["--cfsr=-8200"])
-    assert oracle_result.exit_code == 0, "upstream no longer decodes a negative CFSR"
-    assert "0x-0008200" in oracle_result.output
-
-    port_result = runner.invoke(app, ["--cfsr=-8200"])
-    assert port_result.exit_code == 2
-    assert port_result.output.strip() == f"Error: {_NEGATIVE_CFSR_MESSAGE}"
+# The divergence test that used to live here --
+# `test_the_sdk_original_decodes_a_negative_cfsr_and_tan_deliberately_does_not`
+# -- pinned that alp-sdk's `scripts/alp_cli/faultdecode.py` accepted
+# `--cfsr=-8200` and exited 0, while tan refused at exit 2, with the docstring
+# itself saying "the day upstream adopts the refusal this test goes red and is
+# deleted with a note". alp-sdk dad5b35a (#1389, inside the a3173305..d00dbdc1
+# pin range) did exactly that -- `_HexInt.convert` now rejects a negative
+# parsed value the same way tan's `_parse_hexint` already did -- so the
+# oracle-side half of the assertion (`exit_code == 0`) went red first. Deleted
+# per the docstring's own instruction rather than loosened; the refusal itself
+# stays covered by the tests above, which assert tan's behaviour directly and
+# do not depend on an SDK checkout being reachable.
 
 
 def test_missing_elf_path_is_exit_2():

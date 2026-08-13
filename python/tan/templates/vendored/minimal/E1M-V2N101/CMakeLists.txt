@@ -2,9 +2,10 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-# Resolve the alp-sdk root.  In-tree the SDK is the example's
-# grandparent directory; out-of-tree customers point ALP_SDK_ROOT
-# at their checkout.
+# Resolve the alp-sdk root.  This project lives OUTSIDE the SDK
+# tree, so there is nothing to guess: ALP_SDK_ROOT must name your
+# alp-sdk checkout, set in the environment or passed as
+# `-DALP_SDK_ROOT=/path/to/alp-sdk`.
 if(NOT DEFINED ALP_SDK_ROOT AND NOT DEFINED ENV{ALP_SDK_ROOT})
     message(FATAL_ERROR
         "ALP_SDK_ROOT is not set -- point it at your alp-sdk checkout, "
