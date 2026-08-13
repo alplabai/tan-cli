@@ -152,7 +152,7 @@ Plus two non-binary assets, carrying the same build-provenance attestation:
 | Asset | Contents |
 | --- | --- |
 | `checksums.txt` | sha256 of every other asset. |
-| `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one golden envelope per command family (`contract/envelopes/`), so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. See [`contract/README.md`](../contract/README.md). |
+| `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one entry per command family: a byte golden envelope (`contract/envelopes/`) for most of them, and `doctor`'s `dataKeys` key-set entry (`contract/doctor-data-keys.json`, tan-cli#664 — `doctor`'s `data` values are host facts, so it cannot be a golden) — so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. See [`contract/README.md`](../contract/README.md). |
 
 ## Which shape a release publishes
 
