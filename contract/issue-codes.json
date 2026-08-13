@@ -1628,6 +1628,14 @@
       "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "generate.overlay-not-owned",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "note": "tan-cli#501: a non-fatal `Issue`, not a `GenerateError` -- `boards/native_sim_native_64.overlay` already exists and lacks tan's own banner, but `native-sim-overlay` reached `targets` only via the bare/`--all` default set rather than an explicit `--target`, so the run drops that one target and continues (exit 0) instead of refusing the other eight the way an explicit ask still does (`generate.would-overwrite`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "generate.python-too-old",
       "status": "reserved",
       "severity": "error",

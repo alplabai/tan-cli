@@ -76,7 +76,6 @@ stops being built.
 """
 import json
 import os
-import shutil
 import sys
 import threading
 import time
@@ -111,7 +110,7 @@ from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
 from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT
 from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
-from tan.env import stderr_is_tty
+from tan.env import stderr_is_tty, terminal_width
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -225,8 +224,8 @@ _HEARTBEAT_SILENCE_THRESHOLD_S = 5.0
 #: Refresh cadence once armed -- a live, in-place counter (`\r`, no
 #: trailing newline), not a growing log.
 _HEARTBEAT_TICK_S = 1.0
-#: `shutil.get_terminal_size`'s own fallback when stderr's column count
-#: can't be read. Should not be reachable -- `_Heartbeat` is only ever armed
+#: `tan.env.terminal_width`'s fallback when stderr's column count can't be
+#: read at all. Should not be reachable -- `_Heartbeat` is only ever armed
 #: behind an `isatty()` gate -- but naming a value here is still cheaper
 #: than trusting that gate never has a gap.
 _HEARTBEAT_WIDTH_FALLBACK = 80
@@ -248,13 +247,22 @@ def _heartbeat_line_width() -> int:
     terminal width is what triggers autowrap on many terminals, which would
     make the fix for the wrap defect one more way to trigger it.
 
+    tan-cli#564: measured through [`terminal_width`], which reads stderr's own
+    fd -- the handle the heartbeat is armed on and writes to. The previous
+    `shutil.get_terminal_size` call resolved `sys.__stdout__` instead, so
+    `tan build > log.txt` on that same 70-column terminal returned 79 rather
+    than 69 and `_tick`'s `message.ljust(width)` wrote a 79-char row onto a
+    70-column screen: it soft-wraps, `\r` rewinds only the last physical row,
+    and the "still building" line stacks a fresh row per tick -- exactly the
+    tan-cli#287 defect this width computation was added to remove.
+
     # ponytail: re-reads the width every tick rather than caching it, so a
     # terminal resized mid-build can leave a stale tick's tail past the
     # newly narrower edge; not the reported defect (a STATIC undersized
     # pad on an unchanged terminal) and not measured here -- revisit if a
     # resize-mid-build report ever lands.
     """
-    columns = shutil.get_terminal_size(fallback=(_HEARTBEAT_WIDTH_FALLBACK, 24)).columns
+    columns = terminal_width(_HEARTBEAT_WIDTH_FALLBACK)
     return max(columns - 1, 1)
 
 

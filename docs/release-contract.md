@@ -16,13 +16,15 @@ them only in lockstep with the extension's `releaseAssetForTarget`.
 > below is written for that release; where it describes the retired Rust
 > pipeline it says so explicitly.
 >
-> **v0.5.0 is the transition tag, and it is not cut yet.** Every tag published
-> so far ships a RAW binary — `v0.4.1` (currently `latest`) and `v0.5.0-rc4`
-> included. rc4 carries the `--onefile` freeze as a raw asset, which is what the
-> 13–19 s macOS measurement below was taken on; do not read "`--onedir`" or
-> "archive" as something rc4 shipped, because it shipped neither. Both
-> installers consequently support **both** shapes and decide per release
-> (tan-cli#356) — see [Which shape a release publishes](#which-shape-a-release-publishes).
+> **v0.5.0 was the transition tag; it and v0.5.1 are both cut, and `latest`
+> resolves to v0.5.1.** Every tag published BEFORE v0.5.0 — `v0.4.1` and
+> `v0.5.0-rc4` included — shipped a RAW binary. rc4 carried the `--onefile`
+> freeze as a raw asset, which is what the 13–19 s macOS measurement below was
+> taken on; do not read "`--onedir`" or "archive" as something rc4 shipped,
+> because it shipped neither. From v0.5.0 onward, every published tag ships
+> the archive shape described below. Both installers support **both** shapes
+> and decide per release (tan-cli#356) — see
+> [Which shape a release publishes](#which-shape-a-release-publishes).
 
 ## Tag scheme
 
@@ -276,9 +278,11 @@ function releaseAssetForTarget(platform: NodeJS.Platform, arch: string): string 
 PyInstaller has no equivalent of zigbuild's `--target …-gnu.2.31` pin: a freeze
 inherits the glibc of the machine that froze it. **The old distro is therefore
 the mechanism** — the Linux asset is frozen inside `python:3.12-slim-bullseye`
-(Debian 11, glibc 2.31), which is the same floor the retired zigbuild pin
-targeted. Freezing on bare `ubuntu-latest` would link its 2.39 and reproduce
-`GLIBC_2.39 not found` exactly as before.
+(Debian 11, whose own glibc is 2.31). Freezing on bare `ubuntu-latest` would
+link its 2.39 and reproduce `GLIBC_2.39 not found` exactly as before. Debian
+11's own glibc version is not the same number as the measured payload floor,
+though — see the table below: the actual `GLIBC_` symbol versions the frozen
+payload references top out at 2.30, one minor below the distro's own libc.
 
 The floor published in the release notes is **measured, in the build image,
 over the payload**, and how it is measured matters:
@@ -286,7 +290,7 @@ over the payload**, and how it is measured matters:
 | Where you look | What you get | Useful? |
 | --- | --- | --- |
 | `readelf -V` on the onedir executable | `GLIBC_2.14`, under every image | **No.** That is PyInstaller's vendored bootloader. It is a container-INVARIANT constant — measured identical from bullseye (real floor 2.30) and trixie (real floor 2.38) — so it cannot detect the build image regressing to a newer glibc, which is the only thing the measurement is for. Lower bound only. |
-| the appended payload | the real floor | **Yes.** libpython + the extension modules + their `.so` dependencies, enumerated from `.build/tan/PKG-00.toc` (a plain Python literal listing everything PyInstaller appended) and read with `pyelftools`. |
+| the appended payload | the real floor | **Yes.** libpython + the extension modules + their `.so` dependencies, enumerated by walking the collected onedir tree (`dist/tan/`, the launcher plus `_internal/`) and probing every file as an ELF, then read with `pyelftools`. An earlier revision of this step enumerated `.build/tan/PKG-00.toc` instead and claimed that was "unchanged by --onedir vs --onefile" -- that was false: under `--onedir` PyInstaller collects the natives into `_internal/` instead of appending them, so the TOC lists only 2 BINARY/EXTENSION entries, the floor step refuses to guess, `build` fails, and `release` (needs: `build`) is skipped under an already-pushed tag. That is what happened to the v0.5.0 tag; fixed by 70f9846 (#451). |
 
 The build step refuses to emit a number if the scan finds implausibly few
 native files or no `GLIBC_` version at all, and the release job refuses to
