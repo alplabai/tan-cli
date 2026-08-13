@@ -62,3 +62,9 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- tan-cli#699 followup: correct false operator-facing off-core claims + stale present-tense oracle references in flash_plan.py/flash_cmd.py comments
     - tan/commands/flash_cmd.py: 3923 -> 3927
     - tan/core/flash_plan.py: 3112 -> 3127
+- 2026-08-13 -- tan-cli#501: generate_cmd.py's native-sim-overlay guard now distinguishes an explicit --target ask from an implicit --all/bare inclusion (drop-and-report, not a whole-run refusal or a silent --force clobber of a vendored overlay)
+    - tan/commands/generate_cmd.py: 1312 -> 1342
+- 2026-08-13 -- tan-cli#501 review round 5: closed findings 1-3 (false PREPEND rationale reverted, overlay-not-owned warning no longer recommends the destructive --force clobber of a vendored overlay, data.engine kept in step with a dropped target) -- the explanatory comments this needed grew the module past its prior ratchet
+    - tan/commands/generate_cmd.py: 1342 -> 1348
+- 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1312 -> 1348

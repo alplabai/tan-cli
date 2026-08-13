@@ -134,7 +134,7 @@ create a second list that immediately drifts.
 | `data.available.projectTemplates` (+ `moduleTemplates`, `generationTargets`), `data.summary`, `data.details` | `explain` | golden `explain-overview` |
 | `data.examples[].{id,sourceDir,title,description}` | `examples` | golden `examples-catalog` |
 | `data.targets` / `.written` / `.failed` | `generate` | golden `generate-board-yaml-missing` |
-| `data.checks[].{name,status}`, `data.summary.{pass,warn,fail}`, `data.nextSteps`, the literal check name `workspace` | `doctor` (both invocations) | `python/tests/commands/test_doctor_command.py` — KEY-SET assertions, not a golden, because doctor's values are host facts. `test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback` reads `name`/`status` off the spawned envelope and pins `data`'s key set; `test_unknown_is_counted_in_no_summary_bucket` pins the three summary buckets; `test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host` pins the literal `workspace`. (The Rust `doctor_build_data_keys_the_extension_reads` cited here until #601 went with `crates/`.) |
+| `data.generatedAt`, `.summary.{pass,warn,fail}`, `.checks[].{name,status,scope,detail,fix?}`, `.missingPrerequisites[].{tool,command}`, `.nextSteps` | `doctor` (both invocations) | `python/tests/commands/test_doctor_command.py` — KEY-SET assertions, not a golden, because doctor's values are host facts. `test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback` reads `name`/`status` off the spawned envelope and pins `data`'s key set; `test_unknown_is_counted_in_no_summary_bucket` pins the three summary buckets; `test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host` pins the literal `workspace`. (The Rust `doctor_build_data_keys_the_extension_reads` cited here until #601 went with `crates/`.) **As of tan-cli#664, this key set is also PUBLISHED** — `envelope-contract.json`'s `envelopes.doctor` (built from `contract/doctor-data-keys.json`, the single source) — kept in lockstep with the shipping command by `python/tests/conformance/test_doctor_contract_key_set.py`, which runs a real `tan doctor --format json` and fails on either an undeclared emitted key or a declared key the command stopped emitting. See "The `doctor` family is a key set, not a golden" below. |
 | `data.checks[].scope` | `doctor` (both invocations); also the `support-bundle` FILE's `doctor.checks[]`, not that command's envelope | `python/tests/gates/test_doctor_check_scope.py` + `test_every_check_on_the_wire_carries_a_scope` — see "`doctor` check scope" below |
 | `data.written` | `build --materialise` | **NOT COVERED.** Reaching it needs a resolvable alp-sdk checkout and a Python spawn; nothing in this suite is allowed either. |
 | `data.releases` | `sdk list` | **NOT COVERED.** Hits the GitHub releases API. |
@@ -210,6 +210,72 @@ emitted by `doctor` at all, and `longPaths` is emitted by both invocations on
 Windows. The check names themselves remain unfrozen: no consumer should match
 them now that `scope` exists.
 
+### The `doctor` family is a key set, not a golden (tan-cli#664)
+
+Every family under `envelopes` before tan-cli#664 was a byte golden: fixed
+`args`, a fixed `exitCode`, and a fixed `envelope` a real run must match
+exactly. `doctor` cannot work that way — its `data` VALUES are host facts
+(installed tool versions, absolute paths, which checks even apply on this
+machine), which is exactly why no `envelopes/doctor/` fixture directory has
+ever existed here (see "`doctor` check scope" above: "there is no `doctor`
+case under `envelopes/`"). What alp-sdk-vscode actually binds to is not any
+one of those values — it is the **key set**: `packages/alp-core/src/deps/
+planner.ts` reads `data.missingPrerequisites`, and the debug troubleshooting
+panel renders every `checks[].fix` and `data.nextSteps` verbatim
+(alp-sdk-vscode#491). Before tan-cli#664 that key set was pinned only inside
+this repo (`test_doctor_command.py`, `test_doctor_check_scope.py`) — real
+protection for tan's OWN behaviour, but never shipped where a consumer could
+gate against it, which is the gap issue #664 was filed to close.
+
+So `doctor`'s entry in `envelopes` carries `dataKeys` (the required `data` key
+set) instead of `exitCode`/`envelope`. Every value under `dataKeys` is a
+MACHINE TOKEN — `"string"`, `"int"`, `"string|null"` — never a prose sentence,
+so a consumer can validate structurally without parsing English: `checks`
+is `{requiredKeys, optionalKeys}` (today `optionalKeys` is just `fix`, which
+`Check.as_dict()` omits — never nulls — when a check carries no remediation),
+and `missingPrerequisites` is `{nullable: true, items: {tool, command}}`.
+`contract/doctor-data-keys.json` is the single source (its own `_comment`
+records how it was enumerated and why `status` stays a free string rather
+than a pinned pass/warn/fail/unknown enum — a value added later must survive
+the trip). The release workflow's "Bundle the envelope contract" step folds
+only `args` and `dataKeys` from it into `envelope-contract.json` — not the
+whole file: `_comment` stays a repo-only authoring note, never a published
+field. (`issue-codes.json` is also folded partially, not whole-file
+verbatim: `.github/workflows/release.yml`'s bundling step reads only that
+file's own `issueCodes` array into the bundle's `issueCodes`, dropping
+`issue-codes.json`'s own `schemaVersion` and `_comment` too — neither
+contract source ships as its literal file.)
+`python/tests/conformance/test_doctor_contract_key_set.py` is what keeps the
+published file from drifting apart from the shipping command: it spawns a
+real `tan doctor --format json`, derives every required/optional key set —
+including `checks[]`'s `requiredKeys`/`optionalKeys` and
+`missingPrerequisites[]`'s `items` — FROM `contract/doctor-data-keys.json`
+itself (never from a constant of its own), and fails if the emitted key set
+and the declared one disagree, in EITHER direction, at every level: an
+emitted key nobody declared, or a declared key the command stopped emitting,
+both fail loudly rather than reading as "no problem". Renaming or dropping a
+declared key is the same breaking wire change `contract/README.md`'s
+frozen-issue-code rule describes: bump the CLI MAJOR/MINOR, record it in
+`CHANGELOG.md`, and open the matching alp-sdk-vscode issue.
+
+**Settled here (tan-cli#664):** `data.nextSteps` is NOT guaranteed to equal
+the ordered list of non-null `checks[].fix` values. `next_steps()`
+(`python/tan/commands/doctor_cmd.py`) additionally DEDUPES — one entry per
+DISTINCT fix, in check order — and skips `pass`/`unknown` checks even when
+they carry a `fix`, so the two arrays can and do differ in length on a real
+run: measured on the 2026-08-12 run this contract was enumerated against, 13
+checks produced 8 non-null `fix` values but only 7 `nextSteps` entries (two
+checks shared the fix `tan bootstrap`, which collapsed to one `nextSteps`
+entry). A consumer that wants "the fix for check N" must read
+`checks[N].fix`, not index into `nextSteps` — `nextSteps` is a deduplicated
+action list, not a per-check parallel array. This key-set entry promises only
+that both keys exist and are arrays of strings. Also left alone:
+`checks[].status`'s current pass/warn/fail/unknown vocabulary and
+`checks[].scope`'s host/project vocabulary are documented elsewhere in this
+file (see "`doctor` check scope" above) but deliberately NOT re-pinned as an
+enum in `contract/doctor-data-keys.json` — the key SET is the contract this
+entry publishes, not the value vocabulary.
+
 ### Published as a release asset
 
 Every tagged release carries **`envelope-contract.json`** beside the binaries:
@@ -220,8 +286,9 @@ Every tagged release carries **`envelope-contract.json`** beside the binaries:
   "tanVersion": "0.4.0",
   "issueCodes": [ /* issue-codes.json, verbatim */ ],
   "envelopes": {
-    "presets-heterogeneous-som": { "args": [...], "exitCode": 0, "envelope": { ... } }
+    "presets-heterogeneous-som": { "args": [...], "exitCode": 0, "envelope": { ... } },
     // …one entry per golden case
+    "doctor": { "args": [...], "dataKeys": { /* contract/doctor-data-keys.json's dataKeys, verbatim */ } }
   }
 }
 ```
@@ -270,6 +337,12 @@ asserts `tan.core.bootstrap.fallback_facts` equals it field for field (no
 exemptions) and that no instruction in it names a subcommand in
 `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS`. `tests/parity/bootstrap_manifest_parity.py`
 byte-diffs it against an SDK checkout by hand.
+
+`contract/doctor-data-keys.json` (another sibling, tan-cli#664) is also not an
+`envelopes/<case>/` directory, for the reason above: `doctor`'s `data` cannot
+be a golden. It is the single source the release workflow folds `args` and
+`dataKeys` from into `envelopes.doctor` — not the whole file verbatim, same
+as above — see "The `doctor` family is a key set, not a golden" above.
 
 ## What a golden does NOT cover: key ORDER
 
@@ -359,6 +432,7 @@ just the one that captured it:
 | version-format tests (no fixture dir) | `--version` | 0 | `python/tests/test_cli_skeleton.py` asserts the format rather than a literal version that changes every release. (A Rust mirror of it existed until tan-cli#269 deleted `crates/`.) |
 | issue-code gates (no fixture dir) | — | — | Python AST gates check the shipping emit sites. They prove spelling/registration, while command tests prove reachability. The Rust half, which checked the registry entries the frozen oracle owned, went with `crates/` in tan-cli#269 — see the `emittedBy` note under "Frozen issue codes". |
 | doctor `--build` key set (no fixture dir) | `doctor --build --format json` | — | KEY-SET assertion, not a value diff: doctor's values are host facts (what is on PATH, whether a Zephyr workspace exists), its key names are not. Covers `data.summary.{pass,warn,fail}`, `data.nextSteps`, `data.checks[].{name,status}` and the literal check name `workspace`, in `python/tests/commands/test_doctor_command.py` — the envelope `data` key set and `summary`'s `{pass,warn,fail}` shape, plus the build preflight's leading check names (`sdk`, `boardYaml`, `workspace`) in `test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host`. The single named Rust assertion that used to own this row, `doctor_build_data_keys_the_extension_reads`, went with `crates/` in tan-cli#269; the Python coverage is spread across that module rather than concentrated in one test. |
+| `doctor` published key set (`contract/doctor-data-keys.json`, no `envelopes/` fixture dir) | `doctor --format json` | — | tan-cli#664: the SAME key-set fact as the row above, but PUBLISHED into `envelope-contract.json`'s `envelopes.doctor.dataKeys` rather than pinned only inside this repo. See "The `doctor` family is a key set, not a golden" above. Kept honest by `python/tests/conformance/test_doctor_contract_key_set.py`, which spawns a real `tan doctor --format json` and fails on either an emitted key this file doesn't declare or a declared key the command stopped emitting. |
 
 ### Why the five `debug-config-preview-*` goldens were re-recorded (tan-cli#502)
 

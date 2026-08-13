@@ -1215,3 +1215,36 @@ def test_an_unrecognised_prefix_still_takes_the_alif_default_in_both_derivations
     assert scaffold_module._family_bucket("E1M-ZZZ999") == "E1M-AEN801"
     planned = plan_template_files("sensor-starter", "E1M-ZZZ999")
     assert any(f.relative_path == "board.yaml" for f in planned)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#501 -- a MISSING vendored extra is invisible to
+# tests/parity/scaffold_byte_parity.py (`augment_with_example_extras` only
+# ever reaches for a `NON_ENVELOPE_EXTRAS` name the vendored tree already
+# carries), so the gate is 9/9 PASS whether or not `boards/
+# native_sim_native_64.{conf,overlay}` ship at all -- measured both ways at
+# the pinned SDK tag. This is the SDK-free pin that actually catches it: it
+# fails the moment either file (or the pair's directory) is missing from the
+# vendored tree, which is the exact regression the parity gate cannot see.
+# ---------------------------------------------------------------------------
+
+
+def test_sensor_and_diagnostics_scaffolds_ship_the_native_sim_board_pair():
+    """`sensor-starter`/`board-diagnostics`' documented native_sim build
+    (README: `west build -b native_sim/native/64 .`, no `tan generate` step)
+    depends on Zephyr auto-discovering `boards/native_sim_native_64.conf`
+    (CONFIG_EMUL/CONFIG_I2C_EMUL) and `boards/native_sim_native_64.overlay`
+    (the `alp-i2c0` emul alias) straight out of the scaffold -- neither file
+    is ever emitted by `tan generate`'s `native-sim-overlay` target (that
+    target's own GPIO-only overlay carries no I2C alias at all). Reverting
+    just the four vendored `boards/` directories reproduces the pre-fix
+    6-file scaffold (no `boards/` at all) and this test goes red -- proving
+    the parity gate's blind spot (finding 4) does not."""
+    for template_id, skus in (
+        ("sensor-starter", ("E1M-AEN801", "E1M-V2N101")),
+        ("board-diagnostics", ("E1M-AEN801", "E1M-V2N101")),
+    ):
+        for sku in skus:
+            paths = {f.relative_path for f in plan_template_files(template_id, sku)}
+            assert "boards/native_sim_native_64.conf" in paths, (template_id, sku)
+            assert "boards/native_sim_native_64.overlay" in paths, (template_id, sku)
