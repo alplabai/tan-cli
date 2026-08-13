@@ -108,16 +108,19 @@ of tools, and only the first one is short. A build needs, on `PATH`:
 
 - **Linux:** `git`, `cmake`, `python3`, `ninja`, `xz`, `wget`.
 - **macOS:** `git`, `cmake`, `python3`, `ninja`.
-- **Windows:** TODO(#698) -- this list has not been derived from a real
-  Windows build yet. Do not assume the Linux list carries over as-is (for
-  example, `xz` and `wget` may not be the right entries, and Windows has no
-  direct equivalent of Debian/Ubuntu's `python3-venv` package). Until this row
-  is filled in, treat `tan doctor` below as the authority for what a Windows
-  host is missing.
+- **Windows:** `git`, `cmake`, `python`, `ninja`.
 
-Beyond that list, `west sdk install` also needs `file`, and on Debian/Ubuntu
-`tan bootstrap` cannot create its workspace virtual environment until
-`python3-venv` is installed.
+Beyond that list: on Linux and macOS, `west sdk install` also needs `file`,
+and on Debian/Ubuntu `tan bootstrap` cannot create its workspace virtual
+environment until `python3-venv` is installed. On native Windows, `west sdk
+install` needs 7-Zip on `PATH` instead -- west delegates `.7z` extraction to
+`patoolib`, which shells out to an external `7z`/`7za`/`7zr`/`7zz`/`7zzs`/
+`unar` binary and has no pure-Python fallback (`winget install -e --id
+7zip.7zip`). Note that 7-Zip is only in the SDK's install-command map
+(`metadata/bootstrap.json` `prerequisites.install.windows`), not in its
+required Windows tool list, so `tan doctor`'s `hostPrerequisites` check will
+not itself flag a missing 7-Zip -- the Zephyr SDK install step is where its
+absence surfaces.
 
 Do not assemble any of these lists by hand. `tan doctor` reads its checks from
 the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK

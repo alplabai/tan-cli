@@ -72,6 +72,17 @@ INSTALL_SH = REPO_ROOT / "install.sh"
 _INSTALLER_HEADING = "### Installer (recommended)"
 _SECTION_END = "### From source"
 
+#: The "What a build needs" section's own heading/end markers, and the
+#: per-OS bullet shape inside it (`- **Linux:** \`git\`, ...`). tan-cli#698:
+#: added so a per-OS tool check can be scoped to the OS's OWN bullet rather
+#: than "named anywhere in the README" -- the word-anywhere check that let a
+#: `TODO(#698)` Windows placeholder pass, since `git`/`cmake`/`ninja`/`python`
+#: are all already used elsewhere in the document for unrelated reasons (the
+#: Linux/macOS bullets, `git clone`, `python3 -m venv`, ...).
+_BUILD_NEEDS_HEADING = "### What a build needs"
+_BUILD_NEEDS_END = "## Quickstart"
+_OS_BULLET = re.compile(r"-\s+\*\*(?P<label>[^:*]+):\*\*(?P<body>.*?)(?=\n-\s+\*\*|\n\n)", re.S)
+
 _COMMAND_V = re.compile(r"command -v ([A-Za-z0-9_.-]+)")
 _IF = re.compile(r"^(if|elif)\b")
 
@@ -130,6 +141,25 @@ def _build_tools() -> tuple[str, ...]:
 
 
 @functools.cache
+def _build_tools_macos() -> tuple[str, ...]:
+    """What a BUILD needs on macOS -- the same `hostPrerequisites` list, read
+    from the macOS-specific fallback rather than the POSIX one, so a Windows
+    or Linux-only word (`python` vs `python3`) can't hide behind the POSIX
+    check passing."""
+    return fallback_facts((3, 10)).prerequisites_macos
+
+
+@functools.cache
+def _build_tools_windows() -> tuple[str, ...]:
+    """What a BUILD needs on Windows -- see `_build_tools_macos`. tan-cli#698:
+    this list existed nowhere in the gate before this function -- the README
+    could (and did) carry a bare `TODO(#698)` placeholder for the entire
+    Windows row and `test_the_readme_names_every_tool_a_build_needs_somewhere`
+    still passed, because it only ever read `_build_tools()` (POSIX)."""
+    return fallback_facts((3, 10)).prerequisites_windows
+
+
+@functools.cache
 def _readme() -> str:
     return README.read_text(encoding="utf-8")
 
@@ -140,6 +170,28 @@ def _installer_section() -> str:
     assert _INSTALLER_HEADING in text, f"{_INSTALLER_HEADING} is gone from README.md"
     body = text.split(_INSTALLER_HEADING, 1)[1]
     return body.split(_SECTION_END, 1)[0]
+
+
+@functools.cache
+def _build_needs_section() -> str:
+    text = _readme()
+    assert _BUILD_NEEDS_HEADING in text, f"{_BUILD_NEEDS_HEADING} is gone from README.md"
+    body = text.split(_BUILD_NEEDS_HEADING, 1)[1]
+    return body.split(_BUILD_NEEDS_END, 1)[0]
+
+
+def _os_bullet(label: str) -> str:
+    """The `- **<label>:** ...` bullet's own body, out of the "What a build
+    needs" section. Scoped narrower than `_build_needs_section()` so a check
+    can ask "does the Windows row itself name `python`", not "does the word
+    `python` appear anywhere in a section that also has a Linux row"."""
+    section = _build_needs_section()
+    for match in _OS_BULLET.finditer(section):
+        if match.group("label").strip() == label:
+            return match.group("body")
+    raise AssertionError(
+        f"No `- **{label}:**` bullet found under {_BUILD_NEEDS_HEADING} in README.md"
+    )
 
 
 def _names(text: str, tool: str) -> bool:
@@ -226,15 +278,40 @@ def test_the_readme_names_every_tool_a_build_needs_somewhere():
     described, not next to the one-line install command. What is refused is the
     build list being undocumented, which is how a reader ends up at
     `bootstrap.prerequisites-missing` with no idea it was foreseeable.
+
+    tan-cli#698: covers all three of `fallback_facts()`'s per-OS lists, not
+    just POSIX. Checking POSIX alone let a Windows-only `TODO(#698)`
+    placeholder pass this gate outright -- and checking "named anywhere in
+    the whole README" would have STILL let it pass, because `git`, `cmake`,
+    `ninja` and (bare, not `python3`) `python` are all already used elsewhere
+    in the document for reasons that have nothing to do with a Windows build
+    list (the Linux/macOS bullets sit right next to the Windows one; `git
+    clone` and `python3 -m venv` show up in the Quickstart). So macOS and
+    Windows are checked against their OWN bullet under "What a build needs"
+    (`_os_bullet`), not the document as a whole -- proven to fail on the
+    pre-fix README (the `TODO(#698)` Windows bullet) before being proven to
+    pass on the fixed one; see the PR/commit description for both runs.
     """
-    text = _readme()
-    missing = sorted(t for t in _build_tools() if not _names(text, t))
-    assert not missing, (
-        f"README.md never names {missing}. A build needs "
-        f"{list(_build_tools())} on POSIX (tan.core.bootstrap.fallback_facts()"
-        f".prerequisites_posix, which is what `tan doctor` checks when no SDK "
-        f"manifest has been read yet)."
+    posix_missing = sorted(t for t in _build_tools() if not _names(_readme(), t))
+    assert not posix_missing, (
+        f"README.md never names {posix_missing}, which a build needs on "
+        f"POSIX ({list(_build_tools())} -- tan.core.bootstrap.fallback_facts()"
+        f", which is what `tan doctor` checks when no SDK manifest has been "
+        f"read yet)."
     )
+    for os_label, tools in (
+        ("macOS", _build_tools_macos()),
+        ("Windows", _build_tools_windows()),
+    ):
+        bullet = _os_bullet(os_label)
+        missing = sorted(t for t in tools if not _names(bullet, t))
+        assert not missing, (
+            f"The `- **{os_label}:**` bullet under {_BUILD_NEEDS_HEADING} in "
+            f"README.md does not name {missing}, which a build needs on "
+            f"{os_label} ({list(tools)} -- "
+            f"tan.core.bootstrap.fallback_facts().prerequisites_"
+            f"{os_label.lower()}). Bullet text: {bullet!r}"
+        )
 
 
 def test_the_facts_are_actually_being_read():
@@ -252,6 +329,15 @@ def test_the_facts_are_actually_being_read():
     assert {"git", "cmake", "ninja", "python3"} <= set(_build_tools()), _build_tools()
     # The two sets have to actually differ, or check 2 above compares nothing.
     assert set(_build_tools()) - _installer_tools(), (_build_tools(), _installer_tools())
+    # tan-cli#698: the macOS/Windows fixtures must be non-empty and must
+    # actually use `python`, not `python3`, on Windows -- otherwise
+    # `test_the_readme_names_every_tool_a_build_needs_somewhere`'s Windows arm
+    # would silently pass by matching the Linux/macOS `python3` mentions
+    # instead of exercising a Windows-specific word at all.
+    assert set(_build_tools_macos()), _build_tools_macos()
+    assert set(_build_tools_windows()), _build_tools_windows()
+    assert "python" in _build_tools_windows(), _build_tools_windows()
+    assert "python3" not in _build_tools_windows(), _build_tools_windows()
     section = _installer_section()
     assert "install.sh" in section and len(section) < len(_readme()), len(section)
     # `_names` is a word match, not a substring one: without that, "wget" inside
