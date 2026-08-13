@@ -573,9 +573,13 @@ boot_order: []
         tmp_path, "--format", "json", env={"ALP_FLASH_FORCE": value}, manifest=manifest
     )
     payload = envelope(out)
-    assert exit_code == 0
+    # Non-zero since tan-cli#719: a gate left CLOSED wrote nothing, and a run
+    # that wrote nothing must not exit 0. What this test pins is that the gate
+    # is closed for every near-miss spelling -- `status: planned` and the
+    # confirm issue -- not the exit code it used to return.
+    assert exit_code != 0, value
     assert payload["data"]["entries"][0]["status"] == "planned", value
-    assert codes(payload) == ["flash.confirm-required"]
+    assert codes(payload) == ["flash.confirm-required", "flash.nothing-flashed"]
 
 
 def test_tool_that_is_a_directory_becomes_a_failed_entry(tmp_path):
@@ -4927,12 +4931,17 @@ boot_order: []
         board_yaml=None, core=None, helper=None, dry_run=False,
         skip_missing_tools=False, capture=True, cwd=str(tmp_path),
     )
-    assert exit_code == 0
+    # Non-zero since tan-cli#719: this run signed nothing and wrote nothing, so
+    # it must not exit 0. What this test pins is that SETOOLS was never
+    # spawned and nothing was signed -- see `_fail_if_spawned` and the two
+    # `.exists()` assertions below.
+    assert exit_code != 0
     entry = data["entries"][0]
     assert entry["status"] == "planned"
     assert "would sign" in entry["message"]
     assert "flash_args.confirm is false" in entry["message"]
     assert any(i.code == "flash.confirm-required" for i in issues)
+    assert any(i.code == "flash.nothing-flashed" for i in issues)
     assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
     assert not (setools_dir / "build" / "config").exists()
 
@@ -7678,3 +7687,86 @@ def test_capture_tail_surfaces_a_windows_shaped_transcript_not_the_bare_rc():
         _execute_message(outcome, "swd_probe", "e1")
         == "swd_probe[e1]: Error: could not connect to target"
     )
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#719: a `tan flash` that wrote nothing must not report success, the
+# confirm gate needs a reachable CLI flag, and the message must name every
+# spelling that arms it.
+# ---------------------------------------------------------------------------
+
+_UNCONFIRMED_MANIFEST = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: a.bin, status: ok,
+   flash_method: xspi_flashwriter, flash_args: {flash_partition: mtd1, port: COM3}}
+helper_mcus: []
+boot_order: []
+"""
+
+
+def test_an_unconfirmed_flash_that_wrote_nothing_does_not_report_success(tmp_path):
+    """`tan flash && echo flashed` printed `flashed` over an untouched device.
+
+    Every slice came back `status: planned` with "not run (flash_args.confirm
+    is false)" and the run still exited 0 with `ok: true`. The per-entry
+    `flash.confirm-required` warning existed, but a caller checking `$?` or
+    `ok` -- the documented contract -- could not see it.
+    """
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", manifest=_UNCONFIRMED_MANIFEST
+    )
+    payload = envelope(out)
+    assert exit_code != 0
+    assert payload["ok"] is False
+    assert "flash.nothing-flashed" in codes(payload)
+    assert payload["data"]["entries"][0]["status"] == "planned"
+
+
+def test_dry_run_still_exits_zero_when_it_writes_nothing(tmp_path):
+    """The exclusion that keeps the refusal honest.
+
+    `--dry-run` IS an explicit preview request, so writing nothing is its
+    success. Without this case the fix would be indistinguishable from
+    "refuse every run that does not write", which would break the documented
+    preview flag.
+    """
+    exit_code, out, _ = run_flash(
+        tmp_path, "--dry-run", "--format", "json", manifest=_UNCONFIRMED_MANIFEST
+    )
+    payload = envelope(out)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert "flash.nothing-flashed" not in codes(payload)
+
+
+def test_confirm_flag_arms_the_gate_like_the_env_var(tmp_path):
+    """`--confirm` is the half a user can find. `tan flash --help` documented
+    no flag at all, and `flash_args.confirm` appears in neither the generated
+    `system-manifest.yaml` nor the SoM preset -- so the only working mechanism
+    was an env var named nowhere the user looks.
+    """
+    exit_code, out, _ = run_flash(
+        tmp_path, "--confirm", "--format", "json", manifest=_UNCONFIRMED_MANIFEST
+    )
+    payload = envelope(out)
+    # xspi_flashwriter's real SCIF write is HW-gated and refuses once ARMED --
+    # which is the proof the gate opened: an unarmed run previews instead.
+    assert payload["data"]["entries"][0]["status"] != "planned"
+    assert "flash.confirm-required" not in codes(payload)
+
+
+def test_the_confirm_message_names_every_spelling_that_arms_the_gate(tmp_path):
+    """Three sites composed this note and only one named `ALP_FLASH_FORCE=1`.
+
+    The other two pointed at `flash_args.confirm`, a manifest key the user does
+    not have, and stayed silent about the env var that works.
+    """
+    _, out, _ = run_flash(
+        tmp_path, "--format", "json", manifest=_UNCONFIRMED_MANIFEST
+    )
+    payload = envelope(out)
+    blob = json.dumps(payload)
+    assert "--confirm" in blob
+    assert "ALP_FLASH_FORCE=1" in blob
+    assert "flash_args.confirm: true" in blob
