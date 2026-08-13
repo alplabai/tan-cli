@@ -861,7 +861,29 @@ jobs:
           # token), not a persisted git remote; nothing here pushes to the
           # repo (tan-cli#435).
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      # cache-poisoning is suppressed ON THIS STEP rather than by line number in
+      # .github/zizmor.yml. It used to be baselined there as `release.yml:850:9`,
+      # and that anchor rotted twice: 790 -> 850 when tan-cli#500 added a step to
+      # the `build` job, and 850 -> 864 when this branch added comments above.
+      # Neither change touched this step. A suppression that moves when unrelated
+      # lines move is a suppression that will one day sit on a different step.
+      #
+      # WHY IT IS SUPPRESSED RATHER THAN FIXED. The step passes `node-version`
+      # and `registry-url` only -- no `cache:` input, so no dependency cache is
+      # restored or saved; zizmor reports the action's CAPABILITY, at Low
+      # confidence, not an observed cache. There is also nothing to poison: the
+      # job's two steps are `npm pack --dry-run` and `npm publish`, and it
+      # installs no dependencies.
+      #
+      # WHAT WOULD CHANGE THIS. Add a `cache:` input here, or an install step
+      # ahead of `npm publish`, and this must be re-argued rather than carried:
+      # at that point a restored cache really would reach the one job in this
+      # repository that publishes to a registry. THE SAME IS TRUE IMPLICITLY:
+      # `actions/setup-node` v5+ auto-restores an npm cache with no explicit
+      # `cache:` input at all when `npm-shim/package.json` carries a
+      # `packageManager` field, so this holds only as long as that file has
+      # none -- add one and re-argue this before merging.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
