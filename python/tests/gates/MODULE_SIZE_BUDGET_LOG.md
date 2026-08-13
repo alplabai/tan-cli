@@ -70,3 +70,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/clean_cmd.py: 1098 -> 1110
     - tan/commands/doctor_cmd.py: 3920 -> 3925
     - tan/commands/generate_cmd.py: 1312 -> 1348
+- 2026-08-13 -- tan-cli#719: flash_cmd.py gained the run-level unconfirmed-flash verdict and the --confirm flag; flash_plan.py gained CONFIRM_REMEDY/confirm_gate_note, the single source for the confirm-gate remedy
+    - tan/commands/flash_cmd.py: 3922 -> 3966
+    - tan/core/flash_plan.py: 3079 -> 3102
