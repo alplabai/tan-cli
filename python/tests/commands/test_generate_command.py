@@ -995,6 +995,30 @@ def test_all_with_force_still_leaves_an_unnamed_overlay_alone(
     assert (project / "boards" / "native_sim_native_64.overlay").read_text() == "tuned"
 
 
+def test_all_leaving_the_overlay_alone_keeps_the_engine_key_in_step(
+    tmp_path, monkeypatch, capsys
+):
+    """tan-cli#501 review finding 3: `engine` is computed BEFORE the overlay
+    drop, so it used to still carry `native-sim-overlay` as a 9th key while
+    `data.targets`/`data.written` only ever reached 8 -- the envelope
+    disagreeing with itself. `data.engine`'s keys must match `data.targets`
+    exactly once a target is dropped."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    (project / "boards").mkdir()
+    (project / "boards" / "native_sim_native_64.overlay").write_text(
+        "tuned", encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(all_targets=True, sdk_root=str(sdk), output_format="json")
+    env = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert "native-sim-overlay" not in env["data"]["targets"]
+    assert set(env["data"]["engine"]) == set(env["data"]["targets"])
+
+
 def test_every_reachable_target_renders_in_process():
     """The claim this whole change exists to make: `tan generate` serves all
     TWELVE targets without alp-sdk's Python.

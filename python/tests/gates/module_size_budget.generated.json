@@ -13,7 +13,7 @@
     "tan/commands/doctor_cmd.py": 3920,
     "tan/commands/explain_cmd.py": 1020,
     "tan/commands/flash_cmd.py": 3922,
-    "tan/commands/generate_cmd.py": 1342,
+    "tan/commands/generate_cmd.py": 1348,
     "tan/commands/init_cmd.py": 1247,
     "tan/commands/new_som_cmd.py": 1353,
     "tan/commands/renode_cmd.py": 1533,

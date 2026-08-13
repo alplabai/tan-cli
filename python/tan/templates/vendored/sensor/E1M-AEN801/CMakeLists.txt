@@ -30,17 +30,7 @@ if(NOT _alp_rv EQUAL 0)
         "stderr: ${_alp_stderr}")
 endif()
 
-# PREPEND, not APPEND (tan-cli#379, tan-cli#501). Zephyr merges the
-# EXTRA_CONF_FILE list in order and the last assignment of a symbol wins, so
-# appending the GENERATED alp.conf parks it after the `boards/
-# native_sim_native_64.conf` Zephyr auto-discovers for this board (CONFIG_EMUL,
-# CONFIG_I2C_EMUL) -- backwards for a generated baseline: this template ships
-# that board conf to turn the emulated I2C bus on for native_sim, and could
-# not if the generated file were free to override it. Prepending keeps
-# alp.conf winning over prj.conf (the whole list is merged after it) while
-# letting the board-specific conf win, which is what this README's native_sim
-# build already claims happens.
-list(PREPEND EXTRA_CONF_FILE ${_alp_generated})
+list(APPEND EXTRA_CONF_FILE ${_alp_generated})
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(i2c_master LANGUAGES C)

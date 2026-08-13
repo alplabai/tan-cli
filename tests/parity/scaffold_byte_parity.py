@@ -157,30 +157,19 @@ DELIBERATE_EDITS: dict[tuple[str, str, str], tuple[str, Callable[[str], str]]] =
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
         un_edit_iot_extra_conf_order,
     ),
-    ("sensor", "E1M-AEN801", "CMakeLists.txt"): (
-        "tan-cli#501: same class as tan-cli#379 -- list(PREPEND EXTRA_CONF_FILE "
-        "...) so the vendored boards/native_sim_native_64.conf (CONFIG_EMUL, "
-        "CONFIG_I2C_EMUL) wins over the generated alp.conf",
-        un_edit_iot_extra_conf_order,
-    ),
-    ("sensor", "E1M-V2N101", "CMakeLists.txt"): (
-        "tan-cli#501: same class as tan-cli#379 -- list(PREPEND EXTRA_CONF_FILE "
-        "...) so the vendored boards/native_sim_native_64.conf (CONFIG_EMUL, "
-        "CONFIG_I2C_EMUL) wins over the generated alp.conf",
-        un_edit_iot_extra_conf_order,
-    ),
-    ("diagnostics", "E1M-AEN801", "CMakeLists.txt"): (
-        "tan-cli#501: same class as tan-cli#379 -- list(PREPEND EXTRA_CONF_FILE "
-        "...) so the vendored boards/native_sim_native_64.conf (CONFIG_EMUL, "
-        "CONFIG_I2C_EMUL) wins over the generated alp.conf",
-        un_edit_iot_extra_conf_order,
-    ),
-    ("diagnostics", "E1M-V2N101", "CMakeLists.txt"): (
-        "tan-cli#501: same class as tan-cli#379 -- list(PREPEND EXTRA_CONF_FILE "
-        "...) so the vendored boards/native_sim_native_64.conf (CONFIG_EMUL, "
-        "CONFIG_I2C_EMUL) wins over the generated alp.conf",
-        un_edit_iot_extra_conf_order,
-    ),
+    # tan-cli#501 review finding 1: a matching PREPEND was added to the four
+    # `sensor`/`diagnostics` CMakeLists.txt files under the same
+    # "board-specific conf must win" theory, but it does not apply here --
+    # `boards/native_sim_native_64.conf` joins Zephyr's `CONF_FILE`, not
+    # `EXTRA_CONF_FILE` (`configuration_files.cmake`'s board-dir auto-discovery),
+    # and `merge_config_files` orders `CONF_FILE_AS_LIST` strictly before
+    # `EXTRA_CONF_FILE_AS_LIST` regardless of PREPEND/APPEND within the latter
+    # (`kconfig.cmake`). MEASURED with a real configure of a scaffolded project
+    # against Zephyr v4.4.1 (the revision alp-sdk/west.yml pins): PREPEND and
+    # APPEND produced the identical merge order and identical `.config`
+    # (CONFIG_EMUL=y, CONFIG_I2C_EMUL=y either way). Reverted to plain APPEND,
+    # which is what `--emit scaffold` produces unedited -- these four files
+    # carry no deliberate edit at all now.
 }
 
 
