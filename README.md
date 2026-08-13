@@ -115,15 +115,26 @@ release or a source checkout.
 ### What a build needs
 
 Getting `tan` onto the host and building firmware with it are different sets
-of tools, and only the first one is short. A build needs, on `PATH`: `git`,
-`cmake`, `python3`, `ninja`, `xz` and `wget` on Linux; `git`, `cmake`,
-`python3` and `ninja` on macOS. Beyond that list, `west sdk install` also needs
-`file`, and on Debian/Ubuntu `tan bootstrap` cannot create its workspace
-virtual environment until `python3-venv` is installed.
+of tools, and only the first one is short. A build needs, on `PATH`:
 
-Do not assemble that list by hand. `tan doctor` reads it from the SDK's own
-`metadata/bootstrap.json`, so it stays correct when the SDK changes it, and it
-names what is missing on *this* host together with the command that fixes it:
+- **Linux:** `git`, `cmake`, `python3`, `ninja`, `xz`, `wget`.
+- **macOS:** `git`, `cmake`, `python3`, `ninja`.
+- **Windows:** `git`, `cmake`, `python`, `ninja`.
+
+Beyond that list: on Debian/Ubuntu `tan bootstrap` cannot create its workspace
+virtual environment until `python3-venv` is installed. On native Windows, `west sdk
+install` needs a 7-Zip-compatible archive tool on `PATH` instead -- west
+delegates `.7z` extraction to `patoolib`, which shells out to an external
+`7z`/`7za`/`7zr`/`7zz`/`7zzs`/`unar` binary and has no pure-Python fallback
+(`winget install -e --id 7zip.7zip`). `tan doctor` has a dedicated `sevenZip`
+check for this, on native Windows, once the Zephyr SDK is not yet detected: it
+warns when none of those binaries is on `PATH` and names the same `winget`
+command.
+
+Do not assemble any of these lists by hand. `tan doctor` reads its checks from
+the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK
+changes it, and it names what is missing on *this* host -- Windows included --
+together with the command that fixes it:
 
 ```text
 bootstrap.prerequisites-missing: missing from PATH: cmake, ninja
@@ -134,7 +145,8 @@ doctor.west-resolved: west resolved neither through the workspace venv nor PATH
 ```
 
 `tan doctor` needs none of those tools itself, so run it first, on the bare
-host, rather than guessing.
+host, rather than guessing -- this holds on Windows exactly as it does on
+Linux and macOS.
 
 ## Quickstart
 
