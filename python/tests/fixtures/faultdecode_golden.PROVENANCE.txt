@@ -59,13 +59,15 @@ frozen_golden` makes, so the recording cannot drift from the comparison. Cases
 whose output was unchanged were left byte-for-byte alone; the resulting diff is
 4 lines.
 
-Why the change is correct, and why it is a DIVERGENCE
------------------------------------------------------
+Why the change was correct, and why it was a DIVERGENCE (CLOSED below)
+----------------------------------------------------------------------
 tan-cli#616 defect A: `HFSR.FORCED` (bit 30) is the ESCALATION MECHANISM — a
 configurable fault escalated because it could not be taken — not the fault.
-The fault is in CFSR. Upstream's `_root_cause` ladder has no branch for LSPERR
-(BFSR bit 13) or MLSPERR (MMFSR bit 5), the only two CFSR cause bits it never
-gave one, so those two words fell past every branch and landed on `FORCED`:
+The fault is in CFSR. At the time, upstream's `_root_cause` ladder had no
+branch for LSPERR (BFSR bit 13) or MLSPERR (MMFSR bit 5), the only two CFSR
+cause bits it had never given one, so those two words fell past every branch
+and landed on `FORCED`. This is no longer true as of `dad5b35a` (see CLOSED,
+below) — recorded here only as the history that motivated the divergence:
 
     $ tan faultdecode --cfsr 0x2000 --hfsr 0x40000000
       Most likely cause:
@@ -76,14 +78,23 @@ gave one, so those two words fell past every branch and landed on `FORCED`:
 is FALSE: LSPERR is set, so its own status bits are demonstrably not clear.
 
 tan now (a) gives LSPERR/MLSPERR real root-cause branches and (b) makes
-`FORCED` the headline only when CFSR names no cause at all. alp-sdk's
-`scripts/alp_cli/faultdecode.py` still does neither. That is a deliberate,
-maintainer-decided divergence, reserved for exactly this decision in tan-cli#539
-and now taken; `tan/core/faultdecode.py::_root_cause`'s docstring records it at
-the source, and `tests/core/test_faultdecode.py::test_decode_diverges_from_the_
-sdk_original_only_where_tan_cli_616_declares` polices it against a live alp-sdk
-checkout — a mismatch OUTSIDE the declared classes still fails. THE UPSTREAM
-SHOULD FOLLOW: alp-sdk carries the same defect and nothing here fixes it there.
+`FORCED` the headline only when CFSR names no cause at all. This was a
+deliberate, maintainer-decided divergence, reserved for exactly this decision
+in tan-cli#539 and taken in tan-cli#616; `tan/core/faultdecode.py::_root_cause`'s
+docstring recorded it at the source, and `tests/core/test_faultdecode.py::test_
+decode_diverges_from_the_sdk_original_only_where_tan_cli_616_declares` policed
+it against a live alp-sdk checkout — a mismatch OUTSIDE the declared classes
+still failed.
+
+CLOSED, 2026-08-12: alp-sdk `dad5b35a` ("fix(faultdecode): lead with the
+escalated fault, not the escalation (#1389)", folding #1358) ported both (a)
+and (b) into `scripts/alp_cli/faultdecode.py` verbatim -- upstream followed, as
+this file originally asked. `tan/core/faultdecode.py::_root_cause`'s docstring
+now records the closure instead of an open divergence, and the policing test
+was renamed to `test_decode_matches_the_sdk_original_including_the_classes_
+tan_cli_616_used_to_diverge_on`: it asserts byte-equality again, including on
+these two classes, while still proving (by tan's own answer, not the oracle's)
+that the sweep keeps reaching the words that used to diverge.
 
 Note what this file could NOT have caught, and still cannot
 -----------------------------------------------------------

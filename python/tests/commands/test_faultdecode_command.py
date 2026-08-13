@@ -156,6 +156,25 @@ def test_matches_oracle_exit_code_on_bad_hex_value():
     assert port_result.exit_code == oracle_result.exit_code == 2
 
 
+def test_matches_oracle_exit_code_on_negative_cfsr():
+    """Text differs -- alp-sdk `dad5b35a` refuses via `click.BadParameter`
+    ("Invalid value for '--cfsr': '-8200' is negative -- fault registers are
+    unsigned"), tan refuses via its own registered
+    `faultdecode.invalid-register-value` with a longer message (see
+    `_NEGATIVE_CFSR_MESSAGE` below) -- but the exit code, the part a caller
+    branches on, must agree. Restores the parity tan-cli#616 pinned before
+    alp-sdk closed the divergence and this file's own
+    `test_the_sdk_original_decodes_a_negative_cfsr_and_tan_deliberately_does_not`
+    was deleted, following this module's own precedent immediately above for
+    "text differs, pin the exit code"."""
+    from click.testing import CliRunner as ClickRunner
+
+    oracle_cmd = _load_oracle_command()
+    oracle_result = ClickRunner().invoke(oracle_cmd, ["--cfsr", "-8200"])
+    port_result = runner.invoke(app, ["--cfsr=-8200"])
+    assert port_result.exit_code == oracle_result.exit_code == 2
+
+
 def test_short_help_matches_the_shipped_rust_oracle():
     """Typer takes a command's short help from the docstring's first line.
     Must read `Decode an ARM Cortex-M (ARMv8-M) fault dump.` -- matching
@@ -290,25 +309,27 @@ def test_the_json_flag_surface_also_refuses_a_negative_register():
     assert result.output.strip() == f"Error: {_NEGATIVE_CFSR_MESSAGE}"
 
 
-def test_the_sdk_original_decodes_a_negative_cfsr_and_tan_deliberately_does_not():
-    """The DIVERGENCE, pinned against the live original rather than described.
-
-    alp-sdk's `scripts/alp_cli/faultdecode.py` accepts `--cfsr=-8200` and exits
-    0 having printed a decode. tan refuses at exit 2. This asserts BOTH halves,
-    so the day upstream adopts the refusal this test goes red and is deleted
-    with a note, rather than the divergence quietly persisting in prose only.
-    Skips (never fails) with no alp-sdk checkout reachable, same as its
-    neighbours."""
-    from click.testing import CliRunner as ClickRunner
-
-    oracle_cmd = _load_oracle_command()
-    oracle_result = ClickRunner().invoke(oracle_cmd, ["--cfsr=-8200"])
-    assert oracle_result.exit_code == 0, "upstream no longer decodes a negative CFSR"
-    assert "0x-0008200" in oracle_result.output
-
-    port_result = runner.invoke(app, ["--cfsr=-8200"])
-    assert port_result.exit_code == 2
-    assert port_result.output.strip() == f"Error: {_NEGATIVE_CFSR_MESSAGE}"
+# `test_the_sdk_original_decodes_a_negative_cfsr_and_tan_deliberately_does_not`
+# lived here. It pinned the DIVERGENCE this section's own header names: alp-sdk's
+# `scripts/alp_cli/faultdecode.py` used to accept `--cfsr=-8200`, print
+# "0x-0008200", and exit 0, while tan refused at exit 2. alp-sdk `dad5b35a`
+# ("fix(faultdecode): lead with the escalated fault, not the escalation
+# (#1389)", folding #1358, 2026-08-12) ported tan-cli#616's own negative-value
+# refusal into `_HexInt.convert` -- `--cfsr=-8200` on the SDK original now also
+# exits 2 -- so the divergence this test pinned is CLOSED, and per its own
+# docstring ("the day upstream adopts the refusal this test goes red and is
+# deleted with a note, rather than the divergence quietly persisting in prose
+# only") it is deleted here rather than weakened or left to assert nothing.
+# tan's refusal itself is still its own permanent behaviour and stays pinned,
+# oracle-free, by `test_a_negative_register_is_refused_on_the_text_surface`,
+# `test_a_negative_register_is_refused_with_a_coded_envelope`,
+# `test_every_register_flag_refuses_a_negative_value_and_names_itself`,
+# `test_a_negative_register_is_refused_before_a_valid_one_is_decoded`, and
+# `test_the_json_flag_surface_also_refuses_a_negative_register`, all above
+# this comment. The negative-register surface's oracle-side coverage (exit
+# code only -- the refusal text differs) is restored, separately, by
+# `test_matches_oracle_exit_code_on_negative_cfsr` in the oracle-parity
+# section near the top of this file.
 
 
 def test_missing_elf_path_is_exit_2():

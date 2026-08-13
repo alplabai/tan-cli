@@ -242,11 +242,16 @@ def _root_cause(report: FaultReport) -> str:
     in the "Set flags:" block, which is where a qualifier belongs. This line
     answers "what broke", and `FORCED` never answers that when CFSR does.
 
-    This DIVERGES from alp-sdk's `scripts/alp_cli/faultdecode.py`, which this
-    module is otherwise a verbatim port of (see the module docstring and
-    `tests/core/test_faultdecode.py`'s golden). The divergence is deliberate,
-    bounded to the three branches below, and the upstream should follow --
-    alp-sdk carries the same defect.
+    This USED TO DIVERGE from alp-sdk's `scripts/alp_cli/faultdecode.py`,
+    which this module is otherwise a verbatim port of (see the module
+    docstring and `tests/core/test_faultdecode.py`'s golden). The divergence
+    was deliberate, bounded to the three branches below -- and CLOSED as of
+    alp-sdk `dad5b35a` ("fix(faultdecode): lead with the escalated fault, not
+    the escalation (#1389)", folding #1358, 2026-08-12): upstream ported the
+    identical LSPERR/MLSPERR branches and the address-VALID-is-not-a-cause
+    fallback from this file. `tests/core/test_faultdecode.py`'s live sweep
+    against the SDK original now asserts full agreement, including on these
+    three branches, rather than an excused difference.
     """
     if not report.flags:
         return "No fault status bits are set -- nothing to decode."
@@ -311,11 +316,12 @@ def _root_cause(report: FaultReport) -> str:
     # specific findings than "something faulted during the deferred FP push",
     # so both keep their existing precedence over these two.
     #
-    # That placement is also what keeps the divergence from alp-sdk minimal and
-    # checkable: it changes the answer for exactly the words upstream had no
-    # answer for (LSPERR/MLSPERR as the only cause bits, which fell through to
-    # `FORCED` or to the bare `<NAME> set (<REG>)` fallback) and leaves every
-    # existing precedence untouched -- a claim the live-oracle sweep in
+    # That placement is also what kept the (now-closed, see above) divergence
+    # from alp-sdk minimal and checkable while it was open: it changed the
+    # answer for exactly the words upstream had no answer for (LSPERR/MLSPERR
+    # as the only cause bits, which fell through to `FORCED` or to the bare
+    # `<NAME> set (<REG>)` fallback) and left every existing precedence
+    # untouched -- a claim the live-oracle sweep in
     # `tests/core/test_faultdecode.py` enforces rather than merely asserts.
     #
     # Two earlier drafts got this wrong in the same way, by inserting rather

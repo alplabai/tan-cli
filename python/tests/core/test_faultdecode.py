@@ -73,10 +73,13 @@ def _resolve_oracle_path() -> Path | None:
     each other. The sibling module
     `tests/commands/test_faultdecode_command.py` had the identical defect and
     fixed it this way in tan-cli#254/#256; this copy of `_resolve_oracle_path`
-    was never brought along. tan-cli#616 makes it load-bearing, since this is
-    what resolves the oracle for the gate policing the deliberate divergence
+    was never brought along. tan-cli#616 made it load-bearing, since this is
+    what resolves the oracle for the gate policing tan-cli#616's divergence
     from upstream (see
-    `test_decode_diverges_from_the_sdk_original_only_where_tan_cli_616_declares`).
+    `test_decode_matches_the_sdk_original_including_the_classes_tan_cli_616_used_to_diverge_on`)
+    -- CLOSED as of alp-sdk `dad5b35a` (2026-08-12), so that gate now polices
+    agreement rather than an excused difference, but still needs the same
+    working oracle resolution to do it.
     """
     override = REAL_ENVIRON.get("ALP_SDK_ROOT")
     if override:
@@ -197,7 +200,7 @@ _LAZY_FP_BITS = (1 << 5) | (1 << 13)
 
 
 #: `(cfsr, hfsr, dfsr)` words that pair a lazy-FP-preservation bit with an
-#: HFSR cause, i.e. the region where the new LSPERR/MLSPERR branches sit next
+#: HFSR cause, i.e. the region where the LSPERR/MLSPERR branches sit next
 #: to a branch upstream ALREADY had an answer for.
 #:
 #: The sweep could not reach this region and it mattered: the single-bit sweep
@@ -206,9 +209,9 @@ _LAZY_FP_BITS = (1 << 5) | (1 << 13)
 #: tan-cli#616 placed both branches ABOVE `VECTTBL`/`DEBUGEVT` and silently
 #: overrode both on exactly these words -- an undeclared third divergence class
 #: that this test would have flagged and structurally never saw. These four
-#: words must produce NO divergence at all: they are the pin that the new
-#: branches sit at the BOTTOM of the ladder, and moving them back up reds this
-#: test as an UNDECLARED divergence.
+#: words must produce byte-identical output on both sides: they are the pin
+#: that the branches sit at the BOTTOM of the ladder, and moving them back up
+#: reds this test as an undeclared mismatch.
 _TWO_BIT_PRECEDENCE_CASES: list[tuple[int, int, int]] = [
     (0x2000, 0x00000002, 0),  # LSPERR  + HFSR.VECTTBL  -> VECTTBL wins
     (0x0020, 0x00000002, 0),  # MLSPERR + HFSR.VECTTBL  -> VECTTBL wins
@@ -217,44 +220,94 @@ _TWO_BIT_PRECEDENCE_CASES: list[tuple[int, int, int]] = [
 ]
 
 
-def _declared_divergence(cfsr: int, theirs_root_cause: str) -> str | None:
-    """Which tan-cli#616 divergence class this case falls into, or `None`.
+def _formerly_divergent_class(cfsr: int, ours: port.FaultReport) -> str | None:
+    """Which tan-cli#616 divergence class this case would have exercised, or
+    `None`.
 
-    Deliberately TIGHT on both sides: the class is claimed only when the
-    upstream answer is one of the specific wrong ones #616 names. A predicate
-    that excused every mismatch on any CFSR containing LSPERR would also excuse
-    an unrelated regression on such a word.
+    CLOSED as of alp-sdk `dad5b35a` ("fix(faultdecode): lead with the
+    escalated fault, not the escalation (#1389)", folding #1358,
+    2026-08-12): upstream ported the identical LSPERR/MLSPERR root-cause
+    branches and the address-VALID-is-not-a-cause fallback tan-cli#616
+    introduced here first, so `theirs.root_cause` and `ours.root_cause` are
+    now byte-identical for every case below -- there is nothing left to
+    classify a MISMATCH by. This classifies by tan's OWN answer instead,
+    purely to prove the sweep still REACHES the specific words that used to
+    diverge (the non-vacuity half of the test below); as of the closure it is
+    not distinguishing tan's answer from the oracle's, only tagging which of
+    the two former classes a case belongs to.
+
+    Both legs are keyed on the ACTUAL branch `_root_cause` took, not on "the
+    CFSR happens to carry the relevant bit" -- that used to be true for the
+    lazy-FP leg but not for the address-valid one, and the gap made the
+    address-valid leg unfalsifiable: `cfsr & ((1<<7)|(1<<15))` is true for
+    roughly 80% of random (cfsr, hfsr, dfsr) words (measured: 477/600 on this
+    module's own seeded sweep), and "the answer doesn't start with the
+    ARVALID flag's own text" is true for nearly all of THOSE too, since almost
+    every one is answered by an earlier, unrelated ladder branch instead
+    (PRECISERR, VECTTBL, ...) -- so the leg tagged words that never came near
+    the fallback it exists to police, and could not have caught the coverage
+    loss it was written to catch (tan-cli#692 review, MAJOR 1).
     """
-    if cfsr & _LAZY_FP_BITS and (
-        theirs_root_cause.startswith("Forced HardFault --")
-        or theirs_root_cause.startswith(("LSPERR set (BFSR):", "MLSPERR set (MMFSR):"))
+    if cfsr & _LAZY_FP_BITS and ours.root_cause.startswith(
+        ("Bus fault while lazily preserving", "MemManage fault while lazily preserving")
     ):
         # #616 defect A: a fault taken during lazy FP state preservation is a
         # CAUSE (with an address, when the VALID bit is set), and `FORCED` is
         # only ever the escalation that carried it to the HardFault handler.
+        # Keyed on the branch's own distinctive prose -- no other branch in
+        # the ladder produces this text.
         return "lazy-fp-preservation-is-a-cause"
-    if theirs_root_cause.startswith(("BFARVALID set (BFSR):", "MMARVALID set (MMFSR):")):
-        # Same rule one step down: an address-VALID bit qualifies the register
-        # beside it and describes nothing that broke, so it must not be
-        # announced as the cause while a real one sits later in the flag list.
-        return "address-valid-is-not-a-cause"
+    # The terminal fallback in `_root_cause` (the `next(...)` call that skips
+    # over an ARVALID flag) is what this leg exists to keep exercised, so tag
+    # a case ONLY when that skip demonstrably happened: `ours.flags[0]` must
+    # BE the ARVALID flag (otherwise there was nothing for the fallback to
+    # skip) AND `ours.root_cause` must equal the fallback's own
+    # `"<NAME> set (<REG>): <meaning>"` formatting of the first flag AFTER
+    # it -- the one literal shape no other branch in the ladder produces
+    # (every other branch returns hand-written prose), so an exact match
+    # proves the fallback ran rather than some earlier, unrelated branch that
+    # merely happens not to start with the ARVALID flag's own text.
+    if ours.flags and ours.flags[0].name in port._ADDRESS_VALID_FLAGS:
+        first_non_arvalid = next(
+            (flag for flag in ours.flags if flag.name not in port._ADDRESS_VALID_FLAGS),
+            None,
+        )
+        if first_non_arvalid is not None:
+            expected = (
+                f"{first_non_arvalid.name} set ({first_non_arvalid.reg}): "
+                f"{first_non_arvalid.meaning}"
+            )
+            if ours.root_cause == expected:
+                # Same rule one step down: an address-VALID bit (MMARVALID
+                # bit 7 / BFARVALID bit 15) qualifies the register beside it
+                # and describes nothing that broke, so it must not be
+                # announced as the cause while a real one sits later in the
+                # flag list.
+                return "address-valid-is-not-a-cause"
     return None
 
 
-def test_decode_diverges_from_the_sdk_original_only_where_tan_cli_616_declares():
+def test_decode_matches_the_sdk_original_including_the_classes_tan_cli_616_used_to_diverge_on():
     """`decode()` + `render_human()` + `report_to_json()`, swept over every
     single-bit case, a batch of random combinations, and the deterministic
-    words that exercise each declared divergence, diffed against the SDK
-    original's own functions.
+    words that used to exercise tan-cli#616's divergence, diffed against the
+    SDK original's own functions.
 
-    This used to assert byte-equality outright. tan-cli#616 makes tan diverge
-    ON PURPOSE (see `tan/core/faultdecode.py::_root_cause` and
-    `tests/fixtures/faultdecode_golden.PROVENANCE.txt`), so the assertion
-    becomes: every difference is `root_cause` ONLY, and every one falls into a
-    class this module names. A difference in any other field, or a `root_cause`
-    difference outside those classes, is still a failure -- deleting this test,
-    or loosening it to "differs somehow", would give the divergence exactly the
-    unpinned freedom tan-cli#502's PROVENANCE calls out as the harm.
+    This asserted byte-equality outright before tan-cli#616 made tan diverge
+    from upstream ON PURPOSE, deliberately and by name, on the
+    `lazy-fp-preservation-is-a-cause` and `address-valid-is-not-a-cause`
+    classes (see `tan/core/faultdecode.py::_root_cause` and
+    `tests/fixtures/faultdecode_golden.PROVENANCE.txt`). alp-sdk `dad5b35a`
+    ("fix(faultdecode): lead with the escalated fault, not the escalation
+    (#1389)", folding #1358, 2026-08-12) ported both classes verbatim, so as
+    of that commit there is nothing left to excuse: this is byte-equality
+    again, full stop -- ANY difference anywhere, including inside the words
+    that used to diverge, is now an undeclared failure. Deleting this test, or
+    loosening it to "differs somehow", would give a REOPENED divergence
+    exactly the unpinned freedom tan-cli#502's PROVENANCE calls out as the
+    harm; the non-vacuity check below closes the other direction -- a sweep
+    that quietly stopped reaching the formerly-divergent words would prove
+    nothing about them either.
     """
     original = _load_original()
     import random
@@ -278,7 +331,15 @@ def test_decode_diverges_from_the_sdk_original_only_where_tan_cli_616_declares()
         (0x2000, 0x40000000, 0),  # LSPERR + FORCED -- the issue's own repro
         (0x0020, 0x40000000, 0),  # MLSPERR + FORCED
         (0x2000, 0, 0),           # LSPERR alone
-        (0x8000, 0, 0x2),         # BFARVALID (no cause) + DFSR BKPT
+        # BFARVALID (no cause) + DFSR BKPT. Do not delete: this is the ONLY
+        # case in the whole sweep that reaches the terminal fallback's
+        # ARVALID-skip in `_root_cause` -- proven by reverting the skip
+        # (`first = report.flags[0]`) and re-running this sweep unmodified,
+        # which reds with exactly 3 mismatches, one per bfar/mmfar variant
+        # below, all from this word (tan-cli#692 review, MAJOR 1/3). Delete it
+        # and `_formerly_divergent_class`'s non-vacuity check below passes
+        # while the fallback goes unreached.
+        (0x8000, 0, 0x2),
     ]
     cases += _TWO_BIT_PRECEDENCE_CASES
 
@@ -290,33 +351,30 @@ def test_decode_diverges_from_the_sdk_original_only_where_tan_cli_616_declares()
             theirs = original.decode(
                 cfsr=cfsr, hfsr=hfsr, dfsr=dfsr, bfar=bfar, mmfar=mmfar
             )
-            if port.report_to_json(ours, None) == original.report_to_json(
-                theirs, None
-            ) and port.render_human(ours, None, False) == original.render_human(
-                theirs, None, False
-            ):
-                continue
-            where = f"cfsr={hex(cfsr)} hfsr={hex(hfsr)} dfsr={hex(dfsr)} bfar={bfar} mmfar={mmfar}"
-            kind = _declared_divergence(cfsr, theirs.root_cause)
-            if kind is None:
-                mismatches.append(f"{where}: UNDECLARED divergence -- {ours.root_cause!r}")
-                continue
-            # Adopting their `root_cause` must make both renderings identical
-            # again: that is the exact assertion "differs in root_cause ONLY".
-            ours.root_cause = theirs.root_cause
             if port.report_to_json(ours, None) != original.report_to_json(
                 theirs, None
             ) or port.render_human(ours, None, False) != original.render_human(
                 theirs, None, False
             ):
-                mismatches.append(f"{where}: differs BEYOND root_cause ({kind})")
+                where = f"cfsr={hex(cfsr)} hfsr={hex(hfsr)} dfsr={hex(dfsr)} bfar={bfar} mmfar={mmfar}"
+                mismatches.append(
+                    f"{where}: UNDECLARED mismatch -- tan={ours.root_cause!r} "
+                    f"sdk={theirs.root_cause!r}"
+                )
                 continue
-            classes.add(kind)
-    assert not mismatches, f"{len(mismatches)} undeclared mismatches: {mismatches[:5]}"
-    # Non-vacuity: a sweep that stopped reaching the divergent words would pass
-    # this test while proving nothing about the thing it exists to police.
+            kind = _formerly_divergent_class(cfsr, ours)
+            if kind is not None:
+                classes.add(kind)
+    assert not mismatches, (
+        f"{len(mismatches)} mismatches -- alp-sdk dad5b35a closed tan-cli#616's "
+        f"divergence, so any difference here is a REOPENED, undeclared one: "
+        f"{mismatches[:5]}"
+    )
+    # Non-vacuity: a sweep that stopped reaching the formerly-divergent words
+    # would pass this test while proving nothing about the classes it exists
+    # to keep covered.
     assert classes == {"lazy-fp-preservation-is-a-cause", "address-valid-is-not-a-cause"}, (
-        f"the sweep no longer exercises every declared divergence class: {sorted(classes)}"
+        f"the sweep no longer exercises every formerly-divergent class: {sorted(classes)}"
     )
 
 
