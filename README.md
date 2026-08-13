@@ -14,10 +14,31 @@ flash, and debug firmware. VS Code is optional. The implementation is Python.
 
 ### Installer (recommended)
 
+**Prerequisites.** On Linux and macOS the installer needs a downloader --
+`curl` **or** `wget`, either one -- plus `tar` and `sha256sum` (macOS:
+`shasum`). Nothing else. `tar` and the digest tool are already present on a
+stock Debian/Ubuntu and on macOS; a downloader is not. A pristine
+`ubuntu:24.04` has neither `curl` nor `wget`, so the command below fails there
+with `bash: curl: command not found` until you install one:
+
+```sh
+sudo apt-get update && sudo apt-get install -y curl   # or: wget
+```
+
+That also pulls `ca-certificates`, which `ubuntu:24.04` does not ship either
+and which the download needs. On Windows, `install.ps1` uses only PowerShell
+built-ins, so there is nothing to install first.
+
 Linux and macOS:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh
+```
+
+The same install with `wget`, if that is the downloader the host has:
+
+```sh
+wget -qO- https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh
 ```
 
 Windows PowerShell:
@@ -30,9 +51,26 @@ The installers download the release for your platform, verify its SHA-256
 digest, and install it for the current user. Open a new terminal if `tan` is not
 immediately on `PATH`.
 
-Use `--system` on Unix or `-System` on Windows for a system-wide install. See
-[`docs/release-contract.md`](docs/release-contract.md) for asset names, manual
-verification, and OS support.
+That prerequisite list is the whole of it, and it is deliberately shorter than
+the one a *build* needs: the release asset is a self-contained freeze, so the
+installed `tan` runs on a host with no `python3`, no `git` and no compiler --
+`tan --version` and `tan doctor` both work there. Building firmware needs more;
+see [What a build needs](#what-a-build-needs) below.
+
+For a system-wide install, pass `--system` (Unix) or `-System` (Windows)
+through to the script -- piping straight into `sh` or `iex` swallows a bare
+`--system`/`-System` before the installer ever sees it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh -s -- --system
+```
+
+```powershell
+&([scriptblock]::Create((irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1))) -System
+```
+
+See [`docs/release-contract.md`](docs/release-contract.md) for asset names,
+manual verification, and OS support.
 
 The v0.5 release publishes four archives:
 
@@ -73,6 +111,30 @@ python3 -m pip install "./python[monitor]"
 on npm. The `alp-tan-cli` crate on crates.io is a stale v0.4-era Rust CLI, no
 longer built from this repository and not the current program. Use a GitHub
 release or a source checkout.
+
+### What a build needs
+
+Getting `tan` onto the host and building firmware with it are different sets
+of tools, and only the first one is short. A build needs, on `PATH`: `git`,
+`cmake`, `python3`, `ninja`, `xz` and `wget` on Linux; `git`, `cmake`,
+`python3` and `ninja` on macOS. Beyond that list, `west sdk install` also needs
+`file`, and on Debian/Ubuntu `tan bootstrap` cannot create its workspace
+virtual environment until `python3-venv` is installed.
+
+Do not assemble that list by hand. `tan doctor` reads it from the SDK's own
+`metadata/bootstrap.json`, so it stays correct when the SDK changes it, and it
+names what is missing on *this* host together with the command that fixes it:
+
+```text
+bootstrap.prerequisites-missing: missing from PATH: cmake, ninja
+doctor.zephyr-sdk: Zephyr SDK toolchain not detected (ZEPHYR_SDK_INSTALL_DIR unset)
+                   -- from an initialised west workspace, run `west sdk install`
+doctor.west-resolved: west resolved neither through the workspace venv nor PATH
+                   -- no build slice can be executed. Run `tan bootstrap`
+```
+
+`tan doctor` needs none of those tools itself, so run it first, on the bare
+host, rather than guessing.
 
 ## Quickstart
 
@@ -129,6 +191,15 @@ explicitly:
 tan bootstrap --sdk-root ./alp-sdk --workspace /path/to/alp-workspace
 ```
 
+`--workspace` does not simply relocate where the workspace metadata is
+written: the west topdir is always the checkout's parent, so this **moves**
+the `alp-sdk` checkout itself to `/path/to/alp-workspace/alp-sdk` and updates
+the machine-global `~/.alp/sdk-default` pointer to it. Run this before
+anything else that references `--sdk-root ./alp-sdk` by its old path, or
+those calls stop resolving; if a project's `.alp/sdk-path` already pins the
+old location, re-run `tan init`/`tan bootstrap` from that project after the
+move.
+
 ## Common commands
 
 | Task | Command |
@@ -147,7 +218,8 @@ tan bootstrap --sdk-root ./alp-sdk --workspace /path/to/alp-workspace
 | Generate debugger settings | `tan debug-config` |
 | Run with Renode | `tan renode` |
 | List examples and presets | `tan examples`, `tan presets` |
-| Explain resolved project settings | `tan explain` |
+| Explain resolved project settings | `tan inspect` |
+| Explain a template or generation target | `tan explain` |
 | Show help | `tan <command> --help` |
 
 On a multi-core SoM, `debug-config` needs `--core <name>` to pick a target;

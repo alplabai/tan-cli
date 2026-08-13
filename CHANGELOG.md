@@ -3059,7 +3059,7 @@ All notable changes to `tan` are documented here. Format follows
 
 
 
-## [0.5.1] — 2026-08-04
+## [0.5.1] — 2026-08-05
 
 ### Fixed
 
@@ -3562,7 +3562,8 @@ release.yml extracts the notes by an exact `^## \[<tag minus v>\]` match, so a
   tan-cli#427, which tracks the flags themselves, and the message no longer
   names a release at all: it said "deferred to v0.6.0" while the release it
   meant was renumbered to 0.5.0, and a refusal that promises a version is a
-  claim this port cannot keep true.- **Two SDK discovery ladders answered different checkouts from one directory
+  claim this port cannot keep true.
+- **Two SDK discovery ladders answered different checkouts from one directory
   and both reported `sourceTier: "discovery"`, so nothing on the wire said
   which one had answered** (tan-cli#407). In a workspace holding both a child
   `<ws>/alp-sdk` — what `tan bootstrap` clones — and a lateral `../alp-sdk`,
