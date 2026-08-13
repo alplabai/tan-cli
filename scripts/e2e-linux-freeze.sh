@@ -63,8 +63,23 @@ PYTHON="$PY" VIRTUAL_ENV="$TAN_CHECKOUT/python/.venv-build" \
     echo "         over-ceiling build quarantines only dist/tan.tar.gz)"
     exit 2
   }
-if [ -x dist/tan/tan ]; then
-  echo "  freeze OK: $(dist/tan/tan --version)"
-else
+if [ ! -x dist/tan/tan ]; then
   echo "  ABORT: dist/tan/tan missing after build"; exit 2
 fi
+# `-x` alone is not a freeze that WORKS: it passes on the PyInstaller
+# bootloader whatever state the app inside it is in. A `.venv-build` carrying
+# PyInstaller but not tan's own runtime dependencies produces a tree that dies
+# `ModuleNotFoundError: No module named 'typer'` on every invocation, and this
+# gate used to read the version inside a command substitution -- whose non-zero
+# status is discarded -- so it printed `freeze OK:` with an empty version and
+# returned 0 (tan-cli#717). Same shape as tan-cli#500 three lines above: the
+# fix there made build_binary.sh unpiped so its status is read; the --version
+# call kept the defect. The tree then goes to e2e-container.sh as a green
+# input.
+FREEZE_VERSION=$(dist/tan/tan --version 2>&1); vrc=$?
+if [ "$vrc" -ne 0 ] || [ -z "$FREEZE_VERSION" ]; then
+  echo "  ABORT: dist/tan/tan --version exited $vrc -- the freeze is not runnable"
+  printf '%s\n' "$FREEZE_VERSION" | sed 's/^/         /'
+  exit 2
+fi
+echo "  freeze OK: $FREEZE_VERSION"

@@ -64,6 +64,12 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- tan-cli#699 followup: correct false operator-facing off-core claims + stale present-tense oracle references in flash_plan.py/flash_cmd.py comments
     - tan/commands/flash_cmd.py: 3923 -> 3927
     - tan/core/flash_plan.py: 3112 -> 3127
+- 2026-08-13 -- tan-cli#560: buildplan.py/orchestrator.py west build/ level port, zephyr_board.py AEN LOG_MODE_MINIMAL port (tan-cli#690), template.py pin-doc collision guard + scaffold stale-comment rewrite port (alp-sdk#1394/#1399/#1400) -- all four SDK pins moved to d00dbdc1
+    - tan/planner/template.py: 1329 -> 1436
+    - tan/planner/zephyr_board.py: 1372 -> 1433
+    - function_count_budget: 251 -> 254
+- 2026-08-13 -- tan-cli#560 review: correct the flash_plan.py resolve_artefact_path docstring's now-stale claim about the plan's artifacts block (Major 5)
+    - tan/core/flash_plan.py: 3079 -> 3083
 - 2026-08-13 -- tan-cli#697: cross-drive project/workspace refusal (execute.py's _cross_drive_source_refusal + build_cmd.py's _cross_drive_issues promotion)
     - tan/commands/build/execute.py: 1598 -> 1687
     - tan/commands/build_cmd.py: 2082 -> 2107
@@ -76,3 +82,12 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/clean_cmd.py: 1098 -> 1110
     - tan/commands/doctor_cmd.py: 3920 -> 3925
     - tan/commands/generate_cmd.py: 1312 -> 1348
+- 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build/execute.py: 1598 -> 1643
+    - tan/commands/build_cmd.py: 2082 -> 2106
+    - tan/planner/loader.py: 1251 -> 1254
+- 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/core/flash_plan.py: 3127 -> 3131
+    - tan/planner/template.py: 1329 -> 1436
+    - tan/planner/zephyr_board.py: 1372 -> 1433
+    - function_count_budget: 251 -> 254
