@@ -104,15 +104,25 @@ release or a source checkout.
 ### What a build needs
 
 Getting `tan` onto the host and building firmware with it are different sets
-of tools, and only the first one is short. A build needs, on `PATH`: `git`,
-`cmake`, `python3`, `ninja`, `xz` and `wget` on Linux; `git`, `cmake`,
-`python3` and `ninja` on macOS. Beyond that list, `west sdk install` also needs
-`file`, and on Debian/Ubuntu `tan bootstrap` cannot create its workspace
-virtual environment until `python3-venv` is installed.
+of tools, and only the first one is short. A build needs, on `PATH`:
 
-Do not assemble that list by hand. `tan doctor` reads it from the SDK's own
-`metadata/bootstrap.json`, so it stays correct when the SDK changes it, and it
-names what is missing on *this* host together with the command that fixes it:
+- **Linux:** `git`, `cmake`, `python3`, `ninja`, `xz`, `wget`.
+- **macOS:** `git`, `cmake`, `python3`, `ninja`.
+- **Windows:** TODO(#698) -- this list has not been derived from a real
+  Windows build yet. Do not assume the Linux list carries over as-is (for
+  example, `xz` and `wget` may not be the right entries, and Windows has no
+  direct equivalent of Debian/Ubuntu's `python3-venv` package). Until this row
+  is filled in, treat `tan doctor` below as the authority for what a Windows
+  host is missing.
+
+Beyond that list, `west sdk install` also needs `file`, and on Debian/Ubuntu
+`tan bootstrap` cannot create its workspace virtual environment until
+`python3-venv` is installed.
+
+Do not assemble any of these lists by hand. `tan doctor` reads its checks from
+the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK
+changes it, and it names what is missing on *this* host -- Windows included --
+together with the command that fixes it:
 
 ```text
 bootstrap.prerequisites-missing: missing from PATH: cmake, ninja
@@ -123,7 +133,8 @@ doctor.west-resolved: west resolved neither through the workspace venv nor PATH
 ```
 
 `tan doctor` needs none of those tools itself, so run it first, on the bare
-host, rather than guessing.
+host, rather than guessing -- this holds on Windows exactly as it does on
+Linux and macOS.
 
 ## Quickstart
 
