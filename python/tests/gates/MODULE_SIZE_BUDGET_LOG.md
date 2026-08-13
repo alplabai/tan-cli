@@ -78,6 +78,9 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/clean_cmd.py: 1098 -> 1110
     - tan/commands/doctor_cmd.py: 3920 -> 3925
     - tan/commands/generate_cmd.py: 1312 -> 1348
+- 2026-08-13 -- tan-cli#720: accept --som/--sku as aliases on init, pinmux and new-som
+    - tan/commands/init_cmd.py: 1247 -> 1258
+    - tan/commands/new_som_cmd.py: 1353 -> 1361
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build/execute.py: 1598 -> 1643
     - tan/commands/build_cmd.py: 2082 -> 2106
