@@ -5403,9 +5403,11 @@ def test_explicit_zero_still_means_use_the_default():
 
 
 def test_pyyaml_absent_is_a_manifest_error_not_an_import_traceback(monkeypatch):
-    """tan declares no YAML dependency, so PyYAML can genuinely be missing. That
-    must surface as `flash.manifest-invalid` -- `flash` cannot pick a target
-    without the manifest, and silently flashing nothing is the worse outcome."""
+    """PyYAML is a declared base dependency, but a `--no-deps` install or a
+    broken venv can still lack it (this docstring previously claimed tan
+    declared no YAML dependency at all -- tan-cli#574). That must surface as
+    `flash.manifest-invalid` -- `flash` cannot pick a target without the
+    manifest, and silently flashing nothing is the worse outcome."""
     import builtins
 
     real_import = builtins.__import__
