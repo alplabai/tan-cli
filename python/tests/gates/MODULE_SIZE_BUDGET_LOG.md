@@ -81,6 +81,9 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- tan-cli#719: flash_cmd.py gained the run-level unconfirmed-flash verdict and the --confirm flag; flash_plan.py gained CONFIRM_REMEDY/confirm_gate_note, the single source for the confirm-gate remedy
     - tan/commands/flash_cmd.py: 3922 -> 3966
     - tan/core/flash_plan.py: 3079 -> 3102
+- 2026-08-13 -- tan-cli#720: accept --som/--sku as aliases on init, pinmux and new-som
+    - tan/commands/init_cmd.py: 1247 -> 1258
+    - tan/commands/new_som_cmd.py: 1353 -> 1361
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build/execute.py: 1598 -> 1643
     - tan/commands/build_cmd.py: 2082 -> 2106

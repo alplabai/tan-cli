@@ -430,8 +430,12 @@ def pinmux(
     sku: str = typer.Option(
         None,
         "--sku",
+        # tan-cli#720: `--som` accepted as an alias -- `tan init` spells this
+        # same value `--som`, and being rejected here for the flag `init` just
+        # taught is the trap this closes.
+        "--som",
         metavar="SKU",
-        help="SoM SKU to resolve the pinmux family from (e.g. `E1M-AEN701`).",
+        help="SoM SKU to resolve the pinmux family from (e.g. `E1M-AEN701`) (alias: --som).",
     ),
     board_yaml: str = typer.Option(
         None,
