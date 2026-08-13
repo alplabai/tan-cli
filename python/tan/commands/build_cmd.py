@@ -85,7 +85,6 @@ from pathlib import Path
 import typer
 
 from tan.commands.build.execute import (
-    _CROSS_DRIVE_MSG,
     KNOWN_BACKENDS,
     SliceOutcome,
     execute_slices,
@@ -107,7 +106,7 @@ from tan.commands.sdk_cmd import (
     resolve_sdk_tiered,
 )
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
-from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
+from tan.core.plan_exec import CROSS_DRIVE_MSG, PolicyAction, normalize_path, resolve_action
 from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT
 from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
@@ -1329,8 +1328,8 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
 
 
 def _cross_drive_issues(outcomes: list[SliceOutcome]) -> list[Issue]:
-    """tan-cli#697: promote `execute.py`'s `_cross_drive_source_refusal`
-    refusal -- matched on its own `_CROSS_DRIVE_MSG` marker, same idiom as
+    """tan-cli#697: promote `tan.core.plan_exec.cross_drive_source_refusal`'s
+    refusal -- matched on its own `CROSS_DRIVE_MSG` marker, same idiom as
     `_missing_tool_issues` above -- from a per-slice `reason` into a coded
     top-level `issues[]` entry. Without this the envelope carried only the
     generic `build.slice-failed` header (`_build`, below) for a cross-drive
@@ -1341,7 +1340,7 @@ def _cross_drive_issues(outcomes: list[SliceOutcome]) -> list[Issue]:
     above it in `execute.py`), not something `executionPolicy` governs."""
     issues = []
     for outcome in outcomes:
-        if outcome.message is None or _CROSS_DRIVE_MSG not in outcome.message:
+        if outcome.message is None or CROSS_DRIVE_MSG not in outcome.message:
             continue
         issues.append(Issue("build.cross-drive-workspace", "error", outcome.message))
     return issues

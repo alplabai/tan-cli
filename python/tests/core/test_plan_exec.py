@@ -3,15 +3,18 @@ import os
 from pathlib import Path
 
 from tan.core.plan_exec import (
+    CROSS_DRIVE_MSG,
     ExecutionPolicy,
     PolicyAction,
     SdkStampAction,
     apply_env_append,
     assemble_slice_env,
+    cross_drive_source_refusal,
     normalize_path,
     resolve_action,
     sdk_stamp_action,
     sdk_stamp_key,
+    west_build_source_dir,
 )
 
 SEP = os.pathsep
@@ -129,3 +132,35 @@ def test_normalize_path_treats_a_relative_and_absolute_form_of_the_same_root_as_
     via_relative = normalize_path(workspace_root / "../alp-sdk")
 
     assert via_absolute == via_relative == Path("/ws/alp-sdk")
+
+
+# ---------------------------------------------------------- tan-cli#697 -----
+# `west_build_source_dir`/`cross_drive_source_refusal`: see
+# `tests/commands/test_execute.py`'s own tan-cli#697 section for the
+# refusal's end-to-end/real-oracle-argv coverage (workspace resolution,
+# `_pin_west_workspace` interaction, the spawn-refusal proof). These are the
+# narrow, direct unit tests for the two pure functions themselves, matching
+# this file's own convention of one section per `plan_exec` function.
+
+
+def test_west_build_source_dir_locates_the_token_after_dashb():
+    args = ["build", "-b", "board", "/app", "--", "-DPython3_EXECUTABLE=/py"]
+    assert west_build_source_dir(args) == "/app"
+
+
+def test_west_build_source_dir_is_none_without_a_board_flag():
+    assert west_build_source_dir(["build", "/app"]) is None
+
+
+def test_cross_drive_source_refusal_fires_on_a_real_zephyr_argv_tail():
+    """The regression this fix exists for: `args[-1]` (the first, wrong,
+    implementation) lands on the trailing CMake define every real zephyr
+    slice's command carries, never the source dir -- proven here by feeding
+    the exact tail shape `orchestrator.py` emits (`--`, then
+    `-DPython3_EXECUTABLE=...`)."""
+    args = ["build", "-b", "board", "E:/proj/app", "--", "-DPython3_EXECUTABLE=C:/py"]
+    refusal = cross_drive_source_refusal(Path("C:/ws"), args)
+    assert refusal is not None
+    assert CROSS_DRIVE_MSG in refusal.message
+    assert "E:/proj/app" in refusal.message
+    assert "E:/proj/app" not in refusal.manifest_message

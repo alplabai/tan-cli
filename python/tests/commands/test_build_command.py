@@ -2190,19 +2190,21 @@ def test_build_help_carries_no_port_archaeology():
 
 
 # ---------------------------------------------------------- tan-cli#697 -----
-# `execute.py`'s `_cross_drive_source_refusal` (see `test_execute.py` for the
-# detection/refusal proof) leaves its coded reason only in `data.slices[]
-# .reason`; `_cross_drive_issues` promotes it into a top-level, CODED
-# `issues[]` entry -- the half of the fix that answers the issue's "the
-# envelope carries a specific code, not a bare `build.slice-failed`"
-# acceptance line. Narrow, direct unit test of the promoter itself (same
-# level `test_execute.py` already proves the message it matches on), rather
-# than a full `tan build` subprocess run: reproducing the underlying
-# `ValueError` needs a real two-Windows-drive filesystem this box does not
-# have (see this fix's commit message), and `execute_slices` cannot itself
-# be driven to a REAL cross-drive refusal from a real POSIX `west_workspace_
-# dir` resolution -- only a monkeypatched one, which a subprocess-spawned
-# CLI test cannot install across the process boundary.
+# `tan.core.plan_exec.cross_drive_source_refusal` (see `test_execute.py` and
+# `test_plan_exec.py` for the detection/refusal proof) leaves its coded
+# reason only in `data.slices[].reason`; `_cross_drive_issues` promotes it
+# into a top-level, CODED `issues[]` entry -- the half of the fix that
+# answers the issue's "the envelope carries a specific code, not a bare
+# `build.slice-failed`" acceptance line. The first two tests below are a
+# narrow, direct unit test of the promoter itself (same level
+# `test_execute.py` already proves the message it matches on), rather than a
+# full `tan build` subprocess run: reproducing the underlying `ValueError`
+# needs a real two-Windows-drive filesystem this box does not have, and
+# `execute_slices` cannot itself be driven to a REAL cross-drive refusal
+# from a real POSIX `west_workspace_dir` resolution -- only a monkeypatched
+# one, which a subprocess-spawned CLI test cannot install across the process
+# boundary. The third test below closes that promoter-is-actually-WIRED gap
+# with an in-process (not subprocess) `_build` call instead.
 
 
 def test_cross_drive_issues_promotes_the_refusal_to_a_coded_top_level_issue():
@@ -2238,3 +2240,68 @@ def test_cross_drive_issues_ignores_an_unrelated_failure():
     ]
 
     assert _cross_drive_issues(outcomes) == []
+
+
+def test_build_cross_drive_refusal_reaches_the_envelope_as_a_coded_issue(project, monkeypatch):
+    """`_build`-LEVEL, not just `_cross_drive_issues` in isolation: proves
+    `issues.extend(_cross_drive_issues(outcomes))` (`_build`, this module) is
+    actually WIRED into the envelope's own `issues[]`, not merely correct in
+    isolation. Deleting that one line left BOTH unit tests above green
+    (`_cross_drive_issues` itself was never touched, just never called from
+    `_build`) and the rest of this module's suite passing at 0 failures --
+    measured by actually deleting it and re-running this file.
+
+    `_build` is called IN-PROCESS (not through `run_tan`'s subprocess): a
+    subprocess boundary cannot have `west_workspace_dir` monkeypatched into
+    it, and forcing a REAL two-different-Windows-drive layout from a POSIX
+    test host is exactly what faking that function returns for. Same
+    reasoning, one layer down, as `test_execute.py`'s own
+    `test_cross_drive_workspace_is_refused_before_spawn`."""
+    import tan.commands.build.execute as execute_module
+    from tan.commands.build_cmd import _MODE_NATIVE, _build
+
+    # `appDir` (the plan field `_missing_app_dirs` checks for real, ahead of
+    # dispatch -- tan-cli#483) must be a REAL directory on THIS host, or the
+    # slice is held back before `execute_slices` (and this fix's own
+    # cross-drive check) ever sees it. `command.args`' own source-dir
+    # positional is what `cross_drive_source_refusal` inspects, and stays
+    # the synthetic Windows path under test -- the two are the same
+    # resolved path on a real SDK-emitted plan; decoupled here only because
+    # this box cannot create a real `E:\` directory to satisfy both checks
+    # with one path.
+    real_app_dir = project / "app"
+    real_app_dir.mkdir()
+    zephyr = next(
+        s for s in real_plan("multicore_rpmsg-aen")["slices"] if s["backend"] == "zephyr"
+    )
+    args = list(zephyr["command"]["args"])
+    args[3] = "E:/proj/app"
+    plan = _app_dir_plan(
+        _app_dir_slice(
+            "m55_he", "zephyr", str(real_app_dir),
+            command={"tool": "west", "args": args, "cwd": None},
+        )
+    )
+    plan_path = write_plan(project, plan)
+
+    monkeypatch.setattr(execute_module, "west_workspace_dir", lambda *a, **k: Path("C:/ws"))
+
+    def _must_not_spawn(*a, **k):
+        raise AssertionError("west must never be spawned for a refused cross-drive slice")
+
+    monkeypatch.setattr(execute_module.subprocess, "Popen", _must_not_spawn)
+
+    _exit_code, _data, issues = _build(
+        mode=_MODE_NATIVE,
+        plan_from=str(plan_path),
+        build_root=str(project / "build"),
+        sdk_root=None,
+        sdk_root_for_stamp=None,
+        board_yaml=None,
+    )
+
+    codes = [i.code for i in issues]
+    assert "build.cross-drive-workspace" in codes, issues
+    message = next(i.message for i in issues if i.code == "build.cross-drive-workspace")
+    assert "`C:`" in message
+    assert "`E:`" in message

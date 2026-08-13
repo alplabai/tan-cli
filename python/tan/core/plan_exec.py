@@ -2,6 +2,7 @@
 """Pure build-plan execution decisions (ADR-0020): turn the plan's
 envAppendPath and executionPolicy into concrete env values and skip/fail
 dispositions. No IO, no spawning -- the executor calls these and owns the IO."""
+import ntpath
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -160,3 +161,113 @@ def sdk_stamp_key(sdk_root: str | None, sdk_commit: str | None) -> str | None:
         return None
     commit = sdk_commit.strip() if sdk_commit is not None else ""
     return f"{sdk_root}@{commit}" if commit else sdk_root
+
+
+def west_build_source_dir(args: Sequence[str]) -> str | None:
+    """The SOURCE_DIR positional `west build`'s own `_sanity_check_source_dir`
+    resolves -- `None` when `args` carries no `-b`/`--board` flag (a shape
+    `orchestrator.py` never emits for a `west build` slice).
+
+    `orchestrator.py` always emits the source dir as the token immediately
+    following `-b`'s own value: `cmd = ["west", "build", "-b", slice_.board,
+    app_dir]` (`tan.planner.orchestrator`, the `zephyr` backend's command
+    builder). That is NOT the same as `args[-1]`, the guess this replaces --
+    a real zephyr slice's command tail is never just that four-element
+    prefix. `cmd += ["--", *defines]` always appends at least one CMake
+    define (`defines` starts life as `["-DPython3_EXECUTABLE=${PYTHON}"]`
+    and is never emptied), and a sysbuild slice additionally inserts
+    `--sysbuild` between the source dir and that `--` separator -- so
+    neither "the last token" nor "the last token before `--`" is safe.
+    Anchoring on `-b`'s own position instead matches exactly how the
+    emitter places the source dir, regardless of what is appended after
+    it."""
+    for i, token in enumerate(args):
+        if token in ("-b", "--board") and i + 2 < len(args):
+            return args[i + 2]
+    return None
+
+
+def _build_dir_overridden(args: Sequence[str]) -> bool:
+    """Verbatim mirror of `tan.commands.build.manifest.build_dir_overridden`
+    -- duplicated, not imported: `tan/core` is pure/dependency-free and must
+    not import from `tan/commands` (the reverse of the one real dependency
+    direction in this codebase). Keep the two definitions in sync by hand if
+    `west build`'s own build-dir flag set ever changes."""
+    return any(a == "-d" or a == "--build-dir" or a.startswith("--build-dir=") for a in args)
+
+
+#: tan-cli#697. `_pin_west_workspace` (`tan.commands.build.execute`) redirects
+#: `west build`'s own spawned cwd to the resolved Zephyr workspace so west's
+#: ancestor-`.west` walk lands on the right one -- but `west build`'s own
+#: source-directory sanity check (`_sanity_check_source_dir`, upstream
+#: `scripts/west_commands/build.py:534`, frozen third-party code this repo
+#: does not own) then calls `os.path.relpath(self.source_dir)` with NO
+#: explicit `start`, which defaults to `os.getcwd()` -- the pinned
+#: WORKSPACE, not the slice's own project. On Windows, `os.path.relpath`
+#: RAISES rather than returning a path when its two arguments live on
+#: different drive letters (`ValueError: path is on mount 'E:', start on
+#: mount 'C:'`, reproduced verbatim in the issue). There is no fix reachable
+#: from tan's own side of the seam -- `west` is an upstream pip dependency,
+#: not `crates/`/`tan/planner` -- so the only correct move is to REFUSE,
+#: with a coded reason naming both mounts, before spawning a process
+#: already known to crash.
+CROSS_DRIVE_MSG = "west build cannot span two Windows drives"
+
+
+@dataclass(frozen=True)
+class CrossDriveRefusal:
+    #: Full explanation, naming both mounts and both paths -- this run's
+    #: stdout and the envelope's `data.slices[].reason`.
+    message: str
+    #: Short form for `system-manifest.yaml` `slices[].reason` -- names both
+    #: mounts, drops the absolute paths and the upstream-mechanism
+    #: explanation. Same split, for the same reason, as the missing-tool
+    #: refusal's own `manifest_message` (`tan.commands.build.execute`): a
+    #: build ARTEFACT that outlives the run and gets forwarded should not
+    #: carry a customer's private directory layout.
+    manifest_message: str
+
+
+def cross_drive_source_refusal(
+    workspace_dir: Path | None, args: Sequence[str]
+) -> CrossDriveRefusal | None:
+    """`None` when `_pin_west_workspace` is safe to redirect `west build`'s
+    cwd to `workspace_dir`; else the tan-cli#697 refusal, naming both
+    mounts, for a slice that pin would otherwise send straight into the
+    `ValueError` [`CROSS_DRIVE_MSG`] documents.
+
+    The no-op conditions mirror `_pin_west_workspace`'s own guard verbatim:
+    a slice that pin never rewrites can never hit the crash the pin
+    introduces, so it must never be refused here either.
+
+    `ntpath.splitdrive`, never `os.path.splitdrive`: the two-drive-letter
+    shape this exists to catch is a WINDOWS filesystem fact, independent of
+    whatever platform is running this check right now. `ntpath` parses
+    `C:\\...`/`C:/...` identically on every host -- which is what makes
+    this function exercisable (and unit-tested) on a POSIX box with no
+    two-drive Windows filesystem to reproduce against, unlike the crash it
+    heads off, which only ever fires on Windows itself. Either side missing
+    a drive letter (a POSIX path, or a Windows UNC share) returns `None`,
+    not a refusal -- that combination is not the shape the issue reproduced,
+    and a false "no refusal" there only leaves west to run exactly as it
+    does today, never a NEW failure this function introduces. The
+    comparison itself is case-insensitive (`C:` and `c:` name the same
+    mount)."""
+    if workspace_dir is None or not args or args[0] != "build" or _build_dir_overridden(args):
+        return None
+    source = west_build_source_dir(args)
+    if source is None:
+        return None
+    ws_drive, _ = ntpath.splitdrive(str(workspace_dir))
+    src_drive, _ = ntpath.splitdrive(source)
+    if not ws_drive or not src_drive or ws_drive.lower() == src_drive.lower():
+        return None
+    message = (
+        f"{CROSS_DRIVE_MSG} -- the resolved west workspace `{workspace_dir}` is on "
+        f"mount `{ws_drive}`, but this slice's own project source directory `{source}` "
+        f"is on mount `{src_drive}`. west build's own source-directory check "
+        f"(`os.path.relpath`, upstream `scripts/west_commands/build.py`) raises rather "
+        f"than resolving a path across two Windows drives -- move the project or the "
+        f"`tan bootstrap`-created workspace so both live on the same drive."
+    )
+    return CrossDriveRefusal(message, f"{CROSS_DRIVE_MSG} ({ws_drive} vs {src_drive})")

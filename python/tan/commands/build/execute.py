@@ -86,7 +86,6 @@ it is still safe against the R1 staleness defect the Rust oracle's own module
 doc records (`decide_run_action` never consults it unless `build_ok`, and
 `build_ok` cannot be `True` without `execute_slices` having just run to
 completion in the SAME synchronous call)."""
-import ntpath
 import os
 import queue
 import shutil
@@ -112,10 +111,12 @@ from tan.commands.build.manifest import (
 )
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.core.plan_exec import (
+    CROSS_DRIVE_MSG,
     ExecutionPolicy,
     PolicyAction,
     SdkStampAction,
     assemble_slice_env,
+    cross_drive_source_refusal,
     resolve_action,
     sdk_stamp_action,
     sdk_stamp_key,
@@ -751,71 +752,19 @@ def _maybe_reset_stale_configure_cache(
     ]
 
 
-#: tan-cli#697. `_pin_west_workspace` (below) pins `west build`'s own SPAWNED
-#: cwd to the resolved workspace (tan-cli#307) so west's ancestor-`.west`
-#: walk lands on the right one -- but `west build`'s own source-directory
-#: sanity check (`_sanity_check_source_dir`, upstream `scripts/west_commands/
-#: build.py:534`, frozen third-party code this repo does not own) then calls
-#: `os.path.relpath(self.source_dir)` with NO explicit `start`, which
-#: defaults to `os.getcwd()` -- the pinned WORKSPACE, not the slice's own
-#: project. On Windows, `os.path.relpath` RAISES rather than returning a path
-#: when its two arguments live on different drive letters (`ValueError: path
-#: is on mount 'E:', start on mount 'C:'`, reproduced verbatim in the issue).
-#: There is no fix reachable from tan's own side of the seam -- `west` is an
-#: upstream pip dependency, not `crates/`/`tan/planner` -- so the only
-#: correct move is to REFUSE, with a coded reason naming both mounts, before
-#: spawning a process already known to crash. Matched (not imported) by
-#: `build_cmd._cross_drive_issues` to promote this from a per-slice `reason`
-#: into a coded top-level `issues[]` entry -- same idiom as `_missing_tool_
-#: issues`' `` tool `...` not found `` text match, immediately below in this
-#: same file's `_ZEPHYR_SDK_MISSING_MSG`/`_WEST_NO_WORKSPACE_MSG` pattern.
-_CROSS_DRIVE_MSG = "west build cannot span two Windows drives"
-
-
-def _cross_drive_source_refusal(workspace_dir: Path | None, args: Sequence[str]) -> str | None:
-    """`None` when `_pin_west_workspace` is safe to redirect `west build`'s
-    cwd to `workspace_dir` (below); else the tan-cli#697 refusal message,
-    naming both mounts, for a slice this pin would otherwise send straight
-    into the `ValueError` `_CROSS_DRIVE_MSG` documents.
-
-    The three no-op conditions mirror `_pin_west_workspace`'s own guard
-    verbatim, in the same order: a slice this pin never rewrites can never
-    hit the crash the pin introduces, so it must never be refused here
-    either.
-
-    `west build`'s own positional source-directory argument is `args[-1]` --
-    the planner's `orchestrator.py` always appends the resolved, absolute
-    app dir last (`cmd = ["west", "build", "-b", ..., app_dir]`), and that
-    positional argument is exactly what `_pin_west_workspace` leaves
-    untouched at the tail of the rewritten argv.
-
-    `ntpath.splitdrive`, never `os.path.splitdrive`: the two-drive-letter
-    shape this exists to catch is a WINDOWS filesystem fact, independent of
-    whatever platform is running this check right now. `ntpath` parses
-    `C:\\...`/`C:/...` identically on every host -- which is what makes this
-    function exercisable (and unit-tested) on a POSIX box with no two-drive
-    Windows filesystem to reproduce against, unlike the crash it heads off,
-    which only ever fires on Windows itself. Either side missing a drive
-    letter (a POSIX path, or a Windows UNC share) returns `None`, not a
-    refusal -- that combination is not the shape the issue reproduced, and a
-    false "no refusal" there only leaves west to run exactly as it does
-    today, never a NEW failure this function introduces. The comparison
-    itself is case-insensitive (`C:` and `c:` name the same mount)."""
-    if workspace_dir is None or not args or args[0] != "build" or build_dir_overridden(args):
-        return None
-    source = args[-1]
-    ws_drive, _ = ntpath.splitdrive(str(workspace_dir))
-    src_drive, _ = ntpath.splitdrive(source)
-    if not ws_drive or not src_drive or ws_drive.lower() == src_drive.lower():
-        return None
-    return (
-        f"{_CROSS_DRIVE_MSG} -- the resolved west workspace `{workspace_dir}` is on "
-        f"mount `{ws_drive}`, but this slice's own project source directory `{source}` "
-        f"is on mount `{src_drive}`. west build's own source-directory check "
-        f"(`os.path.relpath`, upstream `scripts/west_commands/build.py`) raises rather "
-        f"than resolving a path across two Windows drives -- move the project or the "
-        f"`tan bootstrap`-created workspace so both live on the same drive."
-    )
+# tan-cli#697. The refusal itself -- `cross_drive_source_refusal` -- is pure
+# argv/path logic with no IO, so it lives in `tan.core.plan_exec` (imported
+# above) rather than here, matching this repo's own convention of keeping
+# pure decisions out of the command/IO module. `CROSS_DRIVE_MSG` (imported
+# above as well) is matched, not imported, by `build_cmd._cross_drive_issues`
+# to promote a refused slice's `reason` into a coded top-level `issues[]`
+# entry -- same idiom as `_missing_tool_issues`' `` tool `...` not found ``
+# text match, immediately below in this same file's `_ZEPHYR_SDK_MISSING_MSG`
+# /`_WEST_NO_WORKSPACE_MSG` pattern. See `cross_drive_source_refusal`'s own
+# docstring (`tan/core/plan_exec.py`) for the no-op conditions (mirroring
+# `_pin_west_workspace`'s own guard, below) and why `args[-1]` -- this
+# function's first, wrong, implementation -- never located the real source
+# dir on a plan `orchestrator.py` actually emits.
 
 
 def _pin_west_workspace(
@@ -1219,14 +1168,21 @@ def execute_slices(
         # `executionPolicy.missingTool`'s default-skip on a host where
         # `west` is ALSO not on PATH.
         if is_west:
-            cross_drive_refusal = _cross_drive_source_refusal(workspace_dir, sl.command.args)
+            cross_drive_refusal = cross_drive_source_refusal(workspace_dir, sl.command.args)
             if cross_drive_refusal is not None:
                 outcomes.append(
                     SliceOutcome(
                         sl.core_id,
                         "failed",
                         None,
-                        f"slice `{sl.core_id}` refused before build: {cross_drive_refusal}",
+                        f"slice `{sl.core_id}` refused before build: "
+                        f"{cross_drive_refusal.message}",
+                        # tan-cli#697 review: a short form for
+                        # `system-manifest.yaml` `slices[].reason` -- see
+                        # [`SliceOutcome.manifest_message`]'s own docstring;
+                        # same split the missing-tool refusal below already
+                        # makes.
+                        manifest_message=cross_drive_refusal.manifest_message,
                     )
                 )
                 continue
