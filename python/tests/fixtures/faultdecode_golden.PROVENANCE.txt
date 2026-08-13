@@ -76,14 +76,27 @@ gave one, so those two words fell past every branch and landed on `FORCED`:
 is FALSE: LSPERR is set, so its own status bits are demonstrably not clear.
 
 tan now (a) gives LSPERR/MLSPERR real root-cause branches and (b) makes
-`FORCED` the headline only when CFSR names no cause at all. alp-sdk's
-`scripts/alp_cli/faultdecode.py` still does neither. That is a deliberate,
-maintainer-decided divergence, reserved for exactly this decision in tan-cli#539
-and now taken; `tan/core/faultdecode.py::_root_cause`'s docstring records it at
-the source, and `tests/core/test_faultdecode.py::test_decode_diverges_from_the_
-sdk_original_only_where_tan_cli_616_declares` polices it against a live alp-sdk
-checkout — a mismatch OUTSIDE the declared classes still fails. THE UPSTREAM
-SHOULD FOLLOW: alp-sdk carries the same defect and nothing here fixes it there.
+`FORCED` the headline only when CFSR names no cause at all. At the time this
+divergence was recorded, alp-sdk's `scripts/alp_cli/faultdecode.py` did
+neither — a deliberate, maintainer-decided divergence, reserved for exactly
+this decision in tan-cli#539 and taken; `tan/core/faultdecode.py::_root_cause`'s
+docstring records it at the source.
+
+DIVERGENCE CLOSED (2026-08-13): alp-sdk dad5b35a ("fix(faultdecode): lead with
+the escalated fault, not the escalation", #1389; inside the tan-cli#560
+a3173305..d00dbdc1 pin range) adopted this fix verbatim — same guard (keyed on
+the flag's REGISTER, named `_cfsr_names_a_cause` on both sides), same branch
+order, LSPERR/MLSPERR placed LAST in the ladder on both sides. alp-sdk#1389's
+own commit message names this repo directly: "This mirrors tan-cli#619's
+deliberate divergence for the identical defect it ported from this file, per
+that PR's note that upstream should follow." THE UPSTREAM DID FOLLOW.
+`tests/core/test_faultdecode.py::test_decode_matches_the_sdk_original_byte_
+for_byte` (renamed from the `..._only_where_tan_cli_616_declares` name this
+note used to cite) went back to plain byte-equality against a live alp-sdk
+checkout — no declared-divergence classes left to carve out. The two
+decode_cases re-recorded below are, as of this pin, once again identical to
+what upstream itself now produces; they simply record how tan reached that
+answer first.
 
 Note what this file could NOT have caught, and still cannot
 -----------------------------------------------------------
