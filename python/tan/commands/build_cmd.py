@@ -85,6 +85,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build.execute import (
+    _CROSS_DRIVE_MSG,
     KNOWN_BACKENDS,
     SliceOutcome,
     execute_slices,
@@ -1327,6 +1328,25 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     return issues
 
 
+def _cross_drive_issues(outcomes: list[SliceOutcome]) -> list[Issue]:
+    """tan-cli#697: promote `execute.py`'s `_cross_drive_source_refusal`
+    refusal -- matched on its own `_CROSS_DRIVE_MSG` marker, same idiom as
+    `_missing_tool_issues` above -- from a per-slice `reason` into a coded
+    top-level `issues[]` entry. Without this the envelope carried only the
+    generic `build.slice-failed` header (`_build`, below) for a cross-drive
+    project/workspace layout, indistinguishable from any other build
+    failure to a JSON consumer that reads `issues[]` and never `data.
+    slices[].reason`. Always `failed`, never `skipped`: this refusal is a
+    hardcoded plan/host-layout defect (mirroring the unsafe-cwd escape
+    above it in `execute.py`), not something `executionPolicy` governs."""
+    issues = []
+    for outcome in outcomes:
+        if outcome.message is None or _CROSS_DRIVE_MSG not in outcome.message:
+            continue
+        issues.append(Issue("build.cross-drive-workspace", "error", outcome.message))
+    return issues
+
+
 def _toolchain_for_plan(plan_text: str) -> ToolchainResolution:
     """This host's `${TOOLCHAIN_ROOT}` -- resolved ONLY when `plan_text`
     actually names the token (tan-cli#547).
@@ -1598,6 +1618,11 @@ def _build(
     # (not `data.slices[]`) must still be able to tell "2 of 3 slices built"
     # from "3 of 3".
     issues.extend(_missing_tool_issues(plan, outcomes))
+    # tan-cli#697: named per cross-drive-refused slice, same reasoning as
+    # `_missing_tool_issues` immediately above -- a JSON consumer reading
+    # only `issues[]` must see the specific cause, not just the generic
+    # `build.slice-failed` header this promotion sits alongside.
+    issues.extend(_cross_drive_issues(outcomes))
     # The sdk-switch-pristine wipe (issue #52) must not be stderr-only in
     # JSON mode -- the VS Code extension only ever sees the envelope, not
     # `_stream`'s output. Verbatim oracle codes/severity

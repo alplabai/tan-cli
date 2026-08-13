@@ -56,3 +56,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build_cmd.py: 2074 -> 2082
     - tan/commands/doctor_cmd.py: 3920 -> 3925
+- 2026-08-13 -- tan-cli#697: cross-drive project/workspace refusal (execute.py's _cross_drive_source_refusal + build_cmd.py's _cross_drive_issues promotion)
+    - tan/commands/build/execute.py: 1598 -> 1687
+    - tan/commands/build_cmd.py: 2082 -> 2107

@@ -5,8 +5,8 @@
   "modules": {
     "tan/cli.py": 1008,
     "tan/commands/bootstrap_cmd.py": 3255,
-    "tan/commands/build/execute.py": 1598,
-    "tan/commands/build_cmd.py": 2082,
+    "tan/commands/build/execute.py": 1687,
+    "tan/commands/build_cmd.py": 2107,
     "tan/commands/clean_cmd.py": 1110,
     "tan/commands/debug_config_cmd.py": 1949,
     "tan/commands/diff_cmd.py": 882,

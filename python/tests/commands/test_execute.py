@@ -11,7 +11,13 @@ from pathlib import Path
 import pytest
 
 from tan.core.build_plan import parse_build_plan
-from tan.commands.build.execute import _pin_west_workspace, _resolve_tool, execute_slices
+from tan.commands.build.execute import (
+    _CROSS_DRIVE_MSG,
+    _cross_drive_source_refusal,
+    _pin_west_workspace,
+    _resolve_tool,
+    execute_slices,
+)
 from tan.commands.build.manifest import PostBuildManifest
 from tan.core.bootstrap import venv_layout
 from tan.core.system_manifest import parse_system_manifest
@@ -1301,6 +1307,137 @@ def test_pin_west_workspace_redirects_cwd_and_injects_the_original_build_dir(tmp
     new_cwd, new_args = _pin_west_workspace(cwd, args, workspace)
     assert new_cwd == workspace
     assert new_args == ["build", "-d", str(cwd / "build"), "-b", "board", "/app"]
+
+
+# ---------------------------------------------------------- tan-cli#697 -----
+# `_pin_west_workspace` (above) redirects `west build`'s own cwd to the
+# resolved workspace -- but `west build`'s OWN source-directory sanity check
+# then calls `os.path.relpath(self.source_dir)` with no explicit `start`,
+# which on Windows RAISES (rather than returning a path) when its two
+# arguments live on different drive letters. `_cross_drive_source_refusal`
+# heads that off by refusing BEFORE `west` is ever spawned. See that
+# function's own docstring for why `ntpath.splitdrive` makes this
+# exercisable here even though the crash it prevents only fires on Windows.
+
+
+def test_cross_drive_refusal_is_a_noop_when_no_workspace_resolved(tmp_path):
+    args = ["build", "-b", "board", "E:/proj/app"]
+    assert _cross_drive_source_refusal(None, args) is None
+
+
+def test_cross_drive_refusal_is_a_noop_for_a_non_build_verb(tmp_path):
+    args = ["flash", "--build-dir", "E:/proj/app/build"]
+    assert _cross_drive_source_refusal(Path("C:/ws"), args) is None
+
+
+def test_cross_drive_refusal_is_a_noop_when_the_plan_already_overrides_build_dir(tmp_path):
+    """Matches `_pin_west_workspace`'s own no-op for this shape: an explicit
+    `-d` means the pin never rewrites `cwd`, so west's own cwd never moves
+    to the (possibly different-drive) workspace in the first place -- there
+    is nothing for this refusal to head off."""
+    args = ["build", "-d", "elsewhere", "-b", "board", "E:/proj/app"]
+    assert _cross_drive_source_refusal(Path("C:/ws"), args) is None
+
+
+def test_cross_drive_refusal_is_a_noop_on_posix_paths(tmp_path):
+    """Neither side carries a Windows drive letter -- the crash this exists
+    to head off is a Windows-only fact, and a POSIX layout is never refused
+    over it."""
+    args = ["build", "-b", "board", "/proj/app"]
+    assert _cross_drive_source_refusal(Path("/ws"), args) is None
+
+
+def test_cross_drive_refusal_is_a_noop_when_both_sides_share_a_drive(tmp_path):
+    args = ["build", "-b", "board", "C:/proj/app"]
+    assert _cross_drive_source_refusal(Path("C:/ws"), args) is None
+
+
+def test_cross_drive_refusal_is_case_insensitive_on_the_drive_letter(tmp_path):
+    args = ["build", "-b", "board", "c:/proj/app"]
+    assert _cross_drive_source_refusal(Path("C:/ws"), args) is None
+
+
+def test_cross_drive_refusal_names_both_mounts(tmp_path):
+    args = ["build", "-b", "board", "E:/proj/app"]
+    message = _cross_drive_source_refusal(Path("C:/ws"), args)
+    assert message is not None
+    assert _CROSS_DRIVE_MSG in message
+    assert "`C:`" in message
+    assert "`E:`" in message
+    assert "C:/ws" in message
+    assert "E:/proj/app" in message
+
+
+def test_cross_drive_workspace_is_refused_before_spawn(tmp_path, monkeypatch):
+    """End to end through `execute_slices`, reproducing the mechanism (not
+    the literal Windows filesystem, which this box does not have): a
+    `west_workspace_dir` resolution that lands on a different DRIVE LETTER
+    than the plan's own source directory. Proves the REFUSAL, not merely a
+    message -- `subprocess.Popen` is monkeypatched to raise if `west` is
+    ever spawned, so the west subprocess that would have hit the real
+    `ValueError` (`scripts/west_commands/build.py:534`, upstream) never gets
+    the chance to; the raw traceback the issue reports has nothing left to
+    escape from."""
+    import tan.commands.build.execute as execute_module
+
+    monkeypatch.setattr(execute_module, "west_workspace_dir", lambda *a, **k: Path("C:/ws"))
+
+    def _must_not_spawn(*args, **kwargs):
+        raise AssertionError("west must never be spawned for a refused cross-drive slice")
+
+    monkeypatch.setattr(execute_module.subprocess, "Popen", _must_not_spawn)
+
+    cmd = '{"tool": "west", "args": ["build", "-b", "board", "E:/proj/app"], "cwd": null}'
+    out = execute_slices(
+        parse_build_plan(_plan(cmd)), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
+    )
+    assert out[0].status == "failed"
+    assert out[0].exit_code is None
+    assert _CROSS_DRIVE_MSG in out[0].message
+    assert "`C:`" in out[0].message
+    assert "`E:`" in out[0].message
+
+
+def test_cross_drive_refusal_reverts_to_a_generic_exit_code_message_pre_fix(tmp_path, monkeypatch):
+    """PROOF that the specific message is what this fix adds, not something
+    an unrelated code path already produced: with the refusal itself
+    disabled (simulating the pre-fix state), the same cross-drive plan spawns
+    `west` -- which here is a real, tiny stand-in that raises the exact
+    `ValueError` west's own `_sanity_check_source_dir` raises, so the
+    outcome degrades to the generic `terminated with exit code` message the
+    issue complains an operator cannot tell apart from any other failure."""
+    import tan.commands.build.execute as execute_module
+
+    fake_workspace = tmp_path / "ws"
+    fake_workspace.mkdir()
+    monkeypatch.setattr(execute_module, "west_workspace_dir", lambda *a, **k: fake_workspace)
+    monkeypatch.setattr(execute_module, "_cross_drive_source_refusal", lambda *a, **k: None)
+
+    fake_west = tmp_path / "fake-west"
+    fake_west.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "raise ValueError(\"path is on mount 'E:', start on mount 'C:'\")\n",
+        encoding="utf-8",
+    )
+    os.chmod(fake_west, 0o755)
+    monkeypatch.setattr(
+        execute_module, "west_program", lambda *a, **k: str(fake_west)
+    )
+    monkeypatch.setattr(
+        execute_module, "_resolve_tool",
+        lambda tool, env: execute_module._ToolResolution(str(fake_west), "n/a"),
+    )
+
+    cmd = '{"tool": "west", "args": ["build", "-b", "board", "E:/proj/app"], "cwd": null}'
+    out = execute_slices(
+        parse_build_plan(_plan(cmd)), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
+    )
+    assert out[0].status == "failed"
+    assert out[0].message.startswith(f"slice `c1` terminated with exit code:")
+    assert _CROSS_DRIVE_MSG not in out[0].message
 
 
 def _plant_spawnable_west(west_path: Path) -> None:

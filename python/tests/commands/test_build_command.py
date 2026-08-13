@@ -2187,3 +2187,54 @@ def test_build_help_carries_no_port_archaeology():
     # type, then refusing it at exit 1 is worse than naming it.
     assert "--verbose" in output
     assert "--non-interactive" in output
+
+
+# ---------------------------------------------------------- tan-cli#697 -----
+# `execute.py`'s `_cross_drive_source_refusal` (see `test_execute.py` for the
+# detection/refusal proof) leaves its coded reason only in `data.slices[]
+# .reason`; `_cross_drive_issues` promotes it into a top-level, CODED
+# `issues[]` entry -- the half of the fix that answers the issue's "the
+# envelope carries a specific code, not a bare `build.slice-failed`"
+# acceptance line. Narrow, direct unit test of the promoter itself (same
+# level `test_execute.py` already proves the message it matches on), rather
+# than a full `tan build` subprocess run: reproducing the underlying
+# `ValueError` needs a real two-Windows-drive filesystem this box does not
+# have (see this fix's commit message), and `execute_slices` cannot itself
+# be driven to a REAL cross-drive refusal from a real POSIX `west_workspace_
+# dir` resolution -- only a monkeypatched one, which a subprocess-spawned
+# CLI test cannot install across the process boundary.
+
+
+def test_cross_drive_issues_promotes_the_refusal_to_a_coded_top_level_issue():
+    from tan.commands.build.execute import SliceOutcome
+    from tan.commands.build_cmd import _cross_drive_issues
+
+    message = (
+        "slice `m55_he` refused before build: west build cannot span two "
+        "Windows drives -- the resolved west workspace `C:\\ws` is on mount "
+        "`C:`, but this slice's own project source directory `E:\\proj\\app` "
+        "is on mount `E:`."
+    )
+    outcomes = [SliceOutcome("m55_he", "failed", None, message)]
+
+    issues = _cross_drive_issues(outcomes)
+
+    assert len(issues) == 1
+    assert issues[0].code == "build.cross-drive-workspace"
+    assert issues[0].severity == "error"
+    assert issues[0].message == message
+
+
+def test_cross_drive_issues_ignores_an_unrelated_failure():
+    """The match is narrow -- an ordinary `terminated with exit code`
+    failure (or any other slice-failed reason) is never mistaken for the
+    cross-drive refusal."""
+    from tan.commands.build.execute import SliceOutcome
+    from tan.commands.build_cmd import _cross_drive_issues
+
+    outcomes = [
+        SliceOutcome("m55_he", "failed", 1, "slice `m55_he` terminated with exit code: 1"),
+        SliceOutcome("m55_hp", "succeeded", 0, None),
+    ]
+
+    assert _cross_drive_issues(outcomes) == []
