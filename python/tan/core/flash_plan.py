@@ -2324,12 +2324,16 @@ def select_flash_method(target: FlashTarget) -> str | None:
     part-number J-Link profile for this slice?", because that arriving at all
     IS metadata's statement that this silicon has a J-Link MRAM loader.
 
-    Consequence, stated plainly: with today's emit
-    (`tan/planner/orchestrator.py::_slice_flash_recipe` returns
-    `("zephyr_west_flash", {})` for every Zephyr slice) NO entry carries that
-    key, so every AEN slice still takes Flow A. Arming Flow D is now a
-    one-function change in THIS repo; it is deliberately NOT emulated here by
-    sniffing the SKU.
+    Consequence, stated plainly: `tan/planner/orchestrator.py
+    ::_slice_flash_recipe` already populates `jlink_flash_device` (and, where
+    the SoC variant's `debug:` block carries them, the `expect_dpidr`/
+    `jlink_device` preflight pair and `slot0_load_address`) from SoM-preset
+    metadata resolved via `tan/planner/loader.py`. So a Zephyr slice whose SoC
+    variant publishes a part-number J-Link profile -- a real `E1M-AEN801`
+    project today -- already carries `FLOW_D_KEYS` on emit and dispatches to
+    Flow D, not Flow A. A slice on a variant with no such profile still emits
+    `args={}` and stays on Flow A, which is correct: that silicon has no
+    J-Link MRAM loader for tan to arm.
     """
     method = target.flash_method or None
     if method == "zephyr_west_flash" and flow_d_available(target.flash_args):
