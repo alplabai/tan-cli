@@ -1,7 +1,15 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # `tan` UX Polish Sweep Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: shipped** (2d402fd, #480). All tasks below landed in the same
+> commit that added this plan; the code they describe is already in the tree
+> and the tests they say should fail already pass. This is now a historical
+> record, not a to-do list — do not re-execute it. The line anchors and
+> "run to verify it fails" steps below describe the pre-#480 tree and no
+> longer match current source.
+>
+> **For agentic workers:** this plan is DONE — see the status line above.
+> Steps use checkbox (`- [x]`) syntax for tracking; all are checked.
 
 **Goal:** Make the `tan` command surface legible to a first-time user — grouped help, help text written for users rather than maintainers, a next step on every dead-end refusal, and a default answer from `presets` and `examples`.
 
@@ -53,7 +61,7 @@ Tasks 1, 2 and 4 are file-disjoint and may run concurrently. Task 3 touches `tan
 | `"Hardware"` | `flash` `monitor` `debug-config` `faultdecode` |
 | `"Inspect & author"` | `inspect` `diff` `trace` `support-bundle` `pinmux` `new-som` |
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `python/tests/test_cli_skeleton.py`:
 
@@ -85,13 +93,13 @@ def test_help_renders_the_six_panels():
         assert panel in p.stdout, f"missing panel: {panel}"
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `py -3.12 -m pytest tests/test_cli_skeleton.py -q -k "help_panel or six_panels"`
 
 Expected: both FAIL. The first lists all 32 names in `unpanelled`; the second fails on the first panel string not found in stdout.
 
-- [ ] **Step 3: Add the panel keyword to each registration**
+- [x] **Step 3: Add the panel keyword to each registration**
 
 In `python/tan/cli.py`, replace the block at lines 79-110. Every line gains `rich_help_panel=`; the existing `context_settings=` arguments on `lock`/`migrate`/`quality` are preserved.
 
@@ -138,25 +146,25 @@ app.command("validate", rich_help_panel="Configure")(validate)
 
 Update the comment block at `tan/cli.py:73-78` to note that the panel string is part of each registration, so a new command gets grouped by the same one-line edit that registers it.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `py -3.12 -m pytest tests/test_cli_skeleton.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 5: Eyeball the real output**
+- [x] **Step 5: Eyeball the real output**
 
 Run: `py -3.12 -m tan --help`
 
 Expected: six titled boxes instead of one `Commands` box. Confirm no command is missing and none appears twice.
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `py -3.12 -m pytest tests -q`
 
 Expected: zero failures. If a test asserts on the literal `--help` body, update its expectation — those are the port's own tests, not a contract.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add python/tan/cli.py python/tests/test_cli_skeleton.py
@@ -182,7 +190,7 @@ git commit -m "feat(cli): group the 32 subcommands into six help panels"
 
 Do not put a version number in the replacement string. The comment at `build_cmd.py:168-171` records why: it previously said "Deferred to v0.6.0" while the release it meant was renumbered to 0.5.0, and *"a help string that names the release a flag will appear in is a promise tan cannot keep true."* The issue link is the durable pointer.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `python/tests/commands/test_build_command.py`:
 
@@ -209,13 +217,13 @@ def test_build_help_carries_no_port_archaeology():
     assert "--non-interactive" in output
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `py -3.12 -m pytest tests/commands/test_build_command.py -q -k archaeology`
 
 Expected: FAIL on `assert "v0.4.1" not in output`.
 
-- [ ] **Step 3: Rewrite the three help strings**
+- [x] **Step 3: Rewrite the three help strings**
 
 In `python/tan/commands/build_cmd.py`, replace `_DEFERRED_HELP` at line 172:
 
@@ -258,19 +266,19 @@ behaviour of NOT overriding the `--plan` that `--plan-from` implies, which
 `test_plan_from_shows_the_plan_and_writes_nothing_even_with_native` pins.
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `py -3.12 -m pytest tests/commands/test_build_command.py -q -k archaeology`
 
 Expected: PASS.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `py -3.12 -m pytest tests -q`
 
 Expected: zero failures. `test_plan_from_shows_the_plan_and_writes_nothing_even_with_native` must still pass — this task changes no behaviour, only help text.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add python/tan/commands/build_cmd.py python/tests/commands/test_build_command.py
@@ -300,7 +308,7 @@ The bare-`tan` refusal is safe to extend: measured, `tan` with no arguments writ
 
 **Hazard to check, not a blocker:** under `--format json`, `cli.py:824` folds the tee'd stderr **verbatim** into the usage-error envelope's `data.message` and `issues[0].message`. Wording added to the bare-`tan` refusal is therefore visible in the JSON channel. No frozen case covers a bare `--format json` invocation, so this is a review item — Step 6 below checks it by hand.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `python/tests/test_cli_skeleton.py`:
 
@@ -336,13 +344,13 @@ def test_would_overwrite_names_the_files_and_offers_preview(tmp_path):
     assert "--force" in message
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `py -3.12 -m pytest tests/test_cli_skeleton.py tests/commands/test_init_command.py -q -k "new_user or names_the_files"`
 
 Expected: the first FAILS on `"tan doctor" in p.stderr`; the second FAILS with `NameError: name 'overwrite_refusal_message' is not defined`.
 
-- [ ] **Step 3: Add the `init` message helper and use it**
+- [x] **Step 3: Add the `init` message helper and use it**
 
 In `python/tan/commands/init_cmd.py`, add above the `_Outcome` construction at line 679:
 
@@ -377,7 +385,7 @@ The issue code `init.would-overwrite` and `ExitCode.WRITE_FAILURE` are unchanged
 
 Make sure the test imports it: add `from tan.commands.init_cmd import overwrite_refusal_message` to `python/tests/commands/test_init_command.py`.
 
-- [ ] **Step 4: Extend the three remaining refusals**
+- [x] **Step 4: Extend the three remaining refusals**
 
 In `python/tan/commands/build_cmd.py`, the no-SDK refusal at lines 668-673:
 
@@ -427,13 +435,13 @@ In `python/tan/cli.py`, line 610:
         )
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `py -3.12 -m pytest tests/test_cli_skeleton.py tests/commands/test_init_command.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Check the JSON channel by hand**
+- [x] **Step 6: Check the JSON channel by hand**
 
 Run: `py -3.12 -m tan --format json`
 
@@ -445,13 +453,13 @@ py -3.12 -m tan --format json | py -3.12 -c "import json,sys; d=json.load(sys.st
 
 Expected: `2 cli.parse-error`.
 
-- [ ] **Step 7: Run the full suite**
+- [x] **Step 7: Run the full suite**
 
 Run: `py -3.12 -m pytest tests -q`
 
 Expected: zero failures. Pay attention to `tests/commands/test_cli_global_flags.py` — line 422 asserts `"a command is required" not in leading.stderr` for a *different* argv, which stays true.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add python/tan/cli.py python/tan/commands/build_cmd.py python/tan/commands/sdk_cmd.py python/tan/commands/init_cmd.py python/tests/test_cli_skeleton.py python/tests/commands/test_init_command.py
@@ -483,7 +491,7 @@ git commit -m "feat(cli): give every dead-end refusal a next step"
 
 **JSON output is untouched in both commands.** `["presets", "--format", "json"]` is a frozen parity case (`test_oracle_parity.py:96`) and `examples`'s no-SDK JSON refusal is frozen at `test_command_surface_oracle_parity.py:366`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `python/tests/commands/test_presets_command.py`:
 
@@ -556,13 +564,13 @@ def test_examples_category_filter_narrows_and_reports_an_empty_match():
     assert lines == ['examples: no example projects in category "nope".']
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `py -3.12 -m pytest tests/commands/test_presets_command.py tests/commands/test_examples_command.py -q -k "display_names or verbose_adds or categories or category_filter"`
 
 Expected: all FAIL — `render_presets_text` still takes `list[str]`, and `render_examples_text` has no `category` parameter.
 
-- [ ] **Step 3: Rewrite `render_presets_text`**
+- [x] **Step 3: Rewrite `render_presets_text`**
 
 Replace `python/tan/commands/presets_cmd.py:543-552`:
 
@@ -599,7 +607,7 @@ Update the caller at `presets_cmd.py:634`:
 
 Leave `skus = [s.sku for s in soms]` at `:609` in place — the JSON payload at `:621` still uses it, and that payload is parity-frozen.
 
-- [ ] **Step 4: Add `--category` to `examples`**
+- [x] **Step 4: Add `--category` to `examples`**
 
 In `python/tan/commands/examples_cmd.py`, add beside `example_matches_filter` at `:271`:
 
@@ -677,19 +685,19 @@ Update the single render call at `examples_cmd.py:459`:
         for line in render_examples_text(found, filter_, category, verbose, sdk is not None):
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `py -3.12 -m pytest tests/commands/test_presets_command.py tests/commands/test_examples_command.py -q`
 
 Expected: PASS. Existing tests in both files that assert the old count-only `presets` line or call `render_examples_text` with four positional arguments will fail — update them to the new shape. That is expected churn, not a regression.
 
-- [ ] **Step 6: Confirm the JSON output did not move**
+- [x] **Step 6: Confirm the JSON output did not move**
 
 Run: `py -3.12 -m pytest tests/parity -q`
 
 Expected: zero failures. `["presets", "--format", "json"]` is frozen; if it goes red, the JSON payload was touched and must be reverted.
 
-- [ ] **Step 7: Eyeball both commands**
+- [x] **Step 7: Eyeball both commands**
 
 ```bash
 py -3.12 -m tan presets
@@ -700,13 +708,13 @@ py -3.12 -m tan examples --category audio
 
 Expected: `presets` lists 11 SKUs with display names; `examples` ends with the 12-category line; `--category audio` narrows the list.
 
-- [ ] **Step 8: Run the full suite**
+- [x] **Step 8: Run the full suite**
 
 Run: `py -3.12 -m pytest tests -q`
 
 Expected: zero failures.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add python/tan/commands/presets_cmd.py python/tan/commands/examples_cmd.py python/tests/commands/test_presets_command.py python/tests/commands/test_examples_command.py
@@ -717,7 +725,7 @@ git commit -m "feat(cli): presets and examples answer by default, and examples g
 
 ## Final verification
 
-- [ ] **Full gate on the merged result**
+- [x] **Full gate on the merged result**
 
 ```bash
 py -3.12 -m pytest tests -q
@@ -726,7 +734,7 @@ py -3.12 scripts/version_check.py --selftest --self
 
 Expected: zero pytest failures; `version_check.py` exits 0.
 
-- [ ] **Confirm no JSON envelope moved**
+- [x] **Confirm no JSON envelope moved**
 
 ```bash
 py -3.12 -m pytest tests/parity tests/conformance -q

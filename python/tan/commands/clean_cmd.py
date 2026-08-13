@@ -55,17 +55,25 @@ constants only -- never a helper that can itself throw -- because a helper
 called from the recovery path is how a single fault became a DOUBLE fault
 elsewhere in this port.
 
-**KNOWN GAP, for whoever owns packaging.** The manifest sweep needs a YAML
-parser and tan declares none; `scripts/build_binary.sh` documents the frozen
-binary's build environment as `pip install typer rich pyinstaller`, so the
-SHIPPED `tan clean` takes the no-PyYAML arm and emits a
-`clean.manifest-unreadable` warning on every project that has ever been built
--- where the Rust oracle emits nothing. The behaviour is correct (see
-[`parse_manifest_slices`]: reported, never swallowed, never fatal) but noisy.
-Closing it is a packaging call -- add PyYAML to the frozen build, weighed against
-the artefact-size budget `build_binary.sh` records -- and deliberately NOT a
-hand-rolled fallback scanner here: a mis-parse would name a PATH handed to a
-recursive removal.
+**The manifest sweep's YAML parser is a DECLARED dependency.** `pyyaml>=6` is a
+base entry in `python/pyproject.toml` `[project].dependencies` -- its own
+comment there reads "`pyyaml` is load-bearing, not optional" -- and
+`scripts/build_binary.sh` builds the frozen binary with
+`pip install -e ".[monitor]" "pyinstaller>=6.10"`, so PyYAML ships.
+
+This block previously recorded a KNOWN GAP claiming the opposite: that tan
+declared no YAML parser, that `build_binary.sh` installed
+`pip install typer rich pyinstaller`, and that the SHIPPED `tan clean`
+therefore took the no-PyYAML arm and warned on every built project. All three
+were false (tan-cli#574) -- the quoted recipe was real historically, `pyyaml`
+entered `pyproject.toml` afterwards, and this docstring was never updated. It
+sent a maintainer to spend an artefact-size budget closing a gap already closed.
+
+[`parse_manifest_slices`] keeps its absent-parser arm anyway, because a
+`--no-deps` install can still lack PyYAML: that arm REPORTS rather than
+swallows, and stays a warning since `clean` never fails over a manifest. There
+is deliberately NO hand-rolled fallback scanner here -- a mis-parse would name
+a PATH handed to a recursive removal.
 """
 
 from __future__ import annotations
@@ -458,10 +466,14 @@ def parse_manifest_slices(text: str) -> tuple[list[dict[str, Any]], str | None]:
     SDK emits strings, and [`test_numeric_build_dir_is_not_turned_into_a_delete_target`]
     pins it so the choice cannot drift silently.
 
-    PyYAML is optional -- tan declares no YAML dependency -- and its absence is
-    REPORTED rather than swallowed: a project whose slices build out of tree
-    would otherwise have them left behind with no indication why. Still only a
-    warning; `clean` never fails over a manifest.
+    PyYAML IS a declared base dependency (`pyproject.toml`
+    `[project].dependencies`), so this arm is the `--no-deps`/broken-venv case
+    rather than the normal one -- an earlier version of this docstring claimed
+    tan declared no YAML dependency at all (tan-cli#574). The arm stays because
+    that case is still reachable, and its absence is REPORTED rather than
+    swallowed: a project whose slices build out of tree would otherwise have
+    them left behind with no indication why. Still only a warning; `clean`
+    never fails over a manifest.
     """
     try:
         import yaml  # noqa: PLC0415  (optional at runtime, by design)
