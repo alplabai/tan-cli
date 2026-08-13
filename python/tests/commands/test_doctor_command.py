@@ -1202,6 +1202,25 @@ def test_zephyr_sdk_install_version_matches_the_real_toolchain_lock():
     assert doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION == doc["zephyrSdk"]["version"]
 
 
+def test_readme_quickstart_names_the_current_zephyr_sdk_install_command():
+    """tan-cli#651. The root README's quickstart embeds `west sdk install
+    --version <N> -t arm-zephyr-eabi` as a literal, copy-pasteable command --
+    a NEW consumer of the pin `contract/fixtures/toolchains/toolchains.json`
+    owns, per that fixture's own `_comment`: "A NEW consumer of this pin
+    needs its own parity assertion; widening this scan will not reach it."
+    Without this, a version bump updates `ZEPHYR_SDK_INSTALL_VERSION` (already
+    guarded above by `test_zephyr_sdk_install_version_matches_the_real_
+    toolchain_lock`) while the README goes silently stale, sending a customer
+    to install a toolchain version alp-sdk no longer pins."""
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    command = doctor_cmd.zephyr_sdk_install_command()
+    assert command in text, (
+        f"README.md's quickstart must contain the literal `{command}` -- not "
+        "found. Either the quickstart step was dropped, or its hardcoded "
+        "version pin has drifted from ZEPHYR_SDK_INSTALL_VERSION."
+    )
+
+
 # --------------------------------------------------------------------------
 # sevenZip (tan-cli#286 second pass, finding 3) -- the `zephyrSdk` Fail names
 # `west sdk install` as the whole remedy, but on native Windows that command
@@ -2953,7 +2972,55 @@ def test_fix_installed_check_never_claims_the_tool_is_now_on_path():
     assert "reopen" in check.detail or "new shell" in check.detail
 
 
+def test_fix_installed_check_discloses_when_it_skipped_elevation_as_root():
+    """tan-cli#650: a root caller's outcome must read differently from an
+    ordinary Tier-A ("this tool never needed elevation at all") one -- both
+    land on `doctor.fix-installed`, but only one of them ran a command the
+    manifest itself marked as needing `sudo`."""
+    check = doctor_cmd.fix_installed_check(
+        "git", "apt-get install -y git", elevation_skipped=True
+    )
+    assert check.code == "doctor.fix-installed"
+    assert "apt-get install -y git" in check.detail
+    assert "root" in check.detail
+    assert "sudo" in check.detail
+
+
+def test_running_as_root_reads_geteuid_and_treats_nonzero_as_false():
+    """`_running_as_root` is the ONE thing standing between a root caller and
+    the pre-tan-cli#650 blanket refusal -- so it must read the real
+    `os.geteuid`, not a hardcoded answer, and must not treat every non-`None`
+    return as truthy."""
+    import types
+
+    fake_os_root = types.SimpleNamespace(geteuid=lambda: 0)
+    fake_os_user = types.SimpleNamespace(geteuid=lambda: 1000)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(doctor_cmd, "os", fake_os_root)
+        assert doctor_cmd._running_as_root() is True
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(doctor_cmd, "os", fake_os_user)
+        assert doctor_cmd._running_as_root() is False
+
+
+def test_running_as_root_is_false_with_no_geteuid_at_all():
+    """Windows has no `os.geteuid` -- and no manifest install command that
+    would ever need this answer (`fix_needs_sudo_check`'s docstring) -- so
+    the absence must resolve to `False`, not an `AttributeError`."""
+    import types
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(doctor_cmd, "os", types.SimpleNamespace())
+        assert doctor_cmd._running_as_root() is False
+
+
 def test_run_fix_refuses_a_sudo_command_and_never_spawns_it(monkeypatch):
+    """The ordinary, non-root case: `_running_as_root` forced `False` here
+    rather than relying on the real process's UID, so this test's meaning
+    does not change depending on who or what happens to run the suite (a
+    root CI container included)."""
+    monkeypatch.setattr(doctor_cmd, "_running_as_root", lambda: False)
+
     def _must_not_run(*_args, **_kwargs):
         raise AssertionError("run_fix must never spawn a command needing sudo")
 
@@ -2965,6 +3032,65 @@ def test_run_fix_refuses_a_sudo_command_and_never_spawns_it(monkeypatch):
     )
     assert len(results) == 1
     assert results[0].code == "doctor.fix-needs-sudo"
+
+
+def test_run_fix_runs_a_sudo_command_directly_when_already_root(monkeypatch, tmp_path):
+    """tan-cli#650: measured against a real `geteuid() == 0` process
+    (`unshare --user --map-root-user`), `run_fix` used to refuse EVERY
+    `sudo`-prefixed manifest command unconditionally, even with nothing left
+    to elevate to. A root caller now gets the manifest's own command run
+    directly -- `sudo` itself is never spawned, only the program after it."""
+    monkeypatch.setattr(doctor_cmd, "_running_as_root", lambda: True)
+    fake_exe = tmp_path / "apt-get"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: str(fake_exe) if name == "apt-get" else None
+    )
+    captured = {}
+
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _fake_run)
+
+    results = doctor_cmd.run_fix(
+        [{"tool": "git", "command": "sudo apt-get install -y git"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-installed"
+    # The `sudo` word itself is never on the spawned argv -- that is the
+    # whole point: the PROGRAM `sudo` is still never invoked.
+    assert "sudo" not in captured["argv"]
+    assert captured["argv"][0] == str(fake_exe)
+    assert captured["argv"][1:] == ["install", "-y", "git"]
+    assert "root" in results[0].detail
+
+
+def test_run_fix_still_reports_fix_failed_for_a_sudo_command_as_root_that_exits_nonzero(
+    monkeypatch, tmp_path
+):
+    """The root path reuses the SAME failure/timeout/spawn-fail outcomes as
+    the ordinary no-elevation path -- this is not a parallel, half-tested
+    branch."""
+    monkeypatch.setattr(doctor_cmd, "_running_as_root", lambda: True)
+    fake_exe = tmp_path / "apt-get"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: str(fake_exe) if name == "apt-get" else None
+    )
+    monkeypatch.setattr(
+        doctor_cmd.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1),
+    )
+
+    results = doctor_cmd.run_fix(
+        [{"tool": "git", "command": "sudo apt-get install -y git"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-failed"
+    assert "sudo" not in results[0].detail
 
 
 def test_run_fix_runs_a_no_elevation_command_through_the_resolved_binary(monkeypatch, tmp_path):

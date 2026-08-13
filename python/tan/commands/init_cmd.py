@@ -96,7 +96,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
-from tan.commands.sdk_cmd import global_default_foreign_project_issue
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_foreign_project_issue
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import (
@@ -526,6 +526,49 @@ def _is_sdk_checkout(root: Path) -> bool:
     return (root / "scripts" / "alp_project.py").is_file()
 
 
+def _sdk_root_flag_unresolved_issue(
+    sdk_root: str | None, resolved_sdk: _Sdk | None
+) -> Issue | None:
+    """tan-cli#642: an explicit `--sdk-root` that does not resolve to a real
+    alp-sdk checkout used to fail SILENTLY on the template path.
+
+    `_resolve_sdk_root`'s explicit-flag branch builds a `_Sdk` from
+    `--sdk-root` UNVALIDATED -- unlike the ladder branch, it never checks
+    `_is_sdk_checkout` before returning, so a typo'd path (or tan-cli#642's
+    more realistic route: a previously-valid `--sdk-root` that `tan
+    bootstrap` has since relocated) reaches `_finish` -> `_pin_sdk`, which
+    declines to write `.alp/sdk-path` for anything that fails
+    `_is_sdk_checkout` -- correctly, that write really would pin a checkout
+    that is not one -- but until this fix said NOTHING about it: `ok:true`,
+    `issues:[]`, `sdkPinned:null`, the whole project scaffolded normally,
+    though the README promises `init` "pins the SDK checkout in
+    .alp/sdk-path". A later command then silently fell through to
+    `~/.alp/sdk-default` -- some OTHER project's last `bootstrap`, in a
+    shared or multi-project setup.
+
+    EMISSION CONDITION: `--sdk-root` was given (non-empty) AND the path it
+    resolves to has no `scripts/alp_project.py` under it. `None` when
+    `--sdk-root` was not given at all -- that is the ordinary, no-SDK-
+    requested case every other ladder tier already covers with its own (or
+    no) diagnostic, not this one's to explain -- and `None` on the
+    `--from-example` path, which already hard-refuses the identical
+    condition as `init.sdk-root-unresolved` before this could ever run (an
+    SDK checkout is NOT optional there, since the thing being copied lives
+    inside one).
+    """
+    if not sdk_root or resolved_sdk is None or _is_sdk_checkout(resolved_sdk.path):
+        return None
+    return Issue(
+        "init.sdk-root-invalid",
+        "warning",
+        f"--sdk-root '{sdk_root}' does not resolve to an alp-sdk checkout "
+        f"(tried '{resolved_sdk.display}', no 'scripts/alp_project.py' "
+        f"found there); the project was scaffolded without pinning an SDK "
+        f"(.alp/sdk-path was not written). Re-run with a --sdk-root that "
+        f"resolves, or {NO_SDK_NEXT_STEPS}.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # The two planning paths
 # ---------------------------------------------------------------------------
@@ -616,7 +659,10 @@ def _apply_cores(
     # edge-ai ships `a55_cluster`, os: "off") -- a --cores id colliding with
     # one would append a SECOND, duplicate `cores:` mapping key. Reject
     # rather than silently drop the caller's os or silently override the
-    # scaffold's.
+    # scaffold's. Checked BEFORE the zephyr-companion refusal below: a
+    # collision with an already-declared companion is the more specific,
+    # more actionable conflict (name the existing declaration), whatever OS
+    # the caller's entry asked for.
     existing = dict(vendored_core_ids(board.content))
     for core_id, _os_value in cores:
         if core_id != app_core and core_id in existing:
@@ -627,6 +673,69 @@ def _apply_cores(
                 f"board.yaml to change its os instead of passing --cores.",
                 ExitCode.VALIDATION_FAILURE,
             )
+
+    # tan-cli#643: a --cores entry naming a DIFFERENT core than the plan's
+    # app core, requesting `zephyr` or `baremetal`, is the app-core-swap
+    # request this mechanism cannot honor -- `splice_companion_cores` only
+    # ever adds an `os:` child to a companion, never an `app:` (that source
+    # directory does not exist for anything but the template's own app
+    # core), so the result would be a second core silently declared with no
+    # source to build there, next to a REQUESTED core-id/os pair that
+    # `board.yaml` never actually honors. Before this fix that shape reached
+    # `splice_companion_cores` unrejected: `--cores m55_he:zephyr` on a
+    # single-core `--som E1M-AEN301` request left the app pinned to the
+    # template's guessed `m55_hp`, added the requested `m55_he` app-less, and
+    # spliced an unrequested default RPMsg carve-out between the two -- all
+    # at `ok:true`/`issues:[]` (the AEN bench e2e that filed the issue: an
+    # operator asking for one core got a two-core project on the wrong one).
+    # `baremetal` reaches the identical dead end via a different door: the
+    # planner's own `_enforce_loader_rules` (tan/planner/validate.py) refuses
+    # an app-less `os: baremetal` slice just as hard as an app-less `os:
+    # zephyr` one -- `--cores <id>:baremetal` would still plan to `ok:true`
+    # here and only fail two commands later, at `tan build`, against a
+    # board.yaml the customer never edited by hand.
+    #
+    # `yocto` is NOT unconditionally safe either -- it reaches the identical
+    # dead end on a Cortex-M companion through a THIRD door: the planner's
+    # `_enforce_os_matches_core_class` (tan/planner/validate.py) rejects a
+    # Cortex-M core running Yocto exactly as hard as it rejects a Cortex-A
+    # core running Zephyr. Measured against `E1M-AEN801` (a Cortex-M
+    # `m55_he` companion, app core `m55_hp`): `--cores m55_he:yocto` planned
+    # to `ok:true`/`issues:[]` here, and `tan validate` on the result then
+    # raised `validate.schema-violation` ("its runtime is determined by the
+    # core class ... got os: 'yocto'") -- the exact #643 shape, just reached
+    # through the one os: value the original fix left unchecked. `tan init`
+    # is deliberately SDK-free (module docstring above) and cannot resolve a
+    # companion's real `topology.<core>.type`, so this reads the same `a`- vs
+    # `m`-prefix convention every SoM topology already follows
+    # (`a32_cluster`/`a55_cluster` are Cortex-A; `m33`/`m33_sm`/`m55_hp`/
+    # `m55_he` are Cortex-M -- true across all 11 `metadata/e1m_modules/
+    # *.yaml` topologies, measured, and the same heuristic
+    # `tan/planner/project_emit/hw_info.py` already relies on) to accept
+    # `yocto` only for an `a`-prefixed companion id. `off` is the one os:
+    # value `_enforce_loader_rules` accepts app-less on ANY core class, so it
+    # is unconditionally allowed regardless of prefix (and
+    # `splice_companion_cores` now quotes it `"off"` so it round-trips as the
+    # schema's string, not YAML 1.1's bareword boolean). Refuse instead of
+    # guessing which core the caller actually meant.
+    for core_id, os_value in cores:
+        if core_id == app_core or os_value == "off":
+            continue
+        if os_value == "yocto" and core_id.startswith("a"):
+            continue
+        raise InitError(
+            "init.invalid-cores",
+            f"Core '{core_id}' requests {os_value}, but this plan's app "
+            f"core is '{app_core}' -- --cores can only splice '{core_id}' "
+            f"in as an app-less companion, and the only os: values a "
+            f"companion can honor app-less are 'off' (always) or 'yocto' "
+            f"(only when '{core_id}' is a Cortex-A core, i.e. its id starts "
+            f"with 'a') -- {os_value} is not one of those. If '{core_id}' "
+            f"is meant to host the app instead of '{app_core}', pick a "
+            f"--template/--som combination whose app core is '{core_id}', "
+            f"or scaffold with --board-yaml to declare it yourself.",
+            ExitCode.VALIDATION_FAILURE,
+        )
 
     spliced = splice_companion_cores(board.content, cores)
     return [
@@ -871,10 +980,16 @@ def _pin_sdk(project_root: Path, sdk: _Sdk | None) -> str | None:
     """Record the resolved SDK in `<project>/.alp/sdk-path` so the new project is
     reproducible without a separate `tan sdk switch`.
 
-    `None` and "not a real checkout" are a silent skip -- an optional
+    `None` and "not a real checkout" are a silent skip HERE -- an optional
     convenience pointer is never a reason to fail a `tan init` whose real
     files already landed. Reached only after the write, so `--preview` can
-    never trip it.
+    never trip it. Not silent on the WIRE any more when the caller passed an
+    explicit `--sdk-root` that failed the checkout check: `init()`'s own
+    `_sdk_root_flag_unresolved_issue` (tan-cli#642) reports that specific
+    case as a coded warning before this function ever runs, since this
+    function's job is only the write, not the diagnosis, and an unresolved
+    default-ladder SDK (no `--sdk-root` given at all) is not a misconfig this
+    layer has anything to say about.
 
     A confinement ESCAPE is different: a pre-existing symlinked (or
     junctioned) `.alp`, or a symlinked parent of it, used to carry this write
@@ -946,8 +1061,12 @@ def init(
         metavar="CORES",
         help=(
             "Comma-separated cores for a heterogeneous project, `id[:os]` "
-            "(e.g. `m33_sm:zephyr,a55_cluster:yocto`); OS is inferred from "
-            "the id when omitted."
+            "(e.g. `m33_sm:zephyr,a55_cluster:yocto`). OS is inferred from "
+            "the id when omitted, but that inference is only honored for "
+            "the plan's app core -- any other id can only be spliced in "
+            "app-less, as `:off` or (on a Cortex-A id) `:yocto`, so a bare "
+            "companion id like `m55_he` infers `:zephyr` and is refused "
+            "unless `m55_he` is the app core."
         ),
     ),
     preview: bool = typer.Option(
@@ -1040,6 +1159,11 @@ def init(
         foreign_issue = global_default_foreign_project_issue(
             resolved_sdk.foreign_global_default_for if resolved_sdk is not None else None
         )
+        # tan-cli#642: computed here, alongside the other two SDK-resolution
+        # warnings above, for the same reason -- this is the last moment the
+        # fact is cheap to disclose, before `_finish` -> `_pin_sdk` silently
+        # declines to write `.alp/sdk-path` for it.
+        sdk_root_invalid_issue = _sdk_root_flag_unresolved_issue(sdk_root, resolved_sdk)
 
         if from_example is not None:
             template_id, files = _plan_from_example(from_example, som, resolved_sdk)
@@ -1092,6 +1216,8 @@ def init(
             outcome.issues.append(divergence_issue)
         if foreign_issue is not None:
             outcome.issues.append(foreign_issue)
+        if sdk_root_invalid_issue is not None:
+            outcome.issues.append(sdk_root_invalid_issue)
     except InitError as err:
         _emit_error(json_mode, err, resolved_sdk)
         return

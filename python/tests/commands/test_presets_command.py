@@ -9,11 +9,15 @@ Named twins live in `crates/tan-cli/src/commands/presets.rs`
 
 The goldens (`presets-heterogeneous-som`, `presets-no-sdk`) pin the wire format;
 what they cannot reach is (a) the text renderer, since both run `--format json`,
-and (b) the **no-PyYAML** reader, since the test host has PyYAML and the frozen
-binary does not (`scripts/build_binary.sh` installs `typer rich pyinstaller`
-only). (b) is the one that would ship broken silently: `cores` is what the New
-Project wizard scaffolds IPC from, so the fallback is held to reading the SAME
-cores PyYAML does, on the real preset shape.
+and (b) the **no-PyYAML** reader, since the test host has PyYAML. The frozen
+binary has it too -- `pyyaml>=6` is a base entry in `pyproject.toml`
+`[project].dependencies` and `scripts/build_binary.sh` installs
+`-e ".[monitor]"`; this docstring previously claimed that script installed
+`typer rich pyinstaller` only, which has not been true since `pyyaml` entered
+`pyproject.toml` (tan-cli#574). (b) is reachable via a `--no-deps` install or a
+broken venv, and it is still the one that would ship broken silently: `cores`
+is what the New Project wizard scaffolds IPC from, so the fallback is held to
+reading the SAME cores PyYAML does, on the real preset shape.
 """
 from __future__ import annotations
 

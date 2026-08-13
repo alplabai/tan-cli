@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tan.core import scaffold as scaffold_module
 from tan.core.scaffold import (
@@ -531,6 +532,25 @@ def test_splice_adds_a_companion_and_a_default_rpmsg_channel():
     assert "endpoints: [m55_hp, a55_cluster]" in out
     # The companion lands inside the `cores:` block, before the next top-level key.
     assert out.index("a55_cluster:") < out.index("libraries:")
+
+
+def test_splice_quotes_a_newly_added_off_companion_so_yaml_parses_it_as_a_string():
+    """tan-cli#645 round-3: `off` is a YAML 1.1 boolean keyword --
+    `yaml.safe_load("os: off")` -> `{"os": False}` -- so an unquoted
+    companion entry writes a bool where the schema's `os` enum requires the
+    string `"off"`. Every vendored scaffold already quotes it this way (see
+    `tan/templates/vendored/edge-ai/E1M-AEN801/board.yaml`); a NEWLY spliced
+    `off` companion must match, not just a pre-declared one (the existing
+    `test_splice_skips_a_core_already_declared_...` case never actually
+    spliced a fresh `off` entry, so this gap went uncaught)."""
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    out = splice_companion_cores(board, [("m55_he", "off")])
+
+    assert '  m55_he:\n    os: "off"\n' in out
+    parsed = yaml.safe_load(out)
+    assert parsed["cores"]["m55_he"]["os"] == "off"
+    # `off` is never the RPMsg endpoint the app core gets paired with.
+    assert "ipc:" not in out
 
 
 def test_splice_skips_a_core_already_declared_and_never_ipcs_an_off_companion():
@@ -1195,3 +1215,36 @@ def test_an_unrecognised_prefix_still_takes_the_alif_default_in_both_derivations
     assert scaffold_module._family_bucket("E1M-ZZZ999") == "E1M-AEN801"
     planned = plan_template_files("sensor-starter", "E1M-ZZZ999")
     assert any(f.relative_path == "board.yaml" for f in planned)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#501 -- a MISSING vendored extra is invisible to
+# tests/parity/scaffold_byte_parity.py (`augment_with_example_extras` only
+# ever reaches for a `NON_ENVELOPE_EXTRAS` name the vendored tree already
+# carries), so the gate is 9/9 PASS whether or not `boards/
+# native_sim_native_64.{conf,overlay}` ship at all -- measured both ways at
+# the pinned SDK tag. This is the SDK-free pin that actually catches it: it
+# fails the moment either file (or the pair's directory) is missing from the
+# vendored tree, which is the exact regression the parity gate cannot see.
+# ---------------------------------------------------------------------------
+
+
+def test_sensor_and_diagnostics_scaffolds_ship_the_native_sim_board_pair():
+    """`sensor-starter`/`board-diagnostics`' documented native_sim build
+    (README: `west build -b native_sim/native/64 .`, no `tan generate` step)
+    depends on Zephyr auto-discovering `boards/native_sim_native_64.conf`
+    (CONFIG_EMUL/CONFIG_I2C_EMUL) and `boards/native_sim_native_64.overlay`
+    (the `alp-i2c0` emul alias) straight out of the scaffold -- neither file
+    is ever emitted by `tan generate`'s `native-sim-overlay` target (that
+    target's own GPIO-only overlay carries no I2C alias at all). Reverting
+    just the four vendored `boards/` directories reproduces the pre-fix
+    6-file scaffold (no `boards/` at all) and this test goes red -- proving
+    the parity gate's blind spot (finding 4) does not."""
+    for template_id, skus in (
+        ("sensor-starter", ("E1M-AEN801", "E1M-V2N101")),
+        ("board-diagnostics", ("E1M-AEN801", "E1M-V2N101")),
+    ):
+        for sku in skus:
+            paths = {f.relative_path for f in plan_template_files(template_id, sku)}
+            assert "boards/native_sim_native_64.conf" in paths, (template_id, sku)
+            assert "boards/native_sim_native_64.overlay" in paths, (template_id, sku)

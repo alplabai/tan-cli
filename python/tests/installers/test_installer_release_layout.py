@@ -4,9 +4,12 @@
 tan-cli#356. #349 switched the release to PyInstaller ``--onedir`` archives and
 both installers then requested the new names UNCONDITIONALLY --
 ``tan-<triple>.tar.gz`` from ``install.sh``, ``tan-<triple>.zip`` from
-``install.ps1``. No published tag has those assets, so the documented install
-command 404'd on every tag that exists: ``v0.4.1`` (what ``latest`` resolves to)
-and the ``v0.5.0-rc4`` pre-release both publish RAW binaries.
+``install.ps1``. At the time this was written, no published tag had those
+assets, so the documented install command 404'd on every tag that existed:
+``v0.4.1`` (what ``latest`` resolved to then) and the ``v0.5.0-rc4``
+pre-release both published RAW binaries. ``v0.5.0`` and ``v0.5.1`` have since
+been cut and both publish the archive shape; ``latest`` now resolves to
+``v0.5.1``.
 
 The fixture releases below mirror the REAL published asset lists name for name
 (``gh release view <tag> --repo alplabai/tan-cli --json assets``, read while
@@ -14,12 +17,11 @@ writing this), so a pass here is a claim about the real thing rather than about
 a shape invented for the test:
 
 ===============  ===========================================================
-``v0.4.1``       8 raw assets -- the last Rust release, and today's ``latest``
+``v0.4.1``       8 raw assets -- the last Rust release
 ``v0.5.0-rc4``   4 raw assets -- the ``--onefile`` freeze; no musl, no
                  linux/arm64
-``v0.5.0``       4 ARCHIVES -- the first tag that publishes them. **Not cut
-                 yet**, which is exactly why archive extraction is covered by a
-                 fixture and not by a live download.
+``v0.5.0``       4 ARCHIVES -- the first published tag with this shape.
+``v0.5.1``       4 ARCHIVES, same shape as ``v0.5.0``; today's ``latest``.
 ===============  ===========================================================
 
 Everything is served from a local HTTP server through ``TAN_INSTALL_BASE_URL``,
@@ -60,10 +62,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "install.sh"
 INSTALL_PS1 = REPO_ROOT / "install.ps1"
 
-#: The FIRST tag that publishes ``--onedir`` archives. It is a real, planned
-#: tag that has not been cut -- deliberately NOT ``v0.5.0-rc4``, whose published
-#: assets are raw (that mistake is the documentation half of #356). When v0.5.0
-#: ships, this constant is the one thing that has to stay true.
+#: The FIRST tag that publishes ``--onedir`` archives -- deliberately NOT
+#: ``v0.5.0-rc4``, whose published assets are raw (that mistake is the
+#: documentation half of #356). v0.5.0 has since been cut and does publish the
+#: archive shape, matching this constant.
 FIRST_ARCHIVE_TAG = "v0.5.0"
 
 #: Every tag that exists today, all of which publish raw binaries.
@@ -2112,3 +2114,293 @@ def test_sh_fish_rerun_is_idempotent(release_server, tmp_path):
     assert second.returncode == 0, f"{second.stdout}\n{second.stderr}"
     assert rc.read_text(encoding="utf-8") == before
     assert "already referenced in" in (second.stdout + second.stderr)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#678 -- PATH-shadow warning
+#
+# install.ps1/install.sh finish with "staged binary verified: tan X.Y.Z" and
+# exit 0, but on a host that already has a DIFFERENT `tan` earlier on PATH,
+# a new shell runs that one instead -- the install is real, but invisible.
+# The fix is one warning line, printed right after "installed tan -> ...",
+# never a PATH reorder and never a non-zero exit (the install DID succeed).
+#
+# The decoy `tan` used below is a real shell script placed AHEAD of $dest on
+# $PATH for the duration of the subprocess only -- these tests build $PATH by
+# hand via `extra_env`, they never touch the real PATH the suite itself runs
+# under.
+# ---------------------------------------------------------------------------
+def _write_decoy_tan(bin_dir: Path, version_line: str = "tan 0.1.0-decoy", exit_code: int = 0) -> Path:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    decoy = bin_dir / "tan"
+    if exit_code == 0:
+        decoy.write_text(f'#!/bin/sh\necho "{version_line}"\n', encoding="utf-8", newline="\n")
+    else:
+        # A decoy that refuses to answer --version at all -- the "cannot run
+        # the shadowing binary" half of tan-cli#678's rule 6, exercised
+        # without needing a real 5s timeout to prove it.
+        decoy.write_text(f'#!/bin/sh\nexit {exit_code}\n', encoding="utf-8", newline="\n")
+    decoy.chmod(0o755)
+    return decoy
+
+
+@posix_only
+def test_sh_warns_when_a_different_tan_shadows_the_new_install(release_server, tmp_path):
+    """tan-cli#678's exact repro, POSIX half: a decoy `tan` sits earlier on
+    PATH than the freshly installed one. install.sh must not stay silent
+    about it -- and must still exit 0, because the install genuinely
+    succeeded.
+    """
+    dest_dir = tmp_path / "bin"
+    decoy_dir = tmp_path / "decoy"
+    decoy = _write_decoy_tan(decoy_dir, "tan 0.1.0-decoy")
+    # $INSTALL_DIR itself must be on $PATH (ahead of nothing else that
+    # matters) for the "already on PATH" trap-4 guard to even look -- the
+    # decoy dir comes first so it wins resolution, exactly reproducing the
+    # issue's own `where tan` finding.
+    path = f"{decoy_dir}{os.pathsep}{dest_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    result = _install_sh(release_server, dest_dir, tmp_path, "--version", "v0.4.1", extra_env={"PATH": path})
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "WARNING: another tan is earlier on PATH and will shadow this install" in combined
+    assert str(decoy) in combined
+    assert "reports: tan 0.1.0-decoy" in combined
+    assert f"installed here: {dest_dir / 'tan'}" in combined
+    assert FIXTURE_VERSION_LINE in combined  # the newly-installed binary's own reported version
+
+
+@posix_only
+def test_sh_no_warning_when_our_own_install_wins_on_path(release_server, tmp_path):
+    """The regression this fix must not introduce: a clean install where
+    $INSTALL_DIR is on PATH and resolves FIRST (the common case -- most
+    installs are not shadowed) must print no warning at all. A false warning
+    on every ordinary install would be worse than the bug tan-cli#678 reports.
+    """
+    dest_dir = tmp_path / "bin"
+    decoy_dir = tmp_path / "decoy"
+    _write_decoy_tan(decoy_dir, "tan 0.1.0-decoy")
+    # dest_dir now comes BEFORE decoy_dir -- our own install wins resolution.
+    path = f"{dest_dir}{os.pathsep}{decoy_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    result = _install_sh(release_server, dest_dir, tmp_path, "--version", "v0.4.1", extra_env={"PATH": path})
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "WARNING" not in combined
+
+
+@posix_only
+def test_sh_no_warning_when_install_dir_is_not_on_path_at_all(release_server, tmp_path):
+    """tan-cli#678's named trap: when $INSTALL_DIR was never on PATH at all
+    (here, simply because nothing put it there and --no-modify-path is the
+    default for these tests), warning about "shadowing" would be wrong --
+    something else winning is expected and unremarkable. The pre-existing
+    "is not on PATH -- add it yourself" message already covers this state;
+    the new warning must not duplicate or contradict it.
+    """
+    dest_dir = tmp_path / "bin"
+    # A decoy IS on PATH (so there is genuinely something else a bare `tan`
+    # would resolve to), but $INSTALL_DIR itself never is.
+    decoy_dir = tmp_path / "decoy"
+    _write_decoy_tan(decoy_dir, "tan 0.1.0-decoy")
+    path = f"{decoy_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    result = _install_sh(release_server, dest_dir, tmp_path, "--version", "v0.4.1", extra_env={"PATH": path})
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "WARNING: another tan is earlier on PATH" not in combined
+    assert "is not on PATH -- add:" in combined
+
+
+@posix_only
+def test_sh_shadow_version_report_is_best_effort_on_an_unrunnable_decoy(release_server, tmp_path):
+    """tan-cli#678 rule 6: reporting the shadowing binary's version is
+    best-effort and must never break the install. A decoy that refuses to
+    answer `--version` (exits non-zero, prints nothing) must still produce a
+    warning -- with `(reports: could not run)` instead of a blank or a
+    crash -- and the install must still exit 0.
+    """
+    dest_dir = tmp_path / "bin"
+    decoy_dir = tmp_path / "decoy"
+    decoy = _write_decoy_tan(decoy_dir, exit_code=7)
+    path = f"{decoy_dir}{os.pathsep}{dest_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    result = _install_sh(release_server, dest_dir, tmp_path, "--version", "v0.4.1", extra_env={"PATH": path})
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "WARNING: another tan is earlier on PATH and will shadow this install" in combined
+    assert str(decoy) in combined
+    assert "reports: could not run" in combined
+
+
+# ---------------------------------------------------------------------------
+# install.ps1's half of tan-cli#678
+# ---------------------------------------------------------------------------
+def _extract_ps1_shadow_functions() -> str:
+    """`Find-FirstTanOnPath` / `Resolve-CanonicalPath` / `Get-TanVersionReport`
+    extracted VERBATIM out of install.ps1 -- the same "run the real source,
+    never a reimplementation that could silently drift from it" approach
+    `test_ps1_access_denied_signature_accepts_the_applocker_policy_codes`
+    already uses for `Get-Win32ErrorCode`/`Test-AccessDeniedSignature`. Stops
+    before `Get-TanVersionReport`'s closing brace is followed by the
+    registry-dependent `$winner = Find-FirstTanOnPath ...` driver code, which
+    these tests supply their own (registry-free) inputs for instead.
+    """
+    text = INSTALL_PS1.read_text()
+    start = text.index("function Find-FirstTanOnPath(")
+    end = text.index("$winner = Find-FirstTanOnPath $effectiveDirs")
+    assert start != -1 and end > start, "install.ps1's PATH-shadow helper functions moved or were renamed"
+    return text[start:end]
+
+
+@pwsh_only
+def test_ps1_shadow_functions_detect_an_earlier_tan_on_path(tmp_path):
+    """tan-cli#678, Windows half, at the resolution-logic level: given an
+    effective PATH (Machine+User dirs, already resolved -- these tests do not
+    touch the registry) where a DIFFERENT `tan.exe` sits in an earlier
+    directory, `Find-FirstTanOnPath` must find IT, and comparing its
+    canonicalised path against the freshly installed one must show a
+    mismatch. Runs on every OS this suite runs on (`pwsh_only`, not
+    `windows_only`) -- ProcessStartInfo/Get-Item/[System.IO.Path] all work
+    identically on POSIX pwsh, and the fixture "tan.exe" files here are
+    ordinary shell scripts, not Windows binaries.
+    """
+    decoy_dir = tmp_path / "decoy"
+    decoy_dir.mkdir()
+    decoy = decoy_dir / "tan.exe"
+    decoy.write_text('#!/bin/sh\necho "tan 0.1.0-decoy"\n', encoding="utf-8", newline="\n")
+    decoy.chmod(0o755)
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = target_dir / "tan.exe"
+    target.write_text('#!/bin/sh\necho "tan 0.5.1"\n', encoding="utf-8", newline="\n")
+    target.chmod(0o755)
+
+    funcs = _extract_ps1_shadow_functions()
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(
+        'param([string]$DecoyDir, [string]$TargetDir, [string]$Dest)\n'
+        '$env:PATHEXT = ".com;.exe;.bat;.cmd"\n'
+        f'{funcs}\n'
+        '$winner = Find-FirstTanOnPath @($DecoyDir, $TargetDir)\n'
+        'if (-not $winner) { Write-Output "NO_WINNER"; exit 0 }\n'
+        'Write-Output "WINNER=$winner"\n'
+        '$winnerCanon = Resolve-CanonicalPath $winner\n'
+        '$destCanon = Resolve-CanonicalPath $Dest\n'
+        'if ($winnerCanon -ine $destCanon) {\n'
+        '    $v = Get-TanVersionReport $winner\n'
+        '    Write-Output "SHADOWED reports=$v"\n'
+        '} else {\n'
+        '    Write-Output "NOT_SHADOWED"\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe),
+         "-DecoyDir", str(decoy_dir), "-TargetDir", str(target_dir), "-Dest", str(target)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert f"WINNER={decoy}" in result.stdout
+
+    # The load-bearing assertion is SHADOWED -- the warning must fire. The
+    # version is best-effort by design (`Get-TanVersionReport` is timeout- and
+    # failure-guarded precisely so a hung or unrunnable binary cannot break an
+    # install), so both outcomes are correct and which one occurs is a property
+    # of the HOST, not of the code under test:
+    #
+    #   POSIX pwsh -- a `#!/bin/sh` file named `tan.exe` is executable, so the
+    #                 probe reads `tan 0.1.0-decoy`.
+    #   real Windows -- a shell script named `tan.exe` is NOT executable, so
+    #                 the probe correctly falls back to `could not run`.
+    #
+    # Asserting only the first spelling is what reddened windows-latest 2/4 on
+    # tan-cli#678's first CI run, on a fixture whose own docstring says these
+    # are "ordinary shell scripts, not Windows binaries". Pinning the fallback
+    # too keeps the graceful-degradation path covered rather than deleting the
+    # case on Windows.
+    assert "SHADOWED reports=" in result.stdout, result.stdout
+    assert (
+        "SHADOWED reports=tan 0.1.0-decoy" in result.stdout
+        or "SHADOWED reports=could not run" in result.stdout
+    ), result.stdout
+
+
+@pwsh_only
+def test_ps1_shadow_functions_no_false_positive_when_our_install_wins(tmp_path):
+    """The regression this fix must not introduce, at the same logic level as
+    the test above: when the freshly-installed `tan.exe`'s OWN directory
+    resolves first, `Find-FirstTanOnPath` must land on it, and the
+    canonicalised-path comparison must show NOT shadowed -- the false-warning
+    direction that would make a clean install noisy.
+    """
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = target_dir / "tan.exe"
+    target.write_text('#!/bin/sh\necho "tan 0.5.1"\n', encoding="utf-8", newline="\n")
+    target.chmod(0o755)
+    decoy_dir = tmp_path / "decoy"
+    decoy_dir.mkdir()
+    decoy = decoy_dir / "tan.exe"
+    decoy.write_text('#!/bin/sh\necho "tan 0.1.0-decoy"\n', encoding="utf-8", newline="\n")
+    decoy.chmod(0o755)
+
+    funcs = _extract_ps1_shadow_functions()
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(
+        'param([string]$TargetDir, [string]$DecoyDir, [string]$Dest)\n'
+        '$env:PATHEXT = ".com;.exe;.bat;.cmd"\n'
+        f'{funcs}\n'
+        '$winner = Find-FirstTanOnPath @($TargetDir, $DecoyDir)\n'
+        'if (-not $winner) { Write-Output "NO_WINNER"; exit 0 }\n'
+        'Write-Output "WINNER=$winner"\n'
+        '$winnerCanon = Resolve-CanonicalPath $winner\n'
+        '$destCanon = Resolve-CanonicalPath $Dest\n'
+        'if ($winnerCanon -ine $destCanon) {\n'
+        '    Write-Output "SHADOWED"\n'
+        '} else {\n'
+        '    Write-Output "NOT_SHADOWED"\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe),
+         "-TargetDir", str(target_dir), "-DecoyDir", str(decoy_dir), "-Dest", str(target)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert f"WINNER={target}" in result.stdout
+    assert "NOT_SHADOWED" in result.stdout
+
+
+def test_ps1_shadow_check_is_gated_on_effective_path_and_wrapped_non_fatal():
+    """tan-cli#678's own trap 4 (never warn when $Dir is not on PATH at all --
+    the -NoModifyPath/declined case, already covered by the pre-existing
+    "is not on the ... Path -- add it yourself" message) and rule 6 (the
+    whole check must be non-fatal) are both structural properties this test
+    checks directly against the shipped source, the same pure-text approach
+    `test_ps1_broadcast_helper_compile_is_gated_and_guarded` uses -- no pwsh
+    needed, runs on every OS.
+    """
+    text = INSTALL_PS1.read_text()
+    marker_start = text.index("# tan-cli#678: the health check above proves the STAGED binary runs")
+    try_at = text.index("try {", marker_start)
+    gate_at = text.index("$dirIsOnEffectivePath = $alreadyPresent -or (-not $NoModifyPath)", marker_start)
+    warn_at = text.index('Write-Host "install.ps1: WARNING: another tan is earlier on PATH', gate_at)
+    # The OUTER catch (rule 6) -- not one of Resolve-CanonicalPath's or
+    # Get-TanVersionReport's own internal `} catch { }` blocks, several of
+    # which appear (and close) BEFORE the warning text in file order. Found
+    # via its own comment (which only the outer one carries), walking
+    # backward to the `} catch {` immediately preceding it.
+    outer_catch_comment_at = text.index("# Non-fatal, deliberately (tan-cli#678)", warn_at)
+    catch_at = text.rindex("} catch {", 0, outer_catch_comment_at)
+    assert try_at < gate_at < warn_at < catch_at, (
+        "the PATH-shadow check must compute $dirIsOnEffectivePath and print its warning "
+        "INSIDE one try/catch, so a bug in it can never fail an install that already succeeded"
+    )
+    # rule 4: the warning must be reached only when the effective-PATH gate is true --
+    # i.e. the `if ($dirIsOnEffectivePath)` guard must wrap the warning, not just precede it.
+    if_at = text.index("if ($dirIsOnEffectivePath) {", gate_at)
+    assert if_at < warn_at < catch_at

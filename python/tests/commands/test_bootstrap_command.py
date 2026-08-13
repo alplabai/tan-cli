@@ -554,6 +554,53 @@ def test_a_refusals_text_output_is_the_issue_message_split_back_into_lines(tmp_p
     assert "tan-no-such-tool-xyz" in " ".join(refusal_lines)
 
 
+def test_text_mode_renders_the_foreign_global_default_warning_json_already_carries(tmp_path):
+    """tan-cli#677: `bootstrap` computes `sdk.global-default-foreign-project`
+    and emits it in `issues[]` under `--format json`, but the default TEXT
+    output never printed it -- while `bootstrap.python-floor-skew` from the
+    same array DOES print (`_run`'s `log.warn(*skew)`). `doctor` and `init`
+    both render this warning in text; `bootstrap` -- the command that WRITES
+    `~/.alp/sdk-default` in the first place -- was the odd one out.
+
+    Pre-fix, the JSON assertion below passes (the warning IS computed and
+    emitted) and the text assertion fails: the warning's own vocabulary
+    ("machine-global default SDK", the foreign project's own path) never
+    appears in stderr even though the identical invocation's `--format json`
+    carries it.
+    """
+    sdk = make_sdk(tmp_path / "realsdk", tools=[PRESENT_TOOL])
+    other_project = tmp_path / "otherproj"
+    other_project.mkdir()
+    proj = tmp_path / "myproj"
+    proj.mkdir()
+    # `run_tan` derives HOME as `cwd.parent / "fake-home"` when no `env_extra`
+    # override is given -- both invocations below use `cwd=proj`, so both read
+    # the SAME pointer written here.
+    home = tmp_path / "fake-home"
+    (home / ".alp").mkdir(parents=True)
+    pointer = home / ".alp" / "sdk-default"
+    pointer.write_text(
+        json.dumps({"sdkPath": str(sdk), "writtenFor": str(other_project)}),
+        encoding="utf-8",
+    )
+
+    json_env = envelope(
+        run_tan("bootstrap", "--dry-run", "--no-west", "--no-pip", "--format", "json", cwd=proj)
+    )
+    assert json_env["exitCode"] == 0
+    assert "sdk.global-default-foreign-project" in codes(json_env), (
+        "precondition unmet: the JSON surface must carry the warning"
+    )
+
+    text = run_tan("bootstrap", "--dry-run", "--no-west", "--no-pip", cwd=proj)
+    assert text.returncode == 0
+    assert "machine-global default SDK" in text.stderr, (
+        f"DEFECT (tan-cli#677): JSON carries sdk.global-default-foreign-project "
+        f"but text does not render it:\n{text.stderr}"
+    )
+    assert str(other_project) in text.stderr
+
+
 @pytest.mark.parametrize(
     ("flag", "key"),
     [("--no-pip", "noPip"), ("--no-west", "noWest"), ("--print-env", "printEnv")],

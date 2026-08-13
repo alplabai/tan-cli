@@ -687,7 +687,7 @@ exit /b %ERRORLEVEL%
 # these two .NET calls: read UNEXPANDED (DoNotExpandEnvironmentNames), and
 # write back using the SAME ValueKind the key already had, so a REG_EXPAND_SZ
 # Path stays REG_EXPAND_SZ and a REG_SZ one stays REG_SZ.
-function Get-PathRegistryKey([bool]$writable) {
+function Get-PathRegistryKey([bool]$writable, [string]$scopeName = $scope) {
 	# Test-only seam (tan-cli#490): the REG_EXPAND_SZ-preserving read/write
 	# below is exactly the code this whole defect is about, and every existing
 	# test runs with -NoModifyPath, so none of them ever reach it -- the one
@@ -698,11 +698,17 @@ function Get-PathRegistryKey([bool]$writable) {
 	# exercises the identical registry mechanics (read UNEXPANDED, write back
 	# with the SAME ValueKind) without touching the real Environment key in
 	# either hive. Never set outside the test suite.
+	#
+	# tan-cli#678: $scopeName defaults to the install's own -System/-User
+	# $scope (every pre-existing call site), but the PATH-shadow check below
+	# passes "Machine"/"User" explicitly -- it has to read BOTH hives
+	# regardless of which one this install just wrote to, since a new shell's
+	# PATH is Machine THEN User, not whichever single scope -System selected.
 	if ($env:TAN_INSTALL_TEST_PATH_REGISTRY_KEY) {
 		return [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
 			$env:TAN_INSTALL_TEST_PATH_REGISTRY_KEY, $writable)
 	}
-	if ($scope -eq "Machine") {
+	if ($scopeName -eq "Machine") {
 		return [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
 			"SYSTEM\CurrentControlSet\Control\Session Manager\Environment", $writable)
 	} else {
@@ -792,4 +798,167 @@ if ($layout -eq "archive") {
 	Write-Host "install.ps1: installed tan -> $dest (runtime: $LibDir)"
 } else {
 	Write-Host "install.ps1: installed tan -> $dest"
+}
+
+# -----------------------------------------------------------------------
+# tan-cli#678: the health check above proves the STAGED binary runs; it says
+# nothing about whether it is the `tan` a NEW shell actually resolves. On a
+# host that already has a different `tan` earlier on PATH, this install is
+# real -- checksum verified, health check passed, $dest is exactly what was
+# promised -- but invisible: the next shell runs the OTHER one, and this
+# script would otherwise never say so. One warning line. This never reorders
+# PATH or removes the other binary (that would be hostile), and it never
+# fails the install over it -- the install DID succeed, so $LASTEXITCODE
+# stays 0 either way.
+#
+# Fires ONLY when BOTH hold:
+#   1. $Dir is on the EFFECTIVE Path a NEW session will get -- Machine THEN
+#      User, read fresh from the registry (never this process's own
+#      $env:Path, which can be stale) -- mirrors the issue's own
+#      re-resolution methodology exactly. When $Dir is not on that Path at
+#      all (-NoModifyPath and declined, or the user chose not to modify it),
+#      the "is not on the ... Path -- add it yourself" message above already
+#      covers that state; warning here too would be noise about something
+#      already reported. $alreadyPresent / -not $NoModifyPath (from the Path
+#      block above) already answer this without a second read of $scope's
+#      own key.
+#   2. Resolving "tan" against that effective Path + PATHEXT order -- the
+#      same directory-major, extension-minor order cmd.exe/PowerShell
+#      actually use -- lands on something other than $dest. Compared by
+#      RESOLVED, case-insensitive path (symlink/8.3 short name normalised
+#      first) -- never by version: two legitimate installs can share a
+#      version, and comparing versions would mean running the other binary
+#      just to decide whether to warn at all.
+#
+# The whole check is wrapped in try/catch: a bug here (a locked-down host
+# that cannot even read the OTHER hive, a shadowing binary that refuses to
+# run) must never turn an install that already succeeded into a reported
+# failure.
+# -----------------------------------------------------------------------
+try {
+	$dirIsOnEffectivePath = $alreadyPresent -or (-not $NoModifyPath)
+	if ($dirIsOnEffectivePath) {
+		function Get-ScopeRawPathDirs([string]$scopeName) {
+			$key = Get-PathRegistryKey $false $scopeName
+			if (-not $key) { return @() }
+			try {
+				$raw = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+			} finally {
+				$key.Close()
+			}
+			if (-not $raw) { return @() }
+			return ($raw -split ';' | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_) })
+		}
+		# The Path write above (if it ran) already computed $newPath for
+		# $scope's own key -- use that in-memory value instead of a stale
+		# re-read, so a run that just added $Dir sees itself on the list
+		# without needing the registry write to have already landed/synced.
+		$justWroteNewPath = (-not $alreadyPresent) -and (-not $NoModifyPath)
+		if ($scope -eq "Machine") {
+			$machineDirs = if ($justWroteNewPath) { ($newPath -split ';' | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_) }) } else { Get-ScopeRawPathDirs "Machine" }
+			$userDirs = Get-ScopeRawPathDirs "User"
+		} else {
+			$machineDirs = Get-ScopeRawPathDirs "Machine"
+			$userDirs = if ($justWroteNewPath) { ($newPath -split ';' | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_) }) } else { Get-ScopeRawPathDirs "User" }
+		}
+		# Machine THEN User -- the same order Windows composes a new session's
+		# PATH in, not an arbitrary one.
+		$effectiveDirs = @($machineDirs) + @($userDirs)
+
+		function Find-FirstTanOnPath([string[]]$dirs) {
+			$pathext = if ($env:PATHEXT) { $env:PATHEXT } else { ".COM;.EXE;.BAT;.CMD" }
+			$exts = @($pathext -split ';' | Where-Object { $_ })
+			foreach ($d in $dirs) {
+				if (-not $d) { continue }
+				foreach ($ext in $exts) {
+					$candidate = Join-Path $d ("tan" + $ext)
+					if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+				}
+			}
+			return $null
+		}
+
+		function Resolve-CanonicalPath([string]$path) {
+			# Best-effort normalisation: GetFullPath first (case/relative/
+			# redundant-separator differences), then follow a symlink/junction
+			# target if Get-Item reports the LEAF ITSELF is one, then try to
+			# expand any 8.3 short name via GetLongPathName. Each stage is
+			# independently guarded -- a stage that cannot run just leaves the
+			# path as the previous stage left it, never throws out of this
+			# function. Does not chase a symlink on an ANCESTOR directory (only
+			# on the leaf itself) -- there is no cheap realpath(3) equivalent
+			# in .NET, and under-resolving two really-identical paths into a
+			# spurious warning is the safe failure direction to take here.
+			$full = [System.IO.Path]::GetFullPath($path)
+			try {
+				$item = Get-Item -LiteralPath $full -ErrorAction Stop
+				if ($item.PSObject.Properties['LinkType'] -and $item.LinkType -and $item.Target) {
+					$target = @($item.Target)[0]
+					if ($target) {
+						if (-not [System.IO.Path]::IsPathRooted($target)) {
+							$target = Join-Path (Split-Path $full -Parent) $target
+						}
+						$full = [System.IO.Path]::GetFullPath($target)
+					}
+				}
+			} catch { }
+			try {
+				if (-not ('TanInstall.PathNative' -as [type])) {
+					Add-Type -Namespace TanInstall -Name PathNative -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+public static extern uint GetLongPathName(string lpszShortPath, System.Text.StringBuilder lpszLongPath, uint cchBuffer);
+'@ -ErrorAction SilentlyContinue
+				}
+				if ('TanInstall.PathNative' -as [type]) {
+					$sb = New-Object System.Text.StringBuilder 1024
+					$len = [TanInstall.PathNative]::GetLongPathName($full, $sb, [uint32]$sb.Capacity)
+					if ($len -gt 0 -and $len -lt $sb.Capacity) { $full = $sb.ToString() }
+				}
+			} catch { }
+			return $full
+		}
+
+		function Get-TanVersionReport([string]$exePath) {
+			# Best-effort, with a real timeout: this runs a binary the
+			# installer does not control (whatever was already on PATH), and
+			# a hang there must not hang the install. Output is read via the
+			# async Read*Async APIs, started BEFORE WaitForExit, so a chatty
+			# process cannot deadlock this on a full pipe buffer.
+			try {
+				$psi = New-Object System.Diagnostics.ProcessStartInfo
+				$psi.FileName = $exePath
+				$psi.Arguments = "--version"
+				$psi.RedirectStandardOutput = $true
+				$psi.RedirectStandardError = $true
+				$psi.UseShellExecute = $false
+				$psi.CreateNoWindow = $true
+				$proc = [System.Diagnostics.Process]::Start($psi)
+				$stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+				$stderrTask = $proc.StandardError.ReadToEndAsync()
+				if ($proc.WaitForExit(5000)) {
+					[System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 1000) | Out-Null
+					$out = ($stdoutTask.Result + $stderrTask.Result).Trim()
+					if ($out) { return $out }
+				} else {
+					try { $proc.Kill() } catch { }
+				}
+			} catch { }
+			return "could not run"
+		}
+
+		$winner = Find-FirstTanOnPath $effectiveDirs
+		if ($winner) {
+			$winnerCanon = Resolve-CanonicalPath $winner
+			$destCanon = Resolve-CanonicalPath $dest
+			if ($winnerCanon -ine $destCanon) {
+				$shadowVersion = Get-TanVersionReport $winner
+				Write-Host "install.ps1: WARNING: another tan is earlier on PATH and will shadow this install:" -ForegroundColor Yellow
+				Write-Host "  $winner  (reports: $shadowVersion)" -ForegroundColor Yellow
+				Write-Host "  installed here: $dest  ($verifyOut)" -ForegroundColor Yellow
+			}
+		}
+	}
+} catch {
+	# Non-fatal, deliberately (tan-cli#678): a bug in this best-effort warning
+	# must never fail an install that already succeeded.
 }

@@ -28,9 +28,12 @@
 #                Plus `checksums.txt` (sha256 of every archive),
 #                `envelope-contract.json` (the WHOLE issue-code registry, all
 #                three statuses and not a frozen-only subset — a consumer reads
-#                `status` to decide what each code promises — plus one golden
-#                envelope per command family; see contract/README.md), and a
-#                GitHub build-provenance attestation covering all of the above —
+#                `status` to decide what each code promises — plus one entry
+#                per command family: a byte golden `{args, exitCode, envelope}`
+#                for 17 of them, and `doctor`'s `{args, dataKeys}` key-set
+#                entry (tan-cli#664 — doctor's `data` VALUES are host facts, so
+#                it cannot be a golden); see contract/README.md), and a GitHub
+#                build-provenance attestation covering all of the above —
 #                verify with `gh attestation verify <file> --repo alplabai/tan-cli`.
 #
 #   The binaries are PyInstaller --onedir freezes of `python/` (the Python
@@ -623,6 +626,17 @@ jobs:
                   "exitCode": int((case / "expected.exit").read_text(encoding="utf-8").strip()),
                   "envelope": json.loads((case / "expected.json").read_text(encoding="utf-8")),
               }
+          # tan-cli#664: `doctor`'s data VALUES are host facts (installed tool
+          # versions, absolute paths, which checks even apply), so it cannot be
+          # a byte golden like every entry above -- it carries `dataKeys`
+          # (the required KEY SET, never values) instead of `exitCode`/
+          # `envelope`. See contract/doctor-data-keys.json for the single
+          # source and how it was enumerated.
+          doctor_keys = json.loads((root / "doctor-data-keys.json").read_text(encoding="utf-8"))
+          envelopes["doctor"] = {
+              "args": doctor_keys["args"],
+              "dataKeys": doctor_keys["dataKeys"],
+          }
           json.dump(
               {
                   "schemaVersion": 1,
@@ -847,7 +861,29 @@ jobs:
           # token), not a persisted git remote; nothing here pushes to the
           # repo (tan-cli#435).
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      # cache-poisoning is suppressed ON THIS STEP rather than by line number in
+      # .github/zizmor.yml. It used to be baselined there as `release.yml:850:9`,
+      # and that anchor rotted twice: 790 -> 850 when tan-cli#500 added a step to
+      # the `build` job, and 850 -> 864 when this branch added comments above.
+      # Neither change touched this step. A suppression that moves when unrelated
+      # lines move is a suppression that will one day sit on a different step.
+      #
+      # WHY IT IS SUPPRESSED RATHER THAN FIXED. The step passes `node-version`
+      # and `registry-url` only -- no `cache:` input, so no dependency cache is
+      # restored or saved; zizmor reports the action's CAPABILITY, at Low
+      # confidence, not an observed cache. There is also nothing to poison: the
+      # job's two steps are `npm pack --dry-run` and `npm publish`, and it
+      # installs no dependencies.
+      #
+      # WHAT WOULD CHANGE THIS. Add a `cache:` input here, or an install step
+      # ahead of `npm publish`, and this must be re-argued rather than carried:
+      # at that point a restored cache really would reach the one job in this
+      # repository that publishes to a registry. THE SAME IS TRUE IMPLICITLY:
+      # `actions/setup-node` v5+ auto-restores an npm cache with no explicit
+      # `cache:` input at all when `npm-shim/package.json` carries a
+      # `packageManager` field, so this holds only as long as that file has
+      # none -- add one and re-argue this before merging.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org

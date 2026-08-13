@@ -2823,6 +2823,25 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         bootstrap_issues = [pin_issue, *bootstrap_issues]
     if foreign_issue is not None:
         bootstrap_issues = [foreign_issue, *bootstrap_issues]
+    # tan-cli#677: `pin_issue`/`foreign_issue` reached `bootstrap_issues`
+    # (the JSON envelope) above and stopped there. `log.warn`-recorded
+    # warnings (e.g. `bootstrap.python-floor-skew`) print live to stderr AS
+    # THEY FIRE, via `Log.line`, so they are already in `text` above by the
+    # time this function returns -- these two are computed once, up front
+    # (before `Log` even exists, since they gate nothing), specifically NOT
+    # through `log.warn` (which would misname their shared, unprefixed
+    # `sdk.*` code `bootstrap.*` -- see the comment at their computation).
+    # That made them the one pair the text surface never saw: `doctor` and
+    # `init` both render them, `bootstrap` -- the command that WRITES
+    # `~/.alp/sdk-default` in the first place -- silently didn't. Prefixed
+    # `{severity}: {message}`, matching `Log.line`'s own `bootstrap: ` shape
+    # closely enough to read as one stream, and PREPENDED so they read
+    # before the run's own progress lines, exactly the order they hold in
+    # `bootstrap_issues`.
+    warning_lines = [
+        f"{issue.severity}: {issue.message}" for issue in (pin_issue, foreign_issue) if issue
+    ]
+    text = warning_lines + text
     return (
         Outcome(exit_code, planned_payload(), bootstrap_issues, text),
         reported_project,

@@ -29,6 +29,7 @@ Three levels, because the hard constraints sit at three levels:
 """
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
@@ -104,21 +105,19 @@ def test_enabled_heartbeat_ticks_after_silence_then_clears_on_output(monkeypatch
     it (a `\\r`-clear) before relaying, so it never mixes into the stream it
     was standing in for.
 
-    `shutil.get_terminal_size` is pinned wide (see
+    `terminal_width` is pinned wide (see
     `test_heartbeat_line_never_wraps_on_a_narrow_terminal` for the narrow
     case this test does NOT cover): unpinned, it reads the REAL terminal --
     `COLUMNS`, on a host/CI runner that exports one, or the actual tty width
     otherwise -- and a value narrower than the ~110-char message below would
     truncate `"still building"` itself out of the line before this test's own
     content assertion ever runs, failing for a reason unrelated to the code
-    under test."""
+    under test. Patched on `build_cmd`'s own name (tan-cli#564): the module
+    imports the helper BY VALUE, so patching `tan.env.terminal_width` would
+    not be seen here."""
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_SILENCE_THRESHOLD_S", 0.05)
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_TICK_S", 0.02)
-    monkeypatch.setattr(
-        build_cmd.shutil,
-        "get_terminal_size",
-        lambda fallback=(80, 24): os.terminal_size((120, 24)),
-    )
+    monkeypatch.setattr(build_cmd, "terminal_width", lambda fallback: 120)
     fake_stderr = io.StringIO()
     monkeypatch.setattr(sys, "stderr", fake_stderr)
 
@@ -156,11 +155,7 @@ def test_heartbeat_line_never_wraps_on_a_narrow_terminal(monkeypatch):
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_SILENCE_THRESHOLD_S", 0.02)
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_TICK_S", 0.01)
     width = 40  # narrower than the old hardcoded 88-column pad
-    monkeypatch.setattr(
-        build_cmd.shutil,
-        "get_terminal_size",
-        lambda fallback=(80, 24): os.terminal_size((width, 24)),
-    )
+    monkeypatch.setattr(build_cmd, "terminal_width", lambda fallback: width)
     term = _FakeTerminal(width)
     monkeypatch.setattr(sys, "stderr", term)
 
@@ -170,6 +165,38 @@ def test_heartbeat_line_never_wraps_on_a_narrow_terminal(monkeypatch):
 
     assert len(term.rows) == 1, term.rows
     assert all(len(row) <= width for row in term.rows), term.rows
+
+
+def test_heartbeat_width_measures_stderr_not_stdout(monkeypatch):
+    """tan-cli#564: `tan build > log.txt` from a 70-column terminal. The
+    heartbeat is armed on `stderr_is_tty()` and writes to stderr, but the
+    width used to come from `shutil.get_terminal_size`, i.e.
+    `sys.__stdout__` -- whose ioctl raises `OSError [Errno 25] Inappropriate
+    ioctl for device` once stdout is redirected, so the measurement fell to
+    its hard-coded 80-column fallback and `_heartbeat_line_width()` returned
+    79 instead of 69. `_tick` writes `message.ljust(width)`, so a 79-char row
+    on a 70-column screen soft-wraps, `\\r` rewinds only the last physical
+    row, and the "still building" line stacks a fresh row per tick -- the
+    tan-cli#287 defect this width computation exists to remove."""
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.delenv("LINES", raising=False)
+
+    class _StderrOnPty:
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 2
+
+    def _sized(fd: int) -> os.terminal_size:
+        if fd == 2:
+            return os.terminal_size((70, 24))
+        raise OSError(errno.ENOTTY, "Inappropriate ioctl for device")
+
+    monkeypatch.setattr(sys, "stderr", _StderrOnPty())
+    monkeypatch.setattr(os, "get_terminal_size", _sized)
+
+    assert build_cmd._heartbeat_line_width() == 69
 
 
 def test_dispatch_does_not_crash_arming_the_heartbeat_when_stderr_is_none(monkeypatch):

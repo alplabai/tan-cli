@@ -53,12 +53,17 @@ _MACOS_INSTALL = {
 
 
 def test_the_remedy_does_not_promise_an_install_it_cannot_perform():
-    """tan-cli#370. `doctor --build --fix` REFUSES to spawn any command whose
-    first word is `sudo` (`doctor_cmd.fix_needs_sudo_check`) -- under
-    `--format json` this process's stdio is captured end to end, so a password
-    prompt would hang forever rather than fail loudly. Every one of alp-sdk's
+    """tan-cli#370. `doctor --build --fix` never spawns the `sudo` PROGRAM
+    (`doctor_cmd.fix_needs_sudo_check`) -- under `--format json` this
+    process's stdio is captured end to end, so a password prompt would hang
+    forever rather than fail loudly. Every one of alp-sdk's
     `prerequisites.install.linux` commands starts with `sudo`, so on Linux
-    `--fix` installs nothing and prints instead.
+    `--fix` installs nothing for a NON-root caller and prints instead
+    (tan-cli#650 made the root case install directly -- see
+    `test_run_fix_runs_a_sudo_command_directly_when_already_root` in
+    `tests/commands/test_doctor_command.py` -- but this wording is not
+    conditioned on the caller's UID, only on the commands, so it stays true
+    either way).
 
     tan-cli#355's original second line said "to install them from the SDK's
     manifest", which is therefore false on the host most customers are on --
@@ -76,6 +81,11 @@ def test_the_remedy_does_not_promise_an_install_it_cannot_perform():
     assert "prints the exact command" in lines[1]
     assert "sudo" in lines[1], "the reason it cannot install has to be the reason given"
     assert "to install them from the SDK's manifest" not in lines[1]
+    # tan-cli#650: the hint that recommends `--fix` also discloses, in the
+    # same breath, that it needs a real interactive terminal -- a Dockerfile
+    # `RUN` or a CI step reading this exact line would otherwise have no way
+    # to know the remedy it was just pointed at is inert for them.
+    assert "interactive terminal" in lines[1]
 
 
 def test_the_remedy_still_promises_an_install_where_none_needs_elevation():
@@ -88,7 +98,8 @@ def test_the_remedy_still_promises_an_install_where_none_needs_elevation():
     lines = posix_refusal(["cmake", "ninja"], _MACOS_INSTALL).lines
 
     assert lines[1] == (
-        "Or run `tan doctor --build --fix` to install them from the SDK's manifest."
+        "Or run `tan doctor --build --fix` (needs a real, interactive "
+        "terminal) to install them from the SDK's manifest."
     )
 
 

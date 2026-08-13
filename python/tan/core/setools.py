@@ -19,10 +19,18 @@ adds is: given a SETOOLS install the customer already has on disk, drive its
 `app-gen-toc` step for them -- copy the build's raw `.bin`, write the JSON
 config it wants, run it, and read back the ATOC placement it prints -- so
 `tan flash` can complete end to end. RESOLVING that install is also this
-module's job ([`resolve_setools_dir`]): an explicit `flash_args.setools_dir`,
-then `SETOOLS_DIR`, in that order, and NOTHING ELSE -- no filesystem search --
-because a WRONG SETOOLS silently signing against the wrong part is worse than
-tan refusing outright.
+module's job ([`resolve_setools_dir`]): the `--setools-dir` flag, then
+`SETOOLS_DIR`, then `flash_args.setools_dir`, in that order, and NOTHING
+ELSE -- no filesystem search -- because a WRONG SETOOLS silently signing
+against the wrong part is worse than tan refusing outright.
+
+That ranking is deliberate and is the tan-cli#368 re-ranking; read
+[`resolve_setools_dir`]'s own docstring before changing it. `flash_args` is
+GENERATED -- every `tan build` overwrites it -- so a stale hand-edited
+`setools_dir` must never outrank the `SETOOLS_DIR` an operator exported or a
+flag they passed for this one invocation. This header previously stated the
+reverse order (tan-cli#572), leaving two docstrings in ONE file disagreeing
+about which SETOOLS signs the image.
 
 **Not `tan.core.flash_plan`.** That module is pure/no-IO by its own
 docstring; this one is not -- it copies a file, writes a config, and spawns

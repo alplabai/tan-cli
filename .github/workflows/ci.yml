@@ -47,6 +47,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A `dev` merge queue is coming online: without this
+  # trigger, a queued PR would wait forever on required contexts
+  # (`python -- pytest across python/ (*)`, `zizmor · workflow security`) that
+  # `merge_group` events never fire -- this workflow only ran on `push`/
+  # `pull_request`/`workflow_call` before, none of which GitHub raises for a
+  # merge-queue entry. No job below is gated to `pull_request` specifically
+  # (`python` and `workflow-security` carry no job-level `if:` at all), so
+  # both required contexts this file produces run unchanged on a
+  # `merge_group` event -- verified by reading every `if:` in this file, not
+  # assumed.
+  merge_group:
   # Called by release.yml so a tag cannot publish binaries the gates never ran
   # against. Keep this the single definition of the gate set.
   workflow_call:
@@ -213,6 +224,15 @@ jobs:
       # this SHA, the same deferred-tag pattern `parity.yml`'s own
       # `PINNED_SDK_TAG` history used while waiting on v0.14.0.
       #
+      # Bumped `1a9f753c` -> `a317330595f744d35f4d785869517110f3678f70` for
+      # tan-cli#639, in the SAME change as `parity.yml`'s `PINNED_SDK_TAG`.
+      # An earlier revision of that PR moved only `parity.yml` and left THIS
+      # ref behind -- precisely the divergence the "MUST be bumped together"
+      # rule above exists to prevent, and the second time it has happened
+      # mid-review (the first is recorded above, during #485). Caught by human
+      # review both times; NOTHING asserts the two SHAs match, which is the
+      # actual gap and is worth its own gate.
+      #
       # `53557a60` -> `f30f4d4b` for tan-cli#543/#425, moved in the SAME change
       # as `parity.yml`'s `PINNED_SDK_TAG`, which is the whole point of the
       # "MUST be bumped together" rule above -- the mid-review divergence that
@@ -275,7 +295,7 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 1a9f753c13e5ab5d444e2dc39d7065a352f1b777
+          ref: a317330595f744d35f4d785869517110f3678f70
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a

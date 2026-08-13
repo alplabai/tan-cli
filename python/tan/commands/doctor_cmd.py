@@ -120,7 +120,6 @@ import os
 import platform
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
@@ -164,7 +163,7 @@ from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
-from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, use_color
+from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -2690,7 +2689,8 @@ FIX_INSTALL_TIMEOUT_S = 300
 
 def fix_needs_sudo_check(tool: str, command: str) -> Check:
     """`doctor.fix-needs-sudo` -- ADR 0021's Tier-B refusal (tan-cli#91,
-    MAINTAINER DECISION): tan never spawns `sudo` on the customer's behalf.
+    MAINTAINER DECISION): tan never spawns the `sudo` PROGRAM on the
+    customer's behalf.
 
     Under `--format json` this process's stdio is captured end to end, so a
     `sudo` password prompt has nowhere to go -- it would hang forever rather
@@ -2701,6 +2701,15 @@ def fix_needs_sudo_check(tool: str, command: str) -> Check:
     `sudo` -- the manifest's own POSIX `prerequisites.install` commands are
     the one place that word appears in this codebase at all; Windows
     (`winget`, user-scope) and macOS (`brew`) never need it.
+
+    tan-cli#650: `run_fix` only reaches THIS branch when the caller is NOT
+    already root -- a root caller has nothing left to elevate to, and
+    `run_fix` strips the literal `sudo ` word and runs the manifest's own
+    remaining command directly instead of calling this function at all. That
+    still never spawns the `sudo` program (the MAINTAINER DECISION above is
+    about the program, not the elevation it grants), so a root caller getting
+    real remediation here does not contradict it -- it recognises that
+    "needs elevation" is already satisfied when the process asking is root.
     """
     return Check(
         f"fix:{tool}",
@@ -2714,7 +2723,9 @@ def fix_needs_sudo_check(tool: str, command: str) -> Check:
     )
 
 
-def fix_installed_check(tool: str, command: str) -> Check:
+def fix_installed_check(
+    tool: str, command: str, *, elevation_skipped: bool = False
+) -> Check:
     """`doctor.fix-installed` -- `--fix` ran a manifest install command that
     needed no elevation (ADR 0021 Tier A), and the child process exited 0.
 
@@ -2725,13 +2736,27 @@ def fix_installed_check(tool: str, command: str) -> Check:
     shell" is the whole truth this check can tell; `hostPrerequisites`
     above still reports `{tool}` missing in THIS report, which is correct
     for THIS report.
+
+    `elevation_skipped` (tan-cli#650): set when `command` is the manifest's
+    own line with its literal `sudo ` prefix already removed by `run_fix`,
+    because the caller was ALREADY root -- there was no elevation left to
+    acquire. Said explicitly so this reads as the root-aware Tier-B path it
+    is, not as an ordinary Tier-A ("this tool never needed elevation at
+    all") outcome; the two are true for different reasons and a reader
+    deciding whether to trust `--fix` on their next root container should be
+    able to tell them apart.
     """
+    lede = (
+        f"`--fix` ran `{command}` for {tool} (already running as root, so "
+        f"the manifest's `sudo` was not needed and was not run)."
+        if elevation_skipped
+        else f"`--fix` ran `{command}` for {tool}."
+    )
     return Check(
         f"fix:{tool}",
         "warn",
-        f"`--fix` ran `{command}` for {tool}. tan cannot see a PATH change "
-        f"made after it started -- open a new shell, then re-run `tan "
-        f"doctor` there to confirm.",
+        f"{lede} tan cannot see a PATH change made after it started -- open "
+        f"a new shell, then re-run `tan doctor` there to confirm.",
         code="doctor.fix-installed",
         scope="host",
     )
@@ -2789,15 +2814,18 @@ def fix_timed_out_check(tool: str, command: str) -> Check:
 
 
 #: Per-installer remedy for `fix_installer_not_found_check`, keyed by the first
-#: word of the manifest's install command. Only two entries because only two
-#: are reachable: `metadata/bootstrap.json`'s `prerequisites.install` produces
-#: `brew` on macOS and `winget` on Windows, and Linux's `sudo apt-get ...` is
-#: refused by `fix_needs_sudo_check` long before anything tries to resolve it
-#: (see `_fallback_install_commands` in `tan.core.bootstrap`, which is
-#: byte-pinned to the manifest). Anything else gets the generic remedy below
-#: -- a manifest is free to name a package manager this table has never heard
-#: of, and "not found" with no advice is the exact silence tan-cli#360 is
-#: about.
+#: word of the command actually resolved and spawned -- for a `sudo`-prefixed
+#: manifest line that is the word AFTER `sudo` (tan-cli#650 strips it for an
+#: already-root caller before this table is ever consulted; a non-root caller
+#: is refused by `fix_needs_sudo_check` long before this point, so `sudo`
+#: itself never appears here as a key). Two named entries: `metadata/
+#: bootstrap.json`'s `prerequisites.install` produces `brew` on macOS and
+#: `winget` on Windows (see `_fallback_install_commands` in `tan.core.
+#: bootstrap`, which is byte-pinned to the manifest). Anything else --
+#: including `apt-get`, on the rare root-container host missing it -- gets
+#: the generic remedy below: a manifest is free to name a package manager
+#: this table has never heard of, and "not found" with no advice is the
+#: exact silence tan-cli#360 is about.
 INSTALLER_REMEDIES = {
     "brew": (
         "Homebrew is not installed -- install it from https://brew.sh, then "
@@ -2859,6 +2887,30 @@ def fix_installer_not_found_check(installer: str, tools: list[str]) -> Check:
         code="doctor.fix-installer-not-found",
         scope="host",
     )
+
+
+def _running_as_root() -> bool:
+    """tan-cli#650: whether THIS process's effective UID is 0 -- POSIX only.
+
+    `os.geteuid` does not exist on Windows, where no manifest install
+    command ever carries a `sudo` prefix in the first place (`winget` is
+    user-scope) -- see `fix_needs_sudo_check`'s docstring -- so this is only
+    ever consulted from the one platform whose manifest can raise the
+    question at all, and `getattr` guards the call rather than an `if
+    sys.platform` branch so this stays correct if that ever changes.
+
+    The caller this exists for: a root container (`docker run`, most CI base
+    images, a fresh cloud VM before its first `useradd`) running `tan doctor
+    --build --fix`. There is no elevation left to acquire there, so
+    `run_fix` refusing every `sudo`-prefixed manifest command unconditionally
+    -- which it did before this -- was not caution, it was a false negative:
+    measured live via a real `geteuid() == 0` process (`unshare --user
+    --map-root-user`, a genuine root user namespace, since this box has no
+    passwordless real root), `run_fix` still emitted `doctor.fix-needs-sudo`
+    and ran nothing.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
 
 
 def run_fix(
@@ -2930,10 +2982,24 @@ def run_fix(
         command = entry.get("command")
         if not tool or not command:
             continue
+        # tan-cli#650: `effective_command` is what actually gets resolved and
+        # spawned below; `command` (the manifest's own, untouched line) is
+        # kept only for `fix_needs_sudo_check`'s refusal message, which must
+        # name the exact line a human would paste into a real terminal.
+        effective_command = command
+        elevation_skipped = False
         if command.strip().startswith("sudo "):
-            _add(fix_needs_sudo_check(tool, command))
-            continue
-        argv = shlex.split(command)
+            if not _running_as_root():
+                _add(fix_needs_sudo_check(tool, command))
+                continue
+            # Already root: there is nothing left to elevate to, and this
+            # process still never spawns the `sudo` PROGRAM (see
+            # `fix_needs_sudo_check`'s docstring) -- it strips the literal
+            # `sudo ` word and runs the manifest's OWN remaining command
+            # directly, the same way every non-elevated entry already does.
+            effective_command = command.strip()[len("sudo ") :].lstrip()
+            elevation_skipped = True
+        argv = shlex.split(effective_command)
         if not argv:
             # The one deliberately silent skip left (tan-cli#360 reviewed the
             # rest): an all-whitespace install command names no program to
@@ -2966,15 +3032,19 @@ def run_fix(
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            _add(fix_timed_out_check(tool, command))
+            _add(fix_timed_out_check(tool, effective_command))
             continue
         except (OSError, ValueError, subprocess.SubprocessError) as err:
-            _add(fix_spawn_failed_check(tool, command, err))
+            _add(fix_spawn_failed_check(tool, effective_command, err))
             continue
         if result.returncode == 0:
-            _add(fix_installed_check(tool, command))
+            _add(
+                fix_installed_check(
+                    tool, effective_command, elevation_skipped=elevation_skipped
+                )
+            )
         else:
-            _add(fix_failed_check(tool, command, result.returncode))
+            _add(fix_failed_check(tool, effective_command, result.returncode))
     for installer, tools in unresolved.items():
         _add(fix_installer_not_found_check(installer, tools))
     return results
@@ -3670,22 +3740,28 @@ def doctor(
         # `PROBE_TIMEOUT_S` each, and the old code printed nothing until every
         # one of them had answered -- on a host where one wedges, a blank
         # terminal names nothing. Width floored at `TEXT_WRAP_MIN_WIDTH` -- a
-        # 20-column terminal must not fall to one word per line -- and the
-        # fallback (piped/redirected stdout) matches `build_cmd`'s own
-        # `shutil.get_terminal_size` convention. `width`/`color` are resolved
-        # unconditionally, even under `--format json` where neither is ever
-        # read: both calls are cheap and emit nothing, so gating them behind
-        # `if stream` bought nothing but a second, held-together-by-an-11-line-
-        # comment invariant (`_print_check` closes over both) for no benefit.
+        # 20-column terminal must not fall to one word per line -- and measured
+        # through `tan.env.terminal_width`, the one place that reads a
+        # terminal's columns, sharing the 100-column fallback with
+        # `tan.env.wrap_width`. tan-cli#564: this used to be a bare
+        # `shutil.get_terminal_size(fallback=(100, 24))`, which measures
+        # `sys.__stdout__` -- but this report is printed to STDERR, so
+        # `tan doctor > report.txt` from a 70-column terminal took the 100 and
+        # put 94-, 95- and 105-column lines on a 70-column screen.
+        # `width`/`color` are resolved unconditionally, even under
+        # `--format json` where neither is ever read: both calls are cheap and
+        # emit nothing, so gating them behind `if stream` bought nothing but a
+        # second, held-together-by-an-11-line-comment invariant (`_print_check`
+        # closes over both) for no benefit.
         #
         # UNCONDITIONAL on stderr being a terminal at all (unlike
         # `tan.env.wrap_width`, which `explain`/`sdk current` use instead): a
-        # piped `tan doctor` still wraps to this `get_terminal_size` fallback
+        # piped `tan doctor` still wraps to `terminal_width`'s own fallback
         # today. That is a real inconsistency with the new seam, left exactly as
         # it shipped in PR #480 rather than silently fixed here -- see that PR
         # for the call to change it.
         stream = not json_mode
-        width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, TEXT_WRAP_MIN_WIDTH)
+        width = max(terminal_width(100), TEXT_WRAP_MIN_WIDTH)
         color = use_color(no_color, ci)
 
         def _print_check(check: Check) -> None:

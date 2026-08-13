@@ -310,6 +310,50 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **`tan init` no longer reports `ok:true`/`issues:[]` while silently
+  discarding what `--sdk-root` or `--cores` asked for.** Two sites, same
+  shape: (1) an unresolvable `--sdk-root` (a typo, or the more realistic
+  route — a previously-valid one that `tan bootstrap` has since relocated)
+  scaffolded the whole project with no `.alp/sdk-path` written and
+  `sdkPinned: null`, with nothing in the envelope saying why, though the
+  README promises `init` pins the checkout there — a later command then
+  silently fell through to `~/.alp/sdk-default`, some OTHER project's last
+  `bootstrap` on a shared host. Now warns `init.sdk-root-invalid`, naming the
+  path. (2) `--cores m55_he:zephyr` on a template whose app core the SoM
+  guess had already fixed to `m55_hp` was spliced in as an app-less
+  COMPANION instead — a single-core request became a two-core project bound
+  to a core the caller never named, plus an unrequested default RPMsg
+  carve-out. `--cores` can only ever add a companion (it has no source
+  directory to give one an `app:`), so a companion entry requesting `zephyr`
+  or `baremetal` — both need an `app:` the splice cannot supply, and the
+  latter would otherwise plan to `ok:true` here only to be refused two
+  commands later at `tan build` — is now refused (`init.invalid-cores`,
+  naming both core ids) rather than silently rendered or deferred to a
+  confusing downstream failure. A `yocto` companion reaches the identical
+  dead end through a fourth door — the planner refuses a Cortex-M core
+  running Yocto exactly as hard as a Cortex-A core running Zephyr — and
+  `--cores <id>:yocto` is now refused too when `<id>` is not one of the
+  `a`-prefixed Cortex-A ids every SoM topology uses (`a32_cluster`,
+  `a55_cluster`); `<id>:off` stays honored unconditionally, and now
+  round-trips as the schema's string `"off"` instead of an unquoted `off`
+  that YAML parses as the boolean `False` and the schema then rejects.
+  (#642, #643)
+- **`tan faultdecode` silently dropped a piped/pasted fault dump whenever ANY
+  register flag was also given, contradicting its own documented contract
+  ("Explicit flags win over a parsed dump" -- only true if the dump is still
+  read when a flag is present too).** `_read_dump`'s implicit stdin read is
+  no longer gated on `not registers_given`; it is attempted unconditionally
+  (still bounded by `_stdin_offers_input`'s `_STDIN_READY_TIMEOUT_S`, so a
+  held-open pipe cannot reopen tan-cli#388's unbounded hang -- measured, a
+  real held-open OS pipe with `--cfsr` given still returns in well under a
+  second). Two reachable failures, both closed: a piped CFSR/BFAR was
+  discarded in favour of an unrelated explicit flag (e.g. `--hfsr
+  0x40000000` reported "Forced HardFault ... its own status bits are clear"
+  while the piped `CFSR=0x00008200`/`BFAR=0xdeadbeef` it never read said the
+  opposite -- a precise bus fault), and `--bfar`/`--mmfar` alone counted
+  toward suppressing the dump read without counting toward the
+  cfsr/hfsr/dfsr "something to analyse" gate, so the dump was skipped AND the
+  command still refused with `faultdecode.no-registers`. (#503)
 - **Re-pinned the vendored-planner staleness audit to alp-sdk `1a9f753c`
   (from `7d58ef32`), and ported the behavioural delta the pin was measuring
   against.** `tan/planner/loader.py`, `manifest.py`, `models.py`, and
@@ -360,6 +404,28 @@ All notable changes to `tan` are documented here. Format follows
   `_synthesised_finding`, so this specific, identifiable cause names the real
   fix — a present-but-independently-broken workspace venv still gets the
   generic message. (#652)
+- **README's quickstart never named the Zephyr SDK toolchain install, and its
+  "From source" instructions failed on stock Ubuntu 24.04.** Both measured in
+  a clean `ubuntu:24.04` container (#651). The quickstart's command list took
+  a customer straight to `tan build` without ever running
+  `west sdk install --version 1.0.1 -t arm-zephyr-eabi` -- the exact command
+  `tan doctor`'s `zephyrSdk` check already names, but neither `tan bootstrap`
+  nor `tan doctor --fix` runs it for you. The quickstart now runs it in
+  sequence, after activating the workspace venv `west` lives in (nothing else
+  puts `west` on `PATH`) and pointing `ZEPHYR_BASE` at the workspace, and
+  names the `file(1)` prerequisite the SDK's own host-tools step needs on a
+  minimal Linux host (#424) but that step's own failure never names. A new
+  test (`test_readme_quickstart_names_the_current_zephyr_sdk_install_command`)
+  keeps the README's embedded version pin from silently drifting from
+  `ZEPHYR_SDK_INSTALL_VERSION`. Separately, `python3 -m pip install ./python`
+  failed with `No module named pip` on Ubuntu 24.04's bare `python3` package,
+  and -- once `python3-pip` is added -- fails again with PEP 668's
+  `externally-managed-environment` (`/usr/lib/python3.12/EXTERNALLY-MANAGED`).
+  The "From source" sections in `README.md` and `python/README.md` now
+  install into a virtual environment instead (which needs only
+  `python3-venv` on Debian/Ubuntu -- its bundled `ensurepip` supplies the
+  venv's own `pip`, so `python3-pip` is not a separate prerequisite at all).
+  Closes #651.
 - **The `tan_under_test` refusal (tan-cli#423) had never been exercised itself
   -- every existing consumer of it is an ordinary test run where it is
   expected to pass silently, so a green suite said nothing about whether the
@@ -376,6 +442,27 @@ All notable changes to `tan` are documented here. Format follows
   this repo's own, correctly-resolved `tan`. `README.md`'s Development
   section now says plainly: install into a venv you create, never a bare or
   `--user` `pip install -e ./python`.
+
+- **`tan doctor --fix` refused every `sudo`-prefixed manifest install command
+  unconditionally, even when the caller already had root -- the exact host a
+  Docker `RUN`, most CI base images, or a fresh cloud VM run as.** Measured
+  against a real `geteuid() == 0` process (`unshare --user --map-root-user`):
+  `run_fix` still reported `doctor.fix-needs-sudo` and installed nothing.
+  There is no elevation left to acquire once the caller is root, so `--fix`
+  now strips the manifest's literal `sudo ` prefix and runs the rest of the
+  line directly -- it still never spawns the `sudo` PROGRAM itself (the
+  tan-cli#91 decision is about the program, not the elevation it grants); a
+  non-root caller is refused exactly as before. `fix_installed_check` gained
+  an `elevation_skipped` flag so the resulting `doctor.fix-installed` check
+  reads as the root-aware outcome it is, not an ordinary no-elevation-needed
+  one. Also disclosed the OTHER way `--fix` goes quiet: it is a no-op (exit
+  4) with no TTY on `stdin`/`stderr` -- piped, redirected, or CI -- per the
+  `can_prompt` consent gate; measured in a clean `ubuntu:24.04` container.
+  The README and both `tan bootstrap` prerequisite-refusal hints
+  (`_DOCTOR_FIX_HINT` / `_DOCTOR_FIX_HINT_NEEDS_ELEVATION`) now say so in the
+  same breath as recommending `--fix`, instead of recommending a remedy that
+  is silently inert for the scripted-onboarding callers most likely to reach
+  for it. (#650)
 - **`tan bootstrap --workspace <dir>` relocated a checkout without updating the
   PROJECT's own `.alp/sdk-path` pin, only `~/.alp/sdk-default`** -- reachable
   any time `tan bootstrap` relocates a checkout inside a project that already
@@ -430,6 +517,41 @@ All notable changes to `tan` are documented here. Format follows
   takes it as a keyword-only `manifest_zephyr_floor` argument that now
   outranks the constant; `ZEPHYR_PYTHON_FLOOR` is the last resort, not the
   routine case. Closes #606.
+
+- **New regression test for the SoM chip-driver Kconfig rule
+  (`_chip_has_driver`, alp-sdk#1241) tan already carries.** alp-sdk#1380's
+  on-silicon runbook reported (tan-cli#654) that `tan build` aborted every AEN
+  Zephyr slice at Kconfig with `attempt to assign the value 'y' to the
+  undefined symbol ALP_SDK_CHIP_DP83825` -- `metadata/e1m_modules/E1M-AEN*`
+  gained `ethernet_phy: dp83825` (`driver_status: none`, no `chips/dp83825/`
+  directory) upstream, and the AEN example's emitted `alp.conf` carried the
+  line while alp-sdk's own `--emit zephyr-conf` did not. Measured against
+  this tree: the fix already landed here via the tan-cli#582/#593 planner
+  re-syncs (`kconfig.py::_chip_has_driver`, ported verbatim from alp-sdk
+  bc73b66c, itself alp-sdk#1241) -- `tan.planner`'s `--emit zephyr-conf` is
+  byte-identical to alp-sdk's own emitter for every `examples/aen/*`
+  `board.yaml`, no `CONFIG_ALP_SDK_CHIP_DP83825` line anywhere, confirmed
+  against alp-sdk `origin/dev` `496e32ad`.
+  `tests/core/test_chip_kconfig_needs_a_driver.py` is the dedicated
+  regression this needed and did not have: a hermetic, GENERIC assertion
+  (not scoped to "dp83825" by name) that feeds every driverless chip
+  manifest the bound SDK ships through `_emit_chips` via a synthetic
+  `on_module:` block and checks the OUTPUT -- not an earlier parametrized
+  form that asserted `_chip_has_driver`'s own body against itself and could
+  not fail -- plus the concrete AEN case end to end through the same
+  function. Verified against the unfixed shape (the `_chip_has_driver`
+  filter line removed from `_emit_chips`) before landing: 2 failed / 3
+  passed -> 5 passed, with the generic assertion itself now among the
+  failures (it names all five driverless chips, not just dp83825).
+  Freshness-pin note, measured rather than assumed: `kconfig.py` and
+  `slugs.py` (the two files this rule lives in) are byte-identical between
+  the pinned SDK audit commit and current alp-sdk `origin/dev` -- no re-pin
+  needed for this fix. Four OTHER `tan/planner/` mirror files (`loader.py`,
+  `manifest.py`, `models.py`, `orchestrator.py`) HAVE drifted since the pin,
+  from two unrelated alp-sdk commits (`c3de155a`, `496e32ad`, both
+  `swd_probe`/`jlink_device` metadata) -- out of scope here; it is the same
+  seam tan-cli#353 already tracks. Closes #654.
+
 - **The test suite no longer means two different things on two machines: the
   debug/flash probe inventory is now a property of the test, not of the host.**
   A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
@@ -2913,9 +3035,31 @@ All notable changes to `tan` are documented here. Format follows
   `github-actions` weekly against `dev`, one PR per action; the Python
   dependency lock stays with #437 rather than being half-done here. (#435)
 
+- **`release-combination.yml`: a scheduled gate for the one combination
+  nothing else tests -- the latest RELEASED `tan` against alp-sdk's latest
+  RELEASE TAG.** Every existing gate binds a pinned commit (`parity.yml`'s
+  `PINNED_SDK_TAG`, `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`), which is the one axis the two repos can never
+  disagree on by construction. Two real defects shipped through that gap in
+  opposite directions: #320/#485/#639 ("too old" -- a released tan predates
+  an alp-sdk release's planner fix) and #591 ("too new" -- a `tan/planner/`
+  re-sync ports a requirement no published alp-sdk tag satisfies yet). The
+  new workflow runs the documented customer journey -- `install.sh` (real
+  release download) -> clone alp-sdk @ its latest release tag -> `tan init`
+  -> `tan generate` -> `tan build` -- for one SKU per SoM family
+  (E1M-AEN801, E1M-V2N101; E1M-NX9101 is matrixed `expect-refuse`, since its
+  `hw_rev: r1` is genuinely `status: tbd` and correctly refuses at
+  `tan generate`). `schedule` + `workflow_dispatch`, not a required PR
+  check -- it depends on release timing neither repo's PR CI controls.
+  Provably not vacuous: reproduced locally, step for step, against today's
+  real released pair (tan v0.5.1 installed from source at that tag, real
+  alp-sdk v0.15.0 clone) -- the E1M-V2N101 leg reproduces #639 exactly, with
+  no synthetic input needed. The first *live* dispatch happens once this
+  workflow registers on `dev`. (#639)
 
 
-## [0.5.1] — 2026-08-04
+
+## [0.5.1] — 2026-08-05
 
 ### Fixed
 
@@ -3418,7 +3562,8 @@ release.yml extracts the notes by an exact `^## \[<tag minus v>\]` match, so a
   tan-cli#427, which tracks the flags themselves, and the message no longer
   names a release at all: it said "deferred to v0.6.0" while the release it
   meant was renumbered to 0.5.0, and a refusal that promises a version is a
-  claim this port cannot keep true.- **Two SDK discovery ladders answered different checkouts from one directory
+  claim this port cannot keep true.
+- **Two SDK discovery ladders answered different checkouts from one directory
   and both reported `sourceTier: "discovery"`, so nothing on the wire said
   which one had answered** (tan-cli#407). In a workspace holding both a child
   `<ws>/alp-sdk` — what `tan bootstrap` clones — and a lateral `../alp-sdk`,

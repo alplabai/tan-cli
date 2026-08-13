@@ -88,6 +88,62 @@ def use_color(no_color: bool, ci: bool) -> bool:
 #: imports this name rather than keeping its own copy.
 TEXT_WRAP_MIN_WIDTH = 60
 
+#: Rows handed to `shutil.get_terminal_size`'s `fallback` pair by
+#: `terminal_width` below. Never read by any caller -- every width probe in
+#: this CLI wants columns only -- but the parameter takes a `(columns, lines)`
+#: pair, so naming the number here keeps each call site from restating a bare
+#: `24` it does not care about.
+_TERMINAL_HEIGHT_FALLBACK = 24
+
+
+def terminal_width(fallback: int) -> int:
+    """The one place that MEASURES a terminal, beside `stderr_is_tty` above
+    which is the one place that PROBES one -- the column count of the stream
+    every text surface in this CLI actually prints to, `sys.stderr`.
+
+    tan-cli#564: `wrap_width` below, `doctor_cmd.doctor`'s report width and
+    `build_cmd._heartbeat_line_width` were each armed on `stderr_is_tty()`
+    and then sized off a bare `shutil.get_terminal_size(fallback=(100, 24))`,
+    which CPython resolves against `os.get_terminal_size(sys.__stdout__.
+    fileno())`. Nothing in text mode is written to stdout, so with stdout
+    redirected that ioctl raised `OSError [Errno 25] Inappropriate ioctl for
+    device` -- swallowed by `shutil` itself -- and every probe silently took
+    the hard-coded 100 columns while stderr's own fd read 70. The #536
+    isatty-guard consolidation moved the PROBE onto one shared helper but
+    left the MEASUREMENT on the other handle; this moves it.
+
+    `COLUMNS` comes first so `shutil`'s existing precedence is preserved
+    exactly: an operator who exports `COLUMNS=137` is overriding BOTH handles
+    on purpose, and that override must not become the one thing the move
+    takes away. A non-positive, empty or non-numeric value is ignored, and so
+    is a 0-column ioctl answer (a known pty shape) -- both exactly as
+    `shutil` ignores them, and because a literal 0 would reach
+    `build_cmd._heartbeat_line_width` as a one-column line.
+
+    The last step falls through to `shutil.get_terminal_size` rather than
+    straight to `fallback`, so the mirror-image run -- stderr redirected
+    while stdout is still a terminal -- resolves exactly the number it
+    resolves today. `fallback` is a plain column count; the
+    `(columns, lines)` pair `shutil` wants is assembled here.
+    """
+    try:
+        columns = int(os.environ["COLUMNS"])
+    except (KeyError, ValueError):
+        pass
+    else:
+        if columns > 0:
+            return columns
+    try:
+        # `AttributeError` when stderr has been replaced by something with no
+        # `.fileno()`, `ValueError` when it has been closed, `OSError` when the
+        # fd is real but not a terminal (the redirected case above).
+        measured = os.get_terminal_size(sys.stderr.fileno()).columns
+    except (AttributeError, ValueError, OSError):
+        measured = 0
+    if measured > 0:
+        return measured
+    return shutil.get_terminal_size(fallback=(fallback, _TERMINAL_HEIGHT_FALLBACK)).columns
+
 
 def wrap_width() -> int | None:
     """The column budget for hard-wrapping prose to stderr, or `None` when
@@ -126,4 +182,4 @@ def wrap_width() -> int | None:
     """
     if not stderr_is_tty():
         return None
-    return max(shutil.get_terminal_size(fallback=(100, 24)).columns, TEXT_WRAP_MIN_WIDTH)
+    return max(terminal_width(100), TEXT_WRAP_MIN_WIDTH)
