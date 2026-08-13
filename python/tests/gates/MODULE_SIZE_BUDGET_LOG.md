@@ -56,3 +56,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build_cmd.py: 2074 -> 2082
     - tan/commands/doctor_cmd.py: 3920 -> 3925
+- 2026-08-13 -- fix(flash): correct select_flash_method's Flow D provenance docstring + FLOW_D_KEYS comment (tan-cli#700) -- net growth from re-attributing jlink_flash_device/expect_dpidr/jlink_device (SoC debug: block) vs slot0_load_address (SoM memory_map:, alp-sdk#1069) correctly, not a new feature
+    - tan/core/flash_plan.py: 3079 -> 3093
