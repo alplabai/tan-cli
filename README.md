@@ -110,17 +110,15 @@ of tools, and only the first one is short. A build needs, on `PATH`:
 - **macOS:** `git`, `cmake`, `python3`, `ninja`.
 - **Windows:** `git`, `cmake`, `python`, `ninja`.
 
-Beyond that list: on Linux and macOS, `west sdk install` also needs `file`,
-and on Debian/Ubuntu `tan bootstrap` cannot create its workspace virtual
-environment until `python3-venv` is installed. On native Windows, `west sdk
-install` needs 7-Zip on `PATH` instead -- west delegates `.7z` extraction to
-`patoolib`, which shells out to an external `7z`/`7za`/`7zr`/`7zz`/`7zzs`/
-`unar` binary and has no pure-Python fallback (`winget install -e --id
-7zip.7zip`). Note that 7-Zip is only in the SDK's install-command map
-(`metadata/bootstrap.json` `prerequisites.install.windows`), not in its
-required Windows tool list, so `tan doctor`'s `hostPrerequisites` check will
-not itself flag a missing 7-Zip -- the Zephyr SDK install step is where its
-absence surfaces.
+Beyond that list: on Debian/Ubuntu `tan bootstrap` cannot create its workspace
+virtual environment until `python3-venv` is installed. On native Windows, `west sdk
+install` needs a 7-Zip-compatible archive tool on `PATH` instead -- west
+delegates `.7z` extraction to `patoolib`, which shells out to an external
+`7z`/`7za`/`7zr`/`7zz`/`7zzs`/`unar` binary and has no pure-Python fallback
+(`winget install -e --id 7zip.7zip`). `tan doctor` has a dedicated `sevenZip`
+check for this, on native Windows, once the Zephyr SDK is not yet detected: it
+warns when none of those binaries is on `PATH` and names the same `winget`
+command.
 
 Do not assemble any of these lists by hand. `tan doctor` reads its checks from
 the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK

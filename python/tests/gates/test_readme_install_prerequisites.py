@@ -78,7 +78,7 @@ _SECTION_END = "### From source"
 #: than "named anywhere in the README" -- the word-anywhere check that let a
 #: `TODO(#698)` Windows placeholder pass, since `git`/`cmake`/`ninja`/`python`
 #: are all already used elsewhere in the document for unrelated reasons (the
-#: Linux/macOS bullets, `git clone`, `python3 -m venv`, ...).
+#: Linux/macOS bullets, `git clone` in the Quickstart, ...).
 _BUILD_NEEDS_HEADING = "### What a build needs"
 _BUILD_NEEDS_END = "## Quickstart"
 _OS_BULLET = re.compile(r"-\s+\*\*(?P<label>[^:*]+):\*\*(?P<body>.*?)(?=\n-\s+\*\*|\n\n)", re.S)
@@ -274,10 +274,9 @@ def test_the_installer_section_does_not_present_a_build_tool_as_an_installer_nee
 def test_the_readme_names_every_tool_a_build_needs_somewhere():
     """The other half of #687: the reader must be able to find the build list.
 
-    Not scoped to the installer section -- `xz` belongs wherever the build is
-    described, not next to the one-line install command. What is refused is the
-    build list being undocumented, which is how a reader ends up at
-    `bootstrap.prerequisites-missing` with no idea it was foreseeable.
+    What is refused is the build list being undocumented, which is how a
+    reader ends up at `bootstrap.prerequisites-missing` with no idea it was
+    foreseeable.
 
     tan-cli#698: covers all three of `fallback_facts()`'s per-OS lists, not
     just POSIX. Checking POSIX alone let a Windows-only `TODO(#698)`
@@ -286,22 +285,16 @@ def test_the_readme_names_every_tool_a_build_needs_somewhere():
     `ninja` and (bare, not `python3`) `python` are all already used elsewhere
     in the document for reasons that have nothing to do with a Windows build
     list (the Linux/macOS bullets sit right next to the Windows one; `git
-    clone` and `python3 -m venv` show up in the Quickstart). So macOS and
-    Windows are checked against their OWN bullet under "What a build needs"
-    (`_os_bullet`), not the document as a whole -- proven to fail on the
-    pre-fix README (the `TODO(#698)` Windows bullet) before being proven to
-    pass on the fixed one; see the PR/commit description for both runs.
+    clone` shows up in the Quickstart). So all three OSes are checked against
+    their OWN bullet under "What a build needs" (`_os_bullet`), not the
+    document as a whole -- proven to fail on the pre-fix README (the
+    `TODO(#698)` Windows bullet) before being proven to pass on the fixed
+    one; see the PR/commit description for both runs.
     """
-    posix_missing = sorted(t for t in _build_tools() if not _names(_readme(), t))
-    assert not posix_missing, (
-        f"README.md never names {posix_missing}, which a build needs on "
-        f"POSIX ({list(_build_tools())} -- tan.core.bootstrap.fallback_facts()"
-        f", which is what `tan doctor` checks when no SDK manifest has been "
-        f"read yet)."
-    )
-    for os_label, tools in (
-        ("macOS", _build_tools_macos()),
-        ("Windows", _build_tools_windows()),
+    for os_label, tools, attr_suffix in (
+        ("Linux", _build_tools(), "posix"),
+        ("macOS", _build_tools_macos(), "macos"),
+        ("Windows", _build_tools_windows(), "windows"),
     ):
         bullet = _os_bullet(os_label)
         missing = sorted(t for t in tools if not _names(bullet, t))
@@ -310,7 +303,7 @@ def test_the_readme_names_every_tool_a_build_needs_somewhere():
             f"README.md does not name {missing}, which a build needs on "
             f"{os_label} ({list(tools)} -- "
             f"tan.core.bootstrap.fallback_facts().prerequisites_"
-            f"{os_label.lower()}). Bullet text: {bullet!r}"
+            f"{attr_suffix}). Bullet text: {bullet!r}"
         )
 
 
