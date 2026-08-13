@@ -402,6 +402,30 @@ class BoardProject:
     storage: list[StorageEntry] = field(default_factory=list)
     security: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+    # The metadata tree this project was RESOLVED against (tan-cli#573).
+    # `load_board_yaml(..., metadata_root=...)` records its caller's root
+    # here so the downstream resolvers -- `resolve_storage_partitions`,
+    # `resolve_carve_outs`, the Kconfig emitters -- read the same tree the
+    # loader validated against instead of the module-level bound
+    # `paths.METADATA_ROOT`. Without it the loader and the resolvers
+    # disagree on an alternate tree: the loader accepts a
+    # `storage[].flash_device` the resolver then blocks.
+    # `None` means "the bound root" -- see `effective_metadata_root()`.
+    metadata_root: Optional[Path] = None
+
+    def effective_metadata_root(self) -> Path:
+        """The metadata tree to read SoM/SoC facts from for THIS project.
+
+        `paths.METADATA_ROOT` is imported lazily, not at module scope:
+        `paths` evaluates `REPO = sdk_root()` on import and raises when no
+        SDK root is bound, and `models` is deliberately a bound-root-free
+        leaf (`tests/core/test_sdk_revision_gate.py` loads `sdk_compat`
+        -- and through it `models` -- with no SDK at all).
+        """
+        if self.metadata_root is not None:
+            return self.metadata_root
+        from .paths import METADATA_ROOT
+        return METADATA_ROOT
 
     def hw_info_eeprom_feature(self) -> Optional[dict[str, Any]]:
         """Return the explicit ``features.hw_info.eeprom`` projection."""
