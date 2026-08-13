@@ -27,7 +27,7 @@
     "tan/planner/kconfig.py": 2012,
     "tan/planner/loader.py": 1251,
     "tan/planner/template.py": 1329,
-    "tan/planner/zephyr_board.py": 1372
+    "tan/planner/zephyr_board.py": 1433
   },
   "function_count_budget": 251,
   "function_worst_budget": 747

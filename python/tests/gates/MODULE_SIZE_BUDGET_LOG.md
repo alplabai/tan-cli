@@ -60,3 +60,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/generate_cmd.py: 1312 -> 1342
 - 2026-08-13 -- tan-cli#501 review round 5: closed findings 1-3 (false PREPEND rationale reverted, overlay-not-owned warning no longer recommends the destructive --force clobber of a vendored overlay, data.engine kept in step with a dropped target) -- the explanatory comments this needed grew the module past its prior ratchet
     - tan/commands/generate_cmd.py: 1342 -> 1348
+- 2026-08-13 -- tan-cli#690: zephyr_board.py carries alp-sdk#1407's LOG_MODE_MINIMAL default for the AEN board emit
+    - tan/planner/zephyr_board.py: 1372 -> 1433
