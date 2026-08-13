@@ -76,6 +76,11 @@ _CHECK_OPTIONAL_KEYS = frozenset(DOCTOR_DATA_KEYS["dataKeys"]["checks"]["optiona
 #: file's own ``missingPrerequisites.items``, not hardcoded.
 _MISSING_PREREQ_KEYS = frozenset(DOCTOR_DATA_KEYS["dataKeys"]["missingPrerequisites"]["items"].keys())
 
+#: Whether the file's own ``missingPrerequisites.nullable`` token permits a
+#: ``null`` value on the wire. Read, not hardcoded, so flipping it in the
+#: file changes what this test enforces without a second edit here.
+_MISSING_PREREQ_NULLABLE = bool(DOCTOR_DATA_KEYS["dataKeys"]["missingPrerequisites"]["nullable"])
+
 
 def _fresh_dir(tag: str) -> Path:
     """Mirrors ``test_contract_envelopes.py``'s ``fresh_dir``: an isolated
@@ -194,8 +199,13 @@ def test_doctor_data_key_set_matches_contract_dataKeys():
 
     assert isinstance(data["generatedAt"], str)
 
+    # Derived from the file, not hardcoded here -- see the module docstring.
+    # The literal {"pass", "warn", "fail"} vocabulary is pinned separately, via
+    # dict-literal equality, in
+    # test_doctor_command.py::test_unknown_is_counted_in_no_summary_bucket;
+    # this assertion only proves this run matches the published contract.
     declared_summary = set(DOCTOR_DATA_KEYS["dataKeys"]["summary"].keys())
-    assert set(data["summary"].keys()) == declared_summary == {"pass", "warn", "fail"}
+    assert set(data["summary"].keys()) == declared_summary
     for key in declared_summary:
         assert isinstance(data["summary"][key], int) and not isinstance(
             data["summary"][key], bool
@@ -216,7 +226,14 @@ def test_doctor_data_key_set_matches_contract_dataKeys():
         "-- tan.core.bootstrap.reported_missing's own contract is '[] is NEVER "
         "a value here'"
     )
-    if isinstance(missing_prereqs, list):
+    if missing_prereqs is None:
+        assert _MISSING_PREREQ_NULLABLE, (
+            "tan doctor emitted data.missingPrerequisites: null on this host, but "
+            "contract/doctor-data-keys.json declares missingPrerequisites.nullable: "
+            "false -- either the command must never emit null here, or the "
+            "declared nullable flag is wrong"
+        )
+    else:
         for entry in missing_prereqs:
             _assert_missing_prereq_entry(entry)
 

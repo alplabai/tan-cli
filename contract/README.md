@@ -238,9 +238,13 @@ and `missingPrerequisites` is `{nullable: true, items: {tool, command}}`.
 records how it was enumerated and why `status` stays a free string rather
 than a pinned pass/warn/fail/unknown enum — a value added later must survive
 the trip). The release workflow's "Bundle the envelope contract" step folds
-only `args` and `dataKeys` from it into `envelope-contract.json` — NOT the
-whole file verbatim the way it folds `issue-codes.json`; `_comment` stays a
-repo-only authoring note, not a published field.
+only `args` and `dataKeys` from it into `envelope-contract.json` — not the
+whole file: `_comment` stays a repo-only authoring note, never a published
+field. (`issue-codes.json` is also folded partially, not whole-file
+verbatim: `.github/workflows/release.yml`'s bundling step reads only that
+file's own `issueCodes` array into the bundle's `issueCodes`, dropping
+`issue-codes.json`'s own `schemaVersion` and `_comment` too — neither
+contract source ships as its literal file.)
 `python/tests/conformance/test_doctor_contract_key_set.py` is what keeps the
 published file from drifting apart from the shipping command: it spawns a
 real `tan doctor --format json`, derives every required/optional key set —
@@ -336,9 +340,9 @@ byte-diffs it against an SDK checkout by hand.
 
 `contract/doctor-data-keys.json` (another sibling, tan-cli#664) is also not an
 `envelopes/<case>/` directory, for the reason above: `doctor`'s `data` cannot
-be a golden. It is the single source the release workflow folds into
-`envelopes.doctor` verbatim — see "The `doctor` family is a key set, not a
-golden" above.
+be a golden. It is the single source the release workflow folds `args` and
+`dataKeys` from into `envelopes.doctor` — not the whole file verbatim, same
+as above — see "The `doctor` family is a key set, not a golden" above.
 
 ## What a golden does NOT cover: key ORDER
 
