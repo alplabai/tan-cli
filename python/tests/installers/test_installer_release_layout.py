@@ -4,9 +4,12 @@
 tan-cli#356. #349 switched the release to PyInstaller ``--onedir`` archives and
 both installers then requested the new names UNCONDITIONALLY --
 ``tan-<triple>.tar.gz`` from ``install.sh``, ``tan-<triple>.zip`` from
-``install.ps1``. No published tag has those assets, so the documented install
-command 404'd on every tag that exists: ``v0.4.1`` (what ``latest`` resolves to)
-and the ``v0.5.0-rc4`` pre-release both publish RAW binaries.
+``install.ps1``. At the time this was written, no published tag had those
+assets, so the documented install command 404'd on every tag that existed:
+``v0.4.1`` (what ``latest`` resolved to then) and the ``v0.5.0-rc4``
+pre-release both published RAW binaries. ``v0.5.0`` and ``v0.5.1`` have since
+been cut and both publish the archive shape; ``latest`` now resolves to
+``v0.5.1``.
 
 The fixture releases below mirror the REAL published asset lists name for name
 (``gh release view <tag> --repo alplabai/tan-cli --json assets``, read while
@@ -14,12 +17,11 @@ writing this), so a pass here is a claim about the real thing rather than about
 a shape invented for the test:
 
 ===============  ===========================================================
-``v0.4.1``       8 raw assets -- the last Rust release, and today's ``latest``
+``v0.4.1``       8 raw assets -- the last Rust release
 ``v0.5.0-rc4``   4 raw assets -- the ``--onefile`` freeze; no musl, no
                  linux/arm64
-``v0.5.0``       4 ARCHIVES -- the first tag that publishes them. **Not cut
-                 yet**, which is exactly why archive extraction is covered by a
-                 fixture and not by a live download.
+``v0.5.0``       4 ARCHIVES -- the first published tag with this shape.
+``v0.5.1``       4 ARCHIVES, same shape as ``v0.5.0``; today's ``latest``.
 ===============  ===========================================================
 
 Everything is served from a local HTTP server through ``TAN_INSTALL_BASE_URL``,
@@ -60,10 +62,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "install.sh"
 INSTALL_PS1 = REPO_ROOT / "install.ps1"
 
-#: The FIRST tag that publishes ``--onedir`` archives. It is a real, planned
-#: tag that has not been cut -- deliberately NOT ``v0.5.0-rc4``, whose published
-#: assets are raw (that mistake is the documentation half of #356). When v0.5.0
-#: ships, this constant is the one thing that has to stay true.
+#: The FIRST tag that publishes ``--onedir`` archives -- deliberately NOT
+#: ``v0.5.0-rc4``, whose published assets are raw (that mistake is the
+#: documentation half of #356). v0.5.0 has since been cut and does publish the
+#: archive shape, matching this constant.
 FIRST_ARCHIVE_TAG = "v0.5.0"
 
 #: Every tag that exists today, all of which publish raw binaries.
