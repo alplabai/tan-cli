@@ -2266,12 +2266,13 @@ def plan_xspi_flashwriter(inp: FlashInputs, which: Callable[[str], bool]) -> Fla
 
 #: The `flash_args` key that ARMS Flow D. Only the part-number device profile
 #: is required: without it J-Link has no MRAM loader at all, so its presence
-#: alone is metadata's statement that this silicon has one. `slot0_load_address` is
-#: NOT an arming key -- it does not exist in any alp-sdk branch today (see
-#: `plan_alif_mram_jlink`'s shape note) and, even once published, it only ever
-#: selects the two-blob mramxip SHAPE, an ITCM-overflow exception, not whether
-#: Flow D applies at all. Requiring it here would leave Flow D permanently
-#: unarmed for every real AEN entry, which is the bug this comment replaces.
+#: alone is metadata's statement that this silicon has one. `slot0_load_address`
+#: is NOT an arming key -- `tan/planner/orchestrator.py`/`loader.py` DO emit it
+#: today (alp-sdk#1374/tan-cli#353) for AEN slot0-XIP cores, but even where
+#: present it only ever selects the two-blob mramxip SHAPE, an ITCM-overflow
+#: exception, not whether Flow D applies at all. Requiring it here would leave
+#: Flow D permanently unarmed for every real AEN entry, which is the bug this
+#: comment replaces.
 FLOW_D_KEYS = ("jlink_flash_device",)
 FLOW_D_METHOD = "alif_mram_jlink"
 
@@ -2324,16 +2325,25 @@ def select_flash_method(target: FlashTarget) -> str | None:
     `zephyr_west_flash` entry whose `flash_args` carries `FLOW_D_KEYS` is
     dispatched as Flow D instead. tan cannot ask "is this an AEN MRAM part?" --
     that would put a SKU or an address in tan, which ADR-0017 / I-26 forbid and
-    no gate would catch. What it CAN ask is "did the SoM preset hand me a
-    part-number J-Link profile for this slice?", because that arriving at all
-    IS metadata's statement that this silicon has a J-Link MRAM loader.
+    no gate would catch. What it CAN ask is "does this slice's SoC variant
+    publish a part-number J-Link profile in its `debug:` block?", because
+    that arriving at all IS metadata's statement that this silicon has a
+    J-Link MRAM loader.
 
-    Consequence, stated plainly: with today's emit
-    (`tan/planner/orchestrator.py::_slice_flash_recipe` returns
-    `("zephyr_west_flash", {})` for every Zephyr slice) NO entry carries that
-    key, so every AEN slice still takes Flow A. Arming Flow D is now a
-    one-function change in THIS repo; it is deliberately NOT emulated here by
-    sniffing the SKU.
+    Consequence, stated plainly: `tan/planner/loader.py` already resolves `jlink_flash_device`
+    (and, where present, the paired `expect_dpidr`/`jlink_device` preflight) from the SoC variant's
+    `debug:` block -- selected via the SoM preset's `silicon_variant` -- and
+    `tan/planner/orchestrator.py::_slice_flash_recipe` copies them onto the emitted `flash_args`.
+    `slot0_load_address` rides alongside them in the same `args` dict but is sourced differently on
+    purpose: `loader.py::_resolve_slot0_load_address` reads it from the SoM preset's `memory_map:`,
+    NOT from that `debug:` block -- it is SDK/module build POLICY, not a silicon fact
+    (alp-sdk#1069), so two SoMs on the same part can pick different slot0 windows. So a Zephyr
+    slice on a SoC variant that publishes a part-number J-Link profile already carries
+    `FLOW_D_KEYS` on emit and dispatches to Flow D, not Flow A. A slice on a variant with no such
+    profile still emits `args={}` and stays on Flow A, which is correct: that silicon has no J-Link
+    MRAM loader for tan to arm. That is most of today's shipped Alif metadata (13 Ensemble variants
+    total; only 2 carry `jlink_flash_device`, and of those only 1 also carries `expect_dpidr`) -- a
+    fact about what's published today, not an invariant of the emitter itself.
     """
     method = target.flash_method or None
     if method == "zephyr_west_flash" and flow_d_available(target.flash_args):
