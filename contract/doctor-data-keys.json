@@ -1,5 +1,4 @@
 {
-  "schemaVersion": 1,
   "_comment": [
     "tan-cli#664. `doctor`'s `data` values are host facts -- installed tool",
     "versions, absolute paths, which checks even apply on this machine -- so",
@@ -10,6 +9,16 @@
     "`data.missingPrerequisites`; the debug troubleshooting panel renders",
     "`checks[].fix` and `data.nextSteps` verbatim, alp-sdk-vscode#491) and",
     "never a value.",
+    "",
+    "Every value under `dataKeys` is a MACHINE TOKEN -- `\"string\"`, `\"int\"`,",
+    "`\"string|null\"` -- never a prose sentence: a consumer structurally",
+    "validating this contract must not have to parse English to learn a",
+    "shape. That is also why `checks` and `missingPrerequisites` are objects",
+    "rather than a single example dict / a description string: `checks`",
+    "splits into `requiredKeys` (present on every entry) and `optionalKeys`",
+    "(may be entirely absent, never null -- see `fix` below) so optionality",
+    "is a structural fact, not a note inside a type string; `missingPrerequisites`",
+    "is `{nullable, items}` so nullability is a structural fact too.",
     "",
     "Enumerated 2026-08-12 by reading the ONE place `doctor`'s envelope is",
     "assembled -- `python/tan/commands/doctor_cmd.py`'s `doctor()` (the",
@@ -31,10 +40,21 @@
     "",
     "`fix` is OMITTED (never `null`) on a `checks[]` entry that passed, is",
     "`unknown`, or otherwise carries no remediation -- `Check.as_dict()`'s",
-    "`skip_serializing_if`-equivalent. `missingPrerequisites` is `null`,",
-    "never `[]`, when `hostPrerequisites` found nothing missing --",
-    "`reported_missing`'s own doctring: '`[]` is NEVER a value here... One",
-    "fact, one spelling.'",
+    "`skip_serializing_if`-equivalent, which is why it lives under",
+    "`checks.optionalKeys` rather than `checks.requiredKeys`.",
+    "`missingPrerequisites` is `null`, never `[]`, when `hostPrerequisites`",
+    "found nothing missing -- `reported_missing`'s own docstring: '`[]` is",
+    "NEVER a value here... One fact, one spelling.'",
+    "",
+    "`data.nextSteps` is NOT guaranteed to equal the ordered list of non-null",
+    "`checks[].fix` values -- `next_steps()` (python/tan/commands/doctor_cmd.py)",
+    "additionally DEDUPES (one entry per distinct fix) and skips `pass`/",
+    "`unknown` checks even when they carry a `fix`, so the two arrays can and",
+    "do differ in length on a real run. Measured on the run this file was",
+    "enumerated against: 13 checks, 8 with a non-null `fix`, 7 `nextSteps`",
+    "entries (two checks shared the fix `tan bootstrap`, collapsed to one",
+    "`nextSteps` entry). This file promises only that both keys exist and",
+    "are arrays of strings.",
     "",
     "Renaming or dropping a key here is the same breaking wire change",
     "`contract/README.md`'s frozen-issue-code rule describes for `issues[].code`:",
@@ -42,12 +62,13 @@
     "matching alp-sdk-vscode issue.",
     "",
     "`python/tests/conformance/test_doctor_contract_key_set.py` is the",
-    "lockstep check: it runs a real `tan doctor --format json` and asserts",
-    "every key this file declares is present (and, for `checks[]`, that no",
-    "UNDECLARED key rides along), so this file cannot drift silently from",
-    "what the command actually emits."
+    "lockstep check: it derives every required/optional key set (including",
+    "`checks[]`'s and `missingPrerequisites[]`'s) FROM this file -- never from",
+    "a hardcoded constant of its own -- runs a real `tan doctor --format",
+    "json`, and asserts the emitted key set equals the declared one exactly,",
+    "in both directions, so this file cannot drift silently from what the",
+    "command actually emits."
   ],
-  "family": "doctor",
   "args": ["doctor", "--format", "json"],
   "dataKeys": {
     "generatedAt": "string",
@@ -56,16 +77,24 @@
       "warn": "int",
       "fail": "int"
     },
-    "checks": [
-      {
+    "checks": {
+      "requiredKeys": {
         "name": "string",
         "status": "string",
         "scope": "string",
-        "detail": "string",
-        "fix": "string (optional -- omitted, never null, when the check has no remediation)"
+        "detail": "string"
+      },
+      "optionalKeys": {
+        "fix": "string"
       }
-    ],
-    "missingPrerequisites": "array of {tool: string, command: string|null} entries, or null when nothing is missing",
+    },
+    "missingPrerequisites": {
+      "nullable": true,
+      "items": {
+        "tool": "string",
+        "command": "string|null"
+      }
+    },
     "nextSteps": ["string"]
   }
 }

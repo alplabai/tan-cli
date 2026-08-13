@@ -228,34 +228,49 @@ protection for tan's OWN behaviour, but never shipped where a consumer could
 gate against it, which is the gap issue #664 was filed to close.
 
 So `doctor`'s entry in `envelopes` carries `dataKeys` (the required `data` key
-set, each key's value a TYPE description — `"string"`, `"int"` — never a
-literal) instead of `exitCode`/`envelope`. `contract/doctor-data-keys.json` is
-the single source (its own `_comment` records how it was enumerated and why
-`status` stays a free string rather than a pinned pass/warn/fail/unknown
-enum — a value added later must survive the trip); the release workflow folds
-it into `envelope-contract.json` verbatim, the same way it already folds
-`issue-codes.json`. `python/tests/conformance/test_doctor_contract_key_set.py`
-is what keeps the two from drifting apart: it spawns a real `tan doctor
---format json` and fails if the emitted key set and the declared one disagree,
-in EITHER direction — an emitted key nobody declared, or a declared key the
-command stopped emitting, both fail loudly rather than reading as "no
-problem". Renaming or dropping a declared key is the same breaking wire
-change `contract/README.md`'s frozen-issue-code rule describes: bump the CLI
-MAJOR/MINOR, record it in `CHANGELOG.md`, and open the matching
-alp-sdk-vscode issue.
+set) instead of `exitCode`/`envelope`. Every value under `dataKeys` is a
+MACHINE TOKEN — `"string"`, `"int"`, `"string|null"` — never a prose sentence,
+so a consumer can validate structurally without parsing English: `checks`
+is `{requiredKeys, optionalKeys}` (today `optionalKeys` is just `fix`, which
+`Check.as_dict()` omits — never nulls — when a check carries no remediation),
+and `missingPrerequisites` is `{nullable: true, items: {tool, command}}`.
+`contract/doctor-data-keys.json` is the single source (its own `_comment`
+records how it was enumerated and why `status` stays a free string rather
+than a pinned pass/warn/fail/unknown enum — a value added later must survive
+the trip). The release workflow's "Bundle the envelope contract" step folds
+only `args` and `dataKeys` from it into `envelope-contract.json` — NOT the
+whole file verbatim the way it folds `issue-codes.json`; `_comment` stays a
+repo-only authoring note, not a published field.
+`python/tests/conformance/test_doctor_contract_key_set.py` is what keeps the
+published file from drifting apart from the shipping command: it spawns a
+real `tan doctor --format json`, derives every required/optional key set —
+including `checks[]`'s `requiredKeys`/`optionalKeys` and
+`missingPrerequisites[]`'s `items` — FROM `contract/doctor-data-keys.json`
+itself (never from a constant of its own), and fails if the emitted key set
+and the declared one disagree, in EITHER direction, at every level: an
+emitted key nobody declared, or a declared key the command stopped emitting,
+both fail loudly rather than reading as "no problem". Renaming or dropping a
+declared key is the same breaking wire change `contract/README.md`'s
+frozen-issue-code rule describes: bump the CLI MAJOR/MINOR, record it in
+`CHANGELOG.md`, and open the matching alp-sdk-vscode issue.
 
-**Left to the maintainer, not settled here (tan-cli#664):** on every run
-measured so far, `data.nextSteps` has been byte-identical to the ordered list
-of non-null `checks[].fix` values (`next_steps()`'s own dedup logic:
-one entry per DISTINCT fix, in check order — the same order `checks[]`
-already carries). Whether that is a guaranteed, intentional relationship or
-an incidental one nothing enforces is not decided by this key-set entry
-either way — it only promises the two keys both exist and are arrays of
-strings. Also left alone: `checks[].status`'s current pass/warn/fail/unknown
-vocabulary and `checks[].scope`'s host/project vocabulary are documented
-elsewhere in this file (see "`doctor` check scope" above) but deliberately
-NOT re-pinned as an enum in `contract/doctor-data-keys.json` — the key SET is
-the contract this entry publishes, not the value vocabulary.
+**Settled here (tan-cli#664):** `data.nextSteps` is NOT guaranteed to equal
+the ordered list of non-null `checks[].fix` values. `next_steps()`
+(`python/tan/commands/doctor_cmd.py`) additionally DEDUPES — one entry per
+DISTINCT fix, in check order — and skips `pass`/`unknown` checks even when
+they carry a `fix`, so the two arrays can and do differ in length on a real
+run: measured on the 2026-08-12 run this contract was enumerated against, 13
+checks produced 8 non-null `fix` values but only 7 `nextSteps` entries (two
+checks shared the fix `tan bootstrap`, which collapsed to one `nextSteps`
+entry). A consumer that wants "the fix for check N" must read
+`checks[N].fix`, not index into `nextSteps` — `nextSteps` is a deduplicated
+action list, not a per-check parallel array. This key-set entry promises only
+that both keys exist and are arrays of strings. Also left alone:
+`checks[].status`'s current pass/warn/fail/unknown vocabulary and
+`checks[].scope`'s host/project vocabulary are documented elsewhere in this
+file (see "`doctor` check scope" above) but deliberately NOT re-pinned as an
+enum in `contract/doctor-data-keys.json` — the key SET is the contract this
+entry publishes, not the value vocabulary.
 
 ### Published as a release asset
 

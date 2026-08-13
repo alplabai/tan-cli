@@ -28,9 +28,12 @@
 #                Plus `checksums.txt` (sha256 of every archive),
 #                `envelope-contract.json` (the WHOLE issue-code registry, all
 #                three statuses and not a frozen-only subset — a consumer reads
-#                `status` to decide what each code promises — plus one golden
-#                envelope per command family; see contract/README.md), and a
-#                GitHub build-provenance attestation covering all of the above —
+#                `status` to decide what each code promises — plus one entry
+#                per command family: a byte golden `{args, exitCode, envelope}`
+#                for 17 of them, and `doctor`'s `{args, dataKeys}` key-set
+#                entry (tan-cli#664 — doctor's `data` VALUES are host facts, so
+#                it cannot be a golden); see contract/README.md), and a GitHub
+#                build-provenance attestation covering all of the above —
 #                verify with `gh attestation verify <file> --repo alplabai/tan-cli`.
 #
 #   The binaries are PyInstaller --onedir freezes of `python/` (the Python

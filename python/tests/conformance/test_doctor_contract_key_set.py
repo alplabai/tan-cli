@@ -15,6 +15,15 @@ A key set nobody checks against a real run is exactly the "tautology wearing
 a gate's name" tan-cli#664 itself was filed to avoid on the CONSUMER side --
 this is the PRODUCER-side half: run the real command, and fail if the
 published file over- or under-states what it emits.
+
+Every required/optional key set this test asserts against -- including
+``checks[]``'s and ``missingPrerequisites[]``'s -- is read FROM
+``contract/doctor-data-keys.json`` itself, never hardcoded here. A prior
+revision hardcoded the ``checks[]`` key sets as module-level constants, which
+meant the published file's ``checks`` entry could be corrupted in either
+direction (a declared key deleted, an unemitted key added) with this test
+still green -- the exact drift a lockstep gate exists to catch. Deriving both
+from the file is what makes it one.
 """
 from __future__ import annotations
 
@@ -32,14 +41,18 @@ DOCTOR_DATA_KEYS = json.loads(
     (CONTRACT_ROOT / "doctor-data-keys.json").read_text(encoding="utf-8")
 )
 
-#: ``checks[]``'s two shapes: always-present fields, and the one field
-#: (``fix``) ``Check.as_dict()`` omits rather than nulls when the check has no
-#: remediation. Mirrors ``contract/doctor-data-keys.json``'s own
-#: ``fix: "string (optional -- ...)"`` marker -- kept as an explicit constant,
-#: not parsed out of that prose, so a rewording of the note can't silently
-#: change what this test enforces.
-_CHECK_REQUIRED_KEYS = frozenset({"name", "status", "scope", "detail"})
-_CHECK_OPTIONAL_KEYS = frozenset({"fix"})
+#: ``checks[]``'s two shapes: always-present fields, and the fields
+#: ``Check.as_dict()`` omits rather than nulls when they don't apply (today,
+#: only ``fix``). Read from the published file's own ``checks.requiredKeys``/
+#: ``checks.optionalKeys`` -- NOT a constant of this test's own -- so a key
+#: added, dropped, or moved between the two in the file changes what this
+#: test enforces without a second edit here.
+_CHECK_REQUIRED_KEYS = frozenset(DOCTOR_DATA_KEYS["dataKeys"]["checks"]["requiredKeys"].keys())
+_CHECK_OPTIONAL_KEYS = frozenset(DOCTOR_DATA_KEYS["dataKeys"]["checks"]["optionalKeys"].keys())
+
+#: ``missingPrerequisites[]`` entries' keys, same reasoning: read from the
+#: file's own ``missingPrerequisites.items``, not hardcoded.
+_MISSING_PREREQ_KEYS = frozenset(DOCTOR_DATA_KEYS["dataKeys"]["missingPrerequisites"]["items"].keys())
 
 
 def _fresh_dir(tag: str) -> Path:
@@ -68,7 +81,7 @@ def _run_doctor() -> dict:
     }
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "tan", "doctor", "--format", "json"],
+            [sys.executable, "-m", "tan", *DOCTOR_DATA_KEYS["args"]],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -147,7 +160,7 @@ def test_doctor_data_key_set_matches_contract_dataKeys():
     )
     if isinstance(missing_prereqs, list):
         for entry in missing_prereqs:
-            assert set(entry.keys()) == {"tool", "command"}, entry
+            assert set(entry.keys()) == _MISSING_PREREQ_KEYS, entry
             assert isinstance(entry["tool"], str)
             assert entry["command"] is None or isinstance(entry["command"], str)
 

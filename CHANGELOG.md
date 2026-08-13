@@ -9,25 +9,6 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Added
 
-- **`envelope-contract.json` now publishes a `doctor` family (tan-cli#664).**
-  All 17 prior families were byte goldens; `doctor` cannot be one — its `data`
-  values are host facts (installed tool versions, absolute paths, which
-  checks even apply on this machine) — so `envelopes.doctor` instead carries
-  `dataKeys`, the required `data` KEY SET (`contract/doctor-data-keys.json`,
-  the single source), never a value. Covers `generatedAt`, `summary.
-  {pass,warn,fail}`, `checks[].{name,status,scope,detail,fix?}`,
-  `missingPrerequisites[].{tool,command}` and `nextSteps` -- enumerated by
-  reading `doctor_cmd.py`'s own envelope assembly and cross-checked against a
-  real `tan doctor --format json` run, not curated by hand. Kept from
-  drifting by `python/tests/conformance/test_doctor_contract_key_set.py`.
-  Before this, alp-sdk-vscode's dependency panel (`packages/alp-core/src/deps/
-  planner.ts`, reading `data.missingPrerequisites`) and its debug
-  troubleshooting panel (rendering `checks[].fix`/`data.nextSteps` verbatim,
-  alp-sdk-vscode#491) had no published shape to gate against, so a rename of
-  any of those keys would have shipped silently. `status`'s pass/warn/fail/
-  unknown vocabulary and `scope`'s host/project vocabulary stay documented,
-  but deliberately un-pinned as an enum here — see `contract/README.md`,
-  "The `doctor` family is a key set, not a golden".
 - **`tan doctor` reports the project's curated-library selection: a `libraries`
   row carrying each entry's tier, licence and whether it can be wired on the
   target.** Ported from alp-sdk's `scripts/alp_cli/doctor.py::_check_libraries`
