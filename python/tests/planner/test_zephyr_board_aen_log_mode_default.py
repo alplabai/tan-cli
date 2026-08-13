@@ -95,5 +95,5 @@ def test_the_defconfig_never_assigns_the_choice_symbol_directly():
     assignment."""
     zb = _mod()
     row = {"silicon_pad": "P3_4"}
-    text = zb._aen_defconfig("uart0", row, row, slot0_base=0x80080000)
+    text = zb._aen_defconfig("uart0", row, row, slot0_base=0x80010000)
     assert "CONFIG_LOG_MODE_MINIMAL=y" not in text

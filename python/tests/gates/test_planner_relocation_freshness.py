@@ -593,6 +593,39 @@ HAND_PORT_PINNED_SDK_COMMIT = "d00dbdc124491c89f68f404cd7ac9d26127f038f"  # alp-
 #: `a3173305..d00dbdc1` range this file's own pin moved across, unseen. sha256
 #: taken directly from the `d00dbdc1` checkout this HAND_PORT_PINNED_SDK_COMMIT
 #: already names, so pinning it here re-freezes nothing unaudited either.
+#:
+#: The eight `scripts/alp_cli/{diagnostic_format,validate,new_som,doctor,
+#: explain,monitor,model,validator}.py` entries below close the same blind
+#: spot (tan-cli#560 review, minor 2): each is named as a hand-port source in
+#: a comment somewhere under `python/tan/` --
+#: `tan/output_format.py`/`tan/commands/validate_cmd.py`
+#: (`diagnostic_format.py`), `tan/commands/validate_cmd.py` (`validate.py`),
+#: `tan/commands/new_som_cmd.py` (`new_som.py`),
+#: `tan/commands/doctor_cmd.py`/`tan/core/doctor_libraries.py` (`doctor.py`),
+#: `tan/core/error_catalog.py`/`tan/commands/explain_cmd.py` (`explain.py`),
+#: `tan/commands/monitor_cmd.py` (`monitor.py`), and
+#: `tan/commands/model_cmd.py` (`model.py`). `scripts/alp_cli/validator.py`'s
+#: `load_board_schema`/`iter_schema_errors` are hand-ported into
+#: `tan/planner/loader.py` (that file's own docstring: "RELOCATED from
+#: alp-sdk's scripts/alp_cli/validator.py, the last module-scope import this
+#: file made across the repo boundary") -- `loader.py` itself is already
+#: tracked in `PINNED_HASHES` above (its main body relocated from
+#: `scripts/alp_orchestrate/loader.py`), so this is the SAME split-heritage
+#: shape `sentinels.py` set the precedent for: a hand-port INTO an
+#: already-tracked file still needs its own SDK-side source hashed. None of
+#: these eight sources live under `tan/planner/` themselves, so like
+#: `faultdecode.py` they are deliberately NOT added to `HAND_PORT_SOURCES`
+#: either. sha256 taken directly from the `d00dbdc1` checkout
+#: HAND_PORT_PINNED_SDK_COMMIT already names, and each verified unchanged
+#: across the `a3173305..d00dbdc1` range this file's own pin moved across, so
+#: pinning them here re-freezes nothing unaudited. `scripts/alp_project_loader.py`
+#: -- the ninth source the same review named -- is deliberately NOT re-added:
+#: it is already a key above (added for `tan/planner/project_loader.py` and
+#: `tan/planner/som_metadata.py`), and its OWN additional hand-port sites
+#: (`tan/core/renode_plan.py`, `tan/commands/new_som_cmd.py`) are already
+#: covered by that one entry -- `HAND_PORT_HASHES` is keyed by the alp-sdk
+#: source path, not by the consuming `tan` file, so a second key for the same
+#: path would be a no-op duplicate, not a new audit.
 HAND_PORT_HASHES: dict[str, str] = {
     "scripts/gen_zephyr_board.py": "083018a76a774d6ea37da87d3d8dda6eda4515c5cd924ebf0b5a141c9ba2cf9b",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
@@ -605,6 +638,14 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_project_emit/native_sim.py": "24943e7099d745b254b853135ff0b4ae8415be7946d93170d479b637105f18c0",
     "scripts/alp_project_emit/west_libs.py": "0bfad8fb6c22b955d0554f8fffca8c1c9bf9f73d3c64778b9ba2de76eb6a972d",
     "scripts/alp_cli/faultdecode.py": "3a9e82b7b6892523923e6f571602be1e3bb11e24090dde0b90f6a5ae207aaa0b",
+    "scripts/alp_cli/diagnostic_format.py": "d6f7872013b7990a08ca724814daaf800a8acf37dec4d9a7d5078807757d162d",
+    "scripts/alp_cli/validate.py": "c7b7175798c3e8f0d7961fb40e3318f60570f7ec85d131c599f83109c2cebfe6",
+    "scripts/alp_cli/new_som.py": "1118f99aa8c334c5d058e69b0e454954b4637678971d9c47472e45dc2d4eb558",
+    "scripts/alp_cli/doctor.py": "f2faa07cecbbffc1bcfb510210e3f24d96a3ad6864eef8f3fe92f93886ddacd5",
+    "scripts/alp_cli/explain.py": "b9e05d32896d1e0855f1c040b581b3e77869b4b03b15371c125757be1e0e09fe",
+    "scripts/alp_cli/monitor.py": "1f67ee1372c73e2bd76b5c9338c141e31accdef1e206b7a64806cf8eb691c0e2",
+    "scripts/alp_cli/model.py": "a51be0a8d3a16bd408bb57d01f049175406b73cc48ab9346d39555c3aa5b1925",
+    "scripts/alp_cli/validator.py": "8dac2e4d3799fe67feceb74e587f23b5e8b44a40df2805220632f8edae26a421",
 }
 
 #: `tan/planner/`-relative path -> the alp-sdk-relative source path it was

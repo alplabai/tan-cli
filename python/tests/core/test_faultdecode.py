@@ -18,9 +18,26 @@ A second, genuinely optional layer re-diffs live against the SDK original
 when one is reachable (`ALP_SDK_ROOT`, or an `alp-sdk` checkout sitting next
 to this repo -- see `_resolve_oracle_path`); it skips when neither is found,
 same as before, but it is a bonus re-check, not the fidelity guard itself.
+
+`test_decode_matches_the_sdk_original_byte_for_byte` additionally gates on
+`_ORACLE_VINTAGE_HASH` (tan-cli#560 review, the one major): a resolved oracle
+is only byte-diffed if it is AT the alp-sdk commit
+(`tests.gates.test_planner_relocation_freshness.HAND_PORT_PINNED_SDK_COMMIT`)
+this sweep was last audited against, else it skips LOUDLY naming the required
+vintage. Without that gate, any sibling `alp-sdk` checkout older than alp-sdk
+dad5b35a (#1389, the commit that adopted tan-cli#616's LSPERR/MLSPERR fix)
+still carries the old `_root_cause` ladder this sweep no longer carves out
+for, and turns a correct port red on a contributor's own machine while CI
+stays green (the `sdk_parity` job binds `ALP_SDK_ROOT` to the pin; the
+non-parity job has no sibling checkout to find at all). Measured: with a
+sibling `alp-sdk` checkout that predates dad5b35a as the only reachable
+oracle and no `ALP_SDK_ROOT` override, the unguarded sweep was `1 failed` (18
+`root_cause` mismatches, all on the LSPERR/MLSPERR words) -- see this
+module's git history for the exact command and output.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -30,9 +47,22 @@ import pytest
 
 from tan.core import faultdecode as port
 from tests.conftest import REAL_ENVIRON
+from tests.gates.test_planner_relocation_freshness import (
+    HAND_PORT_HASHES,
+    HAND_PORT_PINNED_SDK_COMMIT,
+)
 
 _GOLDEN_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "faultdecode_golden.json"
 _GOLDEN = json.loads(_GOLDEN_PATH.read_text(encoding="utf-8"))
+
+#: sha256 of `scripts/alp_cli/faultdecode.py` at
+#: `HAND_PORT_PINNED_SDK_COMMIT` -- the SAME pin and hash
+#: `test_planner_relocation_freshness.py`'s own hand-port freshness gate
+#: tracks for this file, reused here rather than re-pinned separately so the
+#: two audits cannot drift apart (the tan-cli#296 lesson that split
+#: `PINNED_SDK_COMMIT` from `HAND_PORT_PINNED_SDK_COMMIT` in the first place
+#: argues against inventing a THIRD, independent pin for the same file).
+_ORACLE_VINTAGE_HASH = HAND_PORT_HASHES["scripts/alp_cli/faultdecode.py"]
 
 
 def _resolve_oracle_path() -> Path | None:
@@ -125,6 +155,44 @@ def _load_original():
     finally:
         if added:
             sys.path.remove(sdk_scripts)
+
+
+def _require_pinned_oracle_vintage(path: Path) -> None:
+    """Refuse to byte-diff against an oracle that is not AT the alp-sdk
+    commit `test_decode_matches_the_sdk_original_byte_for_byte` was last
+    audited against -- skip LOUDLY naming the required vintage instead of
+    silently full-diffing whatever sibling checkout `_resolve_oracle_path`
+    happened to find (tan-cli#560 review, the one major).
+
+    A sibling `alp-sdk` checkout older than dad5b35a (#1389) still carries
+    the pre-fix `_root_cause` ladder with no LSPERR/MLSPERR branch, which
+    this sweep's now-unconditional byte-equality assertion would report as
+    18 mismatches with no indication the port is fine and the SDK checkout
+    is simply stale -- exactly what the old carve-out existed to prevent
+    resurfacing as a false red. `HAND_PORT_PINNED_SDK_COMMIT` and its sha256
+    for this file are the SAME pin `test_planner_relocation_freshness.py`'s
+    own hand-port freshness gate already tracks -- reused, not duplicated,
+    so the two audits cannot silently disagree about which alp-sdk state
+    `scripts/alp_cli/faultdecode.py` was last checked against."""
+    current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    if current_hash != _ORACLE_VINTAGE_HASH:
+        pytest.skip(
+            "the resolved alp-sdk oracle "
+            f"({path}, sha256 {current_hash}) is not at the alp-sdk commit "
+            f"this byte-for-byte sweep is pinned to "
+            f"({HAND_PORT_PINNED_SDK_COMMIT}, sha256 {_ORACLE_VINTAGE_HASH}) "
+            "-- most likely your sibling alp-sdk checkout predates alp-sdk "
+            "dad5b35a (#1389), before it adopted tan-cli#616's LSPERR/MLSPERR "
+            "fix, and would show a root_cause divergence this port "
+            "deliberately no longer carves out for. Point ALP_SDK_ROOT (or "
+            f"your sibling alp-sdk checkout) at {HAND_PORT_PINNED_SDK_COMMIT} "
+            "to run this sweep for real. If instead the SDK's "
+            "faultdecode.py has genuinely changed again, diff it, port the "
+            "delta, and re-pin HAND_PORT_HASHES + HAND_PORT_PINNED_SDK_COMMIT "
+            "in tests/gates/test_planner_relocation_freshness.py -- "
+            "_ORACLE_VINTAGE_HASH here reads that same table, so it moves "
+            "with it."
+        )
 
 
 def _all_triples(mod) -> set[tuple[str, int, str, str]]:
@@ -241,7 +309,16 @@ def test_decode_matches_the_sdk_original_byte_for_byte():
     If a future SDK pin reopens a gap here, reintroduce a targeted carve-out
     rather than loosening this to "differs somehow" -- unpinned tolerance is
     exactly what tan-cli#502's PROVENANCE calls out as the harm.
+
+    Gated on `_require_pinned_oracle_vintage` (tan-cli#560 review): a resolved
+    oracle that predates alp-sdk dad5b35a still has the old ladder this
+    unconditional equality no longer tolerates, so it must skip rather than
+    report a false regression in the port.
     """
+    oracle_path = _resolve_oracle_path()
+    if oracle_path is None:
+        pytest.skip("no alp-sdk checkout found (set ALP_SDK_ROOT, or run next to one)")
+    _require_pinned_oracle_vintage(oracle_path)
     original = _load_original()
     import random
 
