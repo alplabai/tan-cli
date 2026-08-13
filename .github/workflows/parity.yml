@@ -408,7 +408,7 @@ env:
   #     its `f30f4d4b` vendor point.
   #   - seam1_field_diff PASS, rc 0 -- all 6 boards, including
   #     `multicore_rpmsg-imx93` (alp-sdk and tan both still refuse it)
-  PINNED_SDK_TAG: 1a9f753c13e5ab5d444e2dc39d7065a352f1b777
+  PINNED_SDK_TAG: a317330595f744d35f4d785869517110f3678f70
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
