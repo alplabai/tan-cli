@@ -22,6 +22,7 @@ in the real environment.
 """
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -320,6 +321,16 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 #     and a child resolves through its OWN sys.path, so asserting in this
 #     process would not touch them. `PYTHONPATH` is prepended instead, which
 #     is inherited by every child regardless of cwd or how the argv is built.
+#
+# The `__file__`-resolution assertion below is necessary but not sufficient
+# (tan-cli#665): it proves the module object THIS process imported resolves
+# under `repo_python`, and says nothing about whether `sys.executable` -- the
+# interpreter every spawned child runs under -- can import `tan` at all. An
+# executable missing a dependency, or with no `tan` on its path, passes the
+# `__file__` check trivially (this process's own import already succeeded)
+# and then fails in the spawned-child tests as unrelated-looking
+# `ModuleNotFoundError` / non-zero-exit failures instead of one message here.
+# The second probe below closes that gap by spawning `sys.executable`.
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session", autouse=True)
 def tan_under_test() -> None:
@@ -354,6 +365,34 @@ def tan_under_test() -> None:
         "which have already reported a divergence that did not exist because "
         "of exactly this (tan-cli#423). Run pytest from `python/`, or "
         "`pip uninstall alp-tan`, or set PYTHONPATH to this repo's `python/`."
+    )
+
+    # Second, independent probe (tan-cli#665): does `sys.executable` -- the
+    # interpreter every spawned-child test runs under, via the PYTHONPATH
+    # prepended above -- import `tan` at all? Not redundant with the
+    # `__file__` assertion above: that one proves only that THIS process's
+    # import resolved correctly.
+    # `-m tan --version`, not `-c "import tan"`: `tan/__init__.py` is empty, so
+    # a bare `import tan` succeeds on any interpreter the PYTHONPATH above
+    # reaches, third-party dependencies or not. The children run `-m tan`,
+    # which pulls `tan.__main__` and its typer/pydantic chain -- that is the
+    # import that has to work.
+    probe = subprocess.run(
+        [sys.executable, "-m", "tan", "--version"],
+        env=os.environ,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, (
+        f"`{sys.executable} -m tan` failed (exit {probe.returncode}):\n"
+        f"{probe.stderr}\n"
+        "The spawned-child tests in this suite launch "
+        f"[{sys.executable!r}, '-m', 'tan', ...], and that interpreter must "
+        "be able to import tan for those to run at all -- when it can't, "
+        "the failure shows up as unrelated-looking errors deep in the suite "
+        "instead of one message here. Fix it by creating a "
+        "venv for this interpreter, `pip install -e ./python` into it, and "
+        "running pytest from that venv."
     )
 
 
