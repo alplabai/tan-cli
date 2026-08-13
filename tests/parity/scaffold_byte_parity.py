@@ -157,6 +157,30 @@ DELIBERATE_EDITS: dict[tuple[str, str, str], tuple[str, Callable[[str], str]]] =
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
         un_edit_iot_extra_conf_order,
     ),
+    ("sensor", "E1M-AEN801", "CMakeLists.txt"): (
+        "tan-cli#501: same class as tan-cli#379 -- list(PREPEND EXTRA_CONF_FILE "
+        "...) so the vendored boards/native_sim_native_64.conf (CONFIG_EMUL, "
+        "CONFIG_I2C_EMUL) wins over the generated alp.conf",
+        un_edit_iot_extra_conf_order,
+    ),
+    ("sensor", "E1M-V2N101", "CMakeLists.txt"): (
+        "tan-cli#501: same class as tan-cli#379 -- list(PREPEND EXTRA_CONF_FILE "
+        "...) so the vendored boards/native_sim_native_64.conf (CONFIG_EMUL, "
+        "CONFIG_I2C_EMUL) wins over the generated alp.conf",
+        un_edit_iot_extra_conf_order,
+    ),
+    ("diagnostics", "E1M-AEN801", "CMakeLists.txt"): (
+        "tan-cli#501: same class as tan-cli#379 -- list(PREPEND EXTRA_CONF_FILE "
+        "...) so the vendored boards/native_sim_native_64.conf (CONFIG_EMUL, "
+        "CONFIG_I2C_EMUL) wins over the generated alp.conf",
+        un_edit_iot_extra_conf_order,
+    ),
+    ("diagnostics", "E1M-V2N101", "CMakeLists.txt"): (
+        "tan-cli#501: same class as tan-cli#379 -- list(PREPEND EXTRA_CONF_FILE "
+        "...) so the vendored boards/native_sim_native_64.conf (CONFIG_EMUL, "
+        "CONFIG_I2C_EMUL) wins over the generated alp.conf",
+        un_edit_iot_extra_conf_order,
+    ),
 }
 
 
@@ -228,6 +252,58 @@ def augment_with_example_extras(
             extra_path = example_dir / name
             if extra_path.is_file():
                 live[name] = extra_path.read_text(encoding="utf-8")
+
+
+#: `(template, sku, path)` for a `NON_ENVELOPE_EXTRAS` file the live example
+#: ships that a vendored tree deliberately does NOT carry -- declared, not
+#: silently invisible, so `missing_extras` below has an auditable list rather
+#: than reproducing the exact blind spot it exists to close (tan-cli#501
+#: review finding 4: `augment_with_example_extras` only ever reaches for a
+#: name the vendored tree ALREADY has, so a vendored tree missing an extra
+#: entirely was never compared against anything and this gate stayed 9/9 PASS
+#: with the fix fully reverted -- measured).
+#:
+#: `edge-ai`'s `boards/native_sim_native_64.{conf,overlay}` gap is the one
+#: entry here today: `examples/ai/cold-chain-monitor` ships the pair, but
+#: `cold_chain.c` hits the same synthetic-data `LOG_WRN` branch whether the
+#: I2C alias resolves or not, so the native_sim output is unaffected (see
+#: MANIFEST.md and this module's own docstring). Not independently
+#: re-measured here (would need a real Zephyr build); declared so a future
+#: drift in that reasoning has one place to update, not a silent pass.
+DELIBERATELY_MISSING_EXTRAS: frozenset[tuple[str, str, str]] = frozenset({
+    ("edge-ai", "E1M-AEN801", "boards/native_sim_native_64.conf"),
+    ("edge-ai", "E1M-AEN801", "boards/native_sim_native_64.overlay"),
+    ("edge-ai", "E1M-V2N101", "boards/native_sim_native_64.conf"),
+    ("edge-ai", "E1M-V2N101", "boards/native_sim_native_64.overlay"),
+})
+
+
+def missing_extras(
+    sdk_root: Path, template: str, sku: str, vendored_paths: Iterable[str],
+) -> list[str]:
+    """`NON_ENVELOPE_EXTRAS` the live catalog example ships that the vendored
+    tree does not -- the completeness half `augment_with_example_extras`
+    cannot provide, since it only ever reaches for a name the vendored tree
+    already carries. Anything not declared in `DELIBERATELY_MISSING_EXTRAS`
+    is a real gap and a hard failure, matching `undo_declared_edits`'s own
+    strict discipline: a declaration excuses exactly the gap it names, and an
+    undeclared one cannot pass silently."""
+    example_dir = resolve_example_dir(sdk_root, template)
+    if example_dir is None:
+        return []
+    gaps = []
+    vendored_paths = set(vendored_paths)
+    for name in NON_ENVELOPE_EXTRAS:
+        if name in vendored_paths:
+            continue
+        if (template, sku, name) in DELIBERATELY_MISSING_EXTRAS:
+            continue
+        if (example_dir / name).is_file():
+            gaps.append(
+                f"{name}: live example ships this but the vendored tree does not, "
+                f"and it is not declared in DELIBERATELY_MISSING_EXTRAS"
+            )
+    return gaps
 
 
 def read_vendored_tree(tree_root: Path) -> dict[str, str]:
@@ -322,6 +398,17 @@ def self_check() -> None:
     assert not [f for f in failures if f.startswith(f"{path}:")], failures
     assert diff_trees({path: as_emitted[path]}, {path: emitted}) == [f"{path}: content differs"]
 
+    # `missing_extras` needs a real SDK checkout (a live example directory) to
+    # say anything -- `resolve_example_dir` returning `None` (no SDK bound) is
+    # already covered by every call site tolerating an empty list. What is
+    # provable without one: a declared gap is always a `(template, sku, path)`
+    # this module's own `NON_ENVELOPE_EXTRAS`, so a typo in the declaration
+    # can never silently stop excusing anything.
+    for declared_template, declared_sku, declared_path in DELIBERATELY_MISSING_EXTRAS:
+        assert declared_path in NON_ENVELOPE_EXTRAS, (
+            declared_template, declared_sku, declared_path
+        )
+
 
 def run(sdk_root: Path, vendored_root: Path, pairs: list[tuple[str, str]]) -> bool:
     all_ok = True
@@ -337,7 +424,11 @@ def run(sdk_root: Path, vendored_root: Path, pairs: list[tuple[str, str]]) -> bo
         augment_with_example_extras(live, sdk_root, template, vendored)
         as_emitted, declaration_failures = undo_declared_edits(template, sku, vendored)
 
-        diffs = declaration_failures + diff_trees(as_emitted, live)
+        diffs = (
+            declaration_failures
+            + diff_trees(as_emitted, live)
+            + missing_extras(sdk_root, template, sku, vendored)
+        )
         if diffs:
             print(f"FAIL {template}/{sku}: {len(diffs)} diff(s)")
             for d in diffs:

@@ -928,13 +928,23 @@ def test_all_is_rerunnable_when_the_overlay_already_exists(tmp_path, monkeypatch
     ).read_text(encoding="utf-8")
 
 
-def test_all_refuses_when_the_overlay_is_hand_edited(tmp_path, monkeypatch, capsys):
-    """The flip side, pinned so the tan-cli#457 fix cannot silently widen into
-    the regression it would otherwise reintroduce: a `boards/
-    native_sim_native_64.overlay` that lacks tan's own banner is a real hand
-    edit, and `--all` refuses the WHOLE run for it exactly as an explicit
-    `--target native-sim-overlay` already does (`test_overlay_overwrite_is_
-    exit_3`) -- it is not silently truncated."""
+def test_all_leaves_a_foreign_overlay_alone_and_still_writes_the_rest(
+    tmp_path, monkeypatch, capsys
+):
+    """tan-cli#501: `native-sim-overlay` reaching `targets` only because it
+    rides along in `--all`'s default set is not the same as a user asking for
+    it by name. A `boards/native_sim_native_64.overlay` that lacks tan's own
+    banner might be a customer's hand edit (the shape tan-cli#457 protects) or
+    a template's own vendored overlay (`sensor-starter`/`board-diagnostics`) --
+    either way nobody asked tan to touch this ONE file, so `--all` no longer
+    refuses the other eight targets over it (that used to make a freshly
+    scaffolded project unable to run `tan generate` AT ALL, measured on
+    tan-cli#501). It drops the target, reports why, and leaves the file
+    exactly as it was -- not silently truncated, and not a whole-run refusal.
+    An explicit `--target native-sim-overlay` still refuses (and `--force`
+    still overwrites) exactly as before -- see `test_overlay_overwrite_is_
+    exit_3` and `test_all_is_rerunnable_when_the_overlay_already_exists`.
+    """
     project, sdk = _project_with_echo_sdk(tmp_path)
     (project / "boards").mkdir()
     (project / "boards" / "native_sim_native_64.overlay").write_text(
@@ -946,10 +956,42 @@ def test_all_refuses_when_the_overlay_is_hand_edited(tmp_path, monkeypatch, caps
 
     code = _call_generate(all_targets=True, sdk_root=str(sdk), output_format="json")
     env = json.loads(capsys.readouterr().out.strip())
-    assert code == 3
-    assert env["issues"][0]["code"] == "generate.would-overwrite"
-    assert env["data"]["written"] == []
-    # The hand-tuned file is untouched, not truncated.
+    assert code == 0
+    assert env["issues"][0]["code"] == "generate.overlay-not-owned"
+    assert "native-sim-overlay" not in env["data"]["targets"]
+    assert len(env["data"]["written"]) == 8
+    assert env["data"]["failed"] == []
+    # The hand-tuned / vendored file is untouched, not truncated.
+    assert (project / "boards" / "native_sim_native_64.overlay").read_text() == "tuned"
+
+
+def test_all_with_force_still_leaves_an_unnamed_overlay_alone(
+    tmp_path, monkeypatch, capsys
+):
+    """tan-cli#501 finding 3: `--force` is generic ("overwrite whatever this
+    run would otherwise refuse"), but nobody named `native-sim-overlay`
+    specifically -- so `--all --force` must not silently truncate it either.
+    Measured before this fix: `--all --force` on a fresh sensor-starter
+    scaffold exited 0 having replaced the vendored `alp-i2c0` overlay with
+    tan's GPIO-only emit, with no warning. `--force` only reaches this file
+    via an explicit `--target native-sim-overlay --force`.
+    """
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    (project / "boards").mkdir()
+    (project / "boards" / "native_sim_native_64.overlay").write_text(
+        "tuned", encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        all_targets=True, force=True, sdk_root=str(sdk), output_format="json"
+    )
+    env = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert env["issues"][0]["code"] == "generate.overlay-not-owned"
+    assert "native-sim-overlay" not in env["data"]["targets"]
     assert (project / "boards" / "native_sim_native_64.overlay").read_text() == "tuned"
 
 

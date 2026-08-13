@@ -49,3 +49,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-12 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/renode_cmd.py: 1501 -> 1533
     - tan/commands/diff_cmd.py: 839 -> 882
+- 2026-08-13 -- tan-cli#501: generate_cmd.py's native-sim-overlay guard now distinguishes an explicit --target ask from an implicit --all/bare inclusion (drop-and-report, not a whole-run refusal or a silent --force clobber of a vendored overlay)
+    - tan/commands/generate_cmd.py: 1312 -> 1342
