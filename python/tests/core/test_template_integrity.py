@@ -243,7 +243,7 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
     )
 
 
-def test_a_shipped_overlay_is_not_clobbered_by_the_generated_conf():
+def test_a_documented_extra_conf_file_build_is_not_clobbered_by_the_generated_conf():
     """tan-cli#379's other half: naming the overlay is not enough, the build
     has to actually let it win.
 
@@ -255,6 +255,19 @@ def test_a_shipped_overlay_is_not_clobbered_by_the_generated_conf():
     documented native_sim build and `testcase.yaml`'s `extra_args` were both
     no-ops against the one symbol they were written for.
 
+    Scoped to a template that DOCUMENTS an explicit `-DEXTRA_CONF_FILE=`
+    build line (`_EXTRA_CONF` matching some planned file's content), not to
+    "ships any .conf/.overlay" (tan-cli#501 review finding 1): a file that
+    rides in via `boards/<board>.conf` -- Zephyr's own board-dir
+    auto-discovery, e.g. `sensor`/`diagnostics`'s
+    `boards/native_sim_native_64.conf` -- joins `CONF_FILE`, not
+    `EXTRA_CONF_FILE`, and is unaffected by this ordering question no matter
+    which way the CMakeLists' `EXTRA_CONF_FILE` list is built (MEASURED: a
+    real CMake configure against Zephyr v4.4.1 produced the identical merge
+    order and identical `.config` under both PREPEND and APPEND for that
+    class of file). Only a caller-supplied `-DEXTRA_CONF_FILE=<file>` -- the
+    `iot` scenario -- actually races the generated `alp.conf` for last-write.
+
     Pinned here because the fix is a hand-edit on top of a GENERATED tree
     (`vendored/MANIFEST.md`, "Deliberate edits on top of the emit") -- the next
     re-vendor re-emits the appending version, and the byte-parity gate will
@@ -264,13 +277,17 @@ def test_a_shipped_overlay_is_not_clobbered_by_the_generated_conf():
     for param in CASES:
         template_id, sku = param.values
         planned = _planned(template_id, sku)
-        overlays = [n for n in planned if n.endswith((".conf", ".overlay")) and n != "prj.conf"]
         cmake = planned.get("CMakeLists.txt", "")
-        if overlays and "list(APPEND EXTRA_CONF_FILE" in cmake:
-            clobbered.append(f"{template_id}/{sku} ships {overlays}")
+        documents_extra_conf_file = any(
+            _EXTRA_CONF.search(content)
+            for name, content in planned.items()
+            if name != "CMakeLists.txt"
+        )
+        if documents_extra_conf_file and "list(APPEND EXTRA_CONF_FILE" in cmake:
+            clobbered.append(f"{template_id}/{sku}")
     assert not clobbered, (
-        "generated conf APPENDED after the caller's own EXTRA_CONF_FILE, so a shipped "
-        f"overlay cannot override it: {clobbered}"
+        "generated conf APPENDED after a caller's own documented -DEXTRA_CONF_FILE=, so "
+        f"that file cannot override it: {clobbered}"
     )
 
 

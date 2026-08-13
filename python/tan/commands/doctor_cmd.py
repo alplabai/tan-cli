@@ -120,7 +120,6 @@ import os
 import platform
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
@@ -164,7 +163,7 @@ from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
-from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, use_color
+from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -3741,22 +3740,28 @@ def doctor(
         # `PROBE_TIMEOUT_S` each, and the old code printed nothing until every
         # one of them had answered -- on a host where one wedges, a blank
         # terminal names nothing. Width floored at `TEXT_WRAP_MIN_WIDTH` -- a
-        # 20-column terminal must not fall to one word per line -- and the
-        # fallback (piped/redirected stdout) matches `build_cmd`'s own
-        # `shutil.get_terminal_size` convention. `width`/`color` are resolved
-        # unconditionally, even under `--format json` where neither is ever
-        # read: both calls are cheap and emit nothing, so gating them behind
-        # `if stream` bought nothing but a second, held-together-by-an-11-line-
-        # comment invariant (`_print_check` closes over both) for no benefit.
+        # 20-column terminal must not fall to one word per line -- and measured
+        # through `tan.env.terminal_width`, the one place that reads a
+        # terminal's columns, sharing the 100-column fallback with
+        # `tan.env.wrap_width`. tan-cli#564: this used to be a bare
+        # `shutil.get_terminal_size(fallback=(100, 24))`, which measures
+        # `sys.__stdout__` -- but this report is printed to STDERR, so
+        # `tan doctor > report.txt` from a 70-column terminal took the 100 and
+        # put 94-, 95- and 105-column lines on a 70-column screen.
+        # `width`/`color` are resolved unconditionally, even under
+        # `--format json` where neither is ever read: both calls are cheap and
+        # emit nothing, so gating them behind `if stream` bought nothing but a
+        # second, held-together-by-an-11-line-comment invariant (`_print_check`
+        # closes over both) for no benefit.
         #
         # UNCONDITIONAL on stderr being a terminal at all (unlike
         # `tan.env.wrap_width`, which `explain`/`sdk current` use instead): a
-        # piped `tan doctor` still wraps to this `get_terminal_size` fallback
+        # piped `tan doctor` still wraps to `terminal_width`'s own fallback
         # today. That is a real inconsistency with the new seam, left exactly as
         # it shipped in PR #480 rather than silently fixed here -- see that PR
         # for the call to change it.
         stream = not json_mode
-        width = max(shutil.get_terminal_size(fallback=(100, 24)).columns, TEXT_WRAP_MIN_WIDTH)
+        width = max(terminal_width(100), TEXT_WRAP_MIN_WIDTH)
         color = use_color(no_color, ci)
 
         def _print_check(check: Check) -> None:
