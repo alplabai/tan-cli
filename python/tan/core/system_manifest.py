@@ -752,9 +752,14 @@ def slice_build_dir_or_default(slice_: dict, build_root: str) -> str:
 
 def _nested_variants(base: str) -> list[str]:
     """`base`, then `base/build` -- the I-18 pair. `west build` is emitted with
-    NO `-d`, so its tree lands at `<slice-cwd>/build/` while the plan's
-    `artifacts` block still names `<slice-cwd>/...`; the consumer reconciles
-    that off-by-one directory.
+    NO `-d`, so its tree lands at `<slice-cwd>/build/`.
+
+    Before tan-cli#560 (alp-sdk d00dbdc1), the plan's `artifacts` block still
+    named the un-nested `<slice-cwd>/...`, so this reconciled the off-by-one
+    on every read. As of that pin the planner's own in-process output already
+    carries the nested path; both are still probed, un-nested first, because
+    an older cached plan, the alp-sdk subprocess fallback pinned to a stale
+    SDK, or a hand-authored manifest can still carry the un-nested spelling.
 
     The un-nested path is tried FIRST, always: for every input where the oracle
     finds something, this finds the identical thing, and the nested probe only

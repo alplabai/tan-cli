@@ -95,8 +95,37 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`f30f4d4b`** (alp-sdk `dev`,
-  the commit `parity.yml`'s `PINNED_SDK_TAG` named when this was captured) —
+- **Current vendor point (all templates):** **`d00dbdc1`**
+  (`d00dbdc124491c89f68f404cd7ac9d26127f038f`, alp-sdk `dev`) — tan-cli#560's
+  re-sync, which moves `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT` past
+  alp-sdk#1394/#1399 (`c07254b2`) and #1400 (`739e998b`), both landed in the
+  `HAND_PORT_HASHES` file `scripts/alp_template.py`. #1400 added
+  `_rewrite_stale_sdk_root_comment()`, which rewrites the `ALP_SDK_ROOT`
+  comment paragraph in every emitted `CMakeLists.txt` that carries the
+  in-tree `../../..` guess block. **Four** files moved, all `CMakeLists.txt`:
+  `edge-ai`/E1M-AEN801, `edge-ai`/E1M-V2N101, `minimal`/E1M-AEN801 and
+  `minimal`/E1M-V2N101; `edge-ai`'s pair also gains #1390's
+  `OUTPUT_VARIABLE`/`ERROR_VARIABLE` capture on `execute_process`, folded
+  into the same alp-sdk range.
+
+  **Re-vendoring was necessary but not sufficient.** `scripts/alp_template.py`
+  is a `HAND_PORT_HASHES` file, so this re-sync also ports
+  `_rewrite_stale_sdk_root_comment()` and the loop-based
+  `_scaffold_cmakelists` into `tan/planner/template.py` itself (kept in step
+  with `_derive_pin_doc_renames`'s alp-sdk#1394 collision guard, the other
+  behavioural delta in this same file across the range) — see that module's
+  own history. `scaffold_byte_parity.py` (vendored bytes vs. the SDK emit)
+  alone would have gone green on the re-vendor without the emitter port;
+  `test_planner_emit_parity.py` (tan's OWN emit vs. the SDK emit) is what
+  actually exercises the ported code.
+
+  `iot`/E1M-AEN801's `CMakeLists.txt` still carries the standing
+  `DELIBERATE_EDITS` entry (tan-cli#379's `list(PREPEND EXTRA_CONF_FILE
+  ...)`) and was NOT re-vendored — re-vendoring it would silently revert that
+  fix. Verified at `d00dbdc1`: `scaffold_byte_parity.py` **9/9 PASS** (rc 0).
+
+- **Prior vendor point:** **`f30f4d4b`** (alp-sdk `dev`,
+  the commit `parity.yml`'s `PINNED_SDK_TAG` named when that was captured) —
   re-vendored by the tan-cli#543/#544/#545 planner re-sync. **Eleven** files
   moved:
   - The **seven** `README.md` doc-link files (`diagnostics`, `minimal` and
