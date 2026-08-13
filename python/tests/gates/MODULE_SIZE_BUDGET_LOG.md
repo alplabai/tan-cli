@@ -50,6 +50,8 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/clean_cmd.py: 1098 -> 1110
     - tan/commands/renode_cmd.py: 1501 -> 1533
     - tan/commands/diff_cmd.py: 839 -> 882
+- 2026-08-12 -- tan-cli#573: load_board_yaml's metadata_root override now reaches stages 4-5 (two new parameters) and travels on BoardProject to the downstream resolvers (one new keyword argument); +3 lines in loader.py, none elsewhere.
+    - tan/planner/loader.py: 1251 -> 1254
 - 2026-08-12 -- tan-cli#564: build_cmd/doctor_cmd gained the comments explaining why the width probes measure stderr, not sys.__stdout__
     - tan/commands/build_cmd.py: 2074 -> 2082
     - tan/commands/doctor_cmd.py: 3920 -> 3925
@@ -58,7 +60,15 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/doctor_cmd.py: 3920 -> 3925
 - 2026-08-13 -- fix(flash): correct select_flash_method's Flow D provenance docstring + FLOW_D_KEYS comment (tan-cli#700) -- net growth from re-attributing jlink_flash_device/expect_dpidr/jlink_device (SoC debug: block) vs slot0_load_address (SoM memory_map:, alp-sdk#1069) correctly, not a new feature
     - tan/core/flash_plan.py: 3079 -> 3093
+- 2026-08-13 -- tan-cli#697: cross-drive project/workspace refusal (execute.py's _cross_drive_source_refusal + build_cmd.py's _cross_drive_issues promotion)
+    - tan/commands/build/execute.py: 1598 -> 1687
+    - tan/commands/build_cmd.py: 2082 -> 2107
 - 2026-08-13 -- tan-cli#501: generate_cmd.py's native-sim-overlay guard now distinguishes an explicit --target ask from an implicit --all/bare inclusion (drop-and-report, not a whole-run refusal or a silent --force clobber of a vendored overlay)
     - tan/commands/generate_cmd.py: 1312 -> 1342
 - 2026-08-13 -- tan-cli#501 review round 5: closed findings 1-3 (false PREPEND rationale reverted, overlay-not-owned warning no longer recommends the destructive --force clobber of a vendored overlay, data.engine kept in step with a dropped target) -- the explanatory comments this needed grew the module past its prior ratchet
     - tan/commands/generate_cmd.py: 1342 -> 1348
+- 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build_cmd.py: 2074 -> 2082
+    - tan/commands/clean_cmd.py: 1098 -> 1110
+    - tan/commands/doctor_cmd.py: 3920 -> 3925
+    - tan/commands/generate_cmd.py: 1312 -> 1348
