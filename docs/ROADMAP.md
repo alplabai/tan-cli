@@ -35,15 +35,18 @@ deliberate — it is how a release candidate stays opt-in.
 
 ## Which versions go together
 
-The stable line and the current opt-in Python line:
+The stable line and the current opt-in pre-release line:
 
 | Component | Stable | Opt-in / pre-release |
 |---|---|---|
-| alp-sdk | **v0.14.0** | **v0.15.0-rc1**; tan parity may pin a newer exact commit |
-| tan | **v0.4.1** — frozen Rust line | **v0.5.0-rc4** — shipping Python port |
+| alp-sdk | **v0.15.0** | none live; tan parity may pin a newer exact commit than the latest tag |
+| tan | **v0.5.1** — shipping Python port | none live |
 | Alp IDE | **v0.4.0** | **v0.5.x** pre-release channel |
 
-The planned stable Python line remains tan `v0.5.0` with Alp IDE `v0.6.x`.
+The Python `tan` line is now stable: `v0.5.0` shipped general availability and
+`SUPPORTED_CLI_VERSION` has already moved to it (now `0.5.1`) in
+`alp-sdk-vscode`'s default branch. Alp IDE's own stable cutover to consume it
+by default remains `v0.6.x`.
 
 ### How to tell a beta from a stable Alp IDE build
 
@@ -102,10 +105,12 @@ checkout.
 
 Gated on Target 1 green on silicon.
 
-### tan — `v0.5.0` · general availability
+### tan — `v0.5.0` · general availability — SHIPPED (2026-08-04)
 
-`SUPPORTED_CLI_VERSION` moves; the Python `tan` becomes what customers get.
-Gated on the RC having soaked, not on a date.
+`SUPPORTED_CLI_VERSION` moved; the Python `tan` is what customers get.
+`v0.5.1` (2026-08-05) followed as a patch on the same GA line and is today's
+`latest`; `alp-sdk-vscode`'s default branch already pins
+`SUPPORTED_CLI_VERSION = "0.5.1"`.
 
 ### tan — `v0.6.0` · retire the oracle, and the known divergences
 
