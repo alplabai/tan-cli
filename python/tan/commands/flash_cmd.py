@@ -811,12 +811,13 @@ def _stderr_sink():
 
     NOT the only divergence in this file any more: `plan_flash_targets`
     (`tan.core.flash_plan.TargetPlan.refused_skipped`) treats a `status:
-    skipped` slice/helper as a warning that alone never fails the run, where
-    the shipped Rust `plan_flash_targets` has no such bucket and refuses (and
-    fails) a `status: skipped` slice exactly like any other non-`ok` status.
-    See `TargetPlan.refused_skipped` for the reasoning and
-    `tests/parity/test_flash_oracle_parity.py` for why that case is not diffed
-    against the oracle.
+    skipped` slice/helper, or one declared `os: "off"` in `board.yaml`
+    (tan-cli#699), as a warning that alone never fails the run, where the
+    shipped Rust `plan_flash_targets` has no such bucket (and predates
+    `os: "off"` cores entirely) and refuses (and fails) either shape exactly
+    like any other non-`ok` status. See `TargetPlan.refused_skipped` for the
+    reasoning and `tests/parity/test_flash_oracle_parity.py` for why neither
+    case is diffed against the oracle.
     """
     try:
         sys.stderr.fileno()
