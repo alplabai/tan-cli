@@ -328,7 +328,31 @@ from tests.conftest import sdk_root
 #: that pin's own comment), not merely "the last audit point"; moving it
 #: would erase that meaning even though `scripts/strict_loaders.py` is also
 #: byte-identical between `26b0040e` and `1a9f753c` (re-hashed, confirmed).
-PINNED_SDK_COMMIT = "a317330595f744d35f4d785869517110f3678f70"  # alp-sdk origin/dev
+#:
+#: `a3173305` -> `d00dbdc1` (tan-cli#560), BEHAVIOURAL: alp-sdk#1360/#1401.
+#: `_slice_artifacts` in `buildplan.py` now reports a zephyr slice's six
+#: `artifacts` paths (`elf`/`map`/`bin`/`sizeReport`/`symbols`/
+#: `compileCommands`) rooted at `<buildDir>/build/`, the tree `west build`
+#: -- run with cwd=`<buildDir>` and no `-d` -- actually writes; the old
+#: spelling named `<buildDir>/zephyr/zephyr.elf`, a file west never
+#: creates. `orchestrator.py`'s change in the same alp-sdk commit is
+#: comment-only (the `_slice_command` docstring no longer claims the
+#: consumer "reconciles" the nesting -- it doesn't have to any more).
+#: `tests/parity/seam1_field_diff.py`'s vendored twin gains the matching
+#: `_NESTED_ARTIFACT_TAILS` allowance, keyed on the same six fields and the
+#: same one-segment `build/` insertion, so the frozen 97ad481b oracle's
+#: un-nested paths keep passing against a live emit at this pin.
+#:
+#: `HAND_PORT_PINNED_SDK_COMMIT` moves to the same commit in this same
+#: change (see that pin's own comment) -- re-hashed, not a bare bump: eight
+#: of the ten `HAND_PORT_HASHES` source files are byte-identical between
+#: `a3173305` and `d00dbdc1`; the two that moved (`scripts/gen_zephyr_
+#: board.py`, `scripts/alp_template.py`) carry their own BEHAVIOURAL
+#: deltas, ported into `zephyr_board.py` / `template.py` -- see that pin's
+#: comment for the breakdown. `STRICT_LOADERS_PINNED_SDK_COMMIT` does NOT
+#: move, same reasoning as above: `scripts/strict_loaders.py` does not
+#: appear in the `a3173305..d00dbdc1` diff at all.
+PINNED_SDK_COMMIT = "d00dbdc124491c89f68f404cd7ac9d26127f038f"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -338,7 +362,7 @@ PINNED_SDK_COMMIT = "a317330595f744d35f4d785869517110f3678f70"  # alp-sdk origin
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "03b610ce02d1819d09ad3d5d233bbbd46b950bdc09448748b17ebc5a1b57f272",
-    "buildplan.py": "1b4bed7e0d64b824feced1a482271ecb397ca8afa5d6fc1a48ea688413280059",
+    "buildplan.py": "54c49e8bd21dc0a283b6499b6b39314b089cf2cd65166451f884df614b7dca9f",
     "carveout.py": "23e7920110c333a1f3cbf51ce186c4c2cebdb3ef1573c06df64ca1e9a80be478",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
@@ -349,7 +373,7 @@ PINNED_HASHES: dict[str, str] = {
     "manifest.py": "f38de96a9626672bc08f181e09b3a545d8dc846c0423cc6e9dd08c3b96a87d1d",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
     "models.py": "edf04000c361838b1523eff1a3fd1a5d7b60a5e95583c9acf5d587b8d379ea32",
-    "orchestrator.py": "6fe4c4836dc01b26543939923d12a7e394a6c4e6df7cf1e2c502cf2a53f873fa",
+    "orchestrator.py": "c5d25284f9f06a907c7b95e5d905e17d9a0fa68c9df3f25bb419537a2ce1d5a6",
     "partition.py": "7f37224ff1aa05dd6d943424a664bc4d115dc05853762072854d43ea3628591c",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
@@ -480,7 +504,58 @@ PINNED_HASHES: dict[str, str] = {
 #: and nothing went red. Had any one of the ten moved, the gate would
 #: have failed pointing at a file the branch never touched. Move all
 #: four together or the next bump lands the red instead.
-HAND_PORT_PINNED_SDK_COMMIT = "a317330595f744d35f4d785869517110f3678f70"  # alp-sdk origin/dev
+#:
+#: `a3173305` -> `d00dbdc1` (tan-cli#560), a REAL re-audit, not a bare
+#: bump: `git diff --stat a3173305..d00dbdc1 -- <each of the ten>` is
+#: non-empty for exactly two files.
+#:
+#:   - `scripts/gen_zephyr_board.py` (alp-sdk#1373/#1407, tan-cli#690):
+#:     every AEN board's generated `Kconfig.defconfig` gains a `choice
+#:     LOG_MODE / default LOG_MODE_MINIMAL` block. Zephyr's inherited
+#:     LOG_MODE_DEFERRED needs `CONFIG_LOG_PROCESS_THREAD` to run, and the
+#:     AEN bench procedure runs apps whose `main()` never yields (the
+#:     non-yielding busy loop is what keeps the Secure Enclave from gating
+#:     the DAP/SE-UART) -- so a healthy, fault-free board printed ZERO
+#:     UART bytes. Ported verbatim into `zephyr_board.py::
+#:     _aen_kconfig_defconfig` as the new `_AEN_LOG_MODE_DEFAULT` constant,
+#:     same placement inside the `if BOARD_<sym>` guard as ROM_START_OFFSET.
+#:   - `scripts/alp_template.py` (alp-sdk#1394/#1399 + #1400): TWO
+#:     behavioural deltas, both ported into `template.py`. #1394 adds a
+#:     collision guard to `_derive_pin_doc_renames` -- two `pins:` entries
+#:     re-deriving a SHARED `doc:` string to two different targets now
+#:     raises `TemplateError` instead of silently keeping whichever
+#:     resolution ran last (the separate `resolved` map records every
+#:     entry's resolution, not only the renaming ones). #1400 adds
+#:     `_rewrite_stale_sdk_root_comment` -- `_scaffold_cmakelists` now
+#:     loops instead of `subn`, rewriting each guess block's own preceding
+#:     comment paragraph (which used to keep teaching an in-tree
+#:     `../../..` fallback the hardened block no longer has) in step with
+#:     the code. tan's two deliberate divergences from the oracle (the
+#:     `_ALP_SDK_ROOT_REQUIRED_BLOCK in text` idempotence guard, and the
+#:     `_SDK_ROOT_DEPENDENT_RE` `TemplateError` raise where upstream
+#:     returns best-effort unchanged) are preserved. #1400 changes `--emit
+#:     scaffold` bytes, which is why `python/tan/templates/vendored/` is
+#:     re-vendored in this same change -- see that tree's MANIFEST.md.
+#:
+#: The other eight of the (then-)ten are byte-identical between `a3173305`
+#: and `d00dbdc1` (re-hashed one by one, not assumed), so nothing else was
+#: re-frozen past an unaudited delta. `scripts/strict_loaders.py` does not
+#: appear in the diff at all, so `STRICT_LOADERS_PINNED_SDK_COMMIT` stays put.
+#:
+#: BLOCKER, found in review of tan-cli#560 itself: that "ten" was never the
+#: full hand-port surface. `scripts/alp_cli/faultdecode.py` -- the alp-sdk
+#: source `tan/core/faultdecode.py` is hand-ported from -- sat OUTSIDE both
+#: `scripts/alp_orchestrate/` (PINNED_HASHES) and this table, so the
+#: `a3173305..d00dbdc1` re-audit above never looked at it, and alp-sdk
+#: dad5b35a (#1389, "lead with the escalated fault, not the escalation") --
+#: which lives INSIDE that same range and changes exactly that file -- went
+#: completely unaudited. It happened to be harmless (upstream ADOPTED both of
+#: tan-cli#616's declared divergences verbatim, so `tan/core/faultdecode.py`
+#: needed no code change), but the gate could not have told the difference
+#: from a real drift; it never even ran the comparison. `faultdecode.py` now
+#: joins this table (11th entry) so the next SDK-side change to it is
+#: audited the same way as everything else here.
+HAND_PORT_PINNED_SDK_COMMIT = "d00dbdc124491c89f68f404cd7ac9d26127f038f"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -505,17 +580,31 @@ HAND_PORT_PINNED_SDK_COMMIT = "a317330595f744d35f4d785869517110f3678f70"  # alp-
 #: byte-identical between `ccd34f06` and `7d58ef32` (1186 bytes,
 #: `54c0b5c4...`), so pinning it here at HAND_PORT_PINNED_SDK_COMMIT re-freezes
 #: nothing unaudited.
+#:
+#: `scripts/alp_cli/faultdecode.py` is in THIS table for the same reason as
+#: `sentinels.py` above and, like it, deliberately NOT in HAND_PORT_SOURCES:
+#: its port, `tan/core/faultdecode.py`, lives under `tan/core/`, not
+#: `tan/planner/`, so it has no `tan/planner/`-relative path this dict's
+#: `HAND_PORT_SOURCES` half (a coverage list over `tan/planner/**.py`, see
+#: that dict's own docstring) could name. Tracking the SDK-side hash anyway
+#: is the point (tan-cli#560 review, blocker 2): without it, this entire
+#: freshness gate had zero visibility into `scripts/alp_cli/faultdecode.py`,
+#: and alp-sdk dad5b35a (#1389) changed it inside the very
+#: `a3173305..d00dbdc1` range this file's own pin moved across, unseen. sha256
+#: taken directly from the `d00dbdc1` checkout this HAND_PORT_PINNED_SDK_COMMIT
+#: already names, so pinning it here re-freezes nothing unaudited either.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "75958a138c4fc24d39815edcc6a2a009a8f1d31360aae4b8fc3e5a82f05e0d77",
+    "scripts/gen_zephyr_board.py": "083018a76a774d6ea37da87d3d8dda6eda4515c5cd924ebf0b5a141c9ba2cf9b",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/alp_project_loader.py": "d5f142173a13cfac9e130ef8fde90d35d6bb92d21d152925a275b3e8bdaa49db",
-    "scripts/alp_template.py": "6e62ac385154cef4decb8bb54eb9fae27e45f9797faffe8159cedca770f1f352",
+    "scripts/alp_template.py": "9321c7e31759ef4f9c03c2c750b1d7d7f4019b9a50dd2679668deaa2b0054708",
     "scripts/alp_project_emit/__init__.py": "62c4742bc373e7fafcd8aa864ad7692d3c05b610c6d7457023aeb82c98847d88",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
     "scripts/alp_project_emit/hw_info.py": "25673bb45305ce3f54280560beea8577bdf04bfdada44a133ff7ca48fbe05167",
     "scripts/alp_project_emit/native_sim.py": "24943e7099d745b254b853135ff0b4ae8415be7946d93170d479b637105f18c0",
     "scripts/alp_project_emit/west_libs.py": "0bfad8fb6c22b955d0554f8fffca8c1c9bf9f73d3c64778b9ba2de76eb6a972d",
+    "scripts/alp_cli/faultdecode.py": "3a9e82b7b6892523923e6f571602be1e3bb11e24090dde0b90f6a5ae207aaa0b",
 }
 
 #: `tan/planner/`-relative path -> the alp-sdk-relative source path it was
@@ -565,12 +654,17 @@ def test_hand_port_sources_declares_its_one_strict_loaders_exception():
 #: tan-cli#485: `tan/planner/strict_loaders.py` (the alp-sdk #1127
 #: duplicate-key-rejecting YAML/JSON loaders, wired into `loader.py`'s
 #: `_load_yaml`/`_load_json` to close the silent-sku-retarget hazard) was
-#: hand-ported from `scripts/strict_loaders.py` -- a file that does not
-#: exist at all at HAND_PORT_PINNED_SDK_COMMIT (996937ac predates alp-sdk
-#: #1127). It gets its OWN pin/root/test rather than joining
-#: HAND_PORT_HASHES/HAND_PORT_PINNED_SDK_COMMIT, deliberately: auditing the
-#: rest of that bundle between 996937ac and here turned up a REAL, narrower
-#: gap this fix does not close. `scripts/alp_template.py` gained `_safe_join`/
+#: hand-ported from `scripts/strict_loaders.py` -- a file that did not exist
+#: at all at HAND_PORT_PINNED_SDK_COMMIT when this split was written (then
+#: `996937ac`, which predates alp-sdk #1127). It gets its OWN pin/root/test
+#: rather than joining HAND_PORT_HASHES/HAND_PORT_PINNED_SDK_COMMIT,
+#: deliberately: auditing the rest of that bundle between 996937ac and the
+#: pin current at the time turned up a REAL, narrower gap this fix does not
+#: close. (`scripts/strict_loaders.py` DOES exist at the current
+#: HAND_PORT_PINNED_SDK_COMMIT, `d00dbdc1` -- blob
+#: `d4b6ce64850acb7893ecb894a96988636cc32324` -- so "does not exist" is no
+#: longer why it stays split; the gap below is.) `scripts/alp_template.py`
+#: gained `_safe_join`/
 #: `PathEscapeError` (alp-sdk #1125/#1126); `tan/planner/template.py` has its
 #: own parallel `tan.core.fs_confine.PathEscapeError`/`resolve_confined`,
 #: wired into every catalog-driven WRITE (`scaffold.py:1049`,

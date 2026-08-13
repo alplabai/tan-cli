@@ -408,7 +408,40 @@ env:
   #     its `f30f4d4b` vendor point.
   #   - seam1_field_diff PASS, rc 0 -- all 6 boards, including
   #     `multicore_rpmsg-imx93` (alp-sdk and tan both still refuse it)
-  PINNED_SDK_TAG: a317330595f744d35f4d785869517110f3678f70
+  #
+  # `a317330595f744d35f4d785869517110f3678f70` -> `d00dbdc124491c89f68f404c
+  # d7ac9d26127f038f` (tan-cli#560): moves in lockstep with `ci.yml`'s
+  # `sdk_parity` checkout `ref:` and both `PINNED_SDK_COMMIT` /
+  # `HAND_PORT_PINNED_SDK_COMMIT` in `test_planner_relocation_freshness.py`
+  # -- see that file's `PINNED_SDK_COMMIT` comment for the ported
+  # behavioural delta (alp-sdk#1360/#1401's `build/` level on a zephyr
+  # slice's `artifacts` paths; alp-sdk#1373/#1407's AEN LOG_MODE_MINIMAL
+  # default; alp-sdk#1394/#1399's pin-doc collision guard and #1400's
+  # scaffold stale-comment rewrite, both in the HAND_PORT
+  # `scripts/alp_template.py`).
+  #
+  # `seam1_field_diff.py` gains a third hand-reviewed allowance
+  # (`_NESTED_ARTIFACT_TAILS`) for the #1360 relocation, mirroring
+  # alp-sdk's own `tests/parity/seam1_field_diff.py` -- without it every
+  # zephyr-slice board in the frozen 97ad481b oracle reports 6 disallowed
+  # diffs (one per artifact field) against a live emit at this pin.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `d00dbdc124491c89f68f404cd7ac9d26127f038f` before
+  # landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8345 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, but ONLY after
+  #     re-vendoring the four `edge-ai`/`minimal` `CMakeLists.txt` files
+  #     `_scaffold_cmakelists`'s new comment rewrite touches -- see
+  #     `python/tan/templates/vendored/MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, via the new
+  #     `_NESTED_ARTIFACT_TAILS` allowance above
+  #
+  # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
+  # predates every commit this bump exists to pick up.
+  PINNED_SDK_TAG: d00dbdc124491c89f68f404cd7ac9d26127f038f
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

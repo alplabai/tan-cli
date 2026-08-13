@@ -224,6 +224,27 @@ jobs:
       # this SHA, the same deferred-tag pattern `parity.yml`'s own
       # `PINNED_SDK_TAG` history used while waiting on v0.14.0.
       #
+      # `a317330595f744d35f4d785869517110f3678f70` -> `d00dbdc124491c89f6
+      # 8f404cd7ac9d26127f038f` for tan-cli#560, in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` and both freshness pins. Carries
+      # alp-sdk#1360/#1401: a zephyr slice's six `artifacts` paths now
+      # carry the `build/` level `west build` actually writes (`_slice_
+      # artifacts` in `buildplan.py`; `orchestrator.py`'s change is
+      # comment-only). Also picks up two HAND_PORT deltas that landed in
+      # this same range: alp-sdk#1373/#1407 (AEN `choice LOG_MODE /
+      # default LOG_MODE_MINIMAL`, `gen_zephyr_board.py`, tan-cli#690) and
+      # alp-sdk#1394/#1399 + #1400 (`_derive_pin_doc_renames`'s doc:
+      # collision guard, and `_scaffold_cmakelists`'s stale-comment
+      # rewrite, both `alp_template.py` -- the latter forces a re-vendor
+      # of `python/tan/templates/vendored/`, see its own MANIFEST.md
+      # entry). Bound to the OLD ref after this port lands, both
+      # `test_planner_relocation_freshness.py` halves fail on the hash of
+      # the four moved files, and `test_planner_emit_parity.py`'s
+      # scaffold-mode cases diff the ported planner against the pre-fix
+      # `scripts/alp_template.py`.
+      #
+      # Still not a tag, for the same reason as above.
+      #
       # Bumped `1a9f753c` -> `a317330595f744d35f4d785869517110f3678f70` for
       # tan-cli#639, in the SAME change as `parity.yml`'s `PINNED_SDK_TAG`.
       # An earlier revision of that PR moved only `parity.yml` and left THIS
@@ -295,7 +316,7 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: a317330595f744d35f4d785869517110f3678f70
+          ref: d00dbdc124491c89f68f404cd7ac9d26127f038f
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a

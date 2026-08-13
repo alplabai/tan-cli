@@ -56,3 +56,9 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build_cmd.py: 2074 -> 2082
     - tan/commands/doctor_cmd.py: 3920 -> 3925
+- 2026-08-13 -- tan-cli#560: buildplan.py/orchestrator.py west build/ level port, zephyr_board.py AEN LOG_MODE_MINIMAL port (tan-cli#690), template.py pin-doc collision guard + scaffold stale-comment rewrite port (alp-sdk#1394/#1399/#1400) -- all four SDK pins moved to d00dbdc1
+    - tan/planner/template.py: 1329 -> 1436
+    - tan/planner/zephyr_board.py: 1372 -> 1433
+    - function_count_budget: 251 -> 254
+- 2026-08-13 -- tan-cli#560 review: correct the flash_plan.py resolve_artefact_path docstring's now-stale claim about the plan's artifacts block (Major 5)
+    - tan/core/flash_plan.py: 3079 -> 3083
