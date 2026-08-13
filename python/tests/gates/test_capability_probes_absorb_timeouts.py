@@ -93,6 +93,36 @@ def test_probe_returns_false_instead_of_raising_on_timeout(
         f"run them against a host that never answered")
 
 
+def test_bash_probe_retries_once_so_a_cold_spawn_does_not_silently_skip(monkeypatch):
+    """A timeout on the FIRST spawn must not decide the verdict.
+
+    Absorbing the timeout alone would trade a loud collection abort for 15
+    quietly skipped tests on exactly the loaded hosts that provoke it --
+    measured: the fix's first cut moved this file's 15 tests from FAILED to
+    SKIPPED (`307 -> 325` skips) rather than running them. Since the only
+    observed cause is cold process start-up (10.6s cold, 0.10s warm), the
+    second attempt is warm and answers. `_noexec_probe` deliberately has no
+    retry: an `unshare` namespace probe that times out is reporting a
+    genuinely restricted host, not a warm-up cost.
+    """
+    calls = {"n": 0}
+
+    def timeout_then_succeed(*_a, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise subprocess.TimeoutExpired(cmd=["bash"], timeout=kwargs.get("timeout", 10))
+        return subprocess.CompletedProcess(
+            args=["bash"], returncode=0, stdout="tan-bash-ok\n", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: f"/usr/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", timeout_then_succeed)
+
+    assert _fresh(completion_mod, "_bash_available")() is True
+    assert calls["n"] == 2, (
+        "the probe must make a SECOND attempt after a cold-start timeout, not "
+        f"give up after {calls['n']}")
+
+
 @pytest.mark.parametrize("module,func_name,tool,os_name", PROBES)
 def test_probe_still_returns_false_when_the_tool_is_absent(
     module, func_name, tool, os_name, monkeypatch
