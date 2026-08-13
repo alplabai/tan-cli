@@ -224,6 +224,20 @@ jobs:
       # this SHA, the same deferred-tag pattern `parity.yml`'s own
       # `PINNED_SDK_TAG` history used while waiting on v0.14.0.
       #
+      # Bumped `1a9f753c` -> `c07254b2589406acb3fcb5556bf1e995395431e3` for
+      # tan-cli#639 + #692, in the SAME change as `parity.yml`'s
+      # `PINNED_SDK_TAG` and both constants in the freshness gate -- all four
+      # together. #639 first took this to `a317330595f744...`; #692 supersedes
+      # that with `c07254b2`, which descends from it (verified with
+      # `git merge-base --is-ancestor`) and carries alp-sdk#1400's
+      # `_rewrite_stale_sdk_root_comment` delta that #692 actually hand-ported.
+      # An earlier revision of that PR moved only `parity.yml` and left THIS
+      # ref behind -- precisely the divergence the "MUST be bumped together"
+      # rule above exists to prevent, and the second time it has happened
+      # mid-review (the first is recorded above, during #485). Caught by human
+      # review both times; NOTHING asserts the two SHAs match, which is the
+      # actual gap and is worth its own gate.
+      #
       # `53557a60` -> `f30f4d4b` for tan-cli#543/#425, moved in the SAME change
       # as `parity.yml`'s `PINNED_SDK_TAG`, which is the whole point of the
       # "MUST be bumped together" rule above -- the mid-review divergence that

@@ -498,6 +498,21 @@ PINNED_HASHES: dict[str, str] = {
 #: `_rewrite_stale_sdk_root_comment` has been ported into
 #: `tan/planner/template.py` in this same change -- the pin records an audit
 #: that actually happened, not a bump to silence a gate.
+#:
+#: WHY ALL FOUR PINS MOVE IN ONE COMMIT, recorded from a real near-miss on
+#: tan-cli#639. That branch first moved `ci.yml`'s `ref:`, `parity.yml`'s
+#: `PINNED_SDK_TAG` and `PINNED_SDK_COMMIT` to `a3173305` and left THIS
+#: constant behind at `1a9f753c` -- the "two pins, one checkout" trap this
+#: file's header warns about, in its fourth variant. It passed anyway, but on
+#: a coincidence rather than on correctness: all ten `HAND_PORT_HASHES` source
+#: files below happened to be byte-identical between `1a9f753c` and
+#: `a3173305` (sha256 compared one by one; 44 files changed across that range
+#: and not one of them is in this bundle), so the stale pin re-hashed to the
+#: same values and nothing went red. Had any one of the ten moved, the gate
+#: would have failed pointing at a file the branch never touched. `a3173305`
+#: is not the final pin here -- `c07254b2` descends from it and supersedes it
+#: -- but the lesson outlives the number: move all four together, or a future
+#: bump lands the red instead of the audit.
 HAND_PORT_PINNED_SDK_COMMIT = "c07254b2589406acb3fcb5556bf1e995395431e3"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
