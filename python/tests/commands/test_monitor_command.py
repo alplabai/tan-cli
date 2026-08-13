@@ -457,3 +457,74 @@ def test_child_stdout_falls_back_to_devnull_when_there_is_no_real_stderr(monkeyp
     assert monitor_cmd._child_stdout(True) is monitor_cmd.subprocess.DEVNULL
     # Text mode never consults the stream at all.
     assert monitor_cmd._child_stdout(False) is None
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#701: `\\.\COM<n>` is the spelling Microsoft documents for COM10 and
+# above, and pyserial's win32 backend opens it -- but `comports()` only ever
+# REPORTS the bare `COM<n>` from the registry's `PortName`. A membership test
+# against `comports()` therefore refused a port pyserial would have opened,
+# while listing that same port in its own "not found" message.
+# ---------------------------------------------------------------------------
+
+#: The literal nine characters a user types: \ \ . \ C O M 3 8
+_UNC_COM38 = "\\\\.\\COM38"
+
+
+def test_the_unc_spelling_of_a_present_port_is_accepted(monkeypatch):
+    """Measured on a real Windows host: `serial.Serial(r"\\\\.\\COM38")` opens
+    (`is_open = True`), while `comports()` reports the device as `'COM38'` and
+    `tan monitor --port "\\\\.\\COM38"` refused with
+    `monitor.no-port : port '\\\\.\\COM38' not found`.
+    """
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(
+        monitor_cmd, "_available_ports", lambda: [("COM38", "USB Serial Port")]
+    )
+
+    captured = {}
+
+    class _Completed:
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return _Completed()
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["--port", _UNC_COM38, "--format", "json"])
+    assert result.exit_code == 0, result.output
+    doc = envelope(result)
+    assert doc["ok"] is True
+    # The user's own spelling is preserved end to end -- pyserial opens it, so
+    # there is nothing to gain by rewriting what they asked for.
+    assert doc["data"]["port"] == _UNC_COM38
+    assert captured["argv"][-2:] == [_UNC_COM38, "115200"]
+
+
+def test_a_unc_port_whose_bare_form_is_absent_is_still_refused(monkeypatch):
+    """The gate is normalised, not widened.
+
+    Without this case the fix would be indistinguishable from "accept anything
+    starting with the device prefix", which would refuse nothing at all on
+    Windows.
+    """
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+    result = runner.invoke(app, ["--port", _UNC_COM38, "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert "not found" in doc["issues"][0]["message"]
+
+
+def test_a_posix_device_path_is_not_rewritten(monkeypatch):
+    """`_port_aliases` must leave every non-Windows spelling alone.
+
+    tan-cli#569 covers `/dev/serial/by-id` and pyserial URLs separately; this
+    only asserts that #701's normalisation does not reach them.
+    """
+    assert monitor_cmd._port_aliases("/dev/ttyUSB0") == {"/dev/ttyUSB0"}
+    assert monitor_cmd._port_aliases("COM38") == {"COM38"}
+    assert monitor_cmd._port_aliases(_UNC_COM38) == {_UNC_COM38, "COM38"}
