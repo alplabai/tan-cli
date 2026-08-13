@@ -59,3 +59,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- tan-cli#699: flash_plan.py gained an os:"off" refused_skipped branch (+ docstring detail) so an off core no longer hard-fails tan flash; flash_cmd.py's matching divergence-note docstring grew by one line
     - tan/commands/flash_cmd.py: 3922 -> 3923
     - tan/core/flash_plan.py: 3079 -> 3112
+- 2026-08-13 -- tan-cli#699 followup: correct false operator-facing off-core claims + stale present-tense oracle references in flash_plan.py/flash_cmd.py comments
+    - tan/commands/flash_cmd.py: 3923 -> 3927
+    - tan/core/flash_plan.py: 3112 -> 3127

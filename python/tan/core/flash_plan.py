@@ -319,24 +319,25 @@ class TargetPlan:
     #: fold it into a failure count -- see `refused` for the error-severity,
     #: exit-code-affecting bucket.
     #:
-    #: **DIVERGES from the shipped Rust oracle.** `crates/tan-core/src/
-    #: flash/mod.rs`'s `plan_flash_targets` has no `refused_skipped` bucket at
-    #: all -- a `status: skipped` slice/helper lands in the ONE `refused` list
-    #: alongside `failed`/`pending`/anything else non-`ok`, and the CLI seeds
-    #: `failed` from `refused.len()` before the dispatch loop even runs, so the
-    #: oracle FAILS the run on a `status: skipped` slice exactly like any other
-    #: bad status -- and has no `os: "off"` carve-out either, so it also fails
-    #: on that shape (the oracle predates `os: "off"` cores). This split (and
-    #: the caller's warning-only, exit-0 treatment when something else DID
-    #: flash) is a deliberate product improvement on top of the port, not a
-    #: porting bug -- but the caller (`tan.commands.flash_cmd.flash`) MUST
-    #: still fail the run when every match was a `refused_skipped` entry and
-    #: nothing flashed (`flash.nothing-flashed`), or this bucket reintroduces
-    #: the exact silent-success class `refused` exists to prevent, just
-    #: inverted. `tests/parity/test_flash_oracle_parity.py` deliberately
-    #: carries no `status: skipped` (nor `os: "off"`) case for this reason --
-    #: the two implementations disagree there by design and an oracle diff
-    #: would only fail.
+    #: **DIVERGED from the Rust oracle, before the oracle was retired.**
+    #: `crates/tan-core/src/flash/mod.rs`'s `plan_flash_targets` had no
+    #: `refused_skipped` bucket at all -- a `status: skipped` slice/helper
+    #: landed in the ONE `refused` list alongside `failed`/`pending`/anything
+    #: else non-`ok`, and the CLI seeded `failed` from `refused.len()` before
+    #: the dispatch loop even ran, so the oracle FAILED the run on a
+    #: `status: skipped` slice exactly like any other bad status -- and had no
+    #: `os: "off"` carve-out either, so it also failed on that shape (the
+    #: oracle predated `os: "off"` cores). This split (and the caller's
+    #: warning-only, exit-0 treatment when something else DID flash) was a
+    #: deliberate product improvement on top of the port, not a porting bug --
+    #: but the caller (`tan.commands.flash_cmd.flash`) MUST still fail the run
+    #: when every match was a `refused_skipped` entry and nothing flashed
+    #: (`flash.nothing-flashed`), or this bucket reintroduces the exact
+    #: silent-success class `refused` exists to prevent, just inverted.
+    #: `crates/` and `tests/parity/test_flash_oracle_parity.py` (which
+    #: deliberately carried no `status: skipped` nor `os: "off"` case, for the
+    #: reasons above) were both deleted in 2883cdf -- there is no longer a
+    #: second implementation to diff against.
     refused_skipped: tuple[str, ...] = ()
 
 
@@ -422,24 +423,38 @@ def plan_flash_targets(
                 )
                 continue
             if not slice_should_flash(found.status):
+                # `found.os == "off"` is checked BEFORE `found.status ==
+                # "skipped"` below on purpose: an off core never receives a
+                # `SliceRunResult` (see the comment inside this branch), so
+                # its `status` can only ever be the plan-time `pending`
+                # default -- never `failed` -- making this ordering safe
+                # today. If that ever changed and an off core's manifest
+                # entry could carry `status: failed`, checking `os` first
+                # would silently downgrade a real failure to a warning; the
+                # `os` check would need to move after the `status` checks
+                # (or gain its own `status == "failed"` guard) at that point.
                 if found.os == "off":
                     # tan-cli#699: `board.yaml` declares this core `os: "off"`
-                    # -- `tan build`'s `iter_buildable_slices` correctly never
-                    # includes it (there is no app, no board target, nothing
-                    # to build), so it never receives a `SliceRunResult` and
-                    # the manifest's plan-time `status: pending` default is
-                    # never overlaid to anything else. That is NOT a policy
-                    # skip (`executionPolicy` never ran for this core) and
-                    # NOT an incomplete/failed build -- it is the manifest
-                    # correctly recording a core that will never build.
+                    # -- `tan build`'s `iter_buildable_slices` (`tan/planner/
+                    # orchestrator.py:36`) correctly skips it, so it never
+                    # receives a `SliceRunResult` and the manifest's plan-time
+                    # `status: pending` default is never overlaid to anything
+                    # else. That is NOT a policy skip (`executionPolicy` never
+                    # ran for this core) and NOT an incomplete/failed build --
+                    # it is the manifest correctly recording a core that is
+                    # declared off, so `tan build` never builds it. (The
+                    # manifest can still name an `app:`/`board:`/`toolchain:`
+                    # for an off core -- `board.yaml` may declare those
+                    # fields per-core independent of `os:` -- so this must
+                    # not be read as "no app, no board".)
                     # Checked on `found.os`, not `found.status`: unlike the
                     # `skipped` branch below, this must catch the slice
                     # regardless of which never-advanced status the emitter
                     # happens to have left behind.
                     refused_skipped.append(
                         f"flash: slice '{found.core_id}' is declared `os: \"off\"` "
-                        "in board.yaml -- there is no app and nothing was ever "
-                        "built for it, by design. There is nothing to flash; "
+                        "in board.yaml -- tan build never builds a core "
+                        "declared off, by design. There is nothing to flash; "
                         "this is expected, not an error."
                     )
                 elif found.status == "skipped":

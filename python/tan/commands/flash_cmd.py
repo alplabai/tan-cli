@@ -809,15 +809,15 @@ def _stderr_sink():
     caller doing `tan flash > log` in TEXT mode; `--format json` captures on both
     sides and is byte-identical (43 diffed cases).
 
-    NOT the only divergence in this file any more: `plan_flash_targets`
-    (`tan.core.flash_plan.TargetPlan.refused_skipped`) treats a `status:
-    skipped` slice/helper, or one declared `os: "off"` in `board.yaml`
-    (tan-cli#699), as a warning that alone never fails the run, where the
-    shipped Rust `plan_flash_targets` has no such bucket (and predates
-    `os: "off"` cores entirely) and refuses (and fails) either shape exactly
+    NOT the only divergence this file carried from the Rust oracle: before
+    the oracle was retired (`crates/` deleted in 2883cdf), `plan_flash_targets`
+    (`tan.core.flash_plan.TargetPlan.refused_skipped`) already treated a
+    `status: skipped` slice/helper, or one declared `os: "off"` in
+    `board.yaml` (tan-cli#699), as a warning that alone never fails the run,
+    where the Rust `plan_flash_targets` had no such bucket (and predated
+    `os: "off"` cores entirely) and refused (and failed) either shape exactly
     like any other non-`ok` status. See `TargetPlan.refused_skipped` for the
-    reasoning and `tests/parity/test_flash_oracle_parity.py` for why neither
-    case is diffed against the oracle.
+    reasoning; there is no longer a second implementation to diff against.
     """
     try:
         sys.stderr.fileno()
@@ -3553,12 +3553,16 @@ def _run(
         issues.append(Issue("flash.slice-not-built", "error", refusal))
     for refusal in plan.refused_skipped:
         text_lines.append(refusal)
-        # warning, not error, and NOT counted into `failed` below: `tan build`
-        # already decided (via `executionPolicy`) not to build this slice on
-        # this host -- e.g. no `bitbake` for a Yocto slice on an MCU-only
-        # checkout -- and reported that decision. An MCU customer who never
-        # asked for that slice must not see a red `tan flash` over it; the
-        # skip stays visible in the envelope instead of being swallowed.
+        # warning, not error, and NOT counted into `failed` below. Two shapes
+        # land here: `tan build` already decided (via `executionPolicy`) not
+        # to build this slice on this host -- e.g. no `bitbake` for a Yocto
+        # slice on an MCU-only checkout -- and reported that decision; or the
+        # slice is declared `os: "off"` in `board.yaml` (tan-cli#699), for
+        # which `executionPolicy` never ran at all -- `tan build` never
+        # considers an off core a candidate to build in the first place.
+        # Either way, no customer who never asked for that slice to build
+        # must see a red `tan flash` over it; the skip stays visible in the
+        # envelope instead of being swallowed.
         issues.append(Issue("flash.slice-skipped", "warning", refusal))
 
     # tan-cli#487, defect 3: `resolved_sdk` itself stays untouched -- it
