@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # `tan` UX polish sweep — design
 
-**Date:** 2026-08-05 · **Status:** proposed · **Baseline measured:** `main` @ `0277b4c`
+**Date:** 2026-08-05 · **Status:** shipped (2d402fd, #480) · **Baseline measured:** `main` @ `0277b4c`
 (v0.5.0), Python surface, `py -3.12 -m tan`, typer 0.27.0 / click 8.4.2.
 
 Five low-risk changes to the `tan` command surface, each measured against the

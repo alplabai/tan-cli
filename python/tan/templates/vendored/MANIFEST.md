@@ -9,6 +9,73 @@ from an un-revendored SDK change.
 
 ## Source
 
+- **tan-cli#501: `sensor` and `diagnostics` gained `boards/native_sim_native_64.{overlay,conf}`.**
+  Neither template's vendored tree carried the `boards/` overlay+conf pair
+  their canonical example (`examples/peripheral-io/i2c-master` for `sensor`,
+  `examples/bringup/board-selftest` for `diagnostics`) ships, even though
+  Zephyr auto-discovers that path with no CMakeLists wiring at all. Without
+  it, `west build -b native_sim/native/64` on a scaffolded project has no
+  `alp-i2c0` DT alias and no `CONFIG_EMUL`/`CONFIG_I2C_EMUL`, so the run does
+  not match either README's own "Expected output" block (measured: an
+  unaliased I2C open fails with `alp_last_error=-2` instead of the documented
+  NACK probe). `edge-ai` ships the same gap but is unaffected -- read from
+  `examples/ai/cold-chain-monitor/src/main.c`, whose `bus != NULL &&
+  bme280_init(...)` short-circuit lands on the same synthetic-data `LOG_WRN`
+  branch whether the I2C alias resolves or not, not independently re-measured
+  with a real Zephyr build -- and is deliberately left unvendored (declared in
+  `scaffold_byte_parity.py`'s `DELIBERATELY_MISSING_EXTRAS`, see below). Fixed
+  by vendoring the pair (byte-identical, from the pinned commit below) into
+  all four `sensor`/`diagnostics` × SKU trees and adding both paths to
+  `tests/parity/scaffold_byte_parity.py`'s `NON_ENVELOPE_EXTRAS` (the same
+  mechanism `native_sim.conf`/tan-cli#379 use).
+
+  Landed alongside two follow-on fixes the first cut of this change was
+  missing (both re-measured against the pinned SDK tag below):
+  1. `native-sim-overlay`'s destination colliding with this vendored file
+     used to make a freshly scaffolded project's bare `tan generate` refuse
+     outright (`generate.would-overwrite`, exit 3, nothing written), and
+     `--all --force` — the refusal's own recommended remedy — silently
+     replaced the vendored `alp-i2c0` overlay with tan's GPIO-only emit.
+     `generate_cmd.py` now leaves `native-sim-overlay` alone (dropped from
+     the run, `generate.overlay-not-owned` warning, exit 0) whenever it
+     rides along in the bare/`--all` default set rather than being named by
+     an explicit `--target`; an explicit `--target native-sim-overlay`
+     still refuses without `--force` and still overwrites with it, exactly
+     as before. `python/tests/commands/test_generate_command.py` pins both
+     directions.
+  2. `scaffold_byte_parity.py` could not have failed on a MISSING vendored
+     extra at all: `augment_with_example_extras` only ever reached for a
+     `NON_ENVELOPE_EXTRAS` name the vendored tree already carried, so
+     `--sdk <1a9f753c>` was **9/9 PASS with this whole change reverted**
+     (measured both ways). `missing_extras` closes that: any
+     `NON_ENVELOPE_EXTRAS` file the live example ships that the vendored
+     tree does not is now a hard failure unless declared in
+     `DELIBERATELY_MISSING_EXTRAS` (`edge-ai`'s pair is the one entry).
+     `python/tests/core/test_scaffold.py::
+     test_sensor_and_diagnostics_scaffolds_ship_the_native_sim_board_pair`
+     is the SDK-free pin of the same gap.
+
+  A first cut of this change also gave all four `sensor`/`diagnostics`
+  `CMakeLists.txt` files `list(PREPEND EXTRA_CONF_FILE ...)`, on the theory
+  that appending the generated `alp.conf` let it win over the vendored board
+  conf's `CONFIG_EMUL`/`CONFIG_I2C_EMUL`. MEASURED false with a real CMake
+  configure against Zephyr v4.4.1: `boards/native_sim_native_64.conf` joins
+  `CONF_FILE`, not `EXTRA_CONF_FILE` (Zephyr's board-dir auto-discovery), and
+  `CONF_FILE_AS_LIST` is merged strictly before `EXTRA_CONF_FILE_AS_LIST`
+  regardless of PREPEND/APPEND order within the latter -- PREPEND and APPEND
+  produced the identical merge order and identical `.config` either way.
+  Reverted to plain `list(APPEND ...)`, which is what `--emit scaffold`
+  produces unedited, so these four files carry no "Deliberate edit" anymore
+  (see below; this is unrelated to the real `iot`/tan-cli#379 PREPEND, whose
+  scenario is a caller's own `-DEXTRA_CONF_FILE=` build line, which neither
+  `sensor` nor `diagnostics` documents).
+
+  Verified against `PINNED_SDK_TAG` (`1a9f753c`) after the fixes above:
+  `scaffold_byte_parity.py --sdk <1a9f753c>` is rc 0, **9/9** PASS, `sensor`
+  and `diagnostics` reporting 8 files each (was 6) — and rc 1, **4 FAIL**
+  (the two vendored `boards/` files missing on each of the four trees) with
+  the vendoring reverted, so the gate now actually covers this change.
+
 - **`PINNED_SDK_TAG` has since moved past this vendor point, deliberately.**
   The tan-cli#552…#563 planner re-sync bumped `parity.yml`'s `PINNED_SDK_TAG`
   (and `ci.yml`'s `sdk_parity` checkout `ref:`) from `f30f4d4b` to `ccd34f06`,
@@ -194,14 +261,22 @@ from an un-revendored SDK change.
 - Command: `PYTHONPATH=$SDK/scripts python3 scripts/alp_project.py --emit
   scaffold --template <id> --sku <SKU>`
 
-### Deliberate edits on top of the emit — the only two
+### Deliberate edits on top of the emit
 
 The rule above ("re-vendored by re-running the emit, not by editing these
-files") has exactly two standing exceptions, both because the emit's own
-output is wrong for a customer and the fix lives in alp-sdk, not here. Each is
-a real diff `tests/parity/scaffold_byte_parity.py` would otherwise report, and
-each disappears on its own the moment alp-sdk fixes it and this tree is
+files") has standing exceptions, each because the emit's own output is wrong
+for a customer and the fix lives in alp-sdk, not here. Each is a real diff
+`tests/parity/scaffold_byte_parity.py` would otherwise report, and each
+disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
+
+The `DELIBERATE_EDITS` table below currently carries **one** live entry (the
+`iot` CMakeLists edit). tan-cli#384's seven `README.md` doc-link entries are
+NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0` tag
+(see "Current vendor point" above); listed here only as history, not as a
+current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists edits
+were REVERTED (see entry 3 below) — the theory behind them measured false, so
+those four files carry no deliberate edit at all now.
 
 **Each is DECLARED to that gate, in `scaffold_byte_parity.py`'s
 `DELIBERATE_EDITS`, and the declaration is strict in both directions.** An
@@ -216,7 +291,7 @@ port-vs-oracle axis, before tan-cli#269 deleted that axis with the oracle.
 Editing this section without editing that table (or the reverse) is what the
 strictness exists to catch.
 
-1. **Doc-link ref, all seven `README.md` files (tan-cli#384).** The emit
+1. **(RETIRED, history only) Doc-link ref, all seven `README.md` files (tan-cli#384).** The emit
    renders cross-directory links as `github.com/alplabai/alp-sdk/blob/v<SDK
    VERSION>/…`, and this tree is vendored from a PRE-RELEASE
    (`v0.15.0-rc1`) — so it emitted 40 links to `v0.15.0`, a tag alp-sdk has
@@ -243,26 +318,43 @@ strictness exists to catch.
    `alp.conf` winning over `prj.conf` (the whole list merges after it) and
    lets an explicit caller overlay win. alp-sdk's own
    `examples/connectivity/mqtt-telemetry/CMakeLists.txt` still appends;
-   the other nine vendored trees are left as emitted (none ships an overlay or
-   documents a `-DEXTRA_CONF_FILE=` build), so this is one file, not ten.
+   the other two templates without any vendored native_sim conf (`minimal`,
+   `edge-ai`) are left as emitted (neither ships an overlay or documents a
+   `-DEXTRA_CONF_FILE=` build).
+3. **(REVERTED, history only) `sensor`/`diagnostics` `CMakeLists.txt`, both
+   SKUs: `list(PREPEND …)` (tan-cli#501), on the theory that it was the same
+   defect class as #2.** It is not: `boards/native_sim_native_64.conf` (the
+   pair these four trees gained in the same change) joins Zephyr's
+   `CONF_FILE`, not `EXTRA_CONF_FILE` -- Zephyr auto-discovers a board's own
+   `boards/<board>.conf` regardless of `EXTRA_CONF_FILE` order, and
+   `CONF_FILE_AS_LIST` merges strictly before `EXTRA_CONF_FILE_AS_LIST`
+   either way. MEASURED with a real CMake configure against Zephyr v4.4.1:
+   PREPEND and APPEND produced the identical merge order and identical
+   `.config` (`CONFIG_EMUL=y`, `CONFIG_I2C_EMUL=y` both ways). Reverted to
+   plain `list(APPEND …)`, which is what `--emit scaffold` produces unedited
+   for these four files, so they carry no deliberate edit anymore and this
+   entry is not live.
 
 ## Template x SKU matrix vendored
 
 | tan `WizardTemplateId` | SDK catalog id | Vendored SKUs | Example dir | Files |
 |---|---|---|---|---|
 | `zephyr-app` | `minimal` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/hello-world` | 6 |
-| `sensor-starter` | `sensor` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/i2c-master` | 6 |
+| `sensor-starter` | `sensor` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/i2c-master` | 8 |
 | `edge-ai-starter` | `edge-ai` | `E1M-AEN801`, `E1M-V2N101` | `examples/ai/cold-chain-monitor` | 8 |
-| `board-diagnostics` | `diagnostics` | `E1M-AEN801`, `E1M-V2N101` | `examples/bringup/board-selftest` | 6 |
+| `board-diagnostics` | `diagnostics` | `E1M-AEN801`, `E1M-V2N101` | `examples/bringup/board-selftest` | 8 |
 | `iot-starter` | `iot` | `E1M-AEN801` only (`status: preview`) | `examples/connectivity/mqtt-telemetry` | 7 |
 
 Layout: `vendored/<sdk-template-id>/<sku>/<path>`, e.g.
-`vendored/minimal/E1M-AEN801/CMakeLists.txt`. Two templates ship past the
+`vendored/minimal/E1M-AEN801/CMakeLists.txt`. Four templates ship past the
 common six: `edge-ai` adds `src/cold_chain.c` + `src/cold_chain.h` (the
-cold-chain-metrics core the app links against), and `iot` adds
-`native_sim.conf` (tan-cli#379 — the overlay its own README build command and
-`testcase.yaml` already required; see the non-envelope-extras section at the
-end).
+cold-chain-metrics core the app links against); `sensor` and `diagnostics`
+each add `boards/native_sim_native_64.{conf,overlay}` (tan-cli#501 — a
+board-dir pair Zephyr auto-discovers with no CMakeLists wiring at all); and
+`iot` adds `native_sim.conf` at the project root (tan-cli#379 — NOT
+auto-discovered the same way: its own README build line passes it explicitly
+via `-DEXTRA_CONF_FILE=native_sim.conf`; see the non-envelope-extras section
+at the end).
 
 `python/tan/core/scaffold.py::_vendored_files` reads these through the packaged
 `tan.templates.VENDORED_ROOT`. Setuptools includes the tree in a wheel/source
