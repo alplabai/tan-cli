@@ -435,7 +435,25 @@ def _noexec_probe() -> bool:
             capture_output=True, text=True, timeout=15,
         )
         return probe.returncode == 0
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
+        # tan-cli#725: `TimeoutExpired` is a `SubprocessError`, NOT an
+        # `OSError`, so `timeout=15` above could raise straight through this
+        # handler. `_noexec_probe` runs at MODULE scope (`noexec_capable`
+        # just below calls it), so that would abort COLLECTION of this whole
+        # file rather than skip the tan-cli#490 tests -- pytest exiting 2
+        # having run nothing and printing no `FAILED` lines at all. A
+        # namespace/mount probe on a loaded or restricted host is exactly the
+        # kind of call that hangs to its budget, which is why the budget is
+        # here; absorbing the timeout is what makes it useful.
+        #
+        # Same reasoning as `_bash_available` in
+        # `tests/commands/test_completion_command.py`, and the same narrowing
+        # to `TimeoutExpired`: for a host-capability probe a timeout IS the
+        # answer ("this host cannot, so skip"), whereas production code must
+        # refuse on a timeout rather than fall back -- see
+        # `test_diff_command.py::test_sdk_validator_timeout_refuses_instead_of_reporting_clean`.
+        # `_bash_setlocale_warning_probe` below already had this covered via
+        # `subprocess.SubprocessError`.
         return False
 
 

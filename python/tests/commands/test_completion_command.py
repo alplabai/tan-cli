@@ -463,14 +463,54 @@ def _bash_available() -> bool:
 
     if _shutil.which("bash") is None:
         return False
-    try:
-        proc = _sp.run(  # noqa: S603, S607 -- fixed args, no shell metacharacters
-            ["bash", "-c", "echo tan-bash-ok"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except OSError:
+    proc = None
+    # tan-cli#725: two attempts, because the ONLY observed failure is cold
+    # process start-up. The first spawn pays it (10.6s measured on a loaded
+    # Windows host); a second is warm and returns in ~0.1s. Absorbing the
+    # timeout without retrying would be a silent downgrade -- the 15 tests
+    # this probe guards would SKIP on precisely the busy hosts that provoked
+    # the bug, trading a loud collection abort for quietly untested code. A
+    # healthy host never reaches the second attempt, so this costs nothing
+    # where nothing is wrong.
+    for attempt in range(2):
+        try:
+            proc = _sp.run(  # noqa: S603, S607 -- fixed args, no shell metacharacters
+                ["bash", "-c", "echo tan-bash-ok"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            break
+        except _sp.TimeoutExpired:
+            if attempt == 0:
+                continue
+            proc = None
+        except OSError:
+            proc = None
+        break
+    if proc is None:
+        # tan-cli#725: `TimeoutExpired` is a `SubprocessError`, NOT an
+        # `OSError`, so the one failure mode `timeout=10` exists to bound was
+        # the one this handler did not absorb. The probe runs at MODULE scope
+        # (the `skipif` decorators below call it), so the escaping exception
+        # aborted COLLECTION of this whole file: pytest exited 2 having run
+        # nothing, emitting zero `FAILED` lines. A branch-vs-baseline diff
+        # then reads every known failure as newly PASSING -- a far worse
+        # outcome than a loud failure. Measured trigger: a cold Git Bash
+        # spawn on a loaded Windows host took ~10.6s against this 10s budget
+        # (0.10s once warm). Nothing wrong with bash; process start-up alone.
+        #
+        # Catching it is correct HERE because this is a host-capability
+        # probe: "bash did not answer within the budget" and "no bash on
+        # PATH" are the same answer to the only question asked -- can this
+        # host usefully run the bash completion tests -- and that answer is
+        # no, so skip. That is the OPPOSITE of the rule for production code,
+        # where `test_diff_command.py`'s
+        # `test_sdk_validator_timeout_refuses_instead_of_reporting_clean`
+        # records a blanket `except ... SubprocessError` swallowing a timeout
+        # as a MAJOR defect: a wedged validator must refuse, never fall back
+        # to a clean result. Narrowed to `TimeoutExpired` rather than
+        # `SubprocessError` so that distinction stays visible at the seam.
         return False
     return proc.returncode == 0 and "tan-bash-ok" in proc.stdout
 
