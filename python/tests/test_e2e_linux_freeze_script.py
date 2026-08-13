@@ -18,16 +18,31 @@ minutes and cannot be made to fail on demand.
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "e2e-linux-freeze.sh"
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("bash") is None or shutil.which("git") is None,
-    reason="needs bash and git on PATH",
-)
+#: Not run on Windows. The script under test is the LINUX freeze harness: its
+#: own header says "Build the Linux --onedir freeze for the cross-platform e2e,
+#: INSIDE WSL" and gives its invocation as
+#: `MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -- bash <this file>`. Git Bash puts a
+#: `bash` on PATH on windows-latest, so a presence check alone lets these cases
+#: run a script that is never invoked that way -- and they did, reddening the
+#: windows shards. The ubuntu and macos legs still exercise every case, so this
+#: is a platform restriction, not coverage traded away.
+pytestmark = [
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="e2e-linux-freeze.sh is invoked through WSL, not Windows' own bash",
+    ),
+    pytest.mark.skipif(
+        shutil.which("bash") is None or shutil.which("git") is None,
+        reason="needs bash and git on PATH",
+    ),
+]
 
 #: What `build_binary.sh` is replaced with. Writes the onedir tree the real one
 #: writes -- an executable at `dist/tan/tan` -- with a body the caller chooses.
