@@ -328,7 +328,7 @@ from tests.conftest import sdk_root
 #: that pin's own comment), not merely "the last audit point"; moving it
 #: would erase that meaning even though `scripts/strict_loaders.py` is also
 #: byte-identical between `26b0040e` and `1a9f753c` (re-hashed, confirmed).
-PINNED_SDK_COMMIT = "1a9f753c13e5ab5d444e2dc39d7065a352f1b777"  # alp-sdk origin/dev
+PINNED_SDK_COMMIT = "a317330595f744d35f4d785869517110f3678f70"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -342,9 +342,9 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "23e7920110c333a1f3cbf51ce186c4c2cebdb3ef1573c06df64ca1e9a80be478",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "7d68f6d739f280c72b8cf20165385c474aed96bff38f82b21a97bdde7563744b",
+    "kconfig.py": "4c4a5abea3b1316d66e01f8bcd2e32411c28863179c9983746c06be52e415d30",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
-    "libraries.py": "d3970c0a1b8bba1bf647a6383f668e0a46ceb83b1f235c438e5a228b4cb1c202",
+    "libraries.py": "bf4fd845248067f7713ce270ced265ba2a2c981f91f34911fe446849e9f57a5d",
     "loader.py": "e871dedab4aa21746fab8a5e57f863d11986b5a604f02d48c9b92852f8a4f417",
     "manifest.py": "f38de96a9626672bc08f181e09b3a545d8dc846c0423cc6e9dd08c3b96a87d1d",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
@@ -356,7 +356,7 @@ PINNED_HASHES: dict[str, str] = {
     "secure.py": "f58c5e4ff2c00908ccb3783ce925b26cdaa311548dc8694ffdb0fd01dfce8e95",
     "slugs.py": "339bffdb8e5fef41eefc0cd2eb05705c2b3e53580c7cfd775e1dd1c65127d5cb",
     "topology.py": "12f5f62d3adeb9e935594934fd2fc2b1fbeaec6f466d6dd89c329c54e844f3b1",
-    "validate.py": "ca7b7f8339595cddc7ab3df1807bd1020b3e3e70d900ead3793b68afcca98c85",
+    "validate.py": "07202af06235cc4bcd262ff457b0139e93cd9ad01ccf07b35e4d0ef99e05afa0",
 }
 
 #: alp-sdk commit the SDK-SIDE SOURCE FILES in HAND_PORT_HASHES were last
@@ -465,7 +465,22 @@ PINNED_HASHES: dict[str, str] = {
 #: because it costs nothing to audit and keeps the two pins from silently
 #: drifting apart on a future bump that touches one bundle but not the
 #: other.
-HAND_PORT_PINNED_SDK_COMMIT = "1a9f753c13e5ab5d444e2dc39d7065a352f1b777"  # alp-sdk origin/dev
+#:
+#: `1a9f753c` -> `a3173305` (tan-cli#639, this re-sync): the same PURE
+#: re-pin, and left behind once already -- the first cut of this branch
+#: moved `ci.yml`'s `ref:`, `parity.yml`'s `PINNED_SDK_TAG` and
+#: `PINNED_SDK_COMMIT` to `a3173305` and left THIS constant at
+#: `1a9f753c`, which is the "two pins, one checkout" trap this file's
+#: header warns about, in its fourth variant. It passed anyway, but on a
+#: coincidence rather than on correctness: all ten `HAND_PORT_HASHES`
+#: source files below are byte-identical between `1a9f753c` and
+#: `a3173305` (sha256 compared one by one; 44 files changed across that
+#: range and not one of them is in this bundle), so a stale pin bound
+#: against a freshly-checked-out `a3173305` re-hashed to the same values
+#: and nothing went red. Had any one of the ten moved, the gate would
+#: have failed pointing at a file the branch never touched. Move all
+#: four together or the next bump lands the red instead.
+HAND_PORT_PINNED_SDK_COMMIT = "a317330595f744d35f4d785869517110f3678f70"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its

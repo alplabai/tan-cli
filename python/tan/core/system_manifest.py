@@ -235,7 +235,7 @@ def _import_yaml():
     SAME coded envelope on either the read or the write path rather than one
     of them tracebacking."""
     try:
-        import yaml  # noqa: PLC0415  (declared nowhere; imported where needed)
+        import yaml  # noqa: PLC0415  (declared base dep; imported where needed)
     except ImportError as err:
         raise _parse_error(
             f"no YAML parser available ({err}); install PyYAML "
