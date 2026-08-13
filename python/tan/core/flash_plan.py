@@ -308,8 +308,8 @@ class TargetPlan:
     #: slice declared `os: "off"` in `board.yaml` (tan-cli#699), which `tan
     #: build`'s `iter_buildable_slices` never touches at all, so its manifest
     #: entry never advances off whatever status the plan-time emit left it at
-    #: (`pending`, today). Both were policy decisions already made and
-    #: reported before `tan flash` ever ran; refusing to flash a never-built
+    #: (`pending`, today). Both were decisions already made before `tan
+    #: flash` ever ran; refusing to flash a never-built
     #: artefact is still correct (there is nothing to flash), but it must not
     #: ALSO read as a flash failure for a slice the manifest already
     #: explained away. `refused` (a `"failed"`/`"pending"`/other status on a
@@ -326,8 +326,8 @@ class TargetPlan:
     #: else non-`ok`, and the CLI seeded `failed` from `refused.len()` before
     #: the dispatch loop even ran, so the oracle FAILED the run on a
     #: `status: skipped` slice exactly like any other bad status -- and had no
-    #: `os: "off"` carve-out either, so it also failed on that shape (the
-    #: oracle predated `os: "off"` cores). This split (and the caller's
+    #: `os: "off"` carve-out either, so it also failed on that shape. This
+    #: split (and the caller's
     #: warning-only, exit-0 treatment when something else DID flash) was a
     #: deliberate product improvement on top of the port, not a porting bug --
     #: but the caller (`tan.commands.flash_cmd.flash`) MUST still fail the run
@@ -361,8 +361,8 @@ def plan_flash_targets(
       decided (via `executionPolicy`, or by design for an `off` core) that
       this slice was never going to build -- e.g. no `bitbake` on an MCU-only
       checkout, or a core that is deliberately off -- and that is not a flash
-      failure, it is `tan flash` agreeing with a decision already made and
-      reported. `os: "off"` is checked on the slice's `os` field, not its
+      failure, it is `tan flash` agreeing with a decision already made.
+      `os: "off"` is checked on the slice's `os` field, not its
       `status`: an `off` core's manifest entry never advances off whatever
       status the plan-time emit left it at, so it must be recognised
       regardless of that value. A genuinely broken or unbuilt slice

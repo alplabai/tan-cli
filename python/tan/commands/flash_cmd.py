@@ -814,9 +814,9 @@ def _stderr_sink():
     (`tan.core.flash_plan.TargetPlan.refused_skipped`) already treated a
     `status: skipped` slice/helper, or one declared `os: "off"` in
     `board.yaml` (tan-cli#699), as a warning that alone never fails the run,
-    where the Rust `plan_flash_targets` had no such bucket (and predated
-    `os: "off"` cores entirely) and refused (and failed) either shape exactly
-    like any other non-`ok` status. See `TargetPlan.refused_skipped` for the
+    where the Rust `plan_flash_targets` had no such bucket and refused (and
+    failed) either shape exactly like any other non-`ok` status. See
+    `TargetPlan.refused_skipped` for the
     reasoning; there is no longer a second implementation to diff against.
     """
     try:
@@ -3723,8 +3723,8 @@ def _run(
         issues.append(Issue("flash.nothing-matched", "warning", message))
     elif not flashed_anything and not plan.refused and plan.refused_skipped:
         # `refused_skipped` alone is fine ALONGSIDE at least one real flash (see
-        # `TargetPlan.refused_skipped`): the skip was already a policy decision
-        # `tan build` made and reported, and `flashed_anything` being True there
+        # `TargetPlan.refused_skipped`): the skip was already a decision made
+        # before `tan flash` ran, and `flashed_anything` being True there
         # means the run did something real. But when NOTHING flashed and every
         # match was a skip, exiting 0 here would be the same silent-success bug
         # `refused` fixes above, just inverted: a manifest whose only slice is

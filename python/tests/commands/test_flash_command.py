@@ -244,10 +244,9 @@ boot_order: []
 def test_an_off_core_does_not_fail_flash(tmp_path):
     """tan-cli#699: a core declared `os: "off"` in `board.yaml` is never in
     `tan build`'s `iter_buildable_slices`, so its manifest entry never leaves
-    the plan-time `status: pending` default -- there is no app, no board
-    target, and nothing ever will build for it, by design. `tan flash` must
-    not read that as an incomplete/failed build and hard-refuse the whole
-    run with "Rebuild it first", which the core can never satisfy."""
+    the plan-time `status: pending` default. `tan flash` must not read that
+    as an incomplete/failed build and hard-refuse the whole run with
+    "Rebuild it first", which the core can never satisfy."""
     manifest = """schema_version: 1
 hw_info: {sku: S}
 slices:
