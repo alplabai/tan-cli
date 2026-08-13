@@ -113,19 +113,41 @@ def test_west_sdk_install_is_wrapped_in_a_retry_loop():
     )
 
 
+#: The `if [ "${attempt}" -eq 3 ]; then ... fi` exhaustion branch, body
+#: captured non-greedily so it stops at ITS OWN closing `fi` rather than
+#: running on past it -- there is no nested `if` inside this branch, so the
+#: first `fi` following `-eq 3 ]; then` is always the matching one. Scoping
+#: the body this tightly (rather than scanning the whole step) means an
+#: `exit` or `|| true` living OUTSIDE this branch cannot satisfy or defeat
+#: these assertions.
+_EXHAUSTION_BRANCH = re.compile(
+    r'"\$\{attempt\}"\s*-eq\s*3\s*\]\s*;\s*then(?P<body>.*?)\n\s*fi\b', re.S
+)
+
+
 def test_a_third_failure_still_reds_the_job():
     """Not a skip and not `|| true`: a genuinely unavailable network must still
     fail the job, because this step is testing the remedy `tan` itself
-    prints (#689's own explicit requirement)."""
+    prints (#689's own explicit requirement). The failing `exit` must sit
+    INSIDE the `-eq 3` branch -- a hard exit anywhere else in the step (or a
+    dead branch whose real exit was defanged, e.g. `break`) must not satisfy
+    this check."""
     run = _step()["run"]
-    assert re.search(r'"\$\{attempt\}"\s*-eq\s*3', run), (
-        f"no final-attempt check found -- exhaustion must be detected:\n{run}"
+    branch = _EXHAUSTION_BRANCH.search(run)
+    assert branch, (
+        f"no final-attempt (`-eq 3`) branch found -- exhaustion must be "
+        f"detected:\n{run}"
     )
+    body = branch.group("body")
     # The final-attempt branch must exit non-zero and must not be muted by
     # `|| true`, which would let the step end green after a real failure.
-    assert "|| true" not in run, run
-    assert re.search(r"exit\s+[1-9]\d*", run), (
-        f"no hard failing exit found after retries are exhausted:\n{run}"
+    assert "|| true" not in body, (
+        f"the final-attempt branch mutes its own exit with `|| true`, so "
+        f"the step ends green after a real failure:\n{body}"
+    )
+    assert re.search(r"exit\s+[1-9]\d*", body), (
+        f"the final-attempt branch does not exit non-zero -- exhaustion is "
+        f"detected but not turned into a failing step:\n{body}"
     )
 
 
