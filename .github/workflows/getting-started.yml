@@ -514,8 +514,39 @@ jobs:
           # runner, not part of the remedy tan prints. The command under test is
           # still `west sdk install --version <v> -t arm-zephyr-eabi`; a customer
           # on a home IP has their own unauthenticated quota and needs no token.
-          west sdk install --version "${version}" -t arm-zephyr-eabi \
-              --personal-access-token "${GH_TOKEN}"
+          # Retry the whole install (tan-cli#689). The GH_TOKEN above lifts the
+          # API rate limit on `fetch_releases`, but that is only the FIRST
+          # network call this makes. `setup.sh -t arm-zephyr-eabi` then fetches
+          # the GNU toolchain separately, and no token affects that leg:
+          #
+          #   Installing 'arm-zephyr-eabi' GNU toolchain ...
+          #   ERROR: GNU toolchain download failed
+          #   FATAL ERROR: command ".../setup.sh -t arm-zephyr-eabi -h" failed
+          #
+          # observed 2026-08-12 on PR #688 (`gh pr view 688 --repo
+          # alplabai/tan-cli --json files`: python/tan/planner/{kconfig,
+          # libraries,validate}.py, the ci.yml and parity.yml SDK-ref pins,
+          # and test_planner_relocation_freshness.py's matching hash re-pin)
+          # -- nothing in that diff reaches a toolchain download.
+          #
+          # Same reasoning this repo already applied to `sdk list --online` in
+          # clean-host.yml: "A gate that goes red for a reason unrelated to its
+          # subject stops being read." Three attempts, backing off; still fails
+          # loudly if the network is genuinely unavailable.
+          for attempt in 1 2 3; do
+            if west sdk install --version "${version}" -t arm-zephyr-eabi \
+                   --personal-access-token "${GH_TOKEN}"; then
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::west sdk install failed 3 times -- this is a real \
+          failure, not a transient fetch." >&2
+              exit 1
+            fi
+            echo "::warning::west sdk install attempt ${attempt}/3 failed; \
+          retrying in $((attempt * 15))s" >&2
+            sleep $((attempt * 15))
+          done
 
       # ---- 8. tan init ------------------------------------------------------
 
