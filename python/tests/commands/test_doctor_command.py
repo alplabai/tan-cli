@@ -1295,14 +1295,50 @@ def test_collect_omits_seven_zip_off_windows(tmp_path, monkeypatch):
     assert "sevenZip" not in {c.name for c in checks}
 
 
-def test_collect_omits_seven_zip_on_windows_once_the_sdk_is_detected(tmp_path, monkeypatch):
-    """The permanent-noise case the gate exists to avoid: once the SDK is
-    present, the extractor is irrelevant, so `sevenZip` must not linger."""
+def test_collect_reports_seven_zip_on_windows_even_once_the_sdk_is_detected(
+        tmp_path, monkeypatch):
+    """tan-cli#736 INVERTS this case.
+
+    It used to assert the opposite -- "once the SDK is present, the extractor
+    is irrelevant, so `sevenZip` must not linger" -- on the premise that such
+    a host never runs `west sdk install` again. It does: adding a second
+    architecture's toolchain, or moving to a newer SDK, is ordinary, and
+    `zephyrSdk` passes throughout. Measured on Windows with `7z` stripped
+    from PATH and the SDK present: `overall ok: True` and `any check
+    mentioning 7z: []`, a green verdict on a host that cannot complete the
+    install.
+
+    The check stays a `warn`, so this does not change the verdict -- it makes
+    the fact reachable at all, including to JSON consumers.
+    """
     monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("nt"))
     _plant_zephyr_sdk(tmp_path)
     monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(tmp_path))
     checks = doctor_cmd._collect(None)
-    assert "sevenZip" not in {c.name for c in checks}
+    assert "sevenZip" in {c.name for c in checks}
+    # The SDK really was detected -- otherwise this passes for the old
+    # reason (the zephyrSdk Fail) and proves nothing about the new gate.
+    zephyr = next(c for c in checks if c.name == "zephyrSdk")
+    assert zephyr.status == "pass", zephyr
+
+
+def test_seven_zip_stays_a_warn_not_a_fail_so_the_verdict_is_unchanged(
+        tmp_path, monkeypatch):
+    """tan-cli#736 widened the GATE, deliberately not the SEVERITY. Missing
+    7-Zip blocks the remedy, not the build; `zephyrSdk` is the Fail that
+    stops things. A `fail` here would refuse a host mid-project over a tool
+    its current build does not use."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("nt"))
+    _plant_zephyr_sdk(tmp_path)
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(tmp_path))
+    # Scoped to the 7-Zip probe: stubbing `on_path` itself would also
+    # answer for `west`, `cmake` and every other PATH check in `_collect`.
+    monkeypatch.setattr(
+        doctor_cmd, "SEVEN_ZIP_PROGRAMS", ("alp-no-such-archiver-7z",))
+    checks = doctor_cmd._collect(None)
+    seven = next(c for c in checks if c.name == "sevenZip")
+    assert seven.status == "warn", seven
+    assert not [c for c in checks if c.name == "sevenZip" and c.status == "fail"]
 
 
 def test_collect_reports_zephyr_sdk_unconditionally_with_no_board_or_sdk_resolved():
