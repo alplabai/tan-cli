@@ -265,6 +265,20 @@ jobs:
       python_only: true
     permissions:
       contents: read
+      # `issues: write` is required even though NOTHING here writes an issue.
+      # `parity.yml`'s `notify-planner-drift` job declares
+      # `permissions: {issues: write}`, and a called workflow may never exceed
+      # the grant its caller gives it. GitHub checks that STATICALLY, before
+      # any job runs and regardless of the `if:` that keeps that job to
+      # `repository_dispatch` -- so a caller granting only `contents: read`
+      # fails the ENTIRE run with `startup_failure` and zero jobs, which is
+      # what v0.6.0-rc1's first tag push did (run 31830969596).
+      #
+      # Grant it here rather than dropping it from `notify-planner-drift`:
+      # that job genuinely needs it on its own `repository_dispatch` trigger,
+      # where it files/refreshes the planner-drift tracker. A tag build simply
+      # never reaches it.
+      issues: write
 
   # One PyInstaller freeze of `python/` per runner. There is no cross-build step
   # and there cannot be one: PyInstaller freezes the interpreter it is running
