@@ -10,6 +10,14 @@ There is no safe cross-platform guess for the port itself (COMx vs
 one does not exist -- this command lists every serial port pyserial can see
 and refuses instead of hanging on a wrong device.
 
+"Does not exist" is the stated rule, and until tan-cli#569 the code was
+stricter than it: the gate tested membership in `comports()`, which refuses
+every port pyserial can OPEN but does not ENUMERATE. `_port_is_usable` is now
+the gate, with three accepting arms -- enumerated (plus the `\\\\.\\` alias of
+tan-cli#701), a character device on this host (`/dev/serial/by-id/...`
+symlinks, the case #569 was filed on), or one of pyserial's own URL schemes
+(`socket://`, `rfc2217://`, ... , which have no local device path at all).
+
 Board-context port resolution -- filling in `--port` from the current project
 instead of asking for it -- is deliberately NOT implemented here, and it is
 not simply unstarted (tan-cli#255): the build-plan already carries a
@@ -56,6 +64,8 @@ miniterm returned. The actual child code still reaches the issue message.
 
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -152,6 +162,72 @@ def _port_aliases(port: str) -> set[str]:
     return aliases
 
 
+def _url_handler_prefixes() -> frozenset[str]:
+    """pyserial's own URL schemes, read from `serial.urlhandler` rather than
+    hardcoded here (tan-cli#569).
+
+    `serial.serial_for_url` dispatches on these, and miniterm -- which this
+    command spawns -- goes through it. `comports()` enumerates none of them, so
+    a membership test refuses every one, and for `socket://`/`rfc2217://` there
+    is no device path to fall back on: the port does not exist locally at all.
+
+    Derived by listing `serial/urlhandler/protocol_*.py`, measured on pyserial
+    3.5 as `alt://`, `cp2110://`, `hwgrep://`, `loop://`, `rfc2217://`,
+    `socket://`, `spy://`. Read from the installed package so a pyserial that
+    adds or drops one moves this set with it. An empty result (no such package)
+    yields an empty set, which leaves the gate exactly as strict as before.
+    """
+    try:
+        import pkgutil  # noqa: PLC0415
+        import serial.urlhandler  # noqa: PLC0415
+    except ImportError:
+        return frozenset()
+    return frozenset(
+        f"{module.name[len('protocol_'):]}://"
+        for module in pkgutil.iter_modules(serial.urlhandler.__path__)
+        if module.name.startswith("protocol_")
+    )
+
+
+def _is_openable_device(port: str) -> bool:
+    """Whether `port` is a character device on this host.
+
+    THE case tan-cli#569 was filed on: `/dev/serial/by-id/usb-..._-if00`
+    symlinks. `serial.tools.list_ports` reports raw nodes (`/dev/ttyACM0`) and
+    never the by-id path, while `serial.Serial()` opens the symlink fine --
+    measured on this host against a real Artery AT32 adapter. On a bench with
+    two identical adapters whose `ttyACM` ordering swaps across reboots, the
+    by-id path is the only stable name for the intended board, so refusing it
+    forces the operator onto the unstable one.
+
+    `os.stat` follows symlinks, which is the point. Any `OSError` -- absent
+    path, permission, an embedded NUL -- reads as "not a device", so a
+    genuinely missing port is still refused rather than becoming a traceback.
+    Windows reaches this too and answers False for `COM7` (no stat-able
+    character device there), which is correct: `_port_aliases` is what covers
+    Windows, and this must not quietly widen that platform's gate.
+    """
+    try:
+        return stat.S_ISCHR(os.stat(port).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def _port_is_usable(port: str, enumerated: set[str]) -> bool:
+    """The tan-cli#569 gate: openable, not merely enumerated.
+
+    Three accepting arms -- enumerated (including the `\\\\.\\` alias of
+    tan-cli#701), a character device on this host, or one of pyserial's own URL
+    schemes. A name matching none of the three is still refused, which is the
+    only reason this function is worth having over `True`.
+    """
+    if _port_aliases(port) & enumerated:
+        return True
+    if _is_openable_device(port):
+        return True
+    return any(port.startswith(scheme) for scheme in _url_handler_prefixes())
+
+
 def _ports_data(ports: list[tuple[str, str]]) -> list[dict[str, str]]:
     return [{"device": device, "description": description} for device, description in ports]
 
@@ -237,7 +313,7 @@ def _run_monitor(
 
     if port is None:
         raise _refuse_listing_ports("no --port given")
-    if not (_port_aliases(port) & {device for device, _ in _available_ports()}):
+    if not _port_is_usable(port, {device for device, _ in _available_ports()}):
         raise _refuse_listing_ports(f"port '{port}' not found")
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
