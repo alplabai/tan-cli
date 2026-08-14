@@ -117,3 +117,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 254 -> 255
 - 2026-08-14 -- tan-cli#734: Slice.jlink_flash_device_declared plus loader._jlink_flash_device_declared, so a declared-null survives to flash_args
     - tan/planner/loader.py: 1254 -> 1278
+- 2026-08-14 -- tan-cli#739: doctor_cmd.py gains the measured-evidence docstring explaining why the J-Link V13 firmware requirement was removed (a probe on V11.00 firmware programmed MRAM and byte-verified), plus the reworked setools message separating the Linux SE-UART path from Windows Flow D signing
+    - tan/commands/doctor_cmd.py: 3970 -> 3989
+- 2026-08-14 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/doctor_cmd.py: 3989 -> 4003

@@ -1483,7 +1483,32 @@ def test_jlink_names_the_part_number_device_profile_and_the_dll_floor():
     assert check.status == "pass"
     blob = f"{check.detail} {check.fix or ''}"
     assert "AE822FA0E5597LS0_M55_HE" in blob
-    assert "V13" in blob
+    assert "9.46" in blob
+
+
+def test_jlink_asserts_no_probe_firmware_floor(tmp_path):
+    """tan-cli#739: the message must not state a firmware requirement.
+
+    It used to say the probe "needs matched J-Link V13 firmware or the
+    part-number device will not connect". Measured on the AEN EVK, a probe on
+    `Firmware: J-Link V11 ... / Hardware version: V11.00` connected with the
+    part-number profile and programmed MRAM, byte-verified (alp-sdk#1380).
+
+    Asserted as the ABSENCE of any firmware claim rather than as "V11+",
+    because where the true floor sits is untested -- naming a different
+    number would repeat the defect. Covers every arm, since the claim used to
+    ride in `requirements` (all arms) plus two `fix` hints.
+    """
+    for found, version in (
+        ("/usr/bin/JLinkExe", (9, 50)),   # pass
+        ("/usr/bin/JLinkExe", (9, 40)),   # below the DLL floor
+        ("/usr/bin/JLinkExe", None),      # version unreadable
+        (None, None),                     # absent
+    ):
+        check = doctor_cmd.jlink_check(found=found, version=version)
+        blob = f"{check.detail} {check.fix or ''}"
+        assert "V13" not in blob, f"{found}/{version}: {blob}"
+        assert "firmware" not in blob.lower(), f"{found}/{version}: {blob}"
 
 
 def test_jlink_below_v9_46_warns_because_flow_d_has_no_mram_loader():

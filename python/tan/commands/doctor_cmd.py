@@ -1306,12 +1306,17 @@ def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) 
         return Check(
             "setools",
             "unknown",
-            "AEN MRAM flashing over the SE-UART is Linux-only in this tree: the "
-            f"Alif Security Toolkit bundle is `{SETOOLS_BUNDLE}` and "
+            "AEN MRAM flashing over the SE-UART is Linux-only in this tree: "
             "scripts/west_commands/runners/alif_flash.py hard-codes "
-            "`app-release-exec-linux`. Nothing to check on this host -- run the "
-            "flash from WSL2/Linux (Windows hosts pass the SE-UART through with "
-            "usbipd), or use the J-Link Flow D path below.",
+            f"`app-release-exec-linux`, so its bundle is `{SETOOLS_BUNDLE}`. "
+            "Nothing to check on this host for THAT path -- run it from "
+            "WSL2/Linux (Windows hosts pass the SE-UART through with usbipd). "
+            "Flow D below is a different matter: it signs on Windows with the "
+            "WINDOWS SETOOLS build, which is a different bundle from the "
+            "`-linux` one named above -- point `--setools-dir` at it (measured: "
+            "`app-gen-toc.exe` under a Windows `app-release-exec`, "
+            "SETOOLS_version_SE_FW_1.110.00_DEV, signed an ATOC the part "
+            "booted from).",
             scope="host",
         )
 
@@ -1425,9 +1430,24 @@ def jlink_check(
     DLL from V9.46 (nothing separate to install, and nothing at all below it),
     it is unlocked ONLY by the part-number device profile -- the generic
     `Cortex-M55` connects fine and has no MRAM loader, so a burn against it
-    silently is not one -- and the probe needs matched V13 firmware or the
-    part-number device will not connect. The last two are not host-probeable,
-    which is exactly why they must be said.
+    silently is not one. Both are unprobeable from the host, which is exactly
+    why they must be said.
+
+    tan-cli#739: a third "fact" used to travel with them -- that the probe
+    needs matched J-Link V13 firmware or the part-number device will not
+    connect. Measured on the AEN EVK, that is false. A probe reporting
+    `Firmware: J-Link V11 compiled Apr  1 2025 10:02:30` / `Hardware version:
+    V11.00` connected WITH the part-number profile and programmed MRAM
+    repeatedly, including a 96 KiB loadbin + verifybin at 0x80560000 that
+    byte-verified (alp-sdk#1380 SS1). The claim sent customers with a working
+    probe to a firmware update they did not need, and read as "your setup is
+    unsupported" on a setup that demonstrably works.
+
+    It is NOT restated as "V11+". Where the real floor sits is unknown -- no
+    probe old enough to fail has been tested -- and swapping one unmeasured
+    minimum for another is the same defect wearing a different number. The
+    firmware clause is dropped entirely; the DLL floor and the device profile
+    are the two requirements that are actually established.
 
     `device` defaults to `JLINK_AEN_DEVICE` so every existing call site keeps
     working; `_collect` passes the metadata-resolved value from
@@ -1441,8 +1461,8 @@ def jlink_check(
     """
     requirements = (
         f"Flow D needs the `{device}` part-number device profile (NOT the "
-        f"generic `Cortex-M55`, which has no MRAM loader), a J-Link DLL "
-        f"V{_fmt(JLINK_MIN_DLL)}+, and a probe on matched J-Link V13 firmware."
+        f"generic `Cortex-M55`, which has no MRAM loader) and a J-Link DLL "
+        f"V{_fmt(JLINK_MIN_DLL)}+."
     )
     if device_source is not None:
         requirements += f" Device profile resolved from: {device_source}."
@@ -1454,7 +1474,7 @@ def jlink_check(
             "MRAM flash and SWD debug, not for native_sim or SE-UART flashing). "
             + requirements,
             "Install the SEGGER J-Link Software & Documentation Pack "
-            f"(V{_fmt(JLINK_MIN_DLL)} or newer) and update the probe to V13 firmware.",
+            f"(V{_fmt(JLINK_MIN_DLL)} or newer).",
             scope="host",
         )
     if version is None:
@@ -1475,8 +1495,7 @@ def jlink_check(
             f"J-Link V{_fmt(version)} ({found}) predates V{_fmt(JLINK_MIN_DLL)}, which "
             f"is where Alif's MRAM flash loader became built in -- Flow D has nothing "
             f"to program MRAM with on this DLL. " + requirements,
-            f"Upgrade the SEGGER J-Link pack to V{_fmt(JLINK_MIN_DLL)}+ and put the "
-            f"probe on matched V13 firmware.",
+            f"Upgrade the SEGGER J-Link pack to V{_fmt(JLINK_MIN_DLL)}+.",
             scope="host",
         )
     return Check(
