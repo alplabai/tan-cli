@@ -2037,10 +2037,65 @@ def build(
     if json_mode:
         emit(Envelope("build", project_envelope, data, issues, exit_code, sdk=sdk))
     else:
-        for issue in issues:
-            print(f"{issue.severity}: {issue.message}", file=sys.stderr)
+        _print_text_issues(issues, data)
         _text_recap(mode, data)
     raise typer.Exit(int(exit_code))
+
+
+def _print_text_issues(issues: list[Issue], data: dict | None) -> None:
+    """Print the `issues[]` block of the text recap, minus any line the
+    per-slice recap below is about to repeat verbatim (tan-cli#746).
+
+    Dedup and printing live in ONE function on purpose: a `_text_issues`
+    that only FILTERED could be dropped from the call site and every test of
+    it would stay green -- measured, that is exactly what happened (6 of 6
+    passing with the call removed). Keeping the print here means a test that
+    captures this function's output covers both halves.
+    """
+    for issue in _text_issues(issues, data):
+        print(f"{issue.severity}: {issue.message}", file=sys.stderr)
+
+
+def _text_issues(issues: list[Issue], data: dict | None) -> list[Issue]:
+    """Drop an `issues[]` line whose text the per-slice recap is about to
+    print verbatim anyway (tan-cli#746).
+
+    TEXT MODE ONLY -- the JSON envelope keeps every issue untouched. Two
+    deliberate features collide here and neither is wrong on its own:
+    `_missing_tool_issues` promotes a skip's reason into `issues[]` so a
+    JSON consumer sees it (tan-cli#283), and that reason carries the literal
+    searched-PATH list so a customer can fix it themselves (tan-cli#510).
+    In `--format json` those are two different fields. In text they are two
+    adjacent lines carrying the same string.
+
+    Measured on a Windows host with no `bitbake`, where the AEN801 SoM's
+    `a32_cluster` yocto slice is an EXPECTED skip: 2807 + 2801 = 5608
+    characters, twice the same 57-entry PATH, pushing the two `ok:` lines
+    and the `2 of 3 slice(s) built` summary below it.
+
+    Matched on the reason text, not on the issue code: `_missing_tool_issues`
+    is not the only producer that may wrap a slice reason, and a code list
+    here would silently stop covering the next one. An issue whose message
+    is NOT already on a slice line is always kept -- this only removes a
+    second copy, never information.
+    """
+    if not data:
+        return issues
+    reasons = {
+        result["reason"]
+        for result in (data.get("slices") or [])
+        if isinstance(result, dict) and result.get("reason")
+    }
+    if not reasons:
+        return issues
+    return [
+        issue
+        for issue in issues
+        if not any(
+            reason in issue.message and issue.message.endswith(reason)
+            for reason in reasons
+        )
+    ]
 
 
 def _text_recap(mode: str, data: dict | None) -> None:

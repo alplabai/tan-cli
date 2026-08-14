@@ -126,3 +126,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 255 -> 256
 - 2026-08-14 -- tan-cli#744: slot0 gate reverted to value-based, with the emit-vs-slot0 distinction spelled out
     - tan/planner/loader.py: 1293 -> 1301
+- 2026-08-14 -- tan-cli#747 adds slot0_bytes_for_core + the memory_map arm of resolve_budget (core/size.py); tan-cli#746 adds _print_text_issues/_text_issues (commands/build_cmd.py); size_cmd.py gains _read_som_memory_map to feed the per-core window
+    - tan/commands/build_cmd.py: 2106 -> 2161
+    - tan/commands/size_cmd.py: new entry at 831
+    - function_count_budget: 255 -> 256
