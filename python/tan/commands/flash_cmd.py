@@ -114,7 +114,9 @@ from tan.core.flash_plan import (
     ManifestError,
     YOCTO_WIC_METHODS,
     _DEV_ROOT,
+    CONFIRM_REMEDY,
     backend_for,
+    confirm_gate_note,
     display_argv,
     dpidr_preflight_possible,
     dpidr_preflight_unarmed,
@@ -2529,7 +2531,7 @@ def _resolve_flow_d_atoc_via_setools(
         return flash_args, (
             f"would sign {shape.artefact} with SETOOLS at {setools.path} (via "
             f"{setools.source}) -> build/config/{entry_id}-slot0.json, then run "
-            f"app-gen-toc -- not run ({why})"
+            f"app-gen-toc -- not run ({confirm_gate_note(why)})"
         )
 
     atoc_path, address = sign_slot0(
@@ -2893,8 +2895,8 @@ def _flash_entry(
         # it back into "ok" is I-30's exact regression: a JSON consumer then
         # cannot tell "nothing was written" from "programmed the device".
         msg = (
-            f"would run {shown} -- NOT written: flash_args.confirm is false (set "
-            "ALP_FLASH_FORCE=1 or flash_args.confirm: true to actually flash)"
+            f"would run {shown} -- NOT written: "
+            f"{confirm_gate_note('flash_args.confirm is false')}"
         )
         lines.append(f"  {msg}")
         return 0, entry(method, "planned", 0, msg), lines
@@ -3436,6 +3438,7 @@ def _run(
     cwd: str,
     setools_dir_arg: str | None = None,
     recover: bool = False,
+    confirm_flag: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -3512,7 +3515,10 @@ def _run(
     except ManifestError as err:
         return _error(build_root, "flash.manifest-invalid", f"{manifest_path}: {err}", sdk)
 
-    force_confirm = os.environ.get("ALP_FLASH_FORCE") == "1"
+    # tan-cli#719: `--confirm` is the documented CLI half of the same gate the
+    # env var already armed. OR-ed, not layered: the three spellings are
+    # alternatives, and `confirm_gate_note` lists them in this order.
+    force_confirm = confirm_flag or os.environ.get("ALP_FLASH_FORCE") == "1"
     # tan-cli#589. Read exactly like `ALP_FLASH_FORCE` one line up -- `== "1"`,
     # not truthiness, so an empty or `0` value is off and the two gates cannot
     # be armed by different spellings of the same intent.
@@ -3739,6 +3745,36 @@ def _run(
         message = "flash: every matched slice/helper was build-skipped; nothing was flashed."
         text_lines.append(message)
         issues.append(Issue("flash.nothing-flashed", "error", message))
+
+    # tan-cli#719: the confirm gate's own silent-success hole. Every OTHER
+    # "nothing was written" shape above already bumps `failed`; a run whose
+    # slices all came back `planned` because the gate was not armed did not,
+    # so `tan flash && echo flashed` printed `flashed` over an untouched
+    # device. `--dry-run` is excluded: that IS an explicit preview request and
+    # keeps exiting 0. `flash.confirm-required` is already appended per entry
+    # above; this is the run-level verdict those warnings could not reach,
+    # because a caller checking `$?` or `ok` never sees `issues[]`.
+    #
+    # NOT keyed on `flashed_anything`: that flag is set for every entry that
+    # reached a backend, INCLUDING a `planned` one (see its `continue` above --
+    # only a silent skip leaves it False), so a condition using it could never
+    # fire here. Keyed on the absence of any `ok` entry instead: at least one
+    # target was planned and none was written. A MIXED run -- one slice written,
+    # one planned -- keeps today's exit code and its per-entry
+    # `flash.confirm-required` warning; the hole this closes is the run that
+    # wrote nothing at all.
+    unconfirmed = [e for e in entries if e.get("status") == "planned"]
+    wrote_something = any(e.get("status") == "ok" for e in entries)
+    if unconfirmed and not wrote_something and not dry_run:
+        failed += len(unconfirmed)
+        message = (
+            f"flash: {len(unconfirmed)} target(s) were planned but not written -- "
+            f"the confirm gate is not armed; nothing reached the device. "
+            f"{CONFIRM_REMEDY}."
+        )
+        text_lines.append(message)
+        issues.append(Issue("flash.nothing-flashed", "error", message))
+
     text_lines.append(f"flash: {failed} failure(s).")
 
     exit_code = ExitCode.RUNTIME_FAILURE if failed > 0 else ExitCode.SUCCESS
@@ -3826,6 +3862,13 @@ def flash(
         help="Print the flash command each backend WOULD run and return ok without "
         "spawning; also bypasses the required-tool PATH gate.",
     ),
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Arm the confirm gate and actually write the device. Without it (and "
+        "without ALP_FLASH_FORCE=1 or flash_args.confirm: true) every slice is "
+        "previewed, nothing is written, and the run exits non-zero (tan-cli#719).",
+    ),
     skip_missing_tools: bool = typer.Option(
         False,
         "--skip-missing-tools",
@@ -3892,6 +3935,7 @@ def flash(
             capture=json_mode,
             cwd=cwd,
             setools_dir_arg=setools_dir,
+            confirm_flag=confirm,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an
