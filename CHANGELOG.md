@@ -3578,6 +3578,31 @@ request being legal on a two-slot target (so the refusal keys on the target,
 not the algorithm name), an unrelated `memory_map:` not counting as
 single-slot, and a non-M55 project being out of scope entirely.
 
+- **The installers' header comments no longer say `latest` resolves to
+  v0.4.1.**
+
+  Both `install.ps1` and `install.sh` explained the two asset shapes (the
+  `--onedir` archive from v0.5.0, the raw executable before it) with an aside
+  that `v0.4.1` "is what `latest` resolves to today". It has not been for two
+  releases: `latest` is **v0.5.1** (2026-08-05), measured from `install.ps1`'s
+  own resolution step during a clean-room install:
+
+  ```
+  install.ps1: resolving the latest release tag...
+  install.ps1: latest is v0.5.1.
+  install.ps1: sha256 OK (f7bec9260653f83a2a916c343f9b5dc5aff2f938b67fb606cfecb2b9a4783c61)
+  install.ps1: staged binary verified: tan 0.5.1
+  ```
+
+  A reader following that comment would conclude a no-argument install takes
+  the RAW-executable path; it takes the archive path, and the raw path is now
+  reachable only by asking for an older tag explicitly.
+
+  Comments only — verified zero non-comment lines changed in either file. The
+  shape-detection logic is untouched, and it never depended on the claim: it
+  asks the release itself which asset name it carries, via the `checksums.txt`
+  it fetches first.
+
 ## Two gates re-scoped by the re-pin, not by the port
 
 Binding alp-sdk `56dea6b5` also brings in alp-sdk#1439, which removed
