@@ -919,13 +919,19 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # code, `doctor.libraries`, newly registered in
         # `contract/issue-codes.json`. Unlike the two entries above, this one
         # IS a new code, not just a new call site.
+        #
+        # 63 as of tan-cli#727: `sdk_check` grew a `dangling_flag_root` arm
+        # for a `--sdk-root` the loader-marker check rejected. It is named
+        # `"sdk"` -- the same literal every other arm of that function uses --
+        # and passes no `code=` override, so `doctor.sdk` needs no new
+        # registry entry. One more call site, no new code.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=62,
+        expected_calls=63,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(

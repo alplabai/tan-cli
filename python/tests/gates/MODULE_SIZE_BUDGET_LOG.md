@@ -104,6 +104,8 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
     - tan/core/flash_plan.py: 3106 -> 3116
     - tan/core/flash_plan.py: 3131 -> 3141
+- 2026-08-14 -- tan-cli#727: sdk_check grew the dangling --sdk-root arm, plus its call-site guard and the sdkProvenance skip
+    - tan/commands/doctor_cmd.py: 3925 -> 3970
 - 2026-08-14 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/flash_cmd.py: 3966 -> 3971
     - tan/core/flash_plan.py: 3116 -> 3164
