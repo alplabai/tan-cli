@@ -461,15 +461,29 @@ def _enforce_slot0_disjoint_across_roles(
     """Refuse a dual-M55 AEN SoM whose `m55_he` and `m55_hp` slices publish
     the SAME `flash_args.slot0_load_address` (alp-sdk #1384).
 
-    Not reachable today: `_resolve_slot0_load_address` is only called when
-    the SoC variant already publishes `debug.jlink_flash_device`
-    (`_validate_topology_cores`, just above), and every AEN variant that
-    does also declares a disjoint `he_slot0`/`hp_slot0` `memory_map:`
-    override, so the no-override default -- which is deliberately the SAME
+    alp-sdk#1295 made this reachable for the first time: it populated
+    `debug.jlink_flash_device` for the E3/E5/E6/E7 variants too, not only
+    E1M-AEN801's, so the no-override default -- deliberately the SAME
     address for both roles (see `_resolve_slot0_load_address`'s docstring)
-    -- never collides with a live `jlink_flash_device` in practice yet.
+    -- can now meet a live `jlink_flash_device`.
 
-    Kept as a real guard rather than left to that coincidence: a future AEN
+    Scoped to `os == "zephyr"` on BOTH roles (alp-sdk#1445, ported here as
+    tan-cli#744): a parked (`os: "off"`) or non-Zephyr core produces no
+    flashable artifact, so its resolved `slot0_load_address` is moot and
+    nothing would ever write to it. Comparing it anyway would refuse
+    `examples/power-timing/power-managed-sensor` -- a real, working app
+    that parks `m55_hp` -- for a collision that cannot physically happen.
+    Mirrors `_enforce_flow_d_preflight_pair`'s own `slice_.os != "zephyr"`
+    guard, this file's established convention for "only a live Zephyr slice
+    is a Flow D target".
+
+    Historical note, kept because it is why the guard long looked dead:
+    before alp-sdk#1295 the only AEN variant publishing
+    `jlink_flash_device` was E1M-AEN801's, and that SoM also declares a
+    disjoint `he_slot0`/`hp_slot0` `memory_map:` override -- so the shared
+    default address never met a live `jlink_flash_device` at all.
+
+    Still a real guard: a future AEN
     variant that publishes `jlink_flash_device` without also declaring a
     disjoint-slot0 override would otherwise silently reintroduce #1069's
     HE/HP MRAM collision in `flash_args` -- flashing one core would corrupt
@@ -481,6 +495,7 @@ def _enforce_slot0_disjoint_across_roles(
     he = cores.get("m55_he")
     hp = cores.get("m55_hp")
     if (he is None or hp is None
+            or he.os != "zephyr" or hp.os != "zephyr"
             or he.slot0_load_address is None
             or hp.slot0_load_address is None):
         return

@@ -121,3 +121,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/doctor_cmd.py: 3970 -> 3989
 - 2026-08-14 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/doctor_cmd.py: 3989 -> 4003
+- 2026-08-14 -- tan-cli#744: port alp-sdk#1445's os==zephyr scoping onto the slot0 collision guard
+    - tan/planner/loader.py: 1278 -> 1293
+    - function_count_budget: 255 -> 256
