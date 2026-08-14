@@ -356,3 +356,54 @@ def test_a_half_authored_memory_map_is_a_coded_refusal_not_a_guess(
     with pytest.raises(loader_mod.OrchestratorError) as excinfo:
         loader_mod._resolve_slot0_load_address(som_preset, "m55_he")
     assert "m55_he" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# tan-cli#744 (porting alp-sdk#1445) -- the slot0 HE/HP collision guard is a
+# FLOW D guard, so it only applies to cores that are live Zephyr flash
+# targets.
+#
+# alp-sdk#1295 populated `debug.jlink_flash_device` for the E3/E5/E6/E7
+# variants, not just E1M-AEN801's, which made this guard reachable for the
+# first time. A core parked with `os: "off"` produces no flashable artifact,
+# so its resolved `slot0_load_address` is moot -- nothing will ever write to
+# it, and a "collision" with it cannot physically happen. Comparing it anyway
+# refuses real, working apps: `examples/power-timing/power-managed-sensor`
+# parks `m55_hp` on E1M-AEN301 exactly this way.
+# --------------------------------------------------------------------------
+
+
+def _colliding_cores(loader_mod, he_os: str, hp_os: str):
+    """Two M55 slices resolving the SAME slot0 address -- the #1069 shape."""
+    same = "0x80010000"
+    return {
+        "m55_he": loader_mod._slice_from_resolved(
+            "m55_he", {"os": he_os}, slot0_load_address=same),
+        "m55_hp": loader_mod._slice_from_resolved(
+            "m55_hp", {"os": hp_os}, slot0_load_address=same),
+    }
+
+
+def test_a_parked_sibling_does_not_trip_the_slot0_collision_guard(loader_mod):
+    """THE #744 case: `os: "off"` on one role. No flashable artifact, so no
+    collision -- must not refuse."""
+    cores = _colliding_cores(loader_mod, "zephyr", "off")
+    loader_mod._enforce_slot0_disjoint_across_roles(cores, "E1M-AEN301")
+
+
+def test_two_live_zephyr_cores_at_one_address_are_still_refused(loader_mod):
+    """The control. Without it, deleting the guard entirely passes the test
+    above, and #1069's HE/HP MRAM corruption comes back unguarded."""
+    cores = _colliding_cores(loader_mod, "zephyr", "zephyr")
+    with pytest.raises(loader_mod.OrchestratorError) as excinfo:
+        loader_mod._enforce_slot0_disjoint_across_roles(cores, "E1M-AEN301")
+    message = str(excinfo.value)
+    assert "E1M-AEN301" in message
+    assert "0x80010000" in message
+    assert "slot0" in message
+
+
+def test_neither_core_live_is_also_not_a_collision(loader_mod):
+    """Both parked: still nothing that can be flashed."""
+    cores = _colliding_cores(loader_mod, "off", "off")
+    loader_mod._enforce_slot0_disjoint_across_roles(cores, "E1M-AEN301")

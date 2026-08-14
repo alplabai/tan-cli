@@ -54,16 +54,43 @@ _SKIP_REASON = (
     "root and import (same requirement as the parity suite)"
 )
 
-# The SoM under test and the SRAM bank renamed in the ALTERNATE tree.  E3 is
-# the right silicon for this: `metadata/e1m_modules/E1M-AEN301.yaml` declares
-# NO `memory_map:` block, so `resolve_memory_map` takes the SoC-JSON-derived
-# branch -- the one that reads the metadata root -- rather than returning the
-# preset's override verbatim.
-_SKU = "E1M-AEN301"
-_SOC_JSON = ("socs", "alif", "ensemble", "e3.json")
-_BANK = "SRAM6"
-_RENAMED = "SRAM6X"
+# The SoM under test and the SoC memory region renamed in the ALTERNATE tree.
+#
+# This MUST be a SoM whose preset declares NO `memory_map:` block, so
+# `resolve_memory_map` takes the SoC-JSON-derived branch -- the one that reads
+# the metadata root, and the one the bug in this module's docstring lived in.
+# A SoM with an explicit override returns it verbatim and never consults the
+# root at all, so the rename below would be invisible and every assertion here
+# would pass for the wrong reason.
+#
+# Was E1M-AEN301 / e3.json / `SRAM6` until alp-sdk#1447 gave all six AEN SoMs
+# an explicit `memory_map:` (disjoint he_slot0/hp_slot0 windows, alp-sdk#1295
+# / #1445), which moved the whole Alif family onto the override branch and
+# silently emptied this fixture -- `_known_flash_devices("E1M-AEN301")` now
+# answers from the preset, not the SoC JSON. Measured on alp-sdk
+# `bd8be484680cf5aa1c1ac0e8b38d84128b5a279d`:
+#
+#   E1M-AEN301 -> ['atoc','he_slot0','hp_slot0','mcuboot','mram_main',
+#                  'ospi0','ospi1','reserved','storage']   (override branch)
+#   E1M-V2N101 -> ['ddr_main', 'm33_tcm', 'ocram_low']     (derived branch)
+#   E1M-V2M101 -> ['ddr_main', 'm33_tcm', 'ocram_low']     (derived branch)
+#
+# V2N/V2M are also the right home for this test on their own merits: they are
+# the only SKUs published with `preliminary: false` AND
+# `partial_hw_config: false`, i.e. the parts a customer can actually build
+# against today. A regression test for a customer-facing misdiagnosis belongs
+# on the silicon customers are using, not on a preliminary part -- and as more
+# SoMs gain explicit `memory_map:` overrides, the derived branch converges on
+# exactly this family, so this pin is the durable one.
+_SKU = "E1M-V2N101"
+_SOC_JSON = ("socs", "renesas", "rzv2n", "n44.json")
+_BANK = "ocram_low"
+_RENAMED = "ocram_lowx"
 _DEVICE = _RENAMED.lower()          # region names are lower-cased by the resolver
+#: Board preset hosting this SoM family, and the Zephyr core to hang the
+#: app off -- both family-specific, so they move with `_SKU`.
+_BOARD = "e1m-x-evk"          # preset ids are the lower-case file stem
+_CORE = "m33_sm"
 
 
 @pytest.fixture(scope="module")
@@ -91,14 +118,17 @@ def alternate_tree(tmp_path_factory) -> Path:
     soc = dest.joinpath(*_SOC_JSON)
     doc = json.loads(soc.read_text(encoding="utf-8"))
     renamed = 0
-    for variant in doc["variants"]:
-        banks = variant.get("sram_banks_kb") or {}
-        if _BANK in banks:
-            variant["sram_banks_kb"] = {
-                (_RENAMED if k == _BANK else k): v for k, v in banks.items()}
+    # `memory_regions[]` entries, not `variants[].sram_banks_kb` -- the RZ/V2N
+    # SoC JSON declares its regions at the top level and its variants carry no
+    # bank map at all, so the pre-alp-sdk#1447 Alif-shaped walk found nothing
+    # here and the fixture would have silently renamed zero entries.
+    for region in doc.get("memory_regions") or []:
+        if region.get("name") == _BANK:
+            region["name"] = _RENAMED
             renamed += 1
     assert renamed, (
-        f"no variant in {'/'.join(_SOC_JSON)} declares an {_BANK} bank -- the "
+        f"no memory_regions[] entry in {'/'.join(_SOC_JSON)} is named "
+        f"{_BANK} -- the "
         f"fixture's premise moved; pick another bank")
     soc.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     return dest
@@ -109,9 +139,11 @@ def _board(tmp_path: Path, tail: str) -> Path:
     path.write_text(
         "som:\n"
         f"  sku: {_SKU}\n"
-        "preset: e1m-evk\n"
+        # E1M-X-EVK, not e1m-evk: the latter hosts only the alif-ensemble and
+        # nxp-imx9 families and refuses a renesas-rzv2n SoM outright.
+        f"preset: {_BOARD}\n"
         "cores:\n"
-        "  m55_hp:\n"
+        f"  {_CORE}:\n"
         "    app: ./src\n" + tail,
         encoding="utf-8")
     return path
