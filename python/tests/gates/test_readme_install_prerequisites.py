@@ -342,3 +342,68 @@ def test_the_facts_are_actually_being_read():
     # prerequisite and stay green.
     assert _names_as_a_requirement("a build also needs cmake and ninja", "cmake")
     assert not _names_as_a_requirement("runs on a host with no cmake at all", "cmake")
+
+
+# --------------------------------------------------------------------------
+# tan-cli#706 -- the README's `file` requirement and the `west sdk install`
+# command it documents must stay consistent with each other.
+#
+# alp-sdk's `metadata/bootstrap.json` (`manualInstallHints.posix.note[2]`)
+# calls a missing `file` "WARN-only, not a bootstrap.sh prerequisite", which
+# reads as a flat contradiction of this README -- and #706 was filed on that
+# reading. It is not one: that note is written for the `--no-hosttools`
+# invocation in its own `note[0]`, which never runs the host-tools step this
+# README's command does.
+#
+# `doctor_cmd.zephyr_sdk_check` records the experiment behind the README's
+# claim -- pristine ubuntu:24.04, `file` the only variable, WITH it exit 0
+# ("All done"), WITHOUT it exit 1 with "Host tools installation failed". So
+# the sentence stays. What this gate prevents is the next reader deleting a
+# measured sentence because the two documents look like they disagree: if the
+# README's command ever gains `--no-hosttools`, the `file` requirement must go
+# with it, and if it loses it, the requirement must be there.
+# --------------------------------------------------------------------------
+
+
+def _readme_sdk_install_commands() -> list[str]:
+    """Every `west sdk install ...` line in the README, whole line."""
+    return [line.strip() for line in _readme().splitlines() if "west sdk install --version" in line]
+
+
+def test_the_readme_file_requirement_matches_the_command_it_documents():
+    commands = _readme_sdk_install_commands()
+    # Non-vacuity: the gate compares nothing if it found no command.
+    assert commands, "no `west sdk install --version` line found in README.md"
+
+    installs_host_tools = [c for c in commands if "--no-hosttools" not in c]
+    claims_file = "Host tools installation failed" in _readme()
+
+    if installs_host_tools:
+        assert claims_file, (
+            f"README documents {installs_host_tools!r}, which runs the SDK's "
+            f"host-tools step, but no longer says that step needs `file` on "
+            f"PATH. Measured in a pristine ubuntu:24.04 with `file` as the only "
+            f"variable: with it `west sdk install` exits 0, without it exits 1 "
+            f'with "Host tools installation failed" (see '
+            f"doctor_cmd.zephyr_sdk_check). Restore the sentence, or add "
+            f"`--no-hosttools` to the command."
+        )
+    else:
+        assert not claims_file, (
+            "every README `west sdk install` command now passes "
+            "`--no-hosttools`, which skips the host-tools step, so the `file` "
+            "requirement no longer applies and must not be stated."
+        )
+
+
+def test_the_readme_explains_why_the_sdk_manifest_note_is_not_a_contradiction():
+    """The #706 reading itself. Without naming `--no-hosttools` next to the
+    claim, the two documents read as opposites and the correct one gets
+    deleted -- which is what this whole gate exists to stop."""
+    readme = _readme()
+    assert "Host tools installation failed" in readme
+    assert "--no-hosttools" in readme, (
+        "the README states the `file` requirement but never names the "
+        "`--no-hosttools` invocation alp-sdk's bootstrap.json note is written "
+        "for, so the two documents still read as a contradiction (tan-cli#706)."
+    )

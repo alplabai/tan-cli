@@ -179,7 +179,12 @@ What those commands do:
    On a minimal Linux host this step also needs `file` on PATH
    (Debian/Ubuntu: `sudo apt-get install -y file`); without it the SDK's own
    host-tools step fails with "Host tools installation failed" and names
-   nothing.
+   nothing. alp-sdk's `metadata/bootstrap.json`
+   (`manualInstallHints.posix.note[2]`) calls a missing `file` "WARN-only, not
+   a bootstrap.sh prerequisite", and both statements are true: that note is
+   written for the `--no-hosttools` invocation in its own `note[0]`, which
+   never runs the host-tools step. The command above installs host tools, so
+   it needs `file`. Add `--no-hosttools` and it does not.
 3. `init` creates a Zephyr application and pins the SDK checkout in
    `.alp/sdk-path`.
 4. `validate` checks `board.yaml` and related metadata.
