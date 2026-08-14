@@ -25,7 +25,7 @@
     "tan/core/flash_plan.py": 3164,
     "tan/core/scaffold.py": 1510,
     "tan/planner/kconfig.py": 2088,
-    "tan/planner/loader.py": 1293,
+    "tan/planner/loader.py": 1301,
     "tan/planner/template.py": 1436,
     "tan/planner/zephyr_board.py": 1433
   },

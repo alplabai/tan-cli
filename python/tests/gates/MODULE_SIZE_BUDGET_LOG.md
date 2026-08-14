@@ -124,3 +124,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-14 -- tan-cli#744: port alp-sdk#1445's os==zephyr scoping onto the slot0 collision guard
     - tan/planner/loader.py: 1278 -> 1293
     - function_count_budget: 255 -> 256
+- 2026-08-14 -- tan-cli#744: slot0 gate reverted to value-based, with the emit-vs-slot0 distinction spelled out
+    - tan/planner/loader.py: 1293 -> 1301
