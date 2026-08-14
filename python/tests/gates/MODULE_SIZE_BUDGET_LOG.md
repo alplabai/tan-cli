@@ -107,3 +107,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-14 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/flash_cmd.py: 3966 -> 3971
     - tan/core/flash_plan.py: 3116 -> 3164
+- 2026-08-13 -- tan-cli#728: planner refuses an undeclared CONFIG_ALP_SDK_CHIP_ symbol instead of emitting it
+    - tan/planner/kconfig.py: 2012 -> 2088

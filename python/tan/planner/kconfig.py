@@ -38,6 +38,8 @@ gating (see #874).
 from __future__ import annotations
 
 import json
+import re
+from functools import lru_cache
 from typing import Any, Optional
 
 import yaml
@@ -706,6 +708,79 @@ def _chip_has_driver(slug: str) -> bool:
     return (REPO / "chips" / slug).is_dir()
 
 
+@lru_cache(maxsize=1)
+def _declared_chip_symbols() -> frozenset[str]:
+    """Every `ALP_SDK_CHIP_*` symbol the BOUND alp-sdk actually declares.
+
+    Parsed from the SDK's own `zephyr/**/*.kconfig` rather than inferred, so
+    this is the same fact Zephyr resolves against. Measured on alp-sdk `dev`:
+    80 declarations, all in `zephyr/kconfigs/chips.kconfig`, matching the 80
+    `chips/<slug>/` directories exactly.
+
+    An empty result means the SDK's kconfigs could not be read at all; the
+    caller treats that as "cannot verify" and stays silent rather than
+    refusing every build on a layout this parser does not understand.
+    """
+    declared: set[str] = set()
+    for path in sorted((REPO / "zephyr").rglob("*.kconfig")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        declared.update(re.findall(r"^config (ALP_SDK_CHIP_\w+)", text, re.M))
+    return frozenset(declared)
+
+
+def _assert_chip_symbols_declared(slugs: "list[str]") -> None:
+    """Refuse to write a `CONFIG_` line the bound SDK cannot resolve (#728).
+
+    `_chip_has_driver` decides what to emit from `chips/<slug>/` on disk.
+    That is the right *intent* -- the directory is what the declaration
+    compiles -- but it is an inference, and Zephyr resolves the declaration.
+    When the two disagree, the emitted line reaches Kconfig as
+
+        alp.conf:28: warning: attempt to assign the value 'y' to the
+        undefined symbol ALP_SDK_CHIP_DP83825
+        error: Aborting due to Kconfig warnings
+
+    which blames the app's generated config for a planner/SDK skew and takes
+    out `tan build` for the whole SoM. That is how tan-cli#728 presented:
+    released `tan 0.5.1`, whose vendored planner predates alp-sdk#1241/#1322,
+    against an alp-sdk `dev` whose `ethernet_phy: dp83825` made an undriven
+    chip reachable from `on_module:` for the first time.
+
+    A released binary cannot be retro-fixed, so this does not repair 0.5.1 --
+    it stops the NEXT skew of this class from being discovered by Zephyr. The
+    refusal names the symbol and the SDK, so the reader knows which pair
+    disagrees rather than hunting a `CONFIG_` line they never wrote.
+
+    Silent when the SDK declares nothing this parser recognises: an
+    unreadable or restructured kconfig tree is a reason to stay out of the
+    way, not to refuse every build. Verification is the goal, not gatekeeping
+    on a layout assumption.
+    """
+    declared = _declared_chip_symbols()
+    if not declared:
+        return
+    undeclared = sorted(
+        s for s in slugs
+        if (sym := _slug_kconfig(s).removeprefix("CONFIG_")).startswith("ALP_SDK_CHIP_")
+        and sym not in declared
+    )
+    if not undeclared:
+        return
+    names = ", ".join(f"{_slug_kconfig(s)} (chip `{s}`)" for s in undeclared)
+    raise OrchestratorError(
+        f"the bound alp-sdk at {REPO} declares no Kconfig symbol for "
+        f"{names}. Emitting it would write an assignment Zephyr cannot "
+        f"resolve, failing the build with `attempt to assign the value 'y' "
+        f"to the undefined symbol` and blaming the generated alp.conf. This "
+        f"means tan's planner and this SDK disagree about which chips have "
+        f"drivers -- usually a tan too old for the SDK (tan-cli#728). Update "
+        f"tan, or bind an alp-sdk matching this tan."
+    )
+
+
 def _emit_chips(
     project: "BoardProject",
     chip_subsystems_table: dict[str, tuple[str, ...]],
@@ -733,6 +808,7 @@ def _emit_chips(
         chips = sorted(c for c in set(candidates) if c not in printed)
         if not chips:
             return
+        _assert_chip_symbols_declared(chips)
         lines.append(header)
         for chip in chips:
             on = resolved_chip_state.get(chip, False)
