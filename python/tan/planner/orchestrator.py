@@ -86,7 +86,14 @@ def _slice_flash_recipe(
         # `expect_dpidr`/`jlink_device` pair above -- see
         # `loader._resolve_slot0_load_address` for where it comes from.
         args: dict[str, Any] = {}
-        if slice_.jlink_flash_device:
+        # tan-cli#734: PRESENCE, not truthiness. A schema-declared
+        # `jlink_flash_device: null` means "this variant has no known J-Link
+        # flash profile -- refuse loudly", and a truthiness test dropped it,
+        # so `flash_plan.flow_d_available` -- which decides on key presence
+        # via `_fa_has_key`, deliberately -- never saw it and `tan flash`
+        # silently downgraded Flow D to Flow A over the SE-UART. On Windows
+        # that is a downgrade to a runner that cannot run there at all.
+        if slice_.jlink_flash_device_declared or slice_.jlink_flash_device is not None:
             args["jlink_flash_device"] = slice_.jlink_flash_device
         if slice_.expect_dpidr and slice_.jlink_device:
             args["expect_dpidr"] = slice_.expect_dpidr
