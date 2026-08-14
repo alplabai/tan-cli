@@ -319,25 +319,46 @@ else
   exit 1
 fi
 
-hdr "#322 doctor and bootstrap resolve the SAME root"
+hdr "#322 doctor's CURRENT root vs bootstrap's PLANNED root"
 jrun doc2 any doctor --format json
 jrun bs2 any bootstrap --dry-run --format json
 D=$(jget "$WORK/doc2.out" sdk.root); B=$(jget "$WORK/bs2.out" data.sdkRoot)
-note "doctor=$D"; note "bootstrap=$B"
-# tan-cli#358: this compared the two values for NON-EMPTINESS, which is not what
-# #322 is about. A real run printed doctor=.../proj/alp-sdk against
-# bootstrap=.../proj/alp-workspace/alp-sdk -- two DIFFERENT checkouts, the exact
-# disagreement #322 exists to catch -- and scored `PASS #322: both resolve an
-# SDK`. The assertion is equality; anything weaker cannot fail for the reason it
-# is named after.
+W=$(jget "$WORK/bs2.out" data.workspaceDir)
+note "doctor=$D"; note "bootstrap=$B"; note "workspaceDir=$W"
+# tan-cli#358 tightened this from non-emptiness to equality, which was right to
+# reject, but the PAIR it compares is still wrong -- tan-cli#741.
+#
+# `doctor.sdk.root` is where the checkout IS. `bootstrap.data.sdkRoot` under
+# --dry-run is where it WOULD BE. Those answer different questions, and
+# `tan bootstrap` relocating a checkout into the workspace is deliberate and
+# announced (tan-cli#185). So a flat equality assertion fails on every host
+# where bootstrap can actually succeed, and passes only where it refuses for
+# missing prerequisites and therefore plans no move at all.
+#
+# Measured, same script and same tan build: a pristine ubuntu:24.04 container
+# scored PASS with bs2 exiting 1 ("no 'would' verb (no relocation planned)"),
+# while a provisioned host scored FAIL with bs2 exiting 0 and
+# doctor=.../proj/alp-sdk against bootstrap=.../proj/alp-workspace/alp-sdk.
+# The container's PASS was not agreement -- it was one side not running.
+#
+# The invariant that holds on BOTH shapes: if no relocation is planned the two
+# must be identical, and if one IS planned the destination must sit inside the
+# workspace bootstrap just reported. Post-bootstrap agreement is a different
+# assertion and is already covered by "#299 doctor AFTER a successful
+# bootstrap", which passes on both hosts.
 if [ "$D" = "NONE" ] || [ "$B" = "NONE" ] || [ -z "$B" ]; then
   bad "#322: one side resolved nothing -- doctor='$D' bootstrap='$B'"
-elif [ "$D" != "$B" ]; then
-  bad "#322: doctor and bootstrap resolved DIFFERENT roots"
-  note "doctor    = $D"
-  note "bootstrap = $B"
+elif [ "$D" = "$B" ]; then
+  ok "#322: no relocation planned; doctor and bootstrap agree ($D)"
+elif [ -z "$W" ] || [ "$W" = "NONE" ]; then
+  bad "#322: bootstrap plans a move to '$B' but reported no workspaceDir to move into"
+elif [ "${B#"$W"}" = "$B" ]; then
+  bad "#322: bootstrap's planned root is OUTSIDE the workspace it reported"
+  note "planned      = $B"
+  note "workspaceDir = $W"
 else
-  ok "#322: doctor and bootstrap resolve the same root ($D)"
+  ok "#322: relocation planned into the reported workspace ($B)"
+  note "doctor still reports the pre-move root, which is why a move is planned"
 fi
 
 hdr "#323 --dry-run MUTATES NOTHING"
