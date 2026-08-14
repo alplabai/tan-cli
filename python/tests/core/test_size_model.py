@@ -25,6 +25,7 @@ from tan.core.size import (
     region_json,
     render_table_lines,
     resolve_budget,
+    slot0_bytes_for_core,
     resolve_variant,
     round1,
     sizes_from_elf_sections,
@@ -472,3 +473,91 @@ def test_render_table_lines_shows_an_unknown_status_verbatim_and_plain():
     lines = render_table_lines([zephyr_row("c", "weird-new-status")], True)
     assert lines[2].endswith("weird-new-status")
     assert "\x1b" not in lines[2]
+
+
+# ---------------------------------------------------------------------
+# tan-cli#747: FLASH is the core's OWN slot0 window, not the whole part.
+#
+# Measured on E1M-AEN801 before the fix: BOTH M55s reported against
+# 5767168 B (the whole 5.5 MB MRAM) while each image links into 2752512 B,
+# so `tan size` said 2.0% where the linker said 4.22%, and `over_budget`
+# could never fire -- an image would have to exceed the entire part, which
+# it cannot, since mcuboot + both slot0s + reserved + storage + atoc
+# already fill it.
+# ---------------------------------------------------------------------
+
+AEN801_MEMORY_MAP = [
+    {"name": "mcuboot", "size_kib": 64,
+     "accessible_from": ["m55_he", "m55_hp"]},
+    {"name": "he_slot0", "size_kib": 2688, "accessible_from": ["m55_he"]},
+    {"name": "hp_slot0", "size_kib": 2688, "accessible_from": ["m55_hp"]},
+    {"name": "storage", "size_kib": 96,
+     "accessible_from": ["m55_he", "m55_hp"]},
+]
+
+
+def test_slot0_window_wins_over_the_whole_mram():
+    """The fix. 2688 KiB, not the 5.5 MB the part carries in total."""
+    for core in ("m55_he", "m55_hp"):
+        budget = resolve_budget(core, 5.5, None, [], [], AEN801_MEMORY_MAP)
+        assert budget.flash_total == 2_752_512, (core, budget)
+
+
+def test_each_m55_gets_its_own_window_not_a_shared_pool():
+    """Both cores resolving to the SAME number would be the bug this fixes
+    wearing a different value -- the windows are disjoint (alp-sdk#1069), so
+    what must match is the SIZE, while the entries they came from differ."""
+    assert slot0_bytes_for_core("m55_he", AEN801_MEMORY_MAP) == 2_752_512
+    assert slot0_bytes_for_core("m55_hp", AEN801_MEMORY_MAP) == 2_752_512
+    assert slot0_bytes_for_core("a32_cluster", AEN801_MEMORY_MAP) is None
+
+
+def test_a_window_another_core_owns_is_not_this_core_budget():
+    """`accessible_from` is enforced: silently accepting another core's
+    window is exactly the cross-core confusion #1069 exists to prevent."""
+    stolen = [{"name": "hp_slot0", "size_kib": 2688,
+               "accessible_from": ["m55_he"]}]
+    assert slot0_bytes_for_core("m55_hp", stolen) is None
+
+
+def test_a_som_with_no_memory_map_is_byte_identical_to_before():
+    """Single-M55 parts, non-AEN families, and presets predating
+    alp-sdk#1445 must keep today's answer exactly -- this fix may not move
+    a budget it has no better number for."""
+    assert resolve_budget("m55_hp", 5.5, 4.0, [], [], None) == MemoryBudget(
+        5_767_168, None, None
+    )
+    assert resolve_budget("m55_hp", 5.5, 4.0, [], [], []) == MemoryBudget(
+        5_767_168, None, None
+    )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"name": "hp_slot0", "size_kib": True},      # bool is an int in Python
+        {"name": "hp_slot0", "size_kib": "2688"},    # a string is not a size
+        {"name": "hp_slot0", "size_kib": 0},
+        {"name": "hp_slot0", "size_kib": -2688},
+        {"name": "hp_slot0", "size_kib": float("inf")},
+        {"name": "hp_slot0"},                        # no size at all
+    ],
+    ids=["bool", "string", "zero", "negative", "inf", "absent"],
+)
+def test_a_malformed_window_falls_back_rather_than_inventing_a_budget(entry):
+    """A bad `size_kib` must degrade to the old whole-part answer, never
+    raise out of `tan size` and never become a guessed number."""
+    assert slot0_bytes_for_core("m55_hp", [entry]) is None
+    assert resolve_budget(
+        "m55_hp", 5.5, None, [], [], [entry]
+    ).flash_total == 5_767_168
+
+
+def test_slot0_does_not_disturb_the_ram_half():
+    """FLASH and RAM resolve independently; adding the window must not
+    change the DTCM lookup or its note."""
+    banks = [("SRAM3_M55_HP_DTCM", 1024.0)]
+    budget = resolve_budget("m55_hp", 5.5, None, banks, [], AEN801_MEMORY_MAP)
+    assert budget.flash_total == 2_752_512
+    assert budget.ram_total == 1_048_576
+    assert budget.note is None

@@ -254,6 +254,39 @@ def _read_som_preset(path: str) -> tuple[str, str | None] | None:
     return silicon, _clean_str(root.get("silicon_variant"))
 
 
+def _read_som_memory_map(path: str) -> list[dict]:
+    """The SoM preset's `memory_map:` entries, or `[]` when it declares none
+    (tan-cli#747).
+
+    Read here rather than widened into `read_sdk_som_and_soc`'s return tuple:
+    that walk is shared with `tan debug-config`, and growing a tuple every
+    caller destructures to give ONE of them a field it alone needs is how the
+    two readers drift apart -- the thing that walk exists to prevent. The
+    preset is small and already on this path, so re-reading it is cheaper than
+    a shared shape nobody else wants.
+
+    Deliberately NOT `schema_version`-guarded a second time: the caller has
+    already been through `_read_som_preset`/`read_sdk_som_and_soc` for this
+    same file, so a preset that fails that guard never reaches here. A
+    non-list `memory_map`, or entries that are not mappings, degrade to `[]`
+    /are skipped downstream -- an unreadable budget must fall back to
+    `mram_mb`, never raise out of `tan size`.
+    """
+    text = _read_text(path)
+    if text is None:
+        return []
+    try:
+        root = load_yaml_document(text)
+    except Exception:  # noqa: BLE001 -- SystemManifestError or any PyYAML failure
+        return []
+    if not isinstance(root, dict):
+        return []
+    entries = root.get("memory_map")
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict)]
+
+
 def _clean_str(value: Any) -> str | None:
     """`str_clean`: a string, with the `TBD` sentinel dropped to absent.
 
@@ -377,7 +410,13 @@ def _resolve_slice_budget(
     variant = resolve_variant(silicon_variant, sku, variants)
     mram_mb = None if variant is None else _as_f64(variant.get("mram_mb"))
     banks = [] if variant is None else sram_banks(variant)
-    return resolve_budget(core_id, mram_mb, soc_flash_mb, banks, soc_cores)
+    # tan-cli#747: this core's OWN slot0 window, when the SoM declares one, is
+    # the only FLASH a core can link into -- `mram_mb` is the whole part,
+    # including the other core's slot0.
+    memory_map = _read_som_memory_map(preset_path)
+    return resolve_budget(
+        core_id, mram_mb, soc_flash_mb, banks, soc_cores, memory_map
+    )
 
 
 def _measure_slice(

@@ -17,6 +17,7 @@ file (I-26).
 from __future__ import annotations
 
 import json
+import math
 import re
 import struct
 from dataclasses import dataclass, field
@@ -353,22 +354,81 @@ def resolve_variant(
     return None
 
 
+def slot0_bytes_for_core(
+    core_id: str, memory_map: list[dict] | None
+) -> int | None:
+    """This core's OWN slot0 window from the SoM preset's `memory_map`, in
+    bytes -- `None` when the preset declares none for it (tan-cli#747).
+
+    Since alp-sdk#1445/#1069 a dual-M55 AEN SoM gives each core a disjoint
+    slot0 (`he_slot0` at 0x80010000, `hp_slot0` at 0x802b0000, 2688 KiB
+    each), and only that window is linkable by that core. The whole-MRAM
+    figure is the sum of every partition INCLUDING the other core's, so it
+    is nobody's budget.
+
+    Matched on the `<role>_slot0` name, role being the core id's last
+    segment -- the same `core_id.split("_")[-1]` the SDK's own
+    `gen_zephyr_board` uses to pick a role's window, not a second spelling
+    that could drift from it. `accessible_from`, when the entry declares
+    one, must name this core: a window some other core owns is not a budget
+    for this one, and silently accepting it would reintroduce exactly the
+    cross-core confusion #1069 exists to prevent.
+    """
+    role = core_id.rsplit("_", 1)[-1]
+    if not role:
+        return None
+    want = f"{role}_slot0"
+    for entry in memory_map or []:
+        if not isinstance(entry, dict) or entry.get("name") != want:
+            continue
+        accessible = entry.get("accessible_from")
+        if isinstance(accessible, list) and accessible and core_id not in accessible:
+            continue
+        size_kib = entry.get("size_kib")
+        # bool is an int in Python; a `size_kib: true` is malformed, not 1 KiB.
+        if isinstance(size_kib, bool) or not isinstance(size_kib, (int, float)):
+            continue
+        if size_kib <= 0 or not math.isfinite(float(size_kib)):
+            continue
+        return int(size_kib) * 1024
+    return None
+
+
 def resolve_budget(
     core_id: str,
     mram_mb: float | None,
     soc_flash_mb: float | None,
     sram_banks_kb: list[tuple[str, float]],
     soc_cores: list[tuple[str, float | None]],
+    memory_map: list[dict] | None = None,
 ) -> MemoryBudget:
     """The FLASH/RAM budget for one core, from values a caller already read out
-    of the SoM preset + SoC JSON. FLASH: variant `mram_mb`, else SoC
+    of the SoM preset + SoC JSON. FLASH: this core's own `<role>_slot0` window
+    from the SoM `memory_map`, else variant `mram_mb`, else SoC
     `soc_flash_mb` (with a note). RAM: the `*_DTCM` bank whose name contains the
     core token, else the core's `tcm_kb` (with a note). Anything unresolvable
-    stays `None` -- the caller renders `unknown`, never a guessed number."""
+    stays `None` -- the caller renders `unknown`, never a guessed number.
+
+    FLASH prefers the per-core window for the reason the RAM half below has
+    always resolved per core: a shared total is not a budget. Measured before
+    the fix, `E1M-AEN801` reported BOTH M55s against 5767168 B (the whole
+    5.5 MB MRAM) while each image links into 2752512 B, so utilisation read
+    2.0% where the linker said 4.22%, and `over_budget` could never fire --
+    an image would have to exceed the whole part, which it cannot, because
+    mcuboot + both slot0s + reserved + storage + atoc already fill it
+    (tan-cli#747).
+
+    `memory_map` defaults to `None` so every existing caller keeps today's
+    behaviour exactly; a SoM that declares no per-role window (single-M55
+    parts, non-AEN families, presets predating alp-sdk#1445) still falls
+    through to `mram_mb` with no note, byte-identical to before."""
     notes: list[str] = []
 
-    if mram_mb is not None:
-        flash_total: int | None = _mb_to_bytes(mram_mb)
+    slot0_total = slot0_bytes_for_core(core_id, memory_map)
+    if slot0_total is not None:
+        flash_total: int | None = slot0_total
+    elif mram_mb is not None:
+        flash_total = _mb_to_bytes(mram_mb)
     elif soc_flash_mb is not None:
         notes.append("flash=soc_flash_mb")
         flash_total = _mb_to_bytes(soc_flash_mb)
