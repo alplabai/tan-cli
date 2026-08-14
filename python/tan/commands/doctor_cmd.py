@@ -161,6 +161,7 @@ from tan.core.doctor_libraries import LibraryReport, inspect_selection
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
+from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
@@ -1747,6 +1748,7 @@ def sdk_check(
     unselected_candidate: str | None = None,
     broken_global_default: str | None = None,
     divergent_candidate: str | None = None,
+    dangling_flag_root: str | None = None,
 ) -> Check:
     """`sdk` -- is an alp-sdk checkout resolved at all? Mirrors
     `tan_core::preflight::build_preflight_checks`'s `sdk` check.
@@ -1796,7 +1798,35 @@ def sdk_check(
     pointer file directly, never `tan sdk switch`, which refuses outright in
     this build (tan-cli#305) -- recommending it here would be the exact
     dead end #305 already fixed for the project-pin case.
+
+    `dangling_flag_root` (tan-cli#727) is the raw `--sdk-root` text when that
+    flag named a path carrying no `scripts/alp_project.py`. `--sdk-root` is
+    the terminal tier, so `resolve_sdk_root_ladder` hands it back unvalidated
+    -- correct for a caller that only REPORTS the tier, and wrong for this
+    one, whose entire job is answering "is my setup right". `tan build` given
+    the same path refuses (`build_cmd`, `run_cmd`, `validate_cmd`,
+    `clean_cmd`, `flash_cmd` each guard at their own call site with
+    `is_sdk_root`); doctor did not, so the two commands disagreed about the
+    same flag and it was doctor saying yes. Reported as its own sentence
+    rather than by nulling the root into the `NO_SDK_NEXT_STEPS` branch,
+    which tells the user to clone a checkout and pass `--sdk-root` -- the
+    thing they just did.
     """
+    if dangling_flag_root is not None:
+        return Check(
+            "sdk",
+            "fail",
+            rejected_sdk_root_message(
+                dangling_flag_root,
+                "`tan build` refuses this same path, so nothing this report "
+                "says about the SDK describes a checkout that is there.",
+            ),
+            "Point --sdk-root at a directory holding the marker above. "
+            "`tan bootstrap` MOVES the checkout into the workspace and "
+            "rewrites the default (tan-cli#185), so a --sdk-root copied from "
+            "before a bootstrap names the path it emptied.",
+            scope="project",
+        )
     if sdk_root is not None:
         detail = f"alp-sdk at {sdk_root}"
         if tier is not None:
@@ -3266,6 +3296,14 @@ def _collect(
             _abs_posix(sdk_root)
         ):
             divergent_candidate = str(wide)
+    # tan-cli#727. Guarded at THIS call site, not inside
+    # `resolve_sdk_root_ladder` -- the same placement `build_cmd`,
+    # `run_cmd`, `validate_cmd`, `clean_cmd.sdk_root_resolves` and
+    # `flash_cmd._resolve_sdk` each chose, because every other caller depends
+    # on the ladder handing the flag back unvalidated.
+    dangling_flag_root = (
+        sdk_root if sdk_tier == "sdkRootFlag" and not is_sdk_root(sdk_root) else None
+    )
     _add(
         sdk_check(
             sdk_root,
@@ -3274,6 +3312,7 @@ def _collect(
             unselected_candidate,
             broken_global_default,
             divergent_candidate,
+            dangling_flag_root,
         )
     )
     project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
@@ -3555,7 +3594,13 @@ def _collect(
 
     # tan-cli#294 finding 5: LAST, mirroring `assemble_doctor_report`'s own
     # placement -- traces a report back to the SDK checkout that produced it.
-    if sdk_root is not None:
+    # tan-cli#727: skipped for a `--sdk-root` the marker check rejected.
+    # `sdk_provenance_check` finds no git checkout and no
+    # `metadata/sdk_version.yaml` under a path that is not there, and its
+    # else-branch renders that absence as `pass | alp-sdk at <path> (no git
+    # checkout / metadata/sdk_version.yaml)` -- a green line asserting an
+    # alp-sdk at a directory that does not exist.
+    if sdk_root is not None and dangling_flag_root is None:
         _add(sdk_provenance_check(sdk_root))
 
     return checks

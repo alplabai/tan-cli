@@ -2449,6 +2449,96 @@ def test_doctor_names_a_broken_global_default_end_to_end_via_the_cli(tmp_path):
     assert "--sdk-root" in sdk["fix"]
 
 
+# --------------------------------------------------------------------------
+# tan-cli#727 -- `--sdk-root` naming a path with no `scripts/alp_project.py`
+# reported `[pass] sdk` while `tan build` refused the same path.
+# --------------------------------------------------------------------------
+
+
+def _fake_sdk_root(root: Path) -> Path:
+    """A directory carrying THE marker `is_sdk_root` looks for, and nothing
+    else -- the positive control for every refusal below."""
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "alp_project.py").write_text("# marker\n")
+    return root
+
+
+def test_sdk_check_refuses_a_dangling_sdk_root_flag_and_names_it():
+    check = doctor_cmd.sdk_check(
+        "/nope/gone",
+        project_scope=None,
+        tier="sdkRootFlag",
+        dangling_flag_root="/nope/gone",
+    )
+    assert check.status == "fail"
+    assert "/nope/gone" in check.detail
+    assert "scripts/alp_project.py" in check.detail
+    # Not the `NO_SDK_NEXT_STEPS` sentence, which tells the user to pass the
+    # flag they just passed.
+    assert "no SDK selected" not in check.detail
+
+
+def test_sdk_check_without_the_dangling_signal_is_byte_identical():
+    """The parameter defaults to `None`, so every existing direct caller --
+    and every tier other than `sdkRootFlag` -- is untouched."""
+    assert doctor_cmd.sdk_check("/opt/alp-sdk", project_scope=None).detail == (
+        "alp-sdk at /opt/alp-sdk"
+    )
+
+
+def test_collect_refuses_a_nonexistent_sdk_root_flag_end_to_end(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    gone = tmp_path / "no-such-sdk"
+
+    checks = doctor_cmd._collect(
+        str(gone),
+        workspace_root=str(workspace),
+        sdk_tier="sdkRootFlag",
+    )
+    sdk = next(c for c in checks if c.name == "sdk")
+    assert sdk.status == "fail"
+    assert str(gone) in sdk.detail
+    # `sdkProvenance` rendered `pass | alp-sdk at <path> (no git checkout /
+    # metadata/sdk_version.yaml)` for a directory that is not there. A green
+    # line about an absent SDK is the same defect wearing a different name.
+    assert [c.name for c in checks if c.name == "sdkProvenance"] == []
+
+
+def test_collect_still_passes_a_real_sdk_root_flag(tmp_path):
+    """Positive control. Without it, a `sdk` check hard-wired to `fail` --
+    or a `_collect` that dropped `sdkProvenance` unconditionally -- passes
+    the test above."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    real = _fake_sdk_root(tmp_path / "alp-sdk")
+
+    checks = doctor_cmd._collect(
+        str(real),
+        workspace_root=str(workspace),
+        sdk_tier="sdkRootFlag",
+    )
+    sdk = next(c for c in checks if c.name == "sdk")
+    assert sdk.status == "pass"
+    assert [c.name for c in checks if c.name == "sdkProvenance"] == ["sdkProvenance"]
+
+
+def test_doctor_refuses_a_nonexistent_sdk_root_flag_via_the_cli(tmp_path):
+    """Real subprocess, real envelope -- the surface the issue was reported
+    from."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    gone = tmp_path / "no-such-sdk"
+
+    proc = run_tan("doctor", "--sdk-root", str(gone), "--format", "json", cwd=workspace)
+    envelope = json.loads(proc.stdout)
+    sdk = next(c for c in envelope["data"]["checks"] if c["name"] == "sdk")
+    assert sdk["status"] == "fail"
+    assert str(gone) in sdk["detail"]
+    assert [c for c in envelope["data"]["checks"] if c["name"] == "sdkProvenance"] == []
+    assert envelope["ok"] is False
+
+
 def test_board_yaml_preflight_check_passes_when_present_regardless_of_selection():
     assert doctor_cmd.board_yaml_preflight_check(True, project_selected=False).status == "pass"
     assert doctor_cmd.board_yaml_preflight_check(True, project_selected=True).status == "pass"
