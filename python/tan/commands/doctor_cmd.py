@@ -1182,10 +1182,20 @@ def seven_zip_check(found: bool) -> Check:
     surface it and a customer who followed the `zephyrSdk` fix hint alone hit
     a patoolib error naming no Alp surface and no mention of 7-Zip.
 
-    `Warn`, not `Fail`, mirroring the oracle: a host that already has the SDK
-    never reaches this (the gate), and among hosts that do not, missing
-    7-Zip blocks the REMEDY, not the build itself -- `zephyrSdk` is the
-    `Fail` that stops things.
+    `Warn`, not `Fail`, mirroring the oracle: missing 7-Zip blocks the
+    REMEDY, not the build itself -- `zephyrSdk` is the `Fail` that stops
+    things. That reasoning is unchanged.
+
+    What DID change (tan-cli#736) is the gate this check used to ride: it
+    ran only alongside a FAILING `zephyrSdk`, on the premise that "a host
+    that already has the SDK never reaches this". That premise does not
+    hold -- "already has the SDK" is not "will never run `west sdk
+    install` again". Adding a second architecture's toolchain, or moving to
+    a newer SDK, is an ordinary operation; `zephyrSdk` passes throughout,
+    and the check never fired. Measured on Windows with `7z` stripped from
+    PATH and the SDK present: `overall ok: True`, and
+    `any check mentioning 7z: []` -- a green verdict on a host that cannot
+    complete `west sdk install`. It now runs unconditionally on Windows.
     """
     if found:
         return Check(
@@ -3573,9 +3583,13 @@ def _collect(
     # `zephyr_sdk_check`'s docstring (tan-cli#286).
     zephyr_sdk_ok = _zephyr_sdk_detected()
     _add(zephyr_sdk_check(zephyr_sdk_ok, os.environ.get("ZEPHYR_SDK_INSTALL_DIR")))
-    # `sevenZip` rides beside the `zephyrSdk` Fail it unblocks and only there --
-    # see `seven_zip_check`'s docstring and tan-cli#204.
-    if os.name == "nt" and not zephyr_sdk_ok:
+    # tan-cli#736: unconditional on Windows. This used to ride the
+    # `zephyrSdk` Fail (`and not zephyr_sdk_ok`), which silently excused the
+    # host that has an SDK and no 7-Zip -- exactly the host whose next
+    # `west sdk install` dies with `Zephyr SDK setup requires '7z'`. Still a
+    # `warn`, not a `fail`: see `seven_zip_check`'s docstring and
+    # tan-cli#204 for why the SEVERITY is right and only the GATE was wrong.
+    if os.name == "nt":
         _add(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
 
     _add(
