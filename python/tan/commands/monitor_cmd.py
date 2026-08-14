@@ -126,6 +126,32 @@ def _available_ports() -> list[tuple[str, str]]:
     return [(p.device, p.description or "") for p in list_ports.comports()]
 
 
+#: Windows' documented device-namespace prefix. `\\.\COM38` is the spelling
+#: Microsoft documents for COM10 and above, and pyserial's win32 backend opens
+#: it -- `serial/serialwin32.py` hands any string that does not
+#: `startswith('COM')` straight to `CreateFile`. What it is NOT is a spelling
+#: `comports()` ever REPORTS: `serial/tools/list_ports_windows.py` builds each
+#: `ListPortInfo` from the registry `PortName`, which is the bare `COM38`. So a
+#: membership test against `comports()` refuses a port pyserial would have
+#: opened, while listing that same port in its own "not found" message
+#: (tan-cli#701).
+_WINDOWS_DEVICE_PREFIX = "\\\\.\\"
+
+
+def _port_aliases(port: str) -> set[str]:
+    """Every spelling of `port` that `comports()` might report it under.
+
+    Deliberately narrow: this resolves a spelling pyserial itself accepts back
+    to the bare device name, rather than widening the gate. A port that is
+    genuinely absent is still refused -- see
+    `test_a_unc_port_whose_bare_form_is_absent_is_still_refused`.
+    """
+    aliases = {port}
+    if port.startswith(_WINDOWS_DEVICE_PREFIX):
+        aliases.add(port[len(_WINDOWS_DEVICE_PREFIX):])
+    return aliases
+
+
 def _ports_data(ports: list[tuple[str, str]]) -> list[dict[str, str]]:
     return [{"device": device, "description": description} for device, description in ports]
 
@@ -211,7 +237,7 @@ def _run_monitor(
 
     if port is None:
         raise _refuse_listing_ports("no --port given")
-    if port not in {device for device, _ in _available_ports()}:
+    if not (_port_aliases(port) & {device for device, _ in _available_ports()}):
         raise _refuse_listing_ports(f"port '{port}' not found")
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
