@@ -84,6 +84,9 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/clean_cmd.py: 1098 -> 1110
     - tan/commands/doctor_cmd.py: 3920 -> 3925
     - tan/commands/generate_cmd.py: 1312 -> 1348
+- 2026-08-13 -- tan-cli#719: flash_cmd.py gained the run-level unconfirmed-flash verdict and the --confirm flag; flash_plan.py gained CONFIRM_REMEDY/confirm_gate_note, the single source for the confirm-gate remedy
+    - tan/commands/flash_cmd.py: 3922 -> 3966
+    - tan/core/flash_plan.py: 3079 -> 3102
 - 2026-08-13 -- tan-cli#720: accept --som/--sku as aliases on init, pinmux and new-som
     - tan/commands/init_cmd.py: 1247 -> 1258
     - tan/commands/new_som_cmd.py: 1353 -> 1361
@@ -92,14 +95,19 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/build_cmd.py: 2082 -> 2106
     - tan/planner/loader.py: 1251 -> 1254
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/core/flash_plan.py: 3102 -> 3106
     - tan/core/flash_plan.py: 3127 -> 3131
     - tan/core/flash_plan.py: 3089 -> 3093
     - tan/planner/template.py: 1329 -> 1436
     - tan/planner/zephyr_board.py: 1372 -> 1433
     - function_count_budget: 251 -> 254
 - 2026-08-13 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/core/flash_plan.py: 3106 -> 3116
     - tan/core/flash_plan.py: 3131 -> 3141
 - 2026-08-14 -- tan-cli#727: sdk_check grew the dangling --sdk-root arm, plus its call-site guard and the sdkProvenance skip
     - tan/commands/doctor_cmd.py: 3925 -> 3970
+- 2026-08-14 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/flash_cmd.py: 3966 -> 3971
+    - tan/core/flash_plan.py: 3116 -> 3164
 - 2026-08-13 -- tan-cli#728: planner refuses an undeclared CONFIG_ALP_SDK_CHIP_ symbol instead of emitting it
     - tan/planner/kconfig.py: 2012 -> 2088

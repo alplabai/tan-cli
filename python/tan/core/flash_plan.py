@@ -1263,6 +1263,29 @@ class FlashInputs:
     force_confirm: bool = False
 
 
+#: The one place the confirm gate's remedy is written (tan-cli#719). Three
+#: sites used to compose their own "not run" note and only ONE of them named
+#: `ALP_FLASH_FORCE=1` -- the mechanism that actually works -- so the other two
+#: pointed the reader at a manifest key and stayed silent about the env var.
+#: Most-specific-first, matching the SETOOLS resolution message's shape.
+CONFIRM_REMEDY = (
+    "to actually flash, most-specific first: `--confirm` on the command line, "
+    "`ALP_FLASH_FORCE=1` in the environment, or `flash_args.confirm: true` in "
+    "the manifest"
+)
+
+
+def confirm_gate_note(why: str) -> str:
+    """The parenthetical every confirm-gated preview appends.
+
+    `why` is `dry-run` (an explicit preview, nothing to remedy) or the
+    confirm-gate reason, which carries `CONFIRM_REMEDY`.
+    """
+    if why == "dry-run":
+        return why
+    return f"{why} -- {CONFIRM_REMEDY}"
+
+
 def backend_for(method: str) -> BackendMeta | None:
     """Resolve a `flash_method` string to its backend metadata, or `None`."""
     return _REGISTRY.get(method)
@@ -2300,7 +2323,7 @@ def plan_xspi_flashwriter(inp: FlashInputs, which: Callable[[str], bool]) -> Fla
             argv=argv,
             ok_message=(
                 f"xspi_flashwriter[{inp.core_id}]: would write {artefact_name} -> xSPI "
-                f"{partition} via Flash Writer on {port} ({why})"
+                f"{partition} via Flash Writer on {port} ({confirm_gate_note(why)})"
             ),
             planning_only=True,
         )
