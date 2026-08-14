@@ -287,6 +287,21 @@ def _resolve_jlink_flash_device(debug: dict[str, Any]) -> Optional[str]:
     return debug.get("jlink_flash_device")
 
 
+def _jlink_flash_device_declared(debug: dict[str, Any]) -> bool:
+    """Whether the resolved `debug:` block carried the `jlink_flash_device`
+    KEY, independent of its value (tan-cli#734).
+
+    `_resolve_jlink_flash_device` above cannot answer this: `dict.get`
+    returns `None` both for a schema-declared `jlink_flash_device: null` and
+    for an absent key, and those two mean opposite things. Declared-null is
+    a published "no known J-Link flash profile, refuse loudly"; absent is
+    "this variant says nothing", which keeps the Flow A default. The
+    downstream contract is `flash_plan._fa_has_key`, which is presence-based
+    for exactly this reason -- this is its counterpart on the emitter side.
+    """
+    return "jlink_flash_device" in debug
+
+
 def _resolve_slot0_load_address(
     som_preset: dict[str, Any], core_id: str,
 ) -> Optional[str]:
@@ -418,7 +433,9 @@ def _enforce_flow_d_preflight_pair(
     because a wrong ID that happens to match another board on the same
     bench passes on exactly the board it exists to exclude.
     """
-    if slice_.os != "zephyr" or not slice_.jlink_flash_device:
+    if slice_.os != "zephyr" or not (
+        slice_.jlink_flash_device_declared or slice_.jlink_flash_device is not None
+    ):
         return
     # Bound once and read from the local: interpolating `debug['expect_dpidr']`
     # into the message would make a mis-edited condition fail with a KeyError
@@ -483,6 +500,7 @@ def _slice_from_resolved(
     entry: dict[str, Any],
     soc_core_type: str = "",
     jlink_flash_device: Optional[str] = None,
+    jlink_flash_device_declared: bool = False,
     expect_dpidr: Optional[str] = None,
     jlink_device: Optional[str] = None,
     slot0_load_address: Optional[str] = None,
@@ -528,6 +546,7 @@ def _slice_from_resolved(
         # `topology.<id>.hw_console: false` marks a headless core.
         hw_console=bool(entry.get("hw_console", True)),
         jlink_flash_device=jlink_flash_device,
+        jlink_flash_device_declared=jlink_flash_device_declared,
         expect_dpidr=expect_dpidr,
         jlink_device=jlink_device,
         slot0_load_address=slot0_load_address,
@@ -832,6 +851,9 @@ def _validate_topology_cores(
     # loop.
     variant_debug = _resolve_variant_debug(som_preset, soc_spec)
     jlink_flash_device = _resolve_jlink_flash_device(variant_debug)
+    # tan-cli#734: carried alongside the value, not derived from it -- the
+    # two differ exactly in the declared-null case this exists for.
+    jlink_flash_device_declared = _jlink_flash_device_declared(variant_debug)
 
     cores: dict[str, Slice] = {}
     for core_id in soc_core_ids:
@@ -851,11 +873,13 @@ def _validate_topology_cores(
             variant_debug, core_id)
         slot0_load_address = (
             _resolve_slot0_load_address(som_preset, core_id)
-            if jlink_flash_device else None)
+            if (jlink_flash_device_declared or jlink_flash_device is not None)
+            else None)
         slice_ = _slice_from_resolved(
             core_id, resolved,
             soc_core_type=soc_core_type_by_id.get(core_id, ""),
             jlink_flash_device=jlink_flash_device,
+            jlink_flash_device_declared=jlink_flash_device_declared,
             expect_dpidr=expect_dpidr,
             jlink_device=jlink_device,
             slot0_load_address=slot0_load_address,

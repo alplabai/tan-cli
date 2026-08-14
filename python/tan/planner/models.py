@@ -174,6 +174,17 @@ class Slice:
     # description).  Consumed by `_slice_flash_recipe`'s `zephyr` branch to
     # arm the direct-flash path in `flash_args`.
     jlink_flash_device: Optional[str] = None
+    # Whether the resolved variant's `debug:` block carried the
+    # `jlink_flash_device` KEY AT ALL, independent of what it resolved to
+    # (tan-cli#734).  `debug.get(...)` collapses a schema-declared
+    # `jlink_flash_device: null` -- a deliberate "this variant has no known
+    # J-Link flash profile" -- into the same `None` as a genuinely absent
+    # key, and the emitter's truthiness test then dropped both.  Downstream,
+    # `flash_plan.flow_d_available` decides on KEY PRESENCE precisely so a
+    # declared-null reaches `plan_alif_mram_jlink`'s loud refusal instead of
+    # silently downgrading to Flow A over the SE-UART; that distinction has
+    # to survive the loader for it to mean anything.
+    jlink_flash_device_declared: bool = False
     # The read-only SW-DP IDR (DPIDR) wrong-board preflight PAIR for this
     # core (soc-spec-v1 `variants[].debug.expect_dpidr` +
     # `variants[].debug.jlink_device[<core_id>]`), resolved together by

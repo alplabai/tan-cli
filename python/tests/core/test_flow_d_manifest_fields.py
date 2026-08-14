@@ -148,12 +148,17 @@ def _flash_args_for(loader_mod, orchestrator_mod, soc_spec, som_preset,
     jlink_flash_device = loader_mod._resolve_jlink_flash_device(debug)
     expect_dpidr, jlink_device = loader_mod._resolve_flow_d_preflight(
         debug, core_id)
+    # tan-cli#734: PRESENCE, mirroring `loader.py`'s own call site. Deriving
+    # this from `jlink_flash_device` truthiness here would make the helper
+    # lie about exactly the case the tests below exist for.
+    declared = loader_mod._jlink_flash_device_declared(debug)
     slot0_load_address = (
         loader_mod._resolve_slot0_load_address(som_preset, core_id)
-        if jlink_flash_device else None)
+        if (declared or jlink_flash_device is not None) else None)
     slice_ = loader_mod._slice_from_resolved(
         core_id, {"os": os_},
         jlink_flash_device=jlink_flash_device,
+        jlink_flash_device_declared=declared,
         expect_dpidr=expect_dpidr,
         jlink_device=jlink_device,
         slot0_load_address=slot0_load_address,
@@ -206,6 +211,77 @@ def test_a_core_with_no_jlink_flash_device_arms_no_flow_d_keys(
         loader_mod, orchestrator_mod, soc_spec, som_preset, "m55_hp")
     assert method == "zephyr_west_flash"
     assert args == {}
+
+
+# --------------------------------------------------------------------------
+# tan-cli#734 -- a DECLARED-NULL `jlink_flash_device` must reach flash_args
+# as a PRESENT key, so `flash_plan.flow_d_available` (presence-based, via
+# `_fa_has_key`) arms Flow D and `plan_alif_mram_jlink` raises its existing
+# loud refusal, instead of the emitter dropping the key and silently
+# downgrading to Flow A over the SE-UART.
+#
+# Every assertion below is on KEY PRESENCE, never on the value: declared-null
+# and absent BOTH carry `None`, so a value-based assertion is vacuous here.
+# --------------------------------------------------------------------------
+
+
+def _null_device_soc_spec() -> dict:
+    """A variant that declares the key and sets it null -- alp-sdk#1295's
+    `e4.json` shape, whose order code has no SEGGER device-database entry."""
+    return {"variants": [{"order_code": "X", "alp_module_skus": [],
+                          "debug": {"jlink_flash_device": None}}]}
+
+
+def _absent_device_soc_spec() -> dict:
+    """The same variant with the key omitted entirely."""
+    return {"variants": [{"order_code": "X", "alp_module_skus": [],
+                          "debug": {}}]}
+
+
+def test_a_declared_null_jlink_flash_device_reaches_flash_args_as_a_present_key(
+        loader_mod, orchestrator_mod):
+    som_preset = {"sku": "E1M-AEN801", "silicon_variant": "X"}
+    _method, args = _flash_args_for(
+        loader_mod, orchestrator_mod,
+        _null_device_soc_spec(), som_preset, "m55_hp")
+    assert "jlink_flash_device" in args, (
+        "declared-null was dropped by the emitter, so flow_d_available() "
+        f"cannot see it and tan flash downgrades silently: {sorted(args)}")
+    assert args["jlink_flash_device"] is None
+
+
+def test_an_absent_jlink_flash_device_stays_absent(
+        loader_mod, orchestrator_mod):
+    """The other half of the distinction, and the reason the test above
+    cannot be satisfied by emitting the key unconditionally."""
+    som_preset = {"sku": "E1M-AEN801", "silicon_variant": "X"}
+    _method, args = _flash_args_for(
+        loader_mod, orchestrator_mod,
+        _absent_device_soc_spec(), som_preset, "m55_hp")
+    assert "jlink_flash_device" not in args, sorted(args)
+
+
+def test_flow_d_available_arms_on_the_declared_null_key(
+        loader_mod, orchestrator_mod):
+    """End of the chain: the emitted shape is what `flash_plan` keys on.
+
+    Without this the two tests above pin the emitter in isolation and prove
+    nothing about the behaviour the issue is actually about."""
+    from tan.core.flash_plan import flow_d_available  # noqa: PLC0415
+
+    som_preset = {"sku": "E1M-AEN801", "silicon_variant": "X"}
+    _method, null_args = _flash_args_for(
+        loader_mod, orchestrator_mod,
+        _null_device_soc_spec(), som_preset, "m55_hp")
+    _method, absent_args = _flash_args_for(
+        loader_mod, orchestrator_mod,
+        _absent_device_soc_spec(), som_preset, "m55_hp")
+    # Neither arms Flow D on its own -- FLOW_D_KEYS needs the whole set --
+    # but the declared-null one must at least carry the key that the
+    # truthiness test used to destroy.
+    assert "jlink_flash_device" in null_args
+    assert "jlink_flash_device" not in absent_args
+    assert flow_d_available(absent_args) is False
 
 
 def test_stock_no_override_falls_back_to_the_documented_address(
