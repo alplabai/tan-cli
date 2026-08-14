@@ -528,3 +528,116 @@ def test_a_posix_device_path_is_not_rewritten(monkeypatch):
     assert monitor_cmd._port_aliases("/dev/ttyUSB0") == {"/dev/ttyUSB0"}
     assert monitor_cmd._port_aliases("COM38") == {"COM38"}
     assert monitor_cmd._port_aliases(_UNC_COM38) == {_UNC_COM38, "COM38"}
+
+
+def _stub_child(monkeypatch, returncode: int = 0) -> dict:
+    """Capture the argv `monitor` hands miniterm, without spawning anything.
+
+    Same three-line shape the tan-cli#701 tests above build inline; hoisted so
+    the tan-cli#569 cases below do not add a fourth copy.
+    """
+    captured: dict = {}
+
+    class _Completed:
+        pass
+
+    _Completed.returncode = returncode
+
+    def fake_run(argv, **_kwargs):
+        captured["argv"] = argv
+        return _Completed()
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", fake_run)
+    return captured
+
+
+# --------------------------------------------------------------------------
+# tan-cli#569 -- the gate is openability, not enumeration.
+#
+# `comports()` does not enumerate `/dev/serial/by-id/...` symlinks or any of
+# pyserial's URL schemes, and `serial.Serial()` opens all of them. Measured on
+# a Linux host with a real Artery AT32 adapter before the fix:
+#
+#   $ python -c "import serial; serial.Serial('/dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00')"
+#   opened OK
+#   $ tan monitor --port /dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00
+#   monitor: port '...' not found -- available serial ports: ... /dev/ttyACM0 ...
+#
+# The refused port's own raw node was in the list tan printed back.
+# --------------------------------------------------------------------------
+
+
+def test_a_character_device_not_in_comports_is_accepted(monkeypatch, tmp_path):
+    """THE #569 case: a by-id symlink pyserial opens and `comports()` omits.
+
+    `os.stat` follows the symlink, so the real check is "is the target a
+    character device" -- which is what pyserial's own open does.
+    """
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("/dev/ttyACM0", "AT32")])
+    by_id = "/dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00"
+    monkeypatch.setattr(monitor_cmd, "_is_openable_device", lambda port: port == by_id)
+    captured = _stub_child(monkeypatch, returncode=0)
+
+    result = runner.invoke(app, ["--port", by_id, "--format", "json"])
+    assert result.exit_code == 0, result.output
+    # The operator's own spelling reaches miniterm -- rewriting it to the raw
+    # node would hand back the unstable name #569 exists to avoid.
+    assert captured["argv"][-2:] == [by_id, "115200"]
+
+
+def test_a_pyserial_url_scheme_is_accepted(monkeypatch):
+    """`socket://` and `rfc2217://` have NO local device path, so the
+    character-device arm cannot cover them and there is no workaround."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+    monkeypatch.setattr(monitor_cmd, "_is_openable_device", lambda _port: False)
+    monkeypatch.setattr(
+        monitor_cmd, "_url_handler_prefixes", lambda: frozenset({"socket://", "rfc2217://"})
+    )
+    captured = _stub_child(monkeypatch, returncode=0)
+
+    result = runner.invoke(app, ["--port", "socket://localhost:7000", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert captured["argv"][-2:] == ["socket://localhost:7000", "115200"]
+
+
+def test_a_port_matching_none_of_the_three_arms_is_still_refused(monkeypatch):
+    """Non-vacuity for the whole gate. Without this, `_port_is_usable` could
+    `return True` and every case above would still pass."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("/dev/ttyACM0", "AT32")])
+    monkeypatch.setattr(monitor_cmd, "_is_openable_device", lambda _port: False)
+    monkeypatch.setattr(monitor_cmd, "_url_handler_prefixes", lambda: frozenset({"socket://"}))
+
+    result = runner.invoke(app, ["--port", "/dev/ttyNOPE99", "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert "not found" in doc["issues"][0]["message"]
+
+
+def test_url_handler_prefixes_are_read_from_pyserial_not_hardcoded():
+    """A hardcoded list drifts when pyserial adds or drops a handler. Measured
+    on pyserial 3.5: alt, cp2110, hwgrep, loop, rfc2217, socket, spy."""
+    prefixes = monitor_cmd._url_handler_prefixes()
+    if not prefixes:
+        pytest.skip("pyserial not installed in this environment")
+    assert "socket://" in prefixes
+    assert "rfc2217://" in prefixes
+    # Every entry is a scheme, not a bare module name -- a set of
+    # `protocol_socket` strings would never match a real `--port`.
+    assert all(p.endswith("://") for p in prefixes), sorted(prefixes)
+    assert not any(p.startswith("protocol_") for p in prefixes), sorted(prefixes)
+
+
+def test_is_openable_device_refuses_a_regular_file_and_an_absent_path(tmp_path):
+    """The character-device arm must not accept any old existing path. A
+    regular file exists and stats fine, and is not a serial port."""
+    regular = tmp_path / "not-a-tty"
+    regular.write_text("")
+    assert monitor_cmd._is_openable_device(str(regular)) is False
+    assert monitor_cmd._is_openable_device(str(tmp_path / "absent")) is False
+    # An embedded NUL raises ValueError from os.stat on CPython; a pre-flight
+    # gate must answer False, never traceback.
+    assert monitor_cmd._is_openable_device("/dev/tty\x00evil") is False
