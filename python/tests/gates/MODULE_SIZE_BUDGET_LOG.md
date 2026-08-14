@@ -130,3 +130,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/build_cmd.py: 2106 -> 2161
     - tan/commands/size_cmd.py: new entry at 831
     - function_count_budget: 255 -> 256
+- 2026-08-14 -- rebase onto #745: recompute after tan-cli#744's planner growth and tan-cli#747/#746 landed in the same budget
+    - function_count_budget: 256 -> 257
