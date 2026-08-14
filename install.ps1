@@ -17,10 +17,11 @@
 #     load) and even on Windows measured >2x slower per-invocation than
 #     --onedir. $Dir\tan.cmd is then a thin launcher, not the executable itself
 #     -- the unpacked freeze lives in $Dir\tan-cli-lib\.
-#   * Every tag published BEFORE v0.5.0 -- including v0.4.1, which is what
-#     `latest` resolves to today, and the v0.5.0-rc4 pre-release -- publishes a
-#     raw tan.exe. That one is installed as $Dir\tan.exe, no launcher and no
-#     tan-cli-lib\.
+#   * Every tag published BEFORE v0.5.0 -- v0.4.1 and the v0.5.0-rc4
+#     pre-release -- publishes a raw tan.exe. That one is installed as
+#     $Dir\tan.exe, no launcher and no tan-cli-lib\. `latest` resolves to v0.5.1
+#     today, so the no-argument install takes the archive path; the raw path is
+#     reached only via -Version on an older tag.
 #
 # Mirrors install.sh's shape for the .tar.gz side of the same change.
 #
@@ -219,10 +220,11 @@ try {
 	# WHICH SHAPE does this release publish? (tan-cli#356)
 	#
 	# From v0.5.0 the asset is a .zip of a --onedir freeze (tan-cli#349). Every
-	# tag published before it -- v0.4.1, which is what `latest` resolves to
-	# today, and the v0.5.0-rc4 pre-release -- publishes a raw tan.exe under the
-	# same triple. Requesting the .zip unconditionally 404s on every tag that
-	# exists right now, which is what #356 reported.
+	# tag published before it -- v0.4.1 and the v0.5.0-rc4 pre-release --
+	# publishes a raw tan.exe under the same triple. `latest` resolves to v0.5.1
+	# today, so both shapes are installable and neither name can be assumed:
+	# requesting the .zip unconditionally 404'd on every tag that existed when
+	# #356 was reported.
 	#
 	# Decided by asking the release ITSELF which name it carries, through the
 	# checksums.txt just fetched: that file lists every asset in the release, it
