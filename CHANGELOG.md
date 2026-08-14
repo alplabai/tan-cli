@@ -5,9 +5,10 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.5.2] — Unreleased
+## [0.6.0-rc1] — 2026-08-14
 
 ### Added
+
 
 - **`tan doctor` reports the project's curated-library selection: a `libraries`
   row carrying each entry's tier, licence and whether it can be wired on the
@@ -248,7 +249,76 @@ All notable changes to `tan` are documented here. Format follows
     CI: it needs a real alp-sdk checkout, an optionally-bootstrapped west
     workspace and a real build.
 
+- **End-to-end planner coverage for Flow D's four `flash_args` keys, including
+  two negative controls.** The resolution itself (`expect_dpidr` +
+  `jlink_device` as an inseparable pair, `jlink_flash_device`, and
+  `slot0_load_address`) landed with the alp-sdk #1355/#1362 port; what was
+  missing was a test that drives the PLANNER end to end and asserts the keys
+  arrive in `flash_args`, rather than testing each resolver in isolation. Six
+  tests: all four keys for `m55_hp` and `m55_he`, a core with no
+  `jlink_flash_device` arming no Flow D keys at all, the stock no-override
+  fallback landing on the documented address, and -- the two that matter most
+  -- a half-armed `expect_dpidr`/`jlink_device` pair and a half-authored
+  `memory_map:` each producing a CODED REFUSAL rather than a guess. A planner
+  that guesses one of these silently arms a flasher against the wrong board.
+  (#353)
+
+- **`envelope-contract.json` now publishes a `doctor` family (tan-cli#664).**
+  All 17 prior families were byte goldens; `doctor` cannot be one — its `data`
+  values are host facts (installed tool versions, absolute paths, which
+  checks even apply on this machine) — so `envelopes.doctor` instead carries
+  `args` and `dataKeys`, the required `data` KEY SET (`contract/doctor-data-
+  keys.json`, the single source), never a value. `dataKeys` is entirely
+  machine tokens (`"string"`, `"int"`, `"string|null"`) rather than prose:
+  `checks` is `{requiredKeys, optionalKeys}` (`fix` is the one optional key —
+  omitted, never null, when a check has no remediation) and
+  `missingPrerequisites` is `{nullable: true, items: {tool, command}}` — a
+  consumer can validate the shape structurally without parsing English.
+  Enumerated by reading `doctor_cmd.py`'s own envelope assembly and
+  cross-checked against a real `tan doctor --format json` run, not curated by
+  hand. Kept from drifting by `python/tests/conformance/
+  test_doctor_contract_key_set.py`, which derives every required/optional key
+  set — including `checks[]`'s and `missingPrerequisites[]`'s — from the
+  published file itself and fails if the emitted key set and the declared one
+  disagree in either direction, at every level.
+  Before this, alp-sdk-vscode's dependency panel (`packages/alp-core/src/deps/
+  planner.ts`, reading `data.missingPrerequisites`) and its debug
+  troubleshooting panel (rendering `checks[].fix`/`data.nextSteps` verbatim,
+  alp-sdk-vscode#491) had no published shape to gate against, so a rename of
+  any of those keys would have shipped silently. `status`'s pass/warn/fail/
+  unknown vocabulary and `scope`'s host/project vocabulary stay documented,
+  but deliberately un-pinned as an enum here — see `contract/README.md`,
+  "The `doctor` family is a key set, not a golden". `data.nextSteps` is NOT
+  guaranteed to equal the ordered list of non-null `checks[].fix` values —
+  `next_steps()` additionally dedupes and skips `pass`/`unknown` checks, so
+  the two arrays can and do differ in length on a real run (measured: 13
+  checks, 8 non-null `fix` values, 7 `nextSteps` entries); a consumer wanting
+  "the fix for check N" reads `checks[N].fix`, not `nextSteps` by index.
+
+- **Changelog entries are now one file per change under `changelog.d/`, not
+  edits to `CHANGELOG.md`.** `CHANGELOG.md` has a single insertion point — the
+  `###` lists under `## [X.Y.Z] — Unreleased` — so every open PR appends to the
+  same lines and any two PRs conflict on it by construction, re-firing on every
+  merge. Measured 2026-08-11 across the seven conflicted PRs then open,
+  `CHANGELOG.md` was a conflicted file in **six**, and the **only** conflicted
+  file in **three** — PRs otherwise ready to merge, blocked purely by contention
+  over one list. Fragments are disjoint files, so that class of conflict becomes
+  impossible. Add `changelog.d/<issue>.<category>.md` with the bullet(s) exactly
+  as they should read; `<category>` is one of `added`, `changed`, `deprecated`,
+  `removed`, `fixed`, `security`.
+  - **The release contract is unchanged.**
+    `python/scripts/assemble_changelog.py` folds every fragment into the
+    `Unreleased` section in canonical order and deletes the fragments, so
+    `release.yml`'s existing `## [X.Y.Z]` slice still sees one fully-populated
+    section. Run it before the version bump; `--require-empty` is the release
+    gate that refuses to tag while any fragment is still unfolded, `--check`
+    lists what is pending, `--dry-run` prints the result without writing.
+    Fragment bodies are copied byte-for-byte — never rewrapped or reformatted,
+    because the house style carries verbatim registers, error codes and paths a
+    rewrap would corrupt.
+
 ### Removed
+
 
 - **The Rust oracle is retired: `crates/tan-core`, `crates/tan-cli`,
   `Cargo.toml` and `Cargo.lock` are deleted, and with them the
@@ -294,6 +364,7 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Changed
 
+
 - **`tan debug-config --core <id>` now refuses a `--core` matching no build
   slice even when `--target-kind` is given explicitly**, not only when it is
   omitted. Previously an explicit `--core` was only checked against
@@ -309,6 +380,7 @@ All notable changes to `tan` are documented here. Format follows
   `--target-kind` to let it infer. (#489)
 
 ### Fixed
+
 
 - **`tan init` no longer reports `ok:true`/`issues:[]` while silently
   discarding what `--sdk-root` or `--cores` asked for.** Two sites, same
@@ -2922,7 +2994,1562 @@ All notable changes to `tan` are documented here. Format follows
     by node id, in `python-tests`: a SKIP there is a hard job failure, and the
     job fails in seconds rather than after the full parity round.
 
+- **`sensor-starter`/`board-diagnostics` gained the `boards/
+  native_sim_native_64.{conf,overlay}` pair their canonical examples always
+  shipped, so a scaffolded project's documented native_sim build now has the
+  `alp-i2c0` emulated I2C bus and `CONFIG_EMUL`/`CONFIG_I2C_EMUL` it
+  claimed.** Without them, `west build -b native_sim/native/64` on a fresh
+  scaffold had no I2C alias at all (`alp_last_error=-2` instead of the
+  documented NACK probe). Landed with two fixes the vendoring alone did not
+  cover: `tan generate` no longer refuses a freshly scaffolded project
+  outright (`generate.would-overwrite`, exit 3, nothing written) just
+  because `native-sim-overlay` rides along in the bare/`--all` default set
+  and collides with the vendored overlay -- it now drops that one target,
+  reports `generate.overlay-not-owned`, and writes the other eight, without
+  suggesting `--force` as a remedy (that would replace the vendored,
+  emulated-I2C overlay with tan's plain GPIO-only one, reinstating the exact
+  failure above -- an explicit `--target native-sim-overlay --force` still
+  does that, unchanged, for a caller who names the file on purpose); and
+  `tests/parity/scaffold_byte_parity.py` also gained a `missing_extras`
+  check: it could not previously fail on a vendored `NON_ENVELOPE_EXTRAS`
+  file that was missing entirely (only ever compared a name the vendored
+  tree already had), so it was 9/9 PASS with this whole fix reverted; a
+  matching SDK-free test now pins the shipped file list directly. (A first
+  cut also gave the four affected `CMakeLists.txt` files `list(PREPEND
+  EXTRA_CONF_FILE ...)`, on the theory that it let the vendored board conf's
+  `CONFIG_EMUL` win over the generated `alp.conf` the same way tan-cli#379's
+  real fix does for `iot`; measured false -- `boards/*.conf` joins Zephyr's
+  `CONF_FILE`, not `EXTRA_CONF_FILE`, so it is unaffected by that ordering
+  either way, and PREPEND vs. APPEND produced an identical merge and
+  identical `.config` in a real configure. Reverted to plain `APPEND`.)
+  (#501)
+
+- **A Zephyr slice's `build-plan` `artifacts` paths now carry the `build/`
+  level `west build` actually writes into, matching alp-sdk's re-sync.**
+  `_slice_artifacts` in `tan/planner/buildplan.py` reported
+  `<buildDir>/zephyr/zephyr.elf`, a file `west` never creates: the slice's
+  `command` runs `west build` with `cwd` = `buildDir` and no `-d`, so `west`
+  appends its own default `build` level and the tree lands at
+  `<buildDir>/build/`. All six Zephyr paths move under that level -- `elf`,
+  `map`, `bin`, `sizeReport` and `symbols` in `zephyr/`, `compileCommands` at
+  the build-dir root -- and `outputDir` stays `null` (alp-sdk#1360/#1401).
+  `orchestrator.py`'s matching change is comment-only. Re-synced from alp-sdk
+  `d00dbdc1`, moving all four SDK pins (`ci.yml`'s `sdk_parity` checkout
+  `ref:`, `parity.yml`'s `PINNED_SDK_TAG`, and both `PINNED_SDK_COMMIT` /
+  `HAND_PORT_PINNED_SDK_COMMIT` in `test_planner_relocation_freshness.py`)
+  together, per this repo's own lockstep rule.
+
+  Two HAND_PORT deltas landed in the same alp-sdk range and are folded into
+  this re-sync: `scripts/gen_zephyr_board.py`'s AEN `LOG_MODE_MINIMAL`
+  default (alp-sdk#1373/#1407, completing tan-cli#690's follow-up) and
+  `scripts/alp_template.py`'s pin-`doc:` collision guard
+  (alp-sdk#1394/#1399) plus its scaffold `ALP_SDK_ROOT` comment rewrite
+  (alp-sdk#1400) — the latter forces a re-vendor of four `CMakeLists.txt`
+  files under `python/tan/templates/vendored/` (`edge-ai`/`minimal`, both
+  SKUs; see that tree's `MANIFEST.md`).
+
+  A further change lands inside the same `a3173305..d00dbdc1` range, found
+  because it was invisible to the pin move above: alp-sdk dad5b35a
+  ("fix(faultdecode): lead with the escalated fault, not the escalation",
+  #1389) adopted BOTH of `tan/core/faultdecode.py`'s tan-cli#616 declared
+  divergences from `scripts/alp_cli/faultdecode.py` verbatim -- the
+  LSPERR/MLSPERR root-cause branches and the negative-CFSR refusal -- closing
+  a gap tan's port had flagged as "upstream should follow". The two tests
+  that pinned those divergences against a live oracle went red at this pin,
+  each on its own documented "the day upstream adopts this, delete/rewrite
+  it" instruction (`tests/core/test_faultdecode.py` and
+  `tests/commands/test_faultdecode_command.py`, see those files' own history
+  for the exact test names): the first is rewritten as a plain
+  byte-equality sweep, `test_decode_matches_the_sdk_original_byte_for_byte`;
+  the second is deleted outright.
+  `tests/fixtures/faultdecode_golden.PROVENANCE.txt` records the divergence
+  as closed. `scripts/alp_cli/faultdecode.py` was never in `PINNED_HASHES`
+  or `HAND_PORT_HASHES` -- entirely outside this file's own freshness-gate
+  audit surface by construction -- so nothing here would have caught
+  dad5b35a landing with a REAL behavioural delta; it now joins
+  `HAND_PORT_HASHES` so the next change to it is.
+
+  `test_decode_matches_the_sdk_original_byte_for_byte`'s unconditional
+  byte-equality is now gated on the resolved oracle being AT
+  `HAND_PORT_PINNED_SDK_COMMIT`: any reachable `alp-sdk` checkout older than
+  dad5b35a still carries the pre-fix `_root_cause` ladder with no
+  LSPERR/MLSPERR branch, and would otherwise turn a correct port red on a
+  contributor's own machine (CI is unaffected -- the `sdk_parity` job always
+  binds `ALP_SDK_ROOT` to the pin, and the non-parity job has no sibling
+  checkout to find). An out-of-vintage oracle now skips instead, naming both
+  the required commit and the sha256 mismatch. The other eight
+  `scripts/alp_cli/*.py` sources `tan/` hand-ports (`diagnostic_format`,
+  `validate`, `new_som`, `doctor`, `explain`, `monitor`, `model`,
+  `validator`) join `HAND_PORT_HASHES` the same way `faultdecode.py` did,
+  closing the rest of that blind spot.
+
+  `tests/parity/seam1_field_diff.py`'s vendored comparator gains a third
+  hand-reviewed allowance, `_NESTED_ARTIFACT_TAILS`, mirroring alp-sdk's own:
+  keyed on the six named artifact fields and the exact one-segment `build/`
+  insertion before each field's fixed Zephyr tail, so the frozen 97ad481b
+  oracle's un-nested paths keep passing seam-1 against a live emit at the new
+  pin.
+
+  **Separate, unfixed defect, confirmed but out of scope here:** `tan
+  renode`'s `core/renode_plan.py::zephyr_elf_from_manifest` has its own
+  `<build_dir>/zephyr/zephyr.elf` fallback for a slice with no
+  `output_artefact`, independent of the plan's `artifacts` block. The one
+  place in `tan` that still reads `slice.artifacts` after `core/build_plan.py`
+  parses it is `python/tan/commands/build/execute.py:995`
+  (`sl.artifacts.get("outputDir")`, the `os: baremetal` staleness-disclosure
+  check above) -- harmless here, since `outputDir` is untouched by this fix
+  and that reader never runs for a Zephyr slice, but it means this fix ships
+  with no consumer-side edit because that is the one reader's actual shape,
+  not because there is no reader at all. Called directly with `build_dir:
+  "m55_he-zephyr"`, `zephyr_elf_from_manifest` returns
+  `build/m55_he-zephyr/zephyr/zephyr.elf`, the same one-level-short path this
+  fix removes from the SDK-side contract.
+
+- **Three width probes were armed on stderr but MEASURED on stdout, so
+  `tan explain > out.txt`, `tan doctor > report.txt` and `tan build > log.txt`
+  from any terminal narrower than 100 columns wrapped to the wrong width.**
+  `tan.env.wrap_width()`, `doctor`'s report width and `build`'s
+  `_heartbeat_line_width()` each gated on `stderr_is_tty()` and then took
+  their column count from `shutil.get_terminal_size(fallback=(100, 24))`,
+  which CPython resolves against `os.get_terminal_size(sys.__stdout__.
+  fileno())`. Nothing in text mode is written to stdout, so with stdout
+  redirected that ioctl raised `OSError [Errno 25] Inappropriate ioctl for
+  device` -- swallowed by `shutil` itself -- and every probe silently took the
+  hard-coded 100 columns while stderr's own fd read 70: `explain` put 84- and
+  91-column lines on a 70-column screen, `doctor` put 94-, 95- and 105-column
+  ones, and `_heartbeat_line_width()` returned 79 instead of 69, so
+  `_tick`'s `message.ljust(width)` soft-wrapped and stacked a fresh "still
+  building" row per tick -- the tan-cli#287 defect that width computation was
+  added to remove. The inverse under-wrapped: stderr on a 200-column terminal
+  with stdout on a 40-column one hard-wrapped to the 60-column
+  `TEXT_WRAP_MIN_WIDTH` floor. All three now measure through one shared
+  `tan.env.terminal_width()`, which reads `os.get_terminal_size(sys.stderr.
+  fileno())`. `COLUMNS` keeps its existing precedence over both handles, and a
+  stderr that cannot be measured still falls through to
+  `shutil.get_terminal_size`, so the mirror-image run (stderr redirected,
+  stdout still a terminal) resolves exactly what it resolved before. (#564)
+
+- **`tan renode` reported a PASS on a run that never classified a single
+  console line.** `--timeout 0` computes a deadline already in the past, so
+  the read loop breaks before its first `queue.get` and no line is ever read;
+  every other signal the command reports (`argv-rejected`, `cpu-halted`,
+  `expect` found, `exited-nonzero`) is latched FROM a console line or a
+  captured exit status, so with none of them fired the run fell through to the
+  implicit "nothing else fired, so it's a pass" branch and exited `0`. A
+  genuinely silent Renode that exited clean produced the same false pass at a
+  normal timeout. `run_renode` now returns a `lines_seen` flag and the caller
+  treats `lines_seen is False` as its own outcome --
+  `renode.no-console-output` at `ExitCode.RUNTIME_FAILURE` -- because
+  "nothing was checked" and "checked and correct" are different facts, and
+  collapsing them is exactly the silent pass this command's own module
+  docstring says it must never produce. **`--timeout 0` stays legal** (a
+  caller may legitimately want a single non-blocking sweep); it just cannot
+  buy a pass it did not earn. (#568)
+
+#### `tan monitor` accepts every port pyserial can open, not only the ones `comports()` enumerates (#569)
+
+
+The gate tested set membership against `comports()`, which refuses two whole
+classes of working port: `/dev/serial/by-id/...` symlinks (pyserial reports raw
+nodes, never the by-id path) and pyserial's URL handlers (`socket://`,
+`rfc2217://`, ..., for which there is no local device path to fall back on).
+The module docstring stated the rule as refusing a port that "does not exist";
+the code was stricter than its own stated rule.
+
+Measured on this host against a real Artery AT32 adapter, before the fix:
+
+```
+$ python3 -c "import serial; s=serial.Serial('/dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00'); print('opened OK:', s.name)"
+opened OK: /dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00
+
+$ python3 -c "from serial.tools import list_ports; print('/dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00' in [p.device for p in list_ports.comports()])"
+False
+
+$ tan monitor --port /dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00
+monitor: port '/dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00' not found -- available serial ports: ... /dev/ttyACM0  AT32 Virtual Com Port
+```
+
+tan refused the port and then listed that same port's own raw node in the
+refusal.
+
+After, same host, same adapter:
+
+```
+$ tan monitor --port /dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00
+monitor: /dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00 @ 115200 (Ctrl+] to quit)
+
+$ tan monitor --port socket://localhost:65000
+monitor: socket://localhost:65000 @ 115200 (Ctrl+] to quit)
+could not open port 'socket://localhost:65000': Could not open port socket://localhost:65000: [Errno 111] Connection refused
+```
+
+The `socket://` run reaching a connection refusal is the point: the gate passed
+and miniterm ran.
+
+A genuinely absent port is still refused:
+
+```
+$ tan monitor --port /dev/ttyNOPE99
+monitor: port '/dev/ttyNOPE99' not found -- available serial ports: ...
+rc=1
+```
+
+`_port_is_usable` is now the gate, with three accepting arms — enumerated
+(including the `\\.\` alias of #701), a character device on this host, or one of
+pyserial's URL schemes. The scheme set is read from `serial.urlhandler` via
+`pkgutil.iter_modules` rather than hardcoded, so a pyserial that adds or drops
+a handler moves it; measured on pyserial 3.5 as `alt://`, `cp2110://`,
+`hwgrep://`, `loop://`, `rfc2217://`, `socket://`, `spy://`. No pyserial at all
+yields an empty set, leaving the gate exactly as strict as before.
+
+The operator's own spelling reaches miniterm unrewritten — rewriting a by-id
+path back to its raw node would hand back the unstable name this issue exists
+to avoid.
+
+Non-vacuity, measured. `_port_is_usable` neutered to `return True`:
+
+```
+FAILED tests/commands/test_monitor_command.py::test_port_not_in_the_detected_list_refuses
+FAILED tests/commands/test_monitor_command.py::test_a_unc_port_whose_bare_form_is_absent_is_still_refused
+FAILED tests/commands/test_monitor_command.py::test_a_port_matching_none_of_the_three_arms_is_still_refused
+3 failed, 31 passed, 1 skipped in 0.41s
+```
+
+Restored:
+
+```
+497 passed, 10 skipped in 14.07s
+```
+
+`_is_openable_device` answers `False` for a regular file, an absent path, and a
+path with an embedded NUL — a pre-flight gate must refuse, never traceback. On
+Windows it answers `False` for `COM7`, which is correct: `_port_aliases` is what
+covers that platform, and this arm must not quietly widen it.
+
+- **`tan diff` refused an `os:`/`preset:` value the oracle accepts, and at
+  `schemaVersion >= 2` that false refusal hid the one real change the command
+  exists to report.** `_typed_field(doc, "os", str, ...)` demanded the parsed
+  YAML node already be a Python `str`, but a `String`-typed Rust field
+  (`serde_yaml`) coerces ANY scalar -- a bare `os: true` or `os: 5` is exit 0
+  on the oracle, not exit 2 `diff.schema-violation`. A new
+  `_string_scalar_field` helper now applies the same leniency `os`/`preset`
+  always documented but never implemented (`inference.backend` already had
+  it): only the compound shapes `list`/`dict` no `String` field can ever hold
+  are rejected; every other scalar coerces to its string form (`true`/`false`
+  for a bool, `str(value)` otherwise) for the diff entry's `before` value.
+  (#570)
+
+- **`tan diff` accepted a `schemaVersion` above `u32::MAX` and silently
+  treated it as `>= 2`, instead of refusing the plan it cannot represent.**
+  `_parse_fields`'s `schemaVersion` guard checked only the lower bound
+  (`schema_version < 0`); the `_U32_MAX` ceiling already applied to
+  `inference.default_arena_kib` was never applied here, so
+  `schemaVersion: 4294967296` fell through as a plain Python `int` and
+  reported a fabricated `os` diff entry at exit 0. Now refuses with
+  `diff.schema-violation`, matching the oracle's exit 2, for any
+  `schemaVersion` outside `[0, u32::MAX]`; `u32::MAX` itself is still
+  accepted. (#571)
+
+- **`tan/core/setools.py`'s module docstring stated the SETOOLS resolution
+  precedence backwards and omitted `--setools-dir` entirely.** The header
+  claimed *"an explicit `flash_args.setools_dir`, then `SETOOLS_DIR`, in that
+  order"*, while `resolve_setools_dir` has resolved **`--setools-dir` flag ->
+  `SETOOLS_DIR` -> `flash_args.setools_dir`** since the tan-cli#368
+  re-ranking. Two docstrings in one file disagreed about which SETOOLS signs
+  the image. The header is the first thing read when editing the file, and it
+  ranked the manifest highest -- so a maintainer could reasonably "restore"
+  that order, silently reverting #368 and letting a stale hand-edited
+  `flash_args.setools_dir` (a GENERATED field every `tan build` overwrites)
+  outrank the `SETOOLS_DIR` an operator exported. Corrected, and annotated
+  with why the ranking is what it is so the next reader does not re-invert it.
+  (#572)
+
+- **`load_board_yaml`'s `metadata_root=` override was ignored by two of its
+  five stages, so a load against an alternate metadata tree could refuse a
+  `storage[].flash_device` that tree DOES declare -- and blame the customer's
+  board.yaml while listing the OTHER tree's device names.** `_resolve_storage`
+  called `_known_flash_devices(..., METADATA_ROOT)` and `_validate_cross_fields`
+  called `resolve_memory_map(..., METADATA_ROOT)`, both reading the module-level
+  bound root rather than the caller's. The mismatch was PARTIAL, which hid it:
+  `som_preset` still came from the caller's tree, so an alternate tree's explicit
+  `memory_map:` override and its `on_module.ospi_memories:` keys were honoured --
+  only the SoC-JSON-derived branch of `resolve_memory_map` read the wrong tree.
+  - **The root now travels on the project, not just through the loader.** The
+    resolvers `load_board_yaml` hands its `BoardProject` to read the bound root
+    too (`partition.resolve_storage_partitions`, `carveout.resolve_carve_outs`,
+    `kconfig`'s three `resolve_capabilities` calls), and `BoardProject` carried
+    no root at all -- so fixing only the two loader lines would have left the
+    loader ACCEPTING a flash device the resolver then BLOCKED. `BoardProject`
+    gains a `metadata_root` field and an `effective_metadata_root()` accessor
+    that those five call sites now use.
+  - Latent, not live: every production load takes the default, and the one
+    caller that passes the parameter (`tan doctor`'s library check) binds the
+    same root it passes. A default load's behaviour is unchanged. Still
+    bound-root-only, and out of scope here: the library-manifest readers, none
+    of which have a project in hand where they read. The same two lines exist
+    upstream in alp-sdk's `scripts/alp_orchestrate/loader.py`. (#573)
+
+- **Six comments claimed tan declares no PyYAML dependency and that the frozen
+  binary ships without it; both are false.** `pyyaml>=6` is a base entry in
+  `python/pyproject.toml` `[project].dependencies` -- its own comment reads
+  "`pyyaml` is load-bearing, not optional" -- and `python/scripts/build_binary.sh`
+  installs `-e ".[monitor]" "pyinstaller>=6.10"`. The quoted recipe
+  `pip install typer rich pyinstaller` appears nowhere in that script; it was
+  real historically, `pyyaml` entered `pyproject.toml` afterwards, and the
+  comments were never updated. `clean_cmd.py`'s **KNOWN GAP, for whoever owns
+  packaging** block was the worst of them: it sent a maintainer to spend an
+  artefact-size budget closing a gap that is already closed, against a build
+  recipe that no longer exists. Corrected at all six sites --
+  `clean_cmd.py` (module header + `parse_manifest_slices`),
+  `core/system_manifest.py`, `test_clean_command.py`, `test_presets_command.py`,
+  `test_flash_command.py`. Every absent-parser code path is KEPT: a `--no-deps`
+  install or a broken venv can still lack PyYAML, so the arms are the degraded
+  case rather than what customers run. Comments only; no behaviour change. (#574)
+
+- **The consumer half of #611/#612 is now grounded against what alp-sdk
+  actually shipped, not a proposed edit.** tan-cli#621 landed the `flash_policy`
+  hoist and a #612 measurement of the pre-fix V2N/V2M `flash_args` block ahead
+  of the matching alp-sdk change; that upstream half has since landed
+  (`alplabai/alp-sdk#1357`, merged as `#1364`, measured against `origin/dev`
+  `496e32ad`) with the exact field names and enum values (`flash_policy`:
+  `customer`/`factory`/`recovery_only`) tan already consumed — so no planner
+  change was needed, but two test files were stale about what "the shipped
+  shape" IS:
+  - `tests/core/test_swd_probe_shipped_preset_shape.py` pinned the four V2N/V2M
+    presets' `flash_args` as `target` with no `jlink_device` and asserted
+    `plan_swd_probe` REFUSED it on every host. That block, alongside a `base`,
+    is what alp-sdk#1357/#1364 actually added; the four presets now plan
+    (rather than refuse) on any host with J-Link, OpenOCD or pyOCD, including
+    under `--dry-run`. The pre-fix block is kept as a separate, still-correct
+    regression case for any OTHER `swd_probe` entry that omits `jlink_device`.
+    A new `ALP_SDK_ROOT`-gated case reads all four presets' real
+    `helper_firmware:` block out of a bound checkout and asserts they are
+    byte-identical to each other and to the pinned literal, so a future preset
+    edit that drifts shows up here rather than going unnoticed.
+  - `tests/commands/test_flash_helper_policy_command.py`'s
+    `test_the_shipped_cc3501e_shape_is_untouched` claimed its
+    no-`flash_policy` manifest was "the CC3501E as it ships today". It is not:
+    `flash_policy` is now REQUIRED on every `helper_firmware` entry, and all
+    six `E1M-AEN*` presets' `cc3501e_otp` now carries
+    `flash_policy: recovery_only`, which reaches `helper_flash_gate` before
+    `_flash_entry`'s `update_channel` branch and produces a DIFFERENT (both
+    correct) decline message on an ordinary run. The old case is renamed to
+    name what it actually covers (a pre-#1357 manifest); a new case pins the
+    real, current message, and a third pins that an armed
+    `--helper cc3501e_otp --recover` still falls through to the
+    `update_channel` wording, because the CC3501E has never declared a
+    `flash_method` for `--recover` to unlock.
+
+- **The `tan_under_test` hijack refusal (tan-cli#423) had no test of its own.**
+  Every other consumer of the fixture is an ordinary test run where the
+  refusal is expected to stay silent, so a green suite proved nothing about
+  whether it fires. `python/tests/gates/test_tan_under_test_guard.py` now
+  plants a decoy `tan` package outside this checkout's `python/`, puts it
+  ahead of the real one on `sys.path` — the shape a bare
+  `pip install -e ./python` into user site-packages produces — and asserts the
+  fixture refuses with its own named message; a companion case asserts it
+  stays silent for this repo's correctly-resolved `tan`. `README.md`'s
+  Development section now says to install into a venv you create, never a bare
+  or `--user` `pip install -e ./python`.
+- **`tan_under_test` checked only its own process's `import tan`, never the
+  interpreter the suite spawns.** The `__file__` assertion cannot see a
+  `sys.executable` that has `tan` on its path but no `typer` — the children run
+  `[sys.executable, "-m", "tan", ...]` (47 call sites under `python/tests/`),
+  which pulls `tan.__main__`'s dependency chain. The fixture now runs
+  `[sys.executable, "-m", "tan", "--version"]` once at session start and fails
+  with that command's own stderr. Measured on a bare `python3 -m venv` with no
+  `typer` installed:
+
+  ```
+  PYTHONPATH=$PWD bare-venv/bin/python -m tan --version   -> exit 1
+      ModuleNotFoundError: No module named 'typer'
+  PYTHONPATH=$PWD bare-venv/bin/python -c "import tan"     -> exit 0
+  ```
+
+  `tan/__init__.py` is empty, so the `-c "import tan"` form passes on that
+  same interpreter.
+
+- **`tan bootstrap`'s default text output never rendered the
+  `sdk.global-default-foreign-project` / `sdk.project-pin-unresolved`
+  warnings, though `--format json` from the identical invocation carried
+  them.** `doctor` and `init` both render these in text; `bootstrap` -- the
+  command that WRITES `~/.alp/sdk-default` in the first place -- silently
+  didn't, because `pin_issue`/`foreign_issue` are computed once, up front,
+  specifically NOT through `log.warn` (which would misname their shared,
+  unprefixed `sdk.*` code `bootstrap.*`), so they reached `bootstrap_issues`
+  (the JSON envelope) and stopped there. `_run` now also prepends
+  `{severity}: {message}` lines for both to `text`, ahead of the run's own
+  progress lines. (#677)
+
+- **`install.ps1`/`install.sh` now warn when a different `tan` earlier on
+  PATH will shadow the install they just finished.** Both scripts printed
+  `staged binary verified: tan X.Y.Z` / `installed tan -> ...` and exited `0`
+  while a new shell actually ran a DIFFERENT `tan` that happened to resolve
+  first — the install genuinely succeeded, but the message never said the
+  next shell would run something else. Measured on real Windows 11 with a
+  pre-existing `pip`-installed `tan`: `install.ps1` reported `tan 0.5.1`
+  verified and installed, but a new shell's `tan --version` printed
+  `0.5.0-rc3`, confirmed independently by re-resolving `tan` against the
+  registry Path (Machine + User, PATHEXT order) rather than trusting the
+  installer process's own inherited environment. Fixed by adding one warning
+  line right after the existing success message, printed only when the
+  install's own directory IS on the effective PATH a new shell will have
+  AND something else still resolves first (never when the directory was
+  never added to PATH at all -- that state already gets its own "is not on
+  the ... Path -- add it yourself" message, and warning about shadowing on
+  top of it would be noise). The shadowing binary's own reported version is
+  best-effort (a bounded timeout, printing `(reports: could not run)` on any
+  failure) and the check never reorders PATH, never removes the other
+  binary, and never turns a successful install into a non-zero exit.
+
+- **`.gitignore` now ignores venvs at the checkout ROOT, not only under
+  `python/`.** The existing rule was widened once already, from the single name
+  `.venv-build` to the glob `/python/.venv*/`, after an ad-hoc `.venv-e2e`
+  slipped past the exact-name rule and **3327 files** were committed --
+  including `pyvenv.cfg` and `Activate.ps1` carrying a literal
+  `C:\Users\<name>` home path, into a public repo whose history is permanent.
+  Its own comment states the principle: *"the fix is to stop matching one name
+  and match the shape."* It matched the shape but in only ONE LOCATION. Every
+  gate lane in this repo builds its venv at the **worktree root**
+  (`<worktree>/.venv-gate/`), because the suite is run as `cd python &&
+  ../.venv-gate/bin/python -m pytest` -- so none of them were covered. Measured
+  2026-08-12: **eight** worktrees each held an unignored root-level
+  `.venv-gate/`, and a stray `git add -A` in one staged **1043 files** in a
+  single commit. Adds `/.venv*/` and `/venv*/` alongside the existing
+  `/python/` pair. (#680)
+
+- **The README's first install step no longer assumes `curl`, and now separates
+  what the INSTALLER needs from what a BUILD needs.** `curl -fsSL ... | sh` was
+  the recommended path's opening instruction with no prerequisites line in front
+  of it, and a pristine `docker.io/library/ubuntu:24.04` has no `curl` — nor
+  `wget`, `ca-certificates`, `python3`, `pip3`, `git`, `cmake`, `ninja`, `unzip`
+  or `file` (measured in a clean-room `podman` run; `tar`, `gzip` and
+  `sha256sum` ARE present). The reader got `bash: curl: command not found` at
+  step one, with nothing saying whether `curl` was the only thing missing or the
+  first of several, and no way to reach `tan doctor` — which draws that line
+  correctly and was never the problem. The README was also NARROWER than the
+  script it documents: `install.sh` has always probed `command -v curl` then
+  `command -v wget` and refuses only when both are absent (`install.sh: need
+  curl or wget on PATH`), with the same shape guarding `sha256sum`/`shasum`. A
+  `wget`-only install of a stock `ubuntu:24.04` — the one added package, no
+  `curl` — was run end to end while writing this and reached `staged binary
+  verified: tan 0.5.1`, so the `wget` form is now documented alongside the
+  `curl` one. A new `### What a build needs` section carries the build list
+  (`git`, `cmake`, `python3`, `ninja`, `xz`, `wget` on Linux; no `xz`/`wget` on
+  macOS), plus `file` for `west sdk install` and `python3-venv` for `tan
+  bootstrap`, and points at `tan doctor` as the live authority — verified to run
+  on that bare host and report `hostPrerequisites: missing from PATH: git,
+  cmake, python3, ninja`. `python/tests/gates/test_readme_install_prerequisites.py`
+  reads the required-any tool groups out of `install.sh` and the build list out
+  of `tan.core.bootstrap.fallback_facts()`, so neither list can drift from the
+  thing it describes, and a build tool presented as an installer prerequisite
+  fails the gate. (#687)
+
+- **`tan generate --target zephyr-board` now emits every AEN board's
+  `LOG_MODE_MINIMAL` default, matching alp-sdk's `gen_zephyr_board.py`.**
+  alp-sdk#1407 added a `choice LOG_MODE / default LOG_MODE_MINIMAL` block to
+  `Kconfig.defconfig` for every AEN board (Zephyr's inherited
+  `LOG_MODE_DEFERRED` starves the log thread under the non-yielding
+  busy-loop `main()` the AEN bench procedure requires, so a healthy board
+  printed nothing); `python/tan/planner/zephyr_board.py`'s hand-port of that
+  generator was ported the same delta and re-verified byte-identical against
+  alp-sdk's own output via `tests/parity/test_planner_emit_parity.py`
+  (`ALP_SDK_ROOT`-gated). `HAND_PORT_PINNED_SDK_COMMIT` in
+  `tests/gates/test_planner_relocation_freshness.py` is deliberately not
+  re-pinned by this port alone: it is a single commit shared by ten
+  hand-ported files, and the earliest alp-sdk commit carrying #1407 also
+  carries an unrelated `scripts/alp_template.py` change (alp-sdk#1394/#1399)
+  that had not yet been audited or ported at the time — re-pinning then would
+  have either left that file's hash silently wrong or required porting an
+  unrelated feature. That follow-up audit (`scripts/alp_template.py`'s
+  pin-doc collision guard and scaffold stale-comment rewrite) lands together
+  with this fix in tan-cli#560, which is what actually moves the pin.
+
+- **Nothing warned when a locally-bound `ALP_SDK_ROOT` disagreed with the
+  commit tan's own pins declare**, so a run against the wrong alp-sdk tree
+  produced real-looking failures that were neither pre-existing nor caused by
+  the branch under test. Measured on the same node IDs against an unmodified
+  `origin/dev`, varying only `ALP_SDK_ROOT`: `a3173305` -> `30 passed`,
+  `c07254b2` -> `5 failed, 25 passed` -- four alp-sdk commits' worth of
+  correct upstream behaviour (alp-sdk#1389 adopting both halves of tan-cli#616,
+  alp-sdk#1400 changing the scaffold's `ALP_SDK_ROOT` emit) that tan has not
+  been reconciled to yet. A full suite reported `9 failed, 4986 passed` and it
+  took a three-way comparison by hand to establish that five of the nine were
+  the bound tree. `python/tests/conftest.py` now compares the bound checkout's
+  `HEAD` to `PINNED_SDK_COMMIT` once per session and prints both SHAs, the
+  variable that bound the tree, and the direction and distance between them
+  ("the bound tree is 4 commit(s) AHEAD of the pin, and 0 behind") -- at
+  session start, so an hour-long run can be aborted in its first second, and
+  again in the terminal summary next to the failures it explains. The same
+  check compares `PINNED_SDK_COMMIT` against `parity.yml`'s `PINNED_SDK_TAG`,
+  a pair that has drifted twice (mid-review of #485, and PR #688) and that
+  `ci.yml` says "MUST be bumped together". It **warns, never fails**: binding
+  a newer tree deliberately is how the next planner re-sync's workload is
+  discovered, and the defect was that it was silent, not that it is done. It
+  stays silent when nothing is bound, which is the common case (`ci.yml`'s
+  `python` job, a bare `pytest tests/`), and when the bound root is not a git
+  checkout at all. (#691)
+
+#### planner re-sync: a disjoint-slot0 target defaults MCUboot to single-app instead of emitting a scratch swap it has no partition for (#696)
+
+
+`scripts/alp_orchestrate/` had moved 19 commits past the audited pin, and the
+dispatched parity suite was red against alp-sdk `dev`. The whole behavioural
+delta is one file:
+
+```
+$ git diff --stat d00dbdc124491c89f68f404cd7ac9d26127f038f origin/dev -- scripts/alp_orchestrate/
+ scripts/alp_orchestrate/secure.py | 83 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 82 insertions(+), 1 deletion(-)
+```
+
+That delta is alp-sdk#1413, ported here into `tan/planner/secure.py`.
+
+`emit_sysbuild_conf` defaulted `boot.swap_algorithm` unconditionally to
+`scratch`. On an AEN SKU whose SoM preset declares per-role `<role>_slot0`
+windows (alp-sdk#1069 — both M55 cores share one physical App MRAM, so slot0 is
+split per core and the secondary/scratch slot was dropped rather than forced to
+fit), the generated DT has no slot1 and no scratch partition for any swap mode
+to swap into. `SB_CONFIG_MCUBOOT_MODE_SWAP_SCRATCH=y` described a boot that
+cannot happen, and nothing said so.
+
+Now:
+
+- No `boot.swap_algorithm:` on a single-slot target → `SINGLE_APP`, the boot
+  its curated `zephyr/sysbuild/aen/sysbuild.conf` base already ships. Every
+  other target keeps the historical `scratch` default.
+- An explicit `scratch`/`move`/`overwrite` on a single-slot target → a loud
+  `OrchestratorError`. That is a `boot:` block asking for a partition this
+  target's DT does not have, not a default that drifted.
+
+`_boot_target_is_single_slot` reuses `zephyr_board._aen_role_slot0_map` — the
+same resolver the board-DT generator and `loader._resolve_slot0_load_address`
+already call — rather than scanning `memory_map:` region names for
+"slot1"/"scratch". Those disagree: `memory_map:` is a build-policy override for
+any non-stock partitioning, so a map present for an unrelated reason (an rpmsg
+carve-out) still falls through to the stock two-slot layout, and a name-scan
+would answer "single-slot" on a target that generates a real `image-1` and a
+real `image-scratch`. Lazy import, for the circularity reason
+`loader._resolve_slot0_load_address` already documents.
+
+Re-pinned, all four together — the gate warns that a split "measures tan
+against two different alp-sdks at once", and that pair has drifted twice
+before:
+
+```
+python/tests/gates/test_planner_relocation_freshness.py  PINNED_SDK_COMMIT
+python/tests/gates/test_planner_relocation_freshness.py  HAND_PORT_PINNED_SDK_COMMIT
+.github/workflows/parity.yml                             PINNED_SDK_TAG
+.github/workflows/ci.yml                                 ref:
+```
+
+`d00dbdc124491c89f68f404cd7ac9d26127f038f` → `56dea6b50c3a542a67d1d87513ff4420ad857473`.
+`STRICT_LOADERS_PINNED_SDK_COMMIT` stays at
+`26b0040e9a762c16aff5c7c53b2e19cc7583b2a4` — `strict_loaders.py` is not in the
+diff.
+
+Freshness gate against a worktree bound at alp-sdk `56dea6b5`:
+
+```
+3 passed, 2 skipped in 0.25s
+```
+
+Non-vacuity, measured. `secure.py` reverted to the unconditional `scratch`
+default — the unported code #696 asks for a failing test against:
+
+```
+FAILED tests/planner/test_secure_single_slot_swap_default.py::test_a_single_slot_target_defaults_to_single_app_not_scratch
+FAILED tests/planner/test_secure_single_slot_swap_default.py::test_an_explicit_two_slot_swap_on_a_single_slot_target_is_a_refusal[scratch]
+FAILED tests/planner/test_secure_single_slot_swap_default.py::test_an_explicit_two_slot_swap_on_a_single_slot_target_is_a_refusal[move]
+FAILED tests/planner/test_secure_single_slot_swap_default.py::test_an_explicit_two_slot_swap_on_a_single_slot_target_is_a_refusal[overwrite]
+FAILED tests/planner/test_secure_single_slot_swap_default.py::test_an_explicit_none_stays_legal_on_a_single_slot_target
+5 failed, 6 passed in 0.30s
+```
+
+Restored:
+
+```
+11 passed in 0.29s
+```
+
+The 6 that stay green under the neuter are the controls: a two-slot target
+keeping `scratch` (so hard-wiring `SINGLE_APP` cannot pass), the same explicit
+request being legal on a two-slot target (so the refusal keys on the target,
+not the algorithm name), an unrelated `memory_map:` not counting as
+single-slot, and a non-M55 project being out of scope entirely.
+
+## Two gates re-scoped by the re-pin, not by the port
+
+Binding alp-sdk `56dea6b5` also brings in alp-sdk#1439, which removed
+`flash_method: swd_probe` and `flash_args` from all four `gd32_bridge` helper
+entries. Four assertions across two files measured exactly that block:
+
+```
+tests/gates/test_swd_probe_v2n_gd32_jlink_device_freshness.py  (3)
+tests/core/test_swd_probe_shipped_preset_shape.py              (1)
+```
+
+They now skip, visibly, naming alp-sdk#1439 — and **only** when all four
+presets agree. A partial removal is still the one-PCB drift these files exist
+to catch. Proven by putting `swd_probe` back on `E1M-V2N101` alone in the bound
+tree:
+
+```
+FAILED test_the_four_shipped_presets_carry_an_identical_gd32_bridge_entry
+FAILED test_the_shipped_block_declares_jlink_device_alongside_target
+FAILED test_the_shipped_block_actually_plans_on_the_jlink_arm
+FAILED test_the_shipped_block_can_be_previewed_with_dry_run
+4 failed, 1 passed in 0.50s
+```
+
+Restored:
+
+```
+2 passed, 3 skipped in 0.50s
+```
+
+`test_the_four_shipped_presets_carry_an_identical_gd32_bridge_entry` and the
+`flash_policy` / `update_channel` assertions keep running unconditionally —
+both survive alp-sdk#1439. tan-cli#732 retires the backend and these gates with
+it; this change only stops them going red against metadata that is gone by
+design.
+
+```
+$ ALP_SDK_ROOT=<worktree at alp-sdk 56dea6b5> pytest tests/gates tests/planner tests/core -q
+1396 passed, 8 skipped in 22.28s
+```
+
+- **`tan build` no longer crashes with a raw traceback when the project and its
+  Zephyr workspace sit on two different Windows drive letters.** `west build`'s
+  own source-directory check (`os.path.relpath`, upstream `scripts/west_commands/
+  build.py`) raises `ValueError: path is on mount 'E:', start on mount 'C:'`
+  rather than resolving a path across two drives, once tan-cli#307's own
+  `_pin_west_workspace` redirects `west`'s spawned cwd to the resolved
+  workspace — a normal layout (source on a second drive, toolchain on the
+  system drive) with nothing in the docs requiring them to share a drive. `tan`
+  cannot fix `west`'s own upstream code, so it now refuses the slice BEFORE
+  spawning a process already known to crash, naming both mounts, instead of
+  letting the traceback escape. The envelope also carries a specific coded
+  issue, `build.cross-drive-workspace`, in `issues[]` — not just the generic
+  `build.slice-failed` an operator could not previously tell apart from any
+  other build failure. (#697)
+
+- **README's `### What a build needs` now lists Windows alongside Linux and
+  macOS.** The section enumerated Linux and macOS only; Windows is a supported
+  host with its own installer and CI leg. The Windows row (`git`, `cmake`,
+  `python`, `ninja`) is read off the three in-repo sources that already agreed
+  on it: alp-sdk's `metadata/bootstrap.json` `prerequisites.windows`,
+  `tan.core.bootstrap.fallback_facts().prerequisites_windows`, and
+  `contract/fixtures/bootstrap/manifest.json`. Native Windows additionally
+  needs a 7-Zip-compatible archive tool on `PATH` for `west`'s `.7z`
+  extraction; `tan doctor`'s `sevenZip` check warns when none is found and
+  names the `winget` command. `tests/gates/test_readme_install_prerequisites.py`
+  now scopes each OS list to its own README bullet, so a placeholder or drift
+  in any of the three fails the gate. (#698)
+
+- **`tan flash` no longer hard-fails a project that declares an `os: "off"`
+  core.** `board.yaml` `--cores`-supported "off" companions (`tan init --cores
+  m55_hp:zephyr,m55_he:off`, the shape `tan init --help` itself documents) are
+  correctly excluded from `tan build`'s buildable-slice set — `tan build`
+  never builds a core declared off, by design — but `build/system-
+  manifest.yaml` still carried the core with its plan-time `status: pending`,
+  since nothing was ever there to overlay a real outcome onto it. `tan flash`
+  read that as an incomplete or stale build and aborted the WHOLE run with
+  `flash.slice-not-built`: *"build status is 'pending' (not 'ok'); … Rebuild
+  it first"* — advice the core can never satisfy, because it is off by
+  design. `tan image`, reading the same manifest entry, already degraded
+  gracefully (`image.slice-skipped`, `ok: true`); the two commands disagreed
+  about one piece of state. `plan_flash_targets` (`tan/core/flash_plan.py`)
+  now checks the slice's `os` field, not just its `status`: a slice declared
+  `os: "off"` is routed into the same non-fatal `flash.slice-skipped`
+  warning bucket `status: skipped` already uses, with an accurate message
+  ("declared `os: \"off\"` … nothing to flash; this is expected, not an
+  error") rather than the policy-skip wording that doesn't apply here. A
+  project whose only slice is `os: "off"` still correctly fails with
+  `flash.nothing-flashed` — nothing was flashed, and that must not read as
+  success. (#699)
+
+- **`select_flash_method`'s docstring misattributed where its own emitted
+  fields come from.** The "Consequence, stated plainly" paragraph grouped
+  `slot0_load_address` with `jlink_flash_device`/`expect_dpidr`/`jlink_device`
+  as all coming from the SoC variant's `debug:` block, but
+  `tan/planner/loader.py::_resolve_slot0_load_address` deliberately reads it
+  from the SoM preset's `memory_map:` instead (alp-sdk#1069: it is SDK/module
+  build POLICY, not a silicon fact, so two SoMs on the same part can pick
+  different slot0 windows). A second, older sentence sixty lines above it --
+  the `FLOW_D_KEYS` comment -- still claimed `slot0_load_address` "does not
+  exist in any alp-sdk branch today", false against the same emitter
+  (`tan/planner/orchestrator.py`) since alp-sdk#1374/tan-cli#353. Both are
+  corrected to match the emit; the ADR-0017/I-26 rationale they sit inside is
+  unchanged. (#700)
+- **The same docstring still attributed `jlink_flash_device`/`expect_dpidr`/
+  `jlink_device` to "SoM-preset metadata".** Those three live in the SoC
+  variant's `debug:` block (`tan/planner/loader.py::_resolve_variant_debug`),
+  selected via but not carried by the SoM preset's `silicon_variant`.
+  Corrected, and reworded a nearby sentence that asked "did the SoM preset
+  hand me a part-number J-Link profile" the same way. Also dropped two
+  literal Alif part numbers (`AE822FA0E5597BS0`/`AE822FA0E5597LS0`) the
+  docstring had picked up along the way, which tripped
+  `test_flow_d_holds_no_part_number_of_its_own`. (#700)
+
+- **`tan monitor` refused `\\.\COM<n>` — the spelling Microsoft documents for
+  COM10 and above, and the one pyserial itself opens — while listing that same
+  port in its own "not found" message.** Measured on a real Windows host:
+  `serial.Serial(r"\\.\COM38")` opens (`is_open = True`, closed cleanly), while
+  `serial.tools.list_ports.comports()` reports the device as the bare
+  `'COM38'`, because `list_ports_windows.py` builds each `ListPortInfo` from
+  the registry's `PortName`. `tan monitor --port "\\.\COM38"` then refused with
+  `monitor.no-port : port '\\.\COM38' not found` — and printed
+  `COM38 USB Serial Port (COM38)` in the same message. The membership test now
+  resolves the device-namespace prefix back to the bare name before comparing
+  against `comports()`.
+
+  Normalised, **not** widened: a `\\.\COM<n>` whose bare form is absent is
+  still refused, and no other spelling is touched — tan-cli#569 covers
+  `/dev/serial/by-id` and pyserial URLs separately, and this change does not
+  reach them. Both halves are pinned by tests; removing the alias resolution
+  turns the acceptance case red and leaves the refusal case green.
+
+- **`dev` carried an unresolved conflict marker, and nothing looked for one.**
+  `python/tests/gates/MODULE_SIZE_BUDGET_LOG.md` lines 53-65 held
+  `<<<<<<< HEAD` / `=======` / `>>>>>>> origin/dev`, landed by the squash of
+  PR #702. Both sides were real ledger entries — the #501 generate_cmd growth
+  and the #564 build_cmd/doctor_cmd growth — so the resolution keeps both, in
+  chronological order. `tests/gates/test_no_conflict_markers.py` now fails on
+  any anchored marker in any tracked file. The gate beside it,
+  `test_module_size_budget.py`, parses the `.json` and never reads the `.md`
+  ledger, which is why it passed on the very PR that broke the file.
+
+#### the README now explains why its `file` requirement and alp-sdk's "WARN-only" note are both true, and a gate keeps the two in step (#706)
+
+
+#706 read the README and alp-sdk's `metadata/bootstrap.json` as contradicting
+each other on whether `west sdk install` needs `file`. They do not. The two
+sentences are written for two different invocations.
+
+alp-sdk `metadata/bootstrap.json`, `manualInstallHints.posix.note[2]`, read at
+`origin/dev`:
+
+```
+`west sdk install` may print "could not find a 'file' executable, falling back
+to guess mime type by file extension" -- patool's extension-based fallback
+works fine without it; this is WARN-only, not a bootstrap.sh prerequisite.
+```
+
+Its own `note[0]` names the command that note is about:
+
+```
+west sdk install --gnu-toolchains arm-zephyr-eabi --no-hosttools --install-dir "$PWD/zephyr-sdk"
+```
+
+`--no-hosttools` skips the host-tools step. The command in this repo's README
+does not pass it:
+
+```
+west sdk install --version 1.0.1 -t arm-zephyr-eabi
+```
+
+and that step is what fails without `file`. The measurement is already recorded
+in `doctor_cmd.zephyr_sdk_check`: pristine `ubuntu:24.04`, identical
+bootstrapped workspace, identical `HOME`, `file` the only variable — with it
+`west sdk install` exits 0 (`All done`), without it exits 1 with
+`ERROR: Host tools installation failed` and
+``FATAL ERROR: command `<sdk>/setup.sh -t arm-zephyr-eabi -h` failed``.
+
+So the README sentence is correct and stays. What changed:
+
+- README names the `--no-hosttools` difference beside the claim, so the two
+  documents no longer read as opposites.
+- `tests/gates/test_readme_install_prerequisites.py` gains two cases tying the
+  claim to the command: if every README `west sdk install` line gains
+  `--no-hosttools`, the `file` requirement must go; if any lacks it, the
+  requirement must be present.
+
+Non-vacuity, measured. Deleting the `file` sentence while keeping the command:
+
+```
+FAILED test_the_readme_file_requirement_matches_the_command_it_documents
+FAILED test_the_readme_explains_why_the_sdk_manifest_note_is_not_a_contradiction
+2 failed, 4 passed in 0.24s
+```
+
+Adding `--no-hosttools` to the command while keeping the sentence:
+
+```
+FAILED test_the_readme_file_requirement_matches_the_command_it_documents
+1 failed, 5 passed in 0.46s
+```
+
+Restored:
+
+```
+6 passed in 0.24s
+```
+
+No code changed. The `file` requirement was never promoted into
+`prerequisites`, and is not promoted here either — `tan bootstrap` genuinely
+succeeds without it, and refusing a host over a tool the bootstrap never runs
+would be the opposite defect.
+
+- **`scripts/e2e-linux-freeze.sh` called a freeze that could not run a single
+  command "freeze OK" and exited 0.** The gate was `[ -x dist/tan/tan ]` plus a
+  version read inside `$(...)`: `-x` passes on the PyInstaller bootloader
+  whatever state the app inside it is in, and a command substitution discards
+  the exit status. Measured on `origin/dev` (`aeccb59`) with a `.venv-build`
+  carrying PyInstaller but not tan's runtime dependencies:
+
+  ```
+  ModuleNotFoundError: No module named 'typer'
+  [PYI-1017836:ERROR] Failed to execute script '__main__' due to unhandled exception!
+    freeze OK:
+  FREEZE-RC=0
+  ```
+
+  The script now reads `--version`'s exit status and its output, aborts with
+  exit 2 on either a non-zero status or an empty version, and prints the
+  captured stderr. `scripts/e2e-container.sh` takes this script's output as its
+  input, so the unrunnable tree used to reach the container e2e as a green
+  input. Same shape as tan-cli#500, whose fix (three lines above this gate) made
+  the `build_binary.sh` call unpiped so its status is read.
+  `tests/test_e2e_linux_freeze_script.py` drives the script against a fake
+  checkout with a stubbed `build_binary.sh`, covering a runnable freeze, one
+  that raises on import, and one that exits 0 printing nothing.
+
+- **`tan flash` reported `ok: true` and exit 0 when it had written nothing to
+  the board.** Every slice came back `status: "planned"` with *"not run
+  (flash_args.confirm is false)"*, and the command still reported success — so
+  `tan flash && echo "flashed"` printed `flashed` over an untouched device. The
+  per-entry `flash.confirm-required` warning was already in `issues[]`, but a
+  caller checking `$?` or `ok`, which is the documented contract, never sees
+  that channel. A run where at least one target was planned and none was
+  written now appends a `flash.nothing-flashed` error and exits non-zero.
+  `--dry-run` is excluded — that is an explicit preview request and still exits
+  0. A mixed run (one slice written, one planned) keeps its previous exit code
+  and its per-entry warning; the hole closed here is the run that wrote nothing
+  at all. Same shape as tan-cli#540, tan-cli#717 and alp-sdk#1343.
+- **`tan flash` gained `--confirm`.** The gate was reachable only through
+  `ALP_FLASH_FORCE=1`, which `tan flash --help` did not document;
+  `flash_args.confirm` appears in neither the generated
+  `build/system-manifest.yaml` nor the SoM preset, so the message pointed at a
+  key the user does not have. `--confirm`, `ALP_FLASH_FORCE=1` and
+  `flash_args.confirm: true` are now alternatives, OR-ed.
+- **The confirm-gate note names all three spellings, from one place.** Three
+  sites composed their own version of it and only one named
+  `ALP_FLASH_FORCE=1`. `flash_plan.confirm_gate_note()` is now the single
+  source, most-specific-first in the same style the SETOOLS resolution message
+  uses:
+
+  ```
+  flash_args.confirm is false -- to actually flash, most-specific first:
+  `--confirm` on the command line, `ALP_FLASH_FORCE=1` in the environment, or
+  `flash_args.confirm: true` in the manifest
+  ```
+
+- **`--som` and `--sku` are now interchangeable on `init`, `pinmux` and
+  `new-som`.** The same value — an E1M SoM part number — was spelled `--som` by
+  `tan init` and `--sku` by `tan pinmux` and `tan new-som`, so the second
+  command a new customer runs rejects the flag the first one taught them:
+
+  ```
+  $ tan pinmux --som E1M-AEN801 --sdk-root <sdk>
+  Error: No such option: --som (Possible options: --format, --sku)
+  exit=2
+  ```
+
+  Both words are load-bearing in the codebase, which is why this drifted:
+  `--som` matches `board.yaml`'s `som.sku` block, while `--sku` matches
+  `tan presets`' own output (`skus=11`). So `presets` shows a customer a SKU,
+  `init` asks for it as `--som`, and `pinmux` asks for the same string as
+  `--sku`.
+
+  Each command keeps its existing name FIRST — help text, docs and every
+  existing script are unchanged — and gains the other spelling as an alias.
+  Verified both ways on all three: `tan pinmux --som E1M-AEN801` now returns
+  `pinmux: family=aen pads=96` (exit 0) as does `--sku`, and `tan init` accepts
+  either while emitting the same `sku: E1M-AEN801` into `board.yaml`.
+
+- **A slow `bash` spawn no longer aborts pytest collection and reports zero
+  failures.** `_bash_available()` in
+  `python/tests/commands/test_completion_command.py` bounded its probe with
+  `timeout=10` and then caught only `OSError` — but `subprocess.TimeoutExpired`
+  derives from `SubprocessError`, **not** `OSError`, so the single failure mode
+  the budget existed to bound was the one the handler did not absorb.
+
+  Because the probe runs at **module scope** (the `@pytest.mark.skipif(...)`
+  decorators call it at import time), the escaping exception did not fail a
+  test — it aborted **collection** of the whole file:
+
+  ```
+  tests\commands\test_completion_command.py:479: in <module>
+      not _bash_available(), reason="no real bash on this host ..."
+  E   subprocess.TimeoutExpired: Command '['bash', '-c', 'echo tan-bash-ok']' timed out after 10 seconds
+  !!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+  ```
+
+  pytest then exits **2** having run *nothing at all*, printing zero `FAILED`
+  lines. That is the dangerous part: a branch-vs-baseline failure diff reads
+  every known failure as **newly passing**. Measured during this work — a
+  comparison that should have read `37 failures, 0 regressions` instead read
+  `0 failures, 37 newly passing`, from a run that executed no tests. A silent
+  green from an empty run is worse than a loud red.
+
+  Nothing was wrong with `bash`: it resolves to Git Bash and works. It is
+  purely cold process start-up under load — **10.6 s** cold against the 10 s
+  budget, **0.10 s** once warm. Any budget can be exceeded, so the handler,
+  not the number, is the fix.
+
+  Absorbing the timeout is necessary but **not sufficient**, and the first cut
+  proved it: with only the handler in place, the 15 tests this probe guards
+  moved from FAILED to **SKIPPED** (`307 -> 325` skips in the same run) — a
+  loud collection abort traded for quietly untested code, on exactly the loaded
+  hosts that provoke the bug. Since the sole observed cause is cold process
+  start-up, `_bash_available` now makes a **second attempt**: the first spawn
+  pays the cold cost, the second is warm and answers in ~0.1 s. Measured after
+  the change, the 15 tests run again rather than skipping. A healthy host never
+  reaches the second attempt, so it costs nothing where nothing is wrong.
+  `_noexec_probe` deliberately gets no retry — an `unshare` namespace probe
+  that times out is reporting a genuinely restricted host, not a warm-up cost.
+
+  `_noexec_probe()` in `python/tests/installers/test_installer_release_layout.py`
+  had the identical shape (`timeout=15`, `except OSError`, called at module
+  scope by `noexec_capable`) and is fixed with it — one guard per probe, rather
+  than patching only the site that happened to bite. Two neighbours were checked
+  and already correct: `_bash_setlocale_warning_probe` catches
+  `subprocess.SubprocessError`, and `conftest.py`'s `_git()` catches
+  `(OSError, subprocess.SubprocessError, UnicodeDecodeError)`.
+
+  Both are narrowed to `TimeoutExpired` rather than the broader
+  `SubprocessError`, deliberately. For a **host-capability probe** a timeout is
+  a legitimate answer — "bash did not respond within the budget" and "no bash on
+  `PATH`" both mean *this host cannot usefully run these tests, so skip*. That is
+  the opposite of the rule for production code, where
+  `test_diff_command.py::test_sdk_validator_timeout_refuses_instead_of_reporting_clean`
+  records a blanket `except ... SubprocessError` swallowing a timeout as a MAJOR
+  defect: a wedged validator must refuse, never fall back to a clean result.
+  Keeping the narrower catch keeps that distinction visible at the seam.
+
+  `python/tests/gates/test_capability_probes_absorb_timeouts.py` covers both
+  probes in three directions — a timed-out probe returns `False` instead of
+  raising, a missing tool still returns `False`, and a working host still
+  returns `True` (a fix that made every host look incapable would skip these
+  suites everywhere and hide real breakage). It drives the probes with a patched
+  `subprocess.run`, so it is hermetic and costs no wall-clock.
+
+  Verified it can fail: against the pre-fix probes the new file cannot even be
+  **collected** — importing `test_completion_command` runs the module-scope
+  probe, which raises `TimeoutExpired` — which is the defect reproducing itself.
+  With the fix, 6 passed.
+
+  One trap worth recording: `_bash_available` is `@lru_cache(maxsize=1)` and is
+  already called at import time, so the first cut of these tests read that one
+  cached verdict and exercised none of the code they named — two of them passed
+  against a cached `False`. The tests now clear the cache before each call, and
+  an autouse fixture clears it again afterwards so a verdict computed against a
+  faked `subprocess` cannot leak into the rest of the session.
+
+#### `tan doctor` refuses a `--sdk-root` that is not an alp-sdk checkout, instead of reporting `[pass] sdk` for it (#727)
+
+
+`--sdk-root` is the terminal tier, so `resolve_sdk_root_ladder` hands it back
+unvalidated. `build_cmd`, `run_cmd`, `validate_cmd`, `clean_cmd` and
+`flash_cmd` each guard that at their own call site with `is_sdk_root`; `doctor`
+did not. The two commands disagreed about the same flag, and it was the one
+whose job is answering "is my setup right" that said yes.
+
+Before, on a path that has never existed:
+
+```
+$ tan doctor --sdk-root /tmp/no-such-sdk-xyz
+[   pass] sdk: alp-sdk at /tmp/no-such-sdk-xyz (sdkRootFlag)
+```
+
+After:
+
+```
+$ tan doctor --sdk-root /tmp/no-such-sdk-xyz
+[   fail] sdk: alp-sdk root is unresolved: --sdk-root "/tmp/no-such-sdk-xyz" is not an alp-sdk
+          checkout (scripts/alp_project.py not found under it). `tan build` refuses this same path,
+          so nothing this report says about the SDK describes a checkout that is there.
+          fix: Point --sdk-root at a directory holding the marker above. `tan bootstrap` MOVES the
+          checkout into the workspace and rewrites the default (tan-cli#185), so a --sdk-root copied
+          from before a bootstrap names the path it emptied.
+```
+
+The detail comes from `shapes.rejected_sdk_root_message`, the spelling five
+other commands already use for a rejected `--sdk-root`, rather than a sixth
+one.
+
+`sdkProvenance` is skipped for the same path. It found no git checkout and no
+`metadata/sdk_version.yaml` under a directory that is not there, and rendered
+that absence as `pass | alp-sdk at <path> (no git checkout /
+metadata/sdk_version.yaml)` — a green line asserting an alp-sdk at a path with
+nothing in it.
+
+Non-vacuity, measured: with the call-site guard neutered to
+`dangling_flag_root = None`, the two end-to-end tests fail and the positive
+control (a directory carrying `scripts/alp_project.py` still passes and still
+emits `sdkProvenance`) stays green.
+
+```
+$ python -m pytest tests/commands/test_doctor_command.py -q -k "727 or dangling or sdk_root_flag or byte_identical"
+6 passed, 200 deselected in 0.83s
+
+$ python -m pytest tests/gates tests/commands/test_doctor_command.py -q
+668 passed, 10 skipped in 23.84s
+```
+
+Unchanged: every other tier. The guard is keyed on `sdkRootFlag`, and a
+dangling project pin or machine-global default still falls through to the
+lower tiers exactly as before (#263, #344).
+
+- **`tan build` now refuses a `CONFIG_ALP_SDK_CHIP_*` the bound alp-sdk cannot
+  resolve, instead of writing it into `alp.conf` and letting Zephyr fail.**
+
+  The planner picks chip symbols from `chips/<slug>/` on disk
+  (`_chip_has_driver`). That is the right intent — the directory is what the
+  declaration compiles — but it is an *inference*, while Zephyr resolves the
+  Kconfig *declaration*. When a tan and an alp-sdk disagree about which chips
+  have drivers, the emitted line surfaces as:
+
+  ```
+  alp.conf:28: warning: attempt to assign the value 'y' to the undefined symbol ALP_SDK_CHIP_DP83825
+  error: Aborting due to Kconfig warnings
+  0 of 3 slice(s) built
+  ```
+
+  which takes out `tan build` for the entire SoM and blames a generated file
+  the customer never wrote.
+
+  Measured shape of the skew (tan-cli#728): released `tan 0.5.1`, whose
+  vendored planner predates alp-sdk#1241/#1322, against alp-sdk `dev`, whose
+  `ethernet_phy: dp83825` made an undriven chip reachable from `on_module:`
+  for the first time. `metadata/chips/dp83825.yaml` says `driver_status: none`
+  and no `ALP_SDK_CHIP_DP83825` is declared anywhere in the SDK's kconfigs —
+  so the symbol genuinely does not exist, and the old planner emitted it
+  anyway.
+
+  Each symbol is now checked against the declarations actually parsed out of
+  the bound SDK's `zephyr/**/*.kconfig` before any line is written, and a
+  mismatch raises an `OrchestratorError` naming **both** the symbol and the
+  chip, plus the SDK it was read from — so the reader learns which pair
+  disagrees rather than hunting a `CONFIG_` line they never authored.
+
+  This does **not** repair `tan 0.5.1`; a released binary cannot be
+  retro-fixed, and that half is release sequencing (ship tan and alp-sdk
+  together — see #728). What it does is stop the next skew of this class from
+  being discovered by Zephyr three layers downstream.
+
+  Two deliberate non-behaviours:
+
+  - **Silent when it cannot verify.** An empty declaration set means the
+    kconfig tree could not be read or is structured differently, not that
+    nothing is declared. Refusing every build on a layout assumption would be
+    a worse failure than the one being prevented.
+  - **No change on a healthy pair.** Measured on alp-sdk `dev`: 80
+    `chips/<slug>/` directories, 80 declared `ALP_SDK_CHIP_*` symbols, zero
+    divergence in either direction. A real `tan build` after the change is
+    byte-identical in outcome — `2 of 3 slice(s) built`, `DP83825` emitted 0
+    times.
+
+  `python/tests/planner/test_chip_symbol_declared_guard.py` covers the
+  refusal by name, the pass-through when the sets agree, the stay-silent case,
+  and a live assertion against the bound SDK that every symbol this tan would
+  emit is declared — the check that would have caught #728 at plan time.
+
+#### a declared-null `jlink_flash_device` reaches `flash_args` as a present key instead of being dropped into a silent Flow D downgrade (#734)
+
+
+`orchestrator.py` decided whether to emit `jlink_flash_device` with a
+truthiness test, so a SoC variant declaring `"jlink_flash_device": null` — a
+deliberate, schema-declared "this variant has no known J-Link flash profile" —
+arrived at `flash_plan` with the key **absent**. `flow_d_available()` then
+returned `False` and `tan flash` silently downgraded Flow D to Flow A over the
+SE-UART, with no diagnostic.
+
+That is the exact failure `flow_d_available` was written to prevent. Its own
+docstring, in `python/tan/core/flash_plan.py`:
+
+> KEY PRESENCE, deliberately -- not "resolves to a non-null/non-empty string":
+> an `is not None` check collapses a present-but-null `jlink_flash_device:`
+> (bare YAML null) to "absent" and SILENTLY routes the entry to Flow A over the
+> SE-UART instead, with no diagnostic at all.
+
+`flash_plan` held that line. The emitter upstream destroyed the distinction
+before `flow_d_available` ever saw it.
+
+The root cause was in the loader, not the emitter: `_resolve_jlink_flash_device`
+returns `debug.get("jlink_flash_device")`, and `dict.get` collapses declared-null
+and absent to the same `None`. A new `_jlink_flash_device_declared(debug)`
+carries presence alongside the value, and `Slice` gains
+`jlink_flash_device_declared` to thread it through. Measured:
+
+```
+  declared null  value=None                         declared=True
+  absent         value=None                         declared=False
+  real string    value='AE722F80F55D5LS_M55_HE'     declared=True
+```
+
+Four call sites moved from truthiness to presence: the emitter, the
+`slot0_load_address` resolution that rides the same promotion, and
+`_enforce_flow_d_preflight_pair`'s scope guard — whose own docstring already
+said "that key's presence IS what promotes a `zephyr_west_flash` entry to Flow
+D" while the code tested truthiness.
+
+Absence and declared-null stay distinguishable end to end, which is the whole
+point: a variant that omits the key keeps today's behaviour (Flow A, no key).
+
+Non-vacuity, measured in both directions. Emitter reverted to the truthiness
+test:
+
+```
+FAILED tests/core/test_flow_d_manifest_fields.py::test_a_declared_null_jlink_flash_device_reaches_flash_args_as_a_present_key
+FAILED tests/core/test_flow_d_manifest_fields.py::test_flow_d_available_arms_on_the_declared_null_key
+2 failed, 7 passed in 0.31s
+```
+
+Emitter changed to emit unconditionally — the failure mode a naive fix would
+introduce:
+
+```
+FAILED tests/core/test_flow_d_manifest_fields.py::test_a_core_with_no_jlink_flash_device_arms_no_flow_d_keys
+FAILED tests/core/test_flow_d_manifest_fields.py::test_an_absent_jlink_flash_device_stays_absent
+FAILED tests/core/test_flow_d_manifest_fields.py::test_flow_d_available_arms_on_the_declared_null_key
+3 failed, 6 passed in 0.29s
+```
+
+Restored:
+
+```
+9 passed in 0.28s
+```
+
+Every new assertion is on key presence, never on the value — declared-null and
+absent both carry `None`, so a value-based assertion would be vacuous here.
+
+This is the consumer half of alp-sdk#1295. On Windows the old behaviour was
+worse than a wrong-path warning: the SE-UART Flow A runner in alp-sdk is
+Linux-only, so the silent downgrade pointed at a path that cannot run there at
+all.
+
+#### `tan doctor`'s `sevenZip` check runs on every Windows host, not only while `zephyrSdk` is failing (#736)
+
+
+The check was gated on the `zephyrSdk` Fail it accompanies:
+
+```python
+    if os.name == "nt" and not zephyr_sdk_ok:
+        _add(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
+```
+
+so a Windows host that already has a Zephyr SDK but no 7-Zip got no signal at
+all, and its next `west sdk install` died with
+`Zephyr SDK setup requires '7z'`.
+
+Measured on Windows, `tan 0.5.2-rc1.dev0`, `7z` stripped from `PATH` with the
+SDK still present:
+
+```
+7z now: ABSENT
+overall ok: True
+sevenZip present? False
+any check mentioning 7z: []
+  hostPrerequisites  pass
+  zephyrSdk          pass
+```
+
+A green verdict, with no mention of 7-Zip anywhere, on a host that cannot
+complete `west sdk install`.
+
+The premise in `seven_zip_check`'s own docstring is what failed — "a host that
+already has the SDK never reaches this". "Already has the SDK" is not "will
+never run `west sdk install` again": adding a second architecture's toolchain,
+or moving to a newer SDK, is an ordinary operation, and `zephyrSdk` passes
+throughout. The docstring now records the corrected reasoning rather than
+leaving a stale one beside changed code.
+
+**Severity is deliberately unchanged.** It stays a `warn`, not a `fail`:
+missing 7-Zip blocks the remedy, not the build, and `zephyrSdk` is the Fail
+that stops things. A `fail` would refuse a host mid-project over a tool its
+current build does not use. Only the gate was wrong.
+
+An existing test asserted the opposite behaviour — "once the SDK is present,
+the extractor is irrelevant, so `sevenZip` must not linger" — on that same
+false premise. It is inverted rather than deleted, and now also asserts that
+`zephyrSdk` really did `pass` in that scenario, so it cannot succeed for the
+old reason. A second case pins the `warn` severity so widening the gate cannot
+later be mistaken for licence to escalate it.
+
+Non-vacuity, measured. Gate reverted to `and not zephyr_sdk_ok`:
+
+```
+FAILED tests/commands/test_doctor_command.py::test_collect_reports_seven_zip_on_windows_even_once_the_sdk_is_detected
+FAILED tests/commands/test_doctor_command.py::test_seven_zip_stays_a_warn_not_a_fail_so_the_verdict_is_unchanged
+2 failed, 4 passed, 201 deselected in 0.60s
+```
+
+Restored:
+
+```
+6 passed, 201 deselected in 0.49s
+```
+
+The 4 that stay green under the neuter are the ones this change must not
+disturb: the two pure `seven_zip_check` shape tests, the Windows-with-no-SDK
+case, and `test_collect_omits_seven_zip_off_windows` — the check is still
+Windows-only.
+
+This is the tan-cli half of alp-sdk#1418. The alp-sdk half — adding `7zip` to
+`prerequisites.windows` — is **not** the fix: that list is probed as binary
+names on PATH and nothing is ever named `7zip`, so it would fail every Windows
+host, correctly-provisioned ones included.
+
+- **`tan doctor` no longer states two flash-readiness requirements the AEN EVK
+  silicon refutes.**
+
+  Both were customer-facing, both would have shipped in v0.6.0 as written, and
+  both were surfaced by the release-gate run in alp-sdk#1380.
+
+  **1. The `jlink` check asserted a probe-firmware floor that a working probe
+  disproves.** It said Flow D needs *"a probe on matched J-Link V13 firmware"*,
+  and its docstring stated it as fact — *"the probe needs matched V13 firmware
+  or the part-number device will not connect"*. Measured on the AEN EVK:
+
+  ```
+  SEGGER J-Link Commander V9.46
+  DLL version V9.46, compiled May 27 2026 12:23:54
+  Firmware: J-Link V11 compiled Apr  1 2025 10:02:30
+  Hardware version: V11.00
+  ```
+
+  On that probe Flow D connected **with the part-number profile**
+  (`AE822FA0E5597LS0_M55_HE` — Flow D refuses the generic `Cortex-M55`, so the
+  profile is not in question) and programmed MRAM repeatedly, including a
+  96 KiB `loadbin` + `verifybin` at `0x80560000` that byte-verified. The
+  message sent a customer with a working probe to a firmware update they did
+  not need, and read as "your setup is unsupported" on a setup that
+  demonstrably works.
+
+  The claim is **dropped, not restated as "V11+"**. Where the true floor sits
+  is unknown — no probe old enough to fail has been tested — and swapping one
+  unmeasured minimum for another is the same defect wearing a different
+  number. What remains are the two requirements that are established: the
+  part-number device profile, and the `V9.46` DLL floor (unchanged, and not in
+  question).
+
+  **2. The `setools` check named a Linux-only bundle to hosts that can sign on
+  Windows.** Its scoping sentence was right — SE-UART flashing genuinely is
+  Linux-only, because `scripts/west_commands/runners/alif_flash.py` hard-codes
+  `app-release-exec-linux`. The inaccuracy was narrower: it left a Windows
+  operator believing the `-linux` bundle is what `--setools-dir` must point
+  into. It is not. Measured on the same host, Flow D signed with the **Windows**
+  SETOOLS build — `app-gen-toc.exe` under a Windows `app-release-exec`,
+  `SETOOLS_version_SE_FW_1.110.00_DEV` — producing an ATOC the part booted
+  from. The message now separates the two paths explicitly.
+
+  The regression test asserts the **absence** of any firmware claim across all
+  four `jlink_check` arms (pass, below-DLL-floor, unreadable version, absent),
+  not the presence of a particular number — the retired claim rode in the
+  shared `requirements` string plus two `fix` hints, so a single-arm assertion
+  would not have caught it. The pre-existing test that pinned `"V13" in blob`
+  is updated to pin the DLL floor instead.
+
+- **`scripts/e2e-full.sh`'s `#322` check no longer passes only when `tan
+  bootstrap` fails.**
+
+  It compared `tan doctor`'s **current** sdk root against `tan bootstrap
+  --dry-run`'s **planned** root. Those answer different questions: one is where
+  the checkout *is*, the other where it *would be*. Since relocating the
+  checkout into the workspace is deliberate and announced (tan-cli#185), a flat
+  equality assertion failed on every host where bootstrap can succeed, and
+  passed only where it refused for missing prerequisites and so planned no move
+  at all.
+
+  Measured with the same script and the same `tan 0.5.2-rc1.dev0` build:
+
+  ```
+  pristine ubuntu:24.04   bs2 exit 1   doctor=/work/proj/alp-sdk
+                                       bootstrap=/work/proj/alp-sdk        PASS
+  provisioned Linux host  bs2 exit 0   doctor=.../proj/alp-sdk
+                                       bootstrap=.../proj/alp-workspace/alp-sdk  FAIL
+  ```
+
+  The container's PASS was not the two agreeing — it was one of them not
+  running, which the harness's own `#323` records in the next block (`no
+  'would' verb (no relocation planned)`). A gate that passes precisely when the
+  thing it checks did not happen is close to inverted.
+
+  The assertion is now the invariant that holds on **both** shapes: if no
+  relocation is planned the two roots must be identical, and if one *is*
+  planned the destination must sit inside the `workspaceDir` bootstrap reported
+  in the same envelope. Post-bootstrap agreement is a different assertion and
+  was already covered by `#299 doctor AFTER a successful bootstrap`, which
+  passes on both hosts.
+
+  Still falsifiable — three distinct ways to break it fail, verified by
+  exercising every branch: a planned root outside the reported workspace, a
+  planned move with no `workspaceDir`, and either side resolving nothing.
+
+  No shipped `tan` behaviour changes; this is the harness. But it does mean the
+  container run's previously-reported `33 passed, 0 failed` contained one
+  assertion that passed for the wrong reason.
+
+#### planner re-sync to alp-sdk `bd8be484`, and the metadata-root regression test follows the silicon customers can buy (#744)
+
+
+`scripts/alp_orchestrate/` moved one commit past the audited pin —
+alp-sdk#1447 (`#1295`, `#1445`), which publishes `jlink_flash_device` for every
+Alif variant and gives the five AEN SoMs disjoint slot0 windows.
+
+```
+$ git diff --stat 56dea6b5..bd8be484 -- scripts/alp_orchestrate/
+ scripts/alp_orchestrate/loader.py       | 81 ++++++++++++++++++++++++---------
+ scripts/alp_orchestrate/models.py       | 10 ++++
+ scripts/alp_orchestrate/orchestrator.py | 10 +++-
+ 3 files changed, 78 insertions(+), 23 deletions(-)
+```
+
+Two of the three parts were already here: `jlink_flash_device_declared` and its
+presence-based emit landed as tan-cli#734, and alp-sdk converged on the same
+names independently.
+
+**The one behavioural delta ported:** `_enforce_slot0_disjoint_across_roles`
+now scopes to `os == "zephyr"` on both roles. A core parked with `os: "off"`
+produces no flashable artifact, so its resolved `slot0_load_address` is moot
+and a collision with it cannot physically happen. Mirrors
+`_enforce_flow_d_preflight_pair`'s own `slice_.os != "zephyr"` guard.
+
+alp-sdk#1295 made this guard reachable for the first time by populating
+`debug.jlink_flash_device` beyond E1M-AEN801. It does **not** currently refuse
+anything — `examples/power-timing/power-managed-sensor` on E1M-AEN301 loads
+clean either way, because the same alp-sdk commit also gave that SoM disjoint
+slot0 windows. Ported for correctness, not to fix a live failure.
+
+Non-vacuity, measured. Scoping removed:
+
+```
+FAILED tests/core/test_flow_d_manifest_fields.py::test_a_parked_sibling_does_not_trip_the_slot0_collision_guard
+FAILED tests/core/test_flow_d_manifest_fields.py::test_neither_core_live_is_also_not_a_collision
+2 failed, 10 passed in 0.35s
+```
+
+Restored: `12 passed`. The control — two live Zephyr cores at one address are
+still refused — stays green under the neuter, so deleting the guard outright
+cannot pass.
+
+## The metadata-root regression test moved SoM families, deliberately
+
+`tests/core/test_metadata_root_override.py` guards a customer-facing
+misdiagnosis: a `storage[].flash_device:` naming a bank the requested tree
+declares was refused, and the message **blamed the customer's `board.yaml`
+while listing the other tree's device names**. That bug lives in
+`resolve_memory_map`'s SoC-JSON-**derived** branch.
+
+alp-sdk#1447 gave all six AEN SoMs an explicit `memory_map:`, which returns
+verbatim and never consults the metadata root — so the fixture's E3 bank rename
+became invisible and four of its five tests failed against the new pin.
+
+Retargeted from `E1M-AEN301` / `e3.json` / `SRAM6` to `E1M-V2N101` /
+`n44.json` / `ocram_low`. Measured on alp-sdk `bd8be484`:
+
+```
+  E1M-AEN301 -> ['atoc','he_slot0','hp_slot0','mcuboot','mram_main',
+                 'ospi0','ospi1','reserved','storage']   (override branch)
+  E1M-V2N101 -> ['ddr_main', 'm33_tcm', 'ocram_low']     (derived branch)
+  E1M-V2M101 -> ['ddr_main', 'm33_tcm', 'ocram_low']     (derived branch)
+  E1M-NX9101 -> []
+```
+
+V2N/V2M are the only SKUs published `preliminary: false` **and**
+`partial_hw_config: false` — the parts a customer can build against today. A
+regression test for a customer-facing misdiagnosis belongs on the silicon
+customers are using. It is also the durable pin: as more SoMs gain explicit
+overrides, the derived branch converges on exactly this family.
+
+The rename walks `memory_regions[]` rather than `variants[].sram_banks_kb` —
+the RZ/V2N SoC JSON declares regions at the top level and its variants carry no
+bank map, so the Alif-shaped walk would have renamed zero entries silently. The
+fixture's own premise-guard asserts the rename happened.
+
+**Coverage is preserved, not weakened.** Reproducing the original bug — making
+`_known_flash_devices` ignore its `metadata_root` argument — still turns the
+suite red:
+
+```
+FAILED test_the_two_trees_differ_in_exactly_the_bank_under_test
+FAILED test_storage_flash_device_resolves_against_the_requested_tree
+FAILED test_the_partition_resolver_reads_the_same_tree_the_loader_did
+3 failed, 2 passed in 0.46s
+```
+
+Restored: `5 passed`.
+
+## Re-pinned, all four together
+
+```
+python/tests/gates/test_planner_relocation_freshness.py  PINNED_SDK_COMMIT
+python/tests/gates/test_planner_relocation_freshness.py  HAND_PORT_PINNED_SDK_COMMIT
+.github/workflows/parity.yml                             PINNED_SDK_TAG
+.github/workflows/ci.yml                                 ref:
+```
+
+`56dea6b50c3a542a67d1d87513ff4420ad857473` →
+`bd8be484680cf5aa1c1ac0e8b38d84128b5a279d`, plus the three
+`PINNED_HASHES` entries. `STRICT_LOADERS_PINNED_SDK_COMMIT` stays at
+`26b0040e9a762c16aff5c7c53b2e19cc7583b2a4` — `strict_loaders.py` is not in the
+diff.
+
+```
+$ ALP_SDK_ROOT=<worktree at alp-sdk bd8be484> \
+  ALP_SDK_PARITY_ROOT=<same> pytest tests/parity tests/gates tests/planner tests/core -q
+2169 passed, 16 skipped in 505.93s (0:08:25)
+```
+
+`tests/parity` is included deliberately: it is the suite that compares tan's
+emitters byte-for-byte against alp-sdk's own, which is exactly what a re-sync
+changes. Running only `tests/gates tests/planner tests/core` is what let the
+`slot0_load_address` divergence below reach CI.
+
+## Noted, not fixed
+
+`E1M-NX9101` resolves an **empty** flash-device set, so any
+`storage[].flash_device:` on that SoM would be refused with an empty "did you
+mean" list. That part is not available yet, so it is recorded here rather than
+filed.
+
+## A defect of mine this PR also fixes
+
+tan-cli#737 made `slot0_load_address` resolution ride the same presence
+promotion as the `flash_args` emit:
+
+```python
+        slot0_load_address = (
+            _resolve_slot0_load_address(som_preset, core_id)
+            if (jlink_flash_device_declared or jlink_flash_device is not None)
+            else None)
+```
+
+alp-sdk gates it on the VALUE:
+
+```python
+        slot0_load_address = (
+            _resolve_slot0_load_address(som_preset, core_id)
+            if jlink_flash_device else None)
+```
+
+Those agreed until a variant declared `jlink_flash_device: null`. alp-sdk#1447
+made `e4.json` do exactly that, and tan then emitted a `slot0_load_address`
+alp-sdk does not — caught by the byte-parity suite on
+`examples/peripheral-io/usb-host-storage` (E1M-AEN401), at the line the CI
+failure named:
+
+```
+18a19
+>     slot0_load_address: '0x802b0000'
+27a29
+>     slot0_load_address: '0x80010000'
+```
+
+Reverted to the value-based gate. A variant with no J-Link profile cannot run
+Flow D, so there is no slot0-XIP load address to publish. After the revert the
+emitted manifest is byte-identical to alp-sdk's.
+
+This is the reason the emit gate and the slot0 gate are deliberately different
+conditions, which the code now says out loud.
+
+- **A missing-tool skip no longer prints the searched PATH twice.**
+
+  On a clean-room Windows build, the `E1M-AEN801` SoM contributes an
+  `a32_cluster` yocto slice, which is correctly skipped because `bitbake` is
+  not on a Windows host — an **expected, benign** outcome under
+  `executionPolicy.missingTool: skip`. It cost **5,608 characters** of
+  terminal, as two consecutive lines carrying the same 57-entry PATH:
+
+  ```
+  2807 chars   warning: slice `a32_cluster` skipped: tool `bitbake` not found -- searched PATH: ...
+  2801 chars   skipped: a32_cluster [yocto] -- tool `bitbake` not found -- searched PATH: ...
+               ok: m55_he [zephyr]
+               ok: m55_hp [zephyr]
+               2 of 3 slice(s) built
+  ```
+
+  The two `ok:` lines and the summary — the part a reader wants — sat below
+  5.6 KB of machine layout. After: **2,801 characters**, one copy.
+
+  Neither half was wrong on its own, which is why this is a rendering fix
+  and not a change to either:
+
+  - the searched PATH is deliberate (tan-cli#510) — *"one that names the
+    literal PATH entries this walked is a fix the customer applies
+    themselves"* — and is already kept out of the persisted
+    `system-manifest.yaml` (tan-cli#615);
+  - promoting the reason into `issues[]` is deliberate (tan-cli#283), so a
+    JSON consumer sees it rather than only `data.slices[].reason`.
+
+  In `--format json` those are two different fields. In text they were two
+  adjacent lines. `_text_issues` drops an `issues[]` line whose message the
+  per-slice recap is about to print verbatim — **text mode only**. The JSON
+  envelope is untouched: measured on the same build, `issues[]` still
+  carries the full 2,798-character `build.missing-tool` entry.
+
+  Matched on the reason text anchored at the END of the message, not on the
+  issue code: `_missing_tool_issues` is not the only producer that may wrap
+  a slice reason, and an issue that adds anything of its own is not a
+  duplicate. An issue no slice line carries is always kept — this removes a
+  second copy, never information.
+
+  Dedup and printing live in one function (`_print_text_issues`) on purpose.
+  A filter-only helper could be dropped from its call site with every test
+  of it still green — measured on the first version of this change, 6 of 6
+  passed with the call removed. Reverting the dedup now turns 1 test red;
+  reverting the print turns 2 red.
+
+- **`tan size`'s FLASH budget is the core's own slot0 window, not the whole
+  part.**
+
+  `resolve_budget` took the variant's `mram_mb` for every core. Since
+  alp-sdk#1445/#1069 each M55 on a dual-M55 AEN SoM links into its **own**
+  disjoint slot0 — `he_slot0` at `0x80010000`, `hp_slot0` at `0x802b0000`,
+  2688 KiB each — so the whole-MRAM figure is the sum of every partition
+  *including the other core's*, and is nobody's budget.
+
+  Measured on a clean-room `E1M-AEN801` build, `tan size` against the same
+  image the linker had just reported:
+
+  ```
+  before   m55_hp  113.5K/5.50M  2.0%      linker: 116256 B / 2688 KB  4.22%
+           m55_he   95.4K/5.50M  1.7%      linker:  97708 B / 2688 KB  3.55%
+
+  after    m55_hp  113.5K/2.62M  4.2%
+           m55_he   95.4K/2.62M  3.5%
+  ```
+
+  Three consequences, not one cosmetic one:
+
+  - utilisation was under-reported ~2x;
+  - **`over_budget` could never fire.** An image would have had to exceed
+    5.5 MB to be flagged, which cannot happen — it fails to link into its
+    2688 KiB window long first. The one check `tan size` exists to provide
+    was unreachable on every AEN part;
+  - it read as though the two cores share one pool. Two 3 MiB images looked
+    like they fit; the state where they overlap is precisely the #1069
+    corruption.
+
+  `slot0_bytes_for_core` matches `<role>_slot0` on the core id's last
+  segment — the same `core_id.split("_")[-1]` the SDK's own
+  `gen_zephyr_board` uses, not a second spelling that could drift — and
+  enforces `accessible_from`, so a window another core owns is never
+  mistaken for this one's budget.
+
+  **Unchanged everywhere else.** `memory_map` defaults to `None`, and a SoM
+  that declares no per-role window (single-M55 parts, non-AEN families, any
+  preset predating alp-sdk#1445) still falls through to `mram_mb` with no
+  note — byte-identical to before. A malformed `size_kib` (bool, string,
+  zero, negative, infinite, absent) degrades the same way rather than
+  raising or inventing a number.
+
+  Reverting the lookup turns 2 of 64 tests red.
 ### Security
+
 
 - **`parity.yml` interpolated an attacker-controlled `repository_dispatch`
   payload straight into four `run:` shells.** This one is not a hardening
@@ -3001,6 +4628,7 @@ All notable changes to `tan` are documented here. Format follows
   no block to say it in. (#435)
 
 ### Added — CI
+
 
 - **A `zizmor` gate, and a Dependabot config to keep the pins from rotting.**
   Nothing in this repository read `.github/workflows/`, so a security

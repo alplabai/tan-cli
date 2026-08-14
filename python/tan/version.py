@@ -46,4 +46,4 @@
 # PEP 440 reads `X.devN` as "before X", so a 0.6.0 next release still sorts
 # above it. Its CHANGELOG home is `## [0.5.2] — Unreleased`, because a
 # development version documents the release it heads for, never itself.
-TAN_VERSION = "0.5.2-rc1.dev0"
+TAN_VERSION = "0.6.0-rc1"
