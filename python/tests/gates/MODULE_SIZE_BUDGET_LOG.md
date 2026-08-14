@@ -113,5 +113,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/planner/kconfig.py: 2012 -> 2088
 - 2026-08-14 -- tan-cli#736: sevenZip runs unconditionally on Windows; docstring premise corrected
     - tan/commands/doctor_cmd.py: 3970 -> 3984
+- 2026-08-14 -- tan-cli#696: port alp-sdk#1413 -- _boot_target_is_single_slot plus the swap-mode refusal in secure.py
+    - function_count_budget: 254 -> 255
 - 2026-08-14 -- tan-cli#734: Slice.jlink_flash_device_declared plus loader._jlink_flash_device_declared, so a declared-null survives to flash_args
     - tan/planner/loader.py: 1254 -> 1278

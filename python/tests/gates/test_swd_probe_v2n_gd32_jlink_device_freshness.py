@@ -105,6 +105,42 @@ def _entries() -> dict[str, dict[str, Any]]:
     return {name: _gd32_bridge_entry(name) for name in PRESETS}
 
 
+def _require_swd_probe_block(entries: dict[str, dict[str, Any]]) -> None:
+    """Skip -- visibly -- once alp-sdk stops declaring the block this gate
+    measures, but ONLY when all four agree (tan-cli#696).
+
+    alp-sdk#1439 removed `flash_method: swd_probe` (and `flash_args`) from all
+    four `gd32_bridge` entries: GD32 programming is separated out of `tan`
+    entirely, so there is no longer a local flash path here for this gate's
+    `jlink_device` / plans-on-the-J-Link-arm / previewable-under-`--dry-run`
+    assertions to be about. Re-pinning this repo to an alp-sdk that carries
+    that removal turns those three red against metadata that is gone BY
+    DESIGN. tan-cli#732 retires the backend and this gate with it.
+
+    Deliberately NOT an unconditional skip, and not a deletion: a PARTIAL
+    absence -- some presets declaring `swd_probe`, others not -- is exactly
+    the one-PCB drift this file exists to catch, so it still FAILS. Only the
+    all-four-absent end-state skips, and it says which issue removed it.
+    `test_the_four_shipped_presets_carry_an_identical_gd32_bridge_entry` and
+    `test_the_shipped_block_stays_gated_recovery_only` do not call this: the
+    entries and `flash_policy` both survive #1439, so those two keep running.
+    """
+    declaring = {n for n, e in entries.items()
+                 if e.get("flash_method") == "swd_probe"}
+    if not declaring:
+        pytest.skip(
+            "no shipped preset declares `flash_method: swd_probe` -- removed "
+            "from all four gd32_bridge entries by alp-sdk#1439 (GD32 "
+            "programming separated out of tan; tan-cli#732 is the backend "
+            "removal that retires this gate). Nothing to measure, and this "
+            "is the intended end-state, not drift.")
+    missing = sorted(set(entries) - declaring)
+    assert not missing, (
+        "PARTIAL swd_probe removal across the four one-PCB presets -- "
+        f"declared by {sorted(declaring)}, absent from {missing}. That is "
+        "drift, not alp-sdk#1439's end-state, which removes all four.")
+
+
 def test_the_four_shipped_presets_carry_an_identical_gd32_bridge_entry():
     """One PCB, variant-populated -- shared metadata MUST be identical across
     all four (tan-cli#612's own instruction: verify this rather than assume
@@ -125,6 +161,7 @@ def test_the_shipped_block_declares_jlink_device_alongside_target():
     present with no `flash_args.jlink_device` beside it. Checked on every
     preset independently (not just the baseline) so a future edit that
     reintroduces the gap on only ONE of the four still trips this."""
+    _require_swd_probe_block(_entries())
     for name, entry in _entries().items():
         flash_args = entry.get("flash_args") or {}
         assert "target" in flash_args, (
@@ -148,6 +185,7 @@ def test_the_shipped_block_actually_plans_on_the_jlink_arm():
     does not refuse. Runs for all four presets, not only one, since identity
     is asserted separately and a plan-time divergence between two
     byte-identical blocks would itself be a planner bug."""
+    _require_swd_probe_block(_entries())
     which_jlink_only = lambda tool: tool == "JLinkExe"  # noqa: E731
     for name, entry in _entries().items():
         flash_args = entry["flash_args"]
@@ -180,6 +218,7 @@ def test_the_shipped_block_can_be_previewed_with_dry_run():
     observable "this previews rather than refuses" property here is simply
     that `plan_swd_probe` does not raise, and resolves the same J-Link arm
     with the same device profile a real run on a bare host would."""
+    _require_swd_probe_block(_entries())
     which_nothing_installed = lambda tool: False  # noqa: E731
     for name, entry in _entries().items():
         flash_args = entry["flash_args"]

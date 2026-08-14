@@ -63,6 +63,62 @@ def _default_boot_method(project: BoardProject) -> str:
                  if family.startswith(k)), _BOOT_METHOD_FALLBACK)
 
 
+def _boot_target_is_single_slot(project: BoardProject) -> bool:
+    """Whether this project resolves to a disjoint-slot0 boot shape on
+    ANY of its Zephyr M55 cores -- i.e. any MCUboot swap mode (scratch,
+    move, overwrite) has no slot1/scratch partition to swap into.
+
+    Reuses `zephyr_board._aen_role_slot0_map` -- the SAME resolver the
+    board-DT generator and `loader._resolve_slot0_load_address` already
+    call to answer this exact question -- instead of re-deriving the
+    answer from `memory_map:` region NAMES. The two disagree in general:
+    `som-preset-v1.schema.json` documents `memory_map:` as a build-policy
+    override "ONLY for non-stock partitioning", not something only a
+    disjoint-slot0 SoM sets. A `memory_map:` present for an unrelated
+    reason (an rpmsg carve-out, say) that declares no `<role>_slot0`
+    region makes the partition emitter fall through to the STOCK two-slot
+    layout -- a REAL `image-1` + `image-scratch` -- regardless of what its
+    own region names happen to be, so a check that scans those names for
+    "slot1"/"scratch" can answer True (single-slot) on a target that
+    generates both. `_aen_role_slot0_map` asks the real question: does
+    THIS role have its own `<role>_slot0` region (the only shape that
+    drops slot1/scratch, alp-sdk#1069 -- E1M-AEN801 is the only SKU that
+    sets one today: both M55 cores share one physical App MRAM, so slot0
+    is split into per-core windows and the secondary/scratch slot was
+    dropped rather than forced to fit)?
+
+    Only `m55_he`/`m55_hp` roles are AEN slot0-XIP cores (same convention
+    as `loader._resolve_slot0_load_address`); a project with neither in
+    `cores:` -- any non-AEN family, or an AEN project with no Zephyr M55
+    slice -- is never single-slot by this check.
+
+    Lazy import for the same circularity reason
+    `loader._resolve_slot0_load_address` documents: `zephyr_board.py`
+    imports from `loader.py` at module scope.
+    """
+    memory_map = project.som_preset.get("memory_map")
+    if not memory_map:
+        return False
+    from .zephyr_board import (  # noqa: PLC0415
+        ZephyrBoardEmitError,
+        _aen_role_slot0_map,
+    )
+    for core_id in project.cores:
+        if not core_id.startswith("m55_"):
+            continue
+        role = core_id[len("m55_"):]
+        if role not in ("he", "hp"):
+            continue
+        try:
+            if _aen_role_slot0_map(memory_map, role) is not None:
+                return True
+        except ZephyrBoardEmitError as exc:
+            raise OrchestratorError(
+                f"cannot resolve boot.swap_algorithm default for "
+                f"{project.sku}: {exc}") from exc
+    return False
+
+
 def _has_zephyr_slice(project: BoardProject) -> bool:
     """Whether any core in this project builds under Zephyr.
 
@@ -180,11 +236,38 @@ def emit_sysbuild_conf(project: BoardProject) -> str:
         lines.append(algo_kc)
     if sign.get("key_file"):
         lines.append(f'SB_CONFIG_BOOT_SIGNATURE_KEY_FILE="{sign["key_file"]}"')
-    swap = (boot.get("swap_algorithm") or "scratch").lower()
+    swap_explicit = boot.get("swap_algorithm")
+    swap = (swap_explicit or "").lower()
+    single_slot = _boot_target_is_single_slot(project)
+    if swap_explicit and swap in ("scratch", "move", "overwrite") and single_slot:
+        # alp-sdk#1413: this SKU's `memory_map:` has no slot1/scratch
+        # region (see `_boot_target_is_single_slot`) -- every two-slot
+        # MCUboot swap mode needs one. An explicit request for one here
+        # is not a default that quietly drifted, it is a `boot:` block
+        # asking for a partition that does not exist on this target's DT,
+        # so fail loud rather than emit a config that cannot boot.
+        raise OrchestratorError(
+            f"boot.swap_algorithm: {swap} needs a slot1/scratch "
+            f"partition that {project.sku}'s disjoint-slot0 "
+            "`memory_map:` (metadata/e1m_modules/"
+            f"{project.sku}.yaml, alp-sdk#1069) doesn't declare -- this "
+            "single-slot target only supports the stock "
+            "single-app boot.  Drop `boot.swap_algorithm:` (it now "
+            "defaults correctly on single-slot targets) rather than "
+            "setting it explicitly.")
+    if not swap_explicit:
+        # Historically defaulted unconditionally to "scratch"
+        # (alp-sdk#1413): wrong on a single-slot target, whose DT has no
+        # scratch partition to swap into. Single-slot targets default to
+        # the single-app boot their curated `zephyr/sysbuild/aen/
+        # sysbuild.conf` base already ships; every other target keeps the
+        # historical "scratch" default.
+        swap = "none" if single_slot else "scratch"
     swap_kc = {
         "scratch":   "SB_CONFIG_MCUBOOT_MODE_SWAP_SCRATCH=y",
         "move":      "SB_CONFIG_MCUBOOT_MODE_SWAP_USING_MOVE=y",
         "overwrite": "SB_CONFIG_MCUBOOT_MODE_OVERWRITE_ONLY=y",
+        "none":      "SB_CONFIG_MCUBOOT_MODE_SINGLE_APP=y",
     }.get(swap)
     if swap_kc:
         lines.append(swap_kc)

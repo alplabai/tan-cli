@@ -352,7 +352,7 @@ from tests.conftest import sdk_root
 #: comment for the breakdown. `STRICT_LOADERS_PINNED_SDK_COMMIT` does NOT
 #: move, same reasoning as above: `scripts/strict_loaders.py` does not
 #: appear in the `a3173305..d00dbdc1` diff at all.
-PINNED_SDK_COMMIT = "d00dbdc124491c89f68f404cd7ac9d26127f038f"  # alp-sdk origin/dev
+PINNED_SDK_COMMIT = "56dea6b50c3a542a67d1d87513ff4420ad857473"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -377,7 +377,7 @@ PINNED_HASHES: dict[str, str] = {
     "partition.py": "7f37224ff1aa05dd6d943424a664bc4d115dc05853762072854d43ea3628591c",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
-    "secure.py": "f58c5e4ff2c00908ccb3783ce925b26cdaa311548dc8694ffdb0fd01dfce8e95",
+    "secure.py": "69b2434301b655ef7b8e478a4c6e65ec3aabcc1669e8139cfb1716bec9d4b507",
     "slugs.py": "339bffdb8e5fef41eefc0cd2eb05705c2b3e53580c7cfd775e1dd1c65127d5cb",
     "topology.py": "12f5f62d3adeb9e935594934fd2fc2b1fbeaec6f466d6dd89c329c54e844f3b1",
     "validate.py": "07202af06235cc4bcd262ff457b0139e93cd9ad01ccf07b35e4d0ef99e05afa0",
@@ -555,7 +555,7 @@ PINNED_HASHES: dict[str, str] = {
 #: from a real drift; it never even ran the comparison. `faultdecode.py` now
 #: joins this table (11th entry) so the next SDK-side change to it is
 #: audited the same way as everything else here.
-HAND_PORT_PINNED_SDK_COMMIT = "d00dbdc124491c89f68f404cd7ac9d26127f038f"  # alp-sdk origin/dev
+HAND_PORT_PINNED_SDK_COMMIT = "56dea6b50c3a542a67d1d87513ff4420ad857473"  # alp-sdk origin/dev
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
