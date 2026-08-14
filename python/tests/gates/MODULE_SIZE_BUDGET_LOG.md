@@ -101,3 +101,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/core/flash_plan.py: 3131 -> 3141
 - 2026-08-14 -- tan-cli#727: sdk_check grew the dangling --sdk-root arm, plus its call-site guard and the sdkProvenance skip
     - tan/commands/doctor_cmd.py: 3925 -> 3970
+- 2026-08-13 -- tan-cli#728: planner refuses an undeclared CONFIG_ALP_SDK_CHIP_ symbol instead of emitting it
+    - tan/planner/kconfig.py: 2012 -> 2088
