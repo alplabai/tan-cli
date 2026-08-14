@@ -109,3 +109,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/core/flash_plan.py: 3116 -> 3164
 - 2026-08-13 -- tan-cli#728: planner refuses an undeclared CONFIG_ALP_SDK_CHIP_ symbol instead of emitting it
     - tan/planner/kconfig.py: 2012 -> 2088
+- 2026-08-14 -- tan-cli#696: port alp-sdk#1413 -- _boot_target_is_single_slot plus the swap-mode refusal in secure.py
+    - function_count_budget: 254 -> 255
