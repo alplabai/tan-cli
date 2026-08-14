@@ -2,399 +2,137 @@
 """A 3000-line module and a 679-line function must not arrive unnoticed
 (tan-cli#408).
 
-The house guideline is 800 lines per module and 50 per function. Nothing
-enforced either: there is no `[tool.ruff]`, flake8 or pylint section in
-`python/pyproject.toml` and no Python lint job in `.github/workflows/`. The
-only acknowledgement anywhere under `python/tan/` is one `# noqa: PLR0911,
-PLR0912, PLR0915` on `bootstrap_cmd._run`, which no configured linter would
-ever act on.
+The house guideline is 800 lines per module and 50 per function. Nothing else
+enforces either: there is no `[tool.ruff]`, flake8 or pylint section in
+`python/pyproject.toml` and no Python lint job in `.github/workflows/`. This
+is a RATCHET, not a cap: it records what is true today and fails on growth. It
+deliberately does not fail every module and function that is already over --
+a gate that is red on the day it lands gets disabled, and then it guards
+nothing at all.
 
-The measurement that makes this a gate rather than a preference: between
-tan-cli#408 being filed and this file being written, with nobody objecting
-and nothing failing, every one of the six modules it named GREW.
+## Where the numbers live (tan-cli#668)
 
-    doctor_cmd.py      3019 -> 3114
-    bootstrap_cmd.py   2658 -> 2781
-    core/flash_plan.py 1721 -> 1808
-    flash_cmd.py       1652 -> 1783
-    _run                630 -> 679 lines
+Until tan-cli#668, the per-module ceilings, the function-count budget and the
+worst-function budget were a hand-maintained Python dict IN THIS FILE, one
+entry per over-budget module with a paragraph of prose recording why it grew.
+That dict conflicted on seven separate merges in a single day, because it
+stored ABSOLUTE measurements of one tree and nearly every PR perturbed at
+least one entry -- and both naive conflict resolutions (`--ours`, `--theirs`)
+shipped a red gate, because neither side's numbers describe the tree the
+merge actually produced. Only running the gate on the merged tree does.
 
-So this is a RATCHET, not a cap. It records what is true today and fails on
-growth. It deliberately does NOT fail the 23 modules and 199 functions that
-are already over -- a gate that is red on the day it lands gets disabled, and
-then it guards nothing at all.
+The numbers now live in `module_size_budget.generated.json`, produced by
+`scripts/regen_module_size_budget.py`, never hand-edited. A merge conflict on
+that file is resolved by throwing either side away and re-running the script
+against the merged tree -- it re-measures from source, so the result is
+correct by construction rather than reconciled. `MODULE_SIZE_BUDGET_LOG.md`
+carries the append-only, one-line-per-change record of WHY a ceiling moved,
+in the same "keep both sides" shape that is already correct for
+`CHANGELOG.md` -- unlike the old dict, nothing in that log encodes absolute
+state, so two branches that each grow a module produce two non-conflicting
+lines instead of one contested number.
 
 ## Why a pytest gate and not a ruff job
 
 `python -- pytest across python/` is ALREADY a required context on `main` and
-`dev`. A new CI job would have to be added to the required list to matter,
-and adding a required context blocks every open PR until it has run on each
-of them. This runs inside a gate that is already required, so it starts
-enforcing on the next PR with no protection change. `pyproject.toml` gaining
-a `[tool.ruff]` section is still worth doing for editor integration; it is
-not what makes a rule enforced here.
+`dev`. A new CI job would have to be added to the required list to matter, and
+adding a required context blocks every open PR until it has run on each of
+them. This runs inside a gate that is already required, so it enforces on the
+next PR with no protection change.
 
 ## How to change these numbers
 
-Lower them, freely, whenever a split lands -- that is the point. Raising one
-means a module grew, and needs a reason in the diff that raises it.
+Do not hand-edit `module_size_budget.generated.json`. Run
+`python scripts/regen_module_size_budget.py` -- see its own module docstring
+for the `--reason` / `--merge-resync` distinction. Lowering a ceiling never
+needs either flag: a module shrinking, or dropping under the cap, is always
+safe and the script applies it without asking.
 """
 from __future__ import annotations
 
-import ast
-from pathlib import Path
+import json
 
 import pytest
 
-#: `python/tan`, found from this file rather than from a cwd, so the gate is
-#: identical however pytest was started (tan-cli#423's lesson).
-_PACKAGE = Path(__file__).resolve().parents[2] / "tan"
-
-#: The house guideline. Any module NOT in `_MODULE_BUDGET` must be under it --
-#: that is what stops a 24th oversized module joining the list silently.
-_MODULE_CAP = 800
-
-#: The guideline for a function body, same role for the function ratchet.
-_FUNCTION_CAP = 50
-
-#: Every module over `_MODULE_CAP` as of 2026-08-04, with its measured line
-#: count as its ceiling.
-#:
-#: Four entries were re-measured when this branch caught up with `dev`: the
-#: ratchet was calibrated before tan-cli#426 merged, and that PR grew exactly
-#: these four. Each still pins the file's EXACT current size, so the next
-#: unnoticed growth still fails -- the baseline moved, the gate did not
-#: loosen. `build/execute.py` 902 -> 941 (#419's Zephyr-SDK message),
-#: `generate_cmd.py` 1101 -> 1147 (#420's refused-emit cleanup),
-#: `build_cmd.py` 1555 -> 1559 (#407's ladder-divergence helper),
-#: `validate_cmd.py` 1092 -> 1093 (a corrected #262 docstring). Recorded per file rather than as a single "worst
-#: module" number so a split that shrinks one file cannot be spent widening
-#: another.
-_MODULE_BUDGET: dict[str, int] = {
-    # 3127, not 3114: the 27-camelCase-issue-code fix added `kebab_check_name`
-    # (+ its `_CAMEL_BOUNDARY` regex), the one shared place a `Check.name`
-    # becomes a kebab issue-code suffix, used by both `checks_to_issues()` here
-    # and `support_bundle_cmd._doctor_issues()`.
-    # 3135, not 3127, as of the tan-cli#464 rework: `doctor` now threads
-    # `resolve_sdk_root_ladder`'s `SdkRootResolution` through named fields
-    # instead of a tuple unpack, and appends `sdk.global-default-foreign-
-    # project` alongside `sdk.project-pin-unresolved` -- the same warning
-    # `sdk current`/`tan build` already disclose, wired into the "0 issues"
-    # report doctor exists to be honest about.
-    "tan/commands/doctor_cmd.py": 3135,
-    # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
-    # `--dry-run` about which workspace a real run would build, on both the
-    # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
-    # -- fixing both moved real logic into a new module-level
-    # `_print_env_outcome` (extracted specifically to keep `_run` AT, not
-    # over, its own 679-line ceiling below -- extraction cannot shrink the
-    # MODULE total, only move lines off the worst function), plus the
-    # one-line `target is not None` gate on the tan-cli#389 orphan refusal
-    # (was refusing every in-place re-run of an already-bootstrapped
-    # workspace, naming its own non-existent relocation target "None").
-    #
-    # 2886, not 2953, as of the tan-cli#464 REWORK (measured majors, then an
-    # independent design review, against the 2953-line shape immediately
-    # above): the directory-scoped `.alp/sdk-path` project pin a relocation
-    # used to also write (`_write_project_sdk_pointer`/
-    # `_read_project_sdk_pointer`, `RelocationUndo.previous_project_pointer`,
-    # `_undo_relocation`'s matching rollback branch) is REMOVED outright --
-    # that directory is bootstrap's cwd, the workspace PARENT in the
-    # quickstart, not a project, and a bootstrap run from `$HOME` pinned
-    # inside tan's own machine-global config dir, silencing the layer-2
-    # warning below for essentially every project the user owns. Only layer 2
-    # (`writtenFor` + `sdk.global-default-foreign-project`) ships; the
-    # removal gives back more lines than the small amount `_print_env_outcome`
-    # threading a `foreign_issue` alongside `pin_issue` adds back.
-    # 2917, not 2886, as of tan-cli#469: the inline `workspace-orphan-refused`
-    # message (three string-literal list items, spliced together by `_refusal`)
-    # is now `workspace_orphan_refusal`, a standalone function alongside its two
-    # siblings (`workspace_guard_target_occupied_refusal`,
-    # `enclosing_west_workspace_refusal`) that already had that shape -- it was
-    # the one of the three still inlined. Branches on `target is None` instead
-    # of interpolating it unconditionally: unreachable today (`target is not
-    # None` already gates the call site, tan-cli#389/#390), but the inline
-    # f-string was the exact shape that printed a stringified `None` and then
-    # advised dropping a `--workspace` the invocation never carried, and
-    # nothing stopped that gate from being loosened again.
-    "tan/commands/bootstrap_cmd.py": 2917,
-    "tan/core/bootstrap.py": 1890,
-    "tan/core/flash_plan.py": 1808,
-    # 1829, not 1808, as of the tan-cli#464 stage-2 review round: `_resolve_sdk`/
-    # `resolve_sdk_root_ladder_safe` now return a named `_SdkResolution`
-    # instead of a growing tuple, and `flash` appends
-    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
-    # -- flashing real hardware against the silently-wrong SDK is the highest
-    # cost of any command on this ladder. Grew again when review found the
-    # manifest-not-found gate returned through `_error` BEFORE either warning
-    # was computed, so the dominant refusal reported neither -- `_error` now
-    # takes the resolution facts and calls the shared `sdk_cmd.
-    # sdk_resolution_issues` itself, so no future early return can skip them.
-    "tan/commands/flash_cmd.py": 1829,
-    "tan/planner/kconfig.py": 1639,
-    # 1607, not 1559, as of the tan-cli#464 rework: `resolve_sdk_root_ladder`/
-    # `resolve_sdk_root_wide` return a named `SdkRootResolution` instead of a
-    # tuple that would need a fourth positional slot for
-    # `foreign_global_default_for` -- the exact silent-drop shape #464 exists
-    # to close -- and `build` appends `sdk.global-default-foreign-project`
-    # beside `sdk.project-pin-unresolved`.
-    "tan/commands/build_cmd.py": 1607,
-    # 1476, not 1440, as of the tan-cli#464 rework: `_resolve_sdk_root_and_tier`
-    # returns a named `_SdkRootAndTier` instead of a tuple, and both `renode`
-    # entry points (`_run`, `--sim-mode`) append
-    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`.
-    #
-    # 1501, not 1476, as of tan-cli#470: `--project PATH` used to be accepted
-    # and silently dropped for the default build root (resolved from the CWD
-    # instead), matching every OTHER command's `--project` handling except
-    # this one. `app_path` is now resolved through the same
-    # `build_output.resolve_app_base` ladder `size`/`image` already call,
-    # fed a native-separator workspace dir and renormalised after (this
-    # command does not POSIX-normalise its paths, unlike those two) -- the
-    # extra lines are the routing plus the docstring bullet documenting the
-    # divergence this fix removes.
-    "tan/commands/renode_cmd.py": 1501,
-    # 1402, not 1296, as of tan-cli#462 (both rounds): four new `_failure`
-    # callers (`_build_manifest_missing_failure`/`_core_unknown_failure`,
-    # then the review round's `_target_kind_ambiguous_failure`/
-    # `_no_debuggable_target_class_failure`) split `--target-kind`
-    # inference's four user-fixable refusals off the old blanket
-    # `internal-failure` verdict into their own `VALIDATION_FAILURE` (2)
-    # issue codes, plus the call-site branches that pick between them and the
-    # pre-#462 `internal-failure` fallback. Raised rather than collapsed into
-    # one shared `_validation_failure(generated_at, code, ...)` helper:
-    # `test_every_issue_code_is_registered.py` resolves this file's `_failure`
-    # calls by requiring a LITERAL `code=` keyword at every call site (it
-    # reconstructs `debug-config.<code>` by parsing the AST, not by running
-    # the code), so collapsing the four wrappers into one parameterised
-    # helper reddens that gate with "N code-position argument(s) could not be
-    # resolved to a literal ... a 'code=' keyword argument is not a
-    # resolvable code literal" -- each wrapper's own literal is the only
-    # shape the gate can verify against the registry.
-    "tan/commands/debug_config_cmd.py": 1402,
-    "tan/planner/template.py": 1199,
-    "tan/core/scaffold.py": 1106,
-    # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
-    # `--all` re-run fix had to become content-aware -- reading the existing
-    # overlay and comparing it against the banner every tan-emitted one
-    # carries -- to tell tan's own prior output from a real hand edit, which
-    # the previous 1-line `destination.exists()` check could not. Raised
-    # rather than extracted: `_overlay_would_overwrite` is five body lines
-    # including its own read-error handling; there is nothing left to split.
-    #
-    # 1186, not 1150, as of the tan-cli#464 rework: `_resolve_sdk_root` returns
-    # a named `_ResolvedSdkRoot` instead of a tuple, and `generate` appends
-    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
-    # -- this command WRITES `build/generated/alp.conf` and the DTS overlays
-    # out of whichever checkout resolved.
-    "tan/commands/generate_cmd.py": 1186,
-    # 1215, not 1096, as of tan-cli#464 (measured majors, then an independent
-    # design review): the `globalDefault` tier gained a `writtenFor`-vs-caller
-    # check (`_workspace_under`, `global_default_foreign_project_issue`) and a
-    # shared `_read_pointer_json` (`_pointer_target`/`_pointer_written_for`
-    # now both read through it, rather than duplicating the same
-    # parse-and-degrade logic a second time). `_pointer_written_for` grew
-    # again in the same rework's review round: a non-absolute `writtenFor`
-    # (measured: an empty string resolved `Path("")` to the process's OWN
-    # cwd) is now rejected at the source rather than reaching
-    # `_workspace_under` at all.
-    #
-    # 1265, not 1228, as of the tan-cli#464 stage-2 review round:
-    # `_pointer_written_for`'s `Path(value).is_absolute()` was platform-native
-    # (`PureWindowsPath` needs a drive, `PurePosixPath` needs a leading `/`),
-    # so a legitimate absolute `writtenFor` written by the OTHER platform's tan
-    # degraded to "no opinion" -- now accepted when EITHER `PurePosixPath` or
-    # `PureWindowsPath` calls it absolute. Also adds `sdk_resolution_issues`,
-    # the one shared point `flash`/`size`/`image` now call (from `_error`/
-    # `_error_outcome` themselves) instead of each hand-copying the
-    # pin-issue/foreign-issue pair only on their happy path.
-    "tan/commands/sdk_cmd.py": 1265,
-    "tan/commands/validate_cmd.py": 1093,
-    # 1057, not 1047, as of the tan-cli#464 rework: `new-som` appends
-    # `sdk.global-default-foreign-project` beside `sdk.project-pin-unresolved`
-    # -- this command writes metadata skeletons into whichever checkout
-    # resolved, the same cost `project_pin_issue` above already justified.
-    "tan/commands/new_som_cmd.py": 1057,
-    # 1013, not 1000, as of the tan-cli#464 rework: `resolve_sdk` (shared with
-    # `presets`) now returns the shared `ActiveSdk` instead of its own tuple,
-    # and `clean` appends `sdk.global-default-foreign-project` beside
-    # `sdk.project-pin-unresolved`.
-    "tan/commands/clean_cmd.py": 1013,
-    "tan/planner/loader.py": 996,
-    # 1009, not 974, as of the tan-cli#464 review round: `_resolve_sdk_root`
-    # carries `foreign_global_default_for` through into `_Sdk`, and `init`
-    # surfaces `sdk.global-default-foreign-project` BEFORE `_pin_sdk` writes
-    # -- this is the command a foreign `globalDefault` hurts most, since the
-    # pin it is about to write is PERMANENT, unlike one build silently using
-    # the wrong SDK once.
-    "tan/commands/init_cmd.py": 1009,
-    # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
-    # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
-    # slice reader, and the `--target-kind` inference decision itself
-    # (`infer_target_kind`, its message-building split into four small
-    # helpers to keep it under the FUNCTION ratchet too) all moved here from
-    # `debug_config_cmd.py`, which was over ITS OWN budget after the same
-    # review's bugfix -- "move the decision, don't just extract a helper" was
-    # the review's own suggested fix, since `support_bundle_cmd.py` needs the
-    # identical decision and both commands already import this module.
-    # Raised rather than split further: the alternative was leaving the
-    # shared decision duplicated per command, the exact drift this move
-    # exists to prevent.
-    # 1068, not 1060, as of tan-cli#462: `infer_target_kind` now returns a
-    # `(target, code, message)` 3-tuple instead of `(target, message)`, so its
-    # two user-fixable refusals (a pre-build hardware project, a `--core`
-    # matching nothing) carry a bare reason code the caller maps to a new
-    # issue code -- and `_core_not_in_manifest_message` grew a `slices`
-    # parameter to name the cores the build actually produced.
-    "tan/core/debug_launch.py": 1068,
-    "tan/commands/build/execute.py": 941,
-    # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
-    # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
-    # delta in scripts/gen_zephyr_board.py line for line). Raised rather
-    # than extracted because this file mirrors an upstream generator --
-    # splitting it here would make the next port a hand-merge instead of
-    # a diff.
-    "tan/planner/zephyr_board.py": 970,
-    "tan/commands/support_bundle_cmd.py": 834,
-    # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
-    # `_every_declared_format()` -- the same single source `_format_callback`
-    # reads -- instead of a second, driftable tuple, and the docstring
-    # records why (the old rule silently DROPPED the subcommand for any
-    # leading `--format` outside `text`/`json`). Raised rather than
-    # extracted: the growth is the explanation of a shipped regression,
-    # which is the last thing to move out of the file it explains.
-    "tan/cli.py": 842,
-}
-
-#: Some of these are `tan/planner/**`, which is a hash-audited MIRROR of
-#: alp-sdk's `scripts/alp_orchestrate/**` (`test_planner_relocation_
-#: freshness.py`). Splitting one here would make the mirror diverge in SHAPE
-#: from upstream and is the wrong repository for the fix -- tan-cli#408's
-#: acceptance names `kconfig.py` and a `_library_alias_table` dedup across
-#: `kconfig.py`/`libraries.py`/`loader.py`, and all of those are mirror
-#: files. That part of #408 belongs upstream, not here.
-_MIRRORED = ("tan/planner/",)
-
-#: Functions over `_FUNCTION_CAP` as of 2026-08-04: 199 of them, which is far
-#: too many to enumerate readably. Two numbers ratchet them instead -- the
-#: COUNT (a new long function pushes it up) and the WORST (an existing one
-#: growing pushes it up). Neither can move without this file moving.
-# 200, not 199, for the same reason as the four module entries above: both
-# functions that crossed 50 lines came from the tan-cli#407 fixes that landed
-# after this ratchet was calibrated -- `tan/commands/sdk_cmd.py:_run_current`
-# and `tan/envelope.py:_with_sdk_divergence`, each of which now emits the
-# shared `sdk.discovery-divergent` warning. Measured: 198 over 50 lines at
-# f3208e1, 200 now.
-# 201 as of tan-cli#432: `tan/planner/zephyr_board.py:_aen_flash_partitions`
-# crossed 50 lines carrying the alp-sdk#1069 disjoint-slot0 branch. It is a
-# line-for-line port of alp-sdk's own function, which is the same size --
-# extracting here would make the next port a hand-merge instead of a diff.
-# 202, not 203, as of the tan-cli#464 REWORK: `_undo_relocation` dropped back
-# under 50 lines once its project-pin rollback branch (added, then reverted
-# on review, by the same issue) came back out -- `resolve_sdk_tiered` (61
-# lines, `sdk_cmd.py`, the `writtenFor`-vs-caller check) stays over.
-#
-# 707, not 700, same rework: `bootstrap_cmd._run` gave back the removed
-# project-pin write/read/rollback lines but took on more than that back in
-# disclosure plumbing -- `resolve_sdk_root_ladder`'s named `SdkRootResolution`
-# unpacked into local variables (rather than a tuple, per review) and a
-# `foreign_issue` threaded alongside `pin_issue` into both the `--print-env`
-# short-circuit and the final issues list. Not extracted further: `_run` is
-# already the one long linear refusal ladder tan-cli#408's own `# noqa:
-# PLR0911, PLR0912, PLR0915` stands in front of, and splitting the
-# resolution-and-disclosure lines out would not shrink the MODULE total below,
-# only move them off this ratchet onto that one.
-_FUNCTION_COUNT_BUDGET = 202
-_FUNCTION_WORST_BUDGET = 707
-
-
-def _modules() -> list[Path]:
-    return sorted(_PACKAGE.rglob("*.py"))
-
-
-def _rel(path: Path) -> str:
-    return path.relative_to(_PACKAGE.parent).as_posix()
-
-
-def _long_functions(tree: ast.AST) -> list[tuple[int, str]]:
-    out = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            span = (node.end_lineno or node.lineno) - node.lineno + 1
-            if span > _FUNCTION_CAP:
-                out.append((span, node.name))
-    return out
+from tests.gates import _module_size_budget_core as core
 
 
 def test_no_module_grows_past_its_recorded_budget():
     """The ratchet. A budgeted module may shrink freely; growing past its
-    recorded size fails and must be answered in the diff that causes it."""
+    recorded size fails and must be answered by regenerating the budget file
+    with a reason."""
+    budget = core.load_generated()
     grew = []
-    for path in _modules():
-        rel = _rel(path)
+    for path in core.modules():
+        rel = core.rel(path)
         lines = len(path.read_text(encoding="utf-8").splitlines())
-        ceiling = _MODULE_BUDGET.get(rel, _MODULE_CAP)
+        ceiling = budget.modules.get(rel, core.MODULE_CAP)
         if lines > ceiling:
             grew.append(f"{rel}: {lines} lines, budget {ceiling}")
 
     assert grew == [], (
         "these modules are over budget:\n  "
         + "\n  ".join(grew)
-        + f"\n\nA module not in _MODULE_BUDGET is capped at {_MODULE_CAP}. Either "
-        "extract from it, or raise its entry with a reason -- the entries "
-        "record what was true on 2026-08-04, and every one of them grew "
-        "silently before this gate existed."
+        + f"\n\nA module not in module_size_budget.generated.json is capped at "
+        f"{core.MODULE_CAP}. Either extract from it, or run "
+        "`python scripts/regen_module_size_budget.py --reason \"...\"` to raise "
+        "its entry."
     )
 
 
 def test_the_module_budget_has_not_gone_stale():
     """The other direction: a budget entry for a file that has SHRUNK well
-    under its ceiling is a ratchet that stopped ratcheting. Lower it, so the
-    next growth is caught at the new level rather than at the old one.
+    under its ceiling is a ratchet that stopped ratcheting. Lower it (rerun
+    the regen script -- shrinking never needs a flag) so the next growth is
+    caught at the new level rather than the old one.
 
     The slack allowed is deliberately generous (50 lines). This gate exists
-    to catch a module doubling, not to make every ordinary edit renegotiate a
+    to catch a module doubling, not to make every ordinary edit regenerate a
     number."""
+    budget = core.load_generated()
     slack = []
-    for rel, ceiling in sorted(_MODULE_BUDGET.items()):
-        path = _PACKAGE.parent / rel
+    for rel, ceiling in sorted(budget.modules.items()):
+        path = core.PACKAGE.parent / rel
         if not path.exists():
             slack.append(f"{rel}: budgeted but no longer exists -- drop the entry")
             continue
         lines = len(path.read_text(encoding="utf-8").splitlines())
-        if lines <= _MODULE_CAP:
-            slack.append(f"{rel}: {lines} lines, now under {_MODULE_CAP} -- drop the entry")
+        if lines <= core.MODULE_CAP:
+            slack.append(f"{rel}: {lines} lines, now under {core.MODULE_CAP} -- drop the entry")
         elif ceiling - lines > 50:
             slack.append(f"{rel}: {lines} lines, budget {ceiling} -- lower it")
 
-    assert slack == [], "the module budget no longer describes the tree:\n  " + "\n  ".join(slack)
+    assert slack == [], (
+        "the generated module budget no longer describes the tree (run "
+        "`python scripts/regen_module_size_budget.py`):\n  " + "\n  ".join(slack)
+    )
 
 
 def test_no_new_long_function_and_none_of_them_grows():
-    """199 functions are already over 50 lines, so enumerating them would be
-    a 199-line table nobody reads. The COUNT and the WORST are ratcheted
+    """Hundreds of functions are already over 50 lines, so enumerating them
+    would be a table nobody reads. The COUNT and the WORST are ratcheted
     instead: a new long function moves the count, and an existing one growing
-    moves the worst. `bootstrap_cmd._run` is the worst at 679 lines, which is
-    what tan-cli#408's `# noqa: PLR0911, PLR0912, PLR0915` is standing in
-    front of."""
+    moves the worst."""
+    budget = core.load_generated()
     found: list[tuple[int, str]] = []
-    for path in _modules():
+    for path in core.modules():
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = __import__("ast").parse(path.read_text(encoding="utf-8"))
         except SyntaxError as err:  # pragma: no cover -- a broken tree fails elsewhere first
-            pytest.fail(f"{_rel(path)} does not parse: {err}")
-        found.extend((span, f"{_rel(path)}:{name}") for span, name in _long_functions(tree))
+            pytest.fail(f"{core.rel(path)} does not parse: {err}")
+        found.extend((span, f"{core.rel(path)}:{name}") for span, name in core.long_functions(tree))
 
     worst = max(found, default=(0, "<none>"))
-    assert len(found) <= _FUNCTION_COUNT_BUDGET, (
-        f"{len(found)} functions are over {_FUNCTION_CAP} lines, budget "
-        f"{_FUNCTION_COUNT_BUDGET}. Extract from the one you just grew, or "
-        f"raise the budget with a reason. Longest: {worst[1]} at {worst[0]} lines."
+    assert len(found) <= budget.function_count, (
+        f"{len(found)} functions are over {core.FUNCTION_CAP} lines, budget "
+        f"{budget.function_count}. Extract from the one you just grew, or "
+        "regenerate the budget file with a reason. Longest: "
+        f"{worst[1]} at {worst[0]} lines."
     )
-    assert worst[0] <= _FUNCTION_WORST_BUDGET, (
+    assert worst[0] <= budget.function_worst, (
         f"{worst[1]} is {worst[0]} lines, past the recorded worst "
-        f"({_FUNCTION_WORST_BUDGET}). The longest function in the package "
-        f"getting longer is the exact drift tan-cli#408 reports."
+        f"({budget.function_worst}). The longest function in the package "
+        "getting longer is the exact drift tan-cli#408 reports."
     )
 
 
@@ -404,14 +142,34 @@ def test_the_mirrored_planner_is_named_as_out_of_scope():
     diverge in SHAPE from upstream, which
     `test_planner_relocation_freshness.py` exists to prevent -- so any
     oversized module under it is upstream's to fix, and this records that
-    rather than leaving the next reader to rediscover it from a failing hash.
-
-    Asserted, not commented, because the fact is load-bearing: tan-cli#408's
-    acceptance asks for `kconfig.py` to be split and for
-    `_library_alias_table` to be deduplicated across `kconfig.py`,
-    `libraries.py` and `loader.py`. All of those are mirror files. That part
-    of the issue cannot be done in this repository."""
-    mirrored = [rel for rel in _MODULE_BUDGET if rel.startswith(_MIRRORED)]
+    rather than leaving the next reader to rediscover it from a failing
+    hash."""
+    budget = core.load_generated()
+    mirrored = [rel for rel in budget.modules if rel.startswith(core.MIRRORED_PREFIX)]
     assert mirrored, "no mirrored planner module is budgeted -- has the mirror moved?"
     for rel in mirrored:
-        assert (_PACKAGE.parent / rel).exists(), f"{rel} is budgeted but missing"
+        assert (core.PACKAGE.parent / rel).exists(), f"{rel} is budgeted but missing"
+
+
+def test_the_generated_budget_has_no_duplicate_module_keys():
+    """A duplicate key in `modules` is invisible to every other test in this
+    file, because JSON (like the Python dict literal it replaced) collapses a
+    duplicate on parse -- the LAST spelling wins and the earlier one is dead
+    text (tan-cli#586's class of defect, which this design does not get for
+    free just by moving to JSON)."""
+    try:
+        core.load_generated()
+    except ValueError as err:
+        pytest.fail(str(err))
+
+
+def test_the_generated_file_declares_the_caps_this_gate_uses():
+    """`module_size_budget.generated.json` carries its own `module_cap`/
+    `function_cap` fields alongside the measured data, so the file is
+    self-describing without a second source. They must agree with the
+    constants this gate actually enforces -- a drift here would mean the
+    committed file and the running gate silently disagree about the policy,
+    not just the measurements."""
+    data = json.loads(core.GENERATED_PATH.read_text(encoding="utf-8"))
+    assert data["module_cap"] == core.MODULE_CAP
+    assert data["function_cap"] == core.FUNCTION_CAP

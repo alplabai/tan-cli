@@ -9,11 +9,15 @@ Named twins live in `crates/tan-cli/src/commands/presets.rs`
 
 The goldens (`presets-heterogeneous-som`, `presets-no-sdk`) pin the wire format;
 what they cannot reach is (a) the text renderer, since both run `--format json`,
-and (b) the **no-PyYAML** reader, since the test host has PyYAML and the frozen
-binary does not (`scripts/build_binary.sh` installs `typer rich pyinstaller`
-only). (b) is the one that would ship broken silently: `cores` is what the New
-Project wizard scaffolds IPC from, so the fallback is held to reading the SAME
-cores PyYAML does, on the real preset shape.
+and (b) the **no-PyYAML** reader, since the test host has PyYAML. The frozen
+binary has it too -- `pyyaml>=6` is a base entry in `pyproject.toml`
+`[project].dependencies` and `scripts/build_binary.sh` installs
+`-e ".[monitor]"`; this docstring previously claimed that script installed
+`typer rich pyinstaller` only, which has not been true since `pyyaml` entered
+`pyproject.toml` (tan-cli#574). (b) is reachable via a `--no-deps` install or a
+broken venv, and it is still the one that would ship broken silently: `cores`
+is what the New Project wizard scaffolds IPC from, so the fallback is held to
+reading the SAME cores PyYAML does, on the real preset shape.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ from typer.testing import CliRunner
 
 from tan.cli import app
 from tan.commands.presets_cmd import (
+    SDK_UNRESOLVED_MESSAGE,
     SomShapeError,
     infer_runtime_for_core_id,
     parse_som_preset,
@@ -262,14 +267,36 @@ def test_a_valid_sdk_root_flag_keeps_the_path_as_typed(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_text_is_a_count_line_and_lists_skus_only_when_verbose():
-    assert render_presets_text(["E1M-A", "E1M-B"], ["lvgl"], False) == [
-        "presets: skus=2 libraries=8 boardLibraries=1"
+def test_text_lists_skus_with_display_names_and_verbose_adds_family_cores():
+    """Was count-only-then-bare-skus (tan-cli#164-adjacent regression): three
+    integers and a sku list answer no question a user has. Superseded by
+    `render_presets_text` taking `Som` and printing the display name by
+    default, family/cores under `--verbose`."""
+    from tan.commands.presets_cmd import Som, SomCore
+
+    soms = [
+        Som(
+            sku="E1M-A",
+            display_name="Alpha",
+            family="fam-a",
+            cores=(SomCore(id="c1", os="zephyr"),),
+        ),
+        Som(
+            sku="E1M-B",
+            display_name="Bravo",
+            family="fam-b",
+            cores=(SomCore(id="c2", os="yocto"),),
+        ),
     ]
-    assert render_presets_text(["E1M-A"], [], True) == [
-        "presets: skus=1 libraries=8 boardLibraries=0",
-        "sku: E1M-A",
-    ]
+    lines = render_presets_text(soms, ["lvgl"], False)
+    assert lines[0] == "presets: skus=2 libraries=8 boardLibraries=1"
+    assert any("E1M-A" in line and "Alpha" in line for line in lines)
+    assert any("E1M-B" in line and "Bravo" in line for line in lines)
+
+    verbose = render_presets_text(soms[:1], [], True)
+    assert verbose[0] == "presets: skus=1 libraries=8 boardLibraries=0"
+    assert any("fam-a" in line for line in verbose)
+    assert any("c1" in line and "zephyr" in line for line in verbose)
 
 
 # --------------------------------------------------------------------------
@@ -315,13 +342,17 @@ def test_an_unresolved_sdk_is_a_warning_not_a_failure(tmp_path, monkeypatch):
     assert doc["data"]["soms"] == []
     assert doc["data"]["boardLibraries"] == []
     # The FROZEN code, spelled exactly; the wizard matches it with `===`.
+    # tan-cli#497 defect 7: with `--sdk-root` GIVEN, the message names the value
+    # that was rejected and why. The no-flag message is unchanged and stays
+    # pinned by the `presets-no-sdk` golden envelope.
     assert doc["issues"] == [
         {
             "code": "presets.sdk-root-unresolved",
             "severity": "warning",
             "message": (
-                "alp-sdk root is unresolved. Returning built-in defaults and "
-                "empty SDK preset lists."
+                'alp-sdk root is unresolved: --sdk-root "./nope" is not an '
+                "alp-sdk checkout (scripts/alp_project.py not found under it). "
+                "Returning built-in defaults and empty SDK preset lists."
             ),
         }
     ]
@@ -337,7 +368,88 @@ def test_text_mode_writes_nothing_to_stdout(tmp_path, monkeypatch):
     assert "presets: skus=0 libraries=8 boardLibraries=0" in result.stderr
 
 
+def test_text_mode_reports_the_unresolved_sdk_reason_too(tmp_path, monkeypatch):
+    """The JSON envelope has always carried `presets.sdk-root-unresolved` in
+    `issues`; text mode built the same list and then never printed it -- a
+    customer running a bare `tan presets` with no SDK resolvable saw
+    `skus=0` and nothing telling them why. Mirrors `examples_cmd.py`'s own
+    issue-printing loop for its text branch.
+
+    Driven WITHOUT `--sdk-root` so it pins the shared `SDK_UNRESOLVED_MESSAGE`
+    constant: with the flag given, tan-cli#497 replaces the message with the
+    one naming the rejected value (covered by its own test below)."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["presets"])
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert f"presets: {SDK_UNRESOLVED_MESSAGE}" in result.stderr
+
+
+def test_a_rejected_sdk_root_flag_is_named_in_the_message(tmp_path, monkeypatch):
+    """tan-cli#497 defect 7. `--sdk-root` is TERMINAL, so a path without
+    `scripts/alp_project.py` resolves to nothing -- and the warning used to be
+    the same string as the no-flag one, whose remediation is "pass --sdk-root
+    <path>": the flag the caller had just typed, with the failing value nowhere
+    in the JSON envelope or the stderr text. Both modes must now name it."""
+    monkeypatch.chdir(tmp_path)
+    typo = str(tmp_path / "alp-sdk-typo")
+
+    doc = json.loads(
+        runner.invoke(app, ["presets", "--sdk-root", typo, "--format", "json"]).stdout
+    )
+    assert doc["issues"][0]["code"] == "presets.sdk-root-unresolved"
+    assert doc["issues"][0]["message"] == (
+        f'alp-sdk root is unresolved: --sdk-root "{typo}" is not an alp-sdk '
+        "checkout (scripts/alp_project.py not found under it). Returning "
+        "built-in defaults and empty SDK preset lists."
+    )
+
+    text = runner.invoke(app, ["presets", "--sdk-root", typo]).stderr
+    assert f'presets: alp-sdk root is unresolved: --sdk-root "{typo}" is not' in text
+    # The remediation that recommends the flag the caller just passed is GONE
+    # from this branch -- that self-defeating sentence is the defect.
+    assert "pass --sdk-root <path>" not in text
+
+
 def test_a_bad_format_is_a_usage_error_not_a_traceback():
     result = runner.invoke(app, ["presets", "--format", "yaml"])
     assert result.exit_code == 2
     assert "Traceback" not in result.output
+
+
+def test_presets_text_lists_skus_with_display_names_by_default():
+    """Three integers answer no question a user has. The SoM entries carry a
+    display name already; the default output should show it."""
+    from tan.commands.presets_cmd import Som, SomCore, render_presets_text
+
+    soms = [
+        Som(
+            sku="E1M-AEN301",
+            display_name="E1M-AEN301 (Alif Ensemble E3)",
+            family="alif-ensemble",
+            cores=(SomCore(id="m55_hp", os="zephyr"), SomCore(id="m55_he", os="zephyr")),
+        )
+    ]
+    lines = render_presets_text(soms, ["lib-a"], verbose=False)
+
+    assert lines[0] == "presets: skus=1 libraries=8 boardLibraries=1"
+    assert any("E1M-AEN301" in line and "Alif Ensemble E3" in line for line in lines)
+    # family/cores are the --verbose tier, not the default
+    assert not any("m55_hp" in line for line in lines)
+
+
+def test_presets_text_verbose_adds_family_and_cores():
+    from tan.commands.presets_cmd import Som, SomCore, render_presets_text
+
+    soms = [
+        Som(
+            sku="E1M-AEN301",
+            display_name="E1M-AEN301 (Alif Ensemble E3)",
+            family="alif-ensemble",
+            cores=(SomCore(id="m55_hp", os="zephyr"),),
+        )
+    ]
+    lines = render_presets_text(soms, [], verbose=True)
+
+    assert any("alif-ensemble" in line for line in lines)
+    assert any("m55_hp" in line and "zephyr" in line for line in lines)

@@ -1,4 +1,7 @@
-# Rust build output
+# Rust build output. `crates/` is gone (tan-cli#269) and nothing here produces
+# a `target/` any more, but the entry stays: a stale `target/` from a checkout
+# that predates the deletion is exactly the tree an accidental `git add -A`
+# would commit, and it is 3.6 MB of sources' worth of build products.
 /target
 # Editor / OS cruft
 *.swp
@@ -16,8 +19,20 @@ __pycache__/
 # and `Activate.ps1` carrying a literal `C:\Users\<name>` home path, in a public
 # repo whose history is permanent. Same reason the support-bundle rule below
 # exists; the fix is to stop matching one name and match the shape.
+#
+# NOT anchored to /python/ either, for the same reason the name was widened.
+# The rule above matched the shape but only in ONE LOCATION, and the venvs
+# people actually create for gating live at the CHECKOUT ROOT, not under
+# python/ -- `<worktree>/.venv-gate/` is what every gate lane in this repo
+# builds, because the suite is run as `cd python && ../.venv-gate/bin/python
+# -m pytest`. Measured 2026-08-12: EIGHT worktrees each held an unignored
+# root-level `.venv-gate/`, and a stray `git add -A` in one of them staged
+# 1043 files in a single commit -- the same accident as the 3327-file one
+# above, past a rule written to prevent it. Match the shape in both places.
 /python/.venv*/
 /python/venv*/
+/.venv*/
+/venv*/
 python/build/
 python/*.egg-info/
 # `tan doctor` support bundles. They snapshot the DEVELOPER's machine -- two so
@@ -35,6 +50,24 @@ python/*.egg-info/
 # the real tree. No `.vscode/` is tracked in this repo, so ignoring it at any
 # depth costs nothing; use `git add -f` if one is ever meant to ship.
 .vscode/
+# Atomic-write temp siblings, from TWO independent producers, each with its
+# own naming scheme: `debug_config_cmd.py`'s `_atomic_write_launch_json`
+# (tan-cli#489) uses `tempfile.mkstemp(dir=..., suffix=".tan-tmp")`, which
+# names it `tmpXXXXXXXX.tan-tmp` (mkstemp's own random prefix, not the real
+# file's own name); `bootstrap_cmd.py`'s `reconcile_west_manifest_path`
+# instead names its own `config.<pid>.tan-tmp` beside `.west/config`, an
+# older, PID-based scheme that predates the mkstemp-based one and was not
+# changed to match it. Both sit next to the real file they replace (for
+# `debug_config_cmd.py`'s, the symlink-resolved real target, if `launch.json`
+# is a symlink) and are renamed over that path on success; a process killed
+# between the write and the rename (SIGKILL, power loss) leaves one behind
+# -- `debug_config_cmd.py`'s deliberately NOT swept by a later run, which
+# could otherwise delete a DIFFERENT process's still-open temp. Unanchored:
+# the real file either sits beside can be anywhere `--project`/`--workspace`/
+# `--sdk-root` points, which is never this repo's own tree in normal use, but
+# a stray one must not become committable by a `git add -A` run from inside a
+# test fixture.
+*.tan-tmp
 
 # Agent/session state, never repository content. `.claude/alp-tasks.json` is
 # per-session bookkeeping: it carries a session UUID and a list of in-progress

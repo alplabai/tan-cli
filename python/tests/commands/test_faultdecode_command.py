@@ -198,6 +198,112 @@ def test_bad_hex_value_is_exit_2():
     assert result.exit_code == 2
 
 
+# --------------------------------------------------------------------------
+# tan-cli#616 defect B: a negative register value is refused, not decoded
+# --------------------------------------------------------------------------
+#
+# `int(text, 16)` accepts a leading `-`, and everything downstream then treated
+# the result as a register word: `--cfsr=-8200` rendered `"0x-0008200"` (not a
+# hex integer in any sense), decoded TWELVE flags that are not set out of
+# Python's infinite two's-complement sign extension, concluded "Stack
+# overflow", and exited 0. A register is unsigned by construction. The strings
+# below are pinned verbatim because they are what a firmware engineer reads
+# instead of a diagnosis.
+
+#: The exact refusal for `--cfsr=-8200`, naming the offending value.
+_NEGATIVE_CFSR_MESSAGE = (
+    "--cfsr: '-8200' is negative -- a fault register value is unsigned, so there is "
+    "nothing to decode. Pass the value exactly as the dump printed it (hex, with or "
+    "without a 0x prefix)."
+)
+
+
+def test_a_negative_register_is_refused_on_the_text_surface():
+    result = runner.invoke(app, ["--cfsr=-8200"])
+    assert result.exit_code == 2
+    assert result.output.strip() == f"Error: {_NEGATIVE_CFSR_MESSAGE}"
+    # The whole point: no decode happened, so none of it can be quoted back.
+    assert "0x-0008200" not in result.output
+    assert "Stack overflow" not in result.output
+
+
+def test_a_negative_register_is_refused_with_a_coded_envelope():
+    """`--format json` gets the same refusal as an envelope carrying a
+    REGISTERED issue code, so a consumer can branch on it -- the shape
+    `faultdecode.no-registers` already has (tan-cli#399). A `typer.BadParameter`
+    would instead land on `cli.main`'s generic `command: "cli"` /
+    `cli.parse-error` fallback, i.e. the two-paths-of-one-verb disagreement
+    that issue closed."""
+    result = runner.invoke(app, ["--format", "json", "--cfsr=-8200"])
+    assert result.exit_code == 2
+    # Asserted before parsing, so a refusal that fell back to the plain-text
+    # surface fails HERE, on this test's own claim, rather than as an incidental
+    # `JSONDecodeError` from the line below.
+    assert result.stdout.lstrip().startswith("{"), result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "faultdecode"
+    assert payload["ok"] is False
+    assert payload["exitCode"] == 2
+    assert payload["data"] is None
+    assert payload["issues"] == [
+        {
+            "code": "faultdecode.invalid-register-value",
+            "severity": "error",
+            "message": _NEGATIVE_CFSR_MESSAGE,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["cfsr", "hfsr", "dfsr", "bfar", "mmfar", "mmfsr", "bfsr", "ufsr", "pc", "lr"],
+)
+def test_every_register_flag_refuses_a_negative_value_and_names_itself(option):
+    """All ten go through `_parse_hexint`, addresses (`--bfar`/`--mmfar`/
+    `--pc`/`--lr`) included -- an address is no more signed than a status
+    register. The message names the FLAG that was wrong, not just "a
+    register", so a caller passing several knows which one to fix."""
+    result = runner.invoke(app, [f"--{option}=-1"])
+    assert result.exit_code == 2
+    assert result.output.strip() == (
+        f"Error: --{option}: '-1' is negative -- a fault register value is unsigned, so "
+        "there is nothing to decode. Pass the value exactly as the dump printed it "
+        "(hex, with or without a 0x prefix)."
+    )
+
+
+def test_a_negative_register_is_refused_before_a_valid_one_is_decoded():
+    """The refusal is a refusal, not a warning: a good `--hfsr` alongside a bad
+    `--cfsr` does not buy a partial decode at exit 0."""
+    result = runner.invoke(app, ["--hfsr", "0x40000000", "--cfsr=-8200"])
+    assert result.exit_code == 2
+    assert "Forced HardFault" not in result.output
+
+
+def test_the_json_flag_surface_also_refuses_a_negative_register():
+    """`--json` is the unwrapped SDK report surface, so its refusal stays the
+    plain stderr line (envelope-free), exactly as the no-registers refusal and
+    the bad-hex refusal already do on that surface -- but it is still a
+    refusal, and still exit 2."""
+    result = runner.invoke(app, ["--cfsr=-8200", "--json"])
+    assert result.exit_code == 2
+    assert result.output.strip() == f"Error: {_NEGATIVE_CFSR_MESSAGE}"
+
+
+# The divergence test that used to live here --
+# `test_the_sdk_original_decodes_a_negative_cfsr_and_tan_deliberately_does_not`
+# -- pinned that alp-sdk's `scripts/alp_cli/faultdecode.py` accepted
+# `--cfsr=-8200` and exited 0, while tan refused at exit 2, with the docstring
+# itself saying "the day upstream adopts the refusal this test goes red and is
+# deleted with a note". alp-sdk dad5b35a (#1389, inside the a3173305..d00dbdc1
+# pin range) did exactly that -- `_HexInt.convert` now rejects a negative
+# parsed value the same way tan's `_parse_hexint` already did -- so the
+# oracle-side half of the assertion (`exit_code == 0`) went red first. Deleted
+# per the docstring's own instruction rather than loosened; the refusal itself
+# stays covered by the tests above, which assert tan's behaviour directly and
+# do not depend on an SDK checkout being reachable.
+
+
 def test_missing_elf_path_is_exit_2():
     result = runner.invoke(app, ["--cfsr", "0x8200", "--elf", "does-not-exist.elf"])
     assert result.exit_code == 2
@@ -351,6 +457,154 @@ def test_explicit_flag_wins_over_a_parsed_dump():
     # bit 0 (IACCVIOL) from the explicit flag, not bit 9 (PRECISERR) from the dump.
     assert "IACCVIOL" in result.output
     assert "PRECISERR" not in result.output
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503, defect 1: a piped/pasted dump must still be READ and MERGED
+# when a register flag is ALSO given -- the implicit stdin read used to be
+# suppressed entirely by `not registers_given`, silently dropping whatever
+# the dump carried (the command's own help promises "Explicit flags win over
+# a parsed dump", which is only true if the dump is still read when a flag is
+# present too).
+# --------------------------------------------------------------------------
+
+
+def test_a_piped_dump_is_still_read_and_merged_when_a_register_flag_is_also_given():
+    """Reproduces tan-cli#503 defect 1's failure scenario exactly: `--hfsr`
+    alone used to suppress the implicit stdin read, so a piped CFSR/BFAR was
+    dropped and the tool reported the opposite cause (a "Forced HardFault"
+    escalation with "its own status bits ... clear", when CFSR=0x00008200 is
+    a precise bus fault with BFAR=0xdeadbeef). Both must now show up merged
+    with the explicit HFSR."""
+    result = runner.invoke(
+        app,
+        ["--hfsr", "0x40000000"],
+        input="CFSR: 0x00008200\nBFAR: 0xdeadbeef\n",
+    )
+    assert result.exit_code == 0
+    assert "PRECISERR" in result.output
+    assert "0xdeadbeef" in result.output
+    assert "Precise data bus fault" in result.output
+    # The old bug's report -- must NOT appear now that CFSR/BFAR are read.
+    assert "its own status bits are clear" not in result.output
+
+
+def test_an_address_only_flag_does_not_suppress_the_piped_dump():
+    """`--bfar`/`--mmfar` are address registers, not one of the cfsr/hfsr/dfsr
+    "something to analyse" registers `faultdecode` gates on -- so giving one
+    alone must not (a) throw away a piped CFSR, nor (b) hit the
+    `faultdecode.no-registers` refusal, both of which happened before this
+    fix because `--bfar` counted toward suppressing the dump read without
+    counting toward the gate that read was meant to satisfy."""
+    result = runner.invoke(app, ["--bfar", "0x20001000"], input="CFSR: 0x00008200\n")
+    assert result.exit_code == 0
+    assert "PRECISERR" in result.output
+    # The explicit --bfar flag wins over the dump's own (absent) BFAR.
+    assert "0x20001000" in result.output
+
+
+def test_json_envelope_merges_a_piped_dump_with_an_explicit_flag():
+    """Same merge, `--format json`: the explicit HFSR and the piped
+    CFSR/BFAR must both land in `data.inputs`/`data.addresses`, not just one
+    or the other."""
+    result = runner.invoke(
+        app,
+        ["--hfsr", "0x40000000", "--format", "json"],
+        input="CFSR: 0x00008200\nBFAR: 0xdeadbeef\n",
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    data = payload["data"]
+    assert data["inputs"]["cfsr"] == "0x00008200"
+    assert data["inputs"]["hfsr"] == "0x40000000"
+    assert data["addresses"]["bfar"] == "0xdeadbeef"
+
+
+# --------------------------------------------------------------------------
+# tan-cli#503, defect 2: addr2line must be resolved via `on_path` (PATH-only),
+# never `shutil.which` (which inserts CWD ahead of PATH on Windows), and
+# spawned by its resolved absolute path, never a bare name.
+# --------------------------------------------------------------------------
+
+
+def test_resolve_symbol_resolves_the_tool_through_on_path_not_shutil_which(
+    monkeypatch, tmp_path
+):
+    from tan.commands import faultdecode_cmd
+
+    elf = tmp_path / "zephyr.elf"
+    elf.write_bytes(b"\x7fELF")
+
+    calls: list[list[str]] = []
+
+    def fake_on_path(command: str) -> str | None:
+        if command == "arm-zephyr-eabi-addr2line":
+            return None
+        if command == "llvm-addr2line":
+            return None
+        if command == "addr2line":
+            return "/usr/bin/addr2line"  # a resolved ABSOLUTE path
+        raise AssertionError(f"unexpected tool probe: {command}")
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+
+        class _Result:
+            stdout = "my_func\nfile.c:42\n"
+
+        return _Result()
+
+    monkeypatch.setattr(faultdecode_cmd, "on_path", fake_on_path)
+    monkeypatch.setattr(faultdecode_cmd.subprocess, "run", fake_run)
+
+    sym = faultdecode_cmd.resolve_symbol(0x08001000, elf)
+    assert sym is not None
+    assert sym.func == "my_func"
+    # The RESOLVED ABSOLUTE PATH was spawned, not the bare name "addr2line"
+    # (tan-cli#503): a bare name would let a project-local decoy on CWD
+    # (Windows CreateProcess search order) get executed a second way even
+    # past a hardened probe.
+    assert calls[0][0] == "/usr/bin/addr2line"
+
+
+def test_resolve_symbol_skips_gracefully_when_no_tool_resolves(monkeypatch, tmp_path):
+    from tan.commands import faultdecode_cmd
+
+    elf = tmp_path / "zephyr.elf"
+    elf.write_bytes(b"\x7fELF")
+    monkeypatch.setattr(faultdecode_cmd, "on_path", lambda _tool: None)
+    assert faultdecode_cmd.resolve_symbol(0x08001000, elf) is None
+# `sys.stdin` itself, not just its `.isatty()`, can be `None` (tan-cli#488
+# round 5 class sweep): a process launched with its standard handles
+# detached -- a GUI launcher, a `pythonw`-style spawn, or a shell that closed
+# fd 0 before exec. `CliRunner` can only ever hand the command a real, if
+# captured, stdin object, so these call `_read_dump` directly -- the one
+# place this defect actually lives.
+# --------------------------------------------------------------------------
+
+
+def test_read_dump_auto_consume_returns_no_dump_when_stdin_is_none(monkeypatch):
+    """The IMPLICIT auto-consume path (`... | tan faultdecode`, no `--file`):
+    a detached `sys.stdin` has nothing to offer, same as a closed pipe or a
+    real tty -- `_read_dump` must answer `""`, not
+    `AttributeError: 'NoneType' object has no attribute 'isatty'`."""
+    from tan.commands.faultdecode_cmd import _read_dump
+
+    monkeypatch.setattr(sys, "stdin", None)
+    assert _read_dump(None, auto_consume_stdin=True) == ""
+
+
+def test_read_dump_file_dash_refuses_cleanly_when_stdin_is_none(monkeypatch):
+    """`--file -` NAMES stdin explicitly, so a detached `sys.stdin` there
+    cannot silently fall back to `""` (that would tell the caller "no fault
+    detected" for a request that was never actually served) -- it must
+    refuse with a clear, coded message instead of a raw `AttributeError`."""
+    from tan.commands.faultdecode_cmd import _read_dump
+
+    monkeypatch.setattr(sys, "stdin", None)
+    with pytest.raises(typer.BadParameter, match="stdin is detached"):
+        _read_dump("-", auto_consume_stdin=True)
+
 
 
 def test_symbolication_is_skipped_gracefully_for_a_non_elf_file():

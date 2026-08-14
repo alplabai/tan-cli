@@ -2,10 +2,23 @@
 """Run the committed ``contract/envelopes`` fixtures against the PYTHON tan and
 assert byte-compatibility with the recorded expectations.
 
-These are the same goldens the Rust binary is held to by
-``crates/tan-cli/tests/contract.rs`` -- this is the cross-language conformance
-gate. The harness below mirrors that Rust one exactly; every deviation would
+**This is the ONLY gate over ``contract/envelopes``.** It used to be one of
+two: ``crates/tan-cli/tests/contract.rs`` ran the same goldens against the Rust
+binary, and tan-cli#269 deleted it. That removed a duplicate, not the
+enforcement -- ``contract.rs`` named its 17 cases in 17 hand-written
+``contract_case!`` lines, while ``FIXTURES`` below AUTO-DISCOVERS them by
+walking ``CONTRACT.iterdir()``, so this side already covered everything the
+Rust side did and a NEW case is gated here with nothing to remember to add.
+
+The harness mirrors the Rust one it replaced; every deviation would
 produce a false diff rather than a real one:
+
+The five ``debug-config-preview-*`` cases are RE-RECORDED against the shipping
+Python CLI as of tan-cli#502 -- see each case's ``PROVENANCE.txt``. They were
+previously carried as declared divergences here because the golden was also
+holding the Rust binary; with that gate gone, re-recording them is an ordinary
+change to ``contract/`` and they are gated normally again rather than pinned
+as "differs somehow".
 
 * ``args.txt`` is **one argv token per line**, deliberately NOT shell-split
   (``contract/README.md``: "avoids quoting ambiguity across platforms"). Blank
@@ -19,15 +32,16 @@ produce a false diff rather than a real one:
   ``SOURCE_DATE_EPOCH=0`` pins any timestamped output.
 * Fixture inputs are copied into the scratch dir RECURSIVELY (that is what lets
   a case ship a synthetic ``sdk/`` checkout and pass ``--sdk-root ./sdk``); only
-  the three harness metadata files are skipped, and only at the top level.
+  the harness metadata files (``CASE_METADATA``) are skipped, and only at the
+  top level.
 * Normalisation is SCOPED to the path-shaped keys in ``PATH_KEYS``: ``\\`` ->
   ``/`` and then the absolute scratch path down to ``__WORKDIR__``. A blanket
   rewrite over every string leaf would launder a real drift inside
   ``issues[].message``.
 
-Key ORDER is deliberately not asserted -- the Rust side diffs two
-``serde_json::Value``s whose map equality is order-insensitive, and Python dict
-equality is too. Pin key order in the owning module's own tests, not here.
+Key ORDER is deliberately not asserted -- Python dict equality is
+order-insensitive (as was the retired Rust side's ``serde_json::Value``
+compare). Pin key order in the owning module's own tests, not here.
 """
 import json
 import os
@@ -71,7 +85,13 @@ WORK_DIR_TOKEN = "__WORKDIR__"
 
 #: Harness metadata, skipped when copying fixture inputs -- top level only, so a
 #: fixture ``sdk/`` subtree containing its own ``args.txt`` is still copied.
-CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit"})
+#:
+#: ``PROVENANCE.txt`` is documentation -- why a golden was re-recorded, when,
+#: against which version, and why the previous recording was wrong -- not an
+#: input any case's command reads, so skipping it cannot produce a false diff.
+#: (The retired Rust harness's own metadata list predated it and copied it into
+#: the scratch directory instead, harmlessly, for the same reason.)
+CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit", "PROVENANCE.txt"})
 
 #: Fixtures whose COMMAND the Python port has not landed yet. The MVP's scope is
 #: ``build``; nothing in the committed golden set exercises ``build`` (see
@@ -94,41 +114,54 @@ NOT_PORTED = {
 #: oracle, so the shared golden cannot describe both sides at once.
 #:
 #: This is the opposite direction from :data:`NOT_PORTED` above -- there the
-#: port does LESS -- and it is why these five are declared rather than simply
-#: regenerated. The golden is the CROSS-LANGUAGE contract: the same file holds
-#: the Rust binary via ``crates/tan-cli/tests/contract.rs``, and ``crates/`` is
-#: frozen. Regenerating it to match the port turns the Rust conformance run red
-#: and quietly redefines "the contract" as "whatever the port last emitted".
-#: A deliberate divergence has to be DECLARED, not written into the shared file.
-#: (Measured: regenerating these five reddened ``test (ubuntu-latest)``,
-#: ``test (macos-latest)`` and ``test (windows-latest)`` on the PR.)
+#: port does LESS.
 #:
-#: All five are tan-cli#138. ``create_launch_draft`` restores the v0.3.1
-#: ``preLaunchTask`` default for the three build target kinds, which the frozen
-#: oracle had made opt-in in tan-cli#85. alp-sdk-vscode contributes task
-#: providers for exactly those labels and never passes ``--pre-launch-task``,
-#: so without the default its contribution is dead and build-then-debug
-#: silently stops happening. ``yocto-userspace`` is here only because its
-#: fixture asserts the whole envelope as one document; that target deliberately
-#: gains NO default -- see ``tan.core.debug_launch.DEFAULT_PRE_LAUNCH_TASK``
-#: for why naming its task would put an error dialog in front of every F5.
+#: **An entry here is a LAST RESORT, not the default handling for a divergence.**
+#: A ``strict=True`` xfail fails only on XPASS, so it pins "this envelope differs
+#: from its golden somehow" and nothing finer: every OTHER field in that envelope
+#: loses its gate for as long as the entry stands. The default handling is to
+#: RE-RECORD the golden against the shipping CLI and leave a ``PROVENANCE.txt``
+#: beside it saying what moved, when, against which version, and why the previous
+#: recording was wrong.
+#: Five ``debug-config-preview-*`` entries lived here for exactly that reason and
+#: were re-recorded under tan-cli#502 -- see those cases' ``PROVENANCE.txt``.
 #:
-#: ``strict=True`` for the same reason as above, and it carries more weight
-#: here: an XPASS means the divergence VANISHED -- someone reverted the #138
-#: restoration -- which is a regression that must fail loudly rather than
-#: quietly re-green the suite.
+#: The reason those five were declared rather than re-recorded for as long as
+#: they were, spelled out because it is the ONLY argument that ever justified an
+#: entry here and it has since expired: the golden was the CROSS-LANGUAGE
+#: contract, the same file held the frozen Rust binary via
+#: ``crates/tan-cli/tests/contract.rs``, and re-recording it reddened that
+#: harness (measured on tan-cli#502: the oracle's envelope for each of the five
+#: equalled the OLD golden byte-for-byte, so re-recording turned those five
+#: ``contract.rs`` cases red). tan-cli#269 deleted ``crates/`` and that harness,
+#: so declaring no longer buys anything at all -- it only costs the SHIPPING
+#: side of the fixture its gate. For a ``data`` value a consumer writes verbatim
+#: (``data.configuration``, alp-sdk-vscode#342) that was never the side to leave
+#: unguarded.
+#:
+#: ``strict=True``: an XPASS means the divergence VANISHED -- the shipping
+#: behaviour was reverted -- which is a regression that must fail loudly rather
+#: than quietly re-green the suite.
 DELIBERATE_DIVERGENCE = {
-    "debug-config-preview-zephyr-mcu": "tan-cli#138: restores the v0.3.1 preLaunchTask default",
-    "debug-config-preview-zephyr-mcu-sdk-identity": (
-        "tan-cli#138: restores the v0.3.1 preLaunchTask default"
-    ),
-    "debug-config-preview-baremetal-mcu": (
-        "tan-cli#138: restores the v0.3.1 preLaunchTask default"
-    ),
-    "debug-config-preview-native-host": "tan-cli#138: restores the v0.3.1 preLaunchTask default",
-    "debug-config-preview-yocto-userspace": (
-        "tan-cli#138: sibling of the four above -- this target gains NO default, but its "
-        "fixture asserts the whole envelope and the harness compares it as one document"
+    "validate-offline-clean": (
+        "tan-cli#498 defect 1: the two v2 structural checks in `validate_board_text` were "
+        "gated on `schemaVersion >= 2`, a condition no conforming alp-sdk project can meet "
+        "(alp-sdk pins `LATEST = 1` with an empty migration registry, and 0 of the 100 "
+        "board.yaml files under `alp-sdk/examples` declare the key), so they never ran. "
+        "They are unconditional now, because `metadata/schemas/board.schema.json` conditions "
+        "NOTHING on `schemaVersion` -- its root carries `required: [som, cores]` and "
+        "`not: {required: [os]}` outright. This case's INPUT board.yaml is `som:` + `preset:` "
+        "with no `cores:`, which alp-sdk's own `scripts/validate_board_yaml.py` refuses with "
+        "`error[ALP-B001]: required key 'cores' is missing` at exit 1 (measured, alp-sdk "
+        "99e47476) -- so the golden records tan calling a board clean that the SDK rejects, "
+        "and the port now answers exit 2 `validate.schema-violation`. Declared rather than "
+        "re-recorded for this map's own reason: the file was the CROSS-LANGUAGE contract "
+        "the frozen Rust binary was held to by `crates/tan-cli/tests/contract.rs`, whose "
+        "`crates/tan-core/src/validate.rs:282` carried the identical dead gate (both deleted "
+        "in tan-cli#269). The clean "
+        "envelope's SHAPE is covered instead by "
+        "`test_validate_command.py::test_text_and_json_formats_are_unchanged`, on a board.yaml "
+        "that is genuinely clean."
     ),
 }
 
@@ -264,6 +297,8 @@ def test_envelope_matches_expected(fixture):
 
     assert actual == expected, (
         f"{case}: envelope drifted from the committed golden -- if this is a "
-        "deliberate contract change, regenerate the fixture (see "
-        "contract/README.md), don't just fix the assertion"
+        "deliberate contract change, re-record the fixture against the shipping "
+        "CLI and write its PROVENANCE.txt (see contract/README.md, "
+        "'Regenerating a golden'), don't just fix the assertion and don't "
+        "declare it in DELIBERATE_DIVERGENCE -- that pins only 'differs somehow'"
     )

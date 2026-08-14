@@ -36,6 +36,25 @@ from tan.commands.build_cmd import (
 from tan.core.system_manifest import SliceRunResult, parse_system_manifest
 
 
+def _sdk_shaped(tmp_path):
+    """A directory that passes `write_post_build_manifest`'s is-this-an-alp-sdk
+    check, for tests that stub `planner_root.emit` and only care about what
+    happens AFTER the emit.
+
+    That check (the `scripts/alp_project.py` marker, the same one
+    `resolve_sdk_root_ladder` uses) exists so a non-SDK path is never bound to
+    the process-global planner root: `bind_sdk_root` is first-bind-wins, and a
+    bogus root makes `import tan.planner` die partway inside
+    `tan/planner/slugs.py`, leaving `tan.planner.paths` cached with `REPO`
+    frozen to it. A bare `"/fake/sdk"` now short-circuits before the emit, so
+    these tests would no longer reach the behaviour they are named for.
+    """
+    root = tmp_path / "sdk-shaped"
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    return str(root)
+
+
 def _sdk_root() -> Path | None:
     for var in ("ALP_SDK_PARITY_ROOT", "ALP_SDK_ROOT"):
         raw = os.environ.get(var)
@@ -413,7 +432,7 @@ def test_write_post_build_manifest_writes_a_real_overlaid_file_hermetically(tmp_
     monkeypatch.setattr(planner_root, "emit", lambda *a, **k: _FIXTURE_MANIFEST)
 
     outcome = write_post_build_manifest(
-        sdk_root="/fake/sdk",
+        sdk_root=_sdk_shaped(tmp_path),
         board_yaml=str(tmp_path / "board.yaml"),
         base=str(tmp_path),
         plan_build_root="build",
@@ -468,7 +487,7 @@ def test_serialize_failure_is_reported_not_raised(tmp_path, monkeypatch):
     monkeypatch.setattr(manifest_module, "serialize_system_manifest_raw", _boom)
 
     outcome = write_post_build_manifest(
-        sdk_root="/fake/sdk",
+        sdk_root=_sdk_shaped(tmp_path),
         board_yaml=str(tmp_path / "board.yaml"),
         base=str(tmp_path),
         plan_build_root="build",
@@ -494,7 +513,7 @@ def test_native_sim_target_survives_a_write_failure(tmp_path, monkeypatch):
     (tmp_path / "build" / "system-manifest.yaml").mkdir()
 
     outcome = write_post_build_manifest(
-        sdk_root="/fake/sdk",
+        sdk_root=_sdk_shaped(tmp_path),
         board_yaml=str(tmp_path / "board.yaml"),
         base=str(tmp_path),
         plan_build_root="build",

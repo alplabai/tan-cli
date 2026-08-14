@@ -1,31 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# tan CI — the four cargo gates, the Python package job (installs the
-# declared package + runs `python/tests`, `ALP_SDK_ROOT`-gated via
-# `sdk_parity`), the npm-shim platform-mapping check, plus the two promises
-# nothing else checks: that `tan` still builds and passes on every host
-# platform it ships a release asset for, and that the declared MSRV is real.
+# tan CI — the Python package job (installs the declared package + runs
+# `python/tests`, `ALP_SDK_ROOT`-gated via `sdk_parity`), the npm-shim
+# platform-mapping check, and the sdist/wheel build-floor proof.
 #
-# WHICH OF THESE ARE ACTUALLY REQUIRED (tan-cli#392)
-# ==================================================
-# None of the Python ones. Measured 2026-08-02, `gh api
-# repos/alplabai/tan-cli/branches/<b>/protection` -- `main` and `dev` carry the
-# IDENTICAL six contexts (strict: true, enforce_admins: true):
+# BRANCH PROTECTION MUST BE REPOINTED (tan-cli#392, tan-cli#269)
+# ==============================================================
+# Measured 2026-08-02, `gh api
+# repos/alplabai/tan-cli/branches/<b>/protection` -- `main` and `dev` carried
+# the IDENTICAL six required contexts (strict: true, enforce_admins: true):
 #
 #     lint | test (ubuntu-latest) | test (windows-latest)
 #     test (macos-latest) | msrv | seam1 -- plan-shape parity
 #
-# Five are cargo jobs on the crate #269 retires. The sixth, parity.yml's
-# `seam1-plan-shape`, does run Python -- eight invocations, not the three that
-# issue's text claims (two `tests/parity/test_seam1_*` pytest files, four
-# repo-root `tests/parity/*_parity.py` scripts, and two `python/tests/gates`
-# runs) -- but not one of them is the shipping `python/tests` suite the release
-# assets are frozen from. So every merge in this repo has been gated on the
-# retired crate plus a source-scanning gate suite.
+# FIVE OF THOSE SIX NO LONGER EXIST. `lint`, the three `test (*)` legs and
+# `msrv` were cargo jobs on `crates/`, which tan-cli#269 deleted; they are
+# gone from this file. A required context that never reports does not fail --
+# it sits PENDING forever and blocks the merge, so protection has to be edited
+# before anything can land after this change. Branch protection is a repo
+# SETTING, not a file, and cannot be fixed from here.
 #
-# Branch protection is a repo SETTING, not a file, so it cannot be fixed from
-# here. What CAN live here is something worth requiring, and two jobs already
-# produce one. The exact context strings to add to protection:
+# The exact context strings to require INSTEAD, all of which run today:
 #
 #   `python`
 #       this file's own job below. One OS, whole suite INCLUDING tests/gates --
@@ -52,6 +47,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A `dev` merge queue is coming online: without this
+  # trigger, a queued PR would wait forever on required contexts
+  # (`python -- pytest across python/ (*)`, `zizmor · workflow security`) that
+  # `merge_group` events never fire -- this workflow only ran on `push`/
+  # `pull_request`/`workflow_call` before, none of which GitHub raises for a
+  # merge-queue entry. No job below is gated to `pull_request` specifically
+  # (`python` and `workflow-security` carry no job-level `if:` at all), so
+  # both required contexts this file produces run unchanged on a
+  # `merge_group` event -- verified by reading every `if:` in this file, not
+  # assumed.
+  merge_group:
   # Called by release.yml so a tag cannot publish binaries the gates never ran
   # against. Keep this the single definition of the gate set.
   workflow_call:
@@ -74,52 +80,24 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  CARGO_TERM_COLOR: always
+permissions:
+  # Least privilege by default (tan-cli#435). No job here needs a token at
+  # all: they check out, build, and run tests. Declared anyway rather than
+  # inherited, because the repository default is a SETTING -- it can be
+  # widened for an unrelated reason, and this workflow would silently widen
+  # with it. `zizmor` reported all three jobs as `excessive-permissions`
+  # (medium) for exactly that reason before this block existed.
+  contents: read
 
 jobs:
-  # Platform-independent gates — run once, not per-OS.
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-          # The action otherwise exports RUSTFLAGS=-D warnings, which would also
-          # deny warnings in registry deps and diverge from the local gates. The
-          # clippy step below denies warnings explicitly, where it belongs.
-          rustflags: ""
-      - name: fmt
-        run: cargo fmt --all --check
-      - name: clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-  # tan is a cross-platform CLI whose path handling (os.pathsep env append,
-  # .venv discovery, `.exe` suffixes) differs per host — test all three.
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          rustflags: "" # keep parity with the local gates (see the lint job)
-      - name: build
-        run: cargo build --all-targets --locked
-      - name: test
-        run: cargo test --locked
-
-  # The PYTHON package is what the 0.5.0 release assets are frozen from, and
-  # until this job existed NOTHING in CI ran it: release.yml's `gates` job calls
-  # this workflow, so a tag published a PyInstaller freeze of code no CI step had
-  # ever imported, let alone tested. The cargo jobs above cannot see it -- they
-  # compile a different language in a different directory.
+  # The PYTHON package is what the release assets are frozen from, and until
+  # this job existed NOTHING in CI ran it: release.yml's `gates` job calls this
+  # workflow, so a tag published a PyInstaller freeze of code no CI step had
+  # ever imported, let alone tested. The cargo jobs that used to sit above it
+  # could not see it -- they compiled a different language in a different
+  # directory -- and tan-cli#269 has since deleted them outright. THIS job and
+  # parity.yml's `python-tests` matrix are now the whole of the correctness
+  # gate; there is nothing else left to hide behind.
   #
   # Zero failures is the gate, not a count. The suite is still growing as ports
   # land (~1149 passed / 81 skipped / 4 xfailed at the time of writing), and
@@ -147,10 +125,25 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12" # pyproject's requires-python floor
+      # tan-cli#503: `tests/commands/test_completion_command.py`'s zsh-driven
+      # cases (`test_zsh_format_completion_*`) are `skipif(not zsh on PATH)` --
+      # a skip, not a failure, so a runner image that happens to lack zsh
+      # would silently stop exercising the real emitted `_zsh_subcmd_scan_snippet`
+      # loop and no one would see red for it. Installed explicitly rather than
+      # assumed present, so this job's `pytest` run is the thing that actually
+      # runs that loop, not a hope about the ubuntu-latest image's contents.
+      - name: ensure zsh is on PATH (zsh-driven completion tests)
+        run: |
+          if ! command -v zsh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends zsh
+          fi
       # `pip install -e ./python` and NOT a hand-listed dependency set: this job
       # must fail when the DECLARED dependencies are wrong, which is the defect
       # that shipped (`tan/cli.py` imports `click.testing`, typer stopped
@@ -187,24 +180,143 @@ jobs:
       # exactly this reason. The two MUST be bumped together, or the release
       # gate and the parity gate silently measure different alp-sdks.
       #
-      # Bumped from `v0.15.0-rc1` (#319) to this exact commit for tan-cli#320:
-      # `tan/planner/` was behind `scripts/alp_orchestrate/` on alp-sdk `dev`
-      # (8 files, +267/-33, mostly `kconfig.py` and `sdk_compat.py`) as of
-      # v0.15.0-rc1, so a `sdk_parity: true` run's `pytest tests -q` (no
-      # `--ignore=tests/gates`, unlike `parity.yml`'s own `python-tests` job)
-      # hashed alp_orchestrate/*.py at this OLDER ref and mismatched the
-      # freshly re-pinned `PINNED_HASHES` in
-      # `python/tests/gates/test_planner_relocation_freshness.py`, which now
-      # audits against this same commit. Not a tag -- alp-sdk had not cut one
-      # past v0.15.0-rc1 at the time of this port; re-pin to a real tag once
-      # alp-sdk cuts one at or after this SHA, the same deferred-tag pattern
-      # `parity.yml`'s own `PINNED_SDK_TAG` history used while waiting on
-      # v0.14.0.
-      - uses: actions/checkout@v4
+      # Bumped from `v0.15.0-rc1` (#319) to `f4d87a1f` for tan-cli#320, and from
+      # `f4d87a1f` to THIS commit for tan-cli#485 (#320 recurred) --
+      # `parity.yml`'s own `PINNED_SDK_TAG` bumped to the identical
+      # `53557a6030c4f90a5525d29c142190e7e91f2bbb` in the same tan-cli#485
+      # change, so the "MUST be bumped together" rule two paragraphs up holds
+      # again after a brief, deliberate divergence mid-review (an earlier pass
+      # of #485 left `PINNED_SDK_TAG` at `f4d87a1f` while moving THIS ref and
+      # `python/tests/gates/test_planner_relocation_freshness.py`'s
+      # `PINNED_SDK_COMMIT` to `53557a60` together -- correct for the
+      # freshness-gate hash check this ref exists to satisfy, but it left
+      # `parity.yml`'s `python-tests`/`seam1` jobs, which resolve
+      # `ALP_SDK_ROOT` from `PINNED_SDK_TAG` on every `pull_request`/`push`,
+      # testing tan against the OLDER `f4d87a1f` -- and alp-sdk `53557a60` is
+      # also where `examples/multicore/rpmsg-aen/board.yaml` dropped
+      # `cacheable: true`, the exact field tan-cli#485's `loader.py` refusal
+      # now rejects, so every non-dispatch parity run went red: 31 failures,
+      # all tracing to that one fixture, alp-sdk's own repo unchanged).
+      # Re-verified empirically before this final bump: `test_relocated_
+      # planner_modules_match_the_pinned_sdk_audit` PASSES bound to
+      # `53557a60` (FAILS bound to the old `f4d87a1f`, hash mismatch, since
+      # `PINNED_HASHES` moved), and the `test_the_breadth_layer_still_
+      # covers_every_board` artefact-count floor (`>= 2900`) is NOT hit at
+      # `53557a60` (766 passed / 1 failed / 8 skipped across the whole
+      # `test_planner_emit_parity.py` module) -- unlike the `2bc6b400` bump
+      # #425 tried and reverted for exactly that floor.
+      #
+      # `test_an_unresolvable_board_preset_is_a_coded_envelope` in
+      # `python/tests/parity/test_planner_emit_parity.py`, which surfaced
+      # during this same review (its OWN fixture appended a second `preset:`
+      # key onto a board.yaml that already declared one, tripping the new
+      # duplicate-key refusal before reaching its intended "unresolvable
+      # preset" assertion), is FIXED in the same tan-cli#485 change -- the
+      # fixture now substitutes the existing `preset:` value instead of
+      # appending a second one. `python/tests/parity/` carried no repo-level
+      # freeze (that applied to `crates/`, `contract/`, and `test_oracle_
+      # parity.py`'s `CASES` table specifically -- of those three only
+      # `contract/` still exists, tan-cli#269), so this was in scope to fix
+      # directly rather than route around.
+      #
+      # Not a tag -- alp-sdk had not cut one past v0.15.0-rc1 at the time of
+      # the #320 port; re-pin to a real tag once alp-sdk cuts one at or after
+      # this SHA, the same deferred-tag pattern `parity.yml`'s own
+      # `PINNED_SDK_TAG` history used while waiting on v0.14.0.
+      #
+      # `a317330595f744d35f4d785869517110f3678f70` -> `d00dbdc124491c89f6
+      # 8f404cd7ac9d26127f038f` for tan-cli#560, in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` and both freshness pins. Carries
+      # alp-sdk#1360/#1401: a zephyr slice's six `artifacts` paths now
+      # carry the `build/` level `west build` actually writes (`_slice_
+      # artifacts` in `buildplan.py`; `orchestrator.py`'s change is
+      # comment-only). Also picks up two HAND_PORT deltas that landed in
+      # this same range: alp-sdk#1373/#1407 (AEN `choice LOG_MODE /
+      # default LOG_MODE_MINIMAL`, `gen_zephyr_board.py`, tan-cli#690) and
+      # alp-sdk#1394/#1399 + #1400 (`_derive_pin_doc_renames`'s doc:
+      # collision guard, and `_scaffold_cmakelists`'s stale-comment
+      # rewrite, both `alp_template.py` -- the latter forces a re-vendor
+      # of `python/tan/templates/vendored/`, see its own MANIFEST.md
+      # entry). Bound to the OLD ref after this port lands, both
+      # `test_planner_relocation_freshness.py` halves fail on the hash of
+      # the four moved files, and `test_planner_emit_parity.py`'s
+      # scaffold-mode cases diff the ported planner against the pre-fix
+      # `scripts/alp_template.py`.
+      #
+      # Still not a tag, for the same reason as above.
+      #
+      # Bumped `1a9f753c` -> `a317330595f744d35f4d785869517110f3678f70` for
+      # tan-cli#639, in the SAME change as `parity.yml`'s `PINNED_SDK_TAG`.
+      # An earlier revision of that PR moved only `parity.yml` and left THIS
+      # ref behind -- precisely the divergence the "MUST be bumped together"
+      # rule above exists to prevent, and the second time it has happened
+      # mid-review (the first is recorded above, during #485). Caught by human
+      # review both times; NOTHING asserts the two SHAs match, which is the
+      # actual gap and is worth its own gate.
+      #
+      # `53557a60` -> `f30f4d4b` for tan-cli#543/#425, moved in the SAME change
+      # as `parity.yml`'s `PINNED_SDK_TAG`, which is the whole point of the
+      # "MUST be bumped together" rule above -- the mid-review divergence that
+      # rule was written after (31 red tests, both repos correct) is exactly
+      # what a one-sided bump reproduces. That change also carries the
+      # `tan/planner/` port these refs exist to measure: alp-sdk#1241's
+      # `_chip_has_driver` filter (the `CONFIG_ALP_SDK_CHIP_DP83825=y` divergence
+      # that reddened `parity` on eight consecutive dispatch runs), #1331's
+      # storage-region bounds check, #1289's SE-owned ATOC reservation, #1278's
+      # dead-`cmake-args.txt` removal, and the `template.py`/`hw_info.py`
+      # hand-port deltas. Bound to the OLD `53557a60` after that port lands,
+      # `test_relocated_planner_modules_match_the_pinned_sdk_audit` fails on the
+      # hash of six upstream files, and the emit-parity cases diff the ported
+      # planner against the pre-fix `scripts/alp_orchestrate/`.
+      #
+      # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
+      # PREDATES the six contract-surface commits this bump exists to pick up.
+      #
+      # `f30f4d4b` -> `ccd34f06` for tan-cli#552/#553/#554/#555/#557/#558/#559/
+      # #562/#563, moved in the SAME change as `parity.yml`'s `PINNED_SDK_TAG`
+      # and `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` /
+      # `HAND_PORT_PINNED_SDK_COMMIT` -- the "MUST be bumped together" rule
+      # above, applied to all four pin sites at once. That change carries the
+      # `tan/planner/` port these refs exist to measure: alp-sdk#1345's
+      # two-pass carve-out/partition placement + `access_windows:`, #1347's
+      # refusing family-table reader + per-family `boot.method:` default, and
+      # #1348's Hawkbit URI/units split, log-level choice-symbol form and
+      # core-scoped library layer. Bound to the OLD `f30f4d4b` after that port
+      # lands, `test_relocated_planner_modules_match_the_pinned_sdk_audit`
+      # fails on the hash of six upstream files (and the hand-port test on
+      # `scripts/alp_project_loader.py`), and the emit-parity cases diff the
+      # ported planner against the pre-fix `scripts/alp_orchestrate/`.
+      #
+      # `ccd34f06` -> `7d58ef32` for tan-cli#493/#591, again in the SAME change
+      # as `parity.yml`'s `PINNED_SDK_TAG` and both freshness pins. It carries
+      # alp-sdk#1352 (the #493/#591 fix: AEN board facts read from the SoC
+      # JSON's `part` / `family` / the new `zephyr_peripherals_dtsi`, four
+      # fail-open paths turned into refusals, and the `atoc`-absent message
+      # naming the alp-sdk vintage instead of the consumer's SoM preset) and,
+      # unavoidably, alp-sdk#1344's PLANNER half -- #1352 is its child and the
+      # `zephyr_peripherals_dtsi` metadata exists nowhere before it. #1344's
+      # CONSUMER half (a plan's `postCommands` actually being RUN) is NOT
+      # ported: tan-cli#550/#551 stay open.
+      #
+      # Still not a tag, for the same reason as above.
+      #
+      # `7d58ef32` -> `1a9f753c` for tan-cli#657/#661/#662, again in the SAME
+      # change as `parity.yml`'s `PINNED_SDK_TAG` and both freshness pins.
+      # It carries alp-sdk#1362 (the read-only SW-DP IDR wrong-board
+      # preflight pair, `expect_dpidr`/`jlink_device`), #1364 (the
+      # helper_mcu three-axis projection -- `flash_method`/`flash_args`,
+      # `update_channel`, and `flash_policy` no longer suppress one
+      # another), and #1374 (`flash_args.slot0_load_address`, tan-cli#353) --
+      # see `tests/gates/test_planner_relocation_freshness.py`'s
+      # `PINNED_SDK_COMMIT` comment for the full per-commit breakdown of
+      # what was ported into `tan/planner/loader.py` / `manifest.py` /
+      # `models.py` / `orchestrator.py`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: f4d87a1f472dffe9fe7dffc247cc55bce71034ba
+          ref: bd8be484680cf5aa1c1ac0e8b38d84128b5a279d
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
@@ -253,8 +365,10 @@ jobs:
   shim:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24" # same major release.yml's publish_npm job packs with
       # The FILE, not the directory: `--test <dir>` resolves its argument as a
@@ -279,8 +393,10 @@ jobs:
   wheel-floor:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12" # pyproject's requires-python floor
       # Derived, never hardcoded: a pin written here would be a SECOND place to
@@ -330,25 +446,49 @@ jobs:
           }
           echo "setuptools 68.1.2 rejects project.license, as it must"
 
-  # `rust-version` in Cargo.toml is a promise to anyone building from source;
-  # a dependency bump can silently break it. Check, don't hope.
-  msrv:
+  # The workflows audit themselves (tan-cli#435). Nothing else in this
+  # repository reads `.github/workflows/`, so before this job a security
+  # regression there -- a `uses:` back on a mutable tag, a checkout that leaves
+  # its credential behind, a job that inherits write, a `client_payload` field
+  # interpolated into a shell -- landed green and stayed until someone thought
+  # to look.
+  #
+  # THE VERDICT IS FALSIFIABLE, which is the part worth checking before
+  # trusting it. Same invocation, zizmor 1.29.0:
+  #
+  #   this tree      rc=0    no finding at or above medium
+  #   dev @ 01374d4  rc=14   63 unpinned-uses, 26 artipacked,
+  #                          12 excessive-permissions, 6 template-injection
+  #
+  # So it fails on every class the PR that introduced it fixed, not merely on
+  # nothing.
+  workflow-security:
+    name: zizmor · workflow security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: read rust-version from Cargo.toml
-        id: msrv
-        shell: bash
-        run: |
-          v="$(grep -m1 '^rust-version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          # An unmatched grep exits 0 through the pipe; without this the job would
-          # silently fall back to stable and report green having checked no MSRV.
-          [ -n "$v" ] || { echo "::error::no rust-version found in Cargo.toml"; exit 1; }
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "declared MSRV: $v"
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: ${{ steps.msrv.outputs.version }}
-          rustflags: "" # keep parity with the local gates (see the lint job)
-      - name: check on MSRV
-        run: cargo check --workspace --all-targets --locked
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # PINNED, for the same reason the actions above are: a linter that
+      # resolves live decides this gate's verdict on its own schedule, and a
+      # new audit landing upstream would redden an unrelated PR. Moving it is
+      # a reviewed edit here -- Dependabot does not see a version inside a
+      # `run:` step.
+      - name: install zizmor
+        run: pip install "zizmor==1.29.0"
+      # `--min-severity medium`, and NOT also `--min-confidence medium`: all 26
+      # `artipacked` findings are Low confidence, so adding that flag silently
+      # drops the whole credential-persistence audit. Measured, not assumed.
+      #
+      # `--no-online-audits` keeps the gate hermetic: no token, no API, no
+      # rate limit deciding whether CI is green. Verified to reach the same
+      # verdict as a networked run on this tree, which is what the
+      # `planner-resync.yml` entry in `.github/zizmor.yml` is for.
+      #
+      # The baseline is `.github/zizmor.yml`, picked up automatically. It has
+      # two entries and both carry their argument in full.
+      - name: audit .github/workflows
+        run: zizmor --min-severity medium --no-online-audits .github/workflows/

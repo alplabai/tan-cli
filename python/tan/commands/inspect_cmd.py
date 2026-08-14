@@ -60,7 +60,7 @@ from typing import Any
 import typer
 
 from tan.commands.build_cmd import _abs_posix, resolve_sdk_root_ladder
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -102,6 +102,20 @@ class ResolvedDebugContext:
     project: Project
     #: The envelope `sdk` block, or `None` when nothing resolved.
     sdk: SdkInfo | None
+    #: tan-cli#478: the project `~/.alp/sdk-default` was written FOR, when the
+    #: SDK resolved through `globalDefault` and that project is not this one.
+    #: `resolve_sdk_root_ladder` has always answered with it; this context
+    #: dropped it, so `inspect`/`trace`/`support-bundle` reported
+    #: `sourceTier: "globalDefault"` pointing at ANOTHER project's checkout
+    #: with `ok: true` and `issues: []` -- the exact silence tan-cli#464 closed
+    #: for `doctor`/`generate`/`build`/`presets`/`examples` and no one else.
+    #: `None` when the pointer is this project's own, or was never consulted.
+    foreign_global_default_for: str | None = None
+    #: The unreadable/unresolvable `.alp/sdk-path` pin, same carry-through.
+    #: Paired with the field above because `sdk_resolution_issues` emits the
+    #: two together, in that order, and a caller holding one but not the other
+    #: can only re-open half the hole.
+    broken_project_pin: str | None = None
 
 
 def resolve_debug_project_context(
@@ -130,7 +144,7 @@ def resolve_debug_project_context(
     resolved_sdk = sdk_resolution.path
     sdk_tier = sdk_resolution.tier
     sdk_root = _abs_posix(str(resolved_sdk)) if resolved_sdk is not None else None
-    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
+    sdk = SdkInfo.from_resolution(sdk_root, sdk_resolution) if sdk_root is not None else None
 
     python_binary = "python" if os.name == "nt" else "python3"
 
@@ -144,6 +158,11 @@ def resolve_debug_project_context(
         python_binary=python_binary,
         project=Project.resolved(workspace_root, board_yaml_path),
         sdk=sdk,
+        # tan-cli#478: carried, not recomputed. The ladder already answered
+        # with both; dropping them here is what left three commands silent
+        # about resolving another project's SDK.
+        foreign_global_default_for=sdk_resolution.foreign_global_default_for,
+        broken_project_pin=sdk_resolution.broken_project_pin,
     )
 
 
@@ -225,9 +244,17 @@ def filter_resolved_values(
 def _format_value_text(value: Any) -> str:
     """Strings JSON-quoted, everything else its compact JSON form -- mirrors
     Rust's `format_value` (`Value::String` -> `serde_json::to_string`, else
-    `Value::to_string()`); `json.dumps` gives the identical rendering for a
-    scalar (`true`/`false`/`null`/a bare number) in either language."""
-    return json.dumps(value)
+    `Value::to_string()`).
+
+    `ensure_ascii=False`, for the same reason `diff_cmd._format_value` carries
+    it: `serde_json::to_string` emits raw UTF-8 and never a `\\uXXXX` escape, so
+    the default `ensure_ascii=True` printed `/home/<user>/jos\\u00e9-proj` where
+    the oracle prints `/home/<user>/josé-proj` -- a path that no longer equals
+    disk and can no longer be pasted back into a shell. Every OTHER scalar
+    (`true`/`false`/`null`/a bare number) renders identically either way, so
+    this is the only character class the two languages ever disagreed on.
+    """
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _inspect_text_lines(
@@ -242,7 +269,7 @@ def _inspect_text_lines(
             if show_origin:
                 lines.append(
                     f"{v['key']}={rendered} source={v['source']} "
-                    f"detail={json.dumps(v['detail'])}"
+                    f"detail={json.dumps(v['detail'], ensure_ascii=False)}"
                 )
             else:
                 lines.append(f"{v['key']}={rendered}")
@@ -292,7 +319,14 @@ def inspect(
     generated_at = generated_at_iso(millis=True)
     context = resolve_debug_project_context(project, board_yaml, sdk_root)
 
-    issues: list[Issue] = []
+    # tan-cli#478: FIRST, and unconditionally. `inspect`'s whole job is to say
+    # which SDK a build would use, so resolving another project's checkout
+    # through `globalDefault` is the single most load-bearing thing it can
+    # report -- and it reported the root while saying nothing about whose it
+    # was. Same helper, same order, as `size`/`image`/`flash`.
+    issues: list[Issue] = sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_tier, context.foreign_global_default_for
+    )
     if not context.board_yaml_exists:
         issues.append(
             Issue(
@@ -322,6 +356,15 @@ def inspect(
     }
 
     if not json_mode:
+        # tan-cli#478 review finding 6: `issues` has carried the
+        # foreign-default/broken-pin pair since the top of this function, but
+        # only the JSON branch below ever read it -- the DEFAULT text path
+        # stayed silent on the exact fact this command exists to disclose
+        # ("which SDK a build would use"). Printed first and unconditionally
+        # (unlike the `--quiet`-suppressed resolved-value lines).
+        for issue in issues:
+            if issue.code.startswith("sdk."):
+                typer.echo(issue.message, err=True)
         for line in _inspect_text_lines(values, focus, show_origin, quiet):
             typer.echo(line, err=True)
 

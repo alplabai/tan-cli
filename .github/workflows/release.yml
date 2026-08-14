@@ -12,13 +12,12 @@
 #                the string the shipped binary prints — with pyproject.toml
 #                (PEP 440 rendering) and npm-shim/package.json reconciled
 #                against it. The verify-version job below fails the release if
-#                they disagree. The workspace Cargo.toml is deliberately NOT
-#                read: it versions the frozen Rust crates, which no longer
-#                produce any asset here. An earlier revision of this header
-#                said the tag had to equal that Cargo.toml version — it was
-#                true until the port and is exactly the kind of stale
-#                opposite-of-the-code comment tan-cli#259 warns about; the
-#                consequence was an operator bumping a version no gate reads.
+#                they disagree. There is no longer a workspace Cargo.toml to
+#                read at all — tan-cli#269 deleted `crates/` — but this note
+#                stays because an earlier revision of this header said the tag
+#                had to equal that Cargo.toml's version, and an operator
+#                acting on it bumped a version no gate reads. Exactly the
+#                stale opposite-of-the-code comment tan-cli#259 warns about.
 #
 #   Assets     : one ARCHIVE per target triple (tan-cli#349 — was one raw
 #                uncompressed binary; see below), named
@@ -29,9 +28,12 @@
 #                Plus `checksums.txt` (sha256 of every archive),
 #                `envelope-contract.json` (the WHOLE issue-code registry, all
 #                three statuses and not a frozen-only subset — a consumer reads
-#                `status` to decide what each code promises — plus one golden
-#                envelope per command family; see contract/README.md), and a
-#                GitHub build-provenance attestation covering all of the above —
+#                `status` to decide what each code promises — plus one entry
+#                per command family: a byte golden `{args, exitCode, envelope}`
+#                for 17 of them, and `doctor`'s `{args, dataKeys}` key-set
+#                entry (tan-cli#664 — doctor's `data` VALUES are host facts, so
+#                it cannot be a golden); see contract/README.md), and a GitHub
+#                build-provenance attestation covering all of the above —
 #                verify with `gh attestation verify <file> --repo alplabai/tan-cli`.
 #
 #   The binaries are PyInstaller --onedir freezes of `python/` (the Python
@@ -167,7 +169,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing in this job pushes; don't leave a git credential helper
           # configured with write-capable creds for a job that never uses it.
@@ -191,7 +193,7 @@ jobs:
       #
       # No `pip install` before it: the script imports only the stdlib, so this
       # gate cannot fail for a reason unrelated to versions.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: tag == TAN_VERSION == pyproject == npm-shim
@@ -297,9 +299,18 @@ jobs:
           - os: macos-15-intel
             asset: tan-x86_64-apple-darwin.tar.gz
             archive_ext: tar.gz
+            # The Mach-O cputype the `arch` step below refuses a mismatch
+            # against (tan-cli#500). Stated beside the asset NAME because the
+            # name is the claim being checked: `macos-15-intel` is the INTEL
+            # label and it has to be -- `macos-latest`/`macos-14`/`macos-15`
+            # are all Apple silicon, and PyInstaller freezes the interpreter it
+            # RUNS, so a wrong label here builds fine and uploads an arm64
+            # binary under the x86_64 name.
+            cputype: "0x01000007" # CPU_TYPE_X86_64
           - os: macos-15
             asset: tan-aarch64-apple-darwin.tar.gz
             archive_ext: tar.gz
+            cputype: "0x0100000c" # CPU_TYPE_ARM64
           # `container` both routes this leg through the docker step below AND
           # is the single place the build image is named.
           - os: ubuntu-latest
@@ -308,7 +319,7 @@ jobs:
             container: python:3.12-slim-bullseye
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing in this job pushes; don't persist write-capable creds a
           # PyInstaller build + its resolved deps never need (tan-cli#435).
@@ -317,7 +328,7 @@ jobs:
       # 3.12 is the floor python/pyproject.toml declares, and the floor is what
       # ships: `tan build` bakes the interpreter into every Zephyr slice and
       # Zephyr's own python.cmake rejects anything older.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         if: ${{ !matrix.container }}
         with:
           python-version: "3.12"
@@ -467,16 +478,67 @@ jobs:
       # be published as a release asset.
       - name: upload the measured glibc floor
         if: ${{ matrix.container }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: glibc-floor
           path: python/dist/glibc-floor.txt
           if-no-files-found: error
 
+      # THE SHIPPING PATH'S ARCH CHECK (tan-cli#500). `python-binaries.yml` has
+      # had one since #500; this job -- the one a `v*` push actually runs, the
+      # one whose bytes reach a customer -- had none at all, on either darwin
+      # leg. That is the asymmetry worth naming: the proof-only workflow was
+      # guarded and the shipping one was not.
+      #
+      # PyInstaller cannot cross-compile: it freezes the interpreter it RUNS,
+      # so a wrong runner label produces a correctly NAMED asset of the wrong
+      # architecture. alp-sdk-vscode selects assets BY NAME and never inspects
+      # the file, so nothing downstream catches it either -- the failure lands
+      # on a customer's Intel Mac as `Bad CPU type in executable`, after a tag
+      # that cannot be un-pushed.
+      #
+      # Reads the pre-archive onedir binary, not the .tar.gz staged below: an
+      # archive has no Mach-O header. Runs before `stage asset` so a mismatch
+      # fails while nothing has been named yet.
+      - name: arch (darwin assets)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # An empty `cputype` FAILS rather than skipping. Without this, adding
+          # a darwin row and forgetting the field would silently restore the
+          # unguarded state this step exists to end -- a check that quietly
+          # does nothing is the defect tan-cli#500 is about.
+          if [ -z "${{ matrix.cputype }}" ]; then
+            echo "::error::this darwin matrix row declares no cputype, so its asset would ship unverified. Add cputype beside the asset name (0x01000007 CPU_TYPE_X86_64 / 0x0100000c CPU_TYPE_ARM64)."
+            exit 1
+          fi
+          python3 - "python/dist/tan/tan" "${{ matrix.cputype }}" <<'PY'
+          import struct, sys
+          path, want = sys.argv[1], int(sys.argv[2], 16)
+          with open(path, "rb") as fh:
+              head = fh.read(8)
+          if len(head) < 8:
+              raise SystemExit(f"::error::{path} is too short to hold a Mach-O header")
+          magic, cputype = struct.unpack("<II", head)
+          # Fat magic is stored BIG-endian, so it reads back byte-swapped.
+          # Refused rather than mis-parsed: a universal binary would satisfy
+          # BOTH asset names at once, the opposite of per-architecture assets.
+          if magic in (0xBEBAFECA, 0xCAFEBABE, 0xBFBAFECA, 0xCAFEBABF):
+              raise SystemExit(
+                  f"::error::{path} is a UNIVERSAL (fat) binary; these assets are "
+                  f"per-architecture and a fat one would ship under both names")
+          if magic not in (0xFEEDFACF, 0xFEEDFACE):
+              raise SystemExit(f"::error::{path} is not a Mach-O binary (magic 0x{magic:08x})")
+          print(f"{path}: Mach-O cputype 0x{cputype:08x} (want 0x{want:08x})")
+          if cputype != want:
+              raise SystemExit(f"::error::{path} is not the architecture its asset name claims")
+          PY
+
       - name: stage asset
         shell: bash
         run: cp "python/dist/tan.${{ matrix.archive_ext }}" "${{ matrix.asset }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
@@ -494,7 +556,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # This job creates the Release/uploads assets through the GitHub
           # API (softprops/action-gh-release, actions/attest-build-provenance
@@ -505,12 +567,12 @@ jobs:
       # `pattern: tan-*` and not "everything": assets/ is published verbatim
       # (`files: assets/*`), so anything else this workflow uploads must be
       # fetched separately or it becomes a release asset by accident.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: tan-*
           path: assets
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: glibc-floor
           path: meta
@@ -521,10 +583,30 @@ jobs:
       # side. Publishing the goldens lets the extension's own contract test
       # diff against THIS instead of a hand-copied fixture that drifts.
       #
-      # Pure re-packaging: every input is a committed file already gated by
-      # `cargo test -p alp-tan-cli --test contract`, so there is no fact here
-      # that can be right in the repo and wrong in the asset. Run it locally
-      # with `python3` from the repo root to see exactly what ships.
+      # Pure re-packaging of committed `contract/envelopes/*` files -- but
+      # "committed" is not "matches what ships". Every case is gated by
+      # `python -m pytest tests/conformance` against the actual shipping Python
+      # CLI, which AUTO-DISCOVERS every directory under `contract/envelopes/`
+      # (`test_contract_envelopes.py`'s `CONTRACT.iterdir()`) rather than
+      # listing them -- so adding a case gates it, with nothing to remember to
+      # update. Until tan-cli#269 a second gate, `cargo test -p alp-tan-cli
+      # --test contract`, listed the same 17 cases by hand against the frozen
+      # Rust v0.4.1 oracle; deleting it left the discovery gate covering
+      # exactly the same set.
+      #
+      # The five `debug-config-preview-*` goldens used to be the one gap: they
+      # were `pytest.mark.xfail(strict=True)` in the conformance suite, and this
+      # step re-packaged their frozen-oracle `expected.json` verbatim, so the
+      # asset's five `envelopes["debug-config-preview-*"]` entries did NOT
+      # reflect what `tan` emits for `data.configuration`/`issues[]`. tan-cli#502
+      # re-recorded all five against the shipping CLI and dropped the xfails, so
+      # they are gated like every other case now (see contract/README.md, "Why
+      # the five `debug-config-preview-*` goldens were re-recorded").
+      # `validate-offline-clean` is the one remaining xfail'd entry, and so the
+      # one entry this asset still advertises inaccurately (tan-cli#498 -- see
+      # contract/README.md, "Residual limitation").
+      # Run it locally with `python3` from the repo root to see exactly what
+      # ships.
       - name: Bundle the envelope contract
         shell: bash
         run: |
@@ -544,6 +626,17 @@ jobs:
                   "exitCode": int((case / "expected.exit").read_text(encoding="utf-8").strip()),
                   "envelope": json.loads((case / "expected.json").read_text(encoding="utf-8")),
               }
+          # tan-cli#664: `doctor`'s data VALUES are host facts (installed tool
+          # versions, absolute paths, which checks even apply), so it cannot be
+          # a byte golden like every entry above -- it carries `dataKeys`
+          # (the required KEY SET, never values) instead of `exitCode`/
+          # `envelope`. See contract/doctor-data-keys.json for the single
+          # source and how it was enumerated.
+          doctor_keys = json.loads((root / "doctor-data-keys.json").read_text(encoding="utf-8"))
+          envelopes["doctor"] = {
+              "args": doctor_keys["args"],
+              "dataKeys": doctor_keys["dataKeys"],
+          }
           json.dump(
               {
                   "schemaVersion": 1,
@@ -563,7 +656,7 @@ jobs:
         working-directory: assets
         run: sha256sum * > checksums.txt
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: assets/*
       - name: Slice CHANGELOG section for the release notes
@@ -686,7 +779,7 @@ jobs:
       # `make_latest` is spelled as an explicit "true"/"false" string because the
       # action takes a string, not a boolean.
       - name: publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: assets/*
           fail_on_unmatched_files: true
@@ -762,13 +855,35 @@ jobs:
       # reports success while shipping nothing (#151).
       NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # `npm publish` authenticates via NODE_AUTH_TOKEN (npm registry
           # token), not a persisted git remote; nothing here pushes to the
           # repo (tan-cli#435).
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      # cache-poisoning is suppressed ON THIS STEP rather than by line number in
+      # .github/zizmor.yml. It used to be baselined there as `release.yml:850:9`,
+      # and that anchor rotted twice: 790 -> 850 when tan-cli#500 added a step to
+      # the `build` job, and 850 -> 864 when this branch added comments above.
+      # Neither change touched this step. A suppression that moves when unrelated
+      # lines move is a suppression that will one day sit on a different step.
+      #
+      # WHY IT IS SUPPRESSED RATHER THAN FIXED. The step passes `node-version`
+      # and `registry-url` only -- no `cache:` input, so no dependency cache is
+      # restored or saved; zizmor reports the action's CAPABILITY, at Low
+      # confidence, not an observed cache. There is also nothing to poison: the
+      # job's two steps are `npm pack --dry-run` and `npm publish`, and it
+      # installs no dependencies.
+      #
+      # WHAT WOULD CHANGE THIS. Add a `cache:` input here, or an install step
+      # ahead of `npm publish`, and this must be re-argued rather than carried:
+      # at that point a restored cache really would reach the one job in this
+      # repository that publishes to a registry. THE SAME IS TRUE IMPLICITLY:
+      # `actions/setup-node` v5+ auto-restores an npm cache with no explicit
+      # `cache:` input at all when `npm-shim/package.json` carries a
+      # `packageManager` field, so this holds only as long as that file has
+      # none -- add one and re-argue this before merging.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org

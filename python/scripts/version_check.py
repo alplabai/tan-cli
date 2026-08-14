@@ -17,10 +17,12 @@ the git tag is. Everything else derives from it or is checked against it:
   derives the asset tag as ``TAG = `v${pkg.version}` `` (npm-shim/postinstall.js:25),
   so a stale shim downloads a tag that does not exist. npm ships SemVer, so no
   translation applies here.
-* ``Cargo.toml`` is deliberately NOT read. It versions the Rust crates, which no
-  longer produce the release assets; release.yml used to gate the tag on it
-  (`grep -m1 '^version = ' Cargo.toml`), which is why a v0.5.0 tag failed before
-  a single asset was built while three files said 0.5.0 and one said 0.4.1-dev.
+* ``Cargo.toml`` is not read, and as of tan-cli#269 does not exist: it versioned
+  the Rust crates, which stopped producing the release assets at the port.
+  release.yml used to gate the tag on it (`grep -m1 '^version = ' Cargo.toml`),
+  which is why a v0.5.0 tag failed before a single asset was built while three
+  files said 0.5.0 and one said 0.4.1-dev. Recorded so a future reader does not
+  re-add a fourth version file on the theory that one was overlooked.
 * ``CHANGELOG.md`` must carry the section ``TAN_VERSION`` will be released
   under. release.yml slices the GitHub Release body out of it by an EXACT
   ``^## \\[<tag minus v>\\]`` match and hard-fails the release job when it
@@ -248,6 +250,45 @@ def read_changelog_headings() -> list[tuple[str, str]]:
     return headings
 
 
+def changelog_section_body(target: str) -> str:
+    """The text under `## [target]`, up to the next `## [` heading, stripped.
+
+    `read_changelog_headings()` answers whether a heading EXISTS, which is all
+    `changelog_problems` used to ask -- and a heading with nothing under it
+    satisfies that while release.yml slices an empty release body out of it
+    (tan-cli#500).
+
+    CHARACTER-FOR-CHARACTER release.yml's slicer, and deliberately NOT
+    `read_changelog_headings()`'s regex. release.yml starts on
+    ``re.match(rf"^## \\[{re.escape(version)}\\]", line)`` and ends on
+    ``line.startswith("## [")``; that regex requires a CLOSING bracket, so a
+    malformed ``## [broken`` heading terminates release.yml's slice and would
+    not have terminated one built on the regex. The divergence is not
+    cosmetic: this function would report a populated section, every pre-tag
+    gate would pass, and release.yml would then slice ``''`` and fail the
+    release job after four freezes with the tag already immutable -- the exact
+    late-and-immutable failure this check exists to move to PR time. A slice
+    that disagrees with the slice it stands in for is worse than no slice.
+
+    Returns `""` when the heading is absent as well as when its section is
+    blank; the caller has already established the heading exists, so the two
+    do not need distinguishing here.
+    """
+    path = REPO_ROOT / "CHANGELOG.md"
+    start = re.compile(rf"^## \[{re.escape(target)}\]")
+    body: list[str] = []
+    inside = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not inside:
+            inside = start.match(line) is not None
+            continue
+        if line.startswith("## ["):
+            break
+        if inside:
+            body.append(line)
+    return "\n".join(body).strip()
+
+
 def changelog_problems(tan_version: str) -> list[str]:
     """The section release.yml will slice must exist, and a development tree's
     must still be open. Both halves failed silently before: #212 made a missing
@@ -266,6 +307,14 @@ def changelog_problems(tan_version: str) -> list[str]:
                 f"{tan_version!r} is a development version heading for it. "
                 f"Either that release already shipped and TAN_VERSION must move "
                 f"on, or the section was dated too early."
+            ]
+        if not changelog_section_body(target):
+            return [
+                f"CHANGELOG.md's `## [{target}]` section is EMPTY. The heading "
+                f"exists, so every pre-tag gate passes, and release.yml then "
+                f"slices a release body with nothing in it -- after four "
+                f"PyInstaller freezes, with the tag already pushed and "
+                f"immutable. Write the section, or move TAN_VERSION."
             ]
         return []
     return [

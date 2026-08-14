@@ -1,0 +1,1840 @@
+{
+ "tests/parity/test_flash_oracle_parity.py::test_a_real_spawn_diffs_including_the_captured_failure_tail#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "yocto_wic[c1]: dd: failed to open '<ORACLE-ROOT-0>\\.\\build\\a.elf': No such file or directory",
+      "method": "yocto_wic",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "yocto_wic[c1]: dd: failed to open '<ORACLE-ROOT-0>\\.\\build\\a.elf': No such file or directory",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[absolute-artefact-passes-through]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "a",
+      "kind": "slice",
+      "message": "would run west flash --build-dir C:/abs/tree",
+      "method": "zephyr_west_flash",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[bare-int-base-round-trips-to-hex]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[boot-order-order-and-both-warnings]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "a",
+      "kind": "slice",
+      "message": "would run west flash --build-dir <ORACLE-ROOT-0>\\.\\build",
+      "method": "zephyr_west_flash",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "flash.boot-order-unknown-core",
+     "message": "flash: slice 'b' has no boot_order entry; not flashed",
+     "severity": "warning"
+    },
+    {
+     "code": "flash.boot-order-unknown-core",
+     "message": "flash: boot_order references core 'ghost' not in slices; skipping",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[cmake-jobs-and-config]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run cmake --build <ORACLE-ROOT-0>\\.\\build --target prog --config Rel -j 4",
+      "method": "baremetal_cmake_flash",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[core-and-helper-together-select-nothing]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "flash.nothing-matched",
+     "message": "flash: nothing matched the requested filters.",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[core-filter-matches-nothing]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "flash.nothing-matched",
+     "message": "flash: nothing matched the requested filters.",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[core-filter-suppresses-the-missing-boot-order-warning]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "a",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[empty-boot-order-sorts-and-helpers-last]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "a55_cluster",
+      "kind": "slice",
+      "message": "would run dd if=<ORACLE-ROOT-0>\\.\\build\\a.wic of=/dev/sdb bs=4M conv=fsync status=progress",
+      "method": "yocto_wic",
+      "rc": 0,
+      "status": "ok"
+     },
+     {
+      "id": "m33_sm",
+      "kind": "slice",
+      "message": "would run west flash --build-dir <ORACLE-ROOT-0>\\.\\build",
+      "method": "zephyr_west_flash",
+      "rc": 0,
+      "status": "ok"
+     },
+     {
+      "id": "gd32_bridge",
+      "kind": "helper",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[empty-core-id-is-dropped]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "flash.nothing-matched",
+     "message": "flash: nothing matched the requested filters.",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[explicit-build-dir-wins-over-the-derived-one]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run west flash --build-dir /elsewhere/bd --hex-file /h/x.hex",
+      "method": "zephyr_west_flash",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[explicit-relative-build-root]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[explicit-zero-speed-means-default]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[helper-filter-suppresses-slices-entirely]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "h1",
+      "kind": "helper",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[jlink-bin-artefact-uses-loadbin]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run JLinkExe -device NRF_DUMMY -if SWD -speed 1000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[malformed-boot-order-steps-are-dropped]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "a",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[manifest-missing]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.manifest-not-found",
+     "message": "system-manifest.yaml not found at <ORACLE-ROOT-0>\\.\\build\\system-manifest.yaml; run `tan build --project .` first.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[missing-tool-fails]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash: slice 'c1' backend 'zephyr_west_flash' needs one of [\"west\"] on PATH; none found.",
+      "method": "zephyr_west_flash",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash: slice 'c1' backend 'zephyr_west_flash' needs one of [\"west\"] on PATH; none found.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[negative-base-is-refused]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash_args.base = -8 is negative; refusing to interpret it as an address/count -- this plans a real flash write.",
+      "method": "swd_probe",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash_args.base = -8 is negative; refusing to interpret it as an address/count -- this plans a real flash write.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[newline-in-base-is-refused]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash_args.base = \"0x8000\\n r\" is not a plain hex/decimal address -- refusing to interpolate it into a J-Link/OpenOCD command.",
+      "method": "swd_probe",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash_args.base = \"0x8000\\n r\" is not a plain hex/decimal address -- refusing to interpolate it into a J-Link/OpenOCD command.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[no-artefact-dry-run-previews]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run west flash --build-dir <ORACLE-ROOT-0>\\.\\build",
+      "method": "zephyr_west_flash",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[no-artefact-real-run-fails]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash: slice 'c1' has no output_artefact / firmware_path; can't flash.",
+      "method": "zephyr_west_flash",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash: slice 'c1' has no output_artefact / firmware_path; can't flash.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[no-hw-info-block]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "a",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[no-slices]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "flash.nothing-matched",
+     "message": "flash: nothing matched the requested filters.",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[off-core-skips-without-failing-the-run]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "a",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     },
+     {
+      "id": "idle",
+      "kind": "slice",
+      "message": "flash: slice 'idle' has no flash_method; skipping",
+      "rc": -1,
+      "status": "skipped"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[openocd-missing-interface-and-target]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "swd_probe: flash_args.interface and flash_args.target are required for the openocd/pyocd path (e.g. interface=cmsis-dap, target=gd32g553) -- or install SEGGER J-Link for the primary path.",
+      "method": "swd_probe",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "swd_probe: flash_args.interface and flash_args.target are required for the openocd/pyocd path (e.g. interface=cmsis-dap, target=gd32g553) -- or install SEGGER J-Link for the primary path.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[pyocd-forced-elf-omits-base]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run pyocd flash --target t <ORACLE-ROOT-0>\\.\\build\\a.elf",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[quoted-bool-is-refused]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash_args.erase must be a bare boolean (true/false, unquoted; got String(\"true\")) -- refusing to silently fall back to a default -- this plans a real flash write.",
+      "method": "zephyr_west_flash",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash_args.erase must be a bare boolean (true/false, unquoted; got String(\"true\")) -- refusing to silently fall back to a default -- this plans a real flash write.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[quoted-int-is-refused]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash_args.jlink_speed must be a bare number (unquoted; got String(\"8000\")) -- refusing to silently fall back to a default -- this plans a real flash write.",
+      "method": "swd_probe",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash_args.jlink_speed must be a bare number (unquoted; got String(\"8000\")) -- refusing to silently fall back to a default -- this plans a real flash write.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[reset-false-is-honoured]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[schema-version-2]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\.\\build\\system-manifest.yaml: unsupported system-manifest schema_version 2 (this CLI consumes v1); upgrade the CLI or the SDK so the versions match",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[sdk-root-invalid]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.sdk-root-not-found",
+     "message": "Cannot locate alp-sdk root.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[sequence-base-is-refused]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash_args.base must be a quoted string (got Sequence [Number(1), Number(2)]); refusing to silently fall back to a default -- this plans a real flash write.",
+      "method": "swd_probe",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash_args.base must be a quoted string (got Sequence [Number(1), Number(2)]); refusing to silently fall back to a default -- this plans a real flash write.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[slice-status-not-ok-is-refused]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.slice-not-built",
+     "message": "flash: slice 'a' build status is 'failed' (not 'ok'); refusing to flash its artefact -- it may be stale from a previous successful build. Rebuild it first.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[tcl-metacharacter-in-interface-is-refused]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash_args.interface = \"a;b\" is not a plain identifier or '/'-separated path of plain identifiers (letters, digits, '-', '_' per segment) -- refusing to interpolate it into a spawned command / OpenOCD Tcl script.",
+      "method": "swd_probe",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash_args.interface = \"a;b\" is not a plain identifier or '/'-separated path of plain identifiers (letters, digits, '-', '_' per segment) -- refusing to interpolate it into a spawned command / OpenOCD Tcl script.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[traversal-in-target-is-refused]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash_args.target = \"../../x\" is not a plain identifier or '/'-separated path of plain identifiers (letters, digits, '-', '_' per segment) -- refusing to interpolate it into a spawned command / OpenOCD Tcl script.",
+      "method": "swd_probe",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash_args.target = \"../../x\" is not a plain identifier or '/'-separated path of plain identifiers (letters, digits, '-', '_' per segment) -- refusing to interpolate it into a spawned command / OpenOCD Tcl script.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[west-build-dir-from-zephyr-subdir]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run west flash --build-dir <ORACLE-ROOT-0>\\.\\build\\c1-zephyr",
+      "method": "zephyr_west_flash",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[west-runner-and-erase]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run west flash --build-dir <ORACLE-ROOT-0>\\.\\build --runner openocd --erase",
+      "method": "zephyr_west_flash",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[xspi-confirmed-is-hw-gated]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "xspi_flashwriter: the real SCIF write is HW-gated and not yet validated on silicon (bench shelved). Run with --dry-run; see docs/provisioning.md.",
+      "method": "xspi_flashwriter",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "xspi_flashwriter: the real SCIF write is HW-gated and not yet validated on silicon (bench shelved). Run with --dry-run; see docs/provisioning.md.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[xspi-partition-must-be-mtd0-or-mtd1]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "xspi_flashwriter: flash_args.flash_partition must be 'mtd0' (bl2) or 'mtd1' (fip)",
+      "method": "xspi_flashwriter",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "xspi_flashwriter: flash_args.flash_partition must be 'mtd0' (bl2) or 'mtd1' (fip)",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[xspi-unconfirmed-is-planned]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run flash-writer-scif port=COM3 writer=<flash_writer.mot> baud=921600 partition=mtd1 artefact=a.elf -- NOT written: flash_args.confirm is false (set ALP_FLASH_FORCE=1 or flash_args.confirm: true to actually flash)",
+      "method": "xspi_flashwriter",
+      "rc": 0,
+      "status": "planned"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "flash.confirm-required",
+     "message": "would run flash-writer-scif port=COM3 writer=<flash_writer.mot> baud=921600 partition=mtd1 artefact=a.elf -- NOT written: flash_args.confirm is false (set ALP_FLASH_FORCE=1 or flash_args.confirm: true to actually flash)",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[yocto-alias-method-resolves]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run dd if=<ORACLE-ROOT-0>\\.\\build\\a.elf of=/dev/sdb bs=4M conv=fsync status=progress",
+      "method": "yocto_wic_to_sd_or_emmc",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[yocto-target-is-required]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "yocto_wic: flash_args.target is required (e.g. /dev/sdb)",
+      "method": "yocto_wic",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "yocto_wic: flash_args.target is required (e.g. /dev/sdb)",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[yocto-target-must-be-a-device]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "yocto_wic: refusing target './oops' -- must start with /dev/ to avoid clobbering a regular file. Set flash_args.target to a real block device.",
+      "method": "yocto_wic",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "yocto_wic: refusing target './oops' -- must start with /dev/ to avoid clobbering a regular file. Set flash_args.target to a real block device.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_flash_matches_the_rust_oracle[yocto-unconfirmed-is-planned-not-ok]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run dd if=<ORACLE-ROOT-0>\\.\\build\\a.elf of=/dev/sdb bs=4M conv=fsync status=progress -- NOT written: flash_args.confirm is false (set ALP_FLASH_FORCE=1 or flash_args.confirm: true to actually flash)",
+      "method": "yocto_wic",
+      "rc": 0,
+      "status": "planned"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "flash.confirm-required",
+     "message": "would run dd if=<ORACLE-ROOT-0>\\.\\build\\a.elf of=/dev/sdb bs=4M conv=fsync status=progress -- NOT written: flash_args.confirm is false (set ALP_FLASH_FORCE=1 or flash_args.confirm: true to actually flash)",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_format_json_before_the_subcommand_is_accepted#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_manifest_shape_errors_agree_on_code_and_exit[malformed-yaml]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\.\\build\\system-manifest.yaml: system-manifest is not valid YAML: did not find expected ',' or ']' at line 2 column 1, while parsing a flow sequence at line 1 column 4",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_manifest_shape_errors_agree_on_code_and_exit[malformed-yaml]#1": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\.\\build\\system-manifest.yaml: system-manifest is not valid YAML: did not find expected ',' or ']' at line 2 column 1, while parsing a flow sequence at line 1 column 4",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_manifest_shape_errors_agree_on_code_and_exit[slice-missing-os]#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\.\\build\\system-manifest.yaml: system-manifest is not valid YAML: slices[0]: missing field `os` at line 3 column 3",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_manifest_shape_errors_agree_on_code_and_exit[slice-missing-os]#1": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\.\\build\\system-manifest.yaml: system-manifest is not valid YAML: slices[0]: missing field `os` at line 3 column 3",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_openocd_program_word_diverges_from_the_oracle_by_exactly_the_brace[multi-segment-interface-is-allowed]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run openocd -f interface/ftdi/olimex-arm-usb-ocd-h.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>\\.\\build\\a.elf verify reset exit",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_openocd_program_word_diverges_from_the_oracle_by_exactly_the_brace[openocd-forced-bin-appends-base]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run openocd -f interface/cmsis-dap.cfg -f target/gd32g553.cfg -c program <ORACLE-ROOT-0>\\.\\build\\a.bin verify reset exit 0x08000000",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_unknown_method_diverges_by_exactly_the_flow_d_registry_key#0": [
+  1,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\.\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "flash: slice 'c1' uses flash_method 'bogus_thing' which has no registered backend. Available: [\"baremetal_cmake_flash\", \"swd_probe\", \"xspi_flashwriter\", \"yocto_wic\", \"yocto_wic_to_sd_or_emmc\", \"zephyr_west_flash\"]",
+      "method": "bogus_thing",
+      "rc": 1,
+      "status": "failed"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "flash.entry-failed",
+     "message": "flash: slice 'c1' uses flash_method 'bogus_thing' which has no registered backend. Available: [\"baremetal_cmake_flash\", \"swd_probe\", \"xspi_flashwriter\", \"yocto_wic\", \"yocto_wic_to_sd_or_emmc\", \"zephyr_west_flash\"]",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_workspace_root_and_app_path_are_separate_anchors[subdir-app-path-discovered-sdk]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\app\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_workspace_root_and_app_path_are_separate_anchors[subdir-app-path-explicit-build-root]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\app/build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ],
+ "tests/parity/test_flash_oracle_parity.py::test_workspace_root_and_app_path_are_separate_anchors[subdir-app-path-explicit-sdk]#0": [
+  0,
+  {
+   "command": "flash",
+   "data": {
+    "buildRoot": "<ORACLE-ROOT-0>\\app\\build",
+    "entries": [
+     {
+      "id": "c1",
+      "kind": "slice",
+      "message": "would run JLinkExe -device GD32G553MEY7TR -if SWD -speed 4000 -AutoConnect 1 -ExitOnError 1 -NoGui 1 -CommanderScript <generated.jlink>",
+      "method": "swd_probe",
+      "rc": 0,
+      "status": "ok"
+     }
+    ],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "./sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  }
+ ]
+}

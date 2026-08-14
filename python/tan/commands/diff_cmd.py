@@ -44,14 +44,17 @@ case) to `bool`; `serde_yaml` (YAML 1.2 core schema) resolves only the six
 canonical `true`/`True`/`TRUE`/`false`/`False`/`FALSE` spellings and leaves
 everything else a plain string -- measured against the oracle:
 `schemaVersion: 1` + `os: on` is `changes: [{"path":"libraries",...}]` at exit
-0 there (`os` is a `String` field, untouched at schema version 1), but the
-stock loader hands `_parse_fields` a Python `bool` for `os` and every
-`_typed_field(..., str, ...)` check refuses it as exit 2
-`diff.schema-violation` -- a live false-refusal for every YAML-1.1-only
-boolean spelling in ANY string-typed field (`os`, `preset`), not just this
-one example. `_load_document` therefore parses with `_Yaml12BoolLoader`, a
+0 there (`os` is a `String` field, resolved to the literal text `"on"`,
+untouched at schema version 1). The stock loader instead hands `_parse_fields`
+a Python `bool` for `os` -- and even after `_string_scalar_field` stopped
+refusing an out-of-`str` scalar outright (tan-cli#570), a `bool` there still
+coerces to the CANONICAL text `"true"`, not the original spelling `"on"`,
+which would silently corrupt the diff's `before` value rather than merely
+refuse it. `_load_document` therefore still parses with `_Yaml12BoolLoader`, a
 `SafeLoader` subclass with the YAML 1.1 bool resolver's `on`/`off`/`yes`/`no`/
-`y`/`n` patterns removed, rather than plain `yaml.safe_load`.
+`y`/`n` patterns removed, rather than plain `yaml.safe_load`, so those
+spellings reach `_parse_fields` as the plain strings `serde_yaml` would
+produce in the first place.
 
 **Scope of the structural checks below.** `_parse_fields` validates the
 TOP-LEVEL type of every known `BoardModel` field (is `cores:` a mapping, is
@@ -72,11 +75,11 @@ mis-classifies pruning and fabricates a diff entry the oracle never emits
 `{"path":"iot","kind":"removed",...}` entry; the oracle is exit 2
 `diff.schema-violation`). `iot`'s four toggles must each be `bool` or absent.
 `inference.default_arena_kib` must be a non-negative integer (`u32` range) or
-absent. `inference.backend` is the one `String` field checked here at all --
-and, matching the `os`/`preset` leniency above, it is checked only for the
-compound shapes (`list`/`dict`) no `String` field can ever hold; any other
-scalar PyYAML resolves it to (even a bare `5` or `true`) is accepted as
-non-empty, exactly as the oracle's own String-field coercion treats it
+absent. `inference.backend` is a `String` field checked the same way
+`_string_scalar_field` now checks `os`/`preset` (tan-cli#570) -- only the
+compound shapes (`list`/`dict`) no `String` field can ever hold are rejected;
+any other scalar PyYAML resolves it to (even a bare `5` or `true`) is accepted
+as non-empty, exactly as the oracle's own String-field coercion treats it
 (measured: `inference: {backend: 5}` is `unchanged: true` at exit 0 on the
 oracle, never pruned) -- only `_inference_is_empty`'s stringification needed
 fixing to stop miscounting a non-`str` truthy `backend` as blank.
@@ -150,15 +153,17 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import _planner_python
+from tan.commands.build_cmd import _planner_python_resolution
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.generate_cmd import _python_too_old
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
+from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.commands.validate_cmd import (
     OUTCOME_CLEAN,
     OUTCOME_FAILED,
     VALIDATOR_SCRIPT,
     VALIDATOR_TIMEOUT_S,
+    _Finding,
     _synthesised_finding,
     analyze_validator_output,
 )
@@ -290,6 +295,39 @@ def _typed_field(doc: dict, key: str, expected: type, label: str) -> Any:
     )
 
 
+def _string_scalar_field(doc: dict, key: str) -> str | None:
+    """`doc[key]` coerced the way a `serde_yaml` `String`-typed field actually
+    deserializes: ANY scalar coerces into a string (only the compound shapes
+    `list`/`dict` a `String` field can never hold are refused) -- unlike
+    `_typed_field(..., str, ...)`, which wrongly demanded the YAML node
+    already BE a Python `str` (tan-cli#570). Matches
+    `_check_inference_field_types`'s existing treatment of
+    `inference.backend`, which this module's own docstring already claimed
+    `os`/`preset` shared before the code actually did.
+
+    Measured against the oracle (tan-cli#570): `os: true` -> `"true"`,
+    `os: 5` -> `"5"`. `bool` is special-cased to lowercase text rather than
+    falling through to `str(value)` (which would yield Python's `"True"`) --
+    every canonical YAML 1.2 bool spelling this loader can produce
+    (`_Yaml12BoolLoader`) already normalizes to Python's `True`/`False`, so
+    there is no source-text case to preserve here the way there would be for
+    a number or a YAML timestamp.
+    """
+    value = doc.get(key)
+    if value is None:
+        return None
+    if isinstance(value, (list, dict)):
+        raise ParseFailure(
+            "schema-violation",
+            f"board.yaml is not valid YAML: {key}: expected a string, got {_yaml_kind(value)}",
+        )
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 #: `u32::MAX` -- the upper bound `inference.default_arena_kib` (`u32` in the
 #: Rust model) accepts. Measured against the oracle: `4294967295` is exit 0,
 #: `4294967296` is exit 2 `inference.default_arena_kib: ... expected u32`.
@@ -371,15 +409,22 @@ def _parse_fields(doc: Any) -> tuple[int, str | None, list | None, dict | None, 
 
     schema_version = doc.get("schemaVersion")
     schema_version_ok = isinstance(schema_version, int) and not isinstance(schema_version, bool)
-    if schema_version is not None and (not schema_version_ok or schema_version < 0):
+    # `schemaVersion` is `u32` in the Rust model (`model.rs:18`), so the upper
+    # bound matters just as much as the lower one -- tan-cli#571: without the
+    # `_U32_MAX` ceiling (already applied to `inference.default_arena_kib`
+    # below), a value above it silently fell through and got treated as
+    # `>= 2`, the opposite of the oracle's exit-2 refusal.
+    if schema_version is not None and (
+        not schema_version_ok or schema_version < 0 or schema_version > _U32_MAX
+    ):
         raise ParseFailure(
             "schema-violation",
-            f"board.yaml is not valid YAML: schemaVersion: expected a non-negative integer, "
-            f"got {_yaml_kind(schema_version)}",
+            f"board.yaml is not valid YAML: schemaVersion: expected a non-negative 32-bit "
+            f"integer, got {_yaml_kind(schema_version)}",
         )
     effective_version = schema_version if schema_version is not None else 1
 
-    os_value = _typed_field(doc, "os", str, "a string")
+    os_value = _string_scalar_field(doc, "os")
     libraries = _typed_field(doc, "libraries", list, "a sequence")
     iot = _typed_field(doc, "iot", dict, "a mapping")
     inference = _typed_field(doc, "inference", dict, "a mapping")
@@ -389,7 +434,7 @@ def _parse_fields(doc: Any) -> tuple[int, str | None, list | None, dict | None, 
     # Fields `diff` never reads (never touched by normalize_board_model, so
     # never contribute a diff entry either way) -- top-level shape checked
     # only, per the module docstring's scope note.
-    _typed_field(doc, "preset", str, "a string")
+    _string_scalar_field(doc, "preset")
     _typed_field(doc, "cores", dict, "a mapping")
     _typed_field(doc, "ipc", list, "a sequence")
     _typed_field(doc, "diagnostics", dict, "a mapping")
@@ -516,6 +561,7 @@ def _emit_failure(
     exit_code: ExitCode,
     text_lines: list[str],
     sdk: SdkInfo | None = None,
+    sdk_context_issues: list[Issue] | None = None,
 ) -> None:
     """Mirrors `diff.rs`'s `failure(...)`: the JSON issue message and the
     text-mode lines are independent strings, not one derived from the other
@@ -539,24 +585,40 @@ def _emit_failure(
                 "diff",
                 Project.resolved(root, board_path),
                 _data(board_path, [], unchanged=False),
-                [Issue(f"diff.{code}", "error", message)],
+                [*(sdk_context_issues or []), Issue(f"diff.{code}", "error", message)],
                 exit_code,
                 sdk=sdk,
             )
         )
     else:
         stream = typer.get_text_stream("stderr")
+        # tan-cli#478 review finding 6: the JSON envelope has carried the
+        # foreign-default pair since the `Envelope` seam landed, but the
+        # DEFAULT text path never read `sdk_context_issues` at all -- a
+        # customer running plain `tan diff` (no `--format json`) saw only
+        # `text_lines` and never learned another project's checkout decided
+        # this. Printed first, matching the JSON list's own ordering.
+        for issue in sdk_context_issues or []:
+            stream.write(f"{issue.message}\n")
         for line in text_lines:
             stream.write(f"{line}\n")
     raise typer.Exit(int(exit_code))
 
 
-def _spawn_validator(python_binary: str, script: str, board_path: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+def _spawn_validator(
+    python_binary: str, script: str, board_path: str, *, used_workspace_venv: bool = True
+) -> tuple[str, tuple[Any, ...]]:
     """`(outcome, findings)` for one run of the SDK's own validator, or a
     `ParseFailure("spawn-failed", ...)` when the subprocess could not even be
     started -- `validate_cmd`'s own split (tan-cli#262/#455 review round),
     reused rather than re-derived: a launch that never happened is not a
-    verdict, and must not be swallowed into a silent "nothing to report"."""
+    verdict, and must not be swallowed into a silent "nothing to report".
+
+    `used_workspace_venv` (tan-cli#652) is forwarded verbatim to
+    `_synthesised_finding`: `False` means `python_binary` is a bare PATH
+    fallback (no `tan bootstrap` workspace venv resolved for this project),
+    which is what lets a missing-module crash there name `tan bootstrap` as
+    the remedy instead of surfacing a raw `ModuleNotFoundError`."""
     command_line = f"{python_binary} {script} --input {board_path}"
     try:
         out = subprocess.run(
@@ -573,7 +635,7 @@ def _spawn_validator(python_binary: str, script: str, board_path: str) -> tuple[
         # The child STARTED, so this is a verdict that never arrived, not a
         # launch failure -- mirrors validate_cmd's own tan-cli#262 shape.
         return OUTCOME_FAILED, (
-            (
+            _Finding(
                 "error",
                 f"the SDK validator did not finish within {VALIDATOR_TIMEOUT_S}s "
                 f"and was killed: {command_line}",
@@ -589,7 +651,11 @@ def _spawn_validator(python_binary: str, script: str, board_path: str) -> tuple[
     if result.outcome != OUTCOME_CLEAN and not result.findings:
         # A non-clean run must never reach a consumer as "zero issues",
         # which reads as no problem -- `to_cli_issues`' own synthesis.
-        return result.outcome, (_synthesised_finding(result.outcome, out.stderr),)
+        return result.outcome, (
+            _synthesised_finding(
+                result.outcome, out.stderr, used_workspace_venv=used_workspace_venv
+            ),
+        )
     return result.outcome, result.findings
 
 
@@ -612,7 +678,12 @@ def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path:
     script = os.path.join(sdk_info.root, *VALIDATOR_SCRIPT)
     if not os.path.isfile(script):
         return
-    python_binary = _planner_python(os.path.abspath(root), sdk_info.root)
+    # tan-cli#652: `used_workspace_venv` is threaded through to
+    # `_spawn_validator`/`_synthesised_finding` so a missing-module crash on
+    # the bare-PATH fallback names `tan bootstrap` as the remedy.
+    python_binary, used_workspace_venv = _planner_python_resolution(
+        os.path.abspath(root), sdk_info.root
+    )
 
     # Guard 3 (validate_cmd.py:1013-1015's own): a spawned interpreter below
     # the SDK's declared pythonMinVersion dies inside alp-sdk's
@@ -623,10 +694,19 @@ def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path:
     if (too_old := _python_too_old(python_binary, floor)) is not None:
         raise ParseFailure("python-too-old", too_old)
 
-    outcome, findings = _spawn_validator(python_binary, script, board_path)
+    outcome, findings = _spawn_validator(
+        python_binary, script, board_path, used_workspace_venv=used_workspace_venv
+    )
     if outcome == OUTCOME_CLEAN:
         return
-    detail = "; ".join(message for _severity, message in findings)
+    # `finding.message`, not a `(severity, message)` unpack: tan-cli#498
+    # defect 2 turned `validate_cmd`'s findings into a `_Finding` record so a
+    # rich `error[ALP-Bxxx]` block's code, hint and source range survive the
+    # walk. This module reuses that parser wholesale, so it follows the shape.
+    # The bare `.message` is deliberate here -- `diff` folds every finding into
+    # ONE sentence and points the reader at `tan validate` for the full
+    # diagnostics, which is where the code and hint are rendered.
+    detail = "; ".join(finding.message for finding in findings)
     raise ParseFailure(
         outcome,
         "board.yaml is not valid: the SDK's own validator rejects it -- run "
@@ -692,7 +772,20 @@ def diff(
 
     root, board_path = resolve_project_paths(project, board_yaml)
     sdk = resolve_sdk(sdk_root, root)
-    sdk_info = SdkInfo(sdk.path, sdk.tier) if sdk is not None else None
+    sdk_info = SdkInfo.from_resolution(sdk.path, sdk) if sdk is not None else None
+    # tan-cli#478: `SdkInfo.from_resolution` above carries the pair, and
+    # `Envelope.__init__` appends it to the JSON envelope for every command --
+    # that seam alone is enough for `--format json`, and dedupes by code, so
+    # computing it again here changes nothing there. But `diff`'s text mode
+    # never touches `Envelope` at all (`_emit_failure`'s `else` branch and the
+    # success branch below both write straight to stderr), so without this
+    # the DEFAULT (non-JSON) path stayed silent -- tan-cli#478 review finding
+    # 6. Computed here, once, and threaded into both text branches below.
+    sdk_context_issues: list[Issue] = (
+        sdk_resolution_issues(sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for)
+        if sdk is not None
+        else []
+    )
     board_file = Path(board_path)
 
     if not board_file.exists():
@@ -705,6 +798,7 @@ def diff(
             exit_code=ExitCode.VALIDATION_FAILURE,
             text_lines=["diff: board.yaml path is unresolved or missing."],
             sdk=sdk_info,
+            sdk_context_issues=sdk_context_issues,
         )
         return
 
@@ -720,6 +814,7 @@ def diff(
             exit_code=ExitCode.INTERNAL_FAILURE,
             text_lines=["diff: internal failure", str(err)],
             sdk=sdk_info,
+            sdk_context_issues=sdk_context_issues,
         )
         return
 
@@ -746,6 +841,7 @@ def diff(
             exit_code=failure.exit_code,
             text_lines=[header, failure.message],
             sdk=sdk_info,
+            sdk_context_issues=sdk_context_issues,
         )
         return
     except Exception as err:  # noqa: BLE001 -- the envelope IS the error contract
@@ -759,6 +855,7 @@ def diff(
             exit_code=ExitCode.INTERNAL_FAILURE,
             text_lines=["diff: internal failure", message],
             sdk=sdk_info,
+            sdk_context_issues=sdk_context_issues,
         )
         return
 
@@ -768,13 +865,18 @@ def diff(
                 "diff",
                 Project.resolved(root, board_path),
                 _data(board_path, entries),
-                [],
+                sdk_context_issues,
                 ExitCode.SUCCESS,
                 sdk=sdk_info,
             )
         )
     else:
         stream = typer.get_text_stream("stderr")
+        # tan-cli#478 review finding 6: printed unconditionally, unlike the
+        # `--quiet`-suppressed entries below -- a foreign-checkout warning is
+        # not the "non-essential" output `--quiet` exists to trim.
+        for issue in sdk_context_issues:
+            stream.write(f"{issue.message}\n")
         for line in _render_text(entries, board_path, quiet):
             stream.write(f"{line}\n")
     raise typer.Exit(int(ExitCode.SUCCESS))

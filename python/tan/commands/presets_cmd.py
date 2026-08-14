@@ -68,6 +68,7 @@ from tan.commands.sdk_cmd import (
     ActiveSdk,
     global_default_foreign_project_issue,
     project_pin_issue,
+    rejected_sdk_root_message,
     resolve_sdk_tiered,
 )
 from tan.core.global_flags import accept_global_flags
@@ -90,6 +91,13 @@ SDK_UNRESOLVED_CODE = "presets.sdk-root-unresolved"
 SDK_UNRESOLVED_MESSAGE = (
     "alp-sdk root is unresolved. Returning built-in defaults and empty SDK preset lists."
 )
+
+#: What the reader GOT instead, for the `--sdk-root`-was-given-and-rejected
+#: branch (`sdk_cmd.rejected_sdk_root_message`, tan-cli#497). The no-flag
+#: message above is byte-pinned by the `presets-no-sdk` golden envelope and the
+#: `["presets","--format","json"]` oracle-parity case and is NOT touched; this
+#: branch is unreachable from either, because neither passes the flag.
+SDK_UNRESOLVED_CONSEQUENCE = "Returning built-in defaults and empty SDK preset lists."
 
 #: Built-in, SDK-independent defaults, verbatim from
 #: `tan_core::presets::empty_preset_catalogue`. Order is the wire order (these are
@@ -561,15 +569,27 @@ def resolve_sdk(sdk_root: str | None, workspace_root: str) -> ActiveSdk | None:
 # ---------------------------------------------------------------------------
 
 
-def render_presets_text(skus: list[str], board_libraries: list[str], verbose: bool) -> list[str]:
-    """The count line, plus one `sku: <id>` line per SKU under `--verbose`.
-    Verbatim shape from `presets_text`."""
+def render_presets_text(
+    soms: list[Som], board_libraries: list[str], verbose: bool
+) -> list[str]:
+    """The count line, then one line per SoM.
+
+    Takes `Som` rather than the bare SKU strings it used to: the count line
+    answered nothing on its own, and every field the fuller answer needs was
+    already parsed and then thrown away by the caller.
+    """
     lines = [
-        f"presets: skus={len(skus)} libraries={len(LIBRARIES)} "
+        f"presets: skus={len(soms)} libraries={len(LIBRARIES)} "
         f"boardLibraries={len(board_libraries)}"
     ]
-    if verbose:
-        lines.extend(f"sku: {sku}" for sku in skus)
+    if not soms:
+        return lines
+    sku_width = max(len(s.sku) for s in soms)
+    for som in soms:
+        lines.append(f"  {som.sku:<{sku_width}}  {som.display_name}")
+        if verbose:
+            cores = ", ".join(f"{c.id} ({c.os})" for c in som.cores)
+            lines.append(f"  {'':<{sku_width}}  family: {som.family}; cores: {cores}")
     return lines
 
 
@@ -586,7 +606,9 @@ def presets(
         None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
     ),
     sdk_root: str = typer.Option(None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."),
-    verbose: bool = typer.Option(False, "--verbose", help="List each discovered SKU."),
+    verbose: bool = typer.Option(
+        False, "--verbose", help="Also show each SKU's family and core/OS pairs."
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """List the SDK's SoM presets plus tan's built-in defaults."""
@@ -613,7 +635,19 @@ def presets(
                 if issue is not None
             ]
         else:
-            issues = [Issue(SDK_UNRESOLVED_CODE, "warning", SDK_UNRESOLVED_MESSAGE)]
+            # tan-cli#497 defect 7 (the sibling of `examples_cmd`'s): a
+            # rejected `--sdk-root` is named, so the reader can see WHICH path
+            # failed the loader-marker check instead of only that "the alp-sdk
+            # root is unresolved".
+            issues = [
+                Issue(
+                    SDK_UNRESOLVED_CODE,
+                    "warning",
+                    rejected_sdk_root_message(sdk_root, SDK_UNRESOLVED_CONSEQUENCE)
+                    if sdk_root
+                    else SDK_UNRESOLVED_MESSAGE,
+                )
+            ]
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring
         # No registry entry applies (`contract/issue-codes.json` covers
         # `bootstrap.*`/`debug-config.*` only), so this follows the port's
@@ -653,12 +687,14 @@ def presets(
                 },
                 issues,
                 exit_code,
-                sdk=SdkInfo(sdk.path, sdk.tier) if sdk is not None else None,
+                sdk=SdkInfo.from_resolution(sdk.path, sdk) if sdk is not None else None,
             )
         )
     else:
-        for line in render_presets_text(skus, board_libraries, verbose):
+        for line in render_presets_text(soms, board_libraries, verbose):
             print(line, file=sys.stderr)
+        for issue in issues:
+            print(f"presets: {issue.message}", file=sys.stderr)
     raise typer.Exit(int(exit_code))
 
 

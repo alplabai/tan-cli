@@ -8,17 +8,37 @@
 `tan` is the standalone build CLI for Alp Lab E1M and E1M-X projects. It reads
 hardware metadata from an [alp-sdk](https://github.com/alplabai/alp-sdk)
 checkout, creates build plans, and runs the tools needed to build, inspect,
-flash, and debug firmware. VS Code is optional. The implementation is Python;
-see [Development](#development) for the frozen Rust reference under `crates/`.
+flash, and debug firmware. VS Code is optional. The implementation is Python.
 
 ## Install
 
 ### Installer (recommended)
 
+**Prerequisites.** On Linux and macOS the installer needs a downloader --
+`curl` **or** `wget`, either one -- plus `tar` and `sha256sum` (macOS:
+`shasum`). Nothing else. `tar` and the digest tool are already present on a
+stock Debian/Ubuntu and on macOS; a downloader is not. A pristine
+`ubuntu:24.04` has neither `curl` nor `wget`, so the command below fails there
+with `bash: curl: command not found` until you install one:
+
+```sh
+sudo apt-get update && sudo apt-get install -y curl   # or: wget
+```
+
+That also pulls `ca-certificates`, which `ubuntu:24.04` does not ship either
+and which the download needs. On Windows, `install.ps1` uses only PowerShell
+built-ins, so there is nothing to install first.
+
 Linux and macOS:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh
+```
+
+The same install with `wget`, if that is the downloader the host has:
+
+```sh
+wget -qO- https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh
 ```
 
 Windows PowerShell:
@@ -31,9 +51,26 @@ The installers download the release for your platform, verify its SHA-256
 digest, and install it for the current user. Open a new terminal if `tan` is not
 immediately on `PATH`.
 
-Use `--system` on Unix or `-System` on Windows for a system-wide install. See
-[`docs/release-contract.md`](docs/release-contract.md) for asset names, manual
-verification, and OS support.
+That prerequisite list is the whole of it, and it is deliberately shorter than
+the one a *build* needs: the release asset is a self-contained freeze, so the
+installed `tan` runs on a host with no `python3`, no `git` and no compiler --
+`tan --version` and `tan doctor` both work there. Building firmware needs more;
+see [What a build needs](#what-a-build-needs) below.
+
+For a system-wide install, pass `--system` (Unix) or `-System` (Windows)
+through to the script -- piping straight into `sh` or `iex` swallows a bare
+`--system`/`-System` before the installer ever sees it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh -s -- --system
+```
+
+```powershell
+&([scriptblock]::Create((irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1))) -System
+```
+
+See [`docs/release-contract.md`](docs/release-contract.md) for asset names,
+manual verification, and OS support.
 
 The v0.5 release publishes four archives:
 
@@ -47,11 +84,19 @@ Install from source on those hosts.
 
 ### From source
 
-Python 3.12 or newer is required:
+Python 3.12 or newer is required. Install into a virtual environment, not the
+system interpreter: on a PEP 668 host (Debian/Ubuntu, including stock
+`ubuntu:24.04`) a bare `python3 -m pip install ./python` refuses with
+`error: externally-managed-environment` instead of installing anywhere.
+Debian/Ubuntu's `python3` package also does not include `venv` itself --
+`python3 -m venv` fails there until `python3-venv` is installed:
 
 ```sh
+sudo apt-get install -y python3-venv   # Debian/Ubuntu only
 git clone https://github.com/alplabai/tan-cli
 cd tan-cli
+python3 -m venv .venv
+source .venv/bin/activate              # Windows: .venv\Scripts\Activate.ps1
 python3 -m pip install ./python
 tan --version
 ```
@@ -63,8 +108,45 @@ python3 -m pip install "./python[monitor]"
 ```
 
 `tan` is not published on PyPI, and `@alplabai/tan` is not currently published
-on npm. The old `alp-tan-cli` crate installs the frozen v0.4-era Rust CLI, not
-the current program. Use a GitHub release or a source checkout.
+on npm. The `alp-tan-cli` crate on crates.io is a stale v0.4-era Rust CLI, no
+longer built from this repository and not the current program. Use a GitHub
+release or a source checkout.
+
+### What a build needs
+
+Getting `tan` onto the host and building firmware with it are different sets
+of tools, and only the first one is short. A build needs, on `PATH`:
+
+- **Linux:** `git`, `cmake`, `python3`, `ninja`, `xz`, `wget`.
+- **macOS:** `git`, `cmake`, `python3`, `ninja`.
+- **Windows:** `git`, `cmake`, `python`, `ninja`.
+
+Beyond that list: on Debian/Ubuntu `tan bootstrap` cannot create its workspace
+virtual environment until `python3-venv` is installed. On native Windows, `west sdk
+install` needs a 7-Zip-compatible archive tool on `PATH` instead -- west
+delegates `.7z` extraction to `patoolib`, which shells out to an external
+`7z`/`7za`/`7zr`/`7zz`/`7zzs`/`unar` binary and has no pure-Python fallback
+(`winget install -e --id 7zip.7zip`). `tan doctor` has a dedicated `sevenZip`
+check for this, on native Windows, once the Zephyr SDK is not yet detected: it
+warns when none of those binaries is on `PATH` and names the same `winget`
+command.
+
+Do not assemble any of these lists by hand. `tan doctor` reads its checks from
+the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK
+changes it, and it names what is missing on *this* host -- Windows included --
+together with the command that fixes it:
+
+```text
+bootstrap.prerequisites-missing: missing from PATH: cmake, ninja
+doctor.zephyr-sdk: Zephyr SDK toolchain not detected (ZEPHYR_SDK_INSTALL_DIR unset)
+                   -- from an initialised west workspace, run `west sdk install`
+doctor.west-resolved: west resolved neither through the workspace venv nor PATH
+                   -- no build slice can be executed. Run `tan bootstrap`
+```
+
+`tan doctor` needs none of those tools itself, so run it first, on the bare
+host, rather than guessing -- this holds on Windows exactly as it does on
+Linux and macOS.
 
 ## Quickstart
 
@@ -73,6 +155,9 @@ Start in an empty working directory:
 ```sh
 git clone https://github.com/alplabai/alp-sdk
 tan bootstrap --sdk-root ./alp-sdk
+source alp-workspace/.venv/bin/activate    # Windows: alp-workspace\.venv\Scripts\Activate.ps1
+export ZEPHYR_BASE="$PWD/alp-workspace/zephyr"
+west sdk install --version 1.0.1 -t arm-zephyr-eabi
 tan init --name my-app
 cd my-app
 
@@ -85,17 +170,36 @@ tan run --flash
 What those commands do:
 
 1. `bootstrap` prepares west, Zephyr, the Python environment, and SDK
-   dependencies.
-2. `init` creates a Zephyr application and pins the SDK checkout in
+   dependencies, into a workspace venv at `alp-workspace/.venv` (next to the
+   SDK checkout by default).
+2. `west` lives only inside that venv, so activate it and point `ZEPHYR_BASE`
+   at the workspace before running `west sdk install` -- it installs the
+   Zephyr SDK cross-toolchain (`arm-zephyr-eabi`) that `tan build` needs;
+   `bootstrap` does not install it, and `tan doctor --fix` does not either.
+   On a minimal Linux host this step also needs `file` on PATH
+   (Debian/Ubuntu: `sudo apt-get install -y file`); without it the SDK's own
+   host-tools step fails with "Host tools installation failed" and names
+   nothing. alp-sdk's `metadata/bootstrap.json`
+   (`manualInstallHints.posix.note[2]`) calls a missing `file` "WARN-only, not
+   a bootstrap.sh prerequisite", and both statements are true: that note is
+   written for the `--no-hosttools` invocation in its own `note[0]`, which
+   never runs the host-tools step. The command above installs host tools, so
+   it needs `file`. Add `--no-hosttools` and it does not.
+3. `init` creates a Zephyr application and pins the SDK checkout in
    `.alp/sdk-path`.
-3. `validate` checks `board.yaml` and related metadata.
-4. `build` plans, materialises, and builds every core slice.
-5. `size` reports firmware use against the SoM memory budget.
-6. `run --flash` builds and then runs or programs the selected target.
+4. `validate` checks `board.yaml` and related metadata.
+5. `build` plans, materialises, and builds every core slice.
+6. `size` reports firmware use against the SoM memory budget.
+7. `run --flash` builds and then runs or programs the selected target.
 
-Run `tan doctor` if setup or toolchain discovery fails. `tan doctor --fix`
-installs missing user-level prerequisites interactively; it never invokes
-`sudo` for you.
+Run `tan doctor` if setup or toolchain discovery fails; its `zephyrSdk`
+check names the exact `west sdk install` command above too, so it stays
+correct if that pin ever moves. `tan doctor --fix` installs missing
+prerequisites, but only at a real, interactive terminal -- it is a no-op
+(exit 4) under a pipe, a redirect, or CI, so it is not a scripted-
+onboarding remedy. It never spawns `sudo` itself: it runs a prerequisite's
+manifest install command directly when already root, and otherwise prints
+the exact command to run by hand.
 
 If you do not want the west workspace next to the SDK checkout, choose it
 explicitly:
@@ -103,6 +207,15 @@ explicitly:
 ```sh
 tan bootstrap --sdk-root ./alp-sdk --workspace /path/to/alp-workspace
 ```
+
+`--workspace` does not simply relocate where the workspace metadata is
+written: the west topdir is always the checkout's parent, so this **moves**
+the `alp-sdk` checkout itself to `/path/to/alp-workspace/alp-sdk` and updates
+the machine-global `~/.alp/sdk-default` pointer to it. Run this before
+anything else that references `--sdk-root ./alp-sdk` by its old path, or
+those calls stop resolving; if a project's `.alp/sdk-path` already pins the
+old location, re-run `tan init`/`tan bootstrap` from that project after the
+move.
 
 ## Common commands
 
@@ -122,7 +235,8 @@ tan bootstrap --sdk-root ./alp-sdk --workspace /path/to/alp-workspace
 | Generate debugger settings | `tan debug-config` |
 | Run with Renode | `tan renode` |
 | List examples and presets | `tan examples`, `tan presets` |
-| Explain resolved project settings | `tan explain` |
+| Explain resolved project settings | `tan inspect` |
+| Explain a template or generation target | `tan explain` |
 | Show help | `tan <command> --help` |
 
 On a multi-core SoM, `debug-config` needs `--core <name>` to pick a target;
@@ -209,6 +323,32 @@ python3.12 -m venv .venv
 python3 python/scripts/version_check.py --selftest --self
 ```
 
+**Always install into a venv you create — never a bare `pip install -e ./python`
+or `pip install --user -e ./python`.** Run without an active venv, that writes
+an editable install into your OS user site-packages, and from that moment
+every bare `python3` process on the machine resolves `import tan` to
+whichever checkout was installed last, regardless of which worktree it is
+actually running in — including another developer's or another agent's
+checkout, on a shared box (tan-cli#665). It costs nothing to notice while it
+is happening: `tan --version` and `which tan` keep answering normally, so a
+full `pytest tests -q` run can report hundreds of misleading failures (or,
+worse, a false green) with no other symptom. `tests/conftest.py`'s
+`tan_under_test` fixture refuses loudly at session start if `import tan`
+resolves to anything outside this checkout's own `python/` — that is the
+backstop, not a substitute for using a venv in the first place.
+
+That run means the same thing on every machine, including a bench host with
+real debug tooling installed. The suite neutralises the debug/flash probe
+identities — `JLinkExe`, `openocd`, `pyocd`, `west`, `renode` and friends —
+for its own duration (`python/tests/conftest.py`, `PROBE_TOOLS`), so a
+which()-gated branch answers the way it answers on a CI runner rather than the
+way this host happens to be provisioned. Before that (tan-cli#603) seven
+`test_flow_d_preflight_*` cases passed locally and failed on ubuntu, windows
+and macos at once. Ordinary host tooling — `git`, `python3`, `sleep`, the
+coreutils the installer-script tests execute — is left alone. A test that
+needs a probe tool present seeds its own and points `PATH` at it, which is
+what makes the inventory readable in the test.
+
 Useful directories:
 
 ```text
@@ -217,11 +357,12 @@ python/tan/core/       domain logic and wire models
 python/tan/planner/    in-process planner, mirrored from alp-sdk
 python/tan/templates/  project templates included in the package
 python/tests/          unit, conformance, parity, and repository gates
-crates/                frozen v0.4 compatibility oracle
+contract/              the JSON envelope goldens shared with alp-sdk-vscode
 ```
 
-The Rust reference still has CI coverage, but current release assets are built
-from `python/`.
+Release assets are PyInstaller freezes of `python/`. The Rust implementation
+this program was ported from is deleted; the behaviour it was measured against
+survives as the frozen captures under `python/tests/fixtures/oracle_captures/`.
 
 ## More documentation
 

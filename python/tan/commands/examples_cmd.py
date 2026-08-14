@@ -59,7 +59,11 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
-from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
+from tan.commands.sdk_cmd import (
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    rejected_sdk_root_message,
+)
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -92,6 +96,12 @@ SDK_UNRESOLVED_MESSAGE = (
     "alp-sdk root is unresolved. Returning an empty example catalogue; "
     "pass --sdk-root <path> to name the checkout."
 )
+
+#: What the reader GOT instead, for the `--sdk-root`-was-given-and-rejected
+#: branch (`sdk_cmd.rejected_sdk_root_message`, tan-cli#497). The remediation
+#: clause above is dropped there: recommending the flag the caller just typed
+#: is what made the old message self-defeating.
+SDK_UNRESOLVED_CONSEQUENCE = "Returning an empty example catalogue."
 
 
 @dataclass(frozen=True)
@@ -276,8 +286,23 @@ def example_matches_filter(entry: Example, needle: str) -> bool:
     return lowered in entry.id.lower() or lowered in entry.title.lower()
 
 
+def example_category(entry: Example) -> str:
+    """The catalogue's top-level directory -- `ai` for `ai/cold-chain-monitor`.
+    Derived from the id rather than carried as a field: the SDK emits no
+    category, and the id prefix IS the tree it came from."""
+    return entry.id.split("/", 1)[0]
+
+
+def example_matches_category(entry: Example, category: str) -> bool:
+    return example_category(entry).lower() == category.lower()
+
+
 def render_examples_text(
-    examples: list[Example], filter_: str | None, verbose: bool, sdk_resolved: bool
+    examples: list[Example],
+    filter_: str | None,
+    category: str | None,
+    verbose: bool,
+    sdk_resolved: bool,
 ) -> list[str]:
     """One `id  title` line per example, `id` column aligned to the longest id in
     THIS (possibly filtered) result set; `--verbose` appends the description.
@@ -312,6 +337,11 @@ def render_examples_text(
                 f"examples: no example projects match --filter "
                 f"{json.dumps(filter_, ensure_ascii=False)}."
             ]
+        if category is not None:
+            return [
+                f"examples: no example projects in category "
+                f"{json.dumps(category, ensure_ascii=False)}."
+            ]
         return ["examples: the resolved alp-sdk checkout ships no example projects."]
     id_width = max(len(e.id) for e in examples)
     lines = [f"examples: {len(examples)} example project(s) available"]
@@ -322,6 +352,11 @@ def render_examples_text(
             if description:
                 line += f"   -- {description}"
         lines.append(line)
+    if filter_ is None and category is None:
+        categories = sorted({example_category(e) for e in examples})
+        lines.append("")
+        lines.append(f"categories: {' '.join(categories)}")
+        lines.append("narrow with --category <NAME>, or --filter <TEXT> to search.")
     return lines
 
 
@@ -390,6 +425,13 @@ def examples(
     filter_: str = typer.Option(
         None, "--filter", metavar="TEXT", help="Only examples whose id or title contains TEXT."
     ),
+    category: str = typer.Option(
+        None,
+        "--category",
+        metavar="NAME",
+        help="Only examples in this catalogue category (a bare `tan examples` "
+        "prints the list).",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="Append each example's description."),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
@@ -441,9 +483,23 @@ def examples(
             # discriminator between the two empty answers -- a checkout that
             # resolves and ships no `examples/` tree emits no issue at all,
             # because that is not a misconfiguration to warn anybody about.
-            issues.append(Issue(SDK_UNRESOLVED_CODE, "warning", SDK_UNRESOLVED_MESSAGE))
+            # tan-cli#497 defect 7: when `--sdk-root` WAS given and rejected,
+            # name the value. `SDK_UNRESOLVED_MESSAGE`'s remediation is "pass
+            # --sdk-root <path>" -- the flag they just passed -- and the failing
+            # path appeared nowhere in the envelope or the stderr text.
+            issues.append(
+                Issue(
+                    SDK_UNRESOLVED_CODE,
+                    "warning",
+                    rejected_sdk_root_message(sdk_root, SDK_UNRESOLVED_CONSEQUENCE)
+                    if sdk_root
+                    else SDK_UNRESOLVED_MESSAGE,
+                )
+            )
         if filter_ is not None:
             found = [e for e in found if example_matches_filter(e, filter_)]
+        if category is not None:
+            found = [e for e in found if example_matches_category(e, category)]
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring
         # No registry entry applies (`contract/issue-codes.json` covers
         # `bootstrap.*`/`debug-config.*` only), so this follows the port's
@@ -476,11 +532,11 @@ def examples(
                 },
                 issues,
                 exit_code,
-                sdk=SdkInfo(sdk.display, sdk.tier) if sdk is not None else None,
+                sdk=SdkInfo.from_resolution(sdk.display, sdk) if sdk is not None else None,
             )
         )
     else:
-        for line in render_examples_text(found, filter_, verbose, sdk is not None):
+        for line in render_examples_text(found, filter_, category, verbose, sdk is not None):
             print(line, file=sys.stderr)
         for issue in issues:
             print(f"examples: {issue.message}", file=sys.stderr)

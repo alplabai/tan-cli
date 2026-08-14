@@ -9,11 +9,15 @@ pure module).
 `board_yaml_path`, `sdk_root`, `python` and `toolchain_root` are each
 resolved exactly ONCE by the caller and handed in -- never re-resolved here
 per-slice or on retry, the same "one resolution for the whole plan" contract
-`tan_core::plan_tokens::TokenValues` documents."""
+`tan_core::plan_tokens::TokenValues` documents. `toolchain_advice` travels
+WITH `toolchain_root` for that reason: it is the second half of one
+resolution (`toolchain.ToolchainResolution`), not an independent knob, and
+re-deriving it here would let the reason drift from the value it explains."""
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.commands.build.toolchain import NO_TOOLCHAIN_ADVICE
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.build_plan import BuildPlan
 from tan.core.plan_tokens import (
@@ -49,17 +53,59 @@ class SliceDemotion:
     reason: str
 
 
-_NO_TOOLCHAIN_ADVICE = (
-    "no toolchain install is detectable on this host -- install the Zephyr SDK "
-    "(`west sdk install`) or set `ZEPHYR_SDK_INSTALL_DIR` to an existing install"
-)
+def _is_own_git_checkout(sdk_root: Path) -> bool:
+    """Whether `sdk_root` is itself the TOP of a git checkout, not merely
+    nested somewhere inside an unrelated ENCLOSING one (tan-cli#488 defect 4,
+    mirroring `doctor_cmd._is_own_git_checkout` -- the SAME defect, the SAME
+    fix, duplicated here rather than imported because this is the second of
+    the two sites the issue names, not a shared library call).
+
+    `git -C <root> ...` discovery walks UPWARD looking for a `.git`, so an SDK
+    with no `.git` of its own -- an extracted release archive vendored under a
+    customer's own application repository, a setup this port explicitly
+    supports (`sdk_cmd.check_sdk_readiness`'s own docstring names exactly this
+    shape) -- answers every git query with the ENCLOSING repo's state instead
+    of "not a checkout". `git_short_head` below calls this first and returns
+    no signal (`""`) rather than misattributing a foreign repository's HEAD as
+    the SDK's own -- which, left unguarded, both stamps a build plan's
+    `sdkCommit` with the wrong provenance and lets `sdk_commit_mismatches` fire
+    a false split-brain refusal (or miss a real one) keyed off the enclosing
+    app repo's commit instead of the SDK's.
+
+    Compares the RESOLVED `--show-toplevel` against the RESOLVED `sdk_root`:
+    lexical string comparison alone would false-negative on a symlinked or
+    differently-cased path to the same directory.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(sdk_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if out.returncode != 0:
+        return False
+    top = out.stdout.strip()
+    if not top:
+        return False
+    try:
+        return Path(top).resolve() == Path(sdk_root).resolve()
+    except OSError:
+        return False
 
 
 def git_short_head(sdk_root: Path) -> str:
     """`git rev-parse --short HEAD`. Empty string when git is missing, the
-    checkout has no `.git`, or the command otherwise fails -- all NO SIGNAL,
-    never a hard failure: an SDK checkout with no `.git` (a release tarball)
-    is a normal, supported setup."""
+    checkout has no `.git` OF ITS OWN (see `_is_own_git_checkout` --
+    tan-cli#488 defect 4), or the command otherwise fails -- all NO SIGNAL,
+    never a hard failure: an SDK checkout with no `.git` (a release tarball,
+    including one vendored inside a customer's own git repository) is a
+    normal, supported setup."""
+    if not _is_own_git_checkout(sdk_root):
+        return ""
     try:
         out = subprocess.run(
             ["git", "-C", str(sdk_root), "rev-parse", "--short", "HEAD"],
@@ -81,11 +127,22 @@ def apply_plan_token_substitution(
     sdk_root: str | None,
     python: str,
     toolchain_root: str | None,
+    toolchain_advice: str = NO_TOOLCHAIN_ADVICE,
 ) -> tuple[BuildPlan, list[SliceDemotion]]:
     """Apply the build-plan token-substitution pass to `plan` before
     materialise writes anything or a slice command runs. A no-op unless
     `plan.plan_path_mode` is present; a present-but-unrecognised mode is a
-    hard error, never a half-applied guess."""
+    hard error, never a half-applied guess.
+
+    `toolchain_advice` is the reason an unresolved `${TOOLCHAIN_ROOT}` gets,
+    both in the plan-fatal refusal and in each demoted slice's `reason`.
+    It defaults to the no-toolchain wording this pass always used, so a
+    caller that has not resolved a toolchain at all -- and every existing
+    test -- keeps its exact previous message. `build_cmd` passes the
+    resolver's own reason instead, which distinguishes "this host has none"
+    from "this host has SEVERAL and nothing picking between them"
+    (tan-cli#547): two different fixes, and only the second one names the
+    installs the caller can choose from."""
     if plan.plan_path_mode is None:
         return plan, []
     if plan.plan_path_mode != PLAN_PATH_MODE_TOKENED:
@@ -167,7 +224,7 @@ def apply_plan_token_substitution(
     except UnresolvedToolchainRoot as e:
         raise TokenSubstitutionError(
             "build.toolchain-root-unresolved",
-            f"plan field `{e.field}` names ${{TOOLCHAIN_ROOT}}, but {_NO_TOOLCHAIN_ADVICE}. "
+            f"plan field `{e.field}` names ${{TOOLCHAIN_ROOT}}, but {toolchain_advice}. "
             f"tan refuses rather than substituting an empty path, which would silently build "
             f"against the host root.",
         ) from e
@@ -178,7 +235,7 @@ def apply_plan_token_substitution(
         SliceDemotion(
             slice_index=d.slice_index,
             core_id=d.core_id,
-            reason=f"plan field `{d.field}` names ${{TOOLCHAIN_ROOT}}, but {_NO_TOOLCHAIN_ADVICE}",
+            reason=f"plan field `{d.field}` names ${{TOOLCHAIN_ROOT}}, but {toolchain_advice}",
         )
         for d in demoted
     ]

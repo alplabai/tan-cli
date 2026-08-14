@@ -108,7 +108,21 @@ def _serde_type_name(value: Any) -> str:
 #:                                          made `tan image` exit 3 where the
 #:                                          oracle exits 0)
 #:   `0o17`                 1.1 string    -> 1.2 int 15
-#: `0x…` is an int in both. The regexes are the core schema's own.
+#: `0x…` is an int in both.
+#:
+#: The INT row is serde_yaml's `parse_signed_int`, NOT the YAML 1.2 spec's core
+#: schema regex, which is what it used to transcribe (tan-cli#499 defect 10).
+#: serde_yaml strips a leading `+`/`-` BEFORE it tests the radix prefixes, and it
+#: also accepts `0b`, so two more shapes are integers on the oracle and were
+#: staying strings here -- measured against `tan 0.4.1`:
+#:   `0b1010` -> 10   `0b11` -> 3    `-0b11` -> -3   `+0b11` -> 3
+#:   `-0x1E`  -> -30  `+0x1E` -> 30  `-0o17` -> -15  `+0o17` -> 15
+#: and, unchanged, these stay STRINGS (also measured, and the reason the regex
+#: has to stay the gate rather than deferring to PyYAML's `construct_yaml_int`,
+#: which strips `_` and would resolve most of them):
+#:   `0B11` `0XA5` `0O17` `-0B11` `0x1_F` `0b1_0` `0o1_7` `1_000` `0_1`
+#:   `0x` `0b` `0o` `-0x` `0o8` `0xG` `0b2` `007` `+007` `++5`
+#: The float regex is still the core schema's own.
 _CORE_RESOLVERS = (
     ("tag:yaml.org,2002:null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
     (
@@ -118,7 +132,7 @@ _CORE_RESOLVERS = (
     ),
     (
         "tag:yaml.org,2002:int",
-        r"^(?:[-+]?(?:0|[1-9][0-9]*)|0o[0-7]+|0x[0-9a-fA-F]+)$",
+        r"^[-+]?(?:0|[1-9][0-9]*|0b[01]+|0o[0-7]+|0x[0-9a-fA-F]+)$",
         list("-+0123456789"),
     ),
     (
@@ -221,7 +235,7 @@ def _import_yaml():
     SAME coded envelope on either the read or the write path rather than one
     of them tracebacking."""
     try:
-        import yaml  # noqa: PLC0415  (declared nowhere; imported where needed)
+        import yaml  # noqa: PLC0415  (declared base dep; imported where needed)
     except ImportError as err:
         raise _parse_error(
             f"no YAML parser available ({err}); install PyYAML "
@@ -738,9 +752,14 @@ def slice_build_dir_or_default(slice_: dict, build_root: str) -> str:
 
 def _nested_variants(base: str) -> list[str]:
     """`base`, then `base/build` -- the I-18 pair. `west build` is emitted with
-    NO `-d`, so its tree lands at `<slice-cwd>/build/` while the plan's
-    `artifacts` block still names `<slice-cwd>/...`; the consumer reconciles
-    that off-by-one directory.
+    NO `-d`, so its tree lands at `<slice-cwd>/build/`.
+
+    Before tan-cli#560 (alp-sdk d00dbdc1), the plan's `artifacts` block still
+    named the un-nested `<slice-cwd>/...`, so this reconciled the off-by-one
+    on every read. As of that pin the planner's own in-process output already
+    carries the nested path; both are still probed, un-nested first, because
+    an older cached plan, the alp-sdk subprocess fallback pinned to a stale
+    SDK, or a hand-authored manifest can still carry the un-nested spelling.
 
     The un-nested path is tried FIRST, always: for every input where the oracle
     finds something, this finds the identical thing, and the nested probe only

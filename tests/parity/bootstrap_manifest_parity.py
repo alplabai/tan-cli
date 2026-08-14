@@ -1,38 +1,36 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Bootstrap manifest byte-diff (alp-sdk#917): the FROZEN vendored copy of
-alp-sdk's `metadata/bootstrap.json` vs. any alp-sdk checkout's own copy.
+"""Bootstrap manifest byte-diff (alp-sdk#917): the vendored copy of alp-sdk's
+`metadata/bootstrap.json` vs. any alp-sdk checkout's own copy.
 
 `metadata/bootstrap.json` is the SDK's single source of truth for the
 workspace-assembly FACTS that `scripts/bootstrap.sh`, `scripts/bootstrap.ps1`
 and (the Rust oracle's) `tan bootstrap` all need -- the Zephyr pin, venv
 layout, prerequisite lists + Python floor, the `west` pip spec and argv, the
 pip package sets, the `env` map and the per-OS native-lib hints. Its own
-`_comment` names tan as a real reader of those facts since tan-cli PR #55 --
-`crates/tan-core/src/bootstrap/manifest.rs`'s `parse_bootstrap_manifest` is
-that reader.
+`_comment` names tan as a real reader of those facts since tan-cli PR #55.
 
-**Not a CI gate.** It byte-diffs the vendored copy at
-`contract/fixtures/bootstrap/manifest.json` -- which `manifest.rs` and
-`crates/tan-cli/src/commands/bootstrap/mod.rs` both `include_str!` -- against
-an alp-sdk checkout's `metadata/bootstrap.json`. `contract/` is frozen
-permanently at its own v0.14.0 vendor point (`docs/ROADMAP.md`'s Standing
-Rules: "Never edit `crates/` or `contract/`"), while `PINNED_SDK_TAG` moves
-forward, so a run against anything newer than v0.14.0 reports a MISMATCH by
-design, forever -- that stopped being a signal worth gating a PR on, which is
-why `.github/workflows/parity.yml` no longer runs this script. What it is
-still good for, run BY HAND: pointing `--sdk` at v0.14.0 itself re-verifies
-the frozen fixture has not bit-rotted since it was vendored, and pointing it
-at a later ref shows a maintainer exactly what alp-sdk's bootstrap facts have
-moved on since the freeze -- informational, never actionable against
-`contract/`, which does not move.
+**Not a CI gate**, but ACTIONABLE again since tan-cli#585. It byte-diffs the
+vendored copy at `contract/fixtures/bootstrap/manifest.json` -- which the
+retired Rust oracle `include_str!`d from two places -- against an alp-sdk
+checkout's `metadata/bootstrap.json`.
 
-The Rust oracle's own drift check survives unaffected: `manifest.rs`'s
-`the_fallback_matches_the_real_manifest_field_for_field` `cargo test` still
-asserts its hand-ported fallback constants equal `contract/fixtures/
-bootstrap/manifest.json` field-for-field, at that fixture's own frozen point
--- this script was never load-bearing for that assertion, only for keeping
-the fixture itself current, which no longer applies.
+That fixture spent a stretch declared frozen at the Rust line's v0.14.0
+vendor point, which made a MISMATCH expected-by-design against any newer ref
+and this script informational only. That is no longer true. The fixture went
+stale enough to tell a customer, during onboarding, to run `tan sdk switch`
+-- a subcommand this build REFUSES (`sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS`) --
+and tan-cli#585 re-vendored it at `PINNED_SDK_TAG` (`ccd34f06`, then equal to
+alp-sdk `origin/dev`). So `contract/fixtures/` moves with the pin now, in
+line with the ROADMAP's standing rule that `contract/` is live shared API
+data, and a MISMATCH here against `PINNED_SDK_TAG` IS a re-vendor prompt.
+
+The Rust oracle carried its own drift check over this fixture
+(`manifest.rs`'s `the_fallback_matches_the_real_manifest_field_for_field`
+`cargo test`); tan-cli#269 deleted it. This script was never load-bearing for
+that assertion -- only for keeping the fixture itself current, which is
+exactly the job it has back. The Python mirror named below is the assertion
+that still stands over the vendored bytes.
 
 The shipped Python `tan` carries no equivalent vendored copy to diff here:
 `tan.core.bootstrap` reads `metadata/bootstrap.json` live off the bound SDK
@@ -40,7 +38,8 @@ root (see `fallback_facts`'s own module doc for its hand-ported fallback,
 used only for an SDK predating this manifest, and guarded by
 `python/tests/commands/test_bootstrap_command.py::
 test_the_fallback_constants_match_the_real_manifest_field_for_field` against
-this SAME frozen fixture -- the Python-side mirror of the cargo test above).
+this SAME vendored fixture -- since tan-cli#269, the ONLY assertion standing
+over it, and since tan-cli#585 it covers every field with no exemption).
 
 Optionally self-skipping, same as `scaffold_byte_parity.py` /
 `kconfig_fixture_parity.py`: both consumers' own test suites already prove
@@ -93,12 +92,14 @@ def run(sdk_root: Path) -> bool:
     upstream = upstream_path.read_bytes()
     if vendored != upstream:
         print(f"DIFFERS: {VENDORED_PATH} differs from upstream {upstream_path}. "
-              f"`contract/` is frozen at its v0.14.0 vendor point "
-              f"(`docs/ROADMAP.md` Standing Rules: never edit `crates/` or "
-              f"`contract/`), so this is EXPECTED for any ref newer than "
-              f"v0.14.0 -- not a re-vendor prompt. Point `--sdk` at v0.14.0 "
-              f"itself to confirm the fixture still matches its own freeze "
-              f"point.")
+              f"Since tan-cli#585 the fixture tracks `PINNED_SDK_TAG`, so "
+              f"against THAT ref this is a re-vendor prompt: copy upstream "
+              f"over the fixture, then re-check "
+              f"`tan.core.bootstrap.fallback_facts` field for field "
+              f"(test_the_fallback_constants_match_the_real_manifest_field_"
+              f"for_field) and that no note names a subcommand in "
+              f"NOT_PORTED_SDK_SUBCOMMANDS. Against any OTHER ref a "
+              f"difference only reports how far that ref has moved.")
         return False
 
     print(f"MATCH: {VENDORED_RELPATH} is byte-identical to upstream "

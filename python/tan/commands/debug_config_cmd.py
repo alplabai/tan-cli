@@ -4,14 +4,30 @@
 Port of `crates/tan-cli/src/commands/debug_config.rs`. Build a launch draft for
 the target class + server, resolve what this project's own build already knows
 (#66), then either preview it (`--preview`) or merge it into
-`<workspace>/.vscode/launch.json`. Invalid kind / unsupported backend /
-malformed existing file -> exit 5; a failed write -> exit 3; an omitted
-`--target-kind` this project cannot yet resolve to one target class --
-pre-build, an explicit `--core` matching no slice, more than one target class
-with no `--core` to narrow them, or no slice whose `os` maps to a target class
-at all -- is the CALLER's own precondition to fix, not a tan crash, so all
-four exit `VALIDATION_FAILURE` (2) instead (tan-cli#462, matching the
-distinction tan-cli#262 settled for `tan validate`).
+`<workspace>/.vscode/launch.json`. A malformed existing launch.json -> exit 5;
+a failed write -> exit 3.
+
+Everything else this command refuses is the CALLER's own precondition or flag
+value to fix, not a tan crash, so it exits `VALIDATION_FAILURE` (2)
+(tan-cli#462, matching the distinction tan-cli#262 settled for `tan
+validate`): a bad `--target-kind`/`--server`/target+server pairing/`--svd`/
+`--gdbserver-address` value (tan-cli#477); a `--project` that does not exist
+or is not a directory (tan-cli#476 half (a)); and an omitted `--target-kind`
+this project cannot resolve to one target class -- pre-build hardware, an
+explicit `--core` matching no slice, more than one target class with no
+`--core` to narrow them, or no slice whose `os` maps to a target class at all.
+Two more joined that list rather than continuing to succeed silently:
+
+* an omitted `--target-kind` on a project offering NO signal at all -- no
+  `build/system-manifest.yaml` and no `board.yaml` `som.sku` -- which used to
+  fall through to `parse_target_kind(None)`'s `native-host` default and write
+  a `native_sim` launch configuration into whatever directory `--project`
+  named (tan-cli#476 half (b), `_target_kind_unresolved_failure`);
+* an explicit `--core` naming a core this project's SoM does not have, on a
+  project with no build manifest to check it against, which used to leave
+  `device` as the literal `<resolved-device>` at exit 0 -- validated against
+  the SDK's own published core list instead (tan-cli#477 major 2,
+  `_sdk_published_cores`).
 
 **The debug profile follows from the target CLASS; the customer never selects an
 OS or a backend.** `--target-kind` names one of four classes, each of which
@@ -55,6 +71,7 @@ from typing import Any
 import typer
 
 from tan.commands.build_output import read_sdk_som_and_soc, resolve_project_context
+from tan.core.atomic_write import atomic_write_text
 from tan.core.debug_launch import (
     BAREMETAL_MCU,
     GDBSERVER,
@@ -64,6 +81,7 @@ from tan.core.debug_launch import (
     OPENOCD,
     PYOCD,
     SERVER_NONE,
+    TARGET_KINDS,
     YOCTO_USERSPACE,
     ZEPHYR_MCU,
     DebugConfigError,
@@ -71,6 +89,7 @@ from tan.core.debug_launch import (
     apply_launch_resolution,
     create_launch_draft,
     create_launch_json_write_plan,
+    explicit_core_unknown_message,
     fill_debug_probe_identity_gaps,
     infer_target_kind,
     is_unresolved_placeholder,
@@ -158,11 +177,20 @@ def _normalise(path: str) -> str:
 
 def _resolve_project_reporting_fields(
     project_arg: str, board_yaml_arg: str | None, sdk_root_arg: str | None
-) -> tuple[str, str, str | None]:
-    """`(project.root, project.boardYaml, sdk_root)`. The first two, both
-    posix, are the fields this command REPORTS; `sdk_root` is read for the
-    alp-sdk#1026 metadata fallback (`_fill_debug_probe_identity_from_sdk`)
-    below and is NEVER attached to the outgoing envelope.
+) -> tuple[str, str, str | None, str, str | None]:
+    """`(project.root, project.boardYaml, sdk_root, sdk_source_tier,
+    foreign_global_default_for)`. The first two, both posix, are the fields
+    this command REPORTS; `sdk_root` is read for the alp-sdk#1026 metadata
+    fallback (`_fill_debug_probe_identity_from_sdk`) below and is NEVER
+    attached to the outgoing envelope.
+
+    The last two are the SDK's PROVENANCE, and they are returned for exactly
+    one consumer: [`_sdk_core_refusal_authority`], the tan-cli#477 review
+    round. Reading a debug-probe identity out of whatever SDK happened to
+    resolve is harmless -- the worst case is a placeholder that stays a
+    placeholder. REFUSING the run at exit 2 on that same checkout's word is
+    not, so the caller has to know which tier answered before it lets the
+    answer decide anything.
 
     Delegates to the SAME shared resolver every other command uses
     (`build_output.resolve_project_context`, port of
@@ -190,7 +218,13 @@ def _resolve_project_reporting_fields(
     """
     context = resolve_project_context(project_arg, board_yaml_arg, sdk_root_arg)
     sdk_root = context.sdk.root if context.sdk is not None else None
-    return context.workspace_root, context.board_yaml, sdk_root
+    return (
+        context.workspace_root,
+        context.board_yaml,
+        sdk_root,
+        context.sdk_source_tier,
+        context.foreign_global_default_for,
+    )
 
 
 def _workspace_relative(workspace_root: str, path: str) -> str:
@@ -414,12 +448,149 @@ def _sdk_variant_debug_block(sdk_root: str, sku: str) -> dict[str, Any] | None:
     return debug if isinstance(debug, dict) else None
 
 
+def _board_som_sku(board_yaml_path: str) -> str | None:
+    """This project's `board.yaml` `som.sku`, or `None` for every failure --
+    missing/unreadable file, no PyYAML, not a mapping, no `som.sku`, an empty
+    one. Extracted so the tan-cli#477 `--core` guard and
+    [`_fill_debug_probe_identity_from_sdk`] read the SAME field the same
+    tolerant way rather than each spelling the four-step `isinstance` walk out
+    again (they used to be one site; the guard needs it strictly earlier)."""
+    board = _load_yaml(Path(board_yaml_path))
+    som = board.get("som") if isinstance(board, dict) else None
+    sku = som.get("sku") if isinstance(som, dict) else None
+    return sku if isinstance(sku, str) and sku != "" else None
+
+
+def _sdk_published_cores(sdk_root: str | None, board_yaml_path: str) -> frozenset[str]:
+    """Every core id this project's SoM publishes, per the SDK -- the SoC
+    JSON's own `cores[].id`, unioned with the `variants[].debug.jlink_device`
+    keys. Empty whenever the walk resolves nothing, which the caller reads as
+    "cannot be asked", never as "this SoM has no cores".
+
+    tan-cli#477 major 2. `--core` pre-build is NOT decoration: with no
+    `build/system-manifest.yaml` to check against, it selects which core's
+    SDK-published debug-probe identity to resolve (alp-sdk#1026), so a guard
+    keyed only on "does a build manifest exist" cannot tell a typo apart from
+    that legitimate use -- which is exactly why #508 left this half open. It
+    CAN be told apart by consulting the SDK's own published core list, and
+    that list is already reachable here from the same `--sdk-root` the
+    identity fallback below reads.
+
+    `cores[].id` is the authority; the `jlink_device` union only widens it for
+    a SoC JSON that omits `cores` entirely. Measured across every SoC JSON in
+    alp-sdk `metadata/socs/**` (alif e3-e8, deepx dx/m1, nxp imx9/imx93,
+    renesas rzv2n/n44): the `jlink_device` keys are a SUBSET of `cores[].id`
+    in all nine, so on real metadata the union IS `cores[].id`. It is kept
+    because the frozen contract fixture
+    `contract/envelopes/debug-config-preview-zephyr-mcu-sdk-identity/sdk` --
+    which cannot be edited -- publishes `jlink_device` and no `cores` at all,
+    and its `--core m55_hp` must not become a false refusal.
+
+    Same vocabulary either side: a `build/system-manifest.yaml` slice's
+    `core_id` is spelled with these same ids (`m55_hp`, `m33_sm`,
+    `a55_cluster`), which is what lets this stand in for the manifest check
+    when there is no manifest.
+    """
+    if sdk_root is None:
+        return frozenset()
+    sku = _board_som_sku(board_yaml_path)
+    if sku is None:
+        return frozenset()
+    walked = read_sdk_som_and_soc(os.path.join(sdk_root, "metadata"), sku)
+    if walked is None:
+        return frozenset()
+    _silicon, silicon_variant, variants, _soc_flash_mb, soc_cores = walked
+    cores = {core_id for core_id, _tcm_kb in soc_cores}
+    variant = resolve_variant(silicon_variant, None, variants)
+    debug = variant.get("debug") if isinstance(variant, dict) else None
+    jlink_device = debug.get("jlink_device") if isinstance(debug, dict) else None
+    if isinstance(jlink_device, dict):
+        cores |= {k for k in jlink_device if isinstance(k, str)}
+    return frozenset(cores)
+
+
+def _sdk_core_refusal_authority(
+    sdk_root: str | None, sdk_source_tier: str, foreign_global_default_for: str | None
+) -> str | None:
+    """The SDK root that is allowed to REFUSE a `--core`, or `None`.
+
+    tan-cli#477 major 2, REVIEW round. The refusal below is decided by an SDK
+    checkout, and until this guard existed that could be a checkout the user
+    never named: with no `--sdk-root` and no project pin, `resolve_sdk_tiered`
+    falls through to the machine-global default (`~/.alp/sdk-default`), which
+    `tan bootstrap` may have last pointed at an unrelated project. Measured on
+    this box, from a project directory that names no SDK at all:
+
+        resolve_project_context('.', None, None).sdk
+        -> SdkInfo(root='.../alp-workspace/sdk-triage',
+                   source_tier='globalDefault',
+                   foreign_global_default_for='.../t477/p')
+
+    and the refusal flips purely on which checkout answers -- measured, same
+    project, same `--core m55_hp`, two SDK roots differing only in `e8.json`'s
+    `cores[]`: `--sdk-root A` -> exit 0, `--sdk-root B` -> exit 2
+    `debug-config.core-unknown`. `debug-config` reports no `sdk` block at all
+    (deliberately -- see [`_resolve_project_reporting_fields`]) and does not
+    emit the `sdk.global-default-foreign-project` warning `size`/`image` emit
+    for this same situation, so a customer would have no way to see that a
+    stranger's checkout had just refused their build.
+
+    The guard's own rule -- "refuse only what you can PROVE unknown" -- settles
+    it. A global default last pinned by ANOTHER project cannot prove anything
+    about THIS project's SoM, so it declines to `None`, which the caller reads
+    as "cannot be asked" and stays silent, exactly as it does with no SDK at
+    all. That single flag is the whole discriminator on purpose: every other
+    way to arrive here -- `--sdk-root`, a working project pin, or a global
+    default THIS project's own bootstrap set (including after a broken pin fell
+    through to it) -- is an SDK this project is entitled to be judged by. Those
+    still refuse, and the refusal now names the checkout and the tier that
+    decided it.
+    """
+    if sdk_root is None:
+        return None
+    if foreign_global_default_for is not None:
+        return None
+    return sdk_root
+
+
+def _sdk_core_unknown_message(
+    core: str, published: frozenset[str], sdk_root: str, sdk_source_tier: str
+) -> str:
+    """The tan-cli#477 counterpart of `debug_launch.explicit_core_unknown_
+    message`, which names the cores a BUILD produced. There is no build here,
+    so it names the cores the SDK publishes instead -- same refusal, same
+    code, a different (and the only available) authority.
+
+    It names WHICH checkout, and by which tier it was chosen (REVIEW round).
+    The build-manifest arm needs no such line -- the manifest is inside the
+    project the user pointed at -- but this arm's authority may be a checkout
+    the argv never mentions (`--sdk-root` absent, a project pin, or a global
+    default), and `debug-config` publishes no `sdk` envelope block for the
+    reader to look it up in. A refusal a customer cannot attribute is a support
+    ticket; naming the path makes `--sdk-root <the right one>` the obvious next
+    move. See [`_sdk_core_refusal_authority`] for the tier that is NOT allowed
+    to get this far."""
+    cores = ", ".join(sorted(published))
+    return (
+        f"--core {core} names no core this project's SoM has (its cores, per "
+        f"the SDK's published metadata for this board.yaml's som.sku: "
+        f"{cores}), and this project has no build/system-manifest.yaml to "
+        "check against instead. Pass a --core value this SoM actually has. "
+        f"That core list came from the alp-sdk checkout at {sdk_root} "
+        f"(resolved by: {sdk_source_tier}) -- if that is not the checkout this "
+        "project should be judged against, pass --sdk-root explicitly. "
+        "Left unrefused, this wrote a launch.json whose device stayed the "
+        "literal <resolved-device> placeholder at exit 0 -- a file that looks "
+        "valid and fails later in the debugger (tan-cli#477)."
+    )
+
+
 def _fill_debug_probe_identity_from_sdk(
     resolution: LaunchResolution,
     sdk_root: str | None,
     board_yaml_path: str,
     core_id: str | None,
-) -> bool:
+) -> tuple[bool, frozenset[str]]:
     """alp-sdk#1026: fill `resolution`'s remaining `device`/`target_id`/
     `config_files` gaps from the SDK's published per-variant debug-probe
     identity (`variants[].debug`, alp-sdk#987), so `tan debug-config` resolves
@@ -435,23 +606,28 @@ def _fill_debug_probe_identity_from_sdk(
     existing placeholder note still applies, and nothing here can fail the
     command.
 
-    Returns whether a `variants[].debug` block was actually found for the
-    resolved SoC variant -- distinct from whether every field this run wanted
-    got filled from it. The caller uses this (alp-sdk#1026 review finding #4)
-    to tell "the SDK publishes an identity for this part, but not a value for
-    the specific field this server needs yet" apart from "no identity was
-    resolvable at all".
+    Returns `(debug_block_found, known_jlink_cores)`. `debug_block_found` is
+    whether a `variants[].debug` block was actually found for the resolved SoC
+    variant -- distinct from whether every field this run wanted got filled
+    from it. The caller uses this (alp-sdk#1026 review finding #4) to tell
+    "the SDK publishes an identity for this part, but not a value for the
+    specific field this server needs yet" apart from "no identity was
+    resolvable at all". `known_jlink_cores` is `jlink_device`'s own key set --
+    tan-cli#489 (4): `jlink_device` is the ONE field here keyed by core
+    (`pyocd_target`/`openocd_config` are not), so a `device` placeholder that
+    survives despite `debug_block_found` being true is either "no core id was
+    resolved to index with" or "the given core id has no entry in this SoM's
+    published map" -- two distinct, both-fixable-by-`--core` causes the caller
+    cannot tell apart, or name the known cores for, without this set.
     """
     if sdk_root is None:
-        return False
-    board = _load_yaml(Path(board_yaml_path))
-    som = board.get("som") if isinstance(board, dict) else None
-    sku = som.get("sku") if isinstance(som, dict) else None
-    if not isinstance(sku, str) or sku == "":
-        return False
+        return False, frozenset()
+    sku = _board_som_sku(board_yaml_path)
+    if sku is None:
+        return False, frozenset()
     debug = _sdk_variant_debug_block(sdk_root, sku)
     if debug is None:
-        return False
+        return False, frozenset()
     jlink_device = debug.get("jlink_device")
     jlink_device = (
         {k: v for k, v in jlink_device.items() if isinstance(v, str)}
@@ -463,7 +639,7 @@ def _fill_debug_probe_identity_from_sdk(
     openocd_config = debug.get("openocd_config")
     openocd_config = openocd_config if isinstance(openocd_config, str) else None
     fill_debug_probe_identity_gaps(resolution, core_id, jlink_device, pyocd_target, openocd_config)
-    return True
+    return True, frozenset(jlink_device.keys())
 
 
 def _resolve_user_svd(workspace_root: str, arg: str) -> str:
@@ -664,6 +840,42 @@ def _sdk_identity_key_absent_issue(field: str) -> Issue:
     )
 
 
+def _sdk_identity_core_unresolved_issue(core: str | None, known_cores: frozenset[str]) -> Issue:
+    """tan-cli#489 (4): distinct from [`_sdk_identity_key_absent_issue`] above,
+    which is only correct when the field genuinely has no core dependency
+    (`configFiles`/`targetId`) or a core WAS resolved and is simply not the
+    one the SDK's map happens to key `device` under. On a never-built project
+    with no `--core`, `jlink_device.get(None)` is structurally always `None`
+    -- the SDK's map is never even consulted -- so `sdk-identity-key-absent`
+    told the customer "the SDK publishes no `device` for this SoM" when
+    `metadata/socs/.../*.json` may publish one for every core it has. Both
+    "no core id was resolved" and "the given core id has no entry in the
+    published map" share the SAME working remedy (pass `--core <id>` naming a
+    core the SDK DOES publish), so this one code covers both; the message
+    differs only in whether a core was named to look up."""
+    if core is None:
+        return Issue(
+            "debug-config.sdk-identity-core-unresolved",
+            "info",
+            "This SoM's SDK-published debug-probe identity (alp-sdk#987) is "
+            "keyed per core, and no core id was resolved for this run (no "
+            "--core given, and this project has no prior build to infer one "
+            "from) — so `device` stays the placeholder shown in "
+            "`configuration`, even though the SDK may publish a value for "
+            "one or more of this SoM's cores. Pass --core <id> to resolve it.",
+        )
+    cores = ", ".join(sorted(known_cores)) if known_cores else "none"
+    return Issue(
+        "debug-config.sdk-identity-core-unresolved",
+        "info",
+        f"This SoM's SDK-published debug-probe identity (alp-sdk#987) has no "
+        f"`device` entry for core '{core}' — its published cores are: "
+        f"{cores}. `device` stays the placeholder shown in `configuration`; "
+        "pass --core with one of the cores above, if that is the core you "
+        "meant.",
+    )
+
+
 def _sdk_identity_overwrite_issue(field: str, existing_value: str, incoming_value: str) -> Issue:
     """alp-sdk#1026 review finding #1: emitted whenever the SDK's published
     debug-probe identity (not a real build) just replaced a concrete existing
@@ -807,6 +1019,130 @@ def _build_manifest_missing_failure(
     )
 
 
+def _project_not_found_failure(
+    generated_at: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#476: `--project` names a directory that does not exist.
+
+    Refused rather than created. `_write_launch_json` calls `mkdir(parents=
+    True)`, so a typo'd `--project` (or a stale path in a script) silently
+    MATERIALISED a project tree and dropped a `launch.json` in it, at exit 0
+    with `issues: []`. Nothing downstream could tell that apart from writing
+    into a real project.
+
+    A deliberate divergence from the oracle, which does the same thing --
+    measured, not assumed: `target/release/tan debug-config --project <ghost>`
+    exits 0 and leaves `<ghost>/.vscode/launch.json` behind. No parity CASE
+    pins it (all four frozen `debug-config` argvs run in an existing
+    `work_dir`), so this changes no frozen comparison. `--project` names a
+    project that EXISTS; a path that does not is the caller's own input error,
+    hence `ValidationFailure` (2), the same class as tan-cli#462's four.
+
+    A separate code from `_invalid_argument_failure` below, on purpose
+    (tan-cli#508 review): this fires before target/server are even parsed --
+    a precondition on the WORKSPACE, the same class as
+    `_build_manifest_missing_failure` above, not a flag-value shape check."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="project-not-found",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
+def _target_kind_unresolved_failure(
+    generated_at: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#476 half (b): `--target-kind` was omitted and this project
+    offers NO signal to infer one from -- no `build/system-manifest.yaml`, and
+    no `board.yaml` declaring a `som.sku`. Refused rather than silently
+    defaulting to `native-host`.
+
+    The other half of the same report. Half (a) -- a `--project` that does not
+    exist -- is [`_project_not_found_failure`] above, fixed in tan-cli#508;
+    that PR's own body records this half as "deliberately left". The two share
+    one symptom: a `native_sim` launch configuration materialising, at exit 0
+    with `issues: []`, in a directory that is not a project. #508 stopped the
+    directory being CREATED; a directory that already exists (the "ran it from
+    the wrong cwd" case the issue names in its own words) still got the file.
+
+    `parse_target_kind(None)` -> `NATIVE_HOST` is a REAL default for a
+    project that says so -- `infer_target_kind` returns `NATIVE_HOST` outright
+    when every slice a build produced is native_sim. This refusal fires only
+    on the no-evidence case that default was standing in for, so a project
+    with any signal at all is untouched, and `--target-kind native-host`
+    remains the way to ask for exactly this draft on purpose.
+
+    Exit 2, the same class as `_build_manifest_missing_failure` above and for
+    the same reason: a precondition on the WORKSPACE that the caller can fix,
+    never a tan-side crash. A deliberate divergence from the Rust oracle,
+    which exits 0 with the native-host draft -- measured, not inferred
+    (`target/debug/tan --format json debug-config --project <empty> --preview`
+    -> exit 0, `targetKind: "native-host"`). No parity CASE and no frozen
+    conformance golden pins it: all five frozen `debug-config` argvs pass
+    `--target-kind` explicitly, so none of them reaches the inference path at
+    all."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="target-kind-unresolved",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
+def _invalid_argument_failure(
+    generated_at: str,
+    message: str,
+    launch_json_path: str,
+    target: str = ZEPHYR_MCU,
+    server: str = SERVER_NONE,
+) -> _Outcome:
+    """tan-cli#477: a flag VALUE outside the set this command accepts.
+
+    Covers `--target-kind`, `--server`, an unsupported target+server pairing,
+    `--svd` and `--gdbserver-address` -- every `DebugConfigError` raised while
+    turning the caller's own arguments into a draft. All five already produced
+    a complete, actionable message; only the verdict was wrong:
+
+        Unsupported --target-kind 'bogus'. Allowed values: zephyr-mcu,
+        baremetal-mcu, yocto-userspace, native-host.
+
+    Reporting that as `internal failure` / exit 5 tells the user tan crashed
+    and tells CI to treat a typo as a tool defect. tan-cli#462 made exactly
+    this argument for the four PRECONDITIONS and reclassified them; the
+    argument-validation half was not part of that change, so `--core bogus` --
+    quoted verbatim in #462's own body -- still exited 5 in v0.5.1.
+
+    Exit 5 stays reserved for what `_build_manifest_missing_failure`'s
+    docstring already names: the `except Exception` backstop, and an
+    unreadable or malformed EXISTING launch.json. Neither is reachable from a
+    flag value.
+
+    A DELIBERATE DIVERGENCE from the Rust oracle, which exits 5 here --
+    measured (`target/release/tan debug-config --target-kind bogus` -> 5), and
+    pinned by `test_oracle_parity.py`'s own comment ("Pins exit 5 ... across
+    both implementations"). That CASE is updated in the same commit with the
+    divergence recorded, rather than left to fail."""
+    return _failure(
+        generated_at=generated_at,
+        target=target,
+        server=server,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="invalid-argument",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
 def _core_unknown_failure(generated_at: str, message: str, launch_json_path: str) -> _Outcome:
     """tan-cli#462: an explicit `--core` (with `--target-kind` omitted) names
     no slice this project's own build produced -- the caller's own typo or a
@@ -816,6 +1152,32 @@ def _core_unknown_failure(generated_at: str, message: str, launch_json_path: str
         generated_at=generated_at,
         target=ZEPHYR_MCU,
         server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="core-unknown",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
+def _explicit_core_unknown_failure(
+    generated_at: str, target: str, server: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#489 (5): the SAME `core-unknown` refusal as
+    [`_core_unknown_failure`] above, reached from the OTHER side --
+    `--target-kind` given EXPLICITLY, so `infer_target_kind` (and its own
+    `--core`-vs-manifest guard) never runs at all, and an explicit `--core`
+    naming no slice in this project's own build used to sail through in
+    silence: exit 0, a placeholder `device`, and an `executable` pointing at
+    a path that does not exist in this project. Same code, same exit, same
+    caller-fixable cause -- only the TARGET/SERVER differ: both are already
+    resolved here (unlike the omitted-`--target-kind` path, which fires
+    before either is known), so this reports the REAL ones instead of
+    `_core_unknown_failure`'s `zephyr-mcu`/`none` placeholder pair."""
+    return _failure(
+        generated_at=generated_at,
+        target=target,
+        server=server,
         launch_json_path=launch_json_path,
         exit_code=ExitCode.VALIDATION_FAILURE,
         code="core-unknown",
@@ -958,9 +1320,38 @@ def _run(
 
     workspace_root = _normalise(project_arg)
     launch_json_path = os.path.join(workspace_root, ".vscode", "launch.json")
-    project_root, board_yaml, sdk_root = _resolve_project_reporting_fields(
-        project_arg, board_yaml_arg, sdk_root_arg
-    )
+    # tan-cli#476, FIRST: a `--project` that does not exist is refused, not
+    # created. Everything below this point can write, and the writer uses
+    # `mkdir(parents=True)`.
+    #
+    # Review round: `os.path.isdir` alone cannot tell "missing" apart from
+    # "exists but is a file", so the two get their own message rather than
+    # both being told they "do not exist" -- a `--project` pointing at, say,
+    # `board.yaml` genuinely exists, just not as a directory. And the
+    # parenthetical resolved-path suffix is dropped when `project_arg` was
+    # already absolute, since `_normalise` would otherwise repeat it verbatim.
+    if not os.path.isdir(workspace_root):
+        resolved_suffix = (
+            "" if os.path.isabs(project_arg) else f" ({workspace_root})"
+        )
+        if os.path.exists(workspace_root):
+            reason = "is not a directory"
+        else:
+            reason = "does not exist"
+        return _project_not_found_failure(
+            generated_at,
+            f"--project {project_arg!r} {reason}{resolved_suffix}. "
+            f"Name a project directory that already exists; debug-config "
+            f"never creates one.",
+            launch_json_path,
+        )
+    (
+        project_root,
+        board_yaml,
+        sdk_root,
+        sdk_source_tier,
+        foreign_global_default_for,
+    ) = _resolve_project_reporting_fields(project_arg, board_yaml_arg, sdk_root_arg)
     # tan-cli#236, the pair of #170 above: `boardYaml` reported only when a
     # file is really at the resolved path.
     project = Project.resolved(project_root, board_yaml)
@@ -979,10 +1370,9 @@ def _run(
     inferred: str | None = None
     if target_kind is None:
         manifest = _load_yaml(Path(workspace_root, "build", "system-manifest.yaml"))
-        board = _load_yaml(Path(board_yaml))
-        som = board.get("som") if isinstance(board, dict) else None
-        sku = som.get("sku") if isinstance(som, dict) else None
-        inferred, reason_code, ambiguous = infer_target_kind(manifest, core, sku)
+        inferred, reason_code, ambiguous = infer_target_kind(
+            manifest, core, _board_som_sku(board_yaml)
+        )
         if ambiguous is not None:
             # `launch_json_path` -- this project's own -- not `cwd_launch_path`:
             # unlike the pre-#456 catch-all below, it is already resolved by
@@ -1006,17 +1396,119 @@ def _run(
                     generated_at, ambiguous, launch_json_path
                 )
             return _internal_failure(generated_at, ambiguous, launch_json_path)
-        if inferred is not None:
-            effective_target_kind = inferred
-            if server_arg is None:
-                effective_server_arg = _DEFAULT_SERVER_FOR_TARGET.get(inferred)
+        if inferred is None:
+            # tan-cli#476 half (b): NO signal at all -- `infer_target_kind`
+            # returned `(None, None, None)`, its "nothing to go on" answer.
+            # Falling through here reached `parse_target_kind(None)`, whose
+            # `native-host` default then wrote an `Alp: Native Sim Debug`
+            # entry into whatever directory `--project` happened to name.
+            # That default is only defensible where the project SAYS it is a
+            # native_sim project, which `infer_target_kind` answers with a
+            # real `NATIVE_HOST` of its own, not with "no signal".
+            return _target_kind_unresolved_failure(
+                generated_at,
+                f"--target-kind was not given, and {workspace_root} offers "
+                "nothing to infer one from: it has no "
+                "build/system-manifest.yaml, and no board.yaml declaring "
+                "som.sku. Pass --target-kind explicitly (one of: "
+                f"{', '.join(TARGET_KINDS)}) -- debug-config no longer "
+                "defaults to native-host, which wrote a native_sim launch "
+                "configuration into any directory it was pointed at "
+                "(tan-cli#476). If this really is the project you meant, "
+                "run tan build first, or check you are in the right "
+                "directory.",
+                launch_json_path,
+            )
+        effective_target_kind = inferred
+        if server_arg is None:
+            effective_server_arg = _DEFAULT_SERVER_FOR_TARGET.get(inferred)
 
     try:
         target = parse_target_kind(effective_target_kind)
         server = parse_server_kind(effective_server_arg)
+    except DebugConfigError as err:
+        # Neither local is bound yet -- the zephyr-mcu/none placeholder is the
+        # honest answer here (matches the TS catch block).
+        return _invalid_argument_failure(generated_at, str(err), cwd_launch_path)
+
+    try:
         draft = create_launch_draft(target, server, pre_launch_task)
     except DebugConfigError as err:
-        return _internal_failure(generated_at, str(err), cwd_launch_path)
+        # #508 review, Major 4 follow-up: `target`/`server` ARE already bound
+        # by this point (both parsed above) -- an unsupported PAIRING of two
+        # individually-valid values must report the pairing it actually
+        # refused, not the placeholder. Same reasoning as the `--svd` /
+        # `--gdbserver-address` sites below, which already do this.
+        return _invalid_argument_failure(
+            generated_at, str(err), cwd_launch_path, target, server
+        )
+
+    # tan-cli#489 (5): an EXPLICIT --target-kind bypasses `infer_target_kind`
+    # entirely, so its own --core-vs-manifest guard (the `core-unknown` refusal
+    # above) never runs for this path. Without this check, --core naming no
+    # slice in this project's own build sailed through in silence: exit 0, a
+    # placeholder `device`, and an `executable` pointing at a path this
+    # project's build never produced. Checked against the WHOLE manifest (any
+    # os), mirroring `infer_target_kind`'s own guard exactly.
+    #
+    # tan-cli#477 major 2 closes the half #489 left open: with NO manifest at
+    # all this used to stay silent, so an unknown --core on a real hardware
+    # project sailed through at exit 0 with `device` left as the literal
+    # `<resolved-device>` -- a launch.json that looks valid and fails later in
+    # the debugger with nothing connecting the failure back to this command.
+    # The reason it was left open was that `--core` pre-build has a SECOND,
+    # legitimate job -- selecting which core's SDK-published debug-probe
+    # identity to resolve (alp-sdk#1026, `identity_core = core or
+    # build_core_id` below) -- which a guard keyed only on "does a manifest
+    # exist" cannot tell apart from a typo "without also consulting the SDK's
+    # own published core list". So it consults it: `_sdk_published_cores`
+    # reads the same `--sdk-root` the identity fallback already does.
+    #
+    # The two authorities are ordered, never merged: a real build is the truth
+    # about which cores THIS project produced, so when a manifest exists it
+    # alone decides (a SoM core the project does not build must still be
+    # refused). The SDK list stands in only where there is no manifest.
+    # BOTH arms refuse only what they can PROVE unknown -- no slices / no
+    # resolvable SDK core list means "cannot be asked", and staying silent
+    # there is the existing, correct "not built yet" behaviour every other
+    # placeholder-carrying draft already has. `--core` is not a per-server
+    # flag, so this is server-independent: measured pre-fix, the openocd arm
+    # reported only `sdk-identity-key-absent` (silent about the core) and the
+    # pyocd arm reported `issues: []`.
+    if target_kind is not None and core is not None:
+        build_manifest = _load_yaml(Path(workspace_root, "build", "system-manifest.yaml"))
+        all_slices = manifest_slices(build_manifest)
+        if all_slices:
+            if not any(s.get("core_id") == core for s in all_slices):
+                return _explicit_core_unknown_failure(
+                    generated_at,
+                    target,
+                    server,
+                    explicit_core_unknown_message(core, all_slices),
+                    launch_json_path,
+                )
+        else:
+            # NOT `sdk_root` directly: only a checkout this project is entitled
+            # to be judged by may turn a `--core` into an exit-2 refusal. See
+            # `_sdk_core_refusal_authority` (tan-cli#477 REVIEW round) -- the
+            # identity fallback further down still reads `sdk_root` whatever
+            # its provenance, because filling a placeholder from the wrong
+            # checkout leaves a placeholder, while refusing on its word stops
+            # the run.
+            refusal_sdk = _sdk_core_refusal_authority(
+                sdk_root, sdk_source_tier, foreign_global_default_for
+            )
+            published_cores = _sdk_published_cores(refusal_sdk, board_yaml)
+            if published_cores and core not in published_cores:
+                return _explicit_core_unknown_failure(
+                    generated_at,
+                    target,
+                    server,
+                    _sdk_core_unknown_message(
+                        core, published_cores, str(refusal_sdk), sdk_source_tier
+                    ),
+                    launch_json_path,
+                )
 
     # Fill the `<resolved-...>` placeholders from what this project's own build
     # recorded (#66). Nothing here fails the command: pre-build, or against a
@@ -1040,7 +1532,7 @@ def _run(
     device_before_identity = resolution.device
     target_id_before_identity = resolution.target_id
     config_files_empty_before_identity = not resolution.config_files
-    identity_debug_block_found = _fill_debug_probe_identity_from_sdk(
+    identity_debug_block_found, known_jlink_cores = _fill_debug_probe_identity_from_sdk(
         resolution, sdk_root, board_yaml, identity_core
     )
     # Which launch-configuration JSON keys the SDK fallback (not a real build)
@@ -1061,7 +1553,13 @@ def _run(
         try:
             resolution.svd = _resolve_user_svd(workspace_root, svd)
         except DebugConfigError as err:
-            return _internal_failure(generated_at, str(err), launch_json_path)
+            # tan-cli#477 review: `target`/`server` ARE known here, unlike at
+            # the parse site above -- reporting the zephyr-mcu/none
+            # placeholder would misdescribe what the caller asked for, and a
+            # validation verdict the extension may render must not.
+            return _invalid_argument_failure(
+                generated_at, str(err), launch_json_path, target, server
+            )
 
     # `--gdbserver-address` is the ONLY producer of `resolution.gdbserver_address`
     # (tan-cli#321): a runtime property of the deployed board, so nothing else
@@ -1070,7 +1568,10 @@ def _run(
         try:
             resolution.gdbserver_address = _resolve_gdbserver_address(gdbserver_address)
         except DebugConfigError as err:
-            return _internal_failure(generated_at, str(err), launch_json_path)
+            # Same as `--svd` above: both are known by this point.
+            return _invalid_argument_failure(
+                generated_at, str(err), launch_json_path, target, server
+            )
 
     apply_launch_resolution(draft, resolution)
 
@@ -1084,7 +1585,36 @@ def _run(
     if identity_debug_block_found:
         field = _SERVER_IDENTITY_FIELD.get(server)
         if field is not None and _has_placeholder(draft.get(field)):
-            identity_issues.append(_sdk_identity_key_absent_issue(field))
+            # tan-cli#489 (4): `jlink_device` is the ONE field this identity
+            # keys by core (`configFiles`/`targetId` are not core-dependent at
+            # all -- `sdk-identity-key-absent` is always the right call for
+            # those). For `device`, a placeholder surviving despite a found
+            # debug block means the lookup itself never had a usable key: no
+            # core was resolved, or the one resolved has no entry in the
+            # published map -- never "the SDK publishes no value for this
+            # SoM", which is what `sdk-identity-key-absent` would have said.
+            #
+            # Review round: `bool(known_jlink_cores)` is required in front of
+            # the core-mismatch half. A SoM whose published `variants[].debug`
+            # carries NO `jlink_device` key at all (real shape: today's Alif
+            # entries publish `openocd_config` but not `jlink_device`) makes
+            # `known_jlink_cores` the empty set regardless of `identity_core`
+            # -- `core_unindexed` was unconditionally True, so even a VALID
+            # `--core m55_hp` reported "has no `device` entry for core
+            # 'm55_hp' -- its published cores are: none ... pass --core with
+            # one of the cores above", advice that contradicts itself. That
+            # SoM genuinely publishes no `device` value for ANY core --
+            # `sdk-identity-key-absent` is the correct, and only correct,
+            # code for it, exactly as it was before this split.
+            core_unindexed = bool(known_jlink_cores) and (
+                identity_core is None or identity_core not in known_jlink_cores
+            )
+            if server == JLINK and core_unindexed:
+                identity_issues.append(
+                    _sdk_identity_core_unresolved_issue(identity_core, known_jlink_cores)
+                )
+            else:
+                identity_issues.append(_sdk_identity_key_absent_issue(field))
     notes = _preview_notes_for(draft, registered_runners, server)
     # tan-cli#456 review: say when target/server were DERIVED, not requested --
     # otherwise silent, unlike the --svd/--gdbserver-address no-op notes right
@@ -1207,18 +1737,35 @@ def _run(
     # it can be disclosed.
     overwrites = sdk_identity_overwrites(existing, draft, sdk_filled_json_fields)
 
+    # tan-cli#489 (6): `--pre-launch-task ''` opts OUT of a `preLaunchTask` key
+    # entirely (`create_launch_draft` builds it, then deletes it), which is
+    # indistinguishable, to the merge's own "only visit the draft's own keys"
+    # rule, from this target simply having no default -- so the opt-out was a
+    # silent no-op against an entry a PRIOR run already gave one. Named here,
+    # explicitly, rather than left for `create_launch_json_write_plan` to
+    # infer from the draft alone.
+    explicit_omissions = frozenset({"preLaunchTask"}) if pre_launch_task == "" else frozenset()
+
     try:
-        plan = create_launch_json_write_plan(existing, draft)
+        plan = create_launch_json_write_plan(existing, draft, explicit_omissions)
     except DebugConfigError as err:
         # A malformed existing launch.json surfaces as an internal failure in TS.
         return _internal_failure(generated_at, str(err), cwd_launch_path)
 
+    # `open(launch_json_path, "w")` truncates the customer's file to zero
+    # before a single byte of `plan.content` is written, and that content
+    # exists only in memory -- a failure between the truncate and the flush
+    # (ENOSPC, a quota/RLIMIT_FSIZE hit, an I/O error, or the process dying:
+    # SIGKILL, power loss, the VS Code extension killing the child) destroys
+    # every hand-written configuration with no way for tan to repair it: the
+    # next run reads the wreckage, hits the malformed-JSON guard above, and
+    # refuses at exit 5 forever. `atomic_write_text`'s own docstring
+    # (`tan/core/atomic_write.py`) covers the rest: symlink-safe, fsync'd
+    # before the rename, and mode-preserving -- shared with
+    # `bootstrap_cmd.reconcile_west_manifest_path` (tan-cli#516) rather than
+    # a second hand-synchronised copy living beside this call site.
     try:
-        # `newline=""` so the splice's own CRLF survives: Python's text mode
-        # would otherwise translate every `\n` it wrote, turning a CRLF-authored
-        # file into `\r\r\n`. The content is already exactly the bytes intended.
-        with open(launch_json_path, "w", encoding="utf-8", newline="") as handle:
-            handle.write(plan.content)
+        atomic_write_text(launch_json_path, plan.content)
     except OSError as err:
         return _write_failure(
             generated_at, target, server, launch_json_path, str(err)

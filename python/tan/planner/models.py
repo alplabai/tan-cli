@@ -7,6 +7,20 @@
 # they make a clean leaf module that alp_orchestrate.py (and, later,
 # alp_project.py) re-exports.  Public names are unchanged — `from alp_orchestrate
 # import Slice` still works because alp_orchestrate re-exports from here.
+#
+# Relocated into tan-cli (tan/planner/) from alp-sdk's scripts/alp_orchestrate/
+# models.py -- NOT byte-identical to the upstream source; diverges in several
+# places, INCLUDING (not limited to): the import at the bottom of
+# `Slice.to_manifest_entry` is relative (`from .orchestrator import ...`, so
+# the package resolves as `tan.planner`) rather than absolute, and a few
+# exception docstrings (`SdkRevisionUnsupported` and its two siblings) were
+# reworded because the alp-sdk caller they originally named
+# (`scripts/validate_board_yaml.py`) has no tan-cli counterpart. What IS
+# guaranteed byte-identical is the `Slice.to_manifest_entry()` OUTPUT for a
+# given input -- `tests/parity/test_planner_emit_parity.py` diffs
+# `system-manifest` emits against alp-sdk's own front door byte-for-byte; a
+# module-source diff against upstream is not that guarantee and should not be
+# read as one.
 """Dataclasses for the board.yaml orchestrator."""
 
 from __future__ import annotations
@@ -160,6 +174,44 @@ class Slice:
     # description).  Consumed by `_slice_flash_recipe`'s `zephyr` branch to
     # arm the direct-flash path in `flash_args`.
     jlink_flash_device: Optional[str] = None
+    # Whether the resolved variant's `debug:` block carried the
+    # `jlink_flash_device` KEY AT ALL, independent of what it resolved to
+    # (tan-cli#734).  `debug.get(...)` collapses a schema-declared
+    # `jlink_flash_device: null` -- a deliberate "this variant has no known
+    # J-Link flash profile" -- into the same `None` as a genuinely absent
+    # key, and the emitter's truthiness test then dropped both.  Downstream,
+    # `flash_plan.flow_d_available` decides on KEY PRESENCE precisely so a
+    # declared-null reaches `plan_alif_mram_jlink`'s loud refusal instead of
+    # silently downgrading to Flow A over the SE-UART; that distinction has
+    # to survive the loader for it to mean anything.
+    jlink_flash_device_declared: bool = False
+    # The read-only SW-DP IDR (DPIDR) wrong-board preflight PAIR for this
+    # core (soc-spec-v1 `variants[].debug.expect_dpidr` +
+    # `variants[].debug.jlink_device[<core_id>]`), resolved together by
+    # `loader._resolve_flow_d_preflight` -- both None (preflight not armed,
+    # every variant that has not been measured) or both set; never one of
+    # the two.  `expect_dpidr` is the ID the board's debug port must answer
+    # BEFORE any write; `jlink_device` is the LIVE-CORE attach profile that
+    # read is performed with -- distinct from `jlink_flash_device` above,
+    # which is the part-number flash-algorithm profile.  Resolved SoC-variant
+    # facts like `jlink_flash_device`, NOT customer-overridable.  Consumed by
+    # `_slice_flash_recipe`'s `zephyr` branch, which emits them into
+    # `flash_args` as an inseparable pair (alp-sdk #1355).
+    expect_dpidr: Optional[str] = None
+    jlink_device: Optional[str] = None
+    # This core's AEN MRAM slot0-XIP load address, `0x`-prefixed hex string
+    # (tan-cli#353) -- where Flow D's built-in Alif MRAM loader must write
+    # the slot0-linked application blob itself, distinct from
+    # `jlink_flash_device` above (which only selects the loader's device
+    # PROFILE, not an address).  Resolved by
+    # `loader._resolve_slot0_load_address` from the SoM preset's
+    # `memory_map:` (NOT the SoC JSON -- this is SDK/module build policy,
+    # not a silicon fact), so like `jlink_flash_device` it is NOT
+    # customer-overridable.  None when this core has no AEN slot0-XIP window
+    # (every non-AEN slice, and any AEN core whose SoC variant publishes no
+    # `jlink_flash_device`) -- a published "unknown", never a value to
+    # invent.  Consumed by `_slice_flash_recipe`'s `zephyr` branch.
+    slot0_load_address: Optional[str] = None
 
     # Populated by Orchestrator.fan_out:
     build_dir: Optional[Path] = None
@@ -361,6 +413,30 @@ class BoardProject:
     storage: list[StorageEntry] = field(default_factory=list)
     security: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+    # The metadata tree this project was RESOLVED against (tan-cli#573).
+    # `load_board_yaml(..., metadata_root=...)` records its caller's root
+    # here so the downstream resolvers -- `resolve_storage_partitions`,
+    # `resolve_carve_outs`, the Kconfig emitters -- read the same tree the
+    # loader validated against instead of the module-level bound
+    # `paths.METADATA_ROOT`. Without it the loader and the resolvers
+    # disagree on an alternate tree: the loader accepts a
+    # `storage[].flash_device` the resolver then blocks.
+    # `None` means "the bound root" -- see `effective_metadata_root()`.
+    metadata_root: Optional[Path] = None
+
+    def effective_metadata_root(self) -> Path:
+        """The metadata tree to read SoM/SoC facts from for THIS project.
+
+        `paths.METADATA_ROOT` is imported lazily, not at module scope:
+        `paths` evaluates `REPO = sdk_root()` on import and raises when no
+        SDK root is bound, and `models` is deliberately a bound-root-free
+        leaf (`tests/core/test_sdk_revision_gate.py` loads `sdk_compat`
+        -- and through it `models` -- with no SDK at all).
+        """
+        if self.metadata_root is not None:
+            return self.metadata_root
+        from .paths import METADATA_ROOT
+        return METADATA_ROOT
 
     def hw_info_eeprom_feature(self) -> Optional[dict[str, Any]]:
         """Return the explicit ``features.hw_info.eeprom`` projection."""

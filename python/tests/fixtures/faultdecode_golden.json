@@ -1,5 +1,5 @@
 {
-  "_meta": "Frozen from alp-sdk's scripts/alp_cli/faultdecode.py (bit tables + a swept sample of decode()/report_to_json()/render_human() outputs). Guards tan/core/faultdecode.py's register-level fidelity without needing a live alp-sdk checkout on disk -- see tests/core/test_faultdecode.py.",
+  "_meta": "Frozen from alp-sdk's scripts/alp_cli/faultdecode.py (bit tables + a swept sample of decode()/report_to_json()/render_human() outputs). Guards tan/core/faultdecode.py's register-level fidelity without needing a live alp-sdk checkout on disk -- see tests/core/test_faultdecode.py. NO LONGER a pure alp-sdk recording: two decode_cases (cfsr 0x20 MLSPERR, cfsr 0x2000 LSPERR) were re-recorded from tan's own decode for tan-cli#616, which deliberately diverges from upstream on root_cause alone. Read faultdecode_golden.PROVENANCE.txt beside this file before changing any value here, and do not hand-edit one to make a test pass.",
   "bit_tables": [
     [
       "MMFSR",
@@ -643,10 +643,10 @@
           "mmfar": null,
           "mmfar_valid": false
         },
-        "root_cause": "MLSPERR set (MMFSR): MemManage fault during lazy floating-point state preservation.",
+        "root_cause": "MemManage fault while lazily preserving the floating-point context -- the MPU forbids the deferred push of the FP registers into the space the exception frame reserved for them (wrong region permissions, or a stack that has overflowed out of its region).",
         "symbols": null
       },
-      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000020  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [MMFSR] MLSPERR (bit 5): MemManage fault during lazy floating-point state preservation.\n\nMost likely cause:\n  MLSPERR set (MMFSR): MemManage fault during lazy floating-point state preservation."
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000020  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [MMFSR] MLSPERR (bit 5): MemManage fault during lazy floating-point state preservation.\n\nMost likely cause:\n  MemManage fault while lazily preserving the floating-point context -- the MPU forbids the deferred push of the FP registers into the space the exception frame reserved for them (wrong region permissions, or a stack that has overflowed out of its region)."
     },
     {
       "cfsr": 0,
@@ -1292,10 +1292,10 @@
           "mmfar": null,
           "mmfar_valid": false
         },
-        "root_cause": "LSPERR set (BFSR): Bus fault during lazy floating-point state preservation.",
+        "root_cause": "Bus fault while lazily preserving the floating-point context -- the deferred push of the FP registers into the space the exception frame reserved for them hit a faulting address, so that stack memory is bad or absent (a corrupted or overflowed stack pointer). Check SP/PSPLIM and that the stack fits the larger FP-extended exception frame.",
         "symbols": null
       },
-      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00002000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] LSPERR (bit 13): Bus fault during lazy floating-point state preservation.\n\nMost likely cause:\n  LSPERR set (BFSR): Bus fault during lazy floating-point state preservation."
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00002000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] LSPERR (bit 13): Bus fault during lazy floating-point state preservation.\n\nMost likely cause:\n  Bus fault while lazily preserving the floating-point context -- the deferred push of the FP registers into the space the exception frame reserved for them hit a faulting address, so that stack memory is bad or absent (a corrupted or overflowed stack pointer). Check SP/PSPLIM and that the stack fits the larger FP-extended exception frame."
     },
     {
       "cfsr": 0,

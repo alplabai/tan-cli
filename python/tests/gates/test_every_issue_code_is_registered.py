@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""tan-cli#224: the Python emit-site gate the Rust one cannot stand in for.
+"""tan-cli#224: the Python emit-site gate the Rust one could not stand in for
+-- and, since tan-cli#269 deleted `crates/`, the only emit-site gate there is.
 
-`crates/tan-cli/tests/contract.rs` carries a PAIR of tests --
+`crates/tan-cli/tests/contract.rs` carried a PAIR of tests --
 `every_emitted_issue_code_is_registered` (tan-cli#219: walks every literal
 `code: "family.name"` in `crates/` and asserts it is in
 `contract/issue-codes.json` at some status) and
@@ -9,11 +10,13 @@
 list of `PREFIXING_SITES`, because a code assembled as
 `format!("bootstrap.{code}")` from a bare suffix never appears as one whole
 literal and the first test structurally cannot see it). Both landed in
-commit 78d8308.
+commit 78d8308 and both are gone with the crate.
 
-`crates/` ships to NOBODY -- the release assets are PyInstaller freezes of
+`crates/` shipped to NOBODY -- the release assets are PyInstaller freezes of
 `python/tan` (tan-cli#271) -- so on the surface that actually reaches a
 customer, NEITHER direction of this gate existed until this file. The
+descriptions of the Rust pair kept below are the RECORD of what this file was
+written against, not a claim that a second gate still runs. The
 prefixing shape is not hypothetical on the Python side either:
 `bootstrap_cmd.py`, `debug_config_cmd.py`, `doctor_cmd.py`, `sdk_cmd.py` and
 `validate_cmd.py` all build a code the same way, and `deferred_cmd.py`'s
@@ -384,6 +387,11 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/commands/build/token_substitution.py", "TokenSubstitutionError"): 0,
     ("tan/commands/build_cmd.py", "BuildError"): 0,
     ("tan/commands/build_cmd.py", "_refuse"): 0,
+    # tan-cli#616: `faultdecode_cmd._refuse(code, message, *, envelope_mode)`
+    # -- same shape and same 0th position as `build_cmd`'s namesake. Its two
+    # call sites carry the literals (`faultdecode.no-registers`,
+    # `faultdecode.invalid-register-value`), which is what this index resolves.
+    ("tan/commands/faultdecode_cmd.py", "_refuse"): 0,
     ("tan/commands/build/materialise.py", "MaterialiseError"): 0,
     ("tan/commands/model_cmd.py", "ModelError"): 0,
     ("tan/commands/kconfig_cmd.py", "_CoreResolutionError"): 0,
@@ -430,6 +438,9 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
         ("tan/commands/build_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse`'s OWN body,
         # forwarding ITS OWN `code` parameter -- `_refuse` is itself in
         # `_FULL_CODE_CALLABLES`, so its call sites carry the literal.
+        ("tan/commands/faultdecode_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse`'s OWN
+        # body (tan-cli#616) -- `_refuse` is itself in `_FULL_CODE_CALLABLES`,
+        # so both of its call sites carry the literal.
         ("tan/commands/monitor_cmd.py", "err.code"),  # <- MonitorError
         ("tan/commands/init_cmd.py", "err.code"),  # <- InitError
         ("tan/commands/model_cmd.py", "err.code"),  # <- ModelError
@@ -783,7 +794,32 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `infer_target_kind`'s other two refusal shapes -- the SAME defect,
         # not a distinct one -- bringing this to 6. All four split-off codes
         # checked against the registry before each bump.
-        expected_calls=6,
+        # 9, not 7 or 8: THREE independent changes each added a `_failure(`
+        # call site to this module, and two separate two-way merges each
+        # wrote 8 on their own branch before the third landed.
+        #   tan-cli#489  `_explicit_core_unknown_failure` -- reuses the
+        #     already-registered `core-unknown` literal for the
+        #     `--target-kind`-explicit path `infer_target_kind`'s guard
+        #     never reaches.
+        #   tan-cli#477  `_invalid_argument_failure` -- splits every
+        #     bad-flag-VALUE refusal off `_internal_failure`'s blanket 5.
+        #   tan-cli#476  `_project_not_found_failure` refuses a `--project`
+        #     that names a directory which does not exist, instead of
+        #     creating it and writing a launch.json into it at exit 0.
+        # 6 on dev + 1 + 1 + 1. Resolved deliberately at the merge, not
+        # discovered from a red gate.
+        #   tan-cli#476 half (b)  `_target_kind_unresolved_failure` -- an
+        #     omitted `--target-kind` on a project offering NO signal to
+        #     infer one from used to fall through to `parse_target_kind(
+        #     None)`'s `native-host` default and write an `Alp: Native Sim
+        #     Debug` entry into whatever directory `--project` named. Code
+        #     `debug-config.target-kind-unresolved` registered before this
+        #     bump. tan-cli#477 major 2 added no call site of its own: its
+        #     refusal reuses `_explicit_core_unknown_failure` (already
+        #     counted) with a second, SDK-published authority for the same
+        #     `core-unknown` code.
+        # 9 -> 10.
+        expected_calls=10,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(
@@ -857,13 +893,45 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `_KNOWN_CODE_FORWARDS` entry above rather than by this count -- the
         # count moves anyway, because what it pins is how many `Check(...)`
         # sites exist, not how many of them this spec classifies.
+        #
+        # 57 as of tan-cli#488 defect 1: `west_resolved_check` grew a new
+        # `not ran` return -- a `west` that resolves but cannot be executed.
+        # It passes no `code=` override, so it is NOT skipped -- but its
+        # literal name is still `"westResolved"`, the SAME name the existing
+        # `found is None` arm already uses, so `doctor.west-resolved` needs no
+        # new registry entry. The count moves because one more `Check(...)`
+        # call site exists now (3 -> 4 in that function), not because a new
+        # code exists.
+        #
+        # 58 as of tan-cli#488 ROUND 2, defect 3: `west_check` grew a new
+        # `resolved is not None and not resolved_ran` return -- the sibling of
+        # the `west_resolved_check` case above, for a `west` that resolves
+        # through the workspace venv but cannot actually be spawned. It passes
+        # no `code=` override either, and its literal name is still `"west"`,
+        # the SAME name every other arm of this function already uses, so
+        # `doctor.west` needs no new registry entry. The count moves because
+        # one more `Check(...)` call site exists now, not because a new code
+        # exists.
+        #
+        # 62 as of the alp-sdk `_check_libraries` port: `libraries_check` is
+        # four `Check(...)` sites -- one per `LibraryReport` outcome -- and
+        # all four are literally named `"libraries"`, so they contribute ONE
+        # code, `doctor.libraries`, newly registered in
+        # `contract/issue-codes.json`. Unlike the two entries above, this one
+        # IS a new code, not just a new call site.
+        #
+        # 63 as of tan-cli#727: `sdk_check` grew a `dangling_flag_root` arm
+        # for a `--sdk-root` the loader-marker check rejected. It is named
+        # `"sdk"` -- the same literal every other arm of that function uses --
+        # and passes no `code=` override, so `doctor.sdk` needs no new
+        # registry entry. One more call site, no new code.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=56,
+        expected_calls=63,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(

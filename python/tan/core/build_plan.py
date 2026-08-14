@@ -6,11 +6,19 @@ optional-but-always-emitted ones default cleanly, and an unsupported
 schemaVersion is REFUSED rather than silently hand-ported around."""
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from tan.core.plan_exec import ExecutionPolicy, PolicyAction
 
 SUPPORTED_SCHEMA_VERSION = 1
+
+#: The oracle types `schemaVersion` as a Rust `u32`, so the accepted domain is
+#: exactly `[0, 2**32 - 1]` -- established by RUNNING it: `-1` and
+#: `4294967296` are refused as `invalid value: integer ..., expected u32`,
+#: while `4294967295` gets through the type check and lands on the
+#: version-skew message instead.
+_U32_MAX = 0xFFFFFFFF
 
 _REQUIRED_TOP = (
     "schemaVersion", "generatedBy", "boardYaml", "sku",
@@ -62,6 +70,22 @@ class Slice:
     command: SliceCommand | None
     env: dict[str, str]
     env_append_path: dict[str, list[str]]
+    #: Steps that MUST run, in order, after `command` succeeds (alp-sdk
+    #: #1344, tan-cli#550). `west build` and `bitbake` configure AND build in
+    #: one invocation and carry none; a baremetal slice's `cmake -S ... -B .`
+    #: only CONFIGURES, so its `cmake --build .` arrives here.
+    #:
+    #: Defaulted rather than required -- the strict-producer/tolerant-consumer
+    #: rule this module's own docstring states. A plan emitted by an alp-sdk
+    #: predating #1344 has no `postCommands` key at all, and refusing it would
+    #: turn "your SDK is older than your tan" into `build.plan-invalid` for
+    #: every slice, including the zephyr/yocto ones whose correct value is
+    #: `[]` anyway.
+    #:
+    #: A tuple, not a list: this dataclass is `frozen=True`, and a mutable
+    #: default on a frozen dataclass is a `ValueError` at class-definition
+    #: time. Every consumer only iterates it.
+    post_commands: tuple[SliceCommand, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -73,7 +97,7 @@ class BuildPlan:
     build_root: str
     slices: list[Slice]
     shared_artefacts: list[dict[str, Any]]
-    warnings: list[Any]
+    warnings: list[dict[str, Any]]
     sdk_version: str | None = None
     sdk_commit: str | None = None
     plan_path_mode: str | None = None
@@ -152,11 +176,199 @@ def _artefacts(raw: Any, context: str) -> list[dict[str, Any]]:
     return raw
 
 
+def _warnings(raw: Any) -> list[dict[str, Any]]:
+    """Validate `warnings` -- the LIST and now also every ENTRY.
+
+    `warnings` is a CONTRACT SURFACE, not merely an internal field: `tan
+    build` copies it verbatim into the envelope's `data.warnings`, and a
+    consumer doing `data.warnings ?? []` then `.map(w => w.code)` breaks on a
+    string. An earlier version checked only that the value was a list and
+    left the ENTRIES untyped "on purpose", reasoning that new warning codes
+    may appear without a schemaVersion bump. Running the oracle refutes the
+    second half: `{"warnings": ["oops"]}` is refused as `invalid type: string
+    "oops", expected struct PlanWarning`. The forward compatibility is in the
+    CODES being open, not the entry SHAPE -- measured, `PlanWarning` is a
+    3-field struct: `code` and `message` are required strings, `coreId` is an
+    `Option<String>` (null and absent both fine), and an unknown key such as
+    `zzz` is accepted AND came back untouched in `data.warnings`. `code` is
+    checked before `message`, the order serde reports them in.
+
+    Deliberately NOT replicated: the oracle also accepts a 3-element ARRAY per
+    entry (serde's tuple form for the same struct -- hence its "expected
+    struct PlanWarning with 3 elements" wording). No producer emits that, the
+    schema says objects, and honouring it would mean carrying a second entry
+    shape through every consumer of `data.warnings`."""
+    if not isinstance(raw, list):
+        raise PlanParseError("build.plan-invalid", "`warnings` must be a list")
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise PlanParseError(
+                "build.plan-invalid",
+                f"`warnings[{i}]` must be an object with string `code` and `message` fields",
+            )
+        for key in ("code", "message"):
+            if key not in entry:
+                raise PlanParseError(
+                    "build.plan-invalid", f"`warnings[{i}]` is missing required key `{key}`"
+                )
+            if not isinstance(entry[key], str):
+                raise PlanParseError(
+                    "build.plan-invalid", f"`warnings[{i}].{key}` must be a string"
+                )
+        if entry.get("coreId") is not None and not isinstance(entry["coreId"], str):
+            raise PlanParseError(
+                "build.plan-invalid", f"`warnings[{i}].coreId` must be a string or null"
+            )
+    return raw
+
+
+def _foreign_os_absolute(tool: str) -> str | None:
+    """Return a short name for the OTHER OS's path convention if `tool`
+    looks absolute under it, else `None`.
+
+    `Path(tool).is_absolute()` (below) answers relative to THIS host's own
+    `pathlib` flavour: `/usr/bin/west` is absolute under `PurePosixPath` but
+    NOT under `PureWindowsPath` (no drive), and `C:\\tools\\west.exe` is
+    absolute under `PureWindowsPath` but NOT under `PurePosixPath` (no
+    leading `/`, and `pathlib` never special-cases a drive-letter prefix on
+    POSIX). Used only to name the reason precisely in the refusal message
+    below -- a bare "relative path" reading is misleading for a path that IS
+    absolute, just under the wrong OS's rules."""
+    if tool.startswith("/"):
+        return "POSIX"
+    if len(tool) >= 3 and tool[1] == ":" and tool[2] in "\\/" and tool[0].isalpha():
+        return "Windows"
+    if tool.startswith("\\\\"):
+        return "Windows"
+    return None
+
+
 def _is_legal_env_name(name: str) -> bool:
-    """`os.environ`/`subprocess` reject an empty name or one containing `=`
-    with `ValueError: illegal environment variable name` -- catch that shape
-    here, at parse time, instead of at spawn time deep inside `execute.py`."""
-    return name != "" and "=" not in name
+    """`os.environ`/`subprocess` reject an empty name, one containing `=`
+    (`ValueError: illegal environment variable name`) or one containing an
+    embedded NUL (`ValueError: embedded null byte`) -- catch that shape here,
+    at parse time, instead of at spawn time deep inside `execute.py`."""
+    return name != "" and "=" not in name and "\0" not in name
+
+
+def _reject_nul(value: str, context: str) -> None:
+    """Refuse an embedded NUL in a string that is headed for `subprocess`.
+
+    Every C-level exec/environ interface takes NUL-terminated strings, so
+    CPython refuses the whole call with a bare `ValueError: embedded null
+    byte`. Measured before this fix, on `tan build --plan-from <f>
+    --execute`, a NUL in `env` (name OR value), `envAppendPath`, `command.args`
+    or `command.cwd` each produced `exit 5 build.internal-failure:
+    ValueError: embedded null byte` -- tan reporting ITSELF as broken for
+    what is a malformed plan. That is the same failure mode, and the same
+    remedy, as the `=`/empty env names `_is_legal_env_name` already refuses
+    two lines up.
+
+    ORACLE NOTE -- a MEASURED DIVERGENCE, stated plainly. v0.4.1 has no
+    `--execute` flag, so the oracle has no observable behaviour at all for a
+    NUL-bearing plan on the spawn path; the only path it can reach is plan
+    DISPLAY, where it echoes the NUL back at exit 0. This parse runs on that
+    path too, so `tan build --plan-from <nul-plan>` -- which implies display
+    in this port, exactly as it does in the oracle -- now exits 1 here where
+    the oracle exits 0.
+
+    **That surface is `--plan-from`, NOT `--plan`.** An earlier version of
+    this note named `tan build --plan --plan-from <nul-plan>` as the diverging
+    invocation; measured, `--plan` on `tan build` is a deferred stub in this
+    port and answers `exit 1 cli.command-deferred` for EVERY plan, valid or
+    not (tan-cli#427), so nothing about a NUL is observable through it.
+
+    The trade is taken deliberately, for the same reason and in the same shape
+    as the `=`/empty env names above, which already diverge from the oracle in
+    exactly this way (measured: `{"F=OO": "bar"}` is `exit 0 ok:true` on the
+    oracle and `exit 1 build.plan-invalid` here, and has been since before this
+    change). The alternative is keeping a `build.internal-failure` exit 5 on
+    the only path where the value is ever USED.
+
+    The divergence is deliberately NARROW, and three NUL-bearing fields are
+    still accepted here. What each one ACTUALLY does was re-measured; an
+    earlier version of this list described two of them wrongly:
+
+      * `configArtefacts[].path` and `sharedArtefacts[].path` -- the oracle
+        exits 3 `build.materialise-failed`, "file name contained an unexpected
+        NUL byte", so this parser must not pre-empt it with a vaguer refusal.
+        But this port does NOT reach that answer: measured on
+        `tan build --plan-from <f> --materialise`, both fields give
+        `exit 5 build.internal-failure: ValueError: embedded null byte`. They
+        are NOT "left to the materialiser" in any working sense -- they are a
+        LIVE defect of exactly the class this function exists to close, left
+        open because the fix belongs in `tan.commands.build.materialise`
+        (`confine_to_build_root`/`_write`), out of this lane's file.
+      * `command.tool` -- answered downstream: the slice is `skipped` with
+        `tool `<name>` not found`, the envelope carries a `build.missing-tool`
+        warning and a `build.nothing-built` error, exit 1. A NUL-bearing path
+        can never exist on disk, so the miss is guaranteed.
+      * `buildDir` -- no crash, and no failure either: measured, a slice with
+        a NUL `buildDir` RUNS and SUCCEEDS -- `exit 0`, `ok:true`, slice
+        status `ok`. Nothing on the execute path opens it (`plan_tokens.
+        _substitute_slice` substitutes it; `SliceOutcome.build_dir` comes from
+        `resolve_zephyr_artefact(cwd, ...)`, not from the plan), so the NUL is
+        carried into `data` and dropped. Left accepted rather than refused
+        because the value never reaches an OS call -- but "the slice fails on
+        its own terms", which this note used to claim, is simply not what
+        happens.
+    """
+    if "\0" in value:
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`{context}` contains an embedded NUL byte -- it cannot be handed to a "
+            f"process, its environment, or the filesystem. This is a malformed plan; "
+            f"re-emit it.",
+        )
+
+
+def _validate_tool_shape(tool: str, context: str) -> None:
+    """Refuse a `command.tool` that is neither a bare identity nor an
+    already-resolved absolute path -- split out of `_command` so that
+    function stays under the repo's long-function budget.
+
+    tan-cli#510 review, MAJOR 4: `command.tool` is an IDENTITY per ADR-0020
+    (a bare name to look up, e.g. `west`) or an ALREADY-RESOLVED absolute
+    path a producer computed -- never a relative path. A relative path
+    carrying a separator (`bin/sh`) is neither: `_resolve_tool`
+    (`build/execute.py`) answers `Path(tool).is_absolute()` False for it, so
+    it falls into the bare-identity PATH search, which checks it against
+    THIS process's cwd -- but the spawn below hands it to
+    `subprocess.Popen(cwd=spawn_cwd)`, resolved against the CHILD's cwd
+    instead. Two different directories deciding what "the tool" even means
+    is the exact defect this issue exists to close; refused here, at parse
+    time, rather than reaching that check/spawn split at all. A bare `west`
+    (no separator) is untouched -- it is exactly the identity shape this
+    refusal is not about.
+
+    tan-cli#530, decision (a): "absolute" is deliberately THIS HOST's own
+    notion (`Path(tool).is_absolute()`) -- an already-absolute
+    `command.tool` is inherently host-specific even though the plan around
+    it is portable (see `_foreign_os_absolute`'s docstring for the full
+    reasoning). No emitting flow produces this shape today (the SDK planner
+    only emits bare `west`/`bitbake`/`cmake`); this guards a hand-authored
+    or foreign-host `--plan-from` file."""
+    if Path(tool).is_absolute() or ("/" not in tool and "\\" not in tool):
+        return
+    foreign = _foreign_os_absolute(tool)
+    if foreign is not None:
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`{context}.tool` (`{tool}`) is a {foreign}-absolute path, not "
+            f"executable on this host -- a build plan is a portable artefact, "
+            f"but an absolute `command.tool` is inherently host-specific: "
+            f"`{tool}` is only absolute under {foreign} path rules, and this "
+            f"host cannot resolve or spawn it. `command.tool` must be either "
+            f"a bare identity to look up on PATH (e.g. `west`) or a path this "
+            f"host itself recognises as absolute.",
+        )
+    raise PlanParseError(
+        "build.plan-invalid",
+        f"`{context}.tool` (`{tool}`) is a relative path, not an identity -- "
+        f"`command.tool` must be either a bare identity to look up on PATH "
+        f"(e.g. `west`) or an already-resolved absolute path; a relative path "
+        f"carrying a separator is neither.",
+    )
 
 
 def _command(raw: Any, context: str) -> SliceCommand | None:
@@ -172,13 +384,56 @@ def _command(raw: Any, context: str) -> SliceCommand | None:
     tool = raw.get("tool")
     if not isinstance(tool, str):
         raise PlanParseError("build.plan-invalid", f"`{context}.tool` must be a string")
+    _validate_tool_shape(tool, context)
     args = raw.get("args", [])
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         raise PlanParseError("build.plan-invalid", f"`{context}.args` must be a list of strings")
+    for i, arg in enumerate(args):
+        _reject_nul(arg, f"{context}.args[{i}]")
     cwd = raw.get("cwd")
     if cwd is not None and not isinstance(cwd, str):
         raise PlanParseError("build.plan-invalid", f"`{context}.cwd` must be a string or null")
+    if cwd is not None:
+        _reject_nul(cwd, f"{context}.cwd")
     return SliceCommand(tool=tool, args=list(args), cwd=cwd)
+
+
+def _post_commands(raw: Any, context: str) -> tuple[SliceCommand, ...]:
+    """Validate a slice's `postCommands` (alp-sdk #1344, tan-cli#550).
+
+    Absent or `null` is `()`, not a refusal -- see [`Slice.post_commands`] for
+    why an older SDK's plan must still parse. Anything else must be a LIST,
+    and every entry a real command object: a `null` entry is refused here
+    rather than silently dropped, because `_command` answers `None` for a null
+    `command` (the plan's own "this slice has nothing to run" signal) and that
+    meaning does not exist inside a step list -- a dropped step is a build
+    step that never ran with nothing on the wire to say so, which is the exact
+    class of silence tan-cli#550 is about.
+
+    Each entry goes through the SAME `_command` validation as the slice's own
+    `command`: identical `tool` shape rules (bare identity or host-absolute,
+    never a relative path with a separator), identical `args`/`cwd` typing and
+    identical embedded-NUL refusal. They are handed to `subprocess` by the
+    same executor, so a shape this parser accepts here but not there would be
+    a hole, not a tolerance."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise PlanParseError(
+            "build.plan-invalid", f"`{context}` must be a list of command objects or null"
+        )
+    steps: list[SliceCommand] = []
+    for i, entry in enumerate(raw):
+        if entry is None:
+            raise PlanParseError(
+                "build.plan-invalid",
+                f"`{context}[{i}]` must be an object -- a null step is not a command, and "
+                f"a step that cannot run must be absent from the list, not present as null",
+            )
+        step = _command(entry, f"{context}[{i}]")
+        if step is not None:
+            steps.append(step)
+    return tuple(steps)
 
 
 def _env(raw: Any, context: str) -> dict[str, str]:
@@ -189,6 +444,8 @@ def _env(raw: Any, context: str) -> dict[str, str]:
             "build.plan-invalid",
             f"`{context}` must be an object mapping a legal env-var name to a string value",
         )
+    for key, value in raw.items():
+        _reject_nul(value, f"{context}.{key}")
     return dict(raw)
 
 
@@ -204,6 +461,9 @@ def _env_append_path(raw: Any, context: str) -> dict[str, list[str]]:
             "build.plan-invalid",
             f"`{context}` must be an object mapping a legal env-var name to a list of strings",
         )
+    for key, values in raw.items():
+        for i, value in enumerate(values):
+            _reject_nul(value, f"{context}.{key}[{i}]")
     return {k: list(v) for k, v in raw.items()}
 
 
@@ -225,7 +485,58 @@ def _slice(raw: Any, i: int) -> Slice:
         command=_command(raw["command"], f"slices[{i}].command"),
         env=_env(raw["env"], f"slices[{i}].env"),
         env_append_path=_env_append_path(raw["envAppendPath"], f"slices[{i}].envAppendPath"),
+        post_commands=_post_commands(raw.get("postCommands"), f"slices[{i}].postCommands"),
     )
+
+
+def _schema_version(raw: dict[str, Any]) -> int:
+    """Read and TYPE `schemaVersion`, then apply the version-skew guard.
+
+    The type check is not pedantry, it is the whole defect (tan-cli#491,
+    defect 9). This was a bare `version != SUPPORTED_SCHEMA_VERSION`, and in
+    Python `True == 1` and `1.0 == 1` are both true -- so a plan declaring
+    `"schemaVersion": true` or `"schemaVersion": 1.0` compared EQUAL to 1 and
+    was accepted as a v1 plan. Measured, the oracle refuses both outright:
+    `invalid type: boolean `true`, expected u32` and `invalid type: floating
+    point `1.0`, expected u32`.
+
+    `isinstance(True, int)` is True (bool subclasses int), so the bool test
+    must come first and cannot be folded into the int test.
+
+    The two codes are a deliberate split the oracle does not make -- it
+    answers every case below with `build.plan-invalid`. A value that is not a
+    u32 AT ALL is a malformed plan and keeps that code; a well-typed u32 that
+    simply is not 1 is a version SKEW, which this port reports as
+    `build.plan-unsupported-schema` so a consumer can tell "your SDK and your
+    tan disagree" from "this file is garbage". That split predates this fix
+    and is preserved exactly; what changes is which values reach it."""
+    if "schemaVersion" not in raw:
+        raise PlanParseError(
+            "build.plan-invalid",
+            "plan is missing required key(s): schemaVersion",
+        )
+    version = raw["schemaVersion"]
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`schemaVersion` must be an integer -- got `{version!r}`. A build plan "
+            f"declares its schema as a whole number (the SDK emits "
+            f"{SUPPORTED_SCHEMA_VERSION}); re-emit the plan.",
+        )
+    if not 0 <= version <= _U32_MAX:
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`schemaVersion` ({version}) is outside the representable range "
+            f"0..{_U32_MAX}; re-emit the plan.",
+        )
+    if version != SUPPORTED_SCHEMA_VERSION:
+        raise PlanParseError(
+            "build.plan-unsupported-schema",
+            f"unsupported build-plan schemaVersion `{version}` (this tan supports "
+            f"{SUPPORTED_SCHEMA_VERSION}) -- refusing rather than falling back to "
+            f"hand-ported behaviour. Upgrade tan, or re-emit the plan.",
+        )
+    return version
 
 
 def parse_build_plan(text: str) -> BuildPlan:
@@ -237,20 +548,7 @@ def parse_build_plan(text: str) -> BuildPlan:
     if not isinstance(raw, dict):
         raise PlanParseError("build.plan-invalid", "plan is not a JSON object")
 
-    if "schemaVersion" not in raw:
-        raise PlanParseError(
-            "build.plan-invalid",
-            "plan is missing required key(s): schemaVersion",
-        )
-
-    version = raw["schemaVersion"]
-    if version != SUPPORTED_SCHEMA_VERSION:
-        raise PlanParseError(
-            "build.plan-unsupported-schema",
-            f"unsupported build-plan schemaVersion `{version}` (this tan supports "
-            f"{SUPPORTED_SCHEMA_VERSION}) -- refusing rather than falling back to "
-            f"hand-ported behaviour. Upgrade tan, or re-emit the plan.",
-        )
+    version = _schema_version(raw)
 
     missing = [k for k in _REQUIRED_TOP if k not in raw]
     if missing:
@@ -260,25 +558,31 @@ def parse_build_plan(text: str) -> BuildPlan:
         )
 
     _require_strings(raw, _REQUIRED_STR_TOP, _OPTIONAL_STR_TOP, "")
+    # tan-cli#491 defect 8, REVIEW round: a fourth live NUL vector of the same
+    # class as `env`/`envAppendPath`/`command.args`/`command.cwd`, missed by
+    # the first pass. `buildRoot` reaches `manifest.write_post_build_manifest`
+    # -> `confine_to_build_root(Path(base), plan_build_root)` -> `Path.resolve`
+    # after every dispatch, so measured on `tan build --plan-from <f>
+    # --execute` a NUL here gave `exit 5 build.internal-failure: ValueError:
+    # embedded null byte` -- tan reporting itself as broken for a malformed
+    # plan, the exact shape this defect is about. The oracle has no answer to
+    # pre-empt: it has no `--execute`, and on `--materialise` it never reads
+    # the plan's `buildRoot` at all (measured: `exit 0 ok:true`).
+    _reject_nul(raw["buildRoot"], "buildRoot")
 
     if not isinstance(raw["slices"], list):
         raise PlanParseError("build.plan-invalid", "`slices` must be a list")
-    # `warnings` is a CONTRACT SURFACE, not merely an internal field: `tan
-    # build` copies it verbatim into the envelope's `data.warnings`, and a
-    # consumer doing `data.warnings ?? []` then `.map()` breaks on a string.
-    # Rust types it `Vec<PlanWarning>` and refuses the plan; the list check is
-    # the part of that this port needs -- the ENTRIES stay untyped on purpose,
-    # since the schema says new warning codes may appear without a
-    # schemaVersion bump, so a consumer must not treat them as a closed set.
-    if not isinstance(raw["warnings"], list):
-        raise PlanParseError("build.plan-invalid", "`warnings` must be a list")
+    # Validated HERE, ahead of the slices, purely to keep the pre-existing
+    # report order: a plan with both a bad warning and a bad slice named the
+    # warning first before this change, and still does.
+    warnings = _warnings(raw["warnings"])
 
     return BuildPlan(
         schema_version=version, generated_by=raw["generatedBy"], board_yaml=raw["boardYaml"],
         sku=raw["sku"], build_root=raw["buildRoot"],
         slices=[_slice(s, i) for i, s in enumerate(raw["slices"])],
         shared_artefacts=_artefacts(raw["sharedArtefacts"], "sharedArtefacts"),
-        warnings=raw["warnings"],
+        warnings=warnings,
         sdk_version=raw.get("sdkVersion"), sdk_commit=raw.get("sdkCommit"),
         plan_path_mode=raw.get("planPathMode"), execution_policy=_policy(raw.get("executionPolicy")),
     )

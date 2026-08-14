@@ -306,20 +306,27 @@ def _pump_lossy_lines(stream, q: "queue.Queue[object]") -> None:
 
 def run_renode(
     argv: list[str], log_path: str, timeout_s: float, expect: str | None, echo_stdout: bool
-) -> tuple[bool, int | None, bool, bool]:
+) -> tuple[bool, int | None, bool, bool, bool]:
     """Run Renode, tee-ing its (stdout+stderr) console to `log_path`.
     Terminates on: the `expect` marker appearing, the child exiting (both
     pipes EOF), or `timeout_s` elapsing -- the deadline fires even on a
     silent child via a reader-thread + queue-with-timeout, never a blocking
     line-iterator that would hang forever on a wedged-but-alive Renode.
 
-    Returns `(expect_found, natural_exit, argv_rejected, cpu_halted)`:
-    `natural_exit` is the child's own return code, but ONLY when it exited on
-    its OWN before the deadline/kill -- a forced-kill-for-timeout child
-    always reports `None` here, so a plain timeout is never mistaken for a
-    self-inflicted crash. `argv_rejected`/`cpu_halted` are latched from the
-    console text (Renode exits 0 in both failure shapes, so the exit status
-    alone carries no signal for either).
+    Returns `(expect_found, natural_exit, argv_rejected, cpu_halted,
+    lines_seen)`: `natural_exit` is the child's own return code, but ONLY
+    when it exited on its OWN before the deadline/kill -- a forced-kill-for-
+    timeout child always reports `None` here, so a plain timeout is never
+    mistaken for a self-inflicted crash. `argv_rejected`/`cpu_halted` are
+    latched from the console text (Renode exits 0 in both failure shapes, so
+    the exit status alone carries no signal for either). `lines_seen` is
+    `True` the moment the loop actually dequeues and classifies ONE real
+    console line -- `False` when the loop exits (deadline already past, e.g.
+    `--timeout 0`; or a genuinely silent child) having read nothing at all.
+    Tan-cli#568: the caller MUST treat `lines_seen is False` as its own
+    outcome, never let it fall through to the implicit "nothing else fired,
+    so it's a pass" branch -- a run that observed zero console text has no
+    basis for reporting either a pass or a specific failure signature.
 
     Raises `OSError` when the process cannot even be spawned (the binary
     vanished between the PATH gate and here, or is not executable) --
@@ -345,6 +352,7 @@ def run_renode(
     natural_exit: int | None = None
     argv_rejected = False
     cpu_halted = False
+    lines_seen = False
     eof_count = 0
     deadline = time.monotonic() + timeout_s
     try:
@@ -371,6 +379,7 @@ def run_renode(
                     break
                 continue
             line = item  # type: ignore[assignment]
+            lines_seen = True
             logf.write(line + "\n")
             logf.flush()
             if echo_stdout:
@@ -395,7 +404,7 @@ def run_renode(
         t_err.join(timeout=2.0)
         logf.close()
 
-    return found, natural_exit, argv_rejected, cpu_halted
+    return found, natural_exit, argv_rejected, cpu_halted, lines_seen
 
 
 def _rust_debug_str(text: str) -> str:
@@ -1020,7 +1029,7 @@ def _run(
         )
 
     try:
-        found, natural_exit, argv_rejected, cpu_halted = run_renode(
+        found, natural_exit, argv_rejected, cpu_halted, lines_seen = run_renode(
             argv, log_path, float(timeout), expect, not json_mode
         )
     except OSError as err:
@@ -1064,6 +1073,29 @@ def _run(
             f"{timeout}s timeout (see {log_path})."
         )
         issues.append(_issue("renode.exited-nonzero", "error", msg))
+        if not json_mode:
+            text.append(msg)
+    elif not lines_seen:
+        # tan-cli#568: none of the signals above can fire without at least
+        # one classified console line (argv-rejected/cpu-halted/expect are
+        # all latched FROM a line; exited-nonzero needs a captured exit
+        # status) -- so reaching here with `lines_seen is False` means the
+        # run observed NOTHING: `--timeout 0` breaking the read loop before
+        # its first `queue.get` (the deadline is already past when computed),
+        # or a genuinely silent Renode that exited clean with an empty
+        # console. Either way this is not a pass -- "nothing was checked" and
+        # "checked and correct" are different facts, and reporting `ok: true`
+        # here collapses them into the exact silent pass this command's own
+        # module docstring says it must never produce. `--timeout 0` itself
+        # stays legal (a caller may legitimately want a single non-blocking
+        # sweep); it just cannot buy a pass it did not earn.
+        exit_code = ExitCode.RUNTIME_FAILURE
+        msg = (
+            "renode: exited without classifying a single console line — nothing was "
+            f"observed, so this run cannot report a pass (the console log at "
+            f"{log_path} is empty)."
+        )
+        issues.append(_issue("renode.no-console-output", "error", msg))
         if not json_mode:
             text.append(msg)
 

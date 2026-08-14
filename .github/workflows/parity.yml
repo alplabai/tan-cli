@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # ADR-0020 (alp-sdk#855 amendment) two-seam parity gate + cross-repo trigger.
-# See tests/parity/README.md for the full rationale (oracle SHA, the
-# checkout-root/sdkCommit normalization, the allowed debug.probe delta).
+# See tests/parity/README.md for the full rationale (frozen build-plan oracle
+# SHA, the checkout-root/sdkCommit normalization, the allowed debug.probe
+# delta). NOTE: "oracle" throughout this file means the FROZEN alp-sdk
+# `--emit build-plan` captures under `tests/parity/oracle/`, not the retired
+# Rust `tan` binary -- tan-cli#269 deleted `crates/` and every step here now
+# runs the Python `tan` installed from `python/`.
 #
 #   seam1-plan-shape : live `--emit build-plan` vs. the frozen oracle,
 #                       toolchain-free. Implemented.
@@ -43,7 +47,7 @@ on:
   # so without this the three jobs below never ran on those commits at all --
   # and release.yml's `python-gates` call then skipped them a SECOND time, on
   # the belief they already had. `ci.yml` has always carried
-  # `push: branches: [main]` for the Rust gates; this is the Python side of the
+  # `push: branches: [main]` for its own gates; this is the seam side of the
   # same guarantee, and it is what makes the `python_only` comment below true.
   push:
     branches: [main]
@@ -63,8 +67,22 @@ on:
   # body on every send. Do not "tidy" it onto a feature branch only.
   repository_dispatch:
     types: [alp-sdk-planner-change]
+  # A `dev` merge queue is coming online: without this
+  # trigger, a queued PR would wait forever on the three required contexts
+  # this file produces (`python -- pytest across python/ (ubuntu-latest|
+  # windows-latest|macos-latest)`) and on `seam1 -- plan-shape parity`, none
+  # of which GitHub raises a `merge_group` event for otherwise. Checked every
+  # `if:` in this file against a `merge_group` event before adding this:
+  # `seam1-plan-shape` carries no job-level `if:` (always runs); its
+  # emit/kconfig/bootstrap/toolchain/scaffold steps gate on
+  # `!inputs.python_only`, which is `null`/falsy outside a `workflow_call`
+  # run, same as it already is on `pull_request` today, so they still run;
+  # `python-tests-shard`/`python-tests` carry no `pull_request`-specific
+  # gating either. `seam2`/`first-blink` (not required contexts) share the
+  # same `!inputs.python_only` gate and also run unchanged.
+  merge_group:
   # release.yml's `python-gates` job calls this workflow so a release tag is
-  # gated on the Python suite too, not just ci.yml's Rust jobs -- a release tag
+  # gated on the Python suite too, not just ci.yml's own `python` job -- a release tag
   # can be cut from any green-on-main commit, and until this existed the Python
   # port (python/tests) had no vote on whether `v0.5.0-rc.1` ships. See the
   # `python-tests` job below for the collected-test counts and the condition
@@ -89,7 +107,7 @@ on:
   # commit that is NOT on `main` still gets no seam2/first-blink vote, and no
   # vote from seam1's emit/kconfig/bootstrap/toolchain/scaffold parity steps
   # (it does now get seam1's tests/gates vote, unconditionally). release.yml:90
-  # refuses the analogous assumption for the Rust gates and re-runs ci.yml
+  # refuses the analogous assumption and re-runs ci.yml
   # unconditionally. Tag from `main` and the two agree; tag from anywhere else
   # and the Python side is still the weaker of the two, just less weak than it
   # was. If tags ever get cut off-main, delete the remaining `python_only`
@@ -171,23 +189,31 @@ env:
   # - scaffold byte-parity now defaults to `python/tan/templates/vendored/`
   #   (`scaffold_byte_parity.py`'s own default) -- the tree the shipped
   #   Python `tan` actually reads. It WAS re-vendored to v0.15.0-rc1 (see
-  #   that tree's `MANIFEST.md`) and PASSES. `crates/tan-core/src/wizard/
-  #   vendored/` stays frozen at v0.14.0 and is no longer this gate's
-  #   concern -- its own SDK-free `cargo test` guards it at that point.
+  #   that tree's `MANIFEST.md`) and PASSES. (The Rust oracle's own second
+  #   copy of this tree was the other half of this split; tan-cli#269 deleted
+  #   it with `crates/`, so `python/tan/templates/vendored/` is now the only
+  #   vendored scaffold tree in the repo.)
   # - bootstrap-manifest byte-parity is REMOVED (see the seam1 job below):
   #   the shipped Python `tan` carries no vendored copy of
   #   `metadata/bootstrap.json` to diff -- `tan.core.bootstrap` reads it
   #   live off the bound SDK root. `contract/fixtures/bootstrap/
-  #   manifest.json` now serves only the frozen Rust oracle, guarded at its
-  #   own freeze point by `manifest.rs`'s own `cargo test`
-  #   (`the_fallback_matches_the_real_manifest_field_for_field`).
-  #   `tests/parity/bootstrap_manifest_parity.py` itself survives as a
-  #   manual diagnostic tool (see its module doc), not run in CI.
+  #   manifest.json` was written for the Rust oracle and guarded by that
+  #   crate's own `cargo test`, which tan-cli#269 deleted along with
+  #   `crates/` -- but it is NOT unguarded, and never was: the Python
+  #   `test_the_fallback_constants_match_the_real_manifest_field_for_field`
+  #   asserts `tan.core.bootstrap.fallback_facts` equals it field for field,
+  #   and since tan-cli#585 with no exemption, alongside
+  #   `test_no_instruction_in_the_vendored_manifest_names_a_refused_
+  #   subcommand`. That fixture TRACKS `PINNED_SDK_TAG` since #585 (it had
+  #   gone stale enough to send a customer to `tan sdk switch`, which this
+  #   build refuses), so bump it with the pin.
+  #   `tests/parity/bootstrap_manifest_parity.py` survives as a manual
+  #   diagnostic tool (see its module doc), not run in CI.
   #
-  # HELD at f4d87a1f (tan-cli#425). The pin IS 7 contract-surface commits
-  # behind alp-sdk dev and the freshness warning is correct -- but bumping it
-  # to `2bc6b400` was tried and REVERTED: it reds 77 SDK-bound tests on all
-  # three OS legs, e.g.
+  # HELD at f4d87a1f from tan-cli#425 through tan-cli#485 (moved again below,
+  # to `53557a60`, in #485's own fix). The `2bc6b400` bump #425 tried and
+  # REVERTED stays recorded here as the precedent the #485 bump was checked
+  # against: it reds 77 SDK-bound tests on all three OS legs, e.g.
   #
   #   test_planner_emit_parity.py::test_the_breadth_layer_still_covers_every_board
   #     AssertionError: only 2194 artefacts were compared byte for byte
@@ -229,7 +255,201 @@ env:
   # Windows host this time -- none of the vendored templates' SDK inputs
   # changed in this range, so the Windows-only limitation this comment
   # elsewhere notes did not block the check for THIS bump specifically).
-  PINNED_SDK_TAG: f4d87a1f472dffe9fe7dffc247cc55bce71034ba
+  #
+  # f4d87a1f -> 53557a60 (tan-cli#485, #320 recurred): this is #485's own
+  # suggested step 1, and NOT the same trap #425 hit bumping toward
+  # `2bc6b400` -- that bump broke the emit-parity breadth-layer artefact-count
+  # floor (`>= 2900`); this one does not (measured: 766 passed / 1 failed / 8
+  # skipped against `python/tests/parity/test_planner_emit_parity.py`'s whole
+  # module at `53557a60`, well clear of the floor -- the one failure is
+  # `test_an_unresolvable_board_preset_is_a_coded_envelope`, a pre-existing
+  # fixture defect this same tan-cli#485 change surfaces and fixes in the same
+  # diff, unrelated to this pin). Left at `f4d87a1f`, `python-tests` and this
+  # job's own steps are ref-independent-red on every PR and push instead of
+  # just the dispatch-tested ref: alp-sdk `53557a60` (the SAME commit
+  # `PINNED_SDK_COMMIT` above now targets) is also where alp-sdk dropped
+  # `cacheable: true` from `examples/multicore/rpmsg-aen/board.yaml` -- the
+  # exact field this tan-cli#485 change's `loader.py` refusal now rejects.
+  # Bound to the OLD `f4d87a1f`, tan correctly refuses alp-sdk's OWN fixture
+  # (which at that ref still carries the flag `53557a60` deleted), a 31-test
+  # failure with nothing wrong on either side, just two repos measured a
+  # half-step apart. `ci.yml`'s `sdk_parity` checkout re-pinned to the same
+  # `53557a60` in the matching tan-cli commit, for the same reason -- the two
+  # MUST agree (see that file's comment) -- and the CI-wired byte-parity gate
+  # SCRIPTS (kconfig-fixture, toolchain-lock, scaffold) were re-verified PASS
+  # against `53557a60` locally before this bump too.
+  #
+  # 53557a60 -> f30f4d4b (tan-cli#425, closing out the "held by inaction"
+  # state that issue names). THIS pin is a THIRD, separate audit from the two
+  # in `python/tests/gates/test_planner_relocation_freshness.py` -- it is the
+  # SDK checkout the SHIPPED Python surface is measured against (the four
+  # byte-parity gate scripts + the emit-parity breadth layer), not a hash of
+  # upstream sources. All three move together in tan-cli#543's PR because a
+  # port without the bump, or a bump without the port, reds a seam either way.
+  #
+  # #425's body is STALE and is corrected here rather than inherited: it
+  # reports the pin as `f4d87a1f` (tan-cli#485 moved it to `53557a60` since),
+  # and reports `seam1_field_diff.py` failing with `FAIL multicore_rpmsg-imx93:
+  # alp-sdk refuses but tan does not`. RE-MEASURED against alp-sdk `f30f4d4b`
+  # with this change's tree: that case now reports `PASS multicore_rpmsg-imx93
+  # (alp-sdk and tan both refuse this board)`, both sides quoting the same
+  # `SoM E1M-NX9101 hw_rev 'r1' exists but is not buildable (status: 'tbd').`
+  # tan-cli#485 had already forward-ported alp-sdk#1025's status half into
+  # `project_loader.py:196`, which is what closed it; the whole script is rc 0,
+  # every other case PASS (several with the already-allowed `debug.probe`
+  # delta). So option 1 of #425's three ("bump and fix the divergence") is
+  # taken, and there was no divergence left to fix.
+  #
+  # The `2bc6b400` precedent above still stands as the warning it was written
+  # to be, and was re-checked rather than assumed: the breadth-layer artefact
+  # floor is NOT tripped by this bump.
+  #
+  # The bump is ATOMIC across the vendored artefacts, as #425 warns and this
+  # file's history repeats. Re-measured against `f30f4d4b` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, but ONLY after
+  #     re-vendoring `python/tan/templates/vendored/` (11 files) and RETIRING
+  #     tan-cli#384's seven `DELIBERATE_EDITS` entries in
+  #     `tests/parity/scaffold_byte_parity.py` -- alp-sdk has since cut the
+  #     real `v0.15.0` tag (`e2928b9f`), so the emit's own doc links resolve
+  #     and that divergence is healed. See that tree's `MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0 (above)
+  # `bootstrap_manifest_parity.py` is not run in CI, but since tan-cli#585
+  # `contract/fixtures/bootstrap/manifest.json` DOES track this pin -- so a
+  # `DIFFERS` reported against the ref named here is a re-vendor prompt, not
+  # the expected answer it used to be. Bumping this pin means: run
+  # `python3 tests/parity/bootstrap_manifest_parity.py --sdk alp-sdk`, and on
+  # a `DIFFERS` copy the SDK's `metadata/bootstrap.json` over the fixture,
+  # then re-run `python/tests/commands/test_bootstrap_command.py` (the
+  # field-for-field gate over `fallback_facts`, no exemptions since #585, plus
+  # the check that no note names a subcommand in
+  # `sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS`). The fixture went stale for exactly
+  # as long as this block said not to bother: it was still telling customers
+  # to run `tan sdk switch`, which this build refuses.
+  #
+  # `f30f4d4b` -> `ccd34f06` (tan-cli#552/#553/#554/#555/#557/#558/#559/#562/
+  # #563). Three upstream commits touch `scripts/alp_orchestrate/` in this
+  # range -- alp-sdk#1345 (two-pass carve-out/partition placement +
+  # `access_windows:`), #1347 (the family-table reader stops failing open; the
+  # per-family `boot.method:` default) and #1348 (Hawkbit URI/units, the
+  # log-level choice-symbol form, the core-scoped library layer) -- plus
+  # #1347's other half in `scripts/alp_project_loader.py`, a HAND_PORT file.
+  # All four pin sites move in this one change: this tag, `ci.yml`'s
+  # `sdk_parity` checkout `ref:`, and BOTH `PINNED_SDK_COMMIT` and
+  # `HAND_PORT_PINNED_SDK_COMMIT` in
+  # `python/tests/gates/test_planner_relocation_freshness.py`.
+  # `STRICT_LOADERS_PINNED_SDK_COMMIT` does NOT move and is not stale:
+  # `scripts/strict_loaders.py` is byte-identical between `26b0040e` and
+  # `ccd34f06` (re-hashed, not assumed -- `29cd2c62...`, the value
+  # `STRICT_LOADERS_HASH` already carries), so its audit still holds at its
+  # own, deliberately separate, pin.
+  #
+  # alp-sdk#1344 is deliberately NOT picked up: still OPEN and CONFLICTING
+  # upstream, so tan-cli#550/#551 stay open and are not claimed here.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `ccd34f06` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, NO re-vendor: nothing
+  #     under `examples/`, `metadata/catalog*` or the scaffold templates moved
+  #     in this range (the whole diff is `scripts/`, `metadata/schemas|socs`,
+  #     `docs/`, `tests/` and CHANGELOG), so `python/tan/templates/vendored/`
+  #     stays at its `f30f4d4b` vendor point -- see that tree's `MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0
+  #
+  # `ccd34f06` -> `7d58ef32` (tan-cli#493/#591). Three upstream commits:
+  # alp-sdk#1246 (`metadata/libraries/**` pin repairs, no `scripts/` file),
+  # #1344 (the baremetal slice's `postCommands` / `-B .` / `-DALP_*` /
+  # `alp-baremetal.cmake` -- PLANNER half re-synced into `tan/planner/`, the
+  # executor half NOT ported, so tan-cli#550/#551 stay OPEN and are not
+  # claimed) and #1352 (the tan-cli#493/#591 fix in
+  # `scripts/gen_zephyr_board.py`). This pin CANNOT stay behind: #1352's
+  # generator reads a new `zephyr_peripherals_dtsi` on the SoC JSON, which
+  # only exists in trees that also contain #1344, so an oracle pinned at
+  # `ccd34f06` makes `test_tan_generate_writes_a_zephyr_board_tree_byte_for_
+  # byte` fail (measured: `generate.emit-failed`, exit 3).
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `7d58ef32` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8345 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, NO re-vendor: the six
+  #     `examples/**` files that moved in this range are `board.yaml`s and one
+  #     `main.c` outside every scaffold template, so
+  #     `python/tan/templates/vendored/` stays at its `f30f4d4b` vendor point
+  #     -- see that tree's `MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0 -- but only after `tests/parity/
+  #     seam1_field_diff.py` + `test_seam1_field_diff.py` were re-synced with
+  #     alp-sdk's copies at this commit (#1344 added the `postCommands` /
+  #     `artifacts.outputDir` allowance for the two keys the frozen 97ad481b
+  #     oracle predates). Without that re-sync this step reports `FAIL
+  #     multicore_rpmsg-v2n: 4 disallowed diff(s)`.
+  #
+  # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
+  # predates every commit this bump exists to pick up.
+  #
+  # `7d58ef32` -> `1a9f753c` (tan-cli#657/#661/#662): moves in lockstep with
+  # `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` in
+  # `tests/gates/test_planner_relocation_freshness.py` -- see that file's
+  # comment for the ported behavioural delta (the SW-DP IDR preflight pair,
+  # the helper_mcu three-axis projection, `flash_args.slot0_load_address`).
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `1a9f753c` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8345 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, NO re-vendor: none of
+  #     the three drifted commits touch `examples/**`, `metadata/catalog*` or
+  #     the scaffold templates, so `python/tan/templates/vendored/` stays at
+  #     its `f30f4d4b` vendor point.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, including
+  #     `multicore_rpmsg-imx93` (alp-sdk and tan both still refuse it)
+  #
+  # `a317330595f744d35f4d785869517110f3678f70` -> `d00dbdc124491c89f68f404c
+  # d7ac9d26127f038f` (tan-cli#560): moves in lockstep with `ci.yml`'s
+  # `sdk_parity` checkout `ref:` and both `PINNED_SDK_COMMIT` /
+  # `HAND_PORT_PINNED_SDK_COMMIT` in `test_planner_relocation_freshness.py`
+  # -- see that file's `PINNED_SDK_COMMIT` comment for the ported
+  # behavioural delta (alp-sdk#1360/#1401's `build/` level on a zephyr
+  # slice's `artifacts` paths; alp-sdk#1373/#1407's AEN LOG_MODE_MINIMAL
+  # default; alp-sdk#1394/#1399's pin-doc collision guard and #1400's
+  # scaffold stale-comment rewrite, both in the HAND_PORT
+  # `scripts/alp_template.py`).
+  #
+  # `seam1_field_diff.py` gains a third hand-reviewed allowance
+  # (`_NESTED_ARTIFACT_TAILS`) for the #1360 relocation, mirroring
+  # alp-sdk's own `tests/parity/seam1_field_diff.py` -- without it every
+  # zephyr-slice board in the frozen 97ad481b oracle reports 6 disallowed
+  # diffs (one per artifact field) against a live emit at this pin.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `d00dbdc124491c89f68f404cd7ac9d26127f038f` before
+  # landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8345 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9 (template, sku) pairs, but ONLY after
+  #     re-vendoring the four `edge-ai`/`minimal` `CMakeLists.txt` files
+  #     `_scaffold_cmakelists`'s new comment rewrite touches -- see
+  #     `python/tan/templates/vendored/MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, via the new
+  #     `_NESTED_ARTIFACT_TAILS` allowance above
+  #
+  # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
+  # predates every commit this bump exists to pick up.
+  PINNED_SDK_TAG: bd8be484680cf5aa1c1ac0e8b38d84128b5a279d
+
+permissions:
+  # Least privilege by default (tan-cli#435). Every job here READS: this
+  # repository, plus `alplabai/alp-sdk`, which is public, so the default
+  # token reads it with no extra grant. Nothing in this workflow writes to
+  # either repository -- the planner RE-SYNC, which does push, is a separate
+  # workflow (`planner-resync.yml`) with its own `contents: write`.
+  contents: read
 
 jobs:
   seam1-plan-shape:
@@ -252,8 +472,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # On a `repository_dispatch` the workflow FILE has to come from the
           # DEFAULT branch -- that is GitHub's rule and why #195 put the trigger
           # on `main`. But what we CHECK OUT and test is a separate choice, and
@@ -271,24 +492,60 @@ jobs:
           # run keeps checkout's default (the PR head) by passing an empty ref.
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
+      # `client_payload.*` is attacker-controlled by construction -- anyone able
+      # to POST a `repository_dispatch` picks every field -- so it is carried in
+      # as an ENV VAR, never interpolated into the shell, and then matched
+      # against an allow-list before it reaches `git` or `$GITHUB_OUTPUT`.
+      # `planner-resync.yml`, the OTHER consumer of this same dispatch, has
+      # done it this way since it was written; this file interpolated the field
+      # straight into four `run:` blocks, which `zizmor` reports as
+      # high-confidence `template-injection` (tan-cli#435). Single quotes were
+      # not a defence: a payload containing one closes the string, and the
+      # double-quoted twin in `first-blink` expanded `$(...)` outright.
+      # `PINNED_SDK_TAG` is a workflow-level `env:`, so the fallback is already
+      # an ordinary environment variable here and needs no expansion.
       - name: resolve alp-sdk ref
         id: sdk_ref
         shell: bash
+        env:
+          PAYLOAD_REF: ${{ github.event.client_payload.sdk_ref }}
         run: |
+          set -euo pipefail
           # A dispatch carries the alp-sdk SHA that just landed; a plain PR run
           # has no payload and falls back to the pin. Written as one expression
           # so the two paths cannot drift apart.
-          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
+          dispatched="${PAYLOAD_REF:-}"
+          ref="${dispatched:-${PINNED_SDK_TAG}}"
+          # Allow-list, not a deny-list: a git ref needs none of the characters
+          # a shell or an argument injection needs. Same expression as
+          # `planner-resync.yml`'s. It also protects `$GITHUB_OUTPUT` below --
+          # a payload carrying a newline would otherwise write extra keys.
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
+            exit 1
+          fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          if [ -n "${{ github.event.client_payload.sdk_ref }}" ]; then
+          if [ -n "${dispatched}" ]; then
             echo "::notice::DISPATCHED by alp-sdk -- comparing against the ref that just landed: ${ref}"
           else
             echo "::notice::comparing against the pinned alp-sdk ref: ${ref}"
           fi
 
       - name: clone alp-sdk
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
@@ -340,7 +597,7 @@ jobs:
           fi
           echo "::warning::PINNED_SDK_TAG is ${behind} contract-surface commit(s) behind alp-sdk dev (${head}). Both seams are green against a pin that no longer reflects the planner. Re-bump PINNED_SDK_TAG in .github/workflows/parity.yml."
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
 
@@ -398,20 +655,22 @@ jobs:
         run: python3 tests/parity/kconfig_fixture_parity.py --sdk alp-sdk
 
       # `tan bootstrap` reads the SDK's metadata/bootstrap.json (alp-sdk#917)
-      # live off the bound SDK root -- no baked-in copy of it ships, so there
-      # is no vendored artefact left for a byte-parity step to guard here.
-      # (The Rust oracle's `crates/tan-core/src/bootstrap/manifest.rs` DOES
-      # carry one, frozen alongside it at `contract/fixtures/bootstrap/
-      # manifest.json` -- `docs/ROADMAP.md`'s crates/contract freeze -- and
-      # that fixture is still guarded, at its own freeze point, by
-      # `manifest.rs`'s own `cargo test` (`the_fallback_matches_the_real_
-      # manifest_field_for_field`).) See `tests/parity/
-      # bootstrap_manifest_parity.py`'s module doc for why the script itself
-      # is kept as a manual tool rather than deleted.
+      # live off the bound SDK root -- no baked-in copy of it SHIPS, so there
+      # is no released artefact for a byte-parity step to guard here.
+      # (`contract/fixtures/bootstrap/manifest.json` is a test fixture, not a
+      # shipped file. tan-cli#269 deleted the `cargo test` that guarded it,
+      # but not the guarantee: `python/tests/commands/test_bootstrap_command.py`
+      # asserts `tan.core.bootstrap.fallback_facts` equals it field for field
+      # -- every field since tan-cli#585 -- and that no note in it names a
+      # subcommand this build refuses. Since #585 it tracks `PINNED_SDK_TAG`;
+      # re-vendor it when that pin moves.) See `tests/parity/bootstrap_
+      # manifest_parity.py`'s module doc for why the script itself is kept as
+      # a manual tool rather than deleted.
 
       # `tan doctor`'s zephyrSdk check (tan-cli#160) prints a hand-ported copy
-      # of alp-sdk's metadata/toolchains.json zephyrSdk.version
-      # (crates/tan-core/src/host_env.rs::ZEPHYR_SDK_INSTALL_VERSION).
+      # of alp-sdk's metadata/toolchains.json zephyrSdk.version (the retired
+      # Rust oracle spelled the same constant
+      # `crates/tan-core/src/host_env.rs::ZEPHYR_SDK_INSTALL_VERSION`).
       # scripts/check_toolchain_lock.py guards every CI *workflow* copy of
       # that pin but cannot see this checkout (tan-cli#172) -- this is the
       # tan-side half, reusing this job's alp-sdk checkout rather than a
@@ -426,9 +685,9 @@ jobs:
       # as the kconfig step above) rather than a second clone. The vendored tree
       # is captured at this exact pin, so a re-vendor that drifts from the SDK
       # fails here instead of shipping silently (the drift that hid the stale
-      # `minimal` README before this gate ran in CI). `crates/tan-core/src/
-      # wizard/vendored/` (the frozen Rust oracle's own copy) is measured only
-      # by its own SDK-free `cargo test`, not by this step.
+      # `minimal` README before this gate ran in CI). The frozen Rust oracle's
+      # own second copy of this tree went with `crates/` in tan-cli#269, so
+      # this is the only vendored scaffold tree left to measure.
       - name: scaffold byte-parity (vendored tree vs. pinned alp-sdk --emit scaffold)
         if: ${{ !inputs.python_only }}
         run: python3 tests/parity/scaffold_byte_parity.py --sdk alp-sdk
@@ -471,8 +730,9 @@ jobs:
           echo "::notice::planner-relocation-freshness audited against alp-sdk ${commit}"
 
       - name: clone alp-sdk at the planner audit commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.planner_audit.outputs.commit }}
           path: alp-sdk-planner-audit
@@ -512,11 +772,43 @@ jobs:
           echo "::notice::hand-port-relocation-freshness audited against alp-sdk ${commit}"
 
       - name: clone alp-sdk at the hand-port audit commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.hand_port_audit.outputs.commit }}
           path: alp-sdk-hand-port-audit
+
+      # tan-cli#485: a THIRD pin, STRICT_LOADERS_PINNED_SDK_COMMIT, for
+      # `strict_loaders.py` alone -- see the gate file's own STRICT_LOADERS_*
+      # comment for why it could not join HAND_PORT_HASHES (that bundle's
+      # other three files carry unrelated, unaudited drift including alp-sdk
+      # #1069's dual-M55 boot memory layout; folding strict_loaders.py in
+      # would force re-freezing HAND_PORT_HASHES past that unaudited, or
+      # porting an unrelated hardware-sensitive feature as a drive-by).
+      - name: resolve strict-loaders audit commit (from the gate's own pin)
+        id: strict_loaders_audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          gate=python/tests/gates/test_planner_relocation_freshness.py
+          commit=$(grep -oE '^STRICT_LOADERS_PINNED_SDK_COMMIT = "[0-9a-f]{40}"' "$gate" \
+              | grep -oE '[0-9a-f]{40}')
+          n=$(printf '%s\n' "$commit" | grep -c .)
+          if [ "$n" -ne 1 ]; then
+            echo "::error::expected exactly ONE ^STRICT_LOADERS_PINNED_SDK_COMMIT in ${gate}, found ${n}: ${commit}"
+            exit 1
+          fi
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "::notice::strict-loaders-relocation-freshness audited against alp-sdk ${commit}"
+
+      - name: clone alp-sdk at the strict-loaders audit commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.strict_loaders_audit.outputs.commit }}
+          path: alp-sdk-strict-loaders-audit
 
       # `python/tests/gates/` (dependency-declaration, frozen issue-codes,
       # hardware-facts allowlist, planner-relocation self-consistency) does not
@@ -557,8 +849,9 @@ jobs:
       # Deliberately NOT the full `python/tests` suite here (ports + parity,
       # minutes not seconds, needs its own alp-sdk checkout) -- that now runs
       # in the `python-tests` job further down this file, which deliberately
-      # `--ignore=tests/gates`: this JOB already arms all five gate files (8
-      # collected tests) across the three steps below -- four of them in this
+      # `--ignore=tests/gates`: this JOB already arms all five gate files (9
+      # collected tests, tan-cli#485 added the STRICT_LOADERS_* one) across the
+      # three steps below -- five of them in this
       # step against the FROZEN audit commit(s), `test_jlink_aen_device_freshness`
       # live and blocking in its own step, and `test_planner_relocation_freshness`
       # additionally live and warn-only on `repository_dispatch`. Each is bound
@@ -573,6 +866,7 @@ jobs:
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk-planner-audit
           ALP_SDK_HAND_PORT_ROOT: ${{ github.workspace }}/alp-sdk-hand-port-audit
+          ALP_SDK_STRICT_LOADERS_ROOT: ${{ github.workspace }}/alp-sdk-strict-loaders-audit
         run: |
           set -euo pipefail
           python3 -m pytest tests/gates -v --deselect tests/gates/test_jlink_aen_device_freshness.py | tee /tmp/gates.log
@@ -591,9 +885,10 @@ jobs:
           # see that test's own comment for why the enforcement belongs here,
           # not there).
           for t in test_relocated_planner_modules_match_the_pinned_sdk_audit \
-                   test_hand_ported_planner_modules_match_their_pinned_sdk_source; do
+                   test_hand_ported_planner_modules_match_their_pinned_sdk_source \
+                   test_strict_loaders_matches_its_pinned_sdk_source; do
             if ! grep -qF "test_planner_relocation_freshness.py::${t} PASSED" /tmp/gates.log; then
-              echo "::error::${t} did not PASS in this job -- both ALP_SDK_ROOT and ALP_SDK_HAND_PORT_ROOT are bound here, so a SKIP means the oracle checkout this job cloned did not resolve (or the test regressed to fail-open), not an absent root."
+              echo "::error::${t} did not PASS in this job -- ALP_SDK_ROOT, ALP_SDK_HAND_PORT_ROOT and ALP_SDK_STRICT_LOADERS_ROOT are all bound here, so a SKIP means the oracle checkout this job cloned did not resolve (or the test regressed to fail-open), not an absent root."
               exit 1
             fi
           done
@@ -652,12 +947,73 @@ jobs:
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
         run: |
+          # KEYED ON `<nodeid> PASSED`, NOT ON rc (tan-cli#500 review). Both
+          # freshness tests SKIP rather than fail when their root does not
+          # resolve -- the resolver accepts a root only if
+          # `<root>/scripts/alp_project.py` is a file, and the test's own
+          # comment says "Skip, not fail" -- and a skip leaves pytest at rc=0.
+          # Keying on rc therefore made this alarm silent for any path or
+          # marker change: no ::warning::, step exits 0, nothing in the log.
+          # That is the fail-open shape this file's other steps exist to close,
+          # inside the alarm itself. Same cure the `python/tests/gates` step
+          # above already uses.
           set +e
-          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit -q
-          rc=$?
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit -v 2>&1 | tee /tmp/relocation-alarm.log
           set -e
-          if [ "$rc" -ne 0 ]; then
-            echo "::warning::tan/planner/ has not been re-audited against alp-sdk ${{ steps.sdk_ref.outputs.ref }} -- scripts/alp_orchestrate DIFFERS from the pinned audit commit (see the pytest output above for which file(s)) -- the gate compares hashes, not history, so it does not tell you which side moved. Non-blocking by design: diff and port the delta, then re-pin PINNED_HASHES/PINNED_SDK_COMMIT in python/tests/gates/test_planner_relocation_freshness.py."
+          if ! grep -qF "test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit PASSED" /tmp/relocation-alarm.log; then
+            echo "::warning::tan/planner/ has not been re-audited against alp-sdk ${{ steps.sdk_ref.outputs.ref }}, OR this alarm could not run at all -- either scripts/alp_orchestrate DIFFERS from the pinned audit commit, or ALP_SDK_ROOT did not resolve and the test SKIPPED. Read the pytest output above to tell which. The gate compares hashes, not history, so it does not say which side moved. Non-blocking by design: diff and port the delta, then re-pin PINNED_HASHES/PINNED_SDK_COMMIT in python/tests/gates/test_planner_relocation_freshness.py."
+          fi
+          exit 0
+
+      # The HAND-PORT half of the same alarm, which did not exist (tan-cli#500).
+      #
+      # `test_hand_ported_planner_modules_match_their_pinned_sdk_source` is
+      # structurally incapable of detecting upstream drift as wired: the
+      # `resolve hand-port audit commit` step greps HAND_PORT_PINNED_SDK_COMMIT
+      # out of the gate file and clones alp-sdk at exactly that SHA, so the
+      # always-run job compares the pin's tree against hashes taken FROM the
+      # pin's tree. It can fail on table self-inconsistency and on nothing else.
+      # NO DRIFT COUNT IS QUOTED HERE ON PURPOSE. An earlier revision said
+      # "three of the nine pinned sources had moved" -- both numbers taken from
+      # tan-cli#500's report and both already wrong when this landed:
+      # HAND_PORT_HASHES held TEN entries by then (`da72634` added
+      # `scripts/alp_template.py`), and the same commit re-pinned to
+      # `7d58ef32`, which zeroed the drift the "three" described. A count in a
+      # comment measures the day it was typed and nothing after it. The test
+      # names the files that actually moved; read that instead.
+      #
+      # Its sibling above already has the missing half -- a live-oracle arm --
+      # and was scoped to exclude this test precisely because THIS step's root
+      # was not bound there. So bind it here, to the LIVE checkout rather than
+      # the frozen audit one, and the comparison finally has two different
+      # trees in it.
+      #
+      # Same three deliberate constraints as its sibling, and for the same
+      # reasons argued above: dispatch ONLY (on a `pull_request` run `alp-sdk`
+      # is PINNED_SDK_TAG, which may legitimately sit behind the audit commit,
+      # so the comparison would answer nothing and fire on every PR),
+      # `continue-on-error`, and a `::warning::` rather than a red X. The
+      # blocking question belongs to tan-cli#509, not to this step.
+      #
+      # NOT a replacement for the always-run job's version of this test: that
+      # one still proves the table is internally consistent, which is the check
+      # that catches a mis-typed hash. This one catches the other side.
+      - name: hand-port freshness vs live alp-sdk (alarm, warn only)
+        if: github.event_name == 'repository_dispatch'
+        continue-on-error: true
+        working-directory: python
+        env:
+          ALP_SDK_HAND_PORT_ROOT: ${{ github.workspace }}/alp-sdk
+        run: |
+          # `<nodeid> PASSED`, not rc -- see the sibling step above for why.
+          # `_resolve_hand_port_sdk_root()` skips when ALP_SDK_HAND_PORT_ROOT
+          # does not resolve, and a skip is rc=0: keying on rc made this alarm
+          # report nothing at all in exactly the case it must shout about.
+          set +e
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_hand_ported_planner_modules_match_their_pinned_sdk_source -v 2>&1 | tee /tmp/hand-port-alarm.log
+          set -e
+          if ! grep -qF "test_planner_relocation_freshness.py::test_hand_ported_planner_modules_match_their_pinned_sdk_source PASSED" /tmp/hand-port-alarm.log; then
+            echo "::warning::the HAND-PORTED planner modules no longer match their sources at alp-sdk ${{ steps.sdk_ref.outputs.ref }}, OR this alarm could not run -- either a source listed in HAND_PORT_HASHES moved upstream, or ALP_SDK_HAND_PORT_ROOT did not resolve and the test SKIPPED. Read the pytest output above to tell which; it names the file(s). The always-run job cannot see the drift case: it binds ALP_SDK_HAND_PORT_ROOT to HAND_PORT_PINNED_SDK_COMMIT, so it compares the pin against itself. Non-blocking by design: port the delta, then re-pin HAND_PORT_PINNED_SDK_COMMIT/HAND_PORT_HASHES in python/tests/gates/test_planner_relocation_freshness.py. NOTE tan's copy may be AHEAD of the pin rather than behind -- a forward-port that lands in tan before the pin moves reads identically to upstream drift here -- so diff before assuming which side owes the change."
           fi
           exit 0
 
@@ -687,8 +1043,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # On a `repository_dispatch` the workflow FILE has to come from the
           # DEFAULT branch -- that is GitHub's rule and why #195 put the trigger
           # on `main`. But what we CHECK OUT and test is a separate choice, and
@@ -706,31 +1063,53 @@ jobs:
           # run keeps checkout's default (the PR head) by passing an empty ref.
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
+      # Env var + allow-list, not interpolation -- see seam1's comment above.
       - name: resolve alp-sdk ref
         id: sdk_ref
         shell: bash
+        env:
+          PAYLOAD_REF: ${{ github.event.client_payload.sdk_ref }}
         run: |
           set -euo pipefail
-          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
+          dispatched="${PAYLOAD_REF:-}"
+          ref="${dispatched:-${PINNED_SDK_TAG}}"
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
+            exit 1
+          fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          if [ -n "${{ github.event.client_payload.sdk_ref }}" ]; then
+          if [ -n "${dispatched}" ]; then
             echo "::notice::seam2 DISPATCHED by alp-sdk -- building against the ref that just landed: ${ref}"
           else
             echo "::notice::seam2 building against the pinned alp-sdk ref: ${ref}"
           fi
 
       - name: clone alp-sdk
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
 
-      - uses: actions/setup-python@v5
+      # Pinned, NOT `3.x`: `python/pyproject.toml` floors at 3.12 and the
+      # `tan` under test IS this interpreter now (tan-cli#269 retired the
+      # self-contained cargo binary), so a floating newest-3.x would decide
+      # what the seam executes.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          python-version: "3.12"
 
       - name: host deps
         run: |
@@ -742,36 +1121,18 @@ jobs:
       - name: west + SDK python deps
         run: python3 -m pip install --upgrade pip west pyyaml jsonschema pyelftools
 
-      # `tan generate` live-run e2e (tan-cli#113 + the SoM-swap regression
-      # test for PR #157's output-directory bug): spawns the REAL
-      # `alp_project.py` from the checkout above (already pinned to
-      # PINNED_SDK_TAG by the `clone alp-sdk` step) and asserts what actually
-      # lands on disk -- `zephyr-board`/`west-libraries`/`hw-info-h`, the
-      # SoM-swap non-collision case, `--core` forwarded vs. refused, and the
-      # ValidationFailure(2)-not-InternalFailure(5) exit-code mapping. Needs
-      # only python + the SDK checkout + the pyyaml/jsonschema deps the step
-      # above just installed (no Zephyr SDK/west workspace/Renode, no
-      # separate `cargo build` -- `cargo test` builds the tan binary itself),
-      # so it genuinely runs BEFORE those -- placed here, not after them, so a
-      # Renode CDN hiccup or a Zephyr-SDK sha256 mismatch downstream can never
-      # cost the PR this coverage (tan-cli#158 review finding 4: an earlier
-      # revision of this step made this same claim in its comment while
-      # sitting after all three installs). `TAN_LIVE_RUN_SDK_ROOT` pointed at
-      # THIS job's own pinned `alp-sdk/` checkout is what lets the suite
-      # inherit the pin by construction rather than a second hardcoded SHA --
-      # see `crates/tan-cli/tests/live_run_generate.rs`'s module docs.
-      # `TAN_LIVE_RUN_REQUIRED=1` is what makes a missing root here a hard
-      # panic instead of a quiet skip -- this is the one job that wires the
-      # root, so absence here means the wiring broke, not "not applicable"
-      # (deliberately not keyed off the generic `CI` var: this repo's own
-      # `ci.yml` `test` job also runs under `CI=true` with neither var set,
-      # and gating on `CI` alone made that unrelated job hard-panic instead
-      # of skipping -- tan-cli#158 review finding 1).
-      - name: generate live-run e2e (tan generate vs pinned alp-sdk)
-        env:
-          TAN_LIVE_RUN_SDK_ROOT: ${{ github.workspace }}/alp-sdk
-          TAN_LIVE_RUN_REQUIRED: "1"
-        run: cargo test --locked -p alp-tan-cli --test live_run_generate
+      # The `tan generate` live-run e2e that used to sit here was
+      # `crates/tan-cli/tests/live_run_generate.rs`, deleted with the rest of
+      # `crates/` by tan-cli#269. Nothing is lost by dropping the step: its
+      # whole claim -- spawn a REAL `tan generate` against a pinned alp-sdk
+      # checkout and assert what lands on disk -- is superseded, and widened,
+      # by `python/tests/parity/test_planner_emit_parity.py`, which spawns
+      # `tan generate --output <path>` once per `board.yaml` in the SDK's
+      # `examples/` and byte-compares the written file against
+      # `alp_project.py`'s own front door, across all twelve relocated emit
+      # targets. That module runs in this file's own `python-tests` matrix,
+      # on all three platforms, with `ALP_SDK_ROOT` bound to this same
+      # `PINNED_SDK_TAG`. Do not re-add a narrower shell copy of it here.
 
       # Zephyr itself. `west init -l` against alp-sdk's own manifest is what a
       # customer's `tan bootstrap` does, so the tree under test is the pinned
@@ -833,8 +1194,12 @@ jobs:
           echo "$HOME/renode" >> "$GITHUB_PATH"
           "$HOME/renode/renode" --version
 
-      - name: build tan
-        run: cargo build --locked --bin tan
+      # `tan` under test is the PYTHON package, installed from this checkout
+      # (tan-cli#269). `pip install -e ./python` puts the `tan` console script
+      # on PATH, which is what the steps below invoke -- no absolute path into
+      # a build directory any more, and no second copy of the resolution rule.
+      - name: install tan (the executor under test)
+        run: python3 -m pip install -e ./python
 
       # ---- the seam itself -------------------------------------------------
 
@@ -858,7 +1223,7 @@ jobs:
           ZEPHYR_BASE: ${{ github.workspace }}/zephyr
         run: |
           set -euo pipefail
-          "${GITHUB_WORKSPACE}/target/debug/tan" \
+          tan \
               --sdk-root "${GITHUB_WORKSPACE}/alp-sdk" \
               --format json build --materialise > /tmp/seam2-materialise.json
           python3 -c '
@@ -887,7 +1252,7 @@ jobs:
           ZEPHYR_BASE: ${{ github.workspace }}/zephyr
         run: |
           set -euo pipefail
-          "${GITHUB_WORKSPACE}/target/debug/tan" \
+          tan \
               --sdk-root "${GITHUB_WORKSPACE}/alp-sdk" \
               build --native 2>&1 | tee /tmp/seam2-build.log
           # `tee` would mask a non-zero tan exit without this; the whole point
@@ -975,7 +1340,7 @@ jobs:
 
       - name: upload seam2 logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: seam2-logs
           path: |
@@ -1005,16 +1370,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
+      # Env var + allow-list, not interpolation -- see seam1's comment above.
+      # This one was DOUBLE-quoted, so a payload's `$(...)` ran outright.
       - name: resolve alp-sdk ref
         id: sdk_ref
         shell: bash
+        env:
+          PAYLOAD_REF: ${{ github.event.client_payload.sdk_ref }}
         run: |
           set -euo pipefail
-          ref="${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}"
+          ref="${PAYLOAD_REF:-${PINNED_SDK_TAG}}"
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
+            exit 1
+          fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "::notice::first-blink building against alp-sdk ref: ${ref}"
 
@@ -1027,17 +1412,19 @@ jobs:
       # 2 by design. A dedicated parent is what the guard asks for and what
       # README tells customers to do -- this job runs the documented layout.
       - name: clone alp-sdk into a dedicated workspace parent
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: ws/alp-sdk
 
-      - uses: actions/setup-python@v5
+      # Pinned, NOT `3.x`, for the same reason seam2 pins it: `tan` IS this
+      # interpreter now (tan-cli#269), and `python/pyproject.toml` floors at
+      # 3.12.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          python-version: "3.12"
 
       # Deliberately NOT pip-installing west here: `tan bootstrap` creating the
       # venv and installing west into it is one of the things under test.
@@ -1057,8 +1444,14 @@ jobs:
               ninja-build device-tree-compiler gperf ca-certificates curl xz-utils \
               pkg-config libusb-1.0-0-dev libudev-dev
 
-      - name: build tan
-        run: cargo build --locked --bin tan
+      # `tan` under test is the PYTHON package from this checkout
+      # (tan-cli#269), on PATH as the `tan` console script. Installed with
+      # `--user`-free plain pip into the runner's own interpreter, NOT into
+      # the workspace venv `tan bootstrap` is about to create -- that venv is
+      # the thing under test, and installing tan inside it would let the
+      # bootstrap step's own product decide which tan runs.
+      - name: install tan (the customer's binary)
+        run: python3 -m pip install -e ./python
 
       # THE STEP THAT DID NOT EXIST. Exit 0 is necessary but not sufficient --
       # a bootstrap that "succeeds" without creating the workspace is exactly
@@ -1067,7 +1460,7 @@ jobs:
         working-directory: ws/alp-sdk
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/target/debug/tan" bootstrap --non-interactive \
+          tan bootstrap --non-interactive \
               2>&1 | tee /tmp/first-blink-bootstrap.log
           for p in ../.west/config ../.venv ../zephyr ../modules; do
             if [ ! -e "$p" ]; then
@@ -1104,7 +1497,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          "$GITHUB_WORKSPACE/target/debug/tan" doctor --format json \
+          tan doctor --format json \
               > /tmp/first-blink-doctor-before.json
           code=$?
           set -e
@@ -1167,7 +1560,7 @@ jobs:
         working-directory: ws/alp-sdk
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/target/debug/tan" doctor --format json \
+          tan doctor --format json \
               > /tmp/first-blink-doctor-after.json
           python3 -c '
           import json, sys
@@ -1191,7 +1584,7 @@ jobs:
           # because discovery checked the root, its siblings and its ancestors
           # but never a CHILD (util.rs `discover_sdk_root`). Passing the flag
           # here again would hide the bug it was found by.
-          "$GITHUB_WORKSPACE/target/debug/tan" init \
+          tan init \
               --from-example peripheral-io/hello-world \
               --name my-app --non-interactive
           test -f my-app/board.yaml || { echo "::error::tan init wrote no board.yaml"; exit 1; }
@@ -1200,12 +1593,12 @@ jobs:
         working-directory: ws/my-app
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/target/debug/tan" build 2>&1 | tee /tmp/first-blink-build.log
+          tan build 2>&1 | tee /tmp/first-blink-build.log
           echo "first blink: bootstrap -> doctor -> init -> build, all from the commands a customer types."
 
       - name: upload first-blink logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: first-blink-logs
           path: |
@@ -1219,8 +1612,7 @@ jobs:
   # `python/tests` ran on NO CI machine at all before this job (see the collect
   # counts a few lines down -- collection depends on ALP_SDK_ROOT and
   # --ignore=tests/gates; this job runs with both bound). `ci.yml` ALSO runs
-  # the four cargo gates plus cross-platform build/MSRV checks plus its own
-  # `python` job (`python -m pytest tests -q`, no --ignore) -- grep for
+  # its own `python` job (`python -m pytest tests -q`, no --ignore) -- grep for
   # `pytest` in that file does NOT return zero hits -- but that job only binds
   # `ALP_SDK_ROOT` when called with `sdk_parity: true`, which release.yml's
   # `gates` job does not do (see that job's own comment for the open
@@ -1254,9 +1646,11 @@ jobs:
   #     because it depends on this repo alone. Need an absolute? Measure it:
   #     `python -m pytest --collect-only -q` from `python/`. Do not write the
   #     answer back into this comment.
-  #   * a locally built Rust `tan` -- `tests/parity/oracle.py::rust_binary()`
-  #     auto-discovers `target/{release,debug}/tan{.exe}`, so building it here
-  #     is enough; no `TAN_RUST_BINARY` needed for this job's own checkout.
+  #   The SECOND oracle this job used to arm -- a locally built Rust `tan`,
+  #   auto-discovered off `target/{release,debug}/` -- is gone with `crates/`
+  #   (tan-cli#269). Nothing in the suite resolves or spawns a Rust binary any
+  #   more, so `ALP_SDK_ROOT` is the only binding left that changes what this
+  #   job measures.
   #
   # `--ignore=tests/gates`: NOT because those tests don't matter, but because
   # they already run, correctly, in seam1 above -- all five files, each bound
@@ -1282,47 +1676,102 @@ jobs:
   # rewriting those cases to skip, and it is the only way any of `tan
   # monitor`'s non-hardware-gated logic gets checked in CI at all.
   #
-  # Matrix mirrors ci.yml's own Rust `test` job for the same reason it gives:
-  # `tan`'s path handling (os.pathsep env append, `.venv` discovery, `.exe`
-  # suffixes) differs per host, and the Python port re-implements exactly that
-  # handling -- untested on two of three platforms is not a smaller risk here
-  # than it is for the Rust side.
-  python-tests:
-    name: "python -- pytest across python/ (${{ matrix.os }})"
+  # Matrix runs all three platforms for the reason ci.yml's retired Rust
+  # `test` job gave: `tan`'s path handling (os.pathsep env append, `.venv`
+  # discovery, `.exe` suffixes) differs per host. With that job gone
+  # (tan-cli#269) this matrix is the ONLY cross-platform check in the repo.
+  #
+  # SHARDED four ways per OS. Measured on a real green run
+  # (31532426909): the pytest step alone is 1550s/1353s/1010s of a
+  # 26m/22m/17m job on windows/ubuntu/macos respectively -- ~97% of the wall
+  # clock is this one step, and everything else in the job (checkout, SDK
+  # clone, pip install) is 12-41s, i.e. negligible per-shard overhead. Root
+  # cause (not fixed here, sharding is parallelisation only): ~4300 tests
+  # spawn a fresh interpreter via subprocess.run/Popen at ~150 call sites to
+  # re-exercise `tan` as a customer would invoke it, and process creation is
+  # far more expensive on windows-latest than on the other two runners.
+  #
+  # This job is renamed to `python-tests-shard` and carries `shard` in its
+  # matrix -- deliberately NOT the job branch protection requires. GitHub
+  # appends every matrix dimension to a job's evaluated `name:`, so adding
+  # `shard` to the job protection already pins by string
+  # ("python -- pytest across python/ (<os>)", see ci.yml's header, tan-cli#392)
+  # would silently rename all three required contexts to something like
+  # "python -- pytest across python/ (ubuntu-latest, 1)" -- three phantom
+  # contexts protection would wait on FOREVER, since nothing produces the old
+  # strings any more. tan-cli#392 already lived through exactly this once
+  # (the cargo-job rename at tan-cli#269); this job is named apart from that
+  # trap on purpose. The `python-tests` job below reproduces the three pinned
+  # strings byte-for-byte and is what protection stays pointed at.
+  python-tests-shard:
+    name: "python -- pytest shard (${{ matrix.os }} ${{ matrix.shard == 'parity' && 'parity, whole' || format('{0}/4', matrix.shard) }})"
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # pytest-shard is 0-INDEXED (--shard-id runs 0..num-shards-1). The
+        # matrix values here ARE the --shard-id args passed below, unmodified
+        # -- deliberately NOT [1,2,3,4] with a subtraction applied later,
+        # which is exactly the shape that makes an off-by-one easy to
+        # introduce and easy to miss (one shard would run nothing, another
+        # would never run, and the suite would still report green). The job
+        # `name:` above therefore shows "0/4".."3/4", not "1/4".."4/4" --
+        # a 0-based label that matches the flag it comes from, not a
+        # human-friendly renumbering.
+        #
+        # `parity` is a FIFTH leg, not a fifth shard: it runs `tests/parity`
+        # WHOLE while 0..3 shard everything else. It rides this matrix rather
+        # than a separate job so the aggregate below still has exactly one
+        # `needs:` to check -- adding a second job would mean a second result
+        # to roll up, and a missed one there is a required context that goes
+        # green while a whole suite did not run.
+        shard: [0, 1, 2, 3, parity]
     runs-on: ${{ matrix.os }}
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # Same rule as every other job in this file -- see seam1's comment.
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
+      # Env var + allow-list, not interpolation -- see seam1's comment above.
       - name: resolve alp-sdk ref
         id: sdk_ref
         shell: bash
+        env:
+          PAYLOAD_REF: ${{ github.event.client_payload.sdk_ref }}
         run: |
-          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
+          set -euo pipefail
+          ref="${PAYLOAD_REF:-${PINNED_SDK_TAG}}"
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
+            exit 1
+          fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: clone alp-sdk
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          rustflags: "" # keep parity with ci.yml's local-gate rationale
 
       - name: install alp-tan[monitor] + pytest
         shell: bash
@@ -1330,18 +1779,19 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --quiet --upgrade pip
-          python -m pip install --quiet -e ".[monitor]" pytest
+          python -m pip install --quiet -e ".[monitor]" pytest pytest-shard
 
-      # Auto-discovered by tests/parity/oracle.py off target/{release,debug}/
-      # tan{.exe} -- no TAN_RUST_BINARY needed for this job's own build.
-      - name: build the Rust tan (parity oracle)
-        run: cargo build --locked --bin tan
-
-      # THE context worth adding to branch protection for the Python suite --
+      # The `python-tests` job below (the one wired into branch protection --
       # see .github/workflows/ci.yml's header for the full tan-cli#392 note and
-      # the exact three strings this matrix produces. Nothing in this file can
-      # change branch protection; it can only make sure the job is worth
-      # requiring, which is what the guard below is for.
+      # the exact three strings that job's matrix reproduces) only rolls up
+      # THIS job's per-shard result; it runs no pytest itself. That note
+      # stopped being advisory at tan-cli#269, which deleted the five cargo
+      # contexts protection actually requires; this shard matrix (via its
+      # aggregate) HAS to be wired in before anything can merge. Nothing in
+      # this file can change branch protection; it can only make sure the
+      # aggregate is worth requiring, which is what the guard below is for --
+      # a shard that silently checked nothing would make the aggregate's
+      # "success" meaningless too.
       #
       # The binding is ASSERTED before pytest runs, against the variable
       # actually exported rather than a re-derived path. This job's whole value
@@ -1365,4 +1815,220 @@ jobs:
             echo "::error::ALP_SDK_ROOT is bound to ${ALP_SDK_ROOT}, which has no scripts/alp_project.py -- tests/conftest.py::sdk_root() would return None and every SDK-gated module would SKIP while this job still reported green. Fix the 'clone alp-sdk' step above."
             exit 1
           fi
-          python -m pytest -q --ignore=tests/gates
+          # ...and that guard is NOT sufficient, which is what the node-id
+          # assertion below is for (tan-cli#500). It checks `alp_project.py`,
+          # while `test_planner_emit_parity.py`'s own skip mark reads a
+          # DIFFERENT file -- `scripts/alp_orchestrate/__init__.py`. A checkout
+          # satisfying this guard and shipping no `scripts/alp_orchestrate/`
+          # drops all 775 of that module's cases to SKIP at exit 0, taking its
+          # in-module canary with them, and this job stays green having
+          # compared nothing. alp-sdk retiring that package is the relocation's
+          # STATED end state, so this is a scheduled event, not a hypothetical.
+          #
+          # Run FIRST and by node id, for the same reason seam1 asserts PASSED
+          # by node id: a SKIP does not fail pytest's exit code, so neither
+          # `set -e` nor pipefail is the enforcement here. Running it ahead of
+          # the suite also fails in seconds rather than after the full round.
+          GUARD=tests/parity/test_planner_parity_actually_ran.py::test_a_bound_sdk_root_still_ships_the_planner_oracle
+          # `set +e` around the run, so the tailored message below is REACHABLE.
+          # With `set -e` still armed, the package-less case -- where the guard
+          # FAILS rather than skips -- killed the step at this pipeline and the
+          # branch below never executed: correct verdict, raw traceback, and
+          # none of the explanation an operator needs at 2am (tan-cli#500
+          # review). The message now covers both outcomes it can see.
+          set +e
+          python -m pytest -v "${GUARD}" 2>&1 | tee /tmp/parity-guard.log
+          set -e
+          if ! grep -qF "${GUARD#tests/parity/} PASSED" /tmp/parity-guard.log; then
+            echo "::error::${GUARD} did not PASS in this job. ALP_SDK_ROOT is bound here, so this is one of two things, and the pytest output above says which: a FAIL means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/); a SKIP means the guard itself regressed to fail-open. Either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
+            exit 1
+          fi
+          # The guard run above is NOT sharded (a bare node-id invocation,
+          # no --shard-id/--num-shards) -- it is one fast canary and every
+          # shard should independently prove ALP_SDK_ROOT resolves here, not
+          # just whichever shard happens to collect that one test. The suite
+          # itself IS sharded: pytest-shard partitions the collected test set
+          # before running, so each of the 4 (os, shard) legs below covers a
+          # disjoint quarter and the 4 legs' union is the full collection --
+          # verified locally with --collect-only across all
+          # four --shard-id values before this landed.
+          # `--ignore=tests/parity`: that suite CANNOT be sharded, and the
+          # reason is deliberate rather than incidental.
+          # `test_the_breadth_layer_still_covers_every_board` is a cross-test
+          # ACCUMULATOR -- the parametrised cases feed `_ARTEFACTS_COMPARED`
+          # and it then asserts `len(...) >= 90`, so it exists precisely to
+          # FAIL when the suite runs as a subset ("the floor on the total is
+          # what catches a mode disappearing from GENERATE_MODES"). Split four
+          # ways, each shard sees ~37 boards and it fails -- correctly.
+          # Lowering the floor to 90/num_shards would convert a real guard
+          # into one that cannot fail, the exact defect class this repo keeps
+          # paying for. So parity runs WHOLE, in `python-tests-parity` below.
+          if [ "${{ matrix.shard }}" = "parity" ]; then
+              # WHOLE, unsharded, and nothing else -- the accumulator needs
+              # every parametrised case in one process to reach its floor.
+              python -m pytest -q tests/parity
+          else
+              python -m pytest -q --ignore=tests/gates --ignore=tests/parity \
+                  --shard-id=${{ matrix.shard }} --num-shards=4
+          fi
+
+  # THE required context. `python-tests-shard` above is NOT
+  # wired into branch protection -- its `name:` carries `shard`, so it moves
+  # every time the shard count does, and GitHub required-context strings are
+  # matched literally (tan-cli#392). This job runs no pytest itself; its only
+  # job is to reproduce, byte-for-byte, the three strings protection on `dev`
+  # already pins (see ci.yml's header):
+  #
+  #   python -- pytest across python/ (ubuntu-latest)
+  #   python -- pytest across python/ (windows-latest)
+  #   python -- pytest across python/ (macos-latest)
+  #
+  # A trailing-space or dash difference here silently orphans a required
+  # context forever -- verify the evaluated `name:` against the list above
+  # before trusting this job, don't just read the template string.
+  #
+  # `needs: python-tests-shard` alone is NOT a verdict: GitHub SKIPS a
+  # dependent job when its upstream fails, it does not fail it, so a bare
+  # `needs:` with no `if:` would leave this job PENDING/skipped rather than
+  # red on a shard failure -- a skipped required context does not block a
+  # merge the way a red one does, so that shape is silently worse than no
+  # gate. `if: always()` forces this job to run regardless of the shard
+  # matrix's outcome, and the step below then reads
+  # `needs.python-tests-shard.result` explicitly and `exit 1`s on anything
+  # that is not `success` (failure, cancelled, OR skipped) -- so this job can
+  # never report green off the back of a shard job that did not cleanly pass.
+  #
+  # `needs.<job>.result` for a MATRIX job is ONE rolled-up result across the
+  # WHOLE matrix (12 legs: 3 os x 4 shards), not per-os -- GitHub exposes no
+  # per-leg `needs` result. DELIBERATE CHOICE, spelled out rather than left
+  # for a reader to guess: accept that a shard failure on ANY os reds all
+  # THREE aggregate legs below, rather than build a per-os signal (e.g. one
+  # intermediate rollup job per os, or a status artefact written by each
+  # shard and read back here by os). This is imprecise -- a windows-only
+  # shard failure will also red the macos/ubuntu required contexts -- but it
+  # is the simplest shape that cannot silently pass, which is the one
+  # invariant that actually matters: the aggregate must never be green while
+  # any shard was not green. Revisit only if the imprecision itself becomes
+  # the complaint (PRs redded on an os they didn't touch often enough that
+  # per-os attribution earns the added machinery).
+  python-tests:
+    name: "python -- pytest across python/ (${{ matrix.os }})"
+    needs: python-tests-shard
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    # Always ubuntu-latest regardless of `matrix.os`: this job does no
+    # OS-specific work (no checkout, no pytest, no pip install) -- `matrix.os`
+    # exists ONLY to reproduce the three required `name:` strings above, one
+    # job instance per string. Running it on `matrix.os` itself would pay for
+    # a windows/macos runner just to evaluate one `if` and would leave the
+    # three legs racing three different runner queues for zero benefit.
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify every python-tests-shard leg succeeded
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="${{ needs.python-tests-shard.result }}"
+          echo "python-tests-shard rolled-up result: ${result}"
+          if [ "${result}" != "success" ]; then
+            echo "::error::python-tests-shard did not report success (result: ${result}) -- at least one (os, shard) leg failed, was cancelled, or the whole matrix was skipped. This job exists only to reproduce the required-context name; treating anything but 'success' here as green would report a passing gate for a Python suite that did not fully pass."
+            exit 1
+          fi
+
+  # tan-cli#485 (#320 recurred): the ONE signal that actually catches
+  # tan/planner/ drift -- this `python-tests` job, dispatched by an alp-sdk
+  # push and bound to the ref that just landed rather than PINNED_SDK_TAG --
+  # was red on SIX CONSECUTIVE alp-sdk pushes before #485 was filed, and
+  # nothing acted on any of them: a `repository_dispatch` run has no PR to
+  # post a red X on, so the failure sat in the Actions tab unseen. #485's own
+  # framing: "the pin bump that closed #320 held two days" -- because the
+  # warn-only pin-freshness step (seam1, below) had already said the pin was
+  # stale, and nobody was looking. This job turns the ALREADY-RED signal into
+  # something a human is notified about, without touching that step's
+  # deliberately-warn-only design (parity.yml's own comment above it argues
+  # that rationale is sound, and #485 does not propose changing it -- the
+  # open question of whether the WARNING itself should become blocking is
+  # #509's decision to make, not this job's).
+  #
+  # Deliberately narrow: files or refreshes ONE tracking issue (never a new
+  # one per failing push -- six failures should read as one incident, not
+  # six), only on `repository_dispatch` (a `pull_request`/`push` failure
+  # already has a natural PR/commit to notice it on), and only turns
+  # green->red edges and red->red repeats into a comment -- it does not
+  # relabel, close, or otherwise manage the issue's lifecycle, which stays a
+  # human decision.
+  notify-planner-drift:
+    name: "file/refresh a tracking issue when the dispatched suite is red"
+    needs: python-tests
+    if: always() && github.event_name == 'repository_dispatch' && needs.python-tests.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: file or refresh the tan/planner drift issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_REF: ${{ github.event.client_payload.sdk_ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="tan/planner drift: the dispatched parity suite is red against alp-sdk"
+          # A fixed, grep-able marker rather than matching on the free-text
+          # title -- title wording can be edited by a maintainer without
+          # breaking de-dup.
+          marker="<!-- tan-cli-planner-drift-tracker -->"
+          body=$(cat <<EOF
+          $marker
+
+          The \`python-tests\` job (\`python -- pytest across python/\`) failed on a
+          \`repository_dispatch\` run triggered by an alp-sdk push -- this run tests
+          \`tan/planner/\` against the ref alp-sdk just pushed
+          (\`${SDK_REF:-<unknown, see run>}\`), not the pinned
+          \`PINNED_SDK_TAG\`/\`PINNED_SDK_COMMIT\` this repo's own PRs are measured
+          against. That distinction is the point: a \`pull_request\` run staying
+          green here proves nothing about whether \`tan/planner/\` still matches
+          alp-sdk's current \`scripts/alp_orchestrate/\` -- only this job does.
+
+          Run: ${RUN_URL}
+
+          Next step: diff \`scripts/alp_orchestrate/\` between
+          \`python/tests/gates/test_planner_relocation_freshness.py\`'s
+          \`PINNED_SDK_COMMIT\` and the ref above, port the behavioural delta into
+          \`tan/planner/\`, add a test that fails against the unported code, then
+          re-pin \`PINNED_HASHES\`/\`PINNED_SDK_COMMIT\` (see tan-cli#485 for the
+          worked example). A bump with no matching port re-freezes the hashes and
+          buys about two days (#320's own history).
+
+          This issue is filed/refreshed automatically by \`parity.yml\`'s
+          \`notify-planner-drift\` job; it does not self-close on a green run --
+          close it by hand once the port lands.
+          EOF
+          )
+          # NOT `gh issue list --search "... in:body"`: GitHub's search
+          # tokenizes on hyphens and ANDs the tokens, so a multi-word marker
+          # like this one is not an exact-phrase match -- measured live,
+          # `--search "alp-sdk-planner-change in:body"` returned 5 issues
+          # (only one of which actually contains that string), because
+          # "alp", "sdk", "planner" and "change" each independently appear
+          # across several unrelated open issues and GitHub ANDs the token
+          # set, not the phrase. `.[0].number` on that result comments on
+          # whichever issue happens to sort first, forever, silently
+          # de-duping against the wrong issue. Server-side filter on the
+          # LABEL set this job itself creates the issue with -- exact match,
+          # no tokenizing -- to keep the candidate list small, then filter
+          # CLIENT-SIDE on the literal marker string for the exact match.
+          existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+              --label bug,ci,python-port --json number,body \
+              --jq '[.[] | select(.body | contains("tan-cli-planner-drift-tracker"))][0].number' \
+              || true)
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+            echo "::notice::updated existing drift-tracking issue #${existing}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" \
+                --body "${body}" --label bug,ci,python-port
+            echo "::notice::filed a new drift-tracking issue"
+          fi

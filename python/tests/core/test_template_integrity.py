@@ -91,6 +91,28 @@ _SDK_LINK_REF = re.compile(r"https://github\.com/alplabai/alp-sdk/(?:blob|tree)/
 #: this tree came from. Keep that line's shape if the manifest is reworded.
 _MANIFEST_REF = re.compile(r"^- Ref: `([^`]+)`", re.M)
 
+#: A ref that must NEVER exist as an alp-sdk tag, hardcoded rather than
+#: derived from the live vendor ref. The original control derived it by
+#: stripping `ref`'s pre-release suffix (`v0.15.0-rc1` -> `v0.15.0`) -- exactly
+#: the pair GitHub's PREFIX-matching plural endpoint confuses, which is why
+#: that shape existed at all. But alp-sdk went on to cut a real `v0.15.0` tag
+#: (2026-08), so the SAME derivation now produces a ref that legitimately
+#: EXISTS -- the control would silently stop asserting anything, exactly the
+#: self-disabling failure mode a "negative control" exists to prevent. `v0.15`
+#: (no patch component) keeps the same hazard shape without depending on the
+#: live ref: it is a real PREFIX of both `v0.15.0` and `v0.15.0-rc1` (so the
+#: plural endpoint still 200s on it, prefix-matching one or the other), while
+#: alp-sdk's own tagging convention is always full `MAJOR.MINOR.PATCH`
+#: (optionally `-rcN`) -- a bare `MAJOR.MINOR` has never been cut and would
+#: break that convention if it ever were. Re-verified against the live repo:
+#: singular `/git/ref/tags/v0.15` -> 404 (correctly absent); plural
+#: `/git/refs/tags/v0.15` -> 200, prefix-matching `v0.15.0` (still a hazard).
+#: Go stale only if alp-sdk cuts a literal `v0.15` tag, or once the vendored
+#: line moves far enough (v0.16+) that `v0.15` stops being adjacent to
+#: anything real -- if so, pick a fresh dead-but-plausible-prefix ref from the
+#: new neighbourhood rather than re-deriving one from `_vendor_ref()`.
+_DEAD_CONTROL_REF = "v0.15"
+
 
 #: GitHub's **exact**-ref endpoint. Singular `ref`, and that is the entire
 #: point -- see `_tag_exists`.
@@ -221,7 +243,7 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
     )
 
 
-def test_a_shipped_overlay_is_not_clobbered_by_the_generated_conf():
+def test_a_documented_extra_conf_file_build_is_not_clobbered_by_the_generated_conf():
     """tan-cli#379's other half: naming the overlay is not enough, the build
     has to actually let it win.
 
@@ -233,6 +255,19 @@ def test_a_shipped_overlay_is_not_clobbered_by_the_generated_conf():
     documented native_sim build and `testcase.yaml`'s `extra_args` were both
     no-ops against the one symbol they were written for.
 
+    Scoped to a template that DOCUMENTS an explicit `-DEXTRA_CONF_FILE=`
+    build line (`_EXTRA_CONF` matching some planned file's content), not to
+    "ships any .conf/.overlay" (tan-cli#501 review finding 1): a file that
+    rides in via `boards/<board>.conf` -- Zephyr's own board-dir
+    auto-discovery, e.g. `sensor`/`diagnostics`'s
+    `boards/native_sim_native_64.conf` -- joins `CONF_FILE`, not
+    `EXTRA_CONF_FILE`, and is unaffected by this ordering question no matter
+    which way the CMakeLists' `EXTRA_CONF_FILE` list is built (MEASURED: a
+    real CMake configure against Zephyr v4.4.1 produced the identical merge
+    order and identical `.config` under both PREPEND and APPEND for that
+    class of file). Only a caller-supplied `-DEXTRA_CONF_FILE=<file>` -- the
+    `iot` scenario -- actually races the generated `alp.conf` for last-write.
+
     Pinned here because the fix is a hand-edit on top of a GENERATED tree
     (`vendored/MANIFEST.md`, "Deliberate edits on top of the emit") -- the next
     re-vendor re-emits the appending version, and the byte-parity gate will
@@ -242,13 +277,17 @@ def test_a_shipped_overlay_is_not_clobbered_by_the_generated_conf():
     for param in CASES:
         template_id, sku = param.values
         planned = _planned(template_id, sku)
-        overlays = [n for n in planned if n.endswith((".conf", ".overlay")) and n != "prj.conf"]
         cmake = planned.get("CMakeLists.txt", "")
-        if overlays and "list(APPEND EXTRA_CONF_FILE" in cmake:
-            clobbered.append(f"{template_id}/{sku} ships {overlays}")
+        documents_extra_conf_file = any(
+            _EXTRA_CONF.search(content)
+            for name, content in planned.items()
+            if name != "CMakeLists.txt"
+        )
+        if documents_extra_conf_file and "list(APPEND EXTRA_CONF_FILE" in cmake:
+            clobbered.append(f"{template_id}/{sku}")
     assert not clobbered, (
-        "generated conf APPENDED after the caller's own EXTRA_CONF_FILE, so a shipped "
-        f"overlay cannot override it: {clobbered}"
+        "generated conf APPENDED after a caller's own documented -DEXTRA_CONF_FILE=, so "
+        f"that file cannot override it: {clobbered}"
     )
 
 
@@ -288,10 +327,11 @@ def test_the_vendored_ref_is_a_tag_alp_sdk_actually_has():
     check in the suite; it SKIPS visibly when GitHub cannot be reached, naming
     why, never a silent pass.
 
-    The second assertion is a permanent negative control, not decoration. It
-    re-derives the dead ref from the live one by dropping the pre-release
-    suffix (`v0.15.0-rc1` -> `v0.15.0`), which is precisely the pair GitHub's
-    PLURAL ref endpoint confuses: `/git/refs/tags/v0.15.0` prefix-matches and
+    The second assertion is a permanent negative control, not decoration --
+    `_DEAD_CONTROL_REF` (see its own comment for why it is a hardcoded,
+    plausible-prefix ref rather than one re-derived from the live vendor ref
+    on every run). It is precisely the shape GitHub's PLURAL ref endpoint
+    confuses: `/git/refs/tags/v0.15` prefix-matches `v0.15.0`/`v0.15.0-rc1` and
     answers 200. If `_tag_exists` is ever "simplified" onto that endpoint, this
     control turns True and the run reds -- which is the only way to keep
     proving the gate can still fail for a ref that does not exist.
@@ -305,17 +345,21 @@ def test_the_vendored_ref_is_a_tag_alp_sdk_actually_has():
             f"the shipped templates' 40 version-pinned links were NOT verified."
         )
 
-    control = ref.split("-", 1)[0] if "-" in ref else None
-    if control and control != ref:
-        control_exists = _tag_exists(control)
-        assert control_exists is not True, (
-            f"negative control failed: {control!r} reports as an existing alp-sdk tag. "
-            f"Either _tag_exists is querying the PREFIX-matching plural endpoint "
-            f"(/git/refs/tags/, which answers 200 for {control!r} with {ref!r}) and "
-            f"this gate can no longer detect a dead ref at all, or alp-sdk really did "
-            f"cut {control!r} -- in which case pin the templates at it and re-point "
-            f"this control."
-        )
+    assert _DEAD_CONTROL_REF != ref, (
+        f"the hardcoded dead-control ref {_DEAD_CONTROL_REF!r} now equals the live "
+        f"vendor ref -- a control must never test itself; pick a different dead ref "
+        f"(see _DEAD_CONTROL_REF's comment) before this assertion means anything"
+    )
+    control_exists = _tag_exists(_DEAD_CONTROL_REF)
+    assert control_exists is not True, (
+        f"negative control failed: {_DEAD_CONTROL_REF!r} reports as an existing "
+        f"alp-sdk tag. Either _tag_exists is querying the PREFIX-matching plural "
+        f"endpoint (/git/refs/tags/, which answers 200 for {_DEAD_CONTROL_REF!r} by "
+        f"prefix-matching a real tag) and this gate can no longer detect a dead ref "
+        f"at all, or alp-sdk really did cut a tag literally named "
+        f"{_DEAD_CONTROL_REF!r} -- in which case pick a fresh dead-but-plausible-"
+        f"prefix ref (see _DEAD_CONTROL_REF's comment) and re-point this control."
+    )
 
     assert exists, (
         f"vendored/MANIFEST.md pins this tree at {ref!r}, and every version-pinned "

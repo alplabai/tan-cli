@@ -17,6 +17,7 @@ owes a coded envelope on every failure path, so these tests are the guard.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -301,7 +302,8 @@ def test_json_mode_writes_one_envelope_and_nothing_else():
     doc = json.loads(result.stdout)
     assert doc["command"] == "explain"
     assert doc["project"] == {"root": None, "boardYaml": None}
-    # explain resolves no checkout, so `sdk` is absent -- never null.
+    # `--template` resolves no checkout (only `--code` does), so `sdk` is
+    # absent -- never null.
     assert "sdk" not in doc
     assert list(doc["data"]) == [
         "schemaVersion",
@@ -334,6 +336,34 @@ def test_text_mode_error_line_carries_its_own_prefix():
     assert result.stderr.strip() == (
         "explain: unknown template 'nope'. Run tan explain without selectors to "
         "list available topics."
+    )
+
+
+@pytest.mark.parametrize("code_shaped", ["ALP-B003", "ALP_ERR_NO_BACKEND", "alp_err_not_ready"])
+def test_a_code_shaped_positional_names_the_code_flag(code_shaped):
+    """`tan explain ALP-B003` (the alp-sdk spelling minus the flag) refuses
+    like any other unknown template, but names `--code` in the refusal --
+    the overview deliberately omits `--code` (it would break the golden), so
+    `--help` was otherwise the only way to discover it."""
+    result = runner.invoke(app, ["explain", code_shaped])
+    assert result.exit_code == 1
+    assert result.stderr.strip() == (
+        f"explain: unknown template '{code_shaped}'. Run tan explain without "
+        f"selectors to list available topics. Looking for a diagnostic code? "
+        f"Use --code {code_shaped} instead."
+    )
+
+
+def test_an_ordinary_unknown_template_gets_no_code_hint():
+    """The hint is additive and SHAPE-gated: an unknown id that merely
+    contains one of the diagnostic-code substrings mid-string, or matches
+    neither shape at all, keeps the existing wording verbatim -- this is the
+    regression the anchored regex (`^...$`, not a bare `search`) exists for."""
+    result = runner.invoke(app, ["explain", "--template", "my-ALP-B003-app"])
+    assert result.exit_code == 1
+    assert result.stderr.strip() == (
+        "explain: unknown template 'my-ALP-B003-app'. Run tan explain without "
+        "selectors to list available topics."
     )
 
 
@@ -453,3 +483,117 @@ def test_no_module_template_id_collides_with_a_project_template_id():
     """`resolve` searches project templates first; the two sets are disjoint
     today and this keeps the shadowing hypothetical."""
     assert not {t.id for t in PROJECT_TEMPLATES} & {t.id for t in MODULE_TEMPLATES}
+
+
+# --------------------------------------------------------------------------
+# The shared wrap seam (`tan.core.text_layout.wrap_lines` via
+# `tan.env.wrap_width`), adopted here after `doctor` (PR #480). `iot-starter`
+# is the fixture throughout: its "Real Zephyr app vendored..." explanation
+# line is 207 columns unwrapped -- measured, the widest of any template.
+#
+# Every detail line wraps uniformly now -- an earlier version of this seam
+# kept catalogue/field lines (`Generation targets: ...`, `Default libraries:
+# ...`) exempt via a `_RECORD_DETAIL_PREFIXES` classification table, on the
+# theory that a piped reader might grep them whole. That case cannot occur:
+# `wrap_width()` returns a width only when stderr IS a tty, and any pipe
+# that could grep these lines makes stderr not a tty, which already returns
+# `None` and disables wrapping wholesale -- see
+# `test_text_mode_does_not_wrap_off_a_terminal` below.
+# --------------------------------------------------------------------------
+
+
+def test_text_mode_does_not_wrap_off_a_terminal():
+    """The one that matters: `CliRunner`'s stderr is never a tty (a
+    `BytesIO`-backed stream), so this is the DEFAULT case every other test in
+    this file already runs under -- asserted explicitly here against the
+    widest known line so a future change to the wrap seam cannot silently
+    start wrapping piped output and break `tan explain | grep`."""
+    result = runner.invoke(app, ["explain", "--template", "iot-starter"])
+    assert result.exit_code == 0
+    long_line = (
+        "- Real Zephyr app vendored from the SDK's `iot` scaffold: brings up "
+        "Wi-Fi via the CC3501E bridge and publishes an mqtts:// (TLS) MQTT "
+        "telemetry reading on a cadence, through the portable <alp/iot.h> surface."
+    )
+    assert long_line in result.stderr.splitlines()
+
+
+def test_text_mode_wraps_prose_on_a_real_terminal(monkeypatch):
+    """Forces `sys.stderr.isatty()` True through the REAL CLI dispatch (same
+    technique as `test_doctor_command.py`'s `--no-color` test) and pins
+    `shutil.get_terminal_size` so the wrap width is deterministic across
+    hosts/CI rather than whatever `sys.__stdout__` happens to report."""
+    import shutil
+
+    from typer.testing import _NamedTextIOWrapper
+
+    monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
+
+    result = runner.invoke(app, ["explain", "--template", "iot-starter"])
+    assert result.exit_code == 0
+    lines = result.stderr.splitlines()
+    # The 207-column line above is gone as ONE physical line...
+    assert not any(len(line) > 100 for line in lines)
+    # ...but its own text still appears, reassembled.
+    assert "brings up Wi-Fi via the CC3501E bridge" in " ".join(lines)
+    # The catalogue/field lines stay exactly one line each, never wrapped,
+    # even though "Default libraries: mbedtls" style checks are moot here --
+    # the record-shaped assertion that matters for THIS template is the
+    # feature-flags line, still whole:
+    assert "- Default features: wifi=true mqtt=true ble=false tls=true" in lines
+
+
+def test_text_mode_wraps_the_generation_targets_catalogue_line_too(monkeypatch):
+    """The overview's own "Generation targets: ..." line is 161 columns with
+    all ten target ids listed -- measured, the widest line `tan explain`
+    (bare) prints. Contract change from this task: this is no longer exempt
+    from wrapping (see the section comment above) -- measured at width 100,
+    it now splits into two physical lines (91 + 71 columns), and every
+    target id survives intact on one or the other; none is broken mid-token
+    the way a terminal's own destructive soft-wrap could split one."""
+    import shutil
+
+    from typer.testing import _NamedTextIOWrapper
+
+    monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
+
+    result = runner.invoke(app, ["explain"])
+    assert result.exit_code == 0
+    lines = result.stderr.splitlines()
+    assert not any(len(line) > 100 for line in lines)
+
+    # The "- Generation targets: ..." block: its own first line, plus every
+    # continuation line after it up to the next "- "-prefixed detail (or
+    # end of output).
+    start = next(i for i, line in enumerate(lines) if line.startswith("- Generation targets:"))
+    block = [lines[start]]
+    for line in lines[start + 1 :]:
+        if line.startswith("- "):
+            break
+        block.append(line)
+    assert len(block) > 1, "the 161-column line must actually have split -- it did not"
+    joined = " ".join(block)
+    # Every target id from `GENERATION_TARGETS` (`_overview`'s source) is
+    # present, whole -- none split mid-token across the line break.
+    for target in GENERATION_TARGETS:
+        assert target.emit in joined, (target.emit, block)
+
+
+def test_text_mode_wraps_on_a_terminal_even_with_no_color(monkeypatch):
+    """`--no-color` must NOT disable wrapping (`tan.env.wrap_width` takes no
+    `no_color` argument at all, unlike `use_color`) -- a user who wants plain
+    text still wants readable line breaks on a real terminal."""
+    import shutil
+
+    from typer.testing import _NamedTextIOWrapper
+
+    monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
+
+    result = runner.invoke(app, ["explain", "--template", "iot-starter", "--no-color"])
+    assert result.exit_code == 0
+    lines = result.stderr.splitlines()
+    assert not any(len(line) > 100 for line in lines)
+    assert "brings up Wi-Fi via the CC3501E bridge" in " ".join(lines)

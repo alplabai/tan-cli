@@ -59,10 +59,12 @@ subprocess and arrive as an exit code now propagates into this process, and
 `SystemExit`, which no `except Exception` would stop.
 
 Exit codes, verbatim from the oracle: missing board / unresolved SDK / bad
-target / unresolvable SKU are ValidationFailure (2); the overlay guard is
-WriteFailure (3), as is any target whose emit failed; a too-old interpreter is
-RuntimeFailure (1). **A DELIBERATE divergence** (tan-cli#457): the oracle's
-overlay guard is existence-only and refuses a re-run forever; ours is content-aware.
+target / unresolvable SKU are ValidationFailure (2); a too-old interpreter is
+RuntimeFailure (1); any target whose emit failed is WriteFailure (3), as is
+the overlay guard for an EXPLICIT `--target native-sim-overlay` (tan-cli#457's
+DELIBERATE divergence: the oracle's own is existence-only and refuses a re-run
+forever; ours is content-aware) -- but SUCCESS (0), dropped with a warning
+instead, when it only rides along in the bare/`--all` default set (tan-cli#501).
 
 **`--output` exists because CMake, not tan, decides where a Zephyr build reads
 from.** alp-sdk's `cmake/alp.cmake` -- the one helper all 96 Zephyr examples
@@ -108,6 +110,7 @@ from tan.commands.sdk_cmd import (
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
+from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -327,9 +330,40 @@ def resolve_targets(
             "generate.invalid-target", message, ExitCode.VALIDATION_FAILURE
         )
 
+    if all_targets and target is not None:
+        # tan-cli#498 defect 5. `--all` and `--target` name two different
+        # target sets, and `--all` used to win silently at the `return
+        # ALL_EMIT_MODES` below -- so `--all --target zephyr-board` DISCARDED
+        # the target the user named (`zephyr-board` is not in ALL_EMIT_MODES,
+        # so `build/boards/` was never created) with no field in the envelope
+        # recording the discard. It also opened the hole the `--core` guard
+        # below was written to close: with `target == ZEPHYR_BOARD` the guard
+        # accepted a `--core` that then narrowed six of the nine default emits
+        # (measured on `examples/bringup/board-selftest`:
+        # `build/generated/alp.conf` 3799 -> 1867 bytes, the a32_cluster slice
+        # and the `# --- core: ... ---` markers gone), while the run ended exit
+        # 3 blaming `yocto-conf` for an error the flag COMBINATION caused.
+        #
+        # The frozen oracle drops the target just as silently (measured: `--all
+        # --target zephyr-conf` returns the full default set at exit 0), and no
+        # golden pins the combination -- so this refusal is a deliberate,
+        # unpinned divergence. Refusing beats picking a winner: either choice
+        # ignores half of what was typed.
+        raise invalid(
+            f"`--all` and `--target {target}` name different target sets; pass one "
+            "or the other. `--all` (the default set) runs "
+            f"{', '.join(ALL_EMIT_MODES)}."
+        )
+
     if core is not None:
-        core_is_valid_here = target == ZEPHYR_BOARD or (
-            not all_targets and target in CORE_SCOPABLE_TARGETS
+        # `not all_targets` on BOTH arms since #498: with the guard above in
+        # front, `all_targets` implies `target is None`, so the qualifier is
+        # belt-and-braces -- but its absence on the `ZEPHYR_BOARD` arm is
+        # precisely what let `--all --target zephyr-board --core <id>` past a
+        # message whose own text says `--core` "does nothing for the
+        # default/--all target set".
+        core_is_valid_here = not all_targets and (
+            target == ZEPHYR_BOARD or target in CORE_SCOPABLE_TARGETS
         )
         if not core_is_valid_here:
             raise invalid(
@@ -400,14 +434,29 @@ def _resolve_output_override(
 def _ensure_writable(output: Path, target: str) -> bool:
     """Create `output`'s parent and prove the destination is writable.
 
-    Returns True when the probe ITSELF created the destination file, so a
-    refused emit can take it back off disk (tan-cli#420, `_discard_probe_file`).
+    Returns True when the probe ITSELF created the destination file -- which it
+    then REMOVES again before returning, so nothing tan invented is on disk
+    when the emitter runs.
 
     Done HERE rather than discovered when the spawned emitter trips over it, for
     two reasons: a `PermissionError` traceback on the SDK's stderr is a terrible
     issue message, and the parent directory has to be created either way --
     `alp_sdk_zephyr_conf()` asks for `${CMAKE_BINARY_DIR}/generated/alp.conf` in
     a build tree where `generated/` does not exist yet.
+
+    **The unlink is tan-cli#498 defect 4's fix, and it is structural.** The
+    probe used to LEAVE its zero-byte file behind, which made "the file exists"
+    useless as proof that the emitter wrote anything -- so
+    `_missing_emit_output` demanded a NON-EMPTY file instead, and then failed
+    every emit that legitimately produces zero bytes. Removing the probe's own
+    artefact restores existence as honest evidence. It also retires the window
+    tan-cli#420 patched from the other end: no stray zero-byte
+    `build/generated/alp.conf` survives for a later standalone `west build` to
+    pick up as a valid (and silently empty) `EXTRA_CONF_FILE`.
+
+    It cannot cost a pre-existing file: `existed` is read BEFORE the `open`,
+    and a file that was already there is never touched (`"ab"` does not
+    truncate).
 
     `ValueError` is caught beside `OSError` deliberately: a path carrying a
     surrogate or an embedded NUL raises `UnicodeEncodeError`/`ValueError`, not
@@ -427,7 +476,15 @@ def _ensure_writable(output: Path, target: str) -> bool:
         # file whose emit could still be refused further down.
         with output.open("ab"):
             pass
-        return not existed
+        if not existed:
+            # Best-effort: on the platform where this could fail (another
+            # process grabbed the name between the open and here) the emit is
+            # about to overwrite it anyway, and refusing a run over a
+            # successful writability proof would be the worse answer.
+            with contextlib.suppress(OSError):
+                output.unlink()
+            return True
+        return False
     except (OSError, ValueError) as err:
         raise GenerateError(
             "generate.output-unwritable",
@@ -437,8 +494,14 @@ def _ensure_writable(output: Path, target: str) -> bool:
 
 
 def _discard_probe_file(output: Path) -> None:
-    """Remove a destination file that `_ensure_writable` created and no emit
-    ever filled (tan-cli#420).
+    """Remove a zero-byte destination file left behind by a REFUSED emit at a
+    path this run created (tan-cli#420).
+
+    Narrower since tan-cli#498 defect 4 moved the probe's own cleanup into
+    `_ensure_writable` (which now unlinks what it created immediately, rather
+    than leaving it for this): what is left for this function is the emitter
+    that opened the destination, wrote nothing, and then failed. Kept for
+    exactly that, and still correct for it.
 
     The envelope was always honest about this -- exit 3, `data.written == []`,
     `generate.emit-failed` -- so what is fixed here is the DISK, not the
@@ -505,11 +568,18 @@ def _overlay_would_overwrite(
     force: bool,
     output_override: Path | None = None,
 ) -> bool:
-    """True when this run would truncate a HAND-EDITED
+    """True when this run would truncate a HAND-EDITED (or otherwise foreign)
     `boards/native_sim_native_64.overlay` -- content-aware (like `init`/`scaffold`'s
     `collect_file_changes`): a file lacking `_OVERLAY_BANNER` (`native_sim.py:87-88`'s
-    own) refuses, in `--all` or an explicit `--target` alike (tan-cli#457).
-    `output_override` replaces the default path when `--output` redirected the emit.
+    own) trips it. `output_override` replaces the default path when `--output`
+    redirected the emit.
+
+    Whether that turns into a whole-run refusal or a per-run target drop is the
+    CALLER's decision (tan-cli#501): an explicit `--target native-sim-overlay`
+    still refuses without `--force` (tan-cli#457); `native-sim-overlay` riding
+    along in the bare/`--all` default set instead drops the target and reports
+    an issue, so the caller always passes `force=False` here first to ask "is
+    this foreign at all" before deciding what to do about it.
     """
     if force or "native-sim-overlay" not in targets:
         return False
@@ -560,7 +630,36 @@ def _relative_or_full(workspace_root: Path, output_path: Path) -> str:
         return str(output_path)
 
 
-def _missing_emit_output(emit: str, output: Path) -> str | None:
+def _output_stamp(output: Path) -> tuple[int, int, int] | None:
+    """`(st_ino, st_size, st_mtime_ns)` for `output`, or `None` when it does
+    not exist (or cannot be stat'ed).
+
+    Taken immediately before a spawned emit and compared immediately after, so
+    `_missing_emit_output` can tell "the emitter wrote a legitimately empty
+    file" from "the emitter never touched a file that was already there" --
+    the one case where mere existence is no evidence at all. Three fields
+    rather than one: a rewrite that lands on the same size and the same
+    coarse timestamp still moves the inode on any emitter that writes through
+    a temp file + rename, and a same-inode rewrite moves `st_mtime_ns`.
+
+    Known limit, and the direction it errs in ON PURPOSE: on a filesystem with
+    coarse timestamps (FAT's 2s, HFS+'s 1s -- not ext4/APFS/NTFS, where this
+    runs), an in-place rewrite of byte-identical content inside one tick is
+    indistinguishable from no write at all, and would be reported as a failed
+    emit. That is the safe side of the trade: a false FAILURE is loud, costs a
+    re-run and destroys nothing, while the false SUCCESS it replaces put a
+    previous board's `alp.conf` into the next `tan build` silently.
+    """
+    try:
+        stat = output.stat()
+    except (OSError, ValueError):
+        return None
+    return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _missing_emit_output(
+    emit: str, output: Path, before: tuple[int, int, int] | None = None
+) -> str | None:
     """Why a ZERO exit did not actually produce `output`, or `None` when it did.
 
     tan-cli#397: `_emit_one` used to read `returncode == 0` as proof that a file
@@ -576,15 +675,38 @@ def _missing_emit_output(emit: str, output: Path) -> str | None:
     extension has for what a generate produced, so it performs no existence
     check of its own.
 
-    NON-EMPTY, not merely present, because the destination already exists by the
-    time the emitter runs whenever `--output` was given: `_ensure_writable`
-    proves writability first, with an `open("ab")` that CREATES a zero-byte file
-    (and a `mkdir` for `zephyr-board`'s directory). An existence-only check
-    would therefore accept tan's own probe as the emitter's artefact -- and
-    `--output` is exactly the shape `cmake/alp.cmake` drives for all 96 Zephyr
-    examples. No real emit is empty: every renderer alp-sdk's `alp_project.py`
-    reaches opens with its `# Auto-generated by scripts/alp_orchestrate.py`
-    header (or is JSON), and a board tree is several files.
+    PRESENT, not non-empty -- **tan-cli#498 defect 4 corrected this.** The check
+    used to demand a non-zero size, for a reason true at the time (with
+    `--output`, `_ensure_writable`'s `open("ab")` had already created a
+    zero-byte file, so existence alone would have accepted tan's own probe).
+    The premise it rested on -- "No real emit is empty" -- is FALSE.
+    `alp_project.py`'s unscoped per-core emits write nothing and exit 0 when no
+    core matches the mode's OS class, which is the CORRECT answer: on the
+    shipped `examples/display/lvgl-dashboard-x-evk` (a Linux-only V2N board),
+    `--emit zephyr-conf` prints `alp_project: wrote ref/alp.conf (0 bytes)` and
+    exits 0, as does `--emit cmake-args`. Measured, both engines, same tree:
+    in-process reported exit 0 with those files in `written[]`; spawned
+    reported exit 3, `failed: ["zephyr-conf","cmake-args"]`, "exited 0 but did
+    not write ..." -- about files that were on disk. Worse with `--output`:
+    `probe_created_output` was True, so `_discard_probe_file` then UNLINKED the
+    artefact the SDK really produced. It also broke the parity contract this
+    module's docstring rests on -- the two engines must render a target the
+    same way for the parity suite to diff their bytes.
+
+    The probe ambiguity that motivated the size demand is closed at its source
+    instead: `_ensure_writable` now REMOVES the file it created before the
+    emitter runs, so a file present afterwards is the emitter's, whatever its
+    size. tan-cli#397's guarantee is intact in BOTH of its cases:
+
+    * nothing at the destination -> the file is still absent afterwards, and
+      still refused;
+    * something already at the destination (a stale artefact, or a file the
+      caller's `--output` pointed at) -> `before` carries its
+      [`_output_stamp`], and a destination that comes out of the emit exactly
+      as it went in is refused too. Without that arm the widened check would
+      have called an untouched stale `alp.conf` "written" and handed the next
+      `tan build` a file from a previous board -- exactly #397's failure, one
+      level up.
 
     Only the SPAWNED engine needs this. `_emit_one_in_process` performs the
     write itself, so its `None` is already earned.
@@ -597,8 +719,10 @@ def _missing_emit_output(emit: str, output: Path) -> str | None:
             if not any(output.iterdir()):
                 return prefix + f"wrote no files into `{output}`."
             return None
-        if not output.is_file() or output.stat().st_size == 0:
+        if not output.is_file():
             return prefix + f"did not write `{output}`."
+        if before is not None and _output_stamp(output) == before:
+            return prefix + f"left `{output}` exactly as it found it."
     except (OSError, ValueError) as err:
         # Never swallowed into a success: a destination that cannot even be
         # stat'ed is exactly the state this guard exists to refuse to call
@@ -646,6 +770,9 @@ def _emit_one(
     if core is not None and (emit == ZEPHYR_BOARD or emit in CORE_SCOPABLE_TARGETS):
         argv += ["--core", core]
 
+    # Taken BEFORE the spawn, so a zero exit that left an already-present
+    # destination untouched is still refused -- see `_missing_emit_output`.
+    before = _output_stamp(output)
     try:
         out = subprocess.run(
             argv,
@@ -660,7 +787,7 @@ def _emit_one(
     except (OSError, ValueError, subprocess.SubprocessError) as err:
         return f"Generation failed for target '{emit}': {err}"
     if out.returncode == 0:
-        return _missing_emit_output(emit, output)
+        return _missing_emit_output(emit, output, before)
     stderr = (out.stderr or "").strip()
     return stderr or f"Generation failed for target '{emit}'."
 
@@ -1004,11 +1131,19 @@ def generate(
         if resolved is None:
             raise GenerateError(
                 "generate.sdk-root-unresolved",
+                # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the
+                # value. This refusal carries NO `sdk` block (see `refuse`'s
+                # own comment above -- `sdk_info` is still `None` here), so
+                # before this the typed path appeared nowhere in the envelope
+                # at all, and the message opened by recommending the very flag
+                # it had just rejected.
+                rejected_sdk_root_message(sdk_root, "Nothing was generated.")
+                if sdk_root
                 # `tan sdk switch` refuses in this build (tan-cli#305) -- kept
                 # the two mechanisms that actually work here (`--sdk-root`,
                 # placing the project near a checkout) and swapped the third
                 # for NO_SDK_NEXT_STEPS's honest "how to get one at all".
-                "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+                else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
                 f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
                 ExitCode.VALIDATION_FAILURE,
             )
@@ -1054,13 +1189,41 @@ def generate(
             else None
         )
 
-        if _overlay_would_overwrite(workspace_root, targets, force, output_override):
-            raise GenerateError(
-                "generate.would-overwrite",
-                "boards/native_sim_native_64.overlay already exists. Use --force to "
-                "overwrite.",
-                ExitCode.WRITE_FAILURE,
-            )
+        # tan-cli#501: an EXPLICIT `--target native-sim-overlay` still refuses
+        # a foreign (bannerless) overlay without `--force` -- the user named
+        # this file. But `native-sim-overlay` reaching `targets` only via the
+        # bare/`--all` default set is different (a vendored scaffold ships one,
+        # tan-cli#457 protects a hand edit): refusing the other eight targets
+        # over it is wrong, and a generic `--force` truncating it is worse
+        # (measured). So an implicit inclusion is left alone: dropped, reported.
+        overlay_explicit = targets == ("native-sim-overlay",)
+        issues: list[Issue] = []
+        if _overlay_would_overwrite(workspace_root, targets, False, output_override):
+            if overlay_explicit:
+                if not force:
+                    raise GenerateError(
+                        "generate.would-overwrite",
+                        "boards/native_sim_native_64.overlay already exists. Use "
+                        "--force to overwrite.",
+                        ExitCode.WRITE_FAILURE,
+                    )
+                # else: explicit + --force -- fall through, write loop overwrites.
+            else:
+                targets = tuple(t for t in targets if t != "native-sim-overlay")
+                # #3: keep `data.engine` in step with the drop (computed above).
+                engine = {k: v for k, v in engine.items() if k != "native-sim-overlay"}
+                # #2: may be a template's OWN vendored overlay (tan cannot
+                # tell) -- the old `--force` remedy DESTROYED one (measured);
+                # no clobber offered, an explicit `--target ... --force` still works.
+                issues.append(
+                    Issue(
+                        "generate.overlay-not-owned",
+                        "warning",
+                        "boards/native_sim_native_64.overlay already exists and was "
+                        "not generated by tan -- this project's own file (a hand "
+                        "edit, or a template's vendored overlay); left untouched.",
+                    )
+                )
 
         # LAST of the guards, because it is the only one that WRITES: it creates
         # the parent directory (and, for `zephyr-board`, the output directory
@@ -1095,7 +1258,6 @@ def generate(
         script = resolved_sdk / "scripts" / "alp_project.py"
         written: list[str] = []
         failed: list[str] = []
-        issues: list[Issue] = []
         for mode in targets:
             target_output = output_override or _output_path(
                 workspace_root, mode, board_dir_name

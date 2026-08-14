@@ -19,14 +19,23 @@ in-process calls (`resolve_sdk_root_ladder` et al., called directly) and the
 `run_tan` subprocess helpers (`test_build_command.py` and friends), which
 copy `os.environ` at spawn time and so inherit whatever `monkeypatch` leaves
 in the real environment.
+
+Scrubbing decides what a test OBSERVES. It says nothing about whether the
+checkout the SDK-gated tests deliberately bind against is the one this branch
+was measured against -- so the second block in this file (tan-cli#691) warns,
+once per session and never fatally, when the bound `ALP_SDK_ROOT` is not
+`PINNED_SDK_COMMIT`, or when tan's two alp-sdk pins disagree with each other.
 """
+import functools
 import os
+import re
+import shutil
 import subprocess
+import sys
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
-
-from tests.parity.oracle import PINNED_ORACLE_VERSION, rust_binary
 
 # Typer renders every `--help` through Rich, and BOTH of Rich's inputs are
 # ambient rather than code under test:
@@ -70,10 +79,33 @@ def sdk_root() -> Path | None:
     before any fixture executes, which is what makes the module-level call
     see the developer's real environment.
     """
+    bound = _bound_sdk_root()
+    return None if bound is None else bound[1]
+
+
+def _bound_sdk_root(environ: Mapping[str, str] | None = None) -> tuple[str, Path] | None:
+    """`sdk_root()`'s answer, plus WHICH variable produced it -- `(var, root)`
+    for the first of ``ALP_SDK_PARITY_ROOT`` / ``ALP_SDK_ROOT`` that names a
+    real checkout, `None` when neither does.
+
+    Split out of `sdk_root()` for the warning below, which has to NAME the
+    variable it is complaining about: "the bound tree disagrees with the pin"
+    is unactionable without saying which of the two env vars bound it. The
+    acceptance test (`scripts/alp_project.py` is a file under the root) and
+    the precedence order are `sdk_root()`'s, unchanged -- there is exactly one
+    implementation of both, here, so the warning can never describe a
+    different root than the one the SDK-gated tests actually measured.
+
+    `environ` defaults to the LIVE `os.environ` because `sdk_root()`'s callers
+    are module-level and want that; the warning passes `REAL_ENVIRON` instead,
+    since it runs from a fixture/hook, after `_scrub_sdk_discovery_env` has
+    deleted `ALP_SDK_ROOT` for the first test.
+    """
+    env = os.environ if environ is None else environ
     for var in ("ALP_SDK_PARITY_ROOT", "ALP_SDK_ROOT"):
-        raw = os.environ.get(var)
+        raw = env.get(var)
         if raw and (Path(raw) / "scripts" / "alp_project.py").is_file():
-            return Path(raw).resolve()
+            return var, Path(raw).resolve()
     return None
 
 
@@ -86,6 +118,482 @@ def sdk_root() -> Path | None:
 #: `_scrub_sdk_discovery_env` has by then already repointed `HOME`/
 #: `USERPROFILE` at a pytest tmp dir and deleted `ALP_SDK_ROOT`.
 REAL_ENVIRON: dict[str, str] = dict(os.environ)
+
+
+# ---------------------------------------------------------------------------
+# THE PINS vs THE BOUND TREE, said out loud once per session (tan-cli#691).
+#
+# `sdk_root()` above answers "which alp-sdk checkout is bound?". Nothing
+# answered "is that the checkout this branch was measured against?", and the
+# two are not the same question: `ALP_SDK_ROOT` is whatever the developer's
+# shell exports, while the commit tan's own gates are pinned to is written
+# down in this repository (`PINNED_SDK_COMMIT`). When they disagree, the
+# SDK-gated tests measure a tree this branch has never been reconciled to and
+# report real-looking failures that are neither pre-existing nor caused by the
+# change under test.
+#
+# Measured, 2026-08-12, same node IDs, unmodified `origin/dev`, only
+# `ALP_SDK_ROOT` varied:
+#
+#     ALP_SDK_ROOT=a317330595f744d35f4d785869517110f3678f70  ->  30 passed
+#     ALP_SDK_ROOT=c07254b2589406acb3fcb5556bf1e995395431e3  ->   5 failed, 25 passed
+#
+# `c07254b2` is four commits ahead of the pin; alp-sdk#1389 adopted BOTH
+# halves of tan-cli#616 upstream (so `faultdecode`'s declared divergence
+# evaporates and the non-vacuity guard fires with `classes: []`) and
+# alp-sdk#1400 changed the scaffold's `ALP_SDK_ROOT` emit (so the vendored
+# CMakeLists no longer match). Both are CORRECT behaviour against a tree tan
+# has not been reconciled to yet -- which is exactly what a pin means. A full
+# suite reported `9 failed, 4986 passed` and it took a three-way comparison by
+# hand to establish that five of the nine were the bound tree, not the branch.
+#
+# WARN, NEVER FAIL, and the distinction is the point. Binding a newer tree
+# deliberately is legitimate -- it is how the next re-sync's workload is
+# discovered before the re-sync -- so failing here would forbid the very thing
+# this repository's planner-resync flow depends on. The defect is that it is
+# SILENT, not that it is done. Nor may it fire when nothing is bound, which is
+# the common case (`ci.yml`'s `python` job, a bare `pytest tests/`): a warning
+# on every ordinary run is a warning nobody reads.
+#
+# The SECOND comparison here is between the two pins THEMSELVES, and it needs
+# no bound tree at all. `PINNED_SDK_COMMIT` (the freshness gate's audit ref)
+# and `parity.yml`'s `PINNED_SDK_TAG` (what `ci.yml`'s `sdk_parity` checkout
+# `ref:` must equal, "MUST be bumped together" in that file's own words) have
+# now drifted apart twice -- mid-review of #485, and again in PR #688 -- both
+# times caught by a human reading output rather than by a gate. It is one line
+# once the machinery above exists, so it is here rather than in a fourth
+# place. A split IS sometimes deliberate (`parity.yml`: the audit commit "can
+# legitimately sit on either side" of the parity tag), which is the other
+# reason this warns instead of failing.
+# ---------------------------------------------------------------------------
+
+#: `python/tests/conftest.py` -> `tests` -> `python` -> the repository root.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The only place `PINNED_SDK_COMMIT` is written down.
+_FRESHNESS_GATE = (
+    _REPO_ROOT / "python" / "tests" / "gates" / "test_planner_relocation_freshness.py"
+)
+
+#: The only place `PINNED_SDK_TAG` is written down -- `getting-started.yml`
+#: already `sed`s it out of this same file rather than keeping a second copy.
+_PARITY_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "parity.yml"
+
+#: ANCHORED at line start, exactly as `parity.yml`'s own `resolve planner
+#: audit commit` step greps it, and for the same reason: the gate declares
+#: `HAND_PORT_PINNED_SDK_COMMIT` too, and an unanchored pattern matches that
+#: line as well because it CONTAINS the substring `PINNED_SDK_COMMIT = "..."`.
+_PINNED_SDK_COMMIT_RE = re.compile(r'^PINNED_SDK_COMMIT = "([0-9a-f]{40})"', re.MULTILINE)
+
+#: `PINNED_SDK_TAG: <sha>` as a workflow-level `env:` entry -- indented, so
+#: unlike the pin above this one cannot be anchored hard at column 0.
+_PINNED_SDK_TAG_RE = re.compile(r"^[ \t]*PINNED_SDK_TAG:[ \t]*([0-9a-f]{40})[ \t]*$", re.MULTILINE)
+
+
+def _sole_pin(path: Path, pattern: re.Pattern[str], name: str) -> tuple[str | None, str | None]:
+    """`(sha, None)` when `path` declares exactly one `name`, else
+    `(None, <what went wrong>)`.
+
+    Refuses a plural match rather than taking the first: two matches means the
+    pattern has started catching a pin it was never about, and silently
+    comparing against the wrong one of them is the same class of quiet wrong
+    answer this whole block exists to end. `parity.yml`'s own grep learned
+    this the expensive way -- an unanchored pattern returned two SHAs and
+    wrote a malformed `$GITHUB_OUTPUT` line that failed three steps later
+    with nothing naming the cause.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"could not read {name} out of {path}: {exc}"
+    found = pattern.findall(text)
+    if len(found) != 1:
+        return None, f"expected exactly ONE {name} in {path}, found {len(found)}: {found}"
+    return found[0], None
+
+
+def _git(root: Path, *args: str) -> str | None:
+    """Stripped stdout of `git -C <root> <args...>`, or `None` for ANY
+    unhappy outcome -- git absent, a non-zero exit, a hang, a decoding
+    failure.
+
+    Every caller below treats `None` as "say nothing", which is deliberate:
+    the check is an aid to interpreting a test run, so a host without git or
+    an alp-sdk delivered as a tarball rather than a checkout must be silent,
+    not noisy. `timeout` rather than an unbounded wait for the same reason --
+    a wedged git must not hold the session open.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def _git_head(root: Path) -> str | None:
+    """The 40-hex `HEAD` of the git checkout AT `root`, or `None` when `root`
+    is not itself the top of one.
+
+    `--show-toplevel` first, and it is load-bearing, not belt-and-braces:
+    `git -C <dir> rev-parse HEAD` happily answers for the ENCLOSING
+    repository when `<dir>` is merely nested inside one. An alp-sdk unpacked
+    from a tarball into a directory that happens to live under some other
+    checkout would otherwise be reported as "bound to <that repo's HEAD>",
+    warning about a disagreement between two SHAs that have nothing to do
+    with each other. `sdk_root()` only ever accepts a path with
+    `scripts/alp_project.py` directly under it -- the alp-sdk repository ROOT
+    -- so equality with the toplevel is the correct test, not an
+    over-restriction.
+    """
+    toplevel = _git(root, "rev-parse", "--show-toplevel")
+    if toplevel is None:
+        return None
+    try:
+        resolved = Path(toplevel).resolve()
+    except OSError:
+        return None
+    # normcase, because Windows path comparison is case-insensitive and git
+    # reports forward slashes there while `Path.resolve()` reports backslashes.
+    if os.path.normcase(str(resolved)) != os.path.normcase(str(root.resolve())):
+        return None
+    head = _git(root, "rev-parse", "HEAD")
+    if head is None or not re.fullmatch(r"[0-9a-f]{40}", head):
+        return None
+    return head
+
+
+def _distance(root: Path, pin: str, head: str) -> tuple[int, int] | None:
+    """`(ahead, behind)` of `head` relative to `pin`, or `None` when the two
+    are not comparable in this checkout.
+
+    Not comparable is the NORMAL case in CI, not an error: `actions/checkout`
+    clones at depth 1, so `pin` is usually not an object in the bound tree at
+    all. The SHA mismatch is still worth reporting without a count, so this
+    returns `None` rather than suppressing the whole warning.
+    """
+    counts = _git(root, "rev-list", "--left-right", "--count", f"{pin}...{head}")
+    if counts is None:
+        return None
+    parts = counts.split()
+    if len(parts) != 2:
+        return None
+    try:
+        behind, ahead = (int(part) for part in parts)
+    except ValueError:
+        return None
+    return ahead, behind
+
+
+def sdk_pin_disagreements(
+    bound: tuple[str, Path] | None,
+    *,
+    gate_path: Path = _FRESHNESS_GATE,
+    workflow_path: Path = _PARITY_WORKFLOW,
+) -> list[str]:
+    """Every way the alp-sdk pins and the bound tree currently disagree, one
+    warning per disagreement, as ready-to-print lines. Empty means agreement
+    -- which is the ordinary answer and prints nothing at all.
+
+    A pure function of `(bound, gate_path, workflow_path)` and the git state
+    at `bound`, deliberately: it takes no fixture, reads no global, and asserts
+    nothing, so the gate that proves it fires can build a REAL two-commit
+    checkout in a tmp dir and read the answer back, rather than mocking the
+    condition it is supposed to detect.
+    """
+    lines: list[str] = []
+
+    pinned_commit, commit_problem = _sole_pin(gate_path, _PINNED_SDK_COMMIT_RE, "PINNED_SDK_COMMIT")
+    pinned_tag, tag_problem = _sole_pin(workflow_path, _PINNED_SDK_TAG_RE, "PINNED_SDK_TAG")
+    for problem in (commit_problem, tag_problem):
+        if problem is not None:
+            lines.append(
+                f"WARNING (tan-cli#691): this session cannot compare tan's alp-sdk "
+                f"pins -- {problem}. A pin that moved or was reshaped leaves this "
+                f"check reading nothing while reporting nothing; point it at the "
+                f"pin's new home."
+            )
+
+    if pinned_commit is not None and pinned_tag is not None and pinned_commit != pinned_tag:
+        lines += [
+            "WARNING (tan-cli#691): tan's two alp-sdk pins disagree with EACH OTHER:",
+            f"    PINNED_SDK_COMMIT  {pinned_commit}  ({gate_path})",
+            f"    PINNED_SDK_TAG     {pinned_tag}  ({workflow_path})",
+            "    `ci.yml`'s `sdk_parity` checkout `ref:` tracks PINNED_SDK_TAG and must",
+            "    equal it too -- they 'MUST be bumped together' (ci.yml), and that pair",
+            "    has already drifted twice (mid-review of #485, and PR #688). A split is",
+            "    sometimes deliberate (the audit commit may legitimately sit on either",
+            "    side of the parity tag); a forgotten one measures tan against two",
+            "    different alp-sdks at once.",
+        ]
+
+    if bound is None or pinned_commit is None:
+        return lines
+
+    var, root = bound
+    head = _git_head(root)
+    if head is None or head == pinned_commit:
+        return lines
+
+    distance = _distance(root, pinned_commit, head)
+    if distance is None:
+        direction = (
+            "    the commit distance is unknown here (the pin is not an object in the"
+            " bound tree -- a shallow clone, or a different repository)."
+        )
+    else:
+        ahead, behind = distance
+        direction = (
+            f"    the bound tree is {ahead} commit(s) AHEAD of the pin,"
+            f" and {behind} behind."
+        )
+    return lines + [
+        "WARNING (tan-cli#691): the bound alp-sdk tree is NOT the commit tan pins.",
+        f"    {var}={root}",
+        f"        HEAD               {head}",
+        f"        PINNED_SDK_COMMIT  {pinned_commit}  ({gate_path})",
+        direction,
+        "    This does NOT fail the run, and binding a newer tree is a legitimate thing",
+        "    to do -- it is how the next re-sync's workload is discovered. But every",
+        "    failure in this run may belong to the BOUND TREE rather than to this",
+        "    branch: on 2026-08-12 five of nine did. Re-run with the pinned tree bound,",
+        "    or with the variable unset, before reading a failure as this branch's.",
+    ]
+
+
+@functools.cache
+def _sdk_pin_warning_lines() -> tuple[str, ...]:
+    """`sdk_pin_disagreements` for THIS session, computed at most once.
+
+    Cached because it is emitted from two places (see below) and it spawns
+    git; `REAL_ENVIRON` rather than `os.environ` because both of those places
+    run after `_scrub_sdk_discovery_env` has deleted `ALP_SDK_ROOT` for the
+    first test, and reading the live environment there would answer "nothing
+    bound" on exactly the runs this exists for.
+    """
+    return tuple(sdk_pin_disagreements(_bound_sdk_root(REAL_ENVIRON)))
+
+
+def _write_sdk_pin_warning(write_line: Callable[[str], None]) -> None:
+    """Emit the block through `write_line`, or emit nothing at all."""
+    lines = _sdk_pin_warning_lines()
+    if not lines:
+        return
+    write_line("")
+    for line in lines:
+        write_line(line)
+
+
+def _pin_warning_writer(config: pytest.Config) -> Callable[[str], None]:
+    """A `write_line` that is actually visible.
+
+    The terminal reporter, not `warnings.warn` and not a bare `print`: a
+    warning has to survive `-q` (which suppresses `pytest_report_header`
+    entirely -- measured), pytest's output capture (which swallows a `print`
+    from a fixture until something replays it), and `-W error` (which would
+    turn a `warnings.warn` into an ERROR and break the "never fail" rule this
+    whole block is built on). Coloured, because the point is that it is not
+    missed in a 5000-line run. `None` when the reporter is not installed
+    (`-p no:terminal`), where stderr is the only channel left.
+    """
+    reporter = config.pluginmanager.getplugin("terminalreporter")
+    if reporter is None:
+        return lambda line: print(line, file=sys.stderr)
+    return lambda line: reporter.write_line(line, yellow=True, bold=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _warn_when_the_bound_sdk_disagrees_with_the_pins(pytestconfig) -> None:
+    """Say it BEFORE the tests run, so a session bound to the wrong tree can
+    be aborted in its first second rather than its 55th minute."""
+    _write_sdk_pin_warning(_pin_warning_writer(pytestconfig))
+
+
+def pytest_terminal_summary(terminalreporter) -> None:
+    """Say it AGAIN at the end, next to the failures it explains.
+
+    Deliberately the same block twice per session, and only ever twice: the
+    fixture above catches it early, this catches it where the reader is
+    actually looking when they ask "why did these nine fail?" -- the question
+    tan-cli#691 was opened about. Both are no-ops on an agreeing session, so
+    the cost of the duplication is zero on every ordinary run.
+    """
+    _write_sdk_pin_warning(
+        lambda line: terminalreporter.write_line(line, yellow=True, bold=True)
+    )
+
+
+def _probe_free_path(path: str, scratch_factory: Callable[[], Path]) -> str | None:
+    """`path` with every [`PROBE_TOOLS`] identity unresolvable, or `None`
+    when it already is.
+
+    Rebuilds only the PATH ENTRIES that actually carry a probe tool, each as
+    its own link farm of that directory's other contents, spliced back at the
+    SAME position -- so ordering, shadowing and duplicate entries all survive.
+    Dropping the offending directory outright is not an option: on this bench
+    host `JLinkExe` and `openocd` live in `/usr/bin`, alongside every
+    coreutil the installer-script tests execute.
+
+    `None` when nothing matched -- measured, this is NOT guaranteed to be
+    "every runner": a runner can carry an unrelated tool whose STEM happens to
+    match a [`PROBE_TOOLS`] identity (a pip-installed `west`, say), and this
+    function cannot know that in advance. What IS true on the no-match path:
+    no filesystem work, no rebuilt PATH, nothing to go wrong -- which is why
+    `scratch_factory` is a THUNK rather than an already-created directory.
+    Calling `tmp_path_factory.mktemp(...)` eagerly, as a plain argument, would
+    create the scratch dir on every session regardless of whether anything
+    ever matched -- contradicting exactly this claim. It is called at most
+    once, lazily, on the first entry that actually needs farming.
+
+    Links rather than copies where a link is possible, because a copy of a
+    live tool binary changes what `file`/codesigning/AV scanning sees and can
+    be materially slower for a large directory: a symlink first, a hardlink
+    second (Windows refuses a symlink without Developer Mode or elevation,
+    but `os.link` works within a volume). Both are tried per FILE, not per
+    directory -- `entry`'s directory may itself contain sub-directories (a
+    stray `__pycache__`, a vendored tool's own support tree) that neither
+    linking call can target correctly with the file-only handling below, so
+    those are recursed into with `shutil.copytree` instead of linked, and
+    `os.symlink` is always given `target_is_directory=` explicitly rather
+    than left to guess -- omitting it is silently correct on POSIX and
+    silently WRONG on Windows, where a directory symlink created without it
+    is a broken file-type symlink that resolves to nothing.
+
+    A THIRD tier, `shutil.copy2`/`shutil.copytree`, sits below the hardlink:
+    `os.link` fails not only for lack of privilege but for two conditions a
+    single bench host never exercises and a GitHub Windows runner always
+    might -- a source and destination on DIFFERENT VOLUMES (`C:\\hostedtoolcache`
+    vs a `D:\\a\\_temp` scratch dir, both real GitHub Windows runner paths,
+    raise `OSError` cross-device), and a source that is itself a DIRECTORY
+    (`os.link` refuses those unconditionally on every OS). Copying is
+    correctness-first, not performance-first, and is the reason a symlink is
+    always tried first: the fast, cheap path still wins whenever it is legal.
+
+    Only a directory that yields to NONE of the three still RAISES -- an
+    entry silently left out would remove tools the suite needs, and an entry
+    silently left in would restore the exact host-dependence this exists to
+    close. Loud beats either."""
+    entries = path.split(os.pathsep)
+    lowered = {t.lower() for t in PROBE_TOOLS}
+    rebuilt: list[str] = []
+    changed = False
+    scratch: Path | None = None
+    for index, entry in enumerate(entries):
+        if not entry or not os.path.isdir(entry):
+            rebuilt.append(entry)
+            continue
+        try:
+            names = os.listdir(entry)
+        except OSError:
+            rebuilt.append(entry)
+            continue
+        # Windows matches by STEM, case-insensitively: `JLinkExe.exe` and
+        # `west.cmd` are the same identities as their POSIX bare names, and
+        # `%PATHEXT%` is what makes them resolvable.
+        if not any(os.path.splitext(n)[0].lower() in lowered for n in names):
+            rebuilt.append(entry)
+            continue
+        if scratch is None:
+            scratch = scratch_factory()
+        farm = scratch / f"probe-free-{index}"
+        farm.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            if os.path.splitext(name)[0].lower() in lowered:
+                continue
+            link = farm / name
+            if link.exists() or link.is_symlink():
+                continue
+            source = os.path.join(entry, name)
+            # `os.path.isdir` already follows symlinks -- a SOURCE that is
+            # itself a symlink pointing (transitively) at a directory must
+            # still be treated as a directory here. An earlier draft excluded
+            # `os.path.islink(source)` sources from this check, which handed
+            # `target_is_directory=False` to exactly the case the paragraph
+            # above says this exists to get right: a symlink recreated as a
+            # FILE-type symlink over a directory target is the same broken
+            # shape on Windows, one level of indirection later.
+            is_dir = os.path.isdir(source)
+            try:
+                os.symlink(source, link, target_is_directory=is_dir)
+                continue
+            except OSError:
+                pass
+            if not is_dir:
+                try:
+                    os.link(source, link)
+                    continue
+                except OSError:
+                    pass
+            try:
+                if is_dir:
+                    shutil.copytree(source, link)
+                else:
+                    shutil.copy2(source, link)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot neutralise the debug/flash probe tooling in {entry!r}: "
+                    f"neither a symlink, a hardlink nor a copy of {name!r} could be "
+                    f"made ({exc}). This suite would otherwise run against whatever "
+                    "probe tools this host happens to have installed and disagree "
+                    "with CI silently (tan-cli#603). Remove the probe tooling from "
+                    "PATH for this run, or run the suite somewhere this directory "
+                    "is writable."
+                ) from exc
+        rebuilt.append(str(farm))
+        changed = True
+    return os.pathsep.join(rebuilt) if changed else None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _probe_tools_are_a_property_of_the_test(tmp_path_factory) -> None:
+    """Make no [`PROBE_TOOLS`] identity resolve for the whole session, so
+    every which()-gated branch answers the way it answers on CI (tan-cli#603).
+
+    Mutates `os.environ` rather than using `monkeypatch`, for two reasons:
+    `monkeypatch` is function-scoped and this is a session-wide property, and
+    the 26 test modules that spawn `[sys.executable, "-m", "tan", ...]` build
+    their child environment from `os.environ` -- an in-process patch would
+    leave every one of those spawns host-dependent. Session-scoped autouse
+    fixtures resolve before function-scoped ones, so
+    `_scrub_sdk_discovery_env` below and any test's own `monkeypatch.setenv
+    ("PATH", ...)` both still win over this, which is exactly right: a test
+    that seeds a fake probe tool is DECLARING its inventory, and that
+    declaration is the point.
+
+    A no-op on a host with nothing matching -- see `_probe_free_path`, and do
+    not assume that is every runner: measured directly on windows-latest
+    (tan-cli#625 review, a throwaway diagnostic CI step), it is NOT.
+    `C:\\hostedtoolcache\\windows\\Java_Temurin-Hotspot_jdk\\<ver>\\x64\\bin`
+    -- on `PATH` for the pre-installed Temurin JDK, nothing to do with this
+    suite -- carries `jlink.exe`, the JDK's own module-linker tool. That is a
+    STEM collision, not a debug-probe sighting: [`PROBE_TOOLS`] matches
+    case-insensitively by extension-stripped stem so it can also catch
+    `JLink.cmd`/`JLink.EXE`, and `"JLink"` (the bare identity
+    `doctor_cmd._collect` tries second, no `Exe` suffix) collides with Java's
+    `jlink` by coincidence of naming, not by anything actually resembling a
+    debug probe. Farmed like any other match -- correctly, since the function
+    cannot tell "real J-Link" from "same stem, different tool" apart, and
+    farming is safe either way -- but it means this fixture is exercised for
+    real on windows-latest, working around a directory that was never the
+    hazard tan-cli#603 was written against."""
+    original = os.environ.get("PATH", "")
+    rebuilt = _probe_free_path(
+        original, lambda: tmp_path_factory.mktemp("probe-free-path")
+    )
+    if rebuilt is None:
+        yield
+        return
+    os.environ["PATH"] = rebuilt
+    try:
+        yield
+    finally:
+        os.environ["PATH"] = original
 
 
 @pytest.fixture(autouse=True)
@@ -105,76 +613,25 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     # which is what `tests/core/test_timestamp.py` exists to document. The
     # tests that WANT one set it themselves.
     monkeypatch.delenv("SOURCE_DATE_EPOCH", raising=False)
+    # Same class as `ZEPHYR_BASE` above, and load-bearing from tan-cli#547 on:
+    # `${TOOLCHAIN_ROOT}` now has a real resolver, and
+    # `ZEPHYR_SDK_INSTALL_DIR` short-circuits every branch of it. Left
+    # unscrubbed, a developer or CI shell that exports it makes every
+    # toolchain-root test observe THAT path instead of the one the test
+    # built -- including the demotion tests, which would resolve instead of
+    # demoting and go red for a reason that is nothing to do with the code.
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
 
 
 # ---------------------------------------------------------------------------
-# The oracle pin. Lifted here from `tests/parity/conftest.py` by tan-cli#393:
-# directory-scoped, it could never reach `tests/commands/`, where the only two
-# other oracle consumers in the tree live -- and both of those had hand-copied
-# a release-first resolver `oracle.rust_binary()` had already been rewritten to
-# remove. One of them went red against a stale `tan 0.3.1` with a diff that
-# read as a port regression; the other stayed GREEN measuring a divergence
-# against that same stale binary. Session-scoped and autouse from the tree
-# root, this now nets every oracle consumer, present and future.
-# ---------------------------------------------------------------------------
-@pytest.fixture(scope="session", autouse=True)
-def pinned_oracle() -> None:
-    """FAIL the session -- never skip -- when a resolved oracle binary is
-    present but does not report :data:`oracle.PINNED_ORACLE_VERSION`.
-
-    Absence stays a skip: that is what each file's own ``missing_for_live``/
-    ``_ORACLE_REQUIRED`` gate already decides, and this fixture defers to it
-    entirely by doing nothing when ``rust_binary()`` returns ``None``. Only WRONGNESS
-    fails here -- a resolved binary that answers the wrong ``--version`` --
-    because a quiet skip in that case would hide exactly the gap this
-    harness exists to surface (``missing_for_live``'s own docstring makes the
-    identical argument for the absence case; tan-cli#272 is where that rule
-    was first written down, and it applies just as hard to wrongness as to
-    absence).
-
-    Session-scoped so this runs the check ONCE per test process rather than
-    once per test case; the resolution cannot change mid-session, so
-    re-checking it per-test bought nothing but 17 extra ``--version``
-    subprocesses a run.
-
-    ``rust_binary()`` is called HERE, in the fixture body, and deliberately
-    NOT at this conftest's import. It can raise -- a ``TAN_RUST_BINARY`` that
-    is set but missing, or the mtime TIE between target/{release,debug} that
-    it now refuses to break silently -- and a raise at conftest import is an
-    ``ImportError while loading conftest``, which aborts the WHOLE pytest
-    session rather than this directory. Measured: with a bogus
-    ``TAN_RUST_BINARY``, ``pytest tests/parity tests/core`` collected zero
-    tests and exited rc=4, so the repo's own ``python -m pytest tests -q``
-    gate would have reported nothing at all. Resolving in the fixture keeps
-    the blast radius on ``tests/parity``, which is what it is about.
-    """
-    rust = rust_binary()
-    if rust is None:
-        return
-    proc = subprocess.run([rust, "--version"], capture_output=True, text=True, encoding="utf-8")
-    assert proc.returncode == 0, f"{rust} is not a working tan binary"
-    stdout = proc.stdout.strip()
-    assert stdout == PINNED_ORACLE_VERSION, (
-        f"resolved oracle {rust!r} reports {stdout!r}, not the pinned "
-        f"{PINNED_ORACLE_VERSION!r} this whole parity suite is measured "
-        "against. oracle.rust_binary() picks the MOST RECENTLY BUILT of "
-        "target/{release,debug}/tan, so a resolved-but-wrong binary means "
-        "either an inverted or TIED mtime between the two profiles (a tie "
-        "raises inside rust_binary() itself -- see that function) or an "
-        "explicit TAN_RUST_BINARY naming the wrong one. Rebuild or remove "
-        "the stale profile, or set TAN_RUST_BINARY=<path to the correct "
-        "build> explicitly."
-    )
-
-
-# ---------------------------------------------------------------------------
-# The SUBJECT under test, pinned the same way the ORACLE is (tan-cli#423).
+# The SUBJECT under test, pinned the way the ORACLE used to be (tan-cli#423).
 #
-# `pinned_oracle` above stops the suite measuring the wrong oracle. Nothing
-# stopped it measuring the wrong SUBJECT: `import tan` and `python -m tan`
+# `pinned_oracle` -- retired with the oracle itself in tan-cli#269 -- stopped
+# the suite measuring the wrong ORACLE. Nothing stopped it measuring the wrong
+# SUBJECT, and that half is still live: `import tan` and `python -m tan`
 # both resolve through `sys.path`, so whichever `tan` is INSTALLED wins
 # whenever the repo's own `python/` is not first. On a developer box with an
 # editable install pointing at a second checkout, that is a completely
@@ -198,11 +655,22 @@ def pinned_oracle() -> None:
 #
 # Two halves, because there are two ways in:
 #   * IN-PROCESS `import tan` -- asserted below, and a mismatch FAILS the
-#     session rather than skipping, for the reason `pinned_oracle` gives.
+#     session rather than skipping: a quiet skip would hide exactly the gap
+#     this fixture exists to surface.
 #   * SPAWNED `[sys.executable, "-m", "tan", ...]` -- 26 test files do this,
 #     and a child resolves through its OWN sys.path, so asserting in this
 #     process would not touch them. `PYTHONPATH` is prepended instead, which
 #     is inherited by every child regardless of cwd or how the argv is built.
+#
+# The `__file__`-resolution assertion below is necessary but not sufficient
+# (tan-cli#665): it proves the module object THIS process imported resolves
+# under `repo_python`, and says nothing about whether `sys.executable` -- the
+# interpreter every spawned child runs under -- can import `tan` at all. An
+# executable missing a dependency, or with no `tan` on its path, passes the
+# `__file__` check trivially (this process's own import already succeeded)
+# and then fails in the spawned-child tests as unrelated-looking
+# `ModuleNotFoundError` / non-zero-exit failures instead of one message here.
+# The second probe below closes that gap by spawning `sys.executable`.
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session", autouse=True)
 def tan_under_test() -> None:
@@ -238,3 +706,147 @@ def tan_under_test() -> None:
         "of exactly this (tan-cli#423). Run pytest from `python/`, or "
         "`pip uninstall alp-tan`, or set PYTHONPATH to this repo's `python/`."
     )
+
+    # Second, independent probe (tan-cli#665): does `sys.executable` -- the
+    # interpreter every spawned-child test runs under, via the PYTHONPATH
+    # prepended above -- import `tan` at all? Not redundant with the
+    # `__file__` assertion above: that one proves only that THIS process's
+    # import resolved correctly.
+    # `-m tan --version`, not `-c "import tan"`: `tan/__init__.py` is empty, so
+    # a bare `import tan` succeeds on any interpreter the PYTHONPATH above
+    # reaches, third-party dependencies or not. The children run `-m tan`,
+    # which pulls `tan.__main__` and its typer/pydantic chain -- that is the
+    # import that has to work.
+    probe = subprocess.run(
+        [sys.executable, "-m", "tan", "--version"],
+        env=os.environ,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, (
+        f"`{sys.executable} -m tan` failed (exit {probe.returncode}):\n"
+        f"{probe.stderr}\n"
+        "The spawned-child tests in this suite launch "
+        f"[{sys.executable!r}, '-m', 'tan', ...], and that interpreter must "
+        "be able to import tan for those to run at all -- when it can't, "
+        "the failure shows up as unrelated-looking errors deep in the suite "
+        "instead of one message here. Fix it by creating a "
+        "venv for this interpreter, `pip install -e ./python` into it, and "
+        "running pytest from that venv."
+    )
+
+
+# ---------------------------------------------------------------------------
+# The DEBUG/FLASH PROBE INVENTORY, made a property of the test rather than of
+# the host (tan-cli#603).
+#
+# A bench host genuinely has `JLinkExe`, `openocd`, `pyocd` and `west`
+# installed; a CI runner has none of them. Every which()-gated branch that
+# turns on one of those identities therefore answers DIFFERENTLY in the two
+# places, silently. tan-cli#600 is what that costs: seven
+# `test_flow_d_preflight_*` cases green on the bench host and red on
+# ubuntu-latest, windows-latest AND macos-latest at once -- a false negative
+# that does not merely fail to warn, it points the next hour of debugging at
+# "a CI problem".
+#
+# Measured on the tip this landed at, by instrumenting tan's three resolution
+# seams (`doctor_cmd.on_path`, `tool_lookup.resolve_tool`, `shutil.which`)
+# across two full suite runs: 34 tests took a DIFFERENT BRANCH on the two
+# PATHs -- every `_collect` case in `tests/commands/test_doctor_command.py`,
+# three in `tests/gates/test_doctor_check_scope.py`, and one in
+# `tests/commands/test_support_bundle_command.py`. Identical outcome (3710
+# passed either way), different meaning; and on the bench host those runs
+# really do spawn `/usr/bin/JLinkExe -?` and `west --version`.
+#
+# SURGICAL, deliberately. `empty_tool_inventory` below removes EVERYTHING,
+# which is right for one test and wrong for the suite: measured, a full run
+# under a PATH holding only `sh bash git which env ls cat uname` fails 36
+# tests that need real `python3`/`sleep`/`mktemp`/`sed`/`curl`/`tar`/
+# `sha256sum` -- tools a CI runner has. So only the identities a runner
+# genuinely lacks are removed, and `tests/gates/test_probe_tool_inventory.py::
+# test_ordinary_host_tooling_is_untouched` holds this to that.
+# ---------------------------------------------------------------------------
+#: The probe/flash/Zephyr-meta identities tan resolves through `on_path` /
+#: `resolve_tool` / `shutil.which` that a GitHub runner never has installed.
+#: Deliberately NOT `git`/`cmake`/`ninja`/`python3`/`xz`/`wget`/`dd`/`gzip`/
+#: `addr2line`/`7z`: a runner HAS those, so removing them would invent a new
+#: divergence in the opposite direction rather than close this one.
+PROBE_TOOLS: frozenset[str] = frozenset(
+    {
+        # J-Link, all three names `doctor_cmd._collect` tries in order.
+        "JLinkExe",
+        "JLink",
+        "JLinkGDBServerCL",
+        "JLinkGDBServer",
+        # The other two flash back-ends `flash_cmd` probes for.
+        "openocd",
+        "pyocd",
+        # Zephyr's meta-tool: the single biggest divergence measured (74
+        # resolutions across the suite on the bench host, none on CI).
+        "west",
+        # Emulator + image writer, same class: probed by `renode_cmd` /
+        # `flash_cmd`, absent from every runner.
+        "renode",
+        "bmaptool",
+        # Zephyr-SDK-only; `faultdecode_cmd` tries it ahead of the ordinary
+        # `llvm-addr2line`/`addr2line` pair, which are NOT listed here.
+        "arm-zephyr-eabi-addr2line",
+    }
+)
+
+
+# ---------------------------------------------------------------------------
+# A PATH that resolves NOTHING. Lifted here from `tests/parity/oracle.py` when
+# tan-cli#269 deleted that module: the helper was never about the oracle, and
+# its one surviving caller (`tests/test_cli_skeleton.py`) uses it on the
+# PYTHON `tan`.
+# ---------------------------------------------------------------------------
+def empty_tool_inventory(scratch: Path) -> str:
+    """A ``PATH`` value under which every PROBED tool reports absent.
+
+    Any ``shutil.which`` / ``doctor_cmd.on_path`` probe run against this
+    directory finds nothing -- ``west`` for the west-forwarding verbs,
+    ``git``/``cmake``/``ninja``/``python3``/``xz``/``wget`` for
+    ``support-bundle.hostPrerequisites``, and any other which()-gated case's
+    absent-tool branch -- so a test's answer does not depend on what the host
+    running it happens to have installed (tan-cli#313, tan-cli#324).
+
+    Seeds the directory with exactly one file: a symlink to the REAL ``which``
+    this host resolves on its own PATH, POSIX only (a no-op on Windows, whose
+    probe walks ``%PATH%`` by hand and never spawns an external ``which`` at
+    all). A directory that is genuinely, literally empty is NOT a clean
+    "nothing on PATH" answer on POSIX: a probe that resolves a tool by
+    SPAWNING ``which <tool>`` has to find ``which`` itself via this SAME
+    (test-controlled) PATH. An empty directory cannot resolve ``which``
+    either, so the probe fails before it ever answers the question asked --
+    measured directly: a PATH holding every one of ``support-bundle``'s six
+    required tools but NOT ``which`` still reports all six missing, and
+    copying a working ``which`` in (touching nothing else) makes that same
+    warning vanish entirely. Seeding it is what makes "everything missing" a
+    GENUINE probe that ran and found nothing, rather than a degenerate one
+    that could not run at all.
+
+    REPLACES ``PATH`` outright rather than prepending: prepending would still
+    let a REAL tool further down the host's own PATH be found, which is
+    exactly the host-dependence this exists to remove.
+    """
+    stub_dir = scratch / "empty-path"
+    stub_dir.mkdir(exist_ok=True)
+    if sys.platform != "win32":
+        # The seed is NOT optional -- see the docstring. Refuse rather than
+        # silently return a PATH whose "everything missing" answer is an
+        # artefact of an unresolvable `which` spawn (tan-cli#313, #324).
+        real_which = shutil.which("which")
+        if real_which is None:
+            raise RuntimeError(
+                "empty_tool_inventory() cannot seed `which` into the stub PATH: "
+                "shutil.which('which') returned None on this POSIX host. Without "
+                "it a tool probe cannot run at all and reports every tool missing "
+                "for the wrong reason -- refusing rather than pinning that "
+                "artefact."
+            )
+        link = stub_dir / "which"
+        if not link.exists():
+            os.symlink(real_which, link)
+        assert link.exists(), f"failed to seed `which` into {stub_dir}"
+    return str(stub_dir)

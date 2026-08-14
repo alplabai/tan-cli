@@ -134,7 +134,16 @@
       "consumerEffect": "None today. Reserved for alp-sdk-vscode to distinguish 'this SoM's SDK-published debug-probe identity exists but does not include a value for this server's field yet' (e.g. every Alif variant today, for `openocd_config`) from the generic 'still needs resolution' case, which fires for the same reason a pre-build project has no `device` at all.",
       "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
       "literal": "\"debug-config.sdk-identity-key-absent\"",
-      "note": "alp-sdk#1026 review finding #4: the generic 'Placeholder fields...' preview note is real but unspecific, and names `device` even for e.g. an OpenOCD draft that carries no `device` key at all. Fires when `fill_debug_probe_identity_from_sdk` found a `variants[].debug` block for the resolved SoC variant but the field `server_identity_field` maps to this server is still an unresolved placeholder in the draft. Emitted on BOTH `--preview` and a write -- this is advisory about resolution state, not about what a write changed on disk, unlike its `sdk-identity-overwrite` sibling above."
+      "note": "alp-sdk#1026 review finding #4: the generic 'Placeholder fields...' preview note is real but unspecific, and names `device` even for e.g. an OpenOCD draft that carries no `device` key at all. Fires when `fill_debug_probe_identity_from_sdk` found a `variants[].debug` block for the resolved SoC variant but the field `server_identity_field` maps to this server is still an unresolved placeholder in the draft. Emitted on BOTH `--preview` and a write -- this is advisory about resolution state, not about what a write changed on disk, unlike its `sdk-identity-overwrite` sibling above. tan-cli#489 (4) narrowed this code's own emit condition on the Python side: it no longer fires for `device` (jlink) when the reason `resolution.device` stayed unresolved is that no core id indexed the SDK's per-core `jlink_device` map at all -- `debug-config.sdk-identity-core-unresolved` (below) covers that instead, since 'the SDK publishes no value for this field' is the wrong cause to report when the lookup never had a usable key to try. `configFiles`/`targetId` are not core-keyed, so this code is unaffected for those two fields."
+    },
+    {
+      "code": "debug-config.sdk-identity-core-unresolved",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to distinguish 'device stayed unresolved because no core id indexed the SDK's per-core identity map' (no --core given and no prior build, OR an explicit --core the map has no entry for) from 'the SDK publishes no device value for this SoM at all' (`sdk-identity-key-absent`) -- the two have the same working remedy (pass --core naming a published core) but a different named cause.",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#489 (4): split off `debug-config.sdk-identity-key-absent`, which used to fire for this case too -- misattributing a missing LOOKUP KEY as a missing PUBLISHED VALUE. Reproduced on a never-built E1M-AEN801 project with no --core: `metadata/socs/alif/ensemble/e8.json` publishes `jlink_device: {\"m55_hp\": \"Cortex-M55\", \"m55_he\": \"Cortex-M55\"}`, yet the old message said the identity 'does not include a value for `device` yet', naming no remedy, when `--core m55_hp` resolves it immediately. Scoped to `device`/jlink only: `configFiles` (openocd) and `targetId` (pyocd) are not keyed by core in `variants[].debug` at all (`fill_debug_probe_identity_gaps`), so `sdk-identity-key-absent` remains correct for those. This is a faithful-port gap, not a port regression: the identical message and emit condition exist in the frozen Rust oracle (`crates/tan-cli/src/commands/debug_config.rs:203`+`:439`); this Python-only split does not touch `crates/`. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
     },
     {
       "code": "bootstrap.workspace-guard",
@@ -356,13 +365,40 @@
       "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the wrong verdict for a precondition the command can name and the caller can fix, the same distinction tan-cli#262 settled for `tan validate`. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
     },
     {
+      "code": "debug-config.project-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config` refusing a `--project` that names a directory which does not exist -- exits `ValidationFailure` (2).",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#476: the command used to CREATE the directory and write a `launch.json` into it at exit 0 with `issues: []`, because the writer calls `mkdir(parents=True)`. A deliberate divergence from the Rust oracle, which does the same thing (measured); no parity CASE pins it, since all four frozen `debug-config` argvs run in an existing work_dir. Granularity note (tan-cli#508 review): this earns its OWN code rather than folding into `debug-config.invalid-argument` below, because a missing/non-directory `--project` is checked before target/server are even parsed -- it is a precondition on the WORKSPACE, the same class as `build-manifest-missing` above, not a flag-value shape check. Covers HALF (a) of tan-cli#476 only; half (b) is `debug-config.target-kind-unresolved` below."
+    },
+    {
+      "code": "debug-config.target-kind-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config` refusing a project that offers NOTHING to infer `--target-kind` from -- no `build/system-manifest.yaml` and no `board.yaml` declaring `som.sku` -- exits `ValidationFailure` (2), naming the four target kinds the caller can pass instead.",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#476 half (b), the other half of `debug-config.project-not-found` above. #508 stopped a non-existent `--project` being CREATED and written into; a directory that ALREADY exists but is not a project (the \"ran it from the wrong cwd\" case the issue names in its own words) still received an `Alp: Native Sim Debug` launch configuration at exit 0 with `issues: []`, because `parse_target_kind(None)` defaults to `native-host`. That default is only defensible where the project says so, which `infer_target_kind` answers with a real `NATIVE_HOST` of its own (every slice a build produced is native_sim) -- this code covers ONLY its `(None, None, None)` no-signal answer, so a project with any signal at all is untouched and `--target-kind native-host` still asks for that draft on purpose. Its own code rather than folding into `debug-config.build-manifest-missing`: that one fires when the project DOES declare a real SoM and only the build is missing (remedy: `tan build`), whereas this fires when there is no evidence of a project at all (remedy: `--target-kind`, or a different directory). A deliberate divergence from the Rust oracle, which exits 0 with the native-host draft (measured: `target/debug/tan --format json debug-config --project <empty-dir> --preview`); no parity CASE and no frozen conformance golden pins it, since all five frozen `debug-config` argvs pass `--target-kind` explicitly and never reach the inference path. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`."
+    },
+    {
+      "code": "debug-config.invalid-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config` refusing a flag VALUE outside the accepted set -- `--target-kind`, `--server`, an unsupported target+server pairing, `--svd`, `--gdbserver-address` -- at `ValidationFailure` (2).",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#477: these five all reported `debug-config.internal-failure` at exit 5, which tells the user tan crashed and tells CI a typo is a tool defect. tan-cli#462 made that argument for the four PRECONDITIONS and reclassified them; the argument-validation half was not in that change, so `--core bogus` -- quoted in #462's own body -- still exited 5 in v0.5.1. A deliberate divergence from the Rust oracle (measured: exit 5); the frozen parity CASE is retired in the same commit with the reason recorded. Exit 5 stays for the `except Exception` backstop and a malformed EXISTING launch.json."
+    },
+    {
       "code": "debug-config.core-unknown",
       "status": "reserved",
       "severity": "error",
       "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
-      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--target-kind` is omitted and an explicit `--core` names no slice in this project's own `build/system-manifest.yaml` -- exits `ValidationFailure` (2), naming the cores the build actually produced.",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when an explicit `--core` names no core this project has -- whether `--target-kind` was omitted (inferred, then refused by `infer_target_kind`'s own guard) or given explicitly (tan-cli#489 (5): `infer_target_kind` never runs on that path, so the SAME check is applied again once target/server are resolved) -- exits `ValidationFailure` (2), naming the cores it could have meant. Two ordered authorities behind one code (tan-cli#477 major 2): a `build/system-manifest.yaml`, when one exists, names the cores the build actually produced; with no manifest at all the SDK's published core list for this `board.yaml`'s `som.sku` stands in, and the message names those instead.",
       "emittedBy": "python/tan/commands/debug_config_cmd.py",
-      "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the caller's own typo or a stale `--core` value, not a tan-side crash. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
+      "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the caller's own typo or a stale `--core` value, not a tan-side crash. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from. tan-cli#489 (5) widened this entry's own `consumerEffect` (not a new code) to also cover `_explicit_core_unknown_failure`'s call site: the pre-fix behaviour for `--target-kind` EXPLICIT + a `--core` matching no slice was silent exit 0, an unresolved `device`, and an `executable` pointing at a path this project's build never produced -- `debug-config.core-unknown` was already the right code for 'this cause', just unreachable from that one call path. tan-cli#477 major 2 widened the same entry once more, again with no new code: #489's guard only fired when a build manifest existed, so with NO manifest an unknown `--core` still exited 0 with `device` left as the literal `<resolved-device>` -- a launch.json that looks valid and fails later in the debugger. #508 recorded that half as deliberately open because `--core` pre-build also selects which core's SDK-published debug-probe identity to resolve (alp-sdk#1026), which 'a guard keyed only on \"does a manifest exist\" cannot tell apart from a typo without also consulting the SDK's own published core list'; it now consults it (`_sdk_published_cores`: the SoC JSON's `cores[].id` unioned with the `variants[].debug.jlink_device` keys, off the same `--sdk-root` the identity fallback already reads). Both arms refuse only what they can PROVE unknown -- no slices and no resolvable SDK core list means 'cannot be asked', which stays silent. Server-independent, unlike the `sdk-identity-*` info codes: measured pre-fix, `--server openocd` reported only `sdk-identity-key-absent` and `--server pyocd` reported `issues: []`."
     },
     {
       "code": "debug-config.target-kind-ambiguous",
@@ -417,6 +453,14 @@
       "emittedBy": "crates/tan-cli/src/commands/build/execute/mod.rs",
       "literal": "code: \"build.sdk-switch-pristine-failed\"",
       "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.configure-cache-reset",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/execute.py",
+      "note": "Added by tan-cli#655: `tan build` was reporting success while silently ignoring a newly-added `app.overlay` (or a removed one, or a new `boards/<board>.conf` fragment) on an already-configured project -- CMake's own `DTC_OVERLAY_FILE`/`CONF_FILE` cache (set the first time Zephyr's `configuration_files.cmake` auto-discovery ran, `if(NOT DEFINED ...)`) never re-discovers a file that did not exist at that first configure, no matter how many times tan reconfigures afterward. `execute._maybe_reset_stale_configure_cache` detects the discoverable set changing (a same-process fingerprint, not a plan field) and appends `-UDTC_OVERLAY_FILE -UCONF_FILE` to the next configure; this code carries that reset into the JSON envelope (mirroring `build.sdk-switch-pristine`'s own reasoning) so a `--format json` caller sees it too, not only the `on_output` stream. Python-only: no `crates/` equivalent exists or ever will (crates/ is frozen). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "build.slice-failed",
@@ -507,6 +551,14 @@
       "emittedBy": "crates/tan-cli/src/commands/flash/mod.rs",
       "literal": "code: \"flash.confirm-required\"",
       "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.dpidr-preflight-unarmed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#520's review round (design point): the read-only DPIDR preflight (flash_args.expect_dpidr) stays OPTIONAL -- no shipped alp-sdk preset carries a SW-DP ID for tan to require, and tan is forbidden from deriving one (the I-26 reasoning _resolve_jlink_device documents) -- but a confirmed, real write with expect_dpidr absent used to run with no wrong-board guard AND no signal that it had none. EMISSION CONDITION, as of tan-cli#609: a real, confirmed write on a method flash_plan.DPIDR_GUARD_COVERAGE marks True -- i.e. one whose J-Link Commander session tan composes itself, so expect_dpidr would arm a real check -- with expect_dpidr absent. That is alif_mram_jlink (Flow D) and swd_probe's J-Link arm today; swd_probe's openocd/pyocd arm is excluded because an armed preflight is impossible there, and the other five registered methods because tan composes no probe session for them. #520 shipped this scoped to swd_probe alone, which #609 measured leaving the AEN's Flow D MRAM write -- the customer-facing flash path -- emitting no advisory at all; do not re-derive the scope from a method name, read the table (tests/gates/test_dpidr_guard_coverage.py pins it to the backend registry). The message names the entry's own method and gives that method's remedy (Flow D pairs expect_dpidr with jlink_device; swd_probe arms off expect_dpidr alone). Letting a --format json consumer tell an unguarded write from an ordinary clean flash without making the field mandatory. Deliberately a warning, not an error: the write itself is not wrong, only unconfirmed as to which board received it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "flash.entry-failed",
@@ -648,9 +700,8 @@
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
-      "emittedBy": "crates/tan-cli/src/commands/pinmux.rs",
-      "literal": "code: \"pinmux.sdk-root-unresolved\"",
-      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "emittedBy": "python/tan/commands/pinmux_cmd.py",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. `crates/` was deleted by tan-cli#601; the real emit site is now `pinmux_cmd.py`'s pinmux-context resolution, fixed by this PR (tan-cli#497 defect 7) to name the rejected `--sdk-root` value via `rejected_sdk_root_message` rather than the old bare string. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "pinmux.table-empty",
@@ -841,6 +892,14 @@
       "note": "tan-cli#284: fires from `rollback_relocation_after()` when a LATER phase (venv/west) fails after the checkout was already relocated, and the rollback itself is reported -- whether the move-back and the pointer restore both succeeded, only the pointer restore failed, or the move-back itself could not complete. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "cli.interrupted",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/cli.py",
+      "note": "tan-cli#491 defect 4: the ONE envelope a `--format json` run interrupted by Ctrl-C reports. SIGINT does not reach `tan.cli.main` as a raw `KeyboardInterrupt` -- Typer catches it and re-raises `Exit(130)`, which Click turns into `sys.exit(130)` -- so before this code existed an interrupted run was indistinguishable from any other non-zero exit with no envelope and fell into the `cli.parse-error` fallback: an envelope asserting the COMMAND LINE was invalid for a run that was already programming a board, at an `exitCode` of 130, outside the contract's fixed 0-5 set. The envelope reports `exitCode` 1 (`ExitCode.RUNTIME_FAILURE`) and the process exits 1 to match, since the wire invariant is `process exit code == envelope.exitCode` (tan-cli#327); TEXT mode is untouched and still exits 130 through Click's own machinery. A DELIBERATE divergence from the frozen v0.4.1 oracle, which has no SIGINT handler at all and simply dies from the signal with zero bytes on stdout -- the port cannot copy that and still keep `stdout is the envelope channel`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "cli.command-deferred",
       "status": "reserved",
       "severity": "error",
@@ -871,6 +930,38 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/build_cmd.py",
       "note": "Every slice was skipped rather than any slice failing outright -- a distinct code from the `build.slice-failed` sibling beside it. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.unsupported-build-root",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "tan-cli#566: the plan's top-level `buildRoot` names a tree other than `build`, so the run would materialise, dispatch and write `system-manifest.yaml` somewhere `tan flash`/`size`/`image`/`renode` never look -- all four anchor on `<project>/build/system-manifest.yaml`. Measured on `dev` before the fix: a valid plan with `buildRoot: \"out\"` was ACCEPTED, wrote `out/system-manifest.yaml`, and left `build/system-manifest.yaml` byte-identical to the previous run's (md5-verified), so a following `tan flash` would program the PREVIOUS run's artefact onto silicon. The oracle (`tan 0.4.1`) already refused this at RuntimeFailure; neither the check nor the code was ported. Accepted spellings are a PATH-COMPONENT match, measured ten ways against the oracle's live-emit native path: `build`, `build/` and `./build` pass; `out`, `build/sub`, `BUILD` (case-sensitive), the empty string, `..`, `../build` and an absolute path are refused -- so `build_cmd._build_root_is_consumer_default` compares `Path(...).parts`, not strings. NATIVE mode only, also measured: the oracle accepts a non-`build` root under `--materialise` and `--plan`, which write no manifest and so carry none of the hazard. Escaping shapes were already caught downstream by `materialise.confine_to_build_root`; the gap this closes is exactly the plain-relative non-`build` name. Registered per tan-cli#224's Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.app-dir-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "tan-cli#483: `cores.<id>.app` resolved to a directory that does not exist. Before this code, a bad `app:` was never refused at all -- `tan/planner/orchestrator.py`'s `_zephyr_app_dir` (FROZEN to that unit) falls back to the app dir's PARENT the moment its own `CMakeLists.txt` probe fails to find one at the configured path, which for a nonexistent path resolves to the project root, silently, naming neither the configured path nor the substitution -- so `west build`/`cmake` ran against the wrong source tree and failed deep inside CMake with no path back to the real cause. Checked in `build_cmd._missing_app_dirs`, held back from dispatch the same shape a `${TOOLCHAIN_ROOT}` demotion is (`_dispatch`), so ONE slice with a bad `app:` fails without taking a project's other, valid cores down with it. Always `\"error\"` (not policy-driven skip/warn, unlike the missing-tool/unknown-backend siblings beside it): a bad `app:` is a plan defect, not a host-provisioning gap, and letting it skip forward silently is the exact failure this code exists to stop. EXISTENCE only -- the schema text (`metadata/schemas/board.schema.json` `$defs/core_entry/properties/app`) also asks for `prj.conf`/`CMakeLists.txt` inside the directory, deliberately not enforced: 96 of 105 enabled zephyr/baremetal core entries across alp-sdk `dev`'s own examples name `app: ./src`, a sources-only directory with neither file, which is the shipped convention `_zephyr_app_dir`'s own parent-fallback exists to serve (review round: independently re-counted at 105, not 104 -- one newer example entry, not a defect in the original count). A relative `appDir` is anchored on `--build-root` (the plan's own path-anchoring contract, issue #596), never the tan process's own CWD; a slice the planner already refused a command for (`command: null`) is never checked, since nothing was going to dispatch for it either way; an existing non-directory path is reported \"is not a directory\", not \"does not exist\". The surviving silent substitution -- `_zephyr_app_dir`'s exists-but-no-`CMakeLists.txt` parent fallback, `tan/planner/orchestrator.py:397-401` -- is tracked separately as tan-cli#517 (`planner/**` is out of this code's scope). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.app-dir-substituted",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "tan-cli#517: `cores.<id>.app` names a directory that EXISTS but carries no `CMakeLists.txt`, so `tan/planner/orchestrator.py`'s `_zephyr_app_dir` (FROZEN to that unit) silently substituted its PARENT -- naming neither the configured path nor the substituted one anywhere in the envelope. On a multi-core project that parent is the project root, which is very often the OTHER core's application, so a typo in one core's `app:` that still resolves to an existing directory built the wrong source tree and reported success. The sibling half -- an `app:` that does not exist at all -- is `build.app-dir-missing` (tan-cli#483). This one is deliberately NOT a refusal and NOT an error: the fallback is the shipped convention, 96 of 105 enabled zephyr/baremetal core entries across alp-sdk `dev`'s own examples are `app: ./src` (sources-only, `CMakeLists.txt` one level up), so refusing it would break 91% of the SDK's examples -- tan-cli#517 asks for the substitution to be ANNOUNCED, not stopped. Severity is `info` rather than `warning` for that same measurement: it fires on the CORRECT, shipped shape on nearly every build, and a per-build `warning` in a consumer that renders `issues[]` on an ok build would be an alarm on the normal case rather than a signal (`debug-config.legacy-entry-migrated` is the same shape -- a silent substitution made visible). It never changes the exit code, never holds the slice back from dispatch, and is emitted only for a slice that actually dispatches: a `${TOOLCHAIN_ROOT}` demotion or a `build.app-dir-missing` refusal on the same index wins instead, so the two never disagree about one slice. `zephyr` only -- `os: baremetal` assembles `cmake -S <app>` from `_resolve_app_path` with no `CMakeLists.txt` probe, so it has no substitution to announce. Registered by tan-cli#224's Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.cross-drive-workspace",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "tan-cli#697: a project and its `tan bootstrap`-created Zephyr workspace on two different Windows DRIVE LETTERS. `execute.py`'s tan-cli#307 `_pin_west_workspace` pins `west build`'s own spawned cwd to the resolved workspace so west's ancestor-`.west` walk lands on the right one -- but `west build`'s own source-directory sanity check (`_sanity_check_source_dir`, upstream `scripts/west_commands/build.py:534`, frozen third-party code this repo does not own) then calls `os.path.relpath(self.source_dir)` with no explicit `start`, which defaults to the pinned WORKSPACE cwd, not the project. On Windows `os.path.relpath` RAISES rather than returning a path when its two arguments live on different drive letters (`ValueError: path is on mount 'E:', start on mount 'C:'`, reproduced verbatim in the issue) -- a raw traceback previously reached the user with only the generic `build.slice-failed` in the envelope. There is no fix reachable from tan's own side of the seam (`west` is an upstream pip dependency, not `crates/`/`tan/planner`), so `tan.core.plan_exec.cross_drive_source_refusal` (pure argv/path logic, no IO -- moved out of `execute.py` to keep that command/IO module's own size down) REFUSES the slice before `west` is ever spawned, naming both mounts; `build_cmd._cross_drive_issues` promotes that per-slice reason into this coded top-level issue. Registered by tan-cli#224's Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "clean.internal-failure",
@@ -937,6 +1028,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.entries-skipped",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#487 defect 7: `_flash_entry` can legitimately skip a target it dispatched to (an unresolved `TBD` flash_arg, no flash_method, or a missing tool under `--skip-missing-tools`) -- a real per-entry diagnosis already in `data.entries[]` -- but the aggregate 'did anything flash' check only knew about the planner's OWN skip buckets (`plan.refused`/`plan.refused_skipped`), which an entry-level skip never populates, so it fell through to `flash.nothing-matched` on a run that carried no `--core`/`--helper` filter and DID match a target. This code names the real cause instead. Deliberately a warning, not an error: `ok`/exit code stay SUCCESS for this shape (see `test_tbd_sentinel_never_reaches_a_flasher` and its siblings in `python/tests/commands/test_flash_command.py`) -- unlike the build-skip sibling `flash.nothing-flashed` below, an entry-level skip is not a run that failed to program a real target, it is a target that was never a customer flash target to begin with (an unfinished helper's wiring, a host missing a tool it was told to tolerate). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "flash.internal-failure",
       "status": "reserved",
       "severity": "error",
@@ -953,6 +1052,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.recovery-flash-armed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#611. A helper MCU whose SoM preset declares `flash_policy: recovery_only` is programmed by Alp Lab in production and is customer-flashable ONLY to recover a bricked device, with Alp Lab-supplied binaries. `tan flash` declines it on an ordinary run; it is reached only by `--helper <name> --recover`, and this code is emitted when that combination lets a write through. Deliberately a warning, and the entry's own status/rc are untouched: the write is the sanctioned path, not a failure -- what the code carries is that a normally-declined target was authorised, which an `ok` entry's prose alone is not something a `--format json` consumer can key off. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "flash.sdk-root-not-found",
       "status": "reserved",
       "severity": "error",
@@ -967,6 +1074,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/flash_cmd.py",
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.swd-probe-write-unconfirmed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#540. swd_probe's J-Link arm asserted `{device} flashed via J-Link @ {base}` on JLinkExe's exit code ALONE, and jlink_commander_script gave that arm no `verifybin` at all -- so a load into a core that never halted reported a clean flash with nothing having checked the bytes landed. tan-cli#522 established on real E1M-AEN801 silicon that a halt failure does NOT make JLinkExe exit non-zero even with -ExitOnError 1 (which this arm carries), so the exit code cannot tell the two runs apart. The entry's own message is now qualified from the transcript (_swd_probe_qualified_message), and this code is the machine-readable half: an `ok` entry whose prose carries a caveat is not something a --format json consumer can key off. NARROWED by tan-cli#540 defect 2 (the verifybin half, landed after this code was registered): jlink_commander_script now emits a real `verifybin` read-back for a raw .bin artefact, so THAT arm's write is confirmed by the tool and this code no longer fires for it -- a .bin write that did not land now fails the run outright (verifybin + -ExitOnError 1), and one whose core merely refused to halt keeps the verified claim while saying the target was never taken through a halted reset. Independently NARROWED by the #540/#541 review's MAJOR 1: the halt-marker search is POSITIONAL (_swd_probe_halt_markers), so on BOTH arms a marker printed after JLinkExe reported the load completing speaks to the post-load r/g -- which jlink_commander_script turns on by default -- and not to the write, and this code does not fire for it. What is left is a transcript that names a halt failure with no completed load before it, on the ELF/HEX arm only. This code now fires only for an ELF/HEX artefact, which takes `loadfile` -- an address-less load that `verifybin` cannot check, and for which no `verifyfile` is emitted because nothing in this repo has measured that the shipped Commander accepts it. So the code is scoped to the genuinely unverifiable path rather than retired: a backend that cannot check its own write still owes the operator that sentence. Blast radius is GD32 bridge flashing -- flash_method: swd_probe appears in alp-sdk metadata solely under helper_firmware: (name: gd32_bridge, chip: gd32g553) on E1M-V2N101, E1M-V2M101 and E1M-V2M102. Deliberately a warning, not an error, and the entry stays status ok with rc 0: the write may well have landed (a busy-resident core is the documented benign shape on the Flow D side) and there is no bench evidence that a GD32 halt failure means a failed write, so failing the run would trade an overstatement for a false negative on a command that writes hardware. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "generate.in-process-unavailable",
@@ -1217,12 +1332,20 @@
       "note": "The `validate.` prefix is applied by the local `fail()` closure. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "validate.board-yaml-unreadable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "note": "The `validate.` prefix is applied by the local `fail()` closure. Added by tan-cli#498 defect 3, splitting the `--offline` read failure (a directory named board.yaml, a cp1252/latin-1 file, a permission error) off `validate.internal-failure` and off exit 5. Exit 5 said `tan` had crashed, for an error the inline comment on the same line already called the user's to fix, and disagreed with the SPAWN path, which reports the identical file as exit 2 `validate.failed` (measured, both directions). Now exit 2 (VALIDATION_FAILURE) with `data.outcome: \"failed\"`, which is what this command's own outcome->exit mapping says that outcome is worth; text mode prints its own verdict line (`validate: board.yaml could not be read`) rather than \"validation failure\", since nothing was validated -- the same treatment tan-cli#350 gave `validate.board-yaml-missing`, its sibling in the file-level-problem family. The frozen Rust oracle keeps exit 5 here; this is a deliberate divergence in the family of tan-cli#262 and commit 49a5fde. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "validate.internal-failure",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/validate_cmd.py",
-      "note": "The `validate.` prefix is applied by the local `fail()` closure; two call sites share it -- an unreadable/non-UTF-8 board.yaml, and `validate_board_text` raising unexpectedly. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `validate.` prefix is applied by the local `fail()` closure. ONE call site since tan-cli#498 defect 3 moved the unreadable-board.yaml case out to `validate.board-yaml-unreadable` at exit 2: `validate_board_text` raising something that is not a `BoardShapeError`, i.e. a genuine tan bug, which is what exit 5 means. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "validate.schema-violation",
@@ -1385,6 +1508,30 @@
       "note": "Constructed as the whole literal at a `ExplainError` call site in `explain_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "explain.catalog-unreadable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "note": "`tan explain --code` resolved an alp-sdk checkout but its `metadata/error-catalog.json` is absent, unreadable, not JSON, or wrong-shaped. DISTINCT from `explain.sdk-root-unresolved` on purpose: the checkout is fine and the message names the missing FILE plus the generator that rebuilds it (`scripts/gen_error_catalog.py`), and the envelope still carries the `sdk` block that answered. Constructed as the whole literal at an `ExplainError` call site (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches it yet, so renaming or dropping it is not a breaking wire change."
+    },
+    {
+      "code": "explain.code-unknown",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "note": "`tan explain --code` read the catalogue but the code is not in it. Sibling of `explain.template-unknown`/`explain.target-unknown`, one per selector kind. `data.suggestions` carries the same difflib shortlist the text line names, so a consumer gets the recovery options structured rather than having to re-parse a sentence; it is `[]`, not absent, when nothing was close. Constructed as the whole literal at an `ExplainError` call site. Pre-consumer."
+    },
+    {
+      "code": "explain.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "note": "`tan explain --code` with no alp-sdk checkout resolvable by any ladder tier. Severity `error` and exit 1, NOT `presets.sdk-root-unresolved`'s warning-plus-empty-lists: `presets` still has useful built-in defaults to return without a checkout, whereas a diagnostic code has exactly one source and answering from a vendored copy would answer confidently out of date (I-26/ADR-0017). The `sdk` key is ABSENT on this envelope -- nothing was resolved, so nothing is claimed. EMISSION CONDITION, as of tan-cli#627: fires both when the ladder's `resolve_sdk_root_ladder` returns no path at all (every tier empty) AND when its terminal `--sdk-root` tier returns a path with no `tan.core.shapes.SDK_MARKER` under it -- `resolve_sdk_root_ladder` itself does not check the marker on that tier (I-31: a typo'd flag must not fall through to a lower tier), so `bind_sdk` applies the check `--code` needs before treating the flag's target as a real checkout; without it an unmarked `--sdk-root` reached `resolve_code` and misreported as `explain.catalog-unreadable` (naming a generator to run inside a directory that was never an alp-sdk checkout). Both branches share this one code and message; the caller cannot distinguish 'no tier answered' from 'the flag answered wrong' from the envelope alone, which is acceptable because the remedy (`--sdk-root <path>` to a real checkout) is the same either way. Constructed as the whole literal at an `ExplainError` call site. Pre-consumer."
+    },
+    {
       "code": "explain.internal-failure",
       "status": "reserved",
       "severity": "error",
@@ -1487,6 +1634,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/generate_cmd.py",
       "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.overlay-not-owned",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "note": "tan-cli#501: a non-fatal `Issue`, not a `GenerateError` -- `boards/native_sim_native_64.overlay` already exists and lacks tan's own banner, but `native-sim-overlay` reached `targets` only via the bare/`--all` default set rather than an explicit `--target`, so the run drops that one target and continues (exit 0) instead of refusing the other eight the way an explicit ask still does (`generate.would-overwrite`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "generate.python-too-old",
@@ -1617,12 +1772,28 @@
       "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "init.sdk-root-invalid",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "note": "tan-cli#642. EMISSION CONDITION: an explicit `--sdk-root` was given AND the path it resolves to has no `scripts/alp_project.py` under it (`_is_sdk_checkout`) -- a typo'd path, or (the more realistic route) a previously-valid `--sdk-root` that `tan bootstrap` has since relocated. Fires on the TEMPLATE path only (`_sdk_root_flag_unresolved_issue`, called from `init()` alongside the other two SDK-resolution warnings); the `--from-example` path already hard-refuses the identical condition as `init.sdk-root-unresolved` (error, exit 2) before this could ever run, because an SDK checkout is not optional there. Severity `warning`, `ok:true`, `exitCode:0` -- the project still scaffolds; only `.alp/sdk-path` is not written, mirroring `_pin_sdk`'s own silent-skip for an invalid checkout. Before this code existed, `--sdk-root <bad path>` on the template path produced `ok:true`, `issues:[]`, `sdkPinned:null`, and no `.alp/sdk-path` -- indistinguishable on the wire from the ordinary case of no `--sdk-root` given at all, even though the README promises `init` pins the checkout in `.alp/sdk-path`. A LATER command then silently fell through to `~/.alp/sdk-default` -- some other project's last `bootstrap`, in a shared or multi-project setup. Constructed as the whole literal at a direct `Issue(...)` call (not an `InitError`, since this is a warning appended to a successful outcome, not a raised failure) in `init_cmd.py` (`_FULL_CODE_CALLABLES` need not cover this one -- it is a shape-1 literal site). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "init.sdk-root-unresolved",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/init_cmd.py",
       "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.som-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "note": "tan-cli#579. `--som` names a SoM family tan vendors no scaffold tree for (E1M-NX9* today), so a family-split template cannot be rendered for it. Before this code existed, `_family_bucket`'s `else` arm sent every such SKU onto the ALIF tree and `tan init --som E1M-NX9101 --template sensor-starter` wrote Alif content -- `preset: e1m-evk`, `chips: [tmp112]`, an `alp_e1m_aen801_m55_hp/...` README build line, and a CMakeLists.txt pinned to `--core m55_hp` next to a board.yaml declaring `m33` -- at ok:true/exit 0/issues:[]. Distinct from `init.invalid-som`, which means \"this TEMPLATE supports one SKU\" (iot-starter); this one means \"tan has no scaffold for this SoM family in ANY family-split template\". Constructed as the whole literal at an `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it. RETIRES when alp-sdk's scaffold catalog gains an NXP entry and the tree is vendored: fill in the `None` in `tan/core/scaffold.py`'s `_SOM_FAMILIES` and this stops firing."
     },
     {
       "code": "init.template-unreadable",
@@ -1817,6 +1988,14 @@
       "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "renode.no-console-output",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "note": "tan-cli#568: `_run`'s new `elif not lines_seen` branch. `--timeout 0` makes `run_renode`'s deadline already past when its read loop starts, so the loop breaks before dequeuing a single console line -- the same shape a genuinely silent clean exit produces at any timeout. Neither used to be its own outcome: with no `--expect` set, both fell through every post-spawn check straight to the implicit `ExitCode.SUCCESS`, reporting `ok: true` on a run that observed nothing. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "renode.run-failed",
       "status": "reserved",
       "severity": "error",
@@ -1911,6 +2090,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
       "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.libraries",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "note": "The ADR-0018 curated-library verdict for the selected project (tier + licence + whether each selection can be wired on this target), ported out of alp-sdk's `scripts/alp_cli/doctor.py::_check_libraries` under ADR-0020 end-state B -- a user-facing check belongs on the user command surface, which is `tan`. `severity` is `warning` and only ever `warning`: `libraries_check` never returns a `fail` status, because `tan build` already refuses an unwireable selection outright and a `fail` here would additionally cost exit 4. Emitted only when a project selects at least one curated library; a project selecting none produces no check and therefore no issue at all. The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.long-paths",
@@ -2281,6 +2468,14 @@
       "note": "Assembled by _doctor_issues's `f\"support-bundle.{doctor_cmd.kebab_check_name(c.name)}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.zephyr-sdk-available-for-host` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "support-bundle.redaction-skipped",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
+      "note": "Added by tan-cli#499. `_redact` scrubs the resolved home directory out of the WRITTEN bundle before the user attaches it, but it is refused wholesale when $HOME is a filesystem root -- Docker/OpenShift hand a uid with no /etc/passwd entry HOME=/, and replacing that unanchored rewrote every path separator in every string of the file (measured: exit 0, no warning, 88 `<home>` substitutions in one bundle -- of the illustrative shape `workspaceRoot: \"<home>srv<home>ci<home>work<home>...\"`, real paths elided). This code is what says the file went out UNREDACTED, in the envelope AND in text mode, so the refusal is never silent. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "doctor.fix-needs-sudo",
       "status": "reserved",
       "severity": "warning",
@@ -2482,6 +2677,15 @@
       "consumerEffect": "Distinguishes 'nothing to analyse' from a tan crash on the one refusal `faultdecode` has. Reachable only under `--format json`: the command's own `--json` is the unwrapped SDK report surface (see faultdecode_cmd.py's module docstring) and keeps writing the human error line to stderr, envelope-free, exactly as the forwarded child did.",
       "emittedBy": "python/tan/commands/faultdecode_cmd.py",
       "note": "Exit 2 (ValidationFailure), matching the `click.UsageError` the alp_cli original raised for the same input. Added by tan-cli#399, which made `--format json` emit tan's envelope with the decode report as `data`; without this the refusal path went out as `command: \"cli\"` / `cli.parse-error` while the success path emitted `command: \"faultdecode\"`. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "faultdecode.invalid-register-value",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code with `===` yet; registered so a fault-decode panel has a stable spelling to bind to",
+      "consumerEffect": "Separates 'that register value cannot be read' from both a successful decode and `faultdecode.no-registers`: the input was supplied, it was just not a register value, so re-running with the same paste will not help. The message names the offending FLAG and the offending VALUE verbatim, so a panel can highlight the field the user must fix.",
+      "emittedBy": "python/tan/commands/faultdecode_cmd.py",
+      "note": "Exit 2 (ValidationFailure), same as the sibling `faultdecode.no-registers`, and emitted through the same `_refuse` helper so both refusals agree with the success path about whether stdout is an envelope. Added by tan-cli#616: `_parse_hexint` used `int(text, 16)`, which accepts a leading `-`, so `--cfsr=-8200` rendered `\"0x-0008200\"`, decoded twelve flags that are not set out of Python's two's-complement sign extension, concluded \"Stack overflow\" and exited 0. A fault register is unsigned by construction. Covers all ten register/address flags (--cfsr/--hfsr/--dfsr/--bfar/--mmfar/--mmfsr/--bfsr/--ufsr/--pc/--lr). NOT used for a non-hex value (`--cfsr zz`), which stays a `typer.BadParameter` so the v0.4.1 oracle's exit-code parity for that input is preserved. DIVERGES from alp-sdk's `scripts/alp_cli/faultdecode.py`, which still decodes a negative CFSR at exit 0; the upstream should follow. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
     }
   ]
 }

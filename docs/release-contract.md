@@ -16,13 +16,15 @@ them only in lockstep with the extension's `releaseAssetForTarget`.
 > below is written for that release; where it describes the retired Rust
 > pipeline it says so explicitly.
 >
-> **v0.5.0 is the transition tag, and it is not cut yet.** Every tag published
-> so far ships a RAW binary — `v0.4.1` (currently `latest`) and `v0.5.0-rc4`
-> included. rc4 carries the `--onefile` freeze as a raw asset, which is what the
-> 13–19 s macOS measurement below was taken on; do not read "`--onedir`" or
-> "archive" as something rc4 shipped, because it shipped neither. Both
-> installers consequently support **both** shapes and decide per release
-> (tan-cli#356) — see [Which shape a release publishes](#which-shape-a-release-publishes).
+> **v0.5.0 was the transition tag; it and v0.5.1 are both cut, and `latest`
+> resolves to v0.5.1.** Every tag published BEFORE v0.5.0 — `v0.4.1` and
+> `v0.5.0-rc4` included — shipped a RAW binary. rc4 carried the `--onefile`
+> freeze as a raw asset, which is what the 13–19 s macOS measurement below was
+> taken on; do not read "`--onedir`" or "archive" as something rc4 shipped,
+> because it shipped neither. From v0.5.0 onward, every published tag ships
+> the archive shape described below. Both installers support **both** shapes
+> and decide per release (tan-cli#356) — see
+> [Which shape a release publishes](#which-shape-a-release-publishes).
 
 ## Tag scheme
 
@@ -50,11 +52,12 @@ v<major>.<minor>.<patch>-<pre>        e.g. v0.4.0-rc1 pre-release
     body is sliced from — checked here, at PR time, because `release.yml` only
     discovers it missing after four freezes, under a tag that is already
     immutable.
-- **`Cargo.toml` is deliberately NOT read.** It versions the frozen Rust
-  crates on their own cadence and no release asset comes from them. Bumping it
-  for a release achieves nothing; leaving it behind breaks nothing. It used to
-  be the gate (`grep -m1 '^version = ' Cargo.toml`), and that is precisely how
-  a correct `v0.5.0` tag failed before a single asset was built.
+- **`Cargo.toml` is not read, and since tan-cli#269 does not exist.** It
+  versioned the Rust crates on their own cadence and no release asset came from
+  them. It used to be the gate (`grep -m1 '^version = ' Cargo.toml`), and that
+  is precisely how a correct `v0.5.0` tag failed before a single asset was
+  built. Recorded so a future reader does not go looking for a fourth version
+  file on the theory that one was overlooked.
 - The whole reconciliation lives in `python/scripts/version_check.py`, which
   `release.yml`'s `verify-version` job runs as
   `python python/scripts/version_check.py --selftest --tag "$GITHUB_REF_NAME"`.
@@ -71,9 +74,9 @@ they cannot disagree with each other or with the tag:
 | `v0.4.0` | `false` | `true` |
 | `v0.4.0-rc1` | `true` | `false` |
 
-`publish_crates` is deleted for every tag (the assets no longer come from
-`crates/`, so publishing `alp-tan-cli` would ship a different program under the
-same name). `publish_npm` is a **real job** and runs only on a FINAL tag — its
+`publish_crates` is deleted for every tag (the assets never came from the
+crates any more, and `crates/` itself is gone as of tan-cli#269, so publishing
+`alp-tan-cli` would ship a different program under the same name). `publish_npm` is a **real job** and runs only on a FINAL tag — its
 own `if` is `startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name,
 '-')`, so a pre-release skips it entirely, the same way it skips `make_latest`.
 Even on a final tag the publish itself is **opt-in and off**: the job reads
@@ -149,7 +152,7 @@ Plus two non-binary assets, carrying the same build-provenance attestation:
 | Asset | Contents |
 | --- | --- |
 | `checksums.txt` | sha256 of every other asset. |
-| `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one golden envelope per command family (`contract/envelopes/`), so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. See [`contract/README.md`](../contract/README.md). |
+| `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one entry per command family: a byte golden envelope (`contract/envelopes/`) for most of them, and `doctor`'s `dataKeys` key-set entry (`contract/doctor-data-keys.json`, tan-cli#664 — `doctor`'s `data` values are host facts, so it cannot be a golden) — so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. See [`contract/README.md`](../contract/README.md). |
 
 ## Which shape a release publishes
 
@@ -275,9 +278,11 @@ function releaseAssetForTarget(platform: NodeJS.Platform, arch: string): string 
 PyInstaller has no equivalent of zigbuild's `--target …-gnu.2.31` pin: a freeze
 inherits the glibc of the machine that froze it. **The old distro is therefore
 the mechanism** — the Linux asset is frozen inside `python:3.12-slim-bullseye`
-(Debian 11, glibc 2.31), which is the same floor the retired zigbuild pin
-targeted. Freezing on bare `ubuntu-latest` would link its 2.39 and reproduce
-`GLIBC_2.39 not found` exactly as before.
+(Debian 11, whose own glibc is 2.31). Freezing on bare `ubuntu-latest` would
+link its 2.39 and reproduce `GLIBC_2.39 not found` exactly as before. Debian
+11's own glibc version is not the same number as the measured payload floor,
+though — see the table below: the actual `GLIBC_` symbol versions the frozen
+payload references top out at 2.30, one minor below the distro's own libc.
 
 The floor published in the release notes is **measured, in the build image,
 over the payload**, and how it is measured matters:
@@ -285,7 +290,7 @@ over the payload**, and how it is measured matters:
 | Where you look | What you get | Useful? |
 | --- | --- | --- |
 | `readelf -V` on the onedir executable | `GLIBC_2.14`, under every image | **No.** That is PyInstaller's vendored bootloader. It is a container-INVARIANT constant — measured identical from bullseye (real floor 2.30) and trixie (real floor 2.38) — so it cannot detect the build image regressing to a newer glibc, which is the only thing the measurement is for. Lower bound only. |
-| the appended payload | the real floor | **Yes.** libpython + the extension modules + their `.so` dependencies, enumerated from `.build/tan/PKG-00.toc` (a plain Python literal listing everything PyInstaller appended) and read with `pyelftools`. |
+| the appended payload | the real floor | **Yes.** libpython + the extension modules + their `.so` dependencies, enumerated by walking the collected onedir tree (`dist/tan/`, the launcher plus `_internal/`) and probing every file as an ELF, then read with `pyelftools`. An earlier revision of this step enumerated `.build/tan/PKG-00.toc` instead and claimed that was "unchanged by --onedir vs --onefile" -- that was false: under `--onedir` PyInstaller collects the natives into `_internal/` instead of appending them, so the TOC lists only 2 BINARY/EXTENSION entries, the floor step refuses to guess, `build` fails, and `release` (needs: `build`) is skipped under an already-pushed tag. That is what happened to the v0.5.0 tag; fixed by 70f9846 (#451). |
 
 The build step refuses to emit a number if the scan finds implausibly few
 native files or no `GLIBC_` version at all, and the release job refuses to
@@ -319,6 +324,50 @@ gh attestation verify <downloaded-file> --repo alplabai/tan-cli \
 covered by the same attestation. The `release` job is the only job with
 `id-token: write` / `attestations: write` — every other job keeps the
 workflow-level `contents: write` (or, for `gates`, `contents: read`).
+
+## alp-sdk must be released BEFORE (or with) the tan tag that requires it
+
+**Check this before every tag.** `tan/planner/` is a hash-audited mirror of
+alp-sdk's planner, and a re-sync can start REQUIRING a `metadata/**` fact that
+only unreleased alp-sdk carries. When it does, the released `tan` refuses on a
+released alp-sdk, and the refusal reads to a customer as a defect in their own
+board or SoM metadata. That is not hypothetical — it is tan-cli#591, found in
+the v0.6.0 triage sweep, and the maintainer's 2026-08-09 decision on it was
+**option 3: cut an alp-sdk release when tan is about to release.** No SDK
+version floor in tan, no graceful degradation. This section is where that
+decision lives, because an issue is not a checklist.
+
+**The check.** For each `metadata/**` fact the planner has started requiring
+since the last tag, confirm the alp-sdk commit that introduced it is contained
+in a published alp-sdk **tag**:
+
+```
+git -C <alp-sdk> tag --contains <commit>      # non-empty, or the tag is premature
+```
+
+**Currently outstanding — do not cut a tan release carrying the AEN board emit
+until this clears:**
+
+| Requirement | alp-sdk commit | In a tag? |
+|---|---|---|
+| SE-owned ATOC reservation (`atoc` in `memory_map:`) — alp-sdk#1289 | `d639e777` | **NO** — `git tag --contains d639e777` is empty; `git merge-base --is-ancestor d639e777 v0.15.0` is false |
+| `zephyr_peripherals_dtsi` on the SoC JSON — alp-sdk#1352 | `7d58ef32` | **NO** — descendant of the above, same answer |
+
+Both are reached by `tan generate --target zephyr-board` on any `E1M-AEN*`
+SKU, so today that command fails against **every** released alp-sdk. Until an
+alp-sdk release contains `7d58ef32`, a tan tag carrying this planner ships a
+subcommand that cannot succeed for AEN users on any SDK they can install.
+
+**When that release exists**, two strings stop being true and must be
+revisited in the same change: `zephyr_board.py`'s ATOC refusal says *"upgrade
+alp-sdk to a release that includes alp-sdk#1289"* (an issue number, not a
+version — replace it with the actual floor once one exists), and this table's
+"In a tag?" column. Both live upstream in alp-sdk
+`scripts/gen_zephyr_board.py`, so the string fix is an alp-sdk change
+re-synced in, never a patch to the mirror. Tracked as **alp-sdk#1354**, which
+also carries the reason the ATOC message is not the one a user actually sees
+today: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an ancestor of
+`7d58ef32`, so every checkout with the field already has the region.
 
 ## Decisions
 

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -38,39 +37,10 @@ from tan.commands.pinmux_cmd import (
 )
 from tan.commands.pinmux_cmd import pinmux as pinmux_command
 
-from tests.parity.oracle import resolve_oracle_for_skipif
-
 app = typer.Typer()
 app.command("pinmux")(pinmux_command)
 
 runner = CliRunner()
-
-#: The oracle binary, resolved by the ONE resolver in the suite
-#: (`tests/parity/oracle.py`'s `rust_binary()`): most-recently-built by mtime,
-#: not a fixed release-over-debug order.
-#:
-#: This used to be a private hand copy that tried `release` before `debug`
-#: unconditionally -- byte-identical to the one in `test_diff_command.py`, and
-#: a copy of exactly the resolution `rust_binary()` was rewritten to REMOVE
-#: because it "silently picked a STALE binary". On a tree carrying both
-#: profiles with `release` older, this file went red against `tan 0.3.1` with a
-#: `project.boardYaml` diff that read as a port regression, while the sibling
-#: copy stayed green measuring a divergence against that same stale oracle
-#: (tan-cli#393). The comment that used to sit here justified the duplication
-#: by keeping this module's only non-stdlib import `tan.commands.pinmux_cmd`;
-#: one importable rule is worth more than that tidiness.
-_ORACLE = resolve_oracle_for_skipif()
-_ORACLE_REQUIRED = pytest.mark.skipif(
-    _ORACLE is None,
-    reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
-)
-
-
-def _run_oracle(argv: list[str], cwd: Path) -> tuple[int, dict]:
-    proc = subprocess.run(
-        [_ORACLE, *argv], capture_output=True, text=True, encoding="utf-8", cwd=cwd
-    )
-    return proc.returncode, json.loads(proc.stdout)
 
 _SAMPLE_TABLE = """\
 schemaVersion: pinmux-capability-v1
@@ -322,11 +292,10 @@ def test_compound_pad_fields_still_refuse(tmp_path: Path) -> None:
     assert envelope["issues"][0]["code"] == "pinmux.schema-version-unsupported"
 
 
-@_ORACLE_REQUIRED
 def test_capitalized_bool_pad_literal_is_a_known_divergence_from_the_oracle(
     tmp_path: Path,
 ) -> None:
-    """Both sides accept the row (exit 0, one pad). The oracle preserves the
+    """Both sides accept the row (exit 0, one pad). The oracle preserved the
     RAW YAML source spelling of a coerced scalar (`owner: True` -> `"True"`,
     `silicon_peripheral: on` -> `"on"`, `silicon_pad: yes` -> `"yes"`) --
     there is no equivalent recovery available to this port: PyYAML's stock
@@ -354,30 +323,16 @@ def test_capitalized_bool_pad_literal_is_a_known_divergence_from_the_oracle(
     ]
     result = runner.invoke(app, argv)
     p_out = json.loads(result.stdout)
-    r_code, r_out = _run_oracle(["pinmux", *argv], tmp_path)
 
-    assert result.exit_code == r_code == 0
-    assert p_out["issues"] == r_out["issues"] == []
-    r_pad, p_pad = r_out["data"]["pads"][0], p_out["data"]["pads"][0]
-    assert r_pad == {
-        "e1mPad": "A3",
-        "e1mFunction": "PWM6",
-        "owner": "True",
-        "siliconPeripheral": "on",
-        "siliconPad": "yes",
-    }
+    assert result.exit_code == 0
+    assert p_out["issues"] == []
+    p_pad = p_out["data"]["pads"][0]
     assert p_pad == {
         "e1mPad": "A3",
         "e1mFunction": "PWM6",
         "owner": "true",
         "siliconPeripheral": "true",
         "siliconPad": "true",
-    }
-    # Every OTHER field on the envelope is a real match, not coincidentally
-    # unchecked.
-    assert {**r_out, "data": {**r_out["data"], "pads": []}} == {
-        **p_out,
-        "data": {**p_out["data"], "pads": []},
     }
 
 
@@ -703,3 +658,50 @@ def test_parse_fails_soft_on_malformed_yaml_as_a_document_error():
         pass
     else:
         raise AssertionError("expected a PinmuxParseError")
+
+
+def test_a_rejected_sdk_root_flag_is_named_in_the_warning(tmp_path: Path) -> None:
+    """tan-cli#497 defect 7. `--sdk-root` is TERMINAL (I-31), so a path with no
+    `scripts/alp_project.py` resolves to nothing -- and this command's warning
+    used to say only "alp-sdk root is unresolved; cannot read the pinmux
+    table.", with the path the user typed nowhere in the envelope
+    (`data.sdkRoot` is `null` on this branch) and nowhere in the stderr text.
+
+    The typo'd root is a REAL directory here, and the `--sku` resolves, so the
+    only thing wrong with the run is the missing loader marker: that is the
+    branch this pins, not "the directory does not exist"."""
+    proj = _project(tmp_path)
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    result = runner.invoke(
+        app,
+        [
+            "--project", str(proj),
+            "--sku", "E1M-AEN801",
+            "--sdk-root", str(typo),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["sdkRoot"] is None
+    issue = envelope["issues"][0]
+    assert issue["code"] == "pinmux.sdk-root-unresolved"
+    assert issue["message"] == (
+        f'alp-sdk root is unresolved: --sdk-root "{typo}" is not an alp-sdk '
+        "checkout (scripts/alp_project.py not found under it). Cannot read the "
+        "pinmux table."
+    )
+
+
+def test_the_no_flag_message_is_unchanged(tmp_path: Path) -> None:
+    """The other branch of the same guard. There is no typed value to name
+    when no flag was given, so its string stays exactly what it was -- pinned
+    here so the #497 fix cannot quietly rewrite the wrong one."""
+    proj = _project(tmp_path)
+    result = runner.invoke(app, ["--project", str(proj), "--sku", "E1M-AEN801", "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["message"] == (
+        "alp-sdk root is unresolved; cannot read the pinmux table."
+    )

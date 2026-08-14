@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -360,3 +361,283 @@ def test_unfrozen_build_without_pyserial_reports_the_same_code(monkeypatch):
     envelope = json.loads(result.stdout)
     assert [i["code"] for i in envelope["issues"]] == ["monitor.pyserial-missing"], envelope
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# where miniterm's output goes (tan-cli#491 defect 6)
+# ---------------------------------------------------------------------------
+
+
+def _spawn_kwargs(monkeypatch, argv: list[str]) -> dict:
+    """Run `tan monitor <argv>` with a stub spawn and hand back the `kwargs`
+    the command passed to `subprocess.run`."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+    captured: dict = {}
+
+    class _Completed:
+        returncode = 0
+
+    def fake_run(_argv, **kwargs):
+        captured.update(kwargs)
+        return _Completed()
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", fake_run)
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 0, result.stdout
+    return captured
+
+
+def test_json_mode_keeps_the_boards_bytes_off_stdout(monkeypatch):
+    """tan-cli#491 defect 6. The spawn passed no `stdout=`, so miniterm
+    INHERITED tan's stdout and wrote every received serial byte there --
+    reproduced end to end against a real pty: the board's banner preceded the
+    envelope and a whole-stdout `JSON.parse` failed on an `ok: true`, exit-0
+    run. Under `--format json` the child's stdout must therefore be something
+    other than tan's own.
+
+    Asserted as "not inherit, and not stdout" rather than against a specific
+    stream object: pytest's own capture replaces the process streams, so
+    pinning identity here would test the harness, not the command. What the
+    stream IS is `_child_stdout`'s own case below."""
+    kwargs = _spawn_kwargs(monkeypatch, ["--port", "COM7", "--format", "json"])
+    assert "stdout" in kwargs, kwargs
+    assert kwargs["stdout"] is not None, "inherited stdout -- the #491 d6 defect"
+    assert kwargs["stdout"] is not sys.stdout
+
+
+def test_text_mode_still_inherits_stdout(monkeypatch):
+    """The other half, and the reason this is not an unconditional redirect:
+    in text mode there is no envelope to protect, board traffic on stdout is
+    the whole point of an interactive console, and redirecting it would break
+    `tan monitor > board.log`."""
+    kwargs = _spawn_kwargs(monkeypatch, ["--port", "COM7"])
+    assert kwargs.get("stdout") is None, kwargs
+
+
+def test_child_stdout_is_the_real_stderr_stream_when_it_is_healthy(monkeypatch):
+    """The DEVNULL fallback above is only reachable when `sys.__stderr__` is
+    absent or closed. On the ordinary path -- a real, open, fd-backed stream
+    -- `_child_stdout(True)` must hand back THAT stream, not DEVNULL: a
+    mutant that collapses the healthy branch straight to `return
+    subprocess.DEVNULL` (i.e. `_child_stdout = lambda json_mode: None if not
+    json_mode else subprocess.DEVNULL`) silently drops every board byte
+    under `--format json` while still returning *something* falsy-adjacent
+    for `stdout=`, and neither test above catches it: the None-stderr and
+    closed-stderr cases both already expect DEVNULL, and the d6 stdout test
+    only asserts `is not sys.stdout`, which DEVNULL also satisfies. Built and
+    confirmed RED against exactly that mutant before this test was kept (see
+    the PR receipt)."""
+    fd = os.open(os.devnull, os.O_WRONLY)
+    stream = os.fdopen(fd, "w")
+    try:
+        monkeypatch.setattr(monitor_cmd.sys, "__stderr__", stream, raising=False)
+        assert monitor_cmd._child_stdout(True) is sys.__stderr__
+        assert monitor_cmd._child_stdout(True) is stream
+        assert monitor_cmd._child_stdout(True) is not monitor_cmd.subprocess.DEVNULL
+    finally:
+        stream.close()
+
+
+def test_child_stdout_falls_back_to_devnull_when_there_is_no_real_stderr(monkeypatch):
+    """`_child_stdout` hands the child `sys.__stderr__` -- NOT `sys.stderr`,
+    which `cli.main` binds to a `_TeeStderr` under `--format json`, an object
+    with no `fileno()` for `subprocess` to hand over. `sys.__stderr__` can
+    still be `None` (pythonw, an embedded interpreter) or closed, and the
+    answer then is DEVNULL: dropping the board's bytes is bad, putting them on
+    stdout is the defect."""
+    monkeypatch.setattr(monitor_cmd.sys, "__stderr__", None, raising=False)
+    assert monitor_cmd._child_stdout(True) is monitor_cmd.subprocess.DEVNULL
+
+    class _Closed:
+        def fileno(self):
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr(monitor_cmd.sys, "__stderr__", _Closed(), raising=False)
+    assert monitor_cmd._child_stdout(True) is monitor_cmd.subprocess.DEVNULL
+    # Text mode never consults the stream at all.
+    assert monitor_cmd._child_stdout(False) is None
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#701: `\\.\COM<n>` is the spelling Microsoft documents for COM10 and
+# above, and pyserial's win32 backend opens it -- but `comports()` only ever
+# REPORTS the bare `COM<n>` from the registry's `PortName`. A membership test
+# against `comports()` therefore refused a port pyserial would have opened,
+# while listing that same port in its own "not found" message.
+# ---------------------------------------------------------------------------
+
+#: The literal nine characters a user types: \ \ . \ C O M 3 8
+_UNC_COM38 = "\\\\.\\COM38"
+
+
+def test_the_unc_spelling_of_a_present_port_is_accepted(monkeypatch):
+    """Measured on a real Windows host: `serial.Serial(r"\\\\.\\COM38")` opens
+    (`is_open = True`), while `comports()` reports the device as `'COM38'` and
+    `tan monitor --port "\\\\.\\COM38"` refused with
+    `monitor.no-port : port '\\\\.\\COM38' not found`.
+    """
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(
+        monitor_cmd, "_available_ports", lambda: [("COM38", "USB Serial Port")]
+    )
+
+    captured = {}
+
+    class _Completed:
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return _Completed()
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["--port", _UNC_COM38, "--format", "json"])
+    assert result.exit_code == 0, result.output
+    doc = envelope(result)
+    assert doc["ok"] is True
+    # The user's own spelling is preserved end to end -- pyserial opens it, so
+    # there is nothing to gain by rewriting what they asked for.
+    assert doc["data"]["port"] == _UNC_COM38
+    assert captured["argv"][-2:] == [_UNC_COM38, "115200"]
+
+
+def test_a_unc_port_whose_bare_form_is_absent_is_still_refused(monkeypatch):
+    """The gate is normalised, not widened.
+
+    Without this case the fix would be indistinguishable from "accept anything
+    starting with the device prefix", which would refuse nothing at all on
+    Windows.
+    """
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+    result = runner.invoke(app, ["--port", _UNC_COM38, "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert "not found" in doc["issues"][0]["message"]
+
+
+def test_a_posix_device_path_is_not_rewritten(monkeypatch):
+    """`_port_aliases` must leave every non-Windows spelling alone.
+
+    tan-cli#569 covers `/dev/serial/by-id` and pyserial URLs separately; this
+    only asserts that #701's normalisation does not reach them.
+    """
+    assert monitor_cmd._port_aliases("/dev/ttyUSB0") == {"/dev/ttyUSB0"}
+    assert monitor_cmd._port_aliases("COM38") == {"COM38"}
+    assert monitor_cmd._port_aliases(_UNC_COM38) == {_UNC_COM38, "COM38"}
+
+
+def _stub_child(monkeypatch, returncode: int = 0) -> dict:
+    """Capture the argv `monitor` hands miniterm, without spawning anything.
+
+    Same three-line shape the tan-cli#701 tests above build inline; hoisted so
+    the tan-cli#569 cases below do not add a fourth copy.
+    """
+    captured: dict = {}
+
+    class _Completed:
+        pass
+
+    _Completed.returncode = returncode
+
+    def fake_run(argv, **_kwargs):
+        captured["argv"] = argv
+        return _Completed()
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", fake_run)
+    return captured
+
+
+# --------------------------------------------------------------------------
+# tan-cli#569 -- the gate is openability, not enumeration.
+#
+# `comports()` does not enumerate `/dev/serial/by-id/...` symlinks or any of
+# pyserial's URL schemes, and `serial.Serial()` opens all of them. Measured on
+# a Linux host with a real Artery AT32 adapter before the fix:
+#
+#   $ python -c "import serial; serial.Serial('/dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00')"
+#   opened OK
+#   $ tan monitor --port /dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00
+#   monitor: port '...' not found -- available serial ports: ... /dev/ttyACM0 ...
+#
+# The refused port's own raw node was in the list tan printed back.
+# --------------------------------------------------------------------------
+
+
+def test_a_character_device_not_in_comports_is_accepted(monkeypatch, tmp_path):
+    """THE #569 case: a by-id symlink pyserial opens and `comports()` omits.
+
+    `os.stat` follows the symlink, so the real check is "is the target a
+    character device" -- which is what pyserial's own open does.
+    """
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("/dev/ttyACM0", "AT32")])
+    by_id = "/dev/serial/by-id/usb-Artery_AT32_Virtual_Com_Port_10A2617F4486-if00"
+    monkeypatch.setattr(monitor_cmd, "_is_openable_device", lambda port: port == by_id)
+    captured = _stub_child(monkeypatch, returncode=0)
+
+    result = runner.invoke(app, ["--port", by_id, "--format", "json"])
+    assert result.exit_code == 0, result.output
+    # The operator's own spelling reaches miniterm -- rewriting it to the raw
+    # node would hand back the unstable name #569 exists to avoid.
+    assert captured["argv"][-2:] == [by_id, "115200"]
+
+
+def test_a_pyserial_url_scheme_is_accepted(monkeypatch):
+    """`socket://` and `rfc2217://` have NO local device path, so the
+    character-device arm cannot cover them and there is no workaround."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+    monkeypatch.setattr(monitor_cmd, "_is_openable_device", lambda _port: False)
+    monkeypatch.setattr(
+        monitor_cmd, "_url_handler_prefixes", lambda: frozenset({"socket://", "rfc2217://"})
+    )
+    captured = _stub_child(monkeypatch, returncode=0)
+
+    result = runner.invoke(app, ["--port", "socket://localhost:7000", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert captured["argv"][-2:] == ["socket://localhost:7000", "115200"]
+
+
+def test_a_port_matching_none_of_the_three_arms_is_still_refused(monkeypatch):
+    """Non-vacuity for the whole gate. Without this, `_port_is_usable` could
+    `return True` and every case above would still pass."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("/dev/ttyACM0", "AT32")])
+    monkeypatch.setattr(monitor_cmd, "_is_openable_device", lambda _port: False)
+    monkeypatch.setattr(monitor_cmd, "_url_handler_prefixes", lambda: frozenset({"socket://"}))
+
+    result = runner.invoke(app, ["--port", "/dev/ttyNOPE99", "--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert "not found" in doc["issues"][0]["message"]
+
+
+def test_url_handler_prefixes_are_read_from_pyserial_not_hardcoded():
+    """A hardcoded list drifts when pyserial adds or drops a handler. Measured
+    on pyserial 3.5: alt, cp2110, hwgrep, loop, rfc2217, socket, spy."""
+    prefixes = monitor_cmd._url_handler_prefixes()
+    if not prefixes:
+        pytest.skip("pyserial not installed in this environment")
+    assert "socket://" in prefixes
+    assert "rfc2217://" in prefixes
+    # Every entry is a scheme, not a bare module name -- a set of
+    # `protocol_socket` strings would never match a real `--port`.
+    assert all(p.endswith("://") for p in prefixes), sorted(prefixes)
+    assert not any(p.startswith("protocol_") for p in prefixes), sorted(prefixes)
+
+
+def test_is_openable_device_refuses_a_regular_file_and_an_absent_path(tmp_path):
+    """The character-device arm must not accept any old existing path. A
+    regular file exists and stats fine, and is not a serial port."""
+    regular = tmp_path / "not-a-tty"
+    regular.write_text("")
+    assert monitor_cmd._is_openable_device(str(regular)) is False
+    assert monitor_cmd._is_openable_device(str(tmp_path / "absent")) is False
+    # An embedded NUL raises ValueError from os.stat on CPython; a pre-flight
+    # gate must answer False, never traceback.
+    assert monitor_cmd._is_openable_device("/dev/tty\x00evil") is False

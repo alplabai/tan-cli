@@ -356,9 +356,15 @@ def test_numeric_build_dir_is_not_turned_into_a_delete_target():
 def test_without_pyyaml_the_sweep_is_reported_as_skipped_not_silently_dropped(
     tmp_path, monkeypatch
 ):
-    """**The FROZEN binary has no PyYAML.** `scripts/build_binary.sh` documents
-    its build environment as `pip install typer rich pyinstaller` and nothing
-    else, so this arm is not hypothetical -- it is what customers run.
+    """**The frozen binary DOES carry PyYAML** -- `pyyaml>=6` is a base entry in
+    `pyproject.toml` `[project].dependencies` and `scripts/build_binary.sh`
+    installs `-e ".[monitor]"`. This docstring used to claim the opposite,
+    citing a `pip install typer rich pyinstaller` recipe that no longer exists
+    (tan-cli#574).
+
+    The arm is still worth pinning: a `--no-deps` install or a broken venv can
+    genuinely lack the parser. It is just the degraded case, not what customers
+    run.
 
     Reported, not swallowed: without a parser this run cannot know whether the
     manifest declares an out-of-tree slice `build_dir`, so `clean` may have left
@@ -895,3 +901,208 @@ def test_normalize_is_lexical_and_never_resolves_a_symlink(tmp_path):
     exist yet must still normalise."""
     assert _normalize(os.path.join("a", "b", "..", "c")) == os.path.join("a", "c")
     assert _normalize(os.path.join("a", ".", "b")) == os.path.join("a", "b")
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#499 defect 3 -- the rmtree hook must not raise a TypeError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only: Windows' _rmtree_unsafe never "
+                                            "passes os.open/os.close to the error hook.")
+def test_an_unopenable_build_dir_is_a_warning_not_an_internal_failure(tmp_path, monkeypatch):
+    """tan-cli#499 defect 3. `_retry_after_clearing_readonly` ended in a bare
+    `func(path)`, but on POSIX `shutil.rmtree` runs the fd-based
+    `_rmtree_safe_fd` walk and hands the hook `os.open` (needs `flags`) and
+    `os.close` (takes an fd). For a directory the invoking user OWNS but cannot
+    open -- mode 0000, what a `chmod -R a-r` or tar-preserved tree gives you --
+    `os.chmod` SUCCEEDS and the retry became `os.open(path)`:
+    `TypeError: open() missing required argument 'flags' (pos 2)`.
+
+    A `TypeError` is neither `OSError` nor `ValueError`, so it sailed past the
+    caller's best-effort guard, aborted the target loop and hit `clean`'s outer
+    catch-all -- exit 5, `clean.internal-failure`, and `.alp-build-state.json`
+    (plus every out-of-tree slice dir) never removed.
+
+    Measured on the frozen oracle for the identical tree: exit 0, a
+    `clean.remove-failed` WARNING, and the state file GONE. That is what this
+    pins.
+    """
+    proj = make_project(tmp_path)
+    isolate(monkeypatch, tmp_path, proj)
+    (proj / "build").chmod(0o000)
+    try:
+        result = runner.invoke(app, ["clean", "--sdk-root", str(proj), "--format", "json"])
+        doc = json.loads(result.stdout)
+    finally:
+        (proj / "build").chmod(0o755)
+
+    assert result.exit_code == 0
+    assert doc["ok"] is True
+    assert [(i["code"], i["severity"]) for i in doc["issues"]] == [
+        ("clean.remove-failed", "warning")
+    ]
+    assert "internal-failure" not in result.stdout
+    # The loop CONTINUED past the failure: the state file is the target after
+    # the build root, and it is what the old crash silently skipped.
+    assert not (proj / ".alp-build-state.json").exists()
+    assert doc["data"]["removed"] == 1
+    assert [t["action"] for t in doc["data"]["targets"]] == ["remove-failed", "removed"]
+    assert_canary_intact(tmp_path)
+
+
+def test_the_rmtree_hook_reraises_the_failure_for_a_func_it_cannot_retry(tmp_path):
+    """The unit behind the test above, stated on the hook itself so the
+    contract survives a `shutil` that reshuffles which call fails first: given
+    `os.open` (or any func a lone path cannot drive), the hook must re-raise the
+    ORIGINAL error -- an `OSError` the caller already handles -- and never a
+    `TypeError` nor a quiet return (which would have `rmtree` report a tree it
+    did not remove).
+
+    Driven on a REAL directory the `chmod`/`stat` prologue can succeed on, so
+    the only thing that can fail here is the retry itself."""
+    from tan.commands.clean_cmd import _retry_after_clearing_readonly
+
+    target = tmp_path / "d"
+    target.mkdir()
+    original = PermissionError(13, "Permission denied")
+
+    with pytest.raises(OSError) as caught:  # noqa: PT011 -- identity asserted below
+        _retry_after_clearing_readonly(os.open, str(target), original)
+    assert caught.value is original
+
+    # The deprecated `onerror` hook passes an exc_info TUPLE, not an exception.
+    with pytest.raises(OSError) as caught:  # noqa: PT011 -- identity asserted below
+        _retry_after_clearing_readonly(
+            os.close, str(target), (PermissionError, original, None)
+        )
+    assert caught.value is original
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#499 defect 4 -- a symlinked PARENT must not defeat the unsafe screen
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs an ordinary directory symlink")
+def test_the_project_root_named_through_a_symlinked_parent_is_refused(tmp_path, monkeypatch):
+    """tan-cli#499 defect 4, arm 1: the target IS the project root.
+
+    `_normalize` is `os.path.normpath` only, so with `<base>/wlink -> <base>/work`
+    the spelling `<base>/wlink/proj` is not lexically `<base>/work/proj`,
+    `_remove_dir` lstats only the FINAL component (a real directory, so the
+    link arm never fires) and `shutil.rmtree` deleted the user's sources at exit
+    0 with `issues: []`. Reproduced on the port AND on the frozen oracle, which
+    is why the resolved re-test is a deliberate divergence rather than a
+    regression fix."""
+    proj = make_project(tmp_path)
+    isolate(monkeypatch, tmp_path, proj)
+    (tmp_path / "wlink").symlink_to(tmp_path, target_is_directory=True)
+
+    result = runner.invoke(
+        app,
+        ["clean", "--sdk-root", str(proj), "--project", str(proj),
+         "--build-root", str(tmp_path / "wlink" / "proj"), "--format", "json"],
+    )
+    doc = json.loads(result.stdout)
+    assert result.exit_code == 1
+    assert [i["code"] for i in doc["issues"]] == ["clean.unsafe-build-root"]
+    assert doc["data"]["targets"] == []
+    # Resolution is for the COMPARISON only: the reported build root keeps the
+    # spelling the caller typed.
+    assert doc["data"]["buildRoot"] == str(tmp_path / "wlink" / "proj")
+    assert (proj / "src" / "main.c").is_file()
+    assert_canary_intact(tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs an ordinary directory symlink")
+def test_an_ancestor_of_the_project_named_through_a_symlinked_parent_is_refused(
+    tmp_path, monkeypatch
+):
+    """tan-cli#499 defect 4, arm 2: the target is an ANCESTOR of the project
+    root. Same lexical blind spot, and here what gets destroyed is the sources
+    BESIDE the project, which no canary inside the project would catch.
+
+    The project sits one level deeper (`<base>/outer/proj`) so the target
+    `<base>/wlink/outer` has a REAL final component: a link spelled as the
+    target itself is exempt by design (`_remove_dir` unlinks it and never
+    recurses), and it is specifically a symlinked PARENT that used to slip
+    through."""
+    outer = tmp_path / "outer"
+    proj = outer / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "alp_project.py").write_text("")
+    (proj / "src").mkdir()
+    (proj / "src" / "main.c").write_text("int main(void){return 0;}")
+    (outer / "sibling_sources.txt").write_text("A CUSTOMER'S WORK")
+    (tmp_path / "home").mkdir()
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    (tmp_path / "wlink").symlink_to(tmp_path, target_is_directory=True)
+
+    result = runner.invoke(
+        app,
+        ["clean", "--sdk-root", str(proj), "--project", str(proj),
+         "--build-root", str(tmp_path / "wlink" / "outer"), "--format", "json"],
+    )
+    doc = json.loads(result.stdout)
+    assert result.exit_code == 1
+    assert [i["code"] for i in doc["issues"]] == ["clean.unsafe-build-root"]
+    assert doc["data"]["targets"] == []
+    assert (outer / "sibling_sources.txt").read_text() == "A CUSTOMER'S WORK"
+    assert (proj / "src" / "main.c").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs an ordinary directory symlink")
+def test_a_symlink_spelled_as_the_build_root_is_still_removable(tmp_path, monkeypatch):
+    """The case the resolved re-test must NOT refuse. `_remove_dir` unlinks a
+    link target ITSELF and never recurses through it, so `--build-root <a link
+    to the project root>` costs exactly the link -- verified against the Rust
+    binary. Resolving that spelling would turn a harmless cleanup into an
+    `unsafe-build-root` refusal and leave the stale link behind."""
+    proj = make_project(tmp_path)
+    isolate(monkeypatch, tmp_path, proj)
+    link = tmp_path / "buildlink"
+    link.symlink_to(proj, target_is_directory=True)
+
+    result = runner.invoke(
+        app,
+        ["clean", "--sdk-root", str(proj), "--project", str(proj),
+         "--build-root", str(link), "--format", "json"],
+    )
+    doc = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert [t["action"] for t in doc["data"]["targets"]][0] == "removed"
+    assert not link.is_symlink()
+    # Only the LINK went; everything it pointed at is untouched.
+    assert (proj / "src" / "main.c").is_file()
+    assert_canary_intact(tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs an ordinary directory symlink")
+def test_an_out_of_tree_build_root_reached_through_a_symlink_stays_removable(
+    tmp_path, monkeypatch
+):
+    """The resolved re-test is ADDITIVE and must refuse only what really
+    resolves ONTO the project root or above. An out-of-tree build dir named
+    through a symlinked parent is still a supported clean target -- refusing it
+    would break the module docstring's second rule (Yocto tmp dirs, and
+    `--build-root ../outside`, which the oracle removes at exit 0)."""
+    proj = make_project(tmp_path)
+    isolate(monkeypatch, tmp_path, proj)
+    outside = tmp_path / "elsewhere" / "yocto-tmp"
+    outside.mkdir(parents=True)
+    (outside / "artefact.bin").write_text("x")
+    (tmp_path / "elink").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    result = runner.invoke(
+        app,
+        ["clean", "--sdk-root", str(proj), "--project", str(proj),
+         "--build-root", str(tmp_path / "elink" / "yocto-tmp"), "--format", "json"],
+    )
+    doc = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert doc["issues"] == []
+    assert not outside.exists()
+    assert_canary_intact(tmp_path)

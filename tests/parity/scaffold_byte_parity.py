@@ -17,12 +17,12 @@ for every vendored (template, sku) pair, re-run the live SDK emit and assert
 byte-identity against the vendored tree.
 
 Defaults to `python/tan/templates/vendored/` -- the tree the shipped Python
-`tan` actually reads. `crates/tan-core/src/wizard/vendored/` is frozen at its
-own permanent vendor point (`docs/ROADMAP.md`'s Standing Rules: the Rust
-`tan` is the retired oracle, never re-vendored again) and is guarded instead
-by `tan-core`'s own SDK-free `cargo test` byte-parity check
-(`zephyr_app_scaffold_is_byte_exact_for_the_vendored_sku`); pass `--vendored
-crates/tan-core/src/wizard/vendored` to point this script at it by hand.
+`tan` actually reads, and since tan-cli#269 the ONLY vendored scaffold tree in
+the repo. The Rust oracle carried a second copy, frozen at its own permanent
+vendor point and guarded by its own SDK-free `cargo test`; both went with
+`crates/`. `--vendored <path>` still exists for pointing this script at an
+arbitrary tree by hand, but there is no longer a second in-repo tree to point
+it at.
 
 Optionally self-skipping: the vendored tree's own test suite already proves
 it is internally consistent without an SDK checkout, so a local dev-loop run
@@ -73,7 +73,21 @@ VENDORED_ROOT = Path(__file__).resolve().parent.parent.parent / (
 # catalog example's copy, exactly as `testcase.yaml` already was. Templates with
 # no such file are unaffected -- `augment_with_example_extras` only reaches for
 # a name the vendored tree actually carries.
-NON_ENVELOPE_EXTRAS = ("testcase.yaml", "native_sim.conf")
+#
+# `boards/native_sim_native_64.{overlay,conf}` (tan-cli#501) is the same class
+# again, for `sensor` and `diagnostics`: Zephyr auto-discovers a board overlay
+# by this path convention with no CMakeLists wiring at all, so without it the
+# documented `west build -b native_sim/native/64` run has no `alp-i2c0` DT
+# alias and no `CONFIG_EMUL`/`CONFIG_I2C_EMUL`, and produces output that does
+# not match either README's own "Expected output" block. `edge-ai` ships the
+# same missing pair but is UNAFFECTED (measured identical native_sim output
+# with and without it) and is deliberately not vendored here.
+NON_ENVELOPE_EXTRAS = (
+    "testcase.yaml",
+    "native_sim.conf",
+    "boards/native_sim_native_64.overlay",
+    "boards/native_sim_native_64.conf",
+)
 
 
 #: `github.com/alplabai/alp-sdk/(blob|tree)/<ref>/` -- what the SDK's
@@ -126,27 +140,36 @@ def un_edit_iot_extra_conf_order(text: str) -> str:
 #: `un_edit` that finds nothing to undo is a FAILURE. A healed divergence --
 #: the tree re-vendored, or alp-sdk fixing its emit -- has to force the entry
 #: out, otherwise the next real drift in that file inherits a dead excuse.
+# tan-cli#384's seven README entries were RETIRED here (the tan-cli#543/#545
+# re-vendor). They pinned every scaffold README's doc links at the vendor ref
+# `v0.15.0-rc1` because the emit's own `v0.15.0` was a tag "alp-sdk has never
+# cut" -- a link a customer could not open. MEASURED: alp-sdk HAS since tagged
+# `v0.15.0` (`e2928b9f`, `git tag -l v0.15*`), so the emit's own bytes are
+# browsable and the divergence is healed. This module's own doctrine directly
+# above says a healed divergence must force its entry OUT rather than linger as
+# a dead excuse, and an `un_edit` with nothing to undo is a hard failure -- so
+# the entries are gone and the tree carries the emit's own `v0.15.0` links.
+# `un_edit_doc_link_ref` is kept: it is the only record of the transform, and
+# the next pre-release vendor point will need it again.
 DELIBERATE_EDITS: dict[tuple[str, str, str], tuple[str, Callable[[str], str]]] = {
-    (template, sku, "README.md"): (
-        "tan-cli#384: doc links pinned at the vendor ref v0.15.0-rc1, not the "
-        "emit's own v0.15.0, which alp-sdk has never tagged",
-        un_edit_doc_link_ref,
-    )
-    for template, sku in (
-        ("diagnostics", "E1M-AEN801"),
-        ("diagnostics", "E1M-V2N101"),
-        ("iot", "E1M-AEN801"),
-        ("minimal", "E1M-AEN801"),
-        ("minimal", "E1M-V2N101"),
-        ("sensor", "E1M-AEN801"),
-        ("sensor", "E1M-V2N101"),
-    )
-} | {
     ("iot", "E1M-AEN801", "CMakeLists.txt"): (
         "tan-cli#379: list(PREPEND EXTRA_CONF_FILE ...) so a caller's own "
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
         un_edit_iot_extra_conf_order,
     ),
+    # tan-cli#501 review finding 1: a matching PREPEND was added to the four
+    # `sensor`/`diagnostics` CMakeLists.txt files under the same
+    # "board-specific conf must win" theory, but it does not apply here --
+    # `boards/native_sim_native_64.conf` joins Zephyr's `CONF_FILE`, not
+    # `EXTRA_CONF_FILE` (`configuration_files.cmake`'s board-dir auto-discovery),
+    # and `merge_config_files` orders `CONF_FILE_AS_LIST` strictly before
+    # `EXTRA_CONF_FILE_AS_LIST` regardless of PREPEND/APPEND within the latter
+    # (`kconfig.cmake`). MEASURED with a real configure of a scaffolded project
+    # against Zephyr v4.4.1 (the revision alp-sdk/west.yml pins): PREPEND and
+    # APPEND produced the identical merge order and identical `.config`
+    # (CONFIG_EMUL=y, CONFIG_I2C_EMUL=y either way). Reverted to plain APPEND,
+    # which is what `--emit scaffold` produces unedited -- these four files
+    # carry no deliberate edit at all now.
 }
 
 
@@ -218,6 +241,58 @@ def augment_with_example_extras(
             extra_path = example_dir / name
             if extra_path.is_file():
                 live[name] = extra_path.read_text(encoding="utf-8")
+
+
+#: `(template, sku, path)` for a `NON_ENVELOPE_EXTRAS` file the live example
+#: ships that a vendored tree deliberately does NOT carry -- declared, not
+#: silently invisible, so `missing_extras` below has an auditable list rather
+#: than reproducing the exact blind spot it exists to close (tan-cli#501
+#: review finding 4: `augment_with_example_extras` only ever reaches for a
+#: name the vendored tree ALREADY has, so a vendored tree missing an extra
+#: entirely was never compared against anything and this gate stayed 9/9 PASS
+#: with the fix fully reverted -- measured).
+#:
+#: `edge-ai`'s `boards/native_sim_native_64.{conf,overlay}` gap is the one
+#: entry here today: `examples/ai/cold-chain-monitor` ships the pair, but
+#: `cold_chain.c` hits the same synthetic-data `LOG_WRN` branch whether the
+#: I2C alias resolves or not, so the native_sim output is unaffected (see
+#: MANIFEST.md and this module's own docstring). Not independently
+#: re-measured here (would need a real Zephyr build); declared so a future
+#: drift in that reasoning has one place to update, not a silent pass.
+DELIBERATELY_MISSING_EXTRAS: frozenset[tuple[str, str, str]] = frozenset({
+    ("edge-ai", "E1M-AEN801", "boards/native_sim_native_64.conf"),
+    ("edge-ai", "E1M-AEN801", "boards/native_sim_native_64.overlay"),
+    ("edge-ai", "E1M-V2N101", "boards/native_sim_native_64.conf"),
+    ("edge-ai", "E1M-V2N101", "boards/native_sim_native_64.overlay"),
+})
+
+
+def missing_extras(
+    sdk_root: Path, template: str, sku: str, vendored_paths: Iterable[str],
+) -> list[str]:
+    """`NON_ENVELOPE_EXTRAS` the live catalog example ships that the vendored
+    tree does not -- the completeness half `augment_with_example_extras`
+    cannot provide, since it only ever reaches for a name the vendored tree
+    already carries. Anything not declared in `DELIBERATELY_MISSING_EXTRAS`
+    is a real gap and a hard failure, matching `undo_declared_edits`'s own
+    strict discipline: a declaration excuses exactly the gap it names, and an
+    undeclared one cannot pass silently."""
+    example_dir = resolve_example_dir(sdk_root, template)
+    if example_dir is None:
+        return []
+    gaps = []
+    vendored_paths = set(vendored_paths)
+    for name in NON_ENVELOPE_EXTRAS:
+        if name in vendored_paths:
+            continue
+        if (template, sku, name) in DELIBERATELY_MISSING_EXTRAS:
+            continue
+        if (example_dir / name).is_file():
+            gaps.append(
+                f"{name}: live example ships this but the vendored tree does not, "
+                f"and it is not declared in DELIBERATELY_MISSING_EXTRAS"
+            )
+    return gaps
 
 
 def read_vendored_tree(tree_root: Path) -> dict[str, str]:
@@ -312,6 +387,17 @@ def self_check() -> None:
     assert not [f for f in failures if f.startswith(f"{path}:")], failures
     assert diff_trees({path: as_emitted[path]}, {path: emitted}) == [f"{path}: content differs"]
 
+    # `missing_extras` needs a real SDK checkout (a live example directory) to
+    # say anything -- `resolve_example_dir` returning `None` (no SDK bound) is
+    # already covered by every call site tolerating an empty list. What is
+    # provable without one: a declared gap is always a `(template, sku, path)`
+    # this module's own `NON_ENVELOPE_EXTRAS`, so a typo in the declaration
+    # can never silently stop excusing anything.
+    for declared_template, declared_sku, declared_path in DELIBERATELY_MISSING_EXTRAS:
+        assert declared_path in NON_ENVELOPE_EXTRAS, (
+            declared_template, declared_sku, declared_path
+        )
+
 
 def run(sdk_root: Path, vendored_root: Path, pairs: list[tuple[str, str]]) -> bool:
     all_ok = True
@@ -327,7 +413,11 @@ def run(sdk_root: Path, vendored_root: Path, pairs: list[tuple[str, str]]) -> bo
         augment_with_example_extras(live, sdk_root, template, vendored)
         as_emitted, declaration_failures = undo_declared_edits(template, sku, vendored)
 
-        diffs = declaration_failures + diff_trees(as_emitted, live)
+        diffs = (
+            declaration_failures
+            + diff_trees(as_emitted, live)
+            + missing_extras(sdk_root, template, sku, vendored)
+        )
         if diffs:
             print(f"FAIL {template}/{sku}: {len(diffs)} diff(s)")
             for d in diffs:

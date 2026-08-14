@@ -8,17 +8,26 @@ codes with `===` (tan-cli#106) and that match FAILS OPEN -- an unrecognised
 code is indistinguishable from "no problem" on the consumer side, so a rename
 or removal here is silent on both sides with CI green.
 
-WHO CHECKS WHAT (tan-cli#363). `crates/tan-cli/tests/contract.rs::frozen_issue_codes`
-walks the SAME registry, but only checks entries whose `emittedBy` names Rust
-source: there, `literal` is a verbatim slice of `crates/`, and `crates/` is
-frozen (it ships to nobody -- the release assets are PyInstaller freezes of
-`python/tan`, tan-cli#271), so a substring needle cannot rot under a reformat.
-Every entry whose `emittedBy` names a `python/` path is DELEGATED to this file,
-which parses the emission with `ast` instead. The Rust gate asserts that
-delegation is total and that this file still defines
-[`test_every_python_side_registry_entry_is_still_emitted`]; this file asserts
-the mirror (nothing is owned by neither side), so repointing an entry at a
-third kind of path reddens both.
+WHO CHECKS WHAT (tan-cli#363, amended by tan-cli#269).
+`crates/tan-cli/tests/contract.rs::frozen_issue_codes` walked the SAME registry
+and checked the entries whose `emittedBy` names Rust source: there, `literal`
+was a verbatim slice of `crates/`, and `crates/` was frozen, so a substring
+needle could not rot under a reformat. Every entry whose `emittedBy` names a
+`python/` path is DELEGATED to this file, which parses the emission with `ast`
+instead.
+
+**tan-cli#269 deleted the Rust half, and the `crates/`-owned entries are now
+checked by NOTHING.** Measured on this tree: 229 registry entries name a
+`python/` path and are gated here; 70 name a `crates/` path and are gated
+nowhere. They were NOT deleted with the crate, deliberately -- a
+`status: frozen` code is public wire vocabulary alp-sdk-vscode matches with
+`===`, and removing one is a breaking change on the consumer side, not a
+tidy-up (`contract/README.md`, "The frozen wire vocabulary"). Each of the 70
+needs its `emittedBy` repointed at the real Python emission site, or a
+deliberate retirement -- follow-up work, not silently absorbed here. The
+`startswith(("crates/", "python/"))` assertion below still ACCEPTS the
+`crates/` prefix for exactly that reason: tightening it would red 70 entries
+and block on that repoint. Do not read a passing run as "all 299 are gated".
 
 WHY the split exists rather than one shared needle. The Rust gate used to
 substring-check python-side entries too, and their `literal` field is not a
@@ -356,8 +365,9 @@ def test_python_side_entries_carry_no_literal_field():
     """tan-cli#372's mirror of `contract.rs::check_or_delegate`'s own
     assertion, checked from this side too: a JSON-only edit (no Rust file
     touched) should still be caught by SOME gate before it reaches a
-    `cargo test` run that might not happen the same day. `literal` is
-    required-and-checked for a `crates/` entry; for a `python/` entry nothing
+    `cargo test` run that might not happen the same day. `literal` was
+    required-and-checked for a `crates/` entry, by a gate tan-cli#269 has since
+    deleted; for a `python/` entry nothing
     anywhere reads it (see this file's module docstring), so its mere
     presence is the same "reads as a verified fact and is not one" rot #372
     was filed about, regardless of what value it holds.
@@ -376,12 +386,14 @@ def test_every_python_side_registry_entry_is_still_emitted():
     Python parser over there would be a weaker copy of the one that already
     lives in this directory.
 
-    `contract.rs::frozen_issue_codes` pins THIS function by name and fails if
-    it disappears, so deleting it cannot leave 198 entries owned by neither
-    gate. The mirror assertion is below: every frozen/reserved entry must sit
-    under `crates/` (checked there) or `python/` (checked here), so repointing
-    one at a third kind of path reddens both sides rather than falling into a
-    gap between them.
+    `contract.rs::frozen_issue_codes` used to pin THIS function by name and
+    fail if it disappeared, so deleting it could not leave the python-side
+    entries owned by neither gate; tan-cli#269 removed that backstop, so this
+    function is now load-bearing with nothing watching it. The mirror assertion
+    is below: every frozen/reserved entry must sit under `crates/` or
+    `python/`, so repointing one at a third kind of path is still caught -- but
+    see the module docstring for why a `crates/` prefix passing here does NOT
+    mean the entry is checked.
     """
     codes = _registry()["issueCodes"]
 
@@ -393,7 +405,7 @@ def test_every_python_side_registry_entry_is_still_emitted():
     ]
     assert not unowned, (
         "issue-codes.json entr(ies) whose `emittedBy` is under neither `crates/` "
-        "(checked by contract.rs::frozen_issue_codes) nor `python/` (checked "
+        "(gated by nothing since tan-cli#269) nor `python/` (checked "
         "here) -- they are gated by NOTHING. Point `emittedBy` at the real "
         "emission site:\n  " + "\n  ".join(unowned)
     )

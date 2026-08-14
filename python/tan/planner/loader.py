@@ -49,6 +49,7 @@ from .models import (
 from .partition import _known_flash_devices
 from .paths import BOARD_SCHEMA, METADATA_ROOT, REPO
 from .som_metadata import _sku_family, resolve_memory_map
+from .strict_loaders import DuplicateKeyError, strict_json_loads, strict_yaml_load
 from .topology import _default_os_from_core_type
 from .validate import (
     _enforce_loader_rules,
@@ -100,8 +101,8 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise OrchestratorError(f"file not found: {path}")
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as e:
+        data = strict_yaml_load(path.read_text(encoding="utf-8"), source=path)
+    except (yaml.YAMLError, DuplicateKeyError) as e:
         raise OrchestratorError(f"failed to parse {path}: {e}") from e
     if not isinstance(data, dict):
         raise OrchestratorError(
@@ -113,8 +114,8 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise OrchestratorError(f"file not found: {path}")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
+        return strict_json_loads(path.read_text(encoding="utf-8"), source=path)
+    except (json.JSONDecodeError, DuplicateKeyError) as e:
         raise OrchestratorError(f"failed to parse {path}: {e}") from e
 
 
@@ -216,12 +217,13 @@ def _resolve_topology_for_core(
     return None
 
 
-def _resolve_jlink_flash_device(
+def _resolve_variant_debug(
     som_preset: dict[str, Any],
     soc_spec: dict[str, Any],
-) -> Optional[str]:
-    """Resolve `variants[].debug.jlink_flash_device` for the SoC variant this
-    SoM preset declares.
+) -> dict[str, Any]:
+    """Resolve the whole `variants[].debug` block for the SoC variant this
+    SoM preset declares -- `{}` when the variant can't be resolved or
+    publishes no `debug:` block at all.
 
     Matches the SoM's `silicon_variant:` against `soc_spec["variants"][].
     order_code`, falling back to `alp_module_skus` membership when
@@ -236,23 +238,17 @@ def _resolve_jlink_flash_device(
     reads + re-parses it from disk itself.  By the time this function runs,
     `_resolve_board_impl` has already loaded that exact JSON into the
     `soc_spec` dict this function receives as a parameter, and this
-    function's sole caller (`_validate_topology_cores`) has no other use
-    for `metadata_root`.  Delegating would mean a second disk read + parse
-    of a file already in hand, purely to save this six-line match -- kept
-    independent instead, deliberately in lockstep with both of the above;
-    if either one grows a third fallback or drops the "TBD" sentinel,
-    update this one too.
+    function's callers have no other use for `metadata_root`.  Delegating
+    would mean a second disk read + parse of a file already in hand, purely
+    to save this six-line match -- kept independent instead, deliberately in
+    lockstep with both of the above; if either one grows a third fallback or
+    drops the "TBD" sentinel, update this one too.
 
-    `jlink_flash_device` is a single per-variant string (per
-    soc-spec-v1.schema.json:380-383: it "is not per-core... a single
-    per-variant string, not a jlink_device-shaped map"), unlike its sibling
-    `jlink_device` which IS keyed by core id -- so this returns one value
-    reused for every core's slice, not a per-core lookup.
-
-    None when the variant can't be resolved, or the resolved variant's
-    `debug:` block carries no `jlink_flash_device` key -- per
-    soc-spec-v1.schema.json:368, an absent key is the correct published
-    "unknown", never a value to invent from a naming convention.
+    ONE variant match shared by every `debug:` reader below
+    (`_resolve_jlink_flash_device`, `_resolve_flow_d_preflight`) so a future
+    third fact cannot drift onto a differently-resolved variant than its
+    siblings -- the keys are read as a set precisely because
+    `expect_dpidr`/`jlink_device` are validated downstream as a PAIR.
     """
     variants = soc_spec.get("variants") or []
     variant: Optional[dict[str, Any]] = None
@@ -269,8 +265,249 @@ def _resolve_jlink_flash_device(
             (v for v in variants if sku in (v.get("alp_module_skus") or [])),
             None)
     if variant is None:
+        return {}
+    return dict(variant.get("debug") or {})
+
+
+def _resolve_jlink_flash_device(debug: dict[str, Any]) -> Optional[str]:
+    """`debug.jlink_flash_device` out of an already-resolved `debug:` block
+    (`_resolve_variant_debug`).
+
+    `jlink_flash_device` is a single per-variant string (per
+    soc-spec-v1.schema.json's own description: it "is not per-core... a
+    single per-variant string, not a jlink_device-shaped map"), unlike its
+    sibling `jlink_device` which IS keyed by core id -- so this returns one
+    value reused for every core's slice, not a per-core lookup.
+
+    None when the variant couldn't be resolved (`debug` is then `{}`), or
+    the resolved variant's `debug:` block carries no `jlink_flash_device`
+    key -- per that same schema description, an absent key is the correct
+    published "unknown", never a value to invent from a naming convention.
+    """
+    return debug.get("jlink_flash_device")
+
+
+def _jlink_flash_device_declared(debug: dict[str, Any]) -> bool:
+    """Whether the resolved `debug:` block carried the `jlink_flash_device`
+    KEY, independent of its value (tan-cli#734).
+
+    `_resolve_jlink_flash_device` above cannot answer this: `dict.get`
+    returns `None` both for a schema-declared `jlink_flash_device: null` and
+    for an absent key, and those two mean opposite things. Declared-null is
+    a published "no known J-Link flash profile, refuse loudly"; absent is
+    "this variant says nothing", which keeps the Flow A default. The
+    downstream contract is `flash_plan._fa_has_key`, which is presence-based
+    for exactly this reason -- this is its counterpart on the emitter side.
+    """
+    return "jlink_flash_device" in debug
+
+
+def _resolve_slot0_load_address(
+    som_preset: dict[str, Any], core_id: str,
+) -> Optional[str]:
+    """This core's AEN MRAM slot0-XIP load address, as a `0x`-prefixed hex
+    string for `flash_args.slot0_load_address` (tan-cli#353): the Flow D
+    built-in MRAM loader (`alif_mram_jlink`) needs to know where the
+    slot0-linked application blob itself belongs, distinct from
+    `jlink_flash_device` (which only picks the loader's *device profile*).
+
+    Deliberately sourced from the SoM preset's `memory_map:`, NOT from the
+    SoC JSON `debug:` block `jlink_flash_device` lives in: this address is
+    SDK/module build POLICY, not a silicon fact -- two SoMs built on the
+    same silicon part can freely choose different slot0 windows (alp-sdk
+    #1069, the fix for a stock symmetric layout that put HE's and HP's
+    slot0 at the SAME address and let flashing one silently clobber the
+    other).
+
+    Reuses `zephyr_board.py`'s own `_aen_role_slot0_map` (lazy import, to
+    dodge the circular import -- `zephyr_board.py` imports `_load_yaml`
+    from this module at module scope) rather than re-deriving its per-role
+    override lookup, so this and board generation read the identical
+    override/no-override decision and genuinely cannot disagree on THAT
+    part.  A declared-but-invalid override (a half-authored map naming only
+    one role's `<role>_slot0`, or a wrong `accessible_from`) makes
+    `_aen_role_slot0_map` raise `ZephyrBoardEmitError` -- board generation
+    refuses to build that core's board file for the same reason, so this
+    re-raises as `OrchestratorError` instead of silently publishing an
+    address no board was actually built for.
+
+    Only `m55_he`/`m55_hp` roles are AEN slot0-XIP cores; every other
+    core_id (a32_cluster, non-AEN SoC families) returns None -- a
+    published "unknown", never a value to invent (same convention as
+    `jlink_flash_device`'s absent key).
+
+    No-override default: when `_aen_role_slot0_map` finds no per-role
+    override, this returns the stock symmetric layout's slot0 window --
+    right after the mcuboot region, at the MRAM base -- computed as
+    `zephyr_board._AEN_MRAM_BASE + zephyr_board._AEN_MCUBOOT_KIB * 1024`
+    directly against those two imported constants, not a locally pinned
+    literal, so a change to either constant moves this default too.
+    Applies uniformly to EVERY role in the no-override case (not just
+    `he`): the stock layout has exactly one slot0 window, and whichever
+    M55 core a SoM boots lands on it -- including `m55_hp` on a
+    single-M55 board, the case a role-keyed (`he`-only) fallback would
+    still refuse.
+    """
+    if not core_id.startswith("m55_"):
         return None
-    return (variant.get("debug") or {}).get("jlink_flash_device")
+    role = core_id[len("m55_"):]
+    if role not in ("he", "hp"):
+        return None
+
+    from .zephyr_board import (
+        _AEN_MCUBOOT_KIB, _AEN_MRAM_BASE, ZephyrBoardEmitError,
+        _aen_role_slot0_map)
+
+    memory_map = som_preset.get("memory_map") or []
+    try:
+        slot0_region = _aen_role_slot0_map(memory_map, role)
+    except ZephyrBoardEmitError as exc:
+        raise OrchestratorError(
+            f"cannot resolve flash_args.slot0_load_address for "
+            f"{core_id!r}: {exc}") from exc
+
+    if slot0_region is not None:
+        return f"0x{slot0_region['base']:08x}"
+    return f"0x{_AEN_MRAM_BASE + _AEN_MCUBOOT_KIB * 1024:08x}"
+
+
+def _resolve_flow_d_preflight(
+    debug: dict[str, Any],
+    core_id: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """The read-only SW-DP IDR preflight PAIR for one core, out of an
+    already-resolved `debug:` block: `(expect_dpidr, jlink_device)`.
+
+    Two facts, one guard (alp-sdk #1355).  `expect_dpidr` is the DPIDR the
+    board's debug port must answer before a host flasher writes anything;
+    `jlink_device` is the LIVE-CORE attach profile the read is performed
+    with -- distinct from `jlink_flash_device`, which is the part-number
+    flash-algorithm profile and cannot attach to a running core on an older
+    J-Link DLL.  A consumer needs both or the check cannot run, and tan
+    (`tan.core.flash_plan.validate_flow_d_preflight_args`) hard-refuses a
+    half-armed pair -- so emitting one without the other does not merely
+    leave the guard unarmed, it bricks the flash path outright.
+
+    Hence both-or-neither, unconditionally: either key missing yields
+    `(None, None)`.  Note `debug.jlink_device` is legitimately sparse across
+    `cores[]` -- an AEN variant publishes an attach profile for
+    `m55_hp`/`m55_he` and none for `a32_cluster`, which is a Cortex-A
+    cluster running Yocto, not a J-Link flash target -- so "no attach
+    profile for THIS core" is a normal answer, not an error, and this
+    function must not treat it as one.
+    """
+    expect_dpidr = debug.get("expect_dpidr")
+    jlink_device = (debug.get("jlink_device") or {}).get(core_id)
+    if not expect_dpidr or not jlink_device:
+        return (None, None)
+    return (expect_dpidr, jlink_device)
+
+
+def _enforce_flow_d_preflight_pair(
+    slice_: Slice,
+    debug: dict[str, Any],
+    sku: str,
+) -> None:
+    """Refuse a Flow-D-armed Zephyr slice that silently dropped the
+    wrong-board preflight because its core has no attach profile (alp-sdk
+    #1355).
+
+    `_resolve_flow_d_preflight`'s both-or-neither rule is what keeps the
+    emitted `flash_args` legal, but on its own it would also let a REAL gap
+    -- a variant that publishes `expect_dpidr` and forgets (or loses, to a
+    core rename) the `jlink_device` entry for a core that genuinely flashes
+    -- degrade quietly back to an unguarded write.  That is the exact
+    failure this issue exists to remove, so it must be loud.
+
+    Scoped to the slices where the guard actually applies: `os: zephyr`
+    (Flow D is a Zephyr-on-M path) whose SoC variant publishes
+    `jlink_flash_device` (that key's presence IS what promotes a
+    `zephyr_west_flash` entry to Flow D).  An A-core, an `os: off` core, or
+    a part with no J-Link MRAM loader at all is not a Flow D target and is
+    correctly silent here.
+
+    The converse -- `jlink_device` with no `expect_dpidr` -- is deliberately
+    NOT an error: that is the normal, correct state of every variant whose
+    DPIDR nobody has measured yet, and it simply leaves the guard unarmed.
+    An unarmed guard is recoverable; a guard armed at a guessed ID is not,
+    because a wrong ID that happens to match another board on the same
+    bench passes on exactly the board it exists to exclude.
+    """
+    if slice_.os != "zephyr" or not (
+        slice_.jlink_flash_device_declared or slice_.jlink_flash_device is not None
+    ):
+        return
+    # Bound once and read from the local: interpolating `debug['expect_dpidr']`
+    # into the message would make a mis-edited condition fail with a KeyError
+    # raised from inside its own diagnostic, instead of with the diagnostic.
+    expect_dpidr = debug.get("expect_dpidr")
+    if expect_dpidr and not slice_.jlink_device:
+        raise OrchestratorError(
+            f"{sku}: SoC variant publishes debug.expect_dpidr "
+            f"({expect_dpidr}) but no debug.jlink_device entry for "
+            f"core '{slice_.core_id}', which flashes over Flow D -- the "
+            f"wrong-board SW-DP IDR preflight needs BOTH (the expected ID "
+            f"and the live-core attach profile it is read with), and a "
+            f"downstream flasher refuses a half-armed pair outright rather "
+            f"than skipping the check. Add "
+            f"debug.jlink_device['{slice_.core_id}'] to this variant in "
+            f"metadata/socs/, or remove debug.expect_dpidr.")
+
+
+def _enforce_slot0_disjoint_across_roles(
+    cores: dict[str, Slice],
+    sku: str,
+) -> None:
+    """Refuse a dual-M55 AEN SoM whose `m55_he` and `m55_hp` slices publish
+    the SAME `flash_args.slot0_load_address` (alp-sdk #1384).
+
+    alp-sdk#1295 made this reachable for the first time: it populated
+    `debug.jlink_flash_device` for the E3/E5/E6/E7 variants too, not only
+    E1M-AEN801's, so the no-override default -- deliberately the SAME
+    address for both roles (see `_resolve_slot0_load_address`'s docstring)
+    -- can now meet a live `jlink_flash_device`.
+
+    Scoped to `os == "zephyr"` on BOTH roles (alp-sdk#1445, ported here as
+    tan-cli#744): a parked (`os: "off"`) or non-Zephyr core produces no
+    flashable artifact, so its resolved `slot0_load_address` is moot and
+    nothing would ever write to it. Comparing it anyway would refuse
+    `examples/power-timing/power-managed-sensor` -- a real, working app
+    that parks `m55_hp` -- for a collision that cannot physically happen.
+    Mirrors `_enforce_flow_d_preflight_pair`'s own `slice_.os != "zephyr"`
+    guard, this file's established convention for "only a live Zephyr slice
+    is a Flow D target".
+
+    Historical note, kept because it is why the guard long looked dead:
+    before alp-sdk#1295 the only AEN variant publishing
+    `jlink_flash_device` was E1M-AEN801's, and that SoM also declares a
+    disjoint `he_slot0`/`hp_slot0` `memory_map:` override -- so the shared
+    default address never met a live `jlink_flash_device` at all.
+
+    Still a real guard: a future AEN
+    variant that publishes `jlink_flash_device` without also declaring a
+    disjoint-slot0 override would otherwise silently reintroduce #1069's
+    HE/HP MRAM collision in `flash_args` -- flashing one core would corrupt
+    the other's slot0 window with no signal at all, the exact silent-wrong-
+    address class this file's other guards (`_enforce_flow_d_preflight_pair`,
+    `_resolve_slot0_load_address`'s own `OrchestratorError` on a half-
+    authored override) all exist to remove.
+    """
+    he = cores.get("m55_he")
+    hp = cores.get("m55_hp")
+    if (he is None or hp is None
+            or he.os != "zephyr" or hp.os != "zephyr"
+            or he.slot0_load_address is None
+            or hp.slot0_load_address is None):
+        return
+    if he.slot0_load_address == hp.slot0_load_address:
+        raise OrchestratorError(
+            f"{sku}: m55_he and m55_hp both resolve "
+            f"flash_args.slot0_load_address to the same address "
+            f"({he.slot0_load_address}) -- this is the #1069 HE/HP MRAM "
+            f"slot0 collision (flashing one core would silently corrupt "
+            f"the other's slot0 window). Declare disjoint `he_slot0`/"
+            f"`hp_slot0` regions in this SoM preset's `memory_map:` before "
+            f"this SoM can publish debug.jlink_flash_device.")
 
 
 def _slice_from_resolved(
@@ -278,6 +515,10 @@ def _slice_from_resolved(
     entry: dict[str, Any],
     soc_core_type: str = "",
     jlink_flash_device: Optional[str] = None,
+    jlink_flash_device_declared: bool = False,
+    expect_dpidr: Optional[str] = None,
+    jlink_device: Optional[str] = None,
+    slot0_load_address: Optional[str] = None,
 ) -> Slice:
     """Build a Slice dataclass from the resolved per-core entry.
 
@@ -290,6 +531,15 @@ def _slice_from_resolved(
     `jlink_flash_device` is the caller's already-resolved
     `_resolve_jlink_flash_device()` result (see that docstring) -- None
     when this SoC variant publishes no J-Link flash-device profile.
+
+    `expect_dpidr` / `jlink_device` are the caller's already-resolved
+    `_resolve_flow_d_preflight()` PAIR for this core -- both None (the
+    preflight is not armed) or both set; never one of the two, which is
+    the half-armed shape a downstream flasher refuses (alp-sdk #1355).
+
+    `slot0_load_address` is the caller's already-resolved
+    `_resolve_slot0_load_address()` result for THIS core_id -- None when
+    this core has no AEN MRAM slot0-XIP window to publish.
     """
     return Slice(
         core_id=core_id,
@@ -311,6 +561,10 @@ def _slice_from_resolved(
         # `topology.<id>.hw_console: false` marks a headless core.
         hw_console=bool(entry.get("hw_console", True)),
         jlink_flash_device=jlink_flash_device,
+        jlink_flash_device_declared=jlink_flash_device_declared,
+        expect_dpidr=expect_dpidr,
+        jlink_device=jlink_device,
+        slot0_load_address=slot0_load_address,
     )
 
 
@@ -604,9 +858,17 @@ def _validate_topology_cores(
         for c in (soc_spec.get("cores") or []) if "id" in c
     }
 
-    # SoC-variant fact (not per-core -- see `_resolve_jlink_flash_device`),
-    # resolved once and reused for every core's slice below.
-    jlink_flash_device = _resolve_jlink_flash_device(som_preset, soc_spec)
+    # SoC-variant `debug:` facts, resolved from ONE variant match (see
+    # `_resolve_variant_debug`).  `jlink_flash_device` is not per-core, so
+    # it is resolved once and reused for every slice below; the
+    # `expect_dpidr`/`jlink_device` preflight pair IS per-core (the read
+    # attach profile is keyed by `cores[].id`) and is resolved inside the
+    # loop.
+    variant_debug = _resolve_variant_debug(som_preset, soc_spec)
+    jlink_flash_device = _resolve_jlink_flash_device(variant_debug)
+    # tan-cli#734: carried alongside the value, not derived from it -- the
+    # two differ exactly in the declared-null case this exists for.
+    jlink_flash_device_declared = _jlink_flash_device_declared(variant_debug)
 
     cores: dict[str, Slice] = {}
     for core_id in soc_core_ids:
@@ -622,15 +884,36 @@ def _validate_topology_cores(
                 f"core '{core_id}' has no runtime assigned (neither "
                 f"board.yaml `cores.{core_id}` nor SoM preset "
                 f"`topology.{core_id}` is set)")
+        expect_dpidr, jlink_device = _resolve_flow_d_preflight(
+            variant_debug, core_id)
+        # VALUE, not presence -- deliberately unlike the `flash_args`
+        # emit, and matching alp-sdk's own gate (tan-cli#744). A variant
+        # declaring `jlink_flash_device: null` (e4.json is the live case)
+        # has NO J-Link profile, so Flow D cannot run and there is no
+        # slot0-XIP load address to publish. tan-cli#737 briefly made this
+        # ride the same presence promotion as the emit; that emitted a
+        # slot0_load_address alp-sdk does not, and the byte-parity suite
+        # caught it on `usb-host-storage` (E1M-AEN401) the moment a
+        # declared-null variant existed.
+        slot0_load_address = (
+            _resolve_slot0_load_address(som_preset, core_id)
+            if jlink_flash_device else None)
         slice_ = _slice_from_resolved(
             core_id, resolved,
             soc_core_type=soc_core_type_by_id.get(core_id, ""),
             jlink_flash_device=jlink_flash_device,
+            jlink_flash_device_declared=jlink_flash_device_declared,
+            expect_dpidr=expect_dpidr,
+            jlink_device=jlink_device,
+            slot0_load_address=slot0_load_address,
         )
+        _enforce_flow_d_preflight_pair(slice_, variant_debug, sku)
         _enforce_loader_rules(slice_)
         _enforce_os_matches_core_class(
             slice_, soc_core_type_by_id.get(core_id, ""))
         cores[core_id] = slice_
+
+    _enforce_slot0_disjoint_across_roles(cores, sku)
 
     # IPC entries.
     ipc_raw = project.get("ipc") or []
@@ -644,6 +927,24 @@ def _validate_topology_cores(
             cacheable=entry.get("cacheable"),
             address=entry.get("address"),
         ))
+
+    # alp-sdk #1088: `kind: rpmsg` has no cache-maintenance layer.
+    # `cfg->cacheable` is stored on the backend struct
+    # (`src/backends/rpc/{zephyr,yocto}_drv.c`) and never read again -- no
+    # `sys_cache_*` call exists anywhere under `src/` or `include/`.
+    # `cacheable: true` on a rpmsg entry would therefore select a code path
+    # that promises coherency it can't deliver, which is worse than no flag
+    # at all -- reject it here rather than silently honouring it.  Real fix
+    # (sys_cache_data_flush_range / sys_cache_data_invd_range in
+    # <alp/rpc.h>) remains open; see alp-sdk #1088.
+    for e in ipc_entries:
+        if e.kind == "rpmsg" and e.cacheable:
+            raise OrchestratorError(
+                f"ipc entry '{e.name}': kind: rpmsg does not support "
+                f"cacheable: true -- <alp/rpc.h> has no cache-maintenance "
+                f"implementation yet (#1088).  The D-cache is forced off "
+                f"for this carve-out's endpoints instead; remove "
+                f"`cacheable: true` (or set it to false).")
 
     # Loader rule §4.5.6: every ipc endpoint must be a core with
     # os != off.
@@ -706,6 +1007,7 @@ def _resolve_storage(
     project: dict[str, Any],
     som_preset: dict[str, Any],
     sku: str,
+    metadata_root: Path,
 ) -> list[StorageEntry]:
     """Stage 4 of the #673 Phase-1 `load_board_yaml` split: storage
     partitions (board.yaml `storage:` block).  Parse into StorageEntry
@@ -718,11 +1020,12 @@ def _resolve_storage(
     storage_raw = project.get("storage") or []
     storage_entries: list[StorageEntry] = []
     for idx, item in enumerate(storage_raw):
-        # `raw: true` is the legacy alias for `fs: raw`; the schema
-        # accepts both, the loader normalises.
+        # `fs` defaults to `raw` when omitted. The legacy `raw: true` alias is
+        # gone: `board.schema.json` no longer declares the property and sets
+        # `additionalProperties: false` on storage items, so a board carrying it
+        # is rejected at validation rather than normalised here. Measured before
+        # removal: zero tracked `board.yaml` files used it.
         fs = item.get("fs")
-        if fs is None and item.get("raw") is True:
-            fs = "raw"
         if fs is None:
             fs = "raw"
         storage_entries.append(StorageEntry(
@@ -737,7 +1040,7 @@ def _resolve_storage(
 
     # Cross-field: known flash device set is memory_map names + ospi keys.
     if storage_entries:
-        known_devices = set(_known_flash_devices(som_preset, METADATA_ROOT))
+        known_devices = set(_known_flash_devices(som_preset, metadata_root))
         for entry in storage_entries:
             if entry.flash_device is None:
                 continue   # resolver will block it with a clear reason
@@ -765,6 +1068,7 @@ def _validate_cross_fields(
     som_preset: dict[str, Any],
     sku: str,
     storage_entries: list[StorageEntry],
+    metadata_root: Path,
 ) -> dict[str, Any]:
     """Stage 5 of the #673 Phase-1 `load_board_yaml` split:
     `security.psa:` cross-field validation.  The schema is
@@ -783,7 +1087,7 @@ def _validate_cross_fields(
     if psa:
         storage_name_set = {e.name for e in storage_entries}
         try:
-            mem_map = resolve_memory_map(som_preset, METADATA_ROOT)
+            mem_map = resolve_memory_map(som_preset, metadata_root)
         except Exception:                                # noqa: BLE001
             mem_map = []
         region_names = {
@@ -962,10 +1266,10 @@ def load_board_yaml(path: Path, *,
         project, som_preset, soc_spec, sku, silicon, board_preset,
         board_name)
 
-    storage_entries = _resolve_storage(project, som_preset, sku)
+    storage_entries = _resolve_storage(project, som_preset, sku, metadata_root)
 
     security_block = _validate_cross_fields(
-        project, som_preset, sku, storage_entries)
+        project, som_preset, sku, storage_entries, metadata_root)
 
     out = BoardProject(
         sku=sku,
@@ -986,6 +1290,7 @@ def load_board_yaml(path: Path, *,
         storage=storage_entries,
         security=security_block,
         raw=project,
+        metadata_root=metadata_root,   # tan-cli#573: the tree THIS load read
     )
 
     # Cross-field consistency pass (v0.6 P2.3).  Runs last so it can

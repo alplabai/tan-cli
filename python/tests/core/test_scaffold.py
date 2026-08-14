@@ -15,18 +15,25 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
+from tan.core import scaffold as scaffold_module
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     TEMPLATE_IDS,
     CoresError,
+    ExampleReadError,
     PlannedFile,
     ScaffoldWriteError,
+    TemplateDataError,
+    UnsupportedSomError,
     app_core_for_sku,
     infer_runtime_for_core_id,
     is_plain_relative,
     parse_cores,
     plan_template_files,
+    read_example_tree,
+    retarget_board_yaml_cores,
     retarget_board_yaml_som,
     scaffold_tree_preview,
     splice_companion_cores,
@@ -527,6 +534,25 @@ def test_splice_adds_a_companion_and_a_default_rpmsg_channel():
     assert out.index("a55_cluster:") < out.index("libraries:")
 
 
+def test_splice_quotes_a_newly_added_off_companion_so_yaml_parses_it_as_a_string():
+    """tan-cli#645 round-3: `off` is a YAML 1.1 boolean keyword --
+    `yaml.safe_load("os: off")` -> `{"os": False}` -- so an unquoted
+    companion entry writes a bool where the schema's `os` enum requires the
+    string `"off"`. Every vendored scaffold already quotes it this way (see
+    `tan/templates/vendored/edge-ai/E1M-AEN801/board.yaml`); a NEWLY spliced
+    `off` companion must match, not just a pre-declared one (the existing
+    `test_splice_skips_a_core_already_declared_...` case never actually
+    spliced a fresh `off` entry, so this gap went uncaught)."""
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    out = splice_companion_cores(board, [("m55_he", "off")])
+
+    assert '  m55_he:\n    os: "off"\n' in out
+    parsed = yaml.safe_load(out)
+    assert parsed["cores"]["m55_he"]["os"] == "off"
+    # `off` is never the RPMsg endpoint the app core gets paired with.
+    assert "ipc:" not in out
+
+
 def test_splice_skips_a_core_already_declared_and_never_ipcs_an_off_companion():
     board = "cores:\n  a32_cluster:\n    os: \"off\"\n  m55_hp:\n    app: ./src\n"
     out = splice_companion_cores(board, [("a32_cluster", "off"), ("m55_hp", "zephyr")])
@@ -632,3 +658,593 @@ def test_write_files_still_works_through_a_symlinked_project_root(tmp_path):
     assert (real_project / "board.yaml").read_text(encoding="utf-8") == (
         "som:\n  sku: E1M-AEN801\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#494 defects 1-4: what `tan init` reads off disk, and what it refuses
+# to read. Every one of these shipped as `ok:true` or as an unactionable
+# message, which is why each test pins the REPORT as well as the file set.
+# ---------------------------------------------------------------------------
+
+
+def _example(root: Path, files: dict[str, str]) -> Path:
+    for rel, content in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return root
+
+
+def test_from_example_leaves_a_built_in_place_example_s_build_tree_behind(tmp_path):
+    """**tan-cli#494 defect 1.** `read_example_tree` globbed every regular file,
+    so an example someone had run `west build` in came across as the customer's
+    new project: `CMakeCache.txt` with absolute host paths, `.ninja_deps`,
+    `libapp.a`.
+
+    Measured on the real tree at `examples/v2n/v2n-brd-i2c-bringup` in the
+    alp-sdk checkout beside this repo: **613** files on disk, **607** of them
+    under `build/`, **6** tracked by git. The first binary among the 607 also
+    aborted the whole command with `init.example-unreadable`, so the visible
+    symptom was a hard failure and the silent one was a 613-file project.
+    """
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+            "board.yaml": "som:\n  sku: E1M-AEN801\n",
+            "build/CMakeCache.txt": "CMAKE_HOME_DIRECTORY:INTERNAL=/srv/alp-sdk\n",
+            "build/zephyr/libapp.a": "!<arch>\n",
+            "build_debug/x.o": "obj\n",
+            "cmake-build-release/y.o": "obj\n",
+            "twister-out/handler.log": "log\n",
+            "twister-out.1/handler.log": "log\n",
+        },
+    )
+
+    planned = sorted(f.relative_path for f in read_example_tree(source))
+
+    assert planned == ["CMakeLists.txt", "board.yaml", "src/main.c"]
+
+
+def test_from_example_leaves_behind_the_out_dir_the_examples_own_readme_creates(
+    tmp_path,
+):
+    """**tan-cli#494 defect 1, residue.** The round of this fix that shipped with
+    tan-cli#583 transcribed FIVE of the SEVEN directory patterns alp-sdk's
+    `.gitignore` declares, while its own comment claimed the set was "EXACTLY
+    the five `.gitignore` patterns": `out/` (`.gitignore:4`) and `bwdt/`
+    (`.gitignore:6`) sit inside the very same `# Build directories` block as
+    `build/` and were both missed.
+
+    `out/` is the one that bites. It is not only a `west build -d out` spelling
+    -- `examples/camera-vision/ai-object-detection-realtime/README.md:83` tells
+    the customer, in the example's OWN instructions, to run `dxcom -m
+    yolov8n.onnx -c yolov8n_config.json -o out/` inside the example directory.
+    Intel HEX is ASCII, so an all-text `out/` copies SILENTLY: measured on that
+    example with `out/zephyr/zephyr.hex` + `out/CMakeCache.txt` present,
+    `tan init --from-example` returned `ok:true`, exit 0, `issues: []` and
+    planned both of them into the customer's brand new project. A stale
+    artefact from someone else's build, arriving as if it were the project's
+    own.
+    """
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+            "board.yaml": "som:\n  sku: E1M-AEN801\n",
+            "out/zephyr/zephyr.hex": ":020000040000FA\n:00000001FF\n",
+            "out/CMakeCache.txt": "CMAKE_BUILD_TYPE:STRING=\n",
+            "bwdt/report.txt": "artefact\n",
+        },
+    )
+
+    planned = sorted(f.relative_path for f in read_example_tree(source))
+
+    assert planned == ["CMakeLists.txt", "board.yaml", "src/main.c"]
+
+
+def test_from_example_no_longer_hard_fails_on_the_binary_blob_out_dir_carries(
+    tmp_path,
+):
+    """The loud half of the same residue. `dxcom -o out/` leaves a `.dxnn`
+    behind, which is binary, so before this fix the whole command died --
+    measured through the real CLI against a mirrored SDK root:
+
+        init.example-unreadable
+        Example 'camera-vision/ai-object-detection-realtime' could not be read:
+        .../out/yolov8n.dxnn: 'utf-8' codec can't decode byte 0xff in position
+        8: invalid start byte
+
+    exit 1, no project written. `--from-example` is the one init path that
+    requires a checkout, and it was broken by following the checked-out
+    example's own README.
+    """
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+        },
+    )
+    blob = source / "out" / "yolov8n.dxnn"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"\x7fELF\x02\x01\x01\x00\xff\xfe dxnn blob")
+
+    try:
+        files = read_example_tree(source)
+    except ExampleReadError as err:  # pragma: no cover -- the defect itself
+        pytest.fail(
+            f"a binary under the example's `out/` still aborts the whole command: "
+            f"{err}"
+        )
+
+    assert sorted(f.relative_path for f in files) == ["CMakeLists.txt", "src/main.c"]
+
+
+def test_from_example_keeps_a_hand_written_directory_that_merely_starts_with_build(
+    tmp_path,
+):
+    """The pruning list is EXACTLY alp-sdk's seven `.gitignore` DIRECTORY
+    patterns (`build/`, `build_*/`, `out/`, `cmake-build-*/`, `bwdt/`,
+    `twister-out/`, `twister-out.*/`) and nothing more. An earlier cut of this
+    fix also pruned `build-`, which appears in no pattern there -- an invented
+    rule that silently drops a hand-written `build-utils/` from the customer's
+    project, which is the same damage as copying the build tree in, just in the
+    other direction.
+
+    The five non-glob patterns must match EXACTLY, which is why `outputs/` and
+    `outbox/` are here beside `build-utils/`: adding `out` as a `startswith`
+    prefix rather than an exact name would have eaten both.
+    """
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+            "build-utils/gen.py": "print('hi')\n",
+            "buildings.md": "not a build dir\n",
+            "outputs/report.md": "a hand-written outputs dir\n",
+            "outbox/note.md": "not `out/`\n",
+            "bwdtools/helper.py": "not `bwdt/`\n",
+        },
+    )
+
+    planned = sorted(f.relative_path for f in read_example_tree(source))
+
+    assert planned == [
+        "CMakeLists.txt",
+        "build-utils/gen.py",
+        "buildings.md",
+        "bwdtools/helper.py",
+        "outbox/note.md",
+        "outputs/report.md",
+        "src/main.c",
+    ]
+
+
+#: The two alp-sdk `.gitignore` headings that declare directories a built-in-
+#: place EXAMPLE can carry, each paired with a sentinel that must be found
+#: inside it. A block runs from its heading to the next blank line.
+#:
+#: Two blocks, not one, and the second is the reason this gate is shaped the
+#: way it is: `_EXAMPLE_BUILD_OUTPUT_DIRS` was transcribed from BOTH
+#: (`.gitignore:1-6` and `:34-39`), so gating only the first would leave the
+#: other half an ungated hand transcription -- exactly the defect class
+#: tan-cli#494 defect 1 is, one block over. The sentinel is what stops a
+#: renamed or restructured heading turning this into a silent pass on an empty
+#: read.
+_SDK_GITIGNORE_BLOCKS = (
+    ("# Build directories", "build/"),
+    ("# Zephyr / west workspace artefacts when this repo is the topdir.", ".west/"),
+)
+
+#: Directory patterns inside those blocks that are deliberately NOT pruned,
+#: each with the reason it cannot be example build output.
+#:
+#: All three are in the second block, which -- unlike the first -- is not
+#: build output wholesale: it is what west/Zephyr leave when ALP-SDK ITSELF is
+#: the west topdir, i.e. at the checkout root, never inside an
+#: `examples/<x>/` directory. `.west/` is the workspace marker (tan writes its
+#: own `tan-workspace-sdk` record into one), `modules/` is where `west update`
+#: clones the manifest projects, and `zephyr/.cache/` belongs to the vendored
+#: Zephyr tree. `modules` in particular must NOT become a pruned name: it is an
+#: ordinary source directory inside a project (`tan scaffold` itself writes
+#: `src/modules/<nm>/<nm>.c`), and pruning by name matches at every depth.
+#:
+#: An entry appearing in either block that is neither pruned nor listed here
+#: fails the gate, so the next one is a decision rather than an omission.
+_SDK_NOT_EXAMPLE_BUILD_OUTPUT = (".west/", "modules/", "zephyr/.cache/")
+
+
+def _sdk_gitignore_block(lines: list[str], heading: str) -> list[str]:
+    """The patterns alp-sdk's `.gitignore` declares under `heading`, up to the
+    next blank line. Empty when the heading is absent -- the caller's sentinel
+    assertion is what turns that into a failure rather than a silent pass."""
+    if heading not in lines:
+        return []
+    block = []
+    for line in lines[lines.index(heading) + 1 :]:
+        if not line.strip():
+            break
+        block.append(line.strip())
+    return block
+
+
+@pytest.mark.skipif(SDK is None, reason="needs ALP_SDK_ROOT / ALP_SDK_PARITY_ROOT")
+def test_the_prune_list_still_covers_alp_sdk_s_own_build_directory_gitignore_blocks():
+    """The drift gate the first cut of this fix did not have.
+
+    `_EXAMPLE_BUILD_OUTPUT_DIRS`/`_PREFIXES` is a hand transcription of another
+    repo's `.gitignore`, and tan-cli#583 transcribed it SHORT -- five of seven
+    -- while asserting completeness in its own comment. Nothing measured that
+    claim, so `out/` shipped unpruned. This re-reads BOTH source blocks out of
+    the bound checkout and fails when alp-sdk declares a directory that is
+    neither pruned nor recorded as deliberately kept.
+
+    Deliberately NOT a sweep of the whole `.gitignore`: that file also declares
+    `.vscode/*`, `vendors/`, licence-gated wheels and key material, none of
+    which an example carries. The two blocks in `_SDK_GITIGNORE_BLOCKS` are the
+    scope, and each is asserted to have been FOUND before its contents are
+    judged.
+    """
+    assert SDK is not None
+    lines = (SDK / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    patterns: list[str] = []
+    for heading, sentinel in _SDK_GITIGNORE_BLOCKS:
+        block = _sdk_gitignore_block(lines, heading)
+        assert sentinel in block, (
+            f"alp-sdk's '{heading}' block was not found, or no longer contains "
+            f"'{sentinel}' -- the heading moved or the block was restructured, "
+            f"and this gate was about to pass on an empty read. Re-derive it "
+            f"from {SDK / '.gitignore'}."
+        )
+        patterns.extend(block)
+
+    unknown = []
+    for pattern in patterns:
+        if not pattern.endswith("/"):
+            continue  # a FILE pattern (e.g. `*.out`) -- out of scope, see the
+            # constant's own comment in tan/core/scaffold.py.
+        if pattern in _SDK_NOT_EXAMPLE_BUILD_OUTPUT:
+            continue
+        name = pattern[:-1]
+        probe = name.replace("*", "x") if "*" in name else name
+        if not scaffold_module._is_build_output_dir(probe):
+            unknown.append(pattern)
+
+    assert unknown == [], (
+        f"alp-sdk declares director{'y' if len(unknown) == 1 else 'ies'} "
+        f"{unknown} that tan's `--from-example` prune list does not know, so "
+        f"`tan init --from-example` would copy {'it' if len(unknown) == 1 else 'them'} "
+        f"into a customer's new project. Either add the name to "
+        f"`_EXAMPLE_BUILD_OUTPUT_DIRS` (exact) / `_EXAMPLE_BUILD_OUTPUT_PREFIXES` "
+        f"(glob) in tan/core/scaffold.py, or -- if it is not example build "
+        f"output -- record it in `_SDK_NOT_EXAMPLE_BUILD_OUTPUT` above WITH the "
+        f"reason. See tan-cli#494 defect 1."
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_from_example_does_not_inline_a_symlink_pointing_outside_the_example(tmp_path):
+    """Skipping symlinks matches the oracle's `DirEntry::file_type()`, whose own
+    doc comment says non-regular entries are skipped. `Path.is_file()` FOLLOWS a
+    symlinked file, so a link out of the example would have copied that outside
+    file's CONTENT into the customer's new project under an innocuous name --
+    here a private key, which is the version of this that matters."""
+    secret = tmp_path / "outside" / "id_ed25519"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("PRIVATE KEY MATERIAL\n", encoding="utf-8")
+    source = _example(
+        tmp_path / "ex",
+        {
+            "CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n",
+            "src/main.c": "int main(void) { return 0; }\n",
+        },
+    )
+    (source / "keys.txt").symlink_to(secret)
+    (source / "dangling.txt").symlink_to(tmp_path / "nope")
+
+    planned = read_example_tree(source)
+
+    assert sorted(f.relative_path for f in planned) == ["CMakeLists.txt", "src/main.c"]
+    assert all("PRIVATE KEY MATERIAL" not in f.content for f in planned)
+
+
+def test_a_vendored_tree_keeps_its_own_sku_s_cores_byte_for_byte():
+    """**tan-cli#494 defect 2's** no-op half, first because it is what protects
+    every existing fixture: the two representative SKUs are the trees' own, so
+    `retarget_board_yaml_cores` must be byte-exact passthrough for them. The
+    `os: "off"` companion cluster each tree declares (`a32_cluster` on the E8,
+    `a55_cluster` on the V2N) is REAL for that SKU and must survive."""
+    aen = _board_yaml_of("edge-ai", "edge-ai-starter", "E1M-AEN801")
+    v2n = _board_yaml_of("edge-ai", "edge-ai-starter", "E1M-V2N101")
+
+    assert "a32_cluster:" in aen and "m55_hp:" in aen
+    assert "a55_cluster:" in v2n and "m33_sm:" in v2n
+
+
+@pytest.mark.parametrize(
+    ("sku", "app_core", "dropped"),
+    [
+        ("E1M-AEN301", "m55_hp", "a32_cluster"),
+        # `E1M-NX9101` used to be a second row here. tan-cli#579 refuses it at
+        # `_vendored_files` -- an NXP SoM no longer reaches the Alif tree at all
+        # -- so this end-to-end shape cannot cover it any more. The transform
+        # itself is still exercised for that SKU, directly, in
+        # `test_cores_retargeting_still_handles_a_family_with_no_tree` below;
+        # dropping the row without moving the coverage would have quietly
+        # retired half of tan-cli#494 defect 2's regression guard.
+    ],
+)
+def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
+    sku, app_core, dropped
+):
+    """**tan-cli#494 defect 2.** `tan init` picks a vendored tree by FAMILY and
+    used to retarget only the `som: sku:` line, so every SKU but the two
+    representative ones inherited that tree's core ids verbatim.
+
+    `--template edge-ai-starter --som E1M-AEN301` wrote `a32_cluster` for an
+    Ensemble E3 that has no Cortex-A32 -- `ok:true`, `exitCode 0`, `issues:[]`
+    -- and `tan validate` then hard-errored `unknown core id ['a32_cluster']`
+    on the very next command. `--som E1M-NX9101` landed on the Alif tree and
+    kept `m55_hp` against a topology of `a55_cluster`/`m33`, contradicting
+    `app_core_for_sku` in this same module. (That second SKU is now refused
+    outright -- tan-cli#579 -- because fixing its CORE id left the rest of the
+    Alif tree in place and only made the artefact look more plausible.)
+
+    Both edits only ever REMOVE wrong facts: the app entry is renamed to tan's
+    own `app_core_for_sku`, and the companion cluster -- true only of the
+    tree's own SKU -- is dropped, since a core absent from `cores:` is simply
+    not built.
+    """
+    content = _board_yaml_of("edge-ai", "edge-ai-starter", sku)
+
+    assert f"  {app_core}:" in content
+    assert app_core_for_sku(sku) == app_core
+    assert dropped not in content
+    # The app entry keeps its body -- this is a rename, not a rebuild.
+    assert "app: ./src" in content
+    assert "default_arena_kib: 64" in content
+    # And the SoM line was retargeted too, as it always was.
+    assert f"sku: {sku}" in content
+
+
+def test_cores_retargeting_still_handles_a_family_with_no_tree():
+    """tan-cli#494 defect 2's NXP coverage, moved off the `_vendored_files`
+    path that tan-cli#579 now refuses. The TRANSFORM is unchanged and still
+    correct for an NXP SKU -- it is reached through `--board-yaml` and
+    `--from-example`, neither of which goes near `_family_bucket` -- so the
+    refusal must not be read as retiring it."""
+    content = _board_yaml_of("edge-ai", "edge-ai-starter", "E1M-AEN801")
+
+    retargeted = retarget_board_yaml_cores(content, "E1M-NX9101", "E1M-AEN801")
+
+    assert "  m33:" in retargeted
+    assert "  m55_hp:" not in retargeted
+    assert "  a32_cluster:" not in retargeted
+    assert "app: ./src" in retargeted
+    # Not asserted as absent, deliberately: this tree's `libraries:` entry is
+    # core-SCOPED (`cores: [m55_hp]`) and `retarget_board_yaml_cores` only
+    # rewrites the `cores:` block, so that scope still names a core the
+    # retargeted file no longer declares. Out of tan-cli#579's scope -- the
+    # vendored path that produced it is now refused outright, and the residue
+    # is only reachable via `--from-example`/`--board-yaml`, which are
+    # tan-cli#494 defect 2's territory, not this fix's.
+    assert "cores: [m55_hp]" in retargeted
+
+
+def test_cores_retargeting_leaves_an_unrecognised_block_alone():
+    """A block with no single unambiguous `app:` entry is left verbatim rather
+    than half-rewritten -- the transform never guesses. Same rule as
+    `retarget_board_yaml_som`'s own untouched-on-no-match behaviour."""
+    two_apps = "cores:\n  m55_hp:\n    app: ./a\n  m33:\n    app: ./b\n\nsom:\n  sku: X\n"
+    assert retarget_board_yaml_cores(two_apps, "E1M-NX9101", "E1M-AEN801") == two_apps
+
+    no_block = "som:\n  sku: E1M-AEN801\n"
+    assert retarget_board_yaml_cores(no_block, "E1M-NX9101", "E1M-AEN801") == no_block
+
+
+def test_a_partially_delivered_vendored_tree_is_refused_not_half_written(tmp_path, monkeypatch):
+    """**tan-cli#494 defect 3.** The emptiness guard was all-or-nothing -- it
+    fired only at ZERO files, so any non-empty SUBSET read as a complete tree.
+
+    With `src/main.c` missing (a mis-scoped PyInstaller `--add-data`, a partial
+    copy, an extracted onedir whose `src/` lost `+x`), `tan init` wrote the
+    other files, reported `ok:true` / `issues:[]`, and the `CMakeLists.txt` it
+    DID write still said `target_sources(app PRIVATE src/main.c)`. The
+    customer's first `tan build` died inside CMake with "Cannot find source
+    file", reported to them as their project's problem.
+
+    The expected set is DERIVED from the tree's own `CMakeLists.txt`, so it
+    tracks a template that gains a source file with no edit here.
+    """
+    tree = tmp_path / "vendored" / "edge-ai" / "E1M-AEN801"
+    tree.mkdir(parents=True)
+    (tree / "CMakeLists.txt").write_text(
+        "target_sources(app PRIVATE\n  src/main.c\n  src/extra.c\n)\n", encoding="utf-8"
+    )
+    (tree / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    (tree / "prj.conf").write_text("CONFIG_LOG=y\n", encoding="utf-8")
+    monkeypatch.setattr(scaffold_module, "VENDORED_ROOT", tmp_path / "vendored")
+
+    with pytest.raises(TemplateDataError) as excinfo:
+        scaffold_module._vendored_files("edge-ai", "edge-ai-starter", "E1M-AEN801")
+
+    message = str(excinfo.value)
+    # Names BOTH missing sources, and says whose problem it is.
+    assert "src/extra.c" in message and "src/main.c" in message
+    assert "broken tan installation, not a project problem" in message
+
+
+def test_a_complete_vendored_tree_passes_the_completeness_check(tmp_path, monkeypatch):
+    """Defect 3's control: the check must not fire on a whole tree. Pins that
+    the derived expectation really is satisfiable -- a regex that matched
+    nothing, or one that swept up a `${VAR}`, would make every scaffold
+    unbuildable, which is a far worse failure than the one being fixed."""
+    tree = tmp_path / "vendored" / "edge-ai" / "E1M-AEN801"
+    (tree / "src").mkdir(parents=True)
+    (tree / "CMakeLists.txt").write_text(
+        "target_sources(app PRIVATE\n  src/main.c\n  ${EXTRA_SOURCES}\n)\n", encoding="utf-8"
+    )
+    (tree / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    (tree / "prj.conf").write_text("CONFIG_LOG=y\n", encoding="utf-8")
+    (tree / "src" / "main.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    monkeypatch.setattr(scaffold_module, "VENDORED_ROOT", tmp_path / "vendored")
+
+    planned = scaffold_module._vendored_files("edge-ai", "edge-ai-starter", "E1M-AEN801")
+
+    assert sorted(f.relative_path for f in planned) == [
+        "CMakeLists.txt",
+        "board.yaml",
+        "prj.conf",
+        "src/main.c",
+    ]
+
+
+def test_an_undecodable_example_file_is_named_in_the_error(tmp_path):
+    """**tan-cli#494 defect 4.** `_read_verbatim` re-raised a bare
+    `UnicodeDecodeError`, whose `str()` is only `'utf-8' codec can't decode
+    byte 0xff in position 88: invalid start byte` -- no path. The caller wraps
+    that verbatim into `init.example-unreadable`, so a customer with a stray
+    binary in a large example tree got a byte offset and nothing to act on.
+    Python's own `open()` names the file in every OSError it raises, so only
+    the codec branch -- the one a binary actually trips -- was silent.
+    """
+    source = _example(
+        tmp_path / "ex", {"CMakeLists.txt": "target_sources(app PRIVATE src/main.c)\n"}
+    )
+    (source / "blob.bin").write_bytes(b"\xff\xfe\x00\x01binary")
+
+    with pytest.raises(Exception) as excinfo:
+        read_example_tree(source)
+
+    message = str(excinfo.value)
+    assert "blob.bin" in message
+    # The codec detail is kept, not replaced -- it says WHY the file is not text.
+    assert "utf-8" in message
+
+
+def _board_yaml_of(tree: str, template_id: str, sku: str) -> str:
+    """The `board.yaml` a real vendored-tree plan produces for `sku` -- read
+    through `_vendored_files` so the test exercises the same retargeting chain
+    `tan init` does, rather than calling the transform in isolation."""
+    files = scaffold_module._vendored_files(tree, template_id, sku)
+    return next(f.content for f in files if f.relative_path == "board.yaml")
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#579 -- an NXP SKU used to render the Alif tree's content
+# ---------------------------------------------------------------------------
+
+
+def test_a_som_family_with_no_vendored_tree_is_refused_not_rendered():
+    """**tan-cli#579.** `_family_bucket` was
+    `_FAMILY_TREES[1] if sku.startswith(("E1M-V2N","E1M-V2M")) else _FAMILY_TREES[0]`,
+    so E1M-NX9* -- a family `app_core_for_sku` in this same module already
+    knows (`E1M-NX9` -> `m33`) -- fell down the `else` arm onto the Alif tree.
+    Measured on `dev` before this fix: `plan_template_files("sensor-starter",
+    "E1M-NX9101")` returned the E1M-AEN801 tree with every file except
+    `board.yaml` BYTE-IDENTICAL to the Alif render -- `preset: e1m-evk`,
+    `chips: [tmp112]`, a README whose build line is `west build -b
+    alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .`, and a `CMakeLists.txt`
+    that asks the SDK loader for `--emit zephyr-conf --core m55_hp` while
+    tan-cli#494's own `retarget_board_yaml_cores` had already rewritten the
+    same scaffold's `cores:` key to `m33`. `tan init` reported `ok: true` /
+    exit 0 / `issues: []` for all of it.
+    """
+    for template_id in ("zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"):
+        with pytest.raises(UnsupportedSomError) as excinfo:
+            plan_template_files(template_id, "E1M-NX9101")
+        assert "E1M-NX9101" in str(excinfo.value)
+        assert template_id in str(excinfo.value)
+
+
+def test_the_refusal_names_the_two_paths_that_still_work():
+    """A refusal that leaves the customer with nothing is a worse defect than
+    the one it fixes. `minimal-app` is tan's OWN hand-generated, vendor-neutral
+    template (no vendored tree, so `_family_bucket` never runs for it) and
+    `--from-example` copies a real SDK example -- both are named."""
+    with pytest.raises(UnsupportedSomError) as excinfo:
+        plan_template_files("sensor-starter", "E1M-NX9101")
+
+    message = str(excinfo.value)
+    assert "minimal-app" in message
+    assert "--from-example" in message
+
+
+def test_minimal_app_still_renders_for_a_family_with_no_vendored_tree():
+    """The refusal is scoped to the VENDORED trees. `minimal-app` is
+    hand-generated here and carries no vendor content at all, so it is correct
+    for an NXP SoM -- and it is the escape hatch the refusal names."""
+    files = {f.relative_path: f.content for f in plan_template_files("minimal-app", "E1M-NX9101")}
+
+    assert "sku: E1M-NX9101" in files["board.yaml"]
+    assert "  m33:\n" in files["board.yaml"]
+    assert "m55_hp" not in files["board.yaml"]
+
+
+def test_the_two_family_derivations_read_one_table():
+    """The invariant this module's docstring asserts -- "the two derivations
+    can never disagree" -- restored by CONSTRUCTION rather than by two
+    hand-synced prefix tests. Every family `app_core_for_sku` recognises
+    resolves to a tree, or to an explicit refusal; none of them can fall
+    through to Alif by accident again."""
+    for sku, core, tree in (
+        ("E1M-AEN801", "m55_hp", "E1M-AEN801"),
+        ("E1M-AEN301", "m55_hp", "E1M-AEN801"),
+        ("E1M-V2N101", "m33_sm", "E1M-V2N101"),
+        ("E1M-V2N102", "m33_sm", "E1M-V2N101"),
+        ("E1M-V2M101", "m33_sm", "E1M-V2N101"),
+        ("E1M-NX9101", "m33", None),
+    ):
+        assert app_core_for_sku(sku) == core, sku
+        assert scaffold_module._family_bucket(sku) == tree, sku
+
+
+def test_an_unrecognised_prefix_still_takes_the_alif_default_in_both_derivations():
+    """Deliberately NOT refused. `tan init` is SDK-free and cannot tell a
+    future SKU from a typo, so an unrecognised prefix keeps the pre-existing
+    Alif fallback -- and takes it in BOTH derivations at once, which is what
+    stops an unknown SKU getting a `board.yaml` whose core contradicts its own
+    `CMakeLists.txt`. `tan validate` re-checks the guess once an SDK
+    resolves."""
+    assert app_core_for_sku("E1M-ZZZ999") == "m55_hp"
+    assert scaffold_module._family_bucket("E1M-ZZZ999") == "E1M-AEN801"
+    planned = plan_template_files("sensor-starter", "E1M-ZZZ999")
+    assert any(f.relative_path == "board.yaml" for f in planned)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#501 -- a MISSING vendored extra is invisible to
+# tests/parity/scaffold_byte_parity.py (`augment_with_example_extras` only
+# ever reaches for a `NON_ENVELOPE_EXTRAS` name the vendored tree already
+# carries), so the gate is 9/9 PASS whether or not `boards/
+# native_sim_native_64.{conf,overlay}` ship at all -- measured both ways at
+# the pinned SDK tag. This is the SDK-free pin that actually catches it: it
+# fails the moment either file (or the pair's directory) is missing from the
+# vendored tree, which is the exact regression the parity gate cannot see.
+# ---------------------------------------------------------------------------
+
+
+def test_sensor_and_diagnostics_scaffolds_ship_the_native_sim_board_pair():
+    """`sensor-starter`/`board-diagnostics`' documented native_sim build
+    (README: `west build -b native_sim/native/64 .`, no `tan generate` step)
+    depends on Zephyr auto-discovering `boards/native_sim_native_64.conf`
+    (CONFIG_EMUL/CONFIG_I2C_EMUL) and `boards/native_sim_native_64.overlay`
+    (the `alp-i2c0` emul alias) straight out of the scaffold -- neither file
+    is ever emitted by `tan generate`'s `native-sim-overlay` target (that
+    target's own GPIO-only overlay carries no I2C alias at all). Reverting
+    just the four vendored `boards/` directories reproduces the pre-fix
+    6-file scaffold (no `boards/` at all) and this test goes red -- proving
+    the parity gate's blind spot (finding 4) does not."""
+    for template_id, skus in (
+        ("sensor-starter", ("E1M-AEN801", "E1M-V2N101")),
+        ("board-diagnostics", ("E1M-AEN801", "E1M-V2N101")),
+    ):
+        for sku in skus:
+            paths = {f.relative_path for f in plan_template_files(template_id, sku)}
+            assert "boards/native_sim_native_64.conf" in paths, (template_id, sku)
+            assert "boards/native_sim_native_64.overlay" in paths, (template_id, sku)

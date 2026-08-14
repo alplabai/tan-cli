@@ -22,6 +22,7 @@ import sys
 
 import typer
 from click.testing import CliRunner
+from typer.core import TyperCommand
 from typer.main import get_command, get_command_name
 
 from tan.commands.bootstrap_cmd import bootstrap
@@ -70,44 +71,125 @@ from tan.version import TAN_VERSION
 
 app = typer.Typer(add_completion=False)
 
+#: The `--format` a DISPATCHED subcommand actually resolved to, as a bool, or
+#: `None` when NO command body ran this process (`main()` resets it per run).
+#:
+#: This is the missing half of Rust's own structure (tan-cli#546/#491 defect 3).
+#: `crates/tan-cli/src/main.rs` decides the channel like this:
+#:
+#:     match Cli::try_parse() {
+#:         Ok(cli) => run(cli),                   // channel = cli.format
+#:         Err(e)  => if wants_json(argv) { ... } // channel = the textual scan
+#:     }
+#:
+#: -- so the naive `wants_json` scan is consulted ONLY once clap has already
+#: FAILED, and can never affect a run that parsed. The port promoted the same
+#: scan to a process-wide switch, which is what let a `--format json` that is
+#: not tan's own flag (forwarded past `--` to `west alp-quality`, or sitting in
+#: another option's value slot) replace a text-mode command's real, coded answer
+#: with an unrequested `command:"cli"` / `cli.parse-error` document on stdout.
+#:
+#: Two earlier attempts tried to answer the same question by making the argv
+#: SCAN smarter (an arity walk, then a clap-style hyphen guard). Both failed,
+#: and a third textual shape cannot work either -- MEASURED against the oracle,
+#: which answers the two structurally identical argvs differently:
+#:
+#:     tan quality -- --format json     oracle: TEXT  (0 bytes on stdout)
+#:     tan build   -- --format json     oracle: JSON  (`cli.parse-error`)
+#:
+#: The only thing separating them is whether the parser ACCEPTED the argv
+#: (`quality` forwards trailing args, `build` refuses them), which no scan of
+#: argv alone can know. So the scan stays exactly as it is -- a faithful port of
+#: Rust's `wants_json`, used only where Rust uses it -- and the parse OUTCOME is
+#: recorded here instead.
+_dispatched_json_mode: bool | None = None
+
+
+class _DispatchedCommand(TyperCommand):
+    """A `TyperCommand` that records the `--format` its own parse resolved.
+
+    `Command.invoke` is called by Click only after `cmd.make_context(...)` has
+    already succeeded, so reaching it means the FULL parse (root's flags, the
+    subcommand name, and the subcommand's own options) was accepted and this
+    command's body is about to run -- exactly Rust's `Ok(cli)` arm, and exactly
+    the boundary `main()` cannot otherwise see from the outside.
+
+    The `--format` parameter is found by its OPTION STRING rather than by the
+    `output_format` parameter name every command happens to use today: the name
+    is a convention 32 modules share, the option string is the contract.
+    """
+
+    def invoke(self, ctx):
+        global _dispatched_json_mode
+        param = next((p for p in ctx.command.params if "--format" in p.opts), None)
+        value = ctx.params.get(param.name) if param is not None else None
+        # `OutputFormat.JSON` (an enum), the plain string a `ValidateOutputFormat`
+        # or a future non-enum choice would give, or `None` for the commands
+        # whose `--format` defaults to `None` rather than `TEXT` -- all three
+        # collapse to "is this the envelope channel".
+        _dispatched_json_mode = getattr(value, "value", value) == "json"
+        return super().invoke(ctx)
+
+
 # Registered with a STATIC import, deliberately -- PyInstaller follows the
 # static import graph only, so a pkgutil/importlib auto-registry works from
 # source and produces a frozen `tan` that cannot find its own commands (see
 # `tan.commands.__init__`). Registering here rather than with a decorator in
 # the command module keeps `tan.commands.*` free of any `tan.cli` import,
-# which would otherwise be a cycle.
-app.command("bootstrap")(bootstrap)
-app.command("build")(build)
-app.command("clean")(clean)
-app.command("completion")(completion)
-app.command("debug-config")(debug_config)
-app.command("diff")(diff)
-app.command("doctor")(doctor)
-app.command("examples")(examples)
-app.command("explain")(explain)
-app.command("faultdecode")(faultdecode)
-app.command("flash")(flash)
-app.command("generate")(generate)
-app.command("image")(image)
-app.command("init")(init)
-app.command("inspect")(inspect)
-app.command("kconfig")(kconfig)
-app.command("lock", context_settings=FORWARD_CONTEXT_SETTINGS)(lock)
-app.command("migrate", context_settings=FORWARD_CONTEXT_SETTINGS)(migrate)
-app.command("model")(model)
-app.command("monitor")(monitor)
-app.command("new-som")(new_som)
-app.command("pinmux")(pinmux)
-app.command("presets")(presets)
-app.command("quality", context_settings=FORWARD_CONTEXT_SETTINGS)(quality)
-app.command("renode")(renode)
-app.command("run")(run)
-app.command("scaffold")(scaffold)
-app.command("sdk")(sdk)
-app.command("size")(size)
-app.command("support-bundle")(support_bundle)
-app.command("trace")(trace)
-app.command("validate")(validate)
+# which would otherwise be a cycle. Each registration also carries a
+# `rich_help_panel` keyword that groups commands into six titled panels on
+# `--help`; a new command gains grouping with the same one-line edit that
+# registers it.
+app.command("bootstrap", rich_help_panel="Setup")(bootstrap)
+app.command("build", rich_help_panel="Build & run")(build)
+app.command("clean", rich_help_panel="Build & run")(clean)
+app.command("completion", rich_help_panel="Setup")(completion)
+app.command("debug-config", rich_help_panel="Hardware")(debug_config)
+app.command("diff", rich_help_panel="Inspect & author")(diff)
+app.command("doctor", rich_help_panel="Setup")(doctor)
+app.command("examples", rich_help_panel="Start a project")(examples)
+app.command("explain", rich_help_panel="Start a project")(explain)
+app.command("faultdecode", rich_help_panel="Hardware")(faultdecode)
+app.command("flash", rich_help_panel="Hardware")(flash)
+app.command("generate", rich_help_panel="Configure")(generate)
+app.command("image", rich_help_panel="Build & run")(image)
+app.command("init", rich_help_panel="Start a project")(init)
+app.command("inspect", rich_help_panel="Inspect & author")(inspect)
+app.command("kconfig", rich_help_panel="Configure")(kconfig)
+app.command(
+    "lock", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
+)(lock)
+app.command(
+    "migrate", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
+)(migrate)
+app.command("model", rich_help_panel="Configure")(model)
+app.command("monitor", rich_help_panel="Hardware")(monitor)
+app.command("new-som", rich_help_panel="Inspect & author")(new_som)
+app.command("pinmux", rich_help_panel="Inspect & author")(pinmux)
+app.command("presets", rich_help_panel="Start a project")(presets)
+app.command(
+    "quality", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
+)(quality)
+app.command("renode", rich_help_panel="Build & run")(renode)
+app.command("run", rich_help_panel="Build & run")(run)
+app.command("scaffold", rich_help_panel="Start a project")(scaffold)
+app.command("sdk", rich_help_panel="Setup")(sdk)
+app.command("size", rich_help_panel="Build & run")(size)
+app.command("support-bundle", rich_help_panel="Inspect & author")(support_bundle)
+app.command("trace", rich_help_panel="Inspect & author")(trace)
+app.command("validate", rich_help_panel="Configure")(validate)
+
+# Every command dispatches through `_DispatchedCommand` -- assigned by walking
+# the registration table above rather than by threading `cls=` through all 32
+# `app.command(...)` calls, for the same reason `_SUBCOMMAND_NAMES` below is
+# DERIVED and not retyped: a command registered next year is covered by the one
+# line that registers it, and there is no second place to forget. `cls` is a
+# real `CommandInfo` field (`typer.models.CommandInfo`), read by
+# `typer.main.get_command_from_info` as `command_info.cls or TyperCommand` when
+# `get_command(app)` builds the Click tree -- which happens lazily, well after
+# this module finishes importing.
+for _info in app.registered_commands:
+    _info.cls = _DispatchedCommand
 
 #: Every registered subcommand name, DERIVED from the `app.command(...)` table
 #: above rather than retyped beside it (tan-cli#378). Used only to find the
@@ -607,7 +689,12 @@ def root(
         # stderr, exit code 2), the same shape every other CLI mistake here
         # already gets, so bare invocation does not need its own bespoke
         # rendering.
-        ctx.fail("a command is required")
+        ctx.fail(
+            "a command is required.\n"
+            "New here? `tan doctor` checks this host, `tan init` creates a project, "
+            "`tan build` builds it.\n"
+            "`tan --help` lists all commands by category."
+        )
     # No third branch here any more (tan-cli#378). This callback used to refuse
     # a pre-subcommand `--format` for any command outside a hand-written
     # allowlist of commands that honoured it -- the refusal was correct given the
@@ -626,6 +713,14 @@ def _wants_json(argv: list[str]) -> bool:
     usage error (bare invocation, an unknown command, a bad flag) means Click
     exits via its own machinery before any option ever gets parsed into
     something this code could otherwise trust.
+
+    Deliberately still `--`-blind and arity-blind, exactly like Rust's: this is
+    the PARSE-FAILURE arm's scan, not the run's channel. Since tan-cli#546 the
+    channel a DISPATCHED command answers on comes from `_DispatchedCommand` --
+    the command's own resolved `--format` -- and this scan only decides what a
+    run that never reached a command body does. Making it cleverer is what the
+    two reverted attempts on #546 did; see `_dispatched_json_mode`'s own comment
+    for the oracle measurement that rules out any third textual shape too.
     """
     for i, arg in enumerate(argv):
         if arg == "--format=json":
@@ -663,6 +758,51 @@ def _usage_error_envelope(exit_code: int, captured_stderr: str = "") -> str:
         {"message": message},
         [Issue("cli.parse-error", "error", message)],
         exit_code,
+    )
+    return env.to_json()
+
+
+#: The POSIX 128+SIGINT exit code Ctrl-C lands on. It does NOT reach `main()`
+#: as a raw `KeyboardInterrupt`: Typer's own command wrapper catches it wherever
+#: in the command's call stack it was raised and re-raises `Exit(130)`, which
+#: Click's `Command.main` turns into a plain `sys.exit(130)`. So by the time the
+#: handler in `main()` sees it, an interrupted run is indistinguishable from any
+#: other non-zero exit that emitted no envelope -- and used to fall into the
+#: same `_usage_error_envelope` branch every genuine Click usage error does.
+#: Measured on `dev` (SIGINT 4s into a real `tan build --plan-from ... --execute
+#: --format json` whose slice spawns `sleep 30`): exit 130 and
+#: `{"command":"cli","exitCode":130,...,"code":"cli.parse-error","message":
+#: "invalid command line invocation"}` -- an envelope asserting the COMMAND LINE
+#: was invalid for a run that was already programming a board, at an exit code
+#: outside the contract's fixed 0-5 set (tan-cli#491 defect 4).
+_SIGINT_EXIT_CODE = 130
+
+#: What the interrupt envelope says on both channels. Not command-specific:
+#: `KeyboardInterrupt` reaches the handler identically from all 32 subcommands,
+#: and the command that was running has already lost its own `data` by then.
+_INTERRUPTED_MESSAGE = "interrupted (Ctrl-C)"
+
+
+def _interrupted_envelope() -> str:
+    """The one JSON envelope an interrupted `--format json` run reports.
+
+    `cli.interrupted` names what actually happened. `ExitCode.RUNTIME_FAILURE`
+    (1), not 130: the envelope contract fixes `exitCode` to `tan.exit_codes.
+    ExitCode`'s 0-5, and the wire invariant `process exit code ==
+    envelope.exitCode` (tan-cli#327) means the two cannot disagree -- so the
+    caller of this function exits 1 as well. A DELIBERATE divergence from the
+    oracle, which has no SIGINT handler at all and simply dies from the signal
+    with zero bytes on stdout; the port cannot copy that and still keep "stdout
+    is the envelope channel" for a `--format json` run. TEXT mode is untouched
+    and still exits 130 through Click's own machinery, so an operator's shell
+    still sees the signal.
+    """
+    env = Envelope(
+        "cli",
+        Project(root=None, board_yaml=None),
+        {"message": _INTERRUPTED_MESSAGE},
+        [Issue("cli.interrupted", "error", _INTERRUPTED_MESSAGE)],
+        int(ExitCode.RUNTIME_FAILURE),
     )
     return env.to_json()
 
@@ -741,7 +881,13 @@ def main() -> None:
     missing stdout envelope when the exit signals failure under `--format
     json`.
     """
+    global _dispatched_json_mode
+
     _reconfigure_stdio()
+    # Reset per run, not merely initialised at import: `main()` is called more
+    # than once per process by the in-process tests, and a stale answer from the
+    # previous run would decide this one's output channel.
+    _dispatched_json_mode = None
     original_argv = sys.argv[1:]
     argv = _reorder_global_flags(original_argv)
     sys.argv = [sys.argv[0], *argv]
@@ -820,7 +966,27 @@ def main() -> None:
             elif not isinstance(code, int):
                 code = int(ExitCode.RUNTIME_FAILURE)
             if not envelope_emitted():
-                if code != 0:
+                # `_dispatched_json_mode is False` -- a command's body really
+                # RAN, and its OWN `--format` resolved to text. That run owes
+                # stdout nothing (text mode carries no envelope promise), so
+                # neither of the two fallbacks below may fire for it: printing
+                # one is how `tan quality -- --format json` used to answer a
+                # forwarded west failure with `command:"cli"` /
+                # `cli.parse-error` on stdout for a caller that asked for text
+                # (tan-cli#546). `None` -- nothing dispatched -- means the parse
+                # itself failed, which is precisely Rust's `Err` arm, and the
+                # textual `_wants_json` scan that got us into this branch is
+                # exactly what Rust consults there.
+                ran_in_text_mode = _dispatched_json_mode is False
+                if code == _SIGINT_EXIT_CODE and not ran_in_text_mode:
+                    # Ahead of the generic usage-error fallback: an interrupted
+                    # run is not a usage error, and `sys.exit` here (rather than
+                    # re-raising `exc`) is what keeps the process code equal to
+                    # the `exitCode` the envelope just printed. See
+                    # `_interrupted_envelope`.
+                    print(_interrupted_envelope())
+                    sys.exit(int(ExitCode.RUNTIME_FAILURE))
+                if code != 0 and not ran_in_text_mode:
                     print(_usage_error_envelope(code, captured_stderr.getvalue()))
                 raise
             # tan-cli#327: `Envelope.to_json()`'s serialize-failure fallback

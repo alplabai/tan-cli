@@ -154,6 +154,58 @@ def test_zephyr_floor_falls_back_to_the_pinned_constant_with_no_workspace():
     assert "built-in" in source
 
 
+def test_zephyr_floor_prefers_the_manifest_declared_value_over_the_pinned_constant():
+    """tan-cli#606: alp-sdk's own `zephyr.pythonMinVersion` -- a live fact
+    already resolved out of the manifest, not a constant compiled into tan --
+    now outranks `ZEPHYR_PYTHON_FLOOR` when no workspace resolves to read
+    `python.cmake` from directly (every host at `tan bootstrap` time, and any
+    `tan doctor` run against an unbootstrapped host). `(3, 99)` cannot have
+    come from anywhere else, so this proves the value is READ, not
+    coincidentally equal to the pin (today both are `3.12`)."""
+    floor, source = doctor_cmd.zephyr_python_floor(None, manifest_zephyr_floor=(3, 99))
+    assert floor == (3, 99)
+    assert "zephyr.pythonMinVersion" in source
+    assert "built-in" not in source
+
+
+def test_load_manifest_surfaces_the_zephyr_scoped_floor_distinct_from_prerequisites(tmp_path):
+    """tan-cli#606: `metadata/bootstrap.json` carries TWO independently
+    declared `pythonMinVersion` keys -- `prerequisites.pythonMinVersion`
+    (host-universal, read by `_manifest_floor_from_facts`) and
+    `zephyr.pythonMinVersion` (Zephyr-scoped, alp-sdk#1078, read by
+    `_zephyr_manifest_floor_from_facts`). `_load_manifest` must surface both,
+    distinctly -- not silently drop the second, and not conflate the two into
+    one number."""
+    sdk_root = tmp_path / "sdk"
+    (sdk_root / "metadata").mkdir(parents=True)
+    manifest = {
+        "schemaVersion": 1,
+        "zephyr": {
+            "version": "v4.4.1",
+            "requirementsPath": "zephyr/scripts/requirements.txt",
+            "pythonMinVersion": "3.14",
+        },
+        "venv": {"dirName": ".venv", "posixBinDir": "bin", "windowsBinDir": "Scripts"},
+        "prerequisites": {
+            "posix": ["git"],
+            "windows": ["git"],
+            "pythonMinVersion": "3.10",
+            "install": {},
+        },
+        "west": {"pipSpec": "west==1.2.0"},
+        "env": {},
+        "nativeLibHints": {},
+        "manualInstallHints": {"windows": {"note": []}},
+    }
+    (sdk_root / "metadata" / "bootstrap.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = doctor_cmd._load_manifest(str(sdk_root))
+
+    assert loaded.is_real
+    assert doctor_cmd._manifest_floor_from_facts(loaded.facts) == (3, 10)
+    assert doctor_cmd._zephyr_manifest_floor_from_facts(loaded.facts) == (3, 14)
+
+
 def test_zephyr_floor_survives_an_unreadable_cmake_file(tmp_path):
     """A directory where a file is expected, undecodable bytes, no match at all
     -- every one is a fallback, never an exception."""
@@ -161,6 +213,41 @@ def test_zephyr_floor_survives_an_unreadable_cmake_file(tmp_path):
     modules.mkdir(parents=True)
     (modules / "python.cmake").mkdir()
     assert doctor_cmd.zephyr_python_floor(str(tmp_path))[0] == doctor_cmd.ZEPHYR_PYTHON_FLOOR
+
+
+def test_zephyr_floor_names_the_real_workspace_when_the_cmake_file_is_missing(tmp_path):
+    """tan-cli#488 defect 7: a resolved Zephyr workspace mid-`west update` (a
+    `.west` workspace with no `cmake/modules/python.cmake` yet --
+    `zephyr_workspace_check`'s own "legitimate, working-in-progress host
+    state") used to fall back to the SAME hardcoded string as "nothing
+    resolved at all": "no $ZEPHYR_BASE workspace on this host to read
+    `cmake/modules/python.cmake` from" -- blaming an env var this call was
+    never even given (`_collect` passes the RESOLVED workspace path here,
+    never `$ZEPHYR_BASE`, once one resolves) in the same envelope that
+    reported the workspace resolving fine. The fallback VALUE stays correct;
+    only the PROVENANCE must now name the real cause.
+    """
+    workspace_zephyr = tmp_path / "zephyr"
+    workspace_zephyr.mkdir()
+    floor, source = doctor_cmd.zephyr_python_floor(str(workspace_zephyr))
+    assert floor == doctor_cmd.ZEPHYR_PYTHON_FLOOR
+    assert str(workspace_zephyr) in source
+    assert "could not be read" in source
+    assert "no $ZEPHYR_BASE workspace" not in source
+
+
+def test_zephyr_floor_names_the_real_file_when_it_has_no_parseable_pin(tmp_path):
+    """Third cause: the file resolves and reads fine, but its content has no
+    `PYTHON_MINIMUM_REQUIRED` this regex can find -- a future Zephyr rename,
+    say. Still not "no workspace on this host"."""
+    modules = tmp_path / "cmake" / "modules"
+    modules.mkdir(parents=True)
+    (modules / "python.cmake").write_text("include_guard(GLOBAL)\n", encoding="utf-8")
+    floor, source = doctor_cmd.zephyr_python_floor(str(tmp_path))
+    assert floor == doctor_cmd.ZEPHYR_PYTHON_FLOOR
+    assert "python.cmake" in source
+    assert "did not declare a parseable" in source
+    assert "no $ZEPHYR_BASE workspace" not in source
 
 
 def test_the_manifest_declaring_a_lower_floor_is_itself_reported():
@@ -214,7 +301,12 @@ def test_no_skew_check_when_the_two_floors_agree():
 def _write_bootstrap_json(root: Path, prerequisites: dict) -> Path:
     path = root / "metadata" / "bootstrap.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"prerequisites": prerequisites}), encoding="utf-8")
+    # `schemaVersion` is required (tan-cli#488 defect 3): `_load_manifest`
+    # reads it FIRST, same as `tan.core.bootstrap.parse_bootstrap_manifest`,
+    # and refuses a manifest that omits or misdeclares it.
+    path.write_text(
+        json.dumps({"schemaVersion": 1, "prerequisites": prerequisites}), encoding="utf-8"
+    )
     return path
 
 
@@ -251,6 +343,95 @@ def test_load_manifest_with_no_sdk_resolved_is_not_real():
     assert loaded.facts["pythonMinVersion"] == "3.10"
 
 
+def test_load_manifest_refuses_a_schema_version_tan_bootstrap_would_also_refuse(
+    tmp_path,
+):
+    """tan-cli#488 defect 3: `_load_manifest` used to accept ANY `prerequisites`
+    object regardless of `schemaVersion`, so an SDK whose manifest `tan
+    bootstrap` refuses outright (a schema this build does not understand)
+    still yielded `hostPrerequisites: pass`, zero tools probed, and no
+    `bootstrapManifest` warning -- a clean bill of health for a manifest that
+    was never actually read.
+    """
+    path = tmp_path / "metadata" / "bootstrap.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "prerequisites": {
+                    "pythonMinVersion": "3.10",
+                    "posix": [],
+                    "windows": [],
+                    "install": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is False
+    assert loaded.error is not None
+    assert "schemaVersion 2" in loaded.error
+    assert "supports only 1" in loaded.error
+    # The fallback tool list, not an empty one this manifest declared -- a
+    # manifest tan cannot understand must probe tan's OWN built-in tools,
+    # never trust a shape it never actually parsed as real.
+    assert loaded.facts["posix"] == ["git", "cmake", "python3", "ninja"]
+
+
+def test_load_manifest_refuses_a_manifest_missing_schema_version_entirely(tmp_path):
+    """Same refusal, the other input shape: `schemaVersion` absent altogether
+    (not merely a different number) -- `tan.core.bootstrap.
+    parse_bootstrap_manifest` (the ONE other reader of this file) raises
+    identically, and `_load_manifest` must not disagree with it."""
+    path = tmp_path / "metadata" / "bootstrap.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"prerequisites": {"posix": ["git", "cmake", "python3", "ninja"]}}),
+        encoding="utf-8",
+    )
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is False
+    assert loaded.error is not None
+    assert "schemaVersion" in loaded.error
+
+
+def test_collect_warns_bootstrap_manifest_and_falls_back_on_an_unsupported_schema(
+    tmp_path,
+):
+    """The end-to-end wire: an unsupported `schemaVersion` must surface as the
+    `bootstrapManifest` warning (previously silent) with the fallback tool
+    list actually probed, not a silent `hostPrerequisites: pass`."""
+    path = tmp_path / "metadata" / "bootstrap.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "prerequisites": {
+                    "pythonMinVersion": "3.10",
+                    "posix": [],
+                    "windows": [],
+                    "install": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    checks = doctor_cmd._collect(str(tmp_path))
+    manifest_warn = next((c for c in checks if c.name == "bootstrapManifest"), None)
+    assert manifest_warn is not None, [c.name for c in checks]
+    assert manifest_warn.status == "warn"
+    assert "schemaVersion 2" in manifest_warn.detail
+    # tan-cli#488 defect 2: `_load_manifest`'s schemaVersion-mismatch message
+    # used to end with its own period, and this check's own `f"... rejected:
+    # {loaded.error}. Falling back to ..."` appends another -- rendering
+    # "...outright.. Falling back to" (a double stop) in the assembled detail.
+    assert ".. Falling back to" not in manifest_warn.detail, manifest_warn.detail
+    assert "outright. Falling back to" in manifest_warn.detail, manifest_warn.detail
+
+
 def test_collect_reports_no_manifest_read_when_none_resolves(tmp_path, monkeypatch):
     """The end-to-end wire: with no `metadata/bootstrap.json` under `sdk_root`,
     `pythonFloor` (when it fires) must say the manifest was never consulted --
@@ -279,6 +460,72 @@ def test_missing_prerequisites_carry_the_frozen_code_and_the_install_commands():
     assert check.status == "fail"
     assert check.code == "bootstrap.prerequisites-missing"
     assert "sudo apt-get install -y ninja-build" in (check.fix or "")
+
+
+def test_macos_reads_its_own_prerequisites_list_not_posixs(tmp_path, monkeypatch):
+    """tan-cli#488 defect 2: a stock Mac has neither `wget` nor a standalone
+    `xz`, and alp-sdk v0.14.0 declares a separate `prerequisites.macos` that
+    omits both for exactly that reason. Before the fix, `_collect` selected
+    the tool list with `facts.get("windows" if os.name == "nt" else
+    "posix")` -- no `macos` arm at all -- so a stock Mac got the POSIX list
+    (including `xz`/`wget`) wholesale and `hostPrerequisites` reported `fail`
+    on a host `tan bootstrap` accepts.
+    """
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "darwin")
+    # `_FixedOsName` (not a bare `os.name` mutation) -- mutating the real,
+    # process-wide `os` module makes `pathlib.Path.__new__` re-pick
+    # `PosixPath` on every call anywhere in the process, including `_collect`'s
+    # own `Path(sdk_root)` -- and `PosixPath` cannot be instantiated on
+    # Windows at all (`NotImplementedError`), which reddened this test on the
+    # `windows-latest` CI leg even though the property under test is
+    # platform-independent. See `_FixedOsName`'s docstring below.
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja", "xz", "wget"],
+            "macos": ["git", "cmake", "python3", "ninja"],
+            "windows": ["git", "cmake", "python", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {},
+        },
+    )
+    # Every tool the MACOS list names is "present"; `xz`/`wget` (posix-only)
+    # would be "missing" if the posix list were used instead -- `on_path`
+    # never even gets asked about them when the fix is in place.
+    present = {"git", "cmake", "python3", "ninja"}
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: f"/usr/bin/{name}" if name in present else None)
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    host_prereqs = next(c for c in checks if c.name == "hostPrerequisites")
+    assert host_prereqs.status == "pass", host_prereqs.detail
+
+
+def test_macos_falls_back_to_posix_when_the_manifest_declares_no_macos_list(
+    tmp_path, monkeypatch
+):
+    """A manifest predating alp-sdk v0.14.0 (`prerequisites.macos` absent
+    entirely) must still read `posix` on macOS -- the behaviour every SDK had
+    before that release, not a refusal."""
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "darwin")
+    # See the comment in `test_macos_reads_its_own_prerequisites_list_not_posixs`
+    # -- `_FixedOsName`, never a bare `os.name` mutation.
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "windows": ["git", "cmake", "python", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {},
+        },
+    )
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: f"/usr/bin/{name}")
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    host_prereqs = next(c for c in checks if c.name == "hostPrerequisites")
+    assert host_prereqs.status == "pass", host_prereqs.detail
+    assert "git" in host_prereqs.detail
 
 
 def test_west_on_bare_path_the_activated_venv_state_passes():
@@ -364,40 +611,71 @@ def test_west_resolved_FAILS_when_nothing_resolves_anywhere():
 
 
 def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_path, monkeypatch):
-    """The proof the unit tests below cannot give: two actual host states, run
+    """The proof the unit tests below cannot give: real host states, run
     through `_collect` + `exit_code_for`, asserting the EXIT CODE.
 
     `west_check(found=None)` is ONE input covering three different host states
-    (venv has west / venv lacks it / no venv at all). A test that calls the
-    check twice with the same argument is two inputs, not two states, and it is
-    exactly what let five "refuses a host that works" defects ship green out of
-    this file. The state that actually shipped broken -- venv lacks it too --
-    was constructed by no fixture at all.
+    (venv has a genuinely runnable west / venv holds a west that CANNOT run /
+    no venv at all). A test that calls the check twice with the same argument
+    is two inputs, not two states, and it is exactly what let five "refuses a
+    host that works" defects ship green out of this file. The state that
+    actually shipped broken -- venv lacks it entirely -- was constructed by no
+    fixture at all.
 
-    So: build two real trees, differing only in whether the venv holds a west,
-    keep PATH scrubbed in both, and assert 0 vs 4.
+    tan-cli#488 round 2, defect 5: this test's ORIGINAL two-state form (have a
+    genuinely runnable west / have none at all) PASSES unmodified against
+    `origin/dev`'s pre-fix `doctor_cmd.py` -- measured -- because neither of
+    those two states is the one tan-cli#488 defects 1 and 3 actually broke.
+    "have" was always a full pass and "lack" was always a full fail, on both
+    the buggy and the fixed code; a test built entirely from states that never
+    disagree between the two versions pins nothing. The state that DOES
+    disagree -- a venv whose `west` launcher file survives but cannot be
+    EXECUTED -- is added below as a third real tree, so this integration-level
+    test (not just the narrower unit tests it sits beside) actually fails
+    against the pre-fix code.
+
+    So: build three real trees -- runnable west / unrunnable west / no venv at
+    all -- keep PATH scrubbed in all three, and assert the exit code and both
+    the `westResolved` and `west` verdicts for each.
     """
-    def _tree(name: str, *, with_west: bool) -> Path:
+    def _tree(name: str, *, west: str | None) -> Path:
+        """`west` selects the venv's west launcher: `"runnable"` (a real,
+        spawnable binary), `"unrunnable"` (a 0-byte non-executable file at the
+        right name -- resolves via `is_file()`, cannot actually run), or
+        `None` (no `.venv` west at all)."""
         ws = tmp_path / name
         (ws / ".west").mkdir(parents=True)
         bin_dir = ws / ".venv" / ("Scripts" if os.name == "nt" else "bin")
         bin_dir.mkdir(parents=True)
-        if with_west:
-            (bin_dir / ("west.exe" if os.name == "nt" else "west")).write_text("", encoding="utf-8")
+        if west == "runnable":
+            # A GENUINELY runnable west (tan-cli#488 defect 1): a 0-byte,
+            # non-executable file at the right name used to be enough to
+            # satisfy this fixture's "builds work" state, because
+            # `west_resolved_check` treated ANY resolved path as `pass`
+            # regardless of whether it could actually be spawned. Now it
+            # cannot.
+            _write_runnable_west(bin_dir)
+        elif west == "unrunnable":
+            layout = venv_layout(os.name == "nt")
+            (bin_dir / layout.west).write_text("", encoding="utf-8")
         return ws
 
-    # west is on NEITHER PATH in both states -- that is the constant under test.
+    # west is on NEITHER PATH in any state -- that is the constant under test.
     monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
 
-    have = _tree("have", with_west=True)
-    lack = _tree("lack", with_west=False)
+    have = _tree("have", west="runnable")
+    broken = _tree("broken", west="unrunnable")
+    lack = _tree("lack", west=None)
 
     def _run(ws: Path) -> tuple[list[doctor_cmd.Check], int]:
         checks = doctor_cmd._collect(None, workspace_root=str(ws))
         return checks, int(doctor_cmd.exit_code_for(checks))
 
-    # STATE 1 -- the DEFAULT post-bootstrap state. Builds work; must not refuse.
-    checks, _ = _run(have)
+    # STATE 1 -- the DEFAULT post-bootstrap state. `west`/`westResolved` must
+    # not be why this host refuses (`_collect` here has no SDK/prerequisites
+    # context, so OTHER checks can still fail the overall exit code -- that is
+    # not this test's subject; only the west PAIR's own verdicts are).
+    checks, _code = _run(have)
     by_name = {c.name: c.status for c in checks}
     assert by_name.get("westResolved") == "pass", "venv holds a west: westResolved must pass"
     # tan-cli#299 second half, at `_collect` level: `west` (bare-PATH-only)
@@ -408,7 +686,25 @@ def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_pa
         "a passing `west` check must not surface as an issue at all"
     )
 
-    # STATE 2 -- nothing anywhere. No slice can run; must refuse.
+    # STATE 2 -- tan-cli#488 defects 1 AND 3: the venv's `west` FILE survives
+    # (`is_file()` true, so both checks resolve a path) but cannot actually be
+    # spawned. Pre-fix, `westResolved` treated `version is None` as `pass`
+    # unconditionally (defect 1), and `west_check`'s own
+    # `found is None and resolved is not None` branch reported `pass`
+    # regardless of whether `resolved` could run (defect 3) -- both checks
+    # green, exit 0, on a host where the first real `west build` dies with
+    # `FileNotFoundError`/`ModuleNotFoundError`.
+    checks, code = _run(broken)
+    by_name = {c.name: c.status for c in checks}
+    assert by_name.get("westResolved") == "fail", (
+        "a west that resolves but cannot run must FAIL, not pass"
+    )
+    assert by_name.get("west") != "pass", (
+        "west must not report pass for a binary westResolved just failed on"
+    )
+    assert code == 4, "a host where no build slice can run must not exit 0"
+
+    # STATE 3 -- nothing anywhere. No slice can run; must refuse.
     checks, code = _run(lack)
     by_name = {c.name: c.status for c in checks}
     assert by_name.get("westResolved") == "fail", "no west anywhere: westResolved must FAIL"
@@ -425,7 +721,65 @@ def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_pa
     ), issues
 
 
-def test_the_two_west_checks_split_the_question_and_only_one_can_be_fatal():
+def test_a_resolved_but_unrunnable_west_fails_not_passes(tmp_path, monkeypatch):
+    """tan-cli#488 defect 1, reproduced against the REAL `_collect` wiring: a
+    workspace venv whose `west` launcher FILE survives -- `tool_in_venv`'s
+    `is_file()` check passes -- but cannot actually be EXECUTED. A relocated
+    workspace (the state `tan bootstrap` itself models as
+    `bootstrap.workspace-relocated`), a deleted `.venv/bin/python`, or (as
+    planted here, portable across POSIX/Windows) a 0-byte non-executable file
+    at the right name -- every one leaves `westResolved` unable to spawn the
+    binary it names.
+
+    Before the fix, `probe()` collapsed "could not be spawned" into the same
+    `None` `west_resolved_check` also sees for "spawned fine but printed
+    something unparseable", and treated `version is None` as `pass`
+    unconditionally: `westResolved: pass`, `summary.fail == 0`, `ok: true`,
+    exit 0 -- on a host where the very first real `west build` invocation
+    dies with `FileNotFoundError`/`ModuleNotFoundError`. This is the check
+    that must now refuse instead.
+    """
+    ws = tmp_path
+    (ws / ".west").mkdir(parents=True)
+    bin_dir = ws / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    bin_dir.mkdir(parents=True)
+    (bin_dir / ("west.exe" if os.name == "nt" else "west")).write_text("", encoding="utf-8")
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+
+    checks = doctor_cmd._collect(None, workspace_root=str(ws))
+    by_name = {c.name: c.status for c in checks}
+    assert by_name.get("westResolved") == "fail", (
+        "a west that resolves but cannot run must FAIL, not pass"
+    )
+    assert int(doctor_cmd.exit_code_for(checks)) == 4
+
+
+def test_west_check_probes_the_resolved_path_not_a_bare_name_reprobe(tmp_path, monkeypatch):
+    """tan-cli#488 defect 5: `west`'s version used to come from a SECOND,
+    bare-name spawn (`probe(["west", "--version"])`) rather than the
+    `on_path`-resolved absolute path -- reopening the exact cwd-injection gap
+    `on_path` exists to close (its own docstring: a project-local
+    `west.exe`/`west` at the cwd root must not be reported as this host's
+    tooling). Fake `probe` so the bare name and the resolved path answer
+    DIFFERENT version strings -- a real rogue-binary scenario could not do
+    this so cleanly, but it proves which argv this call site actually spawns.
+    """
+    resolved = "/opt/onpath/west"
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: resolved if name == "west" else None)
+
+    def _fake_probe(argv, timeout=doctor_cmd.PROBE_TIMEOUT_S):
+        if argv == [resolved, "--version"]:
+            return "West version: v1.5.0\n"
+        if argv == ["west", "--version"]:
+            return "West version: v9.99.0\n"  # the rogue binary's answer
+        return None
+
+    monkeypatch.setattr(doctor_cmd, "probe", _fake_probe)
+
+    checks = doctor_cmd._collect(None, workspace_root=str(tmp_path))
+    west = next(c for c in checks if c.name == "west")
+    assert "1.5" in west.detail, west.detail
+    assert "9.99" not in west.detail, west.detail
     """`west` = "is it on bare PATH, or resolvable through the same resolver
     `westResolved` uses" -- never fatal either way (tan-cli#299 second half).
     `westResolved` = "can a slice run at all", fatal when not. tan-cli#123's
@@ -453,6 +807,24 @@ def test_the_two_west_checks_split_the_question_and_only_one_can_be_fatal():
     assert "westResolved" in detail
 
 
+def test_west_check_does_not_pass_a_resolved_but_unspawnable_west():
+    """tan-cli#488 defect 3: `found is None and resolved is not None` used to
+    report `pass` unconditionally -- correct only when the resolved binary can
+    actually run. `westResolved` (tan-cli#488 defect 1) now FAILS the
+    identical binary when it cannot be spawned; this check must not still call
+    it `pass`, which is the exact headline symptom ("pass on an unrunnable
+    west") surviving in the one branch defect 1's own fix did not touch.
+    """
+    check = doctor_cmd.west_check(None, None, None, "/ws/.venv/bin/west", False)
+    assert check.status != "pass", check.detail
+    assert "/ws/.venv/bin/west" in check.detail
+    assert "westResolved" in check.detail
+
+    # `resolved_ran` defaults to `True` -- every pre-existing 4-argument call
+    # site (this file's own unit tests above) keeps its prior "pass" meaning.
+    assert doctor_cmd.west_check(None, None, None, "/ws/.venv/bin/west").status == "pass"
+
+
 def test_west_resolved_passes_and_names_the_resolved_binary_and_version():
     """The working-but-unusual state `west` (bare-PATH-only) cannot see: a
     resolved venv binary, off PATH entirely."""
@@ -478,32 +850,23 @@ def test_collect_reports_west_resolved_unconditionally(tmp_path):
         assert "westResolved" in names, (build, names)
 
 
-def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
-    """tan-cli#123's exact bug, reproduced then guarded: a workspace venv
-    holds `west`, PATH is scrubbed empty so a bare lookup CANNOT possibly
-    answer -- `westResolved` must still resolve and report a version, proving
-    it came from the venv binary, never a bare-PATH re-probe. Break
-    `west_resolved_check`'s wiring in `_collect` (e.g. feed it
-    `on_path("west")` instead of `tan.core.venv.west_program`'s result) and
-    this goes red: `westResolved` would report the same absent verdict `west`
-    (bare-PATH-only) does, with PATH scrubbed.
+def _write_runnable_west(bin_dir: Path) -> Path:
+    """Plant a REAL, spawnable `west` under `bin_dir` -- one that a
+    `subprocess.run([west_path, "--version"])` actually executes to a
+    successful exit, not merely a file at the right name (tan-cli#488 defect
+    1: `west_resolved_check` now FAILS a `west` that resolves but cannot
+    run, so a fixture meaning "this venv's west genuinely works" must plant
+    one that genuinely does).
 
-    Also STATE 2 of tan-cli#299's second half, run through the REAL envelope
-    a `tan doctor --format json` process emits (`doctor_cmd.doctor`'s own
-    `checks_to_issues`/`exit_code_for`, not a hand-built `Check`): `west`
-    must now PASS here too -- fed the SAME resolved venv path `westResolved`
-    reports -- naming it, and it must not surface as a `doctor.west` issue
-    at any severity in `data.issues`. Before this fix, this exact state (the
-    default one every correct install starts in) reported `west` as a
-    permanent `warn`.
+    Shared by every test that needs a "builds work" west, factored out of
+    `test_west_resolved_reproduces_and_closes_tan_cli_123`'s own fixture.
     """
     layout = venv_layout(os.name == "nt")
-    bin_dir = tmp_path / ".venv" / layout.bin_dir
-    bin_dir.mkdir(parents=True)
     west_path = bin_dir / layout.west
     if os.name == "nt":
         # A real, spawnable PE binary under the exact required name -- a text
-        # file named `west.exe` is not executable at all, and this test's own
+        # file named `west.exe` is not executable at all, and
+        # `test_west_resolved_reproduces_and_closes_tan_cli_123`'s own
         # `scrub_path=True` proved (by breaking it first) that a bare copy of
         # `python.exe` is NOT self-contained: with PATH empty it cannot find
         # its own `python3*.dll`/`vcruntime*.dll` via the app-directory search
@@ -539,6 +902,32 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     else:
         west_path.write_text("#!/bin/sh\necho 'West version: v99.98.97'\n", encoding="utf-8")
         os.chmod(west_path, 0o755)
+    return west_path
+
+
+def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
+    """tan-cli#123's exact bug, reproduced then guarded: a workspace venv
+    holds `west`, PATH is scrubbed empty so a bare lookup CANNOT possibly
+    answer -- `westResolved` must still resolve and report a version, proving
+    it came from the venv binary, never a bare-PATH re-probe. Break
+    `west_resolved_check`'s wiring in `_collect` (e.g. feed it
+    `on_path("west")` instead of `tan.core.venv.west_program`'s result) and
+    this goes red: `westResolved` would report the same absent verdict `west`
+    (bare-PATH-only) does, with PATH scrubbed.
+
+    Also STATE 2 of tan-cli#299's second half, run through the REAL envelope
+    a `tan doctor --format json` process emits (`doctor_cmd.doctor`'s own
+    `checks_to_issues`/`exit_code_for`, not a hand-built `Check`): `west`
+    must now PASS here too -- fed the SAME resolved venv path `westResolved`
+    reports -- naming it, and it must not surface as a `doctor.west` issue
+    at any severity in `data.issues`. Before this fix, this exact state (the
+    default one every correct install starts in) reported `west` as a
+    permanent `warn`.
+    """
+    layout = venv_layout(os.name == "nt")
+    bin_dir = tmp_path / ".venv" / layout.bin_dir
+    bin_dir.mkdir(parents=True)
+    west_path = _write_runnable_west(bin_dir)
 
     proc = run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True)
     envelope = json.loads(proc.stdout)
@@ -802,13 +1191,34 @@ def test_zephyr_sdk_install_version_matches_the_real_toolchain_lock():
     """tan-cli#172's Python-side half. `contract/fixtures/toolchains/
     toolchains.json`'s own `_comment` states the rule verbatim: "A NEW
     consumer of this pin needs its own parity assertion; widening this scan
-    will not reach it." Mirrors `crates/tan-core/src/host_env.rs`'s
-    `zephyr_sdk_install_version_matches_the_real_toolchain_lock` -- so a bump
-    that updates the Rust constant but not this one fails HERE, instead of
-    `tan doctor` silently naming a stale `west sdk install --version`."""
+    will not reach it." Mirrored `crates/tan-core/src/host_env.rs`'s
+    `zephyr_sdk_install_version_matches_the_real_toolchain_lock` until
+    tan-cli#269 deleted it; this is now the ONLY assertion in the chain, so a
+    bump that re-vendors the fixture without moving the constant fails HERE or
+    nowhere, and `tan doctor` would otherwise silently name a stale
+    `west sdk install --version`."""
     fixture = REPO_ROOT / "contract" / "fixtures" / "toolchains" / "toolchains.json"
     doc = json.loads(fixture.read_text(encoding="utf-8"))
     assert doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION == doc["zephyrSdk"]["version"]
+
+
+def test_readme_quickstart_names_the_current_zephyr_sdk_install_command():
+    """tan-cli#651. The root README's quickstart embeds `west sdk install
+    --version <N> -t arm-zephyr-eabi` as a literal, copy-pasteable command --
+    a NEW consumer of the pin `contract/fixtures/toolchains/toolchains.json`
+    owns, per that fixture's own `_comment`: "A NEW consumer of this pin
+    needs its own parity assertion; widening this scan will not reach it."
+    Without this, a version bump updates `ZEPHYR_SDK_INSTALL_VERSION` (already
+    guarded above by `test_zephyr_sdk_install_version_matches_the_real_
+    toolchain_lock`) while the README goes silently stale, sending a customer
+    to install a toolchain version alp-sdk no longer pins."""
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    command = doctor_cmd.zephyr_sdk_install_command()
+    assert command in text, (
+        f"README.md's quickstart must contain the literal `{command}` -- not "
+        "found. Either the quickstart step was dropped, or its hardcoded "
+        "version pin has drifted from ZEPHYR_SDK_INSTALL_VERSION."
+    )
 
 
 # --------------------------------------------------------------------------
@@ -885,14 +1295,50 @@ def test_collect_omits_seven_zip_off_windows(tmp_path, monkeypatch):
     assert "sevenZip" not in {c.name for c in checks}
 
 
-def test_collect_omits_seven_zip_on_windows_once_the_sdk_is_detected(tmp_path, monkeypatch):
-    """The permanent-noise case the gate exists to avoid: once the SDK is
-    present, the extractor is irrelevant, so `sevenZip` must not linger."""
+def test_collect_reports_seven_zip_on_windows_even_once_the_sdk_is_detected(
+        tmp_path, monkeypatch):
+    """tan-cli#736 INVERTS this case.
+
+    It used to assert the opposite -- "once the SDK is present, the extractor
+    is irrelevant, so `sevenZip` must not linger" -- on the premise that such
+    a host never runs `west sdk install` again. It does: adding a second
+    architecture's toolchain, or moving to a newer SDK, is ordinary, and
+    `zephyrSdk` passes throughout. Measured on Windows with `7z` stripped
+    from PATH and the SDK present: `overall ok: True` and `any check
+    mentioning 7z: []`, a green verdict on a host that cannot complete the
+    install.
+
+    The check stays a `warn`, so this does not change the verdict -- it makes
+    the fact reachable at all, including to JSON consumers.
+    """
     monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("nt"))
     _plant_zephyr_sdk(tmp_path)
     monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(tmp_path))
     checks = doctor_cmd._collect(None)
-    assert "sevenZip" not in {c.name for c in checks}
+    assert "sevenZip" in {c.name for c in checks}
+    # The SDK really was detected -- otherwise this passes for the old
+    # reason (the zephyrSdk Fail) and proves nothing about the new gate.
+    zephyr = next(c for c in checks if c.name == "zephyrSdk")
+    assert zephyr.status == "pass", zephyr
+
+
+def test_seven_zip_stays_a_warn_not_a_fail_so_the_verdict_is_unchanged(
+        tmp_path, monkeypatch):
+    """tan-cli#736 widened the GATE, deliberately not the SEVERITY. Missing
+    7-Zip blocks the remedy, not the build; `zephyrSdk` is the Fail that
+    stops things. A `fail` here would refuse a host mid-project over a tool
+    its current build does not use."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("nt"))
+    _plant_zephyr_sdk(tmp_path)
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(tmp_path))
+    # Scoped to the 7-Zip probe: stubbing `on_path` itself would also
+    # answer for `west`, `cmake` and every other PATH check in `_collect`.
+    monkeypatch.setattr(
+        doctor_cmd, "SEVEN_ZIP_PROGRAMS", ("alp-no-such-archiver-7z",))
+    checks = doctor_cmd._collect(None)
+    seven = next(c for c in checks if c.name == "sevenZip")
+    assert seven.status == "warn", seven
+    assert not [c for c in checks if c.name == "sevenZip" and c.status == "fail"]
 
 
 def test_collect_reports_zephyr_sdk_unconditionally_with_no_board_or_sdk_resolved():
@@ -964,19 +1410,38 @@ def test_zephyr_workspace_now_runs_unconditionally_not_only_under_build(tmp_path
 # --------------------------------------------------------------------------
 
 
-def test_setools_check_names_both_env_vars_the_fdt_package_and_the_alif_download():
-    check = doctor_cmd.setools_check(
-        setools_dir=None, se_uart=None, has_fdt=False, is_linux=True
-    )
+def test_setools_check_names_both_env_vars_and_the_alif_download():
+    check = doctor_cmd.setools_check(setools_dir=None, se_uart=None, is_linux=True)
     assert check.status == "warn"
     blob = f"{check.detail} {check.fix}"
-    for token in ("SETOOLS_DIR", "SE_UART", "fdt", "app-release-exec-linux"):
+    for token in ("SETOOLS_DIR", "SE_UART", "app-release-exec-linux"):
         assert token in blob, f"the SETOOLS check never mentions {token}"
+
+
+def test_setools_check_no_longer_infers_anything_from_a_hosts_fdt_importability(tmp_path):
+    """tan-cli#641: `fdt` was genuinely unimportable on a real AEN bench host
+    that flashed MRAM fine, even after tan-cli#488 defect 6 pointed the probe
+    at the workspace venv's own interpreter -- `app-gen-toc` is a spawned
+    subprocess, never a Python import under any interpreter, and SETOOLS
+    ships its own dependencies. A fully-provisioned host (SETOOLS_DIR +
+    SE_UART, both real) must pass -- there is no parameter left to fail it
+    over ANY interpreter's `fdt` importability, and reverting `setools_check`
+    to take one back (as `has_fdt=`) must fail this call outright."""
+    import inspect
+
+    assert "has_fdt" not in inspect.signature(doctor_cmd.setools_check).parameters
+    (tmp_path / "app-gen-toc").write_text("", encoding="utf-8")
+    (tmp_path / "app-write-mram").write_text("", encoding="utf-8")
+    check = doctor_cmd.setools_check(
+        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", is_linux=True
+    )
+    assert check.status == "pass"
+    assert "fdt" not in check.detail
 
 
 def test_setools_dir_pointing_somewhere_without_app_gen_toc_is_reported(tmp_path):
     check = doctor_cmd.setools_check(
-        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", has_fdt=True, is_linux=True
+        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", is_linux=True
     )
     assert check.status == "warn"
     assert "app-gen-toc" in check.detail
@@ -986,7 +1451,7 @@ def test_a_fully_provisioned_setools_host_passes(tmp_path):
     (tmp_path / "app-gen-toc").write_text("", encoding="utf-8")
     (tmp_path / "app-write-mram").write_text("", encoding="utf-8")
     check = doctor_cmd.setools_check(
-        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", has_fdt=True, is_linux=True
+        setools_dir=str(tmp_path), se_uart="/dev/ttyUSB0", is_linux=True
     )
     assert check.status == "pass"
 
@@ -994,11 +1459,18 @@ def test_a_fully_provisioned_setools_host_passes(tmp_path):
 def test_setools_is_unknown_not_warn_off_linux():
     """`alif_flash.py` hard-codes `app-release-exec-linux`; there is no verdict
     to give a Windows/macOS host, and `unknown` counts in no summary bucket."""
-    check = doctor_cmd.setools_check(
-        setools_dir=None, se_uart=None, has_fdt=False, is_linux=False
-    )
+    check = doctor_cmd.setools_check(setools_dir=None, se_uart=None, is_linux=False)
     assert check.status == "unknown"
     assert "app-release-exec-linux" in check.detail
+
+
+def test_module_importable_and_has_module_no_longer_exist():
+    """tan-cli#641 removed both -- `_module_importable`/`_has_module` existed
+    only to feed `setools_check`'s now-deleted `fdt` probe (tan-cli#488
+    defect 6); nothing else in this module reads a host or venv interpreter's
+    `sys.path`."""
+    assert not hasattr(doctor_cmd, "_module_importable")
+    assert not hasattr(doctor_cmd, "_has_module")
 
 
 # --------------------------------------------------------------------------
@@ -1011,7 +1483,32 @@ def test_jlink_names_the_part_number_device_profile_and_the_dll_floor():
     assert check.status == "pass"
     blob = f"{check.detail} {check.fix or ''}"
     assert "AE822FA0E5597LS0_M55_HE" in blob
-    assert "V13" in blob
+    assert "9.46" in blob
+
+
+def test_jlink_asserts_no_probe_firmware_floor(tmp_path):
+    """tan-cli#739: the message must not state a firmware requirement.
+
+    It used to say the probe "needs matched J-Link V13 firmware or the
+    part-number device will not connect". Measured on the AEN EVK, a probe on
+    `Firmware: J-Link V11 ... / Hardware version: V11.00` connected with the
+    part-number profile and programmed MRAM, byte-verified (alp-sdk#1380).
+
+    Asserted as the ABSENCE of any firmware claim rather than as "V11+",
+    because where the true floor sits is untested -- naming a different
+    number would repeat the defect. Covers every arm, since the claim used to
+    ride in `requirements` (all arms) plus two `fix` hints.
+    """
+    for found, version in (
+        ("/usr/bin/JLinkExe", (9, 50)),   # pass
+        ("/usr/bin/JLinkExe", (9, 40)),   # below the DLL floor
+        ("/usr/bin/JLinkExe", None),      # version unreadable
+        (None, None),                     # absent
+    ):
+        check = doctor_cmd.jlink_check(found=found, version=version)
+        blob = f"{check.detail} {check.fix or ''}"
+        assert "V13" not in blob, f"{found}/{version}: {blob}"
+        assert "firmware" not in blob.lower(), f"{found}/{version}: {blob}"
 
 
 def test_jlink_below_v9_46_warns_because_flow_d_has_no_mram_loader():
@@ -1028,6 +1525,129 @@ def test_jlink_present_with_an_unreadable_version_still_reports_the_requirements
     check = doctor_cmd.jlink_check(found="/usr/bin/JLinkExe", version=None)
     assert check.status == "warn"
     assert "AE822FA0E5597LS0_M55_HE" in f"{check.detail} {check.fix or ''}"
+
+
+def test_jlink_unreadable_version_fix_names_a_command_that_actually_exists():
+    """tan-cli#641: `JLinkExe -?` -- the old fix hint -- answers `Unknown
+    command line option -?.`; it is not a real flag. The fix text must not
+    send an operator to try it again."""
+    check = doctor_cmd.jlink_check(found="/usr/bin/JLinkExe", version=None)
+    assert "-?" not in (check.fix or "")
+    assert "JLinkExe" in (check.fix or "")
+
+
+# --------------------------------------------------------------------------
+# jlink_banner -- reading the version banner JLinkExe prints unprompted
+# --------------------------------------------------------------------------
+
+
+def test_jlink_banner_reads_the_version_from_a_real_invocation(monkeypatch):
+    """The banner is what a real JLinkExe prints, unprompted, before anything
+    else -- this is what `_collect` must actually parse. `-?` (the old probe
+    argv) is never passed; `-NoGui 1` IS, matching every other J-Link spawn
+    in this repo (flash_plan.py, flash_cmd.py) -- without it a GUI-capable
+    install can raise a modal dialog that `exit\\n` on stdin does not
+    dismiss."""
+    seen_argv = []
+
+    def _fake_run(argv, **kwargs):
+        seen_argv.append(argv)
+        assert kwargs.get("input") == "exit\n"
+        return subprocess.CompletedProcess(
+            argv,
+            returncode=0,
+            stdout=(
+                "SEGGER J-Link Commander V9.50 (Compiled Jun 10 2026 12:27:02)\n"
+                "DLL version V9.50, compiled Jun 10 2026 12:20:00\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _fake_run)
+    banner = doctor_cmd.jlink_banner("/usr/bin/JLinkExe")
+    assert seen_argv == [["/usr/bin/JLinkExe", "-NoGui", "1"]]
+    assert "-?" not in seen_argv[0]
+    assert doctor_cmd._parse_two(banner) == (9, 50)
+
+
+def test_jlink_banner_is_read_even_on_a_non_zero_exit(monkeypatch):
+    """A no-emulator-attached host is still expected to print the banner
+    before it decides how to exit; that text must not be discarded just
+    because the exit code is non-zero (unlike `probe()`)."""
+
+    def _fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            returncode=1,
+            stdout="SEGGER J-Link Commander V9.50 (Compiled Jun 10 2026 12:27:02)\n",
+            stderr="No emulator found.\n",
+        )
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _fake_run)
+    banner = doctor_cmd.jlink_banner("/usr/bin/JLinkExe")
+    assert doctor_cmd._parse_two(banner) == (9, 50)
+
+
+def test_jlink_banner_survives_a_spawn_failure(monkeypatch):
+    def _raise(argv, **kwargs):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _raise)
+    assert doctor_cmd.jlink_banner("/usr/bin/JLinkExe") is None
+
+
+def test_jlink_banner_survives_a_timeout(monkeypatch):
+    def _raise(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 15))
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _raise)
+    assert doctor_cmd.jlink_banner("/usr/bin/JLinkExe") is None
+
+
+def test_collect_reads_the_jlink_version_from_the_banner_not_a_dash_question_flag(
+    monkeypatch,
+):
+    """Reverting `_collect` to `_parse_two(probe([jlink_exe, "-?"]) or "")`
+    must fail THIS test: it is the only coverage of the production call site,
+    not just `jlink_banner`/`jlink_check` in isolation."""
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: "/usr/bin/JLinkExe" if name == "JLinkExe" else None
+    )
+    monkeypatch.setattr(
+        doctor_cmd,
+        "jlink_banner",
+        lambda exe, timeout=doctor_cmd.PROBE_TIMEOUT_S: (
+            "SEGGER J-Link Commander V9.50 (Compiled Jun 10 2026 12:27:02)\n"
+            "DLL version V9.50\n"
+        ),
+    )
+    checks = doctor_cmd._collect(None)
+    jlink = next(c for c in checks if c.name == "jlink")
+    assert jlink.status == "pass"
+    assert "V9.50" in jlink.detail
+
+
+def test_collect_never_spawns_jlink_banner_against_the_gdb_server_fallback(monkeypatch):
+    """`JLinkGDBServerCL` is the third fallback name in `_collect`'s lookup
+    tuple, but it never reads stdin and never quits on `jlink_banner`'s
+    `exit\\n` -- it waits for a GDB connection and holds the port for the
+    full `PROBE_TIMEOUT_S`. `_collect` must not spawn `jlink_banner` against
+    it; a call proves the timeout-holding regression, not just a wrong
+    version string."""
+    monkeypatch.setattr(
+        doctor_cmd,
+        "on_path",
+        lambda name: "/usr/bin/JLinkGDBServerCL" if name == "JLinkGDBServerCL" else None,
+    )
+
+    def _fail_if_called(exe, timeout=doctor_cmd.PROBE_TIMEOUT_S):
+        raise AssertionError("jlink_banner must not be spawned against JLinkGDBServerCL")
+
+    monkeypatch.setattr(doctor_cmd, "jlink_banner", _fail_if_called)
+    checks = doctor_cmd._collect(None)
+    jlink = next(c for c in checks if c.name == "jlink")
+    assert jlink.status == "warn"
+    assert "version could not be read" in jlink.detail
 
 
 def test_jlink_check_names_a_caller_supplied_device_not_only_the_fallback():
@@ -1159,24 +1779,24 @@ def test_collect_wires_the_resolved_jlink_device_and_its_source_into_the_check(t
 
 def test_a_single_failing_check_exits_4_never_0():
     checks = [
-        doctor_cmd.Check("a", "pass", "fine"),
-        doctor_cmd.Check("b", "fail", "broken"),
+        doctor_cmd.Check("a", "pass", "fine", scope="host"),
+        doctor_cmd.Check("b", "fail", "broken", scope="host"),
     ]
     assert doctor_cmd.exit_code_for(checks) == 4
 
 
 def test_warnings_alone_do_not_fail_the_host():
-    checks = [doctor_cmd.Check("a", "warn", "meh"), doctor_cmd.Check("b", "unknown", "?")]
+    checks = [doctor_cmd.Check("a", "warn", "meh", scope="host"), doctor_cmd.Check("b", "unknown", "?", scope="host")]
     assert doctor_cmd.exit_code_for(checks) == 0
 
 
 def test_unknown_is_counted_in_no_summary_bucket():
     summary = doctor_cmd.summarise(
         [
-            doctor_cmd.Check("a", "pass", ""),
-            doctor_cmd.Check("b", "warn", ""),
-            doctor_cmd.Check("c", "fail", ""),
-            doctor_cmd.Check("d", "unknown", ""),
+            doctor_cmd.Check("a", "pass", "", scope="host"),
+            doctor_cmd.Check("b", "warn", "", scope="host"),
+            doctor_cmd.Check("c", "fail", "", scope="host"),
+            doctor_cmd.Check("d", "unknown", "", scope="host"),
         ]
     )
     assert summary == {"pass": 1, "warn": 1, "fail": 1}
@@ -1185,9 +1805,9 @@ def test_unknown_is_counted_in_no_summary_bucket():
 def test_issues_default_to_doctor_dot_check_name_and_skip_passing_checks():
     issues = doctor_cmd.checks_to_issues(
         [
-            doctor_cmd.Check("west", "warn", "old"),
-            doctor_cmd.Check("jlink", "pass", "fine"),
-            doctor_cmd.Check("setools", "unknown", "not askable"),
+            doctor_cmd.Check("west", "warn", "old", scope="host"),
+            doctor_cmd.Check("jlink", "pass", "fine", scope="host"),
+            doctor_cmd.Check("setools", "unknown", "not askable", scope="host"),
         ]
     )
     assert [(i.code, i.severity) for i in issues] == [("doctor.west", "warning")]
@@ -1279,6 +1899,67 @@ def test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback(tmp_
     if host_python["status"] == "fail":
         assert codes & {"bootstrap.python-not-runnable", "bootstrap.python-too-old"}
     assert {"summary", "checks", "generatedAt", "nextSteps"} <= set(envelope["data"])
+
+
+def test_every_check_on_the_wire_carries_a_scope(tmp_path):
+    """tan-cli#549 as the CONSUMER sees it: not "`_collect` returns a field"
+    but "the JSON a spawned `tan doctor` prints carries it on every row".
+
+    Both values must appear on the same scrubbed host, because the split is
+    only useful if it splits: `alp-sdk-vscode` renders the `host` rows with no
+    folder open, and it can only stop hand-maintaining a list of tan's check
+    names if the data answers that for it. Statuses are deliberately not
+    asserted here -- they are host facts (see the case above)."""
+    proc = run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True)
+    envelope = json.loads(proc.stdout)
+    checks = envelope["data"]["checks"]
+    assert checks
+    missing = [c for c in checks if c.get("scope") not in ("host", "project")]
+    assert missing == [], f"checks without a usable scope: {missing}"
+    assert {c["scope"] for c in checks} == {"host", "project"}
+
+
+def test_build_and_plain_doctor_put_the_same_checks_on_the_wire(tmp_path):
+    """The other half of tan-cli#549, end to end. `alp-sdk-vscode` spawns
+    `doctor --build` and plain `doctor` in parallel on every dependency-panel
+    refresh and merges the results, because nothing in the contract promised
+    the two carried the same checks -- so the second subprocess could not be
+    deleted even once it was measured to contribute nothing.
+
+    `--build` has gated no check since tan-cli#290 (`_collect` takes the flag
+    and reads it nowhere). This pins that end to end, on the real binary, so
+    `contract/README.md` can state it and a consumer can act on it. Compared
+    as `(name, scope)` pairs: a status is a host fact and two consecutive
+    probes of the same wedged tool may legitimately disagree; the check SET is
+    the contract."""
+    plain = json.loads(
+        run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True).stdout
+    )
+    build = json.loads(
+        run_tan("doctor", "--build", "--format", "json", cwd=tmp_path, scrub_path=True).stdout
+    )
+    assert [(c["name"], c["scope"]) for c in plain["data"]["checks"]] == [
+        (c["name"], c["scope"]) for c in build["data"]["checks"]
+    ]
+
+
+def test_as_dict_carries_scope_and_still_omits_an_absent_fix():
+    """The serializer itself: `scope` is always present, `fix` is still
+    omitted rather than emitted as null (Rust's `skip_serializing_if`, which
+    the extension's optional-field handling depends on)."""
+    assert doctor_cmd.Check("homePath", "pass", "fine", scope="host").as_dict() == {
+        "name": "homePath",
+        "status": "pass",
+        "scope": "host",
+        "detail": "fine",
+    }
+    assert doctor_cmd.Check("boardYaml", "warn", "d", "f", scope="project").as_dict() == {
+        "name": "boardYaml",
+        "status": "warn",
+        "scope": "project",
+        "detail": "d",
+        "fix": "f",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1829,6 +2510,96 @@ def test_doctor_names_a_broken_global_default_end_to_end_via_the_cli(tmp_path):
     assert "--sdk-root" in sdk["fix"]
 
 
+# --------------------------------------------------------------------------
+# tan-cli#727 -- `--sdk-root` naming a path with no `scripts/alp_project.py`
+# reported `[pass] sdk` while `tan build` refused the same path.
+# --------------------------------------------------------------------------
+
+
+def _fake_sdk_root(root: Path) -> Path:
+    """A directory carrying THE marker `is_sdk_root` looks for, and nothing
+    else -- the positive control for every refusal below."""
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "alp_project.py").write_text("# marker\n")
+    return root
+
+
+def test_sdk_check_refuses_a_dangling_sdk_root_flag_and_names_it():
+    check = doctor_cmd.sdk_check(
+        "/nope/gone",
+        project_scope=None,
+        tier="sdkRootFlag",
+        dangling_flag_root="/nope/gone",
+    )
+    assert check.status == "fail"
+    assert "/nope/gone" in check.detail
+    assert "scripts/alp_project.py" in check.detail
+    # Not the `NO_SDK_NEXT_STEPS` sentence, which tells the user to pass the
+    # flag they just passed.
+    assert "no SDK selected" not in check.detail
+
+
+def test_sdk_check_without_the_dangling_signal_is_byte_identical():
+    """The parameter defaults to `None`, so every existing direct caller --
+    and every tier other than `sdkRootFlag` -- is untouched."""
+    assert doctor_cmd.sdk_check("/opt/alp-sdk", project_scope=None).detail == (
+        "alp-sdk at /opt/alp-sdk"
+    )
+
+
+def test_collect_refuses_a_nonexistent_sdk_root_flag_end_to_end(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    gone = tmp_path / "no-such-sdk"
+
+    checks = doctor_cmd._collect(
+        str(gone),
+        workspace_root=str(workspace),
+        sdk_tier="sdkRootFlag",
+    )
+    sdk = next(c for c in checks if c.name == "sdk")
+    assert sdk.status == "fail"
+    assert str(gone) in sdk.detail
+    # `sdkProvenance` rendered `pass | alp-sdk at <path> (no git checkout /
+    # metadata/sdk_version.yaml)` for a directory that is not there. A green
+    # line about an absent SDK is the same defect wearing a different name.
+    assert [c.name for c in checks if c.name == "sdkProvenance"] == []
+
+
+def test_collect_still_passes_a_real_sdk_root_flag(tmp_path):
+    """Positive control. Without it, a `sdk` check hard-wired to `fail` --
+    or a `_collect` that dropped `sdkProvenance` unconditionally -- passes
+    the test above."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    real = _fake_sdk_root(tmp_path / "alp-sdk")
+
+    checks = doctor_cmd._collect(
+        str(real),
+        workspace_root=str(workspace),
+        sdk_tier="sdkRootFlag",
+    )
+    sdk = next(c for c in checks if c.name == "sdk")
+    assert sdk.status == "pass"
+    assert [c.name for c in checks if c.name == "sdkProvenance"] == ["sdkProvenance"]
+
+
+def test_doctor_refuses_a_nonexistent_sdk_root_flag_via_the_cli(tmp_path):
+    """Real subprocess, real envelope -- the surface the issue was reported
+    from."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    gone = tmp_path / "no-such-sdk"
+
+    proc = run_tan("doctor", "--sdk-root", str(gone), "--format", "json", cwd=workspace)
+    envelope = json.loads(proc.stdout)
+    sdk = next(c for c in envelope["data"]["checks"] if c["name"] == "sdk")
+    assert sdk["status"] == "fail"
+    assert str(gone) in sdk["detail"]
+    assert [c for c in envelope["data"]["checks"] if c["name"] == "sdkProvenance"] == []
+    assert envelope["ok"] is False
+
+
 def test_board_yaml_preflight_check_passes_when_present_regardless_of_selection():
     assert doctor_cmd.board_yaml_preflight_check(True, project_selected=False).status == "pass"
     assert doctor_cmd.board_yaml_preflight_check(True, project_selected=True).status == "pass"
@@ -2271,6 +3042,44 @@ def test_sdk_provenance_check_distinguishes_a_real_git_checkout_from_a_plain_dir
     assert head in real_checkout.detail
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git must be on PATH for this test")
+def test_sdk_provenance_check_does_not_attribute_an_enclosing_repos_commit(tmp_path):
+    """tan-cli#488 defect 4: `git -C <root> ...` discovery walks UPWARD, so an
+    SDK with no `.git` of its own -- an extracted release archive vendored
+    inside a customer's own application repository, a setup this port
+    explicitly supports -- used to answer every git query with the ENCLOSING
+    repo's HEAD instead of "not a checkout". Build exactly that: an outer git
+    repo, and a plain subdirectory inside it standing in for a vendored SDK.
+    """
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        )
+
+    git("init", "-q")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "outer")
+    outer_head = git("rev-parse", "--short", "HEAD").stdout.strip()
+
+    vendored_sdk = tmp_path / "vendor" / "alp-sdk"
+    vendored_sdk.mkdir(parents=True)
+    (vendored_sdk / "metadata").mkdir()
+    (vendored_sdk / "metadata" / "sdk_version.yaml").write_text("version: 0.42.0\n", encoding="utf-8")
+
+    check = doctor_cmd.sdk_provenance_check(str(vendored_sdk))
+    assert check.status == "pass"
+    assert outer_head not in check.detail, check.detail
+    # No commit attributed at all -- `detail` is bare "alp-sdk <version>", not
+    # "alp-sdk <version> @ <commit>", proving `_git_short_commit` answered
+    # `None` rather than the enclosing repo's HEAD.
+    assert "@" not in check.detail, check.detail
+    assert check.detail == "alp-sdk 0.42.0", check.detail
+    # `_is_own_git_checkout` unit-level, directly: proves the guard itself,
+    # not just its downstream effect on the assembled detail string.
+    assert doctor_cmd._is_own_git_checkout(str(vendored_sdk)) is False
+    assert doctor_cmd._is_own_git_checkout(str(tmp_path)) is True
+
+
 def test_sdk_provenance_check_reads_the_sdk_version_file_when_present(tmp_path):
     metadata = tmp_path / "metadata"
     metadata.mkdir()
@@ -2314,7 +3123,55 @@ def test_fix_installed_check_never_claims_the_tool_is_now_on_path():
     assert "reopen" in check.detail or "new shell" in check.detail
 
 
+def test_fix_installed_check_discloses_when_it_skipped_elevation_as_root():
+    """tan-cli#650: a root caller's outcome must read differently from an
+    ordinary Tier-A ("this tool never needed elevation at all") one -- both
+    land on `doctor.fix-installed`, but only one of them ran a command the
+    manifest itself marked as needing `sudo`."""
+    check = doctor_cmd.fix_installed_check(
+        "git", "apt-get install -y git", elevation_skipped=True
+    )
+    assert check.code == "doctor.fix-installed"
+    assert "apt-get install -y git" in check.detail
+    assert "root" in check.detail
+    assert "sudo" in check.detail
+
+
+def test_running_as_root_reads_geteuid_and_treats_nonzero_as_false():
+    """`_running_as_root` is the ONE thing standing between a root caller and
+    the pre-tan-cli#650 blanket refusal -- so it must read the real
+    `os.geteuid`, not a hardcoded answer, and must not treat every non-`None`
+    return as truthy."""
+    import types
+
+    fake_os_root = types.SimpleNamespace(geteuid=lambda: 0)
+    fake_os_user = types.SimpleNamespace(geteuid=lambda: 1000)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(doctor_cmd, "os", fake_os_root)
+        assert doctor_cmd._running_as_root() is True
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(doctor_cmd, "os", fake_os_user)
+        assert doctor_cmd._running_as_root() is False
+
+
+def test_running_as_root_is_false_with_no_geteuid_at_all():
+    """Windows has no `os.geteuid` -- and no manifest install command that
+    would ever need this answer (`fix_needs_sudo_check`'s docstring) -- so
+    the absence must resolve to `False`, not an `AttributeError`."""
+    import types
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(doctor_cmd, "os", types.SimpleNamespace())
+        assert doctor_cmd._running_as_root() is False
+
+
 def test_run_fix_refuses_a_sudo_command_and_never_spawns_it(monkeypatch):
+    """The ordinary, non-root case: `_running_as_root` forced `False` here
+    rather than relying on the real process's UID, so this test's meaning
+    does not change depending on who or what happens to run the suite (a
+    root CI container included)."""
+    monkeypatch.setattr(doctor_cmd, "_running_as_root", lambda: False)
+
     def _must_not_run(*_args, **_kwargs):
         raise AssertionError("run_fix must never spawn a command needing sudo")
 
@@ -2326,6 +3183,65 @@ def test_run_fix_refuses_a_sudo_command_and_never_spawns_it(monkeypatch):
     )
     assert len(results) == 1
     assert results[0].code == "doctor.fix-needs-sudo"
+
+
+def test_run_fix_runs_a_sudo_command_directly_when_already_root(monkeypatch, tmp_path):
+    """tan-cli#650: measured against a real `geteuid() == 0` process
+    (`unshare --user --map-root-user`), `run_fix` used to refuse EVERY
+    `sudo`-prefixed manifest command unconditionally, even with nothing left
+    to elevate to. A root caller now gets the manifest's own command run
+    directly -- `sudo` itself is never spawned, only the program after it."""
+    monkeypatch.setattr(doctor_cmd, "_running_as_root", lambda: True)
+    fake_exe = tmp_path / "apt-get"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: str(fake_exe) if name == "apt-get" else None
+    )
+    captured = {}
+
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _fake_run)
+
+    results = doctor_cmd.run_fix(
+        [{"tool": "git", "command": "sudo apt-get install -y git"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-installed"
+    # The `sudo` word itself is never on the spawned argv -- that is the
+    # whole point: the PROGRAM `sudo` is still never invoked.
+    assert "sudo" not in captured["argv"]
+    assert captured["argv"][0] == str(fake_exe)
+    assert captured["argv"][1:] == ["install", "-y", "git"]
+    assert "root" in results[0].detail
+
+
+def test_run_fix_still_reports_fix_failed_for_a_sudo_command_as_root_that_exits_nonzero(
+    monkeypatch, tmp_path
+):
+    """The root path reuses the SAME failure/timeout/spawn-fail outcomes as
+    the ordinary no-elevation path -- this is not a parallel, half-tested
+    branch."""
+    monkeypatch.setattr(doctor_cmd, "_running_as_root", lambda: True)
+    fake_exe = tmp_path / "apt-get"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: str(fake_exe) if name == "apt-get" else None
+    )
+    monkeypatch.setattr(
+        doctor_cmd.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1),
+    )
+
+    results = doctor_cmd.run_fix(
+        [{"tool": "git", "command": "sudo apt-get install -y git"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-failed"
+    assert "sudo" not in results[0].detail
 
 
 def test_run_fix_runs_a_no_elevation_command_through_the_resolved_binary(monkeypatch, tmp_path):
@@ -2450,7 +3366,7 @@ def test_doctor_fix_explains_a_missing_installer_in_both_text_and_json(monkeypat
     hat. `can_prompt` is stubbed for the reason the section header above
     gives: `CliRunner`'s pipes are never a tty."""
     missing = [{"tool": "ninja", "command": "brew install ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
     monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
@@ -2584,13 +3500,13 @@ def test_doctor_fix_invokes_run_fix_and_folds_its_checks_into_the_report_when_co
     replaced by `pass` (the feature unwired entirely): `run_fix` would never
     be called and its Check would never reach `data.checks`/`issues`."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
 
     calls = []
 
-    def _spy_run_fix(missing_arg):
+    def _spy_run_fix(missing_arg, on_check=None):  # noqa: ARG001 -- streaming covered elsewhere
         calls.append(missing_arg)
         return [doctor_cmd.fix_installed_check("ninja", missing[0]["command"])]
 
@@ -2614,7 +3530,7 @@ def test_doctor_fix_guard_honours_ci_even_in_text_mode(monkeypatch, tmp_path):
     that condition, and text mode makes `not json_mode` true) and against
     `if fix or True` (guard deleted, always runs)."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
 
     calls = []
@@ -2634,7 +3550,7 @@ def test_doctor_fix_guard_honours_no_tty_the_same_way_ci_does(monkeypatch, tmp_p
     output but never passed `--ci`) must refuse `--fix` the same way `--ci`
     does."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
 
     calls = []
@@ -2682,13 +3598,163 @@ def test_fix_suppressed_issue_never_reads_isatty_under_json_mode(monkeypatch):
     assert "--format json" in issue.message
 
 
+def test_fix_suppressed_issue_does_not_crash_when_stdin_is_none(monkeypatch):
+    """tan-cli#488 defect 6: `sys.stdin` itself -- not just `sys.stderr` (see
+    the sibling test above) -- can be `None`: a GUI-launched/`pythonw`-style
+    process, or any host that runs tan with its standard handles detached. A
+    bare `sys.stdin.isatty()` there raised `AttributeError: 'NoneType' object
+    has no attribute 'isatty'`. Only reachable with `json_mode=False` -- that
+    is the one case the `isatty()` pair is read at all.
+    """
+    monkeypatch.setattr(doctor_cmd.sys, "stdin", None)
+    issue = doctor_cmd.fix_suppressed_issue(non_interactive=False, ci=False, json_mode=False)
+    assert issue.code == "doctor.fix-suppressed"
+    assert "no interactive terminal" in issue.message
+
+
+def test_fix_suppressed_issue_does_not_crash_when_stderr_is_none(monkeypatch):
+    """tan-cli#488 round 5: the sibling site of the same defect, in the same
+    function. Round 4 guarded `sys.stdin is not None` here (the test above)
+    but left `sys.stderr.isatty()` -- the NEXT operand of the identical `and`
+    chain -- unguarded, so a host whose `stdin` is real (redirected to a real
+    file, `.isatty()` returns `False` there rather than raising) but whose
+    `stderr` alone is `None` still raised `AttributeError: 'NoneType' object
+    has no attribute 'isatty'` one operand later. `sys.stdin` is left as
+    whatever pytest's own capture already replaced it with (a real object,
+    never `None`) precisely so this test cannot pass by accident via the
+    OTHER guard."""
+    monkeypatch.setattr(doctor_cmd.sys, "stderr", None)
+    issue = doctor_cmd.fix_suppressed_issue(non_interactive=False, ci=False, json_mode=False)
+    assert issue.code == "doctor.fix-suppressed"
+    assert "no interactive terminal" in issue.message
+
+
+def test_doctor_fix_with_stderr_none_does_not_crash_before_reaching_fix_suppressed_issue(
+    monkeypatch, tmp_path
+):
+    """tan-cli#488 round 5, the CLI-level twin of the unit test above: proves
+    `can_prompt` itself (`tan.core.consent`) -- not just `fix_suppressed_issue`
+    -- tolerates a `None` `sys.stderr` when `sys.stdin` genuinely IS a tty.
+    `doctor()`'s `fix_allowed = fix and can_prompt(...)` (doctor_cmd.py:3467)
+    calls the REAL, unmonkeypatched `can_prompt` before `fix_suppressed_issue`
+    ever runs, so a guard added only inside `fix_suppressed_issue` would leave
+    THIS call to crash first, caught only by `doctor()`'s outer
+    `except Exception` and reported as a fabricated `doctor.internal-failure`
+    (exit 5) instead of the correct `doctor.fix-suppressed` warning (exit 4)
+    -- exactly the round-2 regression `can_prompt` was centralised to close,
+    recurring one operand later.
+
+    `_NamedTextIOWrapper.isatty` is forced `True` (the same technique
+    `test_doctor_no_color_flag_reaches_the_render_and_suppresses_ansi` uses)
+    so `CliRunner`'s captured `sys.stdin` -- which `can_prompt` must reach and
+    pass before it ever reads `sys.stderr` -- answers `True`, matching the
+    real detached-process shape this defect needs: a live, non-tty-refusing
+    stdin with stderr alone detached. `sys.stderr` is set to `None` as a side
+    effect inside `_collect`, the same pattern
+    `test_doctor_fix_with_stdin_none_does_not_crash_before_reaching_fix_suppressed_issue`
+    uses for `sys.stdin`, for the identical reason: `CliRunner.invoke`'s own
+    `isolation()` context manager swaps `sys.stderr` for its own captured
+    stream at the START of every invocation, so a monkeypatch applied before
+    `invoke()` is silently overwritten before `doctor()` ever runs.
+
+    Unlike `sys.stdin`, `sys.stderr` cannot simply stay `None` for the rest
+    of the invocation: `doctor()` itself keeps writing to it afterwards (the
+    summary footer), and `CliRunner.invoke`'s own `finally: sys.stderr.flush()`
+    runs once the command returns -- both would raise the same `AttributeError`
+    for a reason that has nothing to do with this defect. `fix_suppressed_issue`
+    is the LAST consumer of the `None` stderr in `doctor()`'s call order (after
+    `can_prompt`), so wrapping it to restore the real stream in a `finally`,
+    once its own body has run with `sys.stderr` still `None`, isolates the
+    `None` window to exactly the two calls this test targets."""
+    from typer.testing import _NamedTextIOWrapper
+
+    monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    real_stderr_box: list[object] = []
+
+    def _collect_stub(*a, **k):  # noqa: ARG001
+        real_stderr_box.append(doctor_cmd.sys.stderr)
+        doctor_cmd.sys.stderr = None
+        return stub_checks
+
+    real_fix_suppressed_issue = doctor_cmd.fix_suppressed_issue
+
+    def _fix_suppressed_issue_wrapper(*a, **k):
+        try:
+            return real_fix_suppressed_issue(*a, **k)
+        finally:
+            doctor_cmd.sys.stderr = real_stderr_box[0]
+
+    monkeypatch.setattr(doctor_cmd, "_collect", _collect_stub)
+    monkeypatch.setattr(doctor_cmd, "fix_suppressed_issue", _fix_suppressed_issue_wrapper)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+
+    assert "doctor.internal-failure" not in result.stderr, result.stderr
+    assert "AttributeError" not in result.stderr, result.stderr
+    assert "`--fix` was requested but not run" in result.stderr, result.stderr
+    assert "no interactive terminal" in result.stderr, result.stderr
+    assert result.exit_code == 4, result.stderr  # hostPrerequisites is still a Fail; not 5
+
+
+def test_doctor_fix_with_stdin_none_does_not_crash_before_reaching_fix_suppressed_issue(
+    monkeypatch, tmp_path
+):
+    """tan-cli#488 round 3: the sibling test above proves `fix_suppressed_issue`
+    itself tolerates `sys.stdin is None` -- but that function is only ever
+    reached AFTER `doctor()`'s own `fix_allowed = fix and can_prompt(...)`
+    (doctor_cmd.py:3454) has already called the UNGUARDED `can_prompt`
+    (`tan.core.consent`). A `sys.stdin is None` guard added only inside
+    `fix_suppressed_issue` -- and not in `can_prompt` itself -- leaves that
+    earlier call to crash first, caught only by `doctor()`'s outer
+    `except Exception`, which discards the whole diagnosis and reports
+    `doctor.internal-failure` (exit 5) instead of the correct
+    `doctor.fix-suppressed` warning. Drives the REAL, unmonkeypatched
+    `can_prompt` through the actual CLI dispatch -- not a direct call to
+    `fix_suppressed_issue` -- because that earlier call site is exactly what
+    round 2 left unfixed. Text mode, not `--format json`: `can_prompt` short-
+    circuits past both `isatty()` reads under `json_mode=True`, so the crash
+    is only reachable in text mode (measured against a real
+    `tan doctor --fix` run with stdin closed before exec, `0<&-`).
+
+    Sets `sys.stdin = None` from INSIDE the stubbed `_collect` -- not before
+    `runner.invoke` -- because `CliRunner.invoke`'s own isolation() context
+    manager swaps `sys.stdin` for its own captured stream at the start of
+    every invocation (and restores it after), so a monkeypatch applied
+    before `invoke()` is silently overwritten the moment the command
+    actually runs, and this test would pass whether or not the bug is
+    fixed (measured). `_collect` runs and returns before `doctor()` ever
+    reaches `can_prompt` (line 3454), so setting it as a side effect there
+    lands exactly where a real detached-stdio host already has
+    `sys.stdin is None` by the time `--fix`'s consent gate is evaluated."""
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+
+    def _collect_stub(*a, **k):  # noqa: ARG001
+        doctor_cmd.sys.stdin = None
+        return stub_checks
+
+    monkeypatch.setattr(doctor_cmd, "_collect", _collect_stub)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+
+    assert "doctor.internal-failure" not in result.stderr, result.stderr
+    assert "AttributeError" not in result.stderr, result.stderr
+    assert "`--fix` was requested but not run" in result.stderr, result.stderr
+    assert "no interactive terminal" in result.stderr, result.stderr
+    assert result.exit_code == 4, result.stderr  # hostPrerequisites is still a Fail; not 5
+
+
 def test_doctor_fix_format_json_is_no_longer_a_silent_no_op(monkeypatch, tmp_path):
     """The exact reported shape: `doctor --fix --format json` on an
     unhealthy host used to be byte-for-byte identical to plain `tan doctor`.
     Now it must carry a `doctor.fix-suppressed` issue naming why, even though
     `run_fix` itself is never called."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     calls = []
     monkeypatch.setattr(doctor_cmd, "run_fix", lambda m: calls.append(m) or [])
@@ -2726,7 +3792,7 @@ def test_doctor_fix_suppressed_notice_reaches_text_mode_not_just_json(monkeypatc
     branch, so an issues-only entry like `fix_suppressed_issue` never
     reached stderr at all outside `--format json`."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.chdir(tmp_path)
 
@@ -2743,3 +3809,284 @@ def test_doctor_fix_suppressed_notice_reaches_text_mode_not_just_json(monkeypatc
     summary_at = result.stderr.rindex("passed,")
     assert notice_at < summary_at, result.stderr
     assert result.stderr.strip().endswith("failed.")
+
+
+# --------------------------------------------------------------------------
+# `--no-color` must actually REACH `doctor()` (UX-polish sweep, text-layout
+# task). `accept_global_flags` (`tan/core/global_flags.py`) injects and then
+# DROPS `--no-color`/`--ci` for any command that doesn't declare them itself
+# -- `doctor()` didn't declare `--no-color`, so `tan doctor --no-color` was
+# accepted and silently ignored (never regressed by a test, because nothing
+# in `doctor` used colour yet either).
+# --------------------------------------------------------------------------
+
+
+def test_doctor_no_color_flag_reaches_the_render_and_suppresses_ansi(monkeypatch, tmp_path):
+    """`CliRunner`'s own stderr is a `BytesIO`-backed stream, never a real
+    tty, so colour is already off there regardless of `--no-color` -- that
+    would make this test pass for the same wrong reason the bug shipped
+    with. Forcing `isatty()` True on typer's own `_NamedTextIOWrapper` (the
+    class both `sys.stdout` and `sys.stderr` are swapped to for the duration
+    of `runner.invoke`) is what makes the flag's effect actually observable:
+    plain `tan doctor` must now carry ANSI escapes and `--no-color` must
+    strip them, through the REAL CLI dispatch (argument parsing ->
+    `accept_global_flags` -> `doctor()`'s body -> `tan.env.use_color` ->
+    `render_doctor_lines`), not a direct call to any one of those.
+
+    `tan.env.use_color` also short-circuits on `NO_COLOR`'s presence in the
+    real environment (`no_color_requested()`, tan-cli#288 -- correctly so,
+    per spec). Left alone, this test's first assertion is a coin flip on
+    whoever runs it: green on a shell with no `NO_COLOR`, red -- for the
+    right reason, colour genuinely suppressed -- on one that has it set
+    (CI runners commonly do). `NO_COLOR` is not something this test
+    controls via any argument or fixture, so it must be neutralised
+    explicitly, same as `isatty` is forced explicitly below. `--ci` needs
+    no equivalent treatment: `ci` reaches `use_color` only as the `--ci`
+    CLI flag's own value (default `False`), never read from an env var, so
+    it is already fully controlled by the argv this test passes.
+
+    `doctor` v2's streaming (change 3): each check's block now prints
+    through the `on_check` callback `_collect` is given, at the moment
+    `_collect` produces it -- a stub replacing `_collect` must call that
+    callback itself, or its check is never printed at all (there is no
+    separate batch-print step left to fall back on)."""
+    from typer.testing import _NamedTextIOWrapper
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
+    stub_checks = [doctor_cmd.Check("west", "fail", "west not found", scope="host")]
+
+    def stub_collect(*a, on_check=None, **k):
+        if on_check is not None:
+            for check in stub_checks:
+                on_check(check)
+        return stub_checks
+
+    monkeypatch.setattr(doctor_cmd, "_collect", stub_collect)
+    monkeypatch.chdir(tmp_path)
+
+    colored = runner.invoke(app, ["doctor"])
+    plain = runner.invoke(app, ["doctor", "--no-color"])
+
+    assert "\x1b[" in colored.stderr, colored.stderr
+    assert "\x1b[" not in plain.stderr, plain.stderr
+
+
+# --------------------------------------------------------------------------
+# Streaming (`doctor` v2 task, change 3): each check's block prints the
+# MOMENT that check completes, not after every check has been computed.
+# --------------------------------------------------------------------------
+
+
+def test_checks_stream_incrementally_not_in_one_final_flush(monkeypatch, tmp_path):
+    """Proves ORDERING/interleaving, not just final content -- a test that
+    only inspects the finished stderr text would pass equally well against
+    the OLD batched code (compute every check first, print everything at the
+    very end) and prove nothing about this change.
+
+    `doctor_cmd._collect` is stubbed to accept the real `on_check` callback
+    `doctor()`'s text branch wires up, and to record a marker into the SAME
+    event list BETWEEN its two calls -- standing in for a slow probe still
+    running for the second check. `builtins.print` is wrapped (not replaced:
+    it still forwards to the real `print`, so `CliRunner` still captures
+    stderr normally) to append every printed line to that one list too. If
+    streaming works, the first check's line is already in `events` before
+    the marker; if the code regressed to batching, the marker would come
+    first, or nothing would separate the two checks' output at all.
+    """
+    events: list[str] = []
+
+    def fake_collect(*args, on_check=None, **kwargs):  # noqa: ARG001
+        first = doctor_cmd.Check("alpha", "pass", "alpha detail", scope="host")
+        second = doctor_cmd.Check("beta", "pass", "beta detail", scope="host")
+        if on_check is not None:
+            on_check(first)
+        # Stand-in for the second check's own slow probe -- spelled without
+        # "alpha"/"beta" so it cannot accidentally satisfy either substring
+        # search below.
+        events.append("MARKER-still-probing")
+        if on_check is not None:
+            on_check(second)
+        return [first, second]
+
+    monkeypatch.setattr(doctor_cmd, "_collect", fake_collect)
+    monkeypatch.chdir(tmp_path)
+
+    real_print = print
+
+    def recording_print(*args, **kwargs):
+        if args:
+            events.append(str(args[0]))
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.print", recording_print)
+
+    result = runner.invoke(app, ["doctor", "--no-color"])
+    assert result.exit_code == 0, result.stderr
+
+    alpha_at = next(i for i, e in enumerate(events) if "alpha" in e)
+    marker_at = events.index("MARKER-still-probing")
+    beta_at = next(i for i, e in enumerate(events) if "beta" in e)
+    assert alpha_at < marker_at < beta_at, events
+
+
+# --------------------------------------------------------------------------
+# Review finding 2: `_print_check`'s own `print` (via `_print_stream_lines`)
+# is a FOURTH way `_collect` touches the outside world, and unlike
+# `probe`/`on_path`/`_read_text` it CAN raise. Measured -- see
+# `_print_stream_lines`'s docstring for the mechanism, not restated here --
+# it is NOT a legacy-codepage stderr (`_reconfigure_stdio()` already forces
+# utf-8/strict before any command runs); it is a lone surrogate in a printed
+# filesystem path, a closed pipe, or a stream closed outright. This test
+# forces the failure directly (a monkeypatched `print`) rather than
+# reproducing any one specific trigger, so it covers the GUARD regardless of
+# which of the three tripped it. Unguarded, that exception used to unwind
+# through `_collect` into `doctor()`'s own `except Exception`, converting an
+# ALREADY-COMPLETED diagnosis into `doctor.internal-failure` -- discarding
+# real information (the probe genuinely ran and answered) over a print-layer
+# hiccup.
+# --------------------------------------------------------------------------
+
+
+def test_a_print_failure_does_not_discard_an_already_completed_diagnosis(monkeypatch, tmp_path):
+    """`builtins.print` is made to fail on exactly the rendered check-block
+    line (it always starts with `"["`, see `render_check_lines`'s `prefix`),
+    so the guard's own fallback note -- plain text, no leading `"["` -- still
+    goes through the real `print`. Proves both halves finding 2 asks for:
+    the finished `west` verdict survives (exit 0, no internal-failure), and
+    the guard is not silent about WHY that check's own block did not print."""
+    stub_checks = [doctor_cmd.Check("west", "pass", "west 1.2.0 found", scope="host")]
+
+    def stub_collect(*a, on_check=None, **k):
+        if on_check is not None:
+            for check in stub_checks:
+                on_check(check)
+        return stub_checks
+
+    monkeypatch.setattr(doctor_cmd, "_collect", stub_collect)
+    monkeypatch.chdir(tmp_path)
+
+    real_print = print
+
+    def flaky_print(*args, **kwargs):
+        text = str(args[0]) if args else ""
+        if text.startswith("["):
+            raise UnicodeEncodeError("cp1252", text, 0, 1, "ordinal not in range(128)")
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.print", flaky_print)
+
+    result = runner.invoke(app, ["doctor", "--no-color"])
+
+    # The real verdict (`west` passed) survives -- exit 0, not the fabricated
+    # `INTERNAL_FAILURE` a discarded diagnosis would produce.
+    assert result.exit_code == 0, result.stderr
+    assert "doctor.internal-failure" not in result.stderr
+    assert "could not print the 'west' block" in result.stderr
+
+
+# --------------------------------------------------------------------------
+# Review finding 3: `--fix`'s checks used to stream only after `run_fix`
+# returned IN FULL -- the largest blank-terminal window in the whole command
+# (`FIX_INSTALL_TIMEOUT_S` (300s) times up to 4 tools, against
+# `PROBE_TIMEOUT_S` (15s) for the probes that already streamed). `run_fix`
+# now takes the same `on_check` shape `_collect` does.
+# --------------------------------------------------------------------------
+
+
+def test_run_fix_streams_each_outcome_via_on_check_as_it_happens(monkeypatch, tmp_path):
+    """Proves ORDERING, the same way
+    `test_checks_stream_incrementally_not_in_one_final_flush` proves it for
+    `_collect`: a marker recorded between two tools' `subprocess.run` calls
+    must land between their two `on_check` firings, not before both (the old,
+    print-after-`run_fix`-returns shape) or after both."""
+    fake_exe = tmp_path / "tool.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: str(fake_exe))
+
+    events: list[str] = []
+
+    def fake_run(argv, **k):  # noqa: ARG001
+        events.append(f"RUN-{argv[-1].lstrip('-')}")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", fake_run)
+
+    def on_check(check):
+        events.append(f"CHECK-{check.name}")
+
+    missing = [
+        {"tool": "ninja", "command": "installer --ninja"},
+        {"tool": "dtc", "command": "installer --dtc"},
+    ]
+    results = doctor_cmd.run_fix(missing, on_check=on_check)
+
+    assert events == ["RUN-ninja", "CHECK-fix:ninja", "RUN-dtc", "CHECK-fix:dtc"], events
+    assert [c.name for c in results] == ["fix:ninja", "fix:dtc"]
+
+
+def test_doctor_fix_passes_a_real_on_check_to_run_fix_in_text_mode_and_none_under_json(
+    monkeypatch, tmp_path
+):
+    """Wiring, not `run_fix`'s own streaming internals (covered above):
+    `doctor()` must actually PASS a callable into `run_fix` when text mode is
+    streaming (never just accept the parameter and leave it unused), and
+    must NOT print `--fix` checks under `--format json` -- the same `stream`
+    gate `_collect` is given, applied consistently to the second caller."""
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+    monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
+
+    seen_on_check = []
+
+    def _spy_run_fix(missing_arg, on_check=None):  # noqa: ARG001
+        seen_on_check.append(on_check)
+        return []
+
+    monkeypatch.setattr(doctor_cmd, "run_fix", _spy_run_fix)
+    monkeypatch.chdir(tmp_path)
+
+    runner.invoke(app, ["doctor", "--fix", "--no-color"])
+    runner.invoke(app, ["doctor", "--fix", "--format", "json"])
+
+    assert callable(seen_on_check[0]), seen_on_check  # text mode: a real callback
+    assert seen_on_check[1] is None, seen_on_check  # json mode: never streamed
+
+
+# --------------------------------------------------------------------------
+# tan-cli#488 defect 8 -- a deleted cwd must produce an envelope, not a
+# traceback with empty stdout.
+# --------------------------------------------------------------------------
+
+
+def test_a_deleted_working_directory_still_produces_an_envelope(monkeypatch):
+    """`doctor()`'s prologue -- `Path.cwd()` through `Project.resolved(...)`
+    and the SDK-root ladder -- used to run OUTSIDE the `try`/`except` that
+    turns a raise into the `doctor.internal-failure` envelope: `Path.cwd()`
+    throws `FileNotFoundError` when the working directory has been deleted
+    out from under the process (entirely reachable -- a cleanup script
+    racing a `tan doctor` run in the same shell), and that raise used to
+    unwind through typer's own traceback renderer instead: empty stdout, a
+    bare non-zero exit, no error on either side of the CLI/extension seam.
+    `flash_cmd`/`build_cmd`/`validate_cmd` already guard the identical shape
+    (`flash_cmd.workspace_root`'s own docstring calls it "the port's
+    recurring double fault").
+    """
+    def gone():
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(doctor_cmd.Path, "cwd", staticmethod(gone))
+
+    result = runner.invoke(app, ["doctor", "--format", "json"])
+    assert result.stdout, "must never be empty stdout"
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "doctor"
+    assert payload["ok"] is False
+    assert result.exit_code == payload["exitCode"] == int(doctor_cmd.ExitCode.INTERNAL_FAILURE)
+    # An envelope, whatever the outcome -- both `project` keys present (null
+    # is fine; typer's own traceback renderer would have produced no JSON at
+    # all).
+    assert set(payload["project"]) == {"root", "boardYaml"}
+    assert payload["issues"], "a failure must always carry an issue"
+    assert any(i["code"] == "doctor.internal-failure" for i in payload["issues"]), payload["issues"]

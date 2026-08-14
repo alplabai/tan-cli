@@ -39,7 +39,7 @@ would refuse consent in a session where the human is sitting right there. The
 """
 from __future__ import annotations
 
-import sys
+from tan.env import stderr_is_tty, stdin_is_tty
 
 
 def can_prompt(*, non_interactive: bool, ci: bool, json_mode: bool) -> bool:
@@ -53,11 +53,52 @@ def can_prompt(*, non_interactive: bool, ci: bool, json_mode: bool) -> bool:
 
     A command with a documented default takes it when this returns `False`; one
     without a default fails instead of asking.
+
+    tan-cli#488: `sys.stdin` itself, not just the result of calling `.isatty()`
+    on it, can be `None` -- a process launched with its standard handles
+    detached (a GUI launcher, `pythonw`-style spawn, or a shell that closed fd
+    0 before exec, `0<&-`) leaves `sys.stdin` unbound rather than merely
+    non-interactive, and a bare `sys.stdin.isatty()` then raises
+    `AttributeError: 'NoneType' object has no attribute 'isatty'`. This is the
+    ONE place that guard belongs: every caller of `can_prompt` (`doctor_cmd`,
+    `scaffold_cmd`) reaches this line before any caller-side guard could run,
+    so duplicating the `is not None` check downstream (as doctor_cmd.py's
+    `fix_suppressed_issue` still does, for its own separate per-condition
+    explanation) does not help -- this call is the one that crashes first.
+
+    tan-cli#488 round 5: the SAME detachment guards ONLY `sys.stdin`, not
+    `sys.stderr` -- the very next operand of this same `and` chain, and just
+    as reachable: the identical detached-process shape can leave `sys.stdin`
+    live (redirected to a real, non-tty file) while `sys.stderr` alone is
+    unbound, since each handle is detached independently by whatever spawned
+    the process. Verified against the real binary, not a mock: a `pty.fork()`
+    child with a genuine tty on stdin (`isatty() is True`, so the chain
+    reaches this line) and `stderr` closed before `exec` crashed
+    `tan doctor --fix` with exactly this `AttributeError` -- `sys.stdin is not
+    None` alone does not protect the `sys.stderr.isatty()` call one line
+    below it.
+
+    tan-cli#488 round 6: `is not None` was never the whole guard either --
+    it stops a detached (`None`) handle from crashing `.isatty()`, but not a
+    handle that EXISTS and simply has no `.isatty()` method, which is
+    exactly what `sys.stderr` becomes under `tan --format json`
+    (`tan.cli.main` tees it through `_TeeStderr`: `write`/`flush`/
+    `getvalue` only). This function's own `not json_mode` operand happens to
+    short-circuit ahead of the `sys.stderr` checks before that shape is ever
+    reached today, so `can_prompt` itself was never observed to crash on
+    it -- but `tan.commands.build_cmd._dispatch` hand-rolled the identical
+    `is not None and .isatty()` pair with no `json_mode` operand in front of
+    it at all, and DID crash, on a real `tan run --format json`
+    (`AttributeError: '_TeeStderr' object has no attribute 'isatty'`,
+    measured). Both operands now route through `tan.env.stdin_is_tty`/
+    `stderr_is_tty` -- the one shared probe (tan-cli#288) that already
+    wraps both exception classes -- rather than leaving this copy's safety
+    resting on an operand order a future edit could reshuffle.
     """
     return (
         not non_interactive
         and not ci
         and not json_mode
-        and sys.stdin.isatty()
-        and sys.stderr.isatty()
+        and stdin_is_tty()
+        and stderr_is_tty()
     )

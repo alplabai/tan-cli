@@ -71,10 +71,10 @@ import typer
 import yaml
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, resolve_sdk_tiered, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_workspace_dir
-from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
+from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
@@ -141,31 +141,25 @@ def _resolve_core(core_arg: str | None, board_yaml: str) -> str:
         # `read_to_string` error to `kconfig.board-yaml-missing`. Not
         # `errors="replace"`: that would silently mangle the user's bytes and
         # then resolve a core out of the mangled result.
+        #
+        # tan-cli#440: a SECOND `except UnicodeDecodeError:` used to follow
+        # this clause, raising `kconfig.board-yaml-invalid` for the same
+        # bytes. It was unreachable -- the tuple above already consumes every
+        # `UnicodeDecodeError` -- and it contradicted this one about which
+        # code the contract owes. Deleted rather than reordered: reordering
+        # would have made the WRONG code live. Re-measured against the frozen
+        # oracle before deleting, on a board.yaml carrying one 0xE9 byte:
+        #
+        #   $ target/debug/tan kconfig --sdk-root <sdk> --format json   # tan 0.4.1
+        #   ... "issues":[{"code":"kconfig.board-yaml-missing","severity":"error",
+        #        "message":"failed to read board.yaml at `<...>`: stream did not
+        #        contain valid UTF-8"}]   rc=2
+        #
+        # so `board-yaml-missing` is the contract and the deleted arm was the
+        # pre-#421 explanation left behind by that parity correction.
         raise _CoreResolutionError(
             "kconfig.board-yaml-missing",
             f"failed to read board.yaml at `{board_yaml}`: {err}",
-        ) from err
-    except UnicodeDecodeError as err:
-        # tan-cli#396: `UnicodeDecodeError` is a `ValueError`, NOT an
-        # `OSError`, so the clause above could never fire on it -- one
-        # undecodable byte in the customer's own board.yaml (a cp1252/latin-1
-        # editor on Windows, a stray byte pasted into a comment) escaped this
-        # whole command as a traceback: rc 1, ZERO bytes on stdout, no
-        # envelope. That is the worst possible shape for this particular
-        # command, which exists to feed the alp-sdk-vscode `prj.conf` LSP
-        # symbol menu: per `contract/README.md:33-37` the extension's two
-        # string matches both fail OPEN on empty stdout, so it renders an
-        # empty or stale menu and never tells the user why. `scaffold.py`
-        # already learned this exact lesson (`except (OSError,
-        # UnicodeDecodeError)`); this file had not.
-        #
-        # `board-yaml-invalid`, not `board-yaml-missing`: the file is there
-        # and readable, so "missing" would send the customer looking for the
-        # wrong problem. Same class -- and same remedy -- as the list-shaped
-        # board.yaml below.
-        raise _CoreResolutionError(
-            "kconfig.board-yaml-invalid",
-            f"failed to read board.yaml at `{board_yaml}`: not valid UTF-8: {err}",
         ) from err
     try:
         doc = yaml.safe_load(text)
@@ -252,19 +246,34 @@ def _fail(
     core: str | None,
     json_mode: bool,
     sdk: SdkInfo | None = None,
+    sdk_issues: list[Issue] | None = None,
 ) -> None:
+    """tan-cli#497 defect 2: this used to hardcode `[Issue(code, "error",
+    message)]`, so EVERY refusal dropped whatever `sdk.project-pin-unresolved`
+    / `sdk.global-default-foreign-project` the resolution had already
+    computed -- while `sdk current`, `presets`, `size` and `image` all
+    surfaced them from the identical workspace. `sdk_issues` is the pair from
+    the one shared `sdk_resolution_issues`, prepended (warnings first, the
+    order `flash`/`size`/`image` use), so no refusal path here can drop them
+    again. Printed in text mode too, `{severity}: {message}` -- the shape
+    `build_cmd`/`run` use -- because text is the DEFAULT mode and this
+    command's whole job is answering "which symbols does my board have",
+    solved out of a checkout the pin does not name."""
+    warnings = sdk_issues or []
     if json_mode:
         emit(
             Envelope(
                 "kconfig",
                 Project.resolved(root, board_path),
                 _empty_data(core),
-                [Issue(code, "error", message)],
+                [*warnings, Issue(code, "error", message)],
                 exit_code,
                 sdk=sdk,
             )
         )
     else:
+        for issue in warnings:
+            print(f"{issue.severity}: {issue.message}", file=sys.stderr)
         print(f"kconfig: {message}", file=sys.stderr)
     raise typer.Exit(int(exit_code))
 
@@ -375,6 +384,7 @@ def _run_kconfig(
     sdk_root: str | None,
     verbose: bool,
     json_mode: bool,
+    disclosure: SdkDisclosure,
 ) -> None:
     """The whole setup-class ladder plus the emit, split out of `kconfig`
     below so that command can wrap it in ONE catch-all (tan-cli#396) without
@@ -383,16 +393,43 @@ def _run_kconfig(
     Every failure exits through `_fail`, which raises `typer.Exit` after
     writing the envelope -- so this function's only control-flow exception is
     `typer.Exit`, which is exactly what the caller re-raises untouched.
+
+    `disclosure` is the caller's, by reference: the resolution facts are
+    computed HERE and the caller's `kconfig.internal-failure` handler is the
+    tenth `_fail` site, so it needs a name to read them from after this
+    function has already raised. See `SdkDisclosure`.
     """
     # Setup-class check #1: no SDK checkout resolved -- checked before core
     # resolution so every setup-class failure here is uniformly one shape,
     # never a spawn attempt with half-resolved inputs (mirrors kconfig.rs).
     sdk = resolve_sdk(sdk_root, root)
     if sdk is None:
-        # No `sdk=` here -- there is nothing resolved to report, matching the
-        # oracle (which likewise omits the `sdk` envelope key on this one
-        # failure; every OTHER `_fail` below runs after `sdk` resolved and
-        # threads it through).
+        # tan-cli#497 defect 2, the branch #578 explicitly left open (its own
+        # comment here used to read "there is nothing resolved to report").
+        # `presets_cmd.resolve_sdk` deliberately collapses to a bare `None`
+        # whenever nothing resolves to a USABLE checkout, and its docstring
+        # documents that this drops `broken_project_pin`/
+        # `foreign_global_default_for` on the floor -- so a workspace whose
+        # own `.alp/sdk-path` pin is broken, with no OTHER tier resolving
+        # anything either, answered `kconfig.no-sdk-root` alone: the ladder
+        # had already computed the pin warning and this branch threw it away
+        # a second time. `resolve_sdk_tiered` is called again here, directly
+        # -- NOT through `resolve_sdk`, which is what discards the facts --
+        # to recover them: it is a pure four-tier filesystem walk with no
+        # side effects, so a second call costs a few stats, not a changed
+        # return contract for `presets_cmd`/`clean_cmd`, the other two
+        # callers of `resolve_sdk` that still share its `None`-collapsing
+        # shape and are unaffected by this fix.
+        #
+        # Still no `sdk=` -- there is genuinely no root to report, matching
+        # the oracle -- but `sdk_issues` now carries whatever the ladder
+        # found before giving up, in both JSON and text (`_fail` prepends
+        # and prints them), so the workspace's own diagnosis reaches the
+        # user instead of being computed and silently discarded.
+        active = resolve_sdk_tiered(sdk_root, Path(root))
+        sdk_issues = sdk_resolution_issues(
+            active.broken_project_pin, active.tier, active.foreign_global_default_for
+        )
         _fail(
             root=root,
             board_path=board_path,
@@ -407,9 +444,45 @@ def _run_kconfig(
             f"{NO_SDK_NEXT_STEPS}.",
             core=None,
             json_mode=json_mode,
+            sdk_issues=sdk_issues,
         )
         return
-    sdk_info = SdkInfo(sdk.path, sdk.tier)
+    # tan-cli#504's blessed constructor: it carries `foreign_global_default_for`
+    # and `broken_project_pin` off the resolution onto the `SdkInfo`, which is
+    # what `Envelope._with_sdk_resolution_advisories` reads. A raw
+    # `SdkInfo(sdk.path, sdk.tier)` drops both and
+    # `tests/gates/test_sdk_info_is_built_from_a_resolution.py` refuses it.
+    sdk_info = SdkInfo.from_resolution(sdk.path, sdk)
+    # tan-cli#497 defect 2: `resolve_sdk` deliberately CARRIES both facts onto
+    # the `ActiveSdk` it returns, and this module read neither -- it imported
+    # `resolve_sdk` and none of the issue helpers, so a workspace whose
+    # `.alp/sdk-path` pin misses answered `ok: true, issues: []` with a full
+    # symbol menu solved out of a checkout the pin does not name. Computed
+    # ONCE here, threaded into all seven `_fail` sites below and into the
+    # success emit -- and, via `disclosure` just below, into the eighth site
+    # this function cannot reach: `kconfig`'s own `kconfig.internal-failure`
+    # catch-all. Ten `_fail` calls exist; the tenth is the `sdk is None` branch
+    # above, which now recovers the same two facts through a second,
+    # independent `resolve_sdk_tiered` call rather than through `resolve_sdk`
+    # (see that branch for why).
+    #
+    # `presets_cmd.resolve_sdk`'s OWN return contract is unchanged by that --
+    # it still collapses to a bare `None` and still drops both facts for its
+    # other two callers, `presets_cmd.py`'s own `presets()` and
+    # `clean_cmd._run`, which is theirs to fix, not this module's.
+    #
+    # Kept alongside #504's envelope-seam advisory rather than deleted in
+    # favour of it: the seam appends its pair at the END and dedupes BY CODE
+    # ("a command that already emitted the pair keeps its own copy and
+    # position"), so this hand-call is what keeps the two issues in this
+    # command's own order, ahead of the command-specific issues below.
+    sdk_issues = sdk_resolution_issues(
+        sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for
+    )
+    # Handed to the caller's `kconfig.internal-failure` handler the instant
+    # both facts exist -- that handler is the one `_fail` site this function
+    # cannot reach, and every line below it can raise something unenumerated.
+    disclosure.record(sdk_info, sdk_issues)
 
     try:
         resolved_core = _resolve_core(core, board_path)
@@ -423,6 +496,7 @@ def _run_kconfig(
             core=None,
             json_mode=json_mode,
             sdk=sdk_info,
+            sdk_issues=sdk_issues,
         )
         return
 
@@ -440,6 +514,7 @@ def _run_kconfig(
             core=resolved_core,
             json_mode=json_mode,
             sdk=sdk_info,
+            sdk_issues=sdk_issues,
         )
         return
 
@@ -468,6 +543,7 @@ def _run_kconfig(
                 core=resolved_core,
                 json_mode=json_mode,
                 sdk=sdk_info,
+                sdk_issues=sdk_issues,
             )
             return
         except Exception as err:  # noqa: BLE001 -- every planner failure is an
@@ -483,6 +559,7 @@ def _run_kconfig(
                 core=resolved_core,
                 json_mode=json_mode,
                 sdk=sdk_info,
+                sdk_issues=sdk_issues,
             )
             return
     finally:
@@ -503,6 +580,7 @@ def _run_kconfig(
             core=resolved_core,
             json_mode=json_mode,
             sdk=sdk_info,
+            sdk_issues=sdk_issues,
         )
         return
     if not isinstance(data, dict) or data.get("schemaVersion") != KCONFIG_SCHEMA_VERSION:
@@ -518,6 +596,7 @@ def _run_kconfig(
             core=resolved_core,
             json_mode=json_mode,
             sdk=sdk_info,
+            sdk_issues=sdk_issues,
         )
         return
 
@@ -533,6 +612,7 @@ def _run_kconfig(
             core=resolved_core,
             json_mode=json_mode,
             sdk=sdk_info,
+            sdk_issues=sdk_issues,
         )
         return
 
@@ -542,12 +622,18 @@ def _run_kconfig(
                 "kconfig",
                 Project.resolved(root, board_path),
                 data,
-                [],
+                # tan-cli#497 defect 2: a literal `[]` here was the WORST of
+                # the drops -- a full symbol menu, `ok: true`, solved out of a
+                # checkout the workspace's own pin does not name, with nothing
+                # in the envelope the extension could notice.
+                list(sdk_issues),
                 ExitCode.SUCCESS,
                 sdk=sdk_info,
             )
         )
     else:
+        for issue in sdk_issues:
+            print(f"{issue.severity}: {issue.message}", file=sys.stderr)
         for line in _text_lines(data, verbose):
             print(line, file=sys.stderr)
     raise typer.Exit(int(ExitCode.SUCCESS))
@@ -595,6 +681,23 @@ def kconfig(
     # paths` is itself inside the guard, so the failing envelope needs a
     # `project` block even when resolution is what blew up.
     root, board_path = ".", "./board.yaml"
+    # tan-cli#497 defect 2, the tenth `_fail` site. The first pass threaded the
+    # resolution pair into the seven sites inside `_run_kconfig` and left THIS
+    # one -- the catch-all, which runs strictly AFTER `resolve_sdk` has already
+    # produced both facts -- hardcoding a single-element issue list. Measured
+    # against a broken-`.alp/sdk-path` workspace with a discoverable sibling and
+    # `_resolve_zephyr_base` (outside every `try` in `_run_kconfig`) raising
+    # `OSError: [Errno 24] Too many open files`: exit 5,
+    # `issues: [kconfig.internal-failure]`, `sdk.project-pin-unresolved`
+    # dropped -- the same drop the issue is about, on a path the fix was
+    # believed to cover.
+    #
+    # The facts cannot simply be recomputed here: `resolve_sdk` is itself one
+    # of the things that can raise, and re-running the ladder in an exception
+    # handler risks a second raise out of the one place that must not throw.
+    # They are RECORDED by `_run_kconfig` instead, into a carrier this function
+    # owns, so the handler only ever reads two fields.
+    disclosure = SdkDisclosure()
     try:
         root, board_path = resolve_project_paths(project, board_yaml)
         _run_kconfig(
@@ -604,6 +707,7 @@ def kconfig(
             sdk_root=sdk_root,
             verbose=verbose,
             json_mode=json_mode,
+            disclosure=disclosure,
         )
     except typer.Exit:
         raise
@@ -616,6 +720,8 @@ def kconfig(
             message=f"kconfig failed unexpectedly: {type(err).__name__}: {err}",
             core=core,
             json_mode=json_mode,
+            sdk=disclosure.sdk,
+            sdk_issues=disclosure.issues,
         )
 
 

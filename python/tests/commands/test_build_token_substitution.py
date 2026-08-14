@@ -298,3 +298,54 @@ def test_sdk_commit_match_does_not_refuse(sdk_root):
         toolchain_root=None,
     )
     assert demoted == []
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git must be on PATH for this test")
+def test_git_short_head_does_not_attribute_an_enclosing_repos_commit(tmp_path):
+    """tan-cli#488 defect 4, second site: `git -C <root> ...` discovery walks
+    UPWARD, so an SDK vendored with no `.git` of its own inside a customer's
+    own application repository -- a setup this port explicitly supports --
+    used to make `git_short_head` answer with the ENCLOSING app repo's HEAD
+    instead of no signal (`""`). Left unfixed, a build stamps a plan's
+    `sdkCommit` with the app repo's commit, and the split-brain guard in
+    `apply_plan_token_substitution` compares the wrong repository's HEAD.
+    """
+    from tan.commands.build.token_substitution import _is_own_git_checkout, git_short_head
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        )
+
+    git("init", "-q")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "outer")
+    outer_head = git("rev-parse", "--short", "HEAD").stdout.strip()
+
+    vendored_sdk = tmp_path / "vendor" / "alp-sdk"
+    vendored_sdk.mkdir(parents=True)
+
+    # Pre-fix: this returned `outer_head` (the enclosing app repo's HEAD).
+    assert git_short_head(vendored_sdk) == ""
+    assert _is_own_git_checkout(vendored_sdk) is False
+    assert _is_own_git_checkout(tmp_path) is True
+
+    # And the split-brain guard must not fire off that misattribution: a plan
+    # captured with no real signal (`sdkCommit` from a checkout `git_short_head`
+    # cannot see) must not be refused as a mismatch against `outer_head`.
+    json = """{
+      "schemaVersion": 1, "generatedBy": "g", "planPathMode": "tokened", "sdkCommit": "deadbee",
+      "boardYaml": "${PROJECT_ROOT}/board.yaml", "sku": "S", "buildRoot": "build",
+      "slices": [], "sharedArtefacts": [], "warnings": []
+    }"""
+    plan = parse_build_plan(json)
+    assert plan.sdk_commit != outer_head
+    out, demoted = apply_plan_token_substitution(
+        plan,
+        board_yaml_path="/work/proj/board.yaml",
+        exec_base="/work/proj",
+        sdk_root=str(vendored_sdk),
+        python="python3",
+        toolchain_root=None,
+    )
+    assert demoted == []

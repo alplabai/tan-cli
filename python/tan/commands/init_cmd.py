@@ -12,10 +12,12 @@ Four properties this file exists to hold:
 **Every failure is a coded issue, never a traceback.** An unknown template, an
 unwritable destination, a destination that is a file, files already in the way,
 a missing SDK checkout for `--from-example`, a vendored template tree that will
-not read -- each maps to an `issues[].code` and an exit code. This is the port's
-recurring bug class: an uncaught exception replaces the envelope with a Python
-traceback on stderr, and the extension parses stdout, so it renders NOTHING with
-no error visible on either side. The catch-all at the bottom of `init` is the
+not read, a `--som` whose SoM family has no vendored tree at all
+(`init.som-unsupported`, tan-cli#579) -- each maps to an `issues[].code` and an
+exit code. This is the port's recurring bug class: an uncaught exception
+replaces the envelope with a Python traceback on stderr, and the extension
+parses stdout, so it renders NOTHING with no error visible on either side.
+The catch-all at the bottom of `init` is the
 backstop for the case nobody enumerated.
 
 **`--preview` writes nothing.** Not one directory, not one file, not even the
@@ -94,7 +96,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
-from tan.commands.sdk_cmd import global_default_foreign_project_issue
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_foreign_project_issue
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import (
@@ -108,6 +110,7 @@ from tan.core.scaffold import (
     PlannedFile,
     ScaffoldWriteError,
     TemplateDataError,
+    UnsupportedSomError,
     collect_file_changes,
     is_plain_relative,
     parse_cores,
@@ -122,7 +125,7 @@ from tan.core.scaffold import (
     vendored_core_ids,
     write_files,
 )
-from tan.envelope import Envelope, Issue, Project, emit
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
@@ -219,12 +222,53 @@ def _stderr(line: str) -> None:
     print(line, file=sys.stderr)
 
 
-def _emit_error(json_mode: bool, err: InitError) -> None:
+def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
+    """The envelope's `sdk` block for a resolved [`_Sdk`], or `None`.
+
+    tan-cli#491 defect 5: `init` passed no `sdk=` to `Envelope(...)` on ANY
+    path, so the key was absent from all four outcomes and at both resolution
+    tiers, while the frozen v0.4.1 oracle emits `sdk:{root,sourceTier}` for the
+    identical argv (`test_oracle_parity.json`, the `init` capture:
+    `"sdk": {"root": "../rust-sdk", "sourceTier": "sdkRootFlag"}`). It was the
+    only field naming WHICH checkout a run is about to permanently pin --
+    `data.sdkPinned` is `null` on the preview, refusal and error paths.
+
+    Gated on the loader marker, matching `build_output.resolve_project_context`
+    ("the envelope's `sdk` only records what core's own loader-marker check
+    accepted"), and NOT merely on `sdk is not None`. `_resolve_sdk_root`
+    returns an explicit `--sdk-root` unvalidated, and `_pin_sdk` then silently
+    declines to pin a path that is not a checkout -- so reporting `sdk` there
+    would advertise a checkout that is about to be pinned and is not.
+
+    `SdkInfo.from_resolution`, not a raw `SdkInfo(root, tier)`: `_Sdk` carries
+    `tier` and `foreign_global_default_for`, which is the shape that
+    constructor reads (`tests/gates/test_sdk_info_is_built_from_a_resolution.py`).
+    `init` still surfaces the foreign-global-default warning through its own
+    explicit `global_default_foreign_project_issue` call, computed BEFORE
+    `_pin_sdk` writes -- see that call site.
+
+    Note the ROOT reported is `_Sdk.display`, i.e. absolute, where the oracle
+    echoed `--sdk-root` verbatim. That divergence is `_Sdk`'s own, already
+    deliberate and already documented there (tan-cli#263: a relative pointer
+    persisted into `.alp/sdk-path` resolves against the wrong cwd later); this
+    field simply reports the same value `data.sdkPinned` does.
+    """
+    if sdk is None or not _is_sdk_checkout(sdk.path):
+        return None
+    return SdkInfo.from_resolution(sdk.display, sdk)
+
+
+def _emit_error(json_mode: bool, err: InitError, sdk: _Sdk | None = None) -> None:
     """The error envelope. Note the asymmetry with `_emit_outcome`, which is
     contract, not an oversight: an error reports `project.root: null` and an
     EMPTY `templateId`/`destination` even when the CLI had already resolved
     both, because nothing was created and there is no project to point a
     consumer at. `contract/envelopes/init-invalid-template` pins it.
+
+    `sdk` defaults to `None` because the two `_emit_error` call sites sit in
+    handlers that can be reached BEFORE `_resolve_sdk_root` has run at all (a
+    bad `--template`, an unreadable `--board-yaml`); there is genuinely nothing
+    to report then, and the key stays absent rather than becoming `null`.
     """
     written, unchanged = err.partial
     if json_mode:
@@ -243,6 +287,7 @@ def _emit_error(json_mode: bool, err: InitError) -> None:
                 ),
                 [Issue(err.code, "error", err.message)],
                 err.exit_code,
+                sdk=_sdk_block(sdk),
             )
         )
     else:
@@ -250,7 +295,7 @@ def _emit_error(json_mode: bool, err: InitError) -> None:
     raise typer.Exit(int(err.exit_code))
 
 
-def _emit_outcome(json_mode: bool, outcome: _Outcome) -> None:
+def _emit_outcome(json_mode: bool, outcome: _Outcome, sdk: _Sdk | None = None) -> None:
     if json_mode:
         emit(
             Envelope(
@@ -269,6 +314,7 @@ def _emit_outcome(json_mode: bool, outcome: _Outcome) -> None:
                 ),
                 outcome.issues,
                 outcome.exit_code,
+                sdk=_sdk_block(sdk),
             )
         )
     elif outcome.preview:
@@ -333,6 +379,25 @@ def _resolve_name(name: str | None) -> str:
     )
 
 
+def _cwd_or_dot() -> Path:
+    """`Path.cwd()`, falling back to `"."` when the cwd has been removed
+    (tan-cli#494 defect 10).
+
+    Unguarded, `Path.cwd()`'s `FileNotFoundError` escaped to `init`'s catch-all
+    as `init.internal-failure` / exit 5 with an empty preview, where the oracle
+    exits 0 and emits the full envelope (measured: same argv, same deleted cwd).
+    `clean_cmd._cli_workspace_root` and `presets_cmd.resolve_project_paths`
+    already wrap the identical call this way, quoting the Rust
+    `current_dir().unwrap_or_else(|_| PathBuf::from("."))`; `init` -- the one
+    command that also WRITES its answer into `.alp/sdk-path` -- was the one
+    that skipped it.
+    """
+    try:
+        return Path.cwd()
+    except OSError:
+        return Path(".")
+
+
 def _join_display(dest: str, name: str) -> str:
     """Mirror `PathBuf::from(dest).join(name)`'s `.display()` text
     (`from_example.rs:70-74`): literal string concatenation with the native
@@ -381,6 +446,15 @@ class _Sdk:
 
     path: Path
     display: str
+    #: `SdkRootResolution.tier` carried through (tan-cli#491 defect 5) -- the
+    #: `sourceTier` half of the envelope's `sdk` block, which `init` was the
+    #: only wide-ladder command not to emit at all. `_resolve_sdk_root` had
+    #: the tier in hand on both branches and dropped it here, so neither
+    #: emitter could report which mechanism answered, on ANY of the four
+    #: outcome paths (preview, write, overwrite refusal, every `_emit_error`).
+    #: The explicit-flag branch is `"sdkRootFlag"` by construction; the ladder
+    #: branch carries `resolve_sdk_root_wide`'s own answer.
+    tier: str = "sdkRootFlag"
     #: `SdkRootResolution.foreign_global_default_for` carried through
     #: (tan-cli#464). `None` on the `--sdk-root` branch (an explicit flag is
     #: never "foreign" -- there is nothing to fall through from) and on every
@@ -424,7 +498,7 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     option in this command does that either."""
     if sdk_root:
         resolved = Path(os.path.abspath(os.path.expanduser(sdk_root)))
-        return _Sdk(resolved, posix(resolved))
+        return _Sdk(resolved, posix(resolved), "sdkRootFlag")
     # `_broken_pin` unused: `init` is what WRITES `.alp/sdk-path`, so a broken
     # pin already sitting in the parent workspace is superseded by this run's
     # own resolution rather than something for `init` itself to disclose --
@@ -439,12 +513,60 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     found = resolution.path
     if found is None:
         return None
-    return _Sdk(found, posix(found), resolution.foreign_global_default_for)
+    return _Sdk(
+        found,
+        posix(found),
+        resolution.tier,
+        foreign_global_default_for=resolution.foreign_global_default_for,
+    )
 
 
 def _is_sdk_checkout(root: Path) -> bool:
     """`scripts/alp_project.py` is THE marker for an alp-sdk checkout (I-31)."""
     return (root / "scripts" / "alp_project.py").is_file()
+
+
+def _sdk_root_flag_unresolved_issue(
+    sdk_root: str | None, resolved_sdk: _Sdk | None
+) -> Issue | None:
+    """tan-cli#642: an explicit `--sdk-root` that does not resolve to a real
+    alp-sdk checkout used to fail SILENTLY on the template path.
+
+    `_resolve_sdk_root`'s explicit-flag branch builds a `_Sdk` from
+    `--sdk-root` UNVALIDATED -- unlike the ladder branch, it never checks
+    `_is_sdk_checkout` before returning, so a typo'd path (or tan-cli#642's
+    more realistic route: a previously-valid `--sdk-root` that `tan
+    bootstrap` has since relocated) reaches `_finish` -> `_pin_sdk`, which
+    declines to write `.alp/sdk-path` for anything that fails
+    `_is_sdk_checkout` -- correctly, that write really would pin a checkout
+    that is not one -- but until this fix said NOTHING about it: `ok:true`,
+    `issues:[]`, `sdkPinned:null`, the whole project scaffolded normally,
+    though the README promises `init` "pins the SDK checkout in
+    .alp/sdk-path". A later command then silently fell through to
+    `~/.alp/sdk-default` -- some OTHER project's last `bootstrap`, in a
+    shared or multi-project setup.
+
+    EMISSION CONDITION: `--sdk-root` was given (non-empty) AND the path it
+    resolves to has no `scripts/alp_project.py` under it. `None` when
+    `--sdk-root` was not given at all -- that is the ordinary, no-SDK-
+    requested case every other ladder tier already covers with its own (or
+    no) diagnostic, not this one's to explain -- and `None` on the
+    `--from-example` path, which already hard-refuses the identical
+    condition as `init.sdk-root-unresolved` before this could ever run (an
+    SDK checkout is NOT optional there, since the thing being copied lives
+    inside one).
+    """
+    if not sdk_root or resolved_sdk is None or _is_sdk_checkout(resolved_sdk.path):
+        return None
+    return Issue(
+        "init.sdk-root-invalid",
+        "warning",
+        f"--sdk-root '{sdk_root}' does not resolve to an alp-sdk checkout "
+        f"(tried '{resolved_sdk.display}', no 'scripts/alp_project.py' "
+        f"found there); the project was scaffolded without pinning an SDK "
+        f"(.alp/sdk-path was not written). Re-run with a --sdk-root that "
+        f"resolves, or {NO_SDK_NEXT_STEPS}.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +591,18 @@ def _plan_from_template(
         )
     try:
         files = plan_template_files(template_id, sku)
+    except UnsupportedSomError as err:
+        # tan-cli#579. A VALIDATION failure, not an internal one: the tree is
+        # not missing from the install, it was never captured -- alp-sdk's
+        # scaffold catalog declares no entry for this SoM family -- so the
+        # actionable thing is the `--som`/`--template` pair the customer typed.
+        # Distinct from `init.invalid-som` above, which says "this TEMPLATE
+        # supports one SKU"; this one says "tan has no scaffold for this SoM
+        # family at all, in any family-split template". `UnsupportedSomError`
+        # itself records why refusing beats vendoring or warning.
+        raise InitError(
+            "init.som-unsupported", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
     except TemplateDataError as err:
         # tan's own template data is unreadable -- a broken installation (or a
         # frozen binary built without the template `--add-data`), not a project
@@ -525,7 +659,10 @@ def _apply_cores(
     # edge-ai ships `a55_cluster`, os: "off") -- a --cores id colliding with
     # one would append a SECOND, duplicate `cores:` mapping key. Reject
     # rather than silently drop the caller's os or silently override the
-    # scaffold's.
+    # scaffold's. Checked BEFORE the zephyr-companion refusal below: a
+    # collision with an already-declared companion is the more specific,
+    # more actionable conflict (name the existing declaration), whatever OS
+    # the caller's entry asked for.
     existing = dict(vendored_core_ids(board.content))
     for core_id, _os_value in cores:
         if core_id != app_core and core_id in existing:
@@ -536,6 +673,69 @@ def _apply_cores(
                 f"board.yaml to change its os instead of passing --cores.",
                 ExitCode.VALIDATION_FAILURE,
             )
+
+    # tan-cli#643: a --cores entry naming a DIFFERENT core than the plan's
+    # app core, requesting `zephyr` or `baremetal`, is the app-core-swap
+    # request this mechanism cannot honor -- `splice_companion_cores` only
+    # ever adds an `os:` child to a companion, never an `app:` (that source
+    # directory does not exist for anything but the template's own app
+    # core), so the result would be a second core silently declared with no
+    # source to build there, next to a REQUESTED core-id/os pair that
+    # `board.yaml` never actually honors. Before this fix that shape reached
+    # `splice_companion_cores` unrejected: `--cores m55_he:zephyr` on a
+    # single-core `--som E1M-AEN301` request left the app pinned to the
+    # template's guessed `m55_hp`, added the requested `m55_he` app-less, and
+    # spliced an unrequested default RPMsg carve-out between the two -- all
+    # at `ok:true`/`issues:[]` (the AEN bench e2e that filed the issue: an
+    # operator asking for one core got a two-core project on the wrong one).
+    # `baremetal` reaches the identical dead end via a different door: the
+    # planner's own `_enforce_loader_rules` (tan/planner/validate.py) refuses
+    # an app-less `os: baremetal` slice just as hard as an app-less `os:
+    # zephyr` one -- `--cores <id>:baremetal` would still plan to `ok:true`
+    # here and only fail two commands later, at `tan build`, against a
+    # board.yaml the customer never edited by hand.
+    #
+    # `yocto` is NOT unconditionally safe either -- it reaches the identical
+    # dead end on a Cortex-M companion through a THIRD door: the planner's
+    # `_enforce_os_matches_core_class` (tan/planner/validate.py) rejects a
+    # Cortex-M core running Yocto exactly as hard as it rejects a Cortex-A
+    # core running Zephyr. Measured against `E1M-AEN801` (a Cortex-M
+    # `m55_he` companion, app core `m55_hp`): `--cores m55_he:yocto` planned
+    # to `ok:true`/`issues:[]` here, and `tan validate` on the result then
+    # raised `validate.schema-violation` ("its runtime is determined by the
+    # core class ... got os: 'yocto'") -- the exact #643 shape, just reached
+    # through the one os: value the original fix left unchecked. `tan init`
+    # is deliberately SDK-free (module docstring above) and cannot resolve a
+    # companion's real `topology.<core>.type`, so this reads the same `a`- vs
+    # `m`-prefix convention every SoM topology already follows
+    # (`a32_cluster`/`a55_cluster` are Cortex-A; `m33`/`m33_sm`/`m55_hp`/
+    # `m55_he` are Cortex-M -- true across all 11 `metadata/e1m_modules/
+    # *.yaml` topologies, measured, and the same heuristic
+    # `tan/planner/project_emit/hw_info.py` already relies on) to accept
+    # `yocto` only for an `a`-prefixed companion id. `off` is the one os:
+    # value `_enforce_loader_rules` accepts app-less on ANY core class, so it
+    # is unconditionally allowed regardless of prefix (and
+    # `splice_companion_cores` now quotes it `"off"` so it round-trips as the
+    # schema's string, not YAML 1.1's bareword boolean). Refuse instead of
+    # guessing which core the caller actually meant.
+    for core_id, os_value in cores:
+        if core_id == app_core or os_value == "off":
+            continue
+        if os_value == "yocto" and core_id.startswith("a"):
+            continue
+        raise InitError(
+            "init.invalid-cores",
+            f"Core '{core_id}' requests {os_value}, but this plan's app "
+            f"core is '{app_core}' -- --cores can only splice '{core_id}' "
+            f"in as an app-less companion, and the only os: values a "
+            f"companion can honor app-less are 'off' (always) or 'yocto' "
+            f"(only when '{core_id}' is a Cortex-A core, i.e. its id starts "
+            f"with 'a') -- {os_value} is not one of those. If '{core_id}' "
+            f"is meant to host the app instead of '{app_core}', pick a "
+            f"--template/--som combination whose app core is '{core_id}', "
+            f"or scaffold with --board-yaml to declare it yourself.",
+            ExitCode.VALIDATION_FAILURE,
+        )
 
     spliced = splice_companion_cores(board.content, cores)
     return [
@@ -671,6 +871,20 @@ def _plan_from_example(
 # ---------------------------------------------------------------------------
 
 
+def overwrite_refusal_message(changes: list[FileChange]) -> str:
+    """Name the files that actually collide, and offer the non-destructive
+    option first. `--force` is the only escape the old wording named, which
+    made overwriting look like the intended next step rather than the last
+    resort."""
+    colliding = [c.relative_path for c in changes if c.kind == "update"]
+    listed = ", ".join(sorted(colliding))
+    return (
+        f"{len(colliding)} file(s) would be overwritten: {listed}. "
+        "Run with --preview to see the full plan, --destination <DIR> or "
+        "--name <NAME> to write somewhere else, or --force to overwrite."
+    )
+
+
 def _finish(
     template_id: str,
     destination: str,
@@ -709,7 +923,7 @@ def _finish(
                 Issue(
                     "init.would-overwrite",
                     "error",
-                    "One or more files would be overwritten. Use --force to allow updates.",
+                    overwrite_refusal_message(changes),
                 )
             ],
             exit_code=ExitCode.WRITE_FAILURE,
@@ -766,10 +980,16 @@ def _pin_sdk(project_root: Path, sdk: _Sdk | None) -> str | None:
     """Record the resolved SDK in `<project>/.alp/sdk-path` so the new project is
     reproducible without a separate `tan sdk switch`.
 
-    `None` and "not a real checkout" are a silent skip -- an optional
+    `None` and "not a real checkout" are a silent skip HERE -- an optional
     convenience pointer is never a reason to fail a `tan init` whose real
     files already landed. Reached only after the write, so `--preview` can
-    never trip it.
+    never trip it. Not silent on the WIRE any more when the caller passed an
+    explicit `--sdk-root` that failed the checkout check: `init()`'s own
+    `_sdk_root_flag_unresolved_issue` (tan-cli#642) reports that specific
+    case as a coded warning before this function ever runs, since this
+    function's job is only the write, not the diagnosis, and an unresolved
+    default-ladder SDK (no `--sdk-root` given at all) is not a misconfig this
+    layer has anything to say about.
 
     A confinement ESCAPE is different: a pre-existing symlinked (or
     junctioned) `.alp`, or a symlinked parent of it, used to carry this write
@@ -827,7 +1047,18 @@ def init(
         None, "--destination", metavar="PATH", help="Destination directory (defaults to '.')."
     ),
     som: str = typer.Option(
-        None, "--som", metavar="SKU", help="SoM SKU to target in the generated board.yaml."
+        None,
+        "--som",
+        # tan-cli#720: `--sku` accepted as an alias. The value IS a SKU string
+        # -- `tan presets` prints it under `skus=`, `board.yaml` nests it as
+        # `som.sku`, and `tan pinmux`/`tan new-som` spell the same value
+        # `--sku`. A customer who scaffolds with `--som` and then runs
+        # `tan pinmux --som ...` was rejected for the flag `init` had just
+        # taught them. Each command keeps its existing name FIRST, so help
+        # text and every existing script are unchanged; only an alias is added.
+        "--sku",
+        metavar="SKU",
+        help="SoM SKU to target in the generated board.yaml (alias: --sku).",
     ),
     board_yaml: str = typer.Option(
         None,
@@ -841,8 +1072,12 @@ def init(
         metavar="CORES",
         help=(
             "Comma-separated cores for a heterogeneous project, `id[:os]` "
-            "(e.g. `m33_sm:zephyr,a55_cluster:yocto`); OS is inferred from "
-            "the id when omitted."
+            "(e.g. `m33_sm:zephyr,a55_cluster:yocto`). OS is inferred from "
+            "the id when omitted, but that inference is only honored for "
+            "the plan's app core -- any other id can only be spliced in "
+            "app-less, as `:off` or (on a Cortex-A id) `:yocto`, so a bare "
+            "companion id like `m55_he` infers `:zephyr` and is refused "
+            "unless `m55_he` is the app core."
         ),
     ),
     preview: bool = typer.Option(
@@ -887,6 +1122,12 @@ def init(
     del verbose, quiet, no_color, target, all_targets
     json_mode = output_format == "json"
 
+    # Bound BEFORE the `try` (tan-cli#491 defect 5): both `except` arms emit an
+    # envelope, and an `InitError` raised before `_resolve_sdk_root` runs (a bad
+    # `--template`, an unreadable `--board-yaml`) must not turn the `sdk` block
+    # into an `UnboundLocalError` inside the very handler whose job is to keep a
+    # traceback off stdout.
+    resolved_sdk: _Sdk | None = None
     try:
         # `--destination`, then the global `--project`, then `.`. `--name` does
         # NOT answer this: it names a subdirectory INSIDE the destination, so
@@ -903,7 +1144,7 @@ def init(
         project_root = Path(dest) / resolved_name if resolved_name else Path(dest)
         project_root_display = _join_display(dest, resolved_name)
 
-        workspace_root = Path(os.path.abspath(project)) if project else Path.cwd()
+        workspace_root = Path(os.path.abspath(project)) if project else _cwd_or_dot()
         resolved_sdk = _resolve_sdk_root(sdk_root, workspace_root)
         # tan-cli#407, and this is the command where it matters most: `init`
         # does not merely resolve an SDK, it WRITES the answer to
@@ -929,6 +1170,11 @@ def init(
         foreign_issue = global_default_foreign_project_issue(
             resolved_sdk.foreign_global_default_for if resolved_sdk is not None else None
         )
+        # tan-cli#642: computed here, alongside the other two SDK-resolution
+        # warnings above, for the same reason -- this is the last moment the
+        # fact is cheap to disclose, before `_finish` -> `_pin_sdk` silently
+        # declines to write `.alp/sdk-path` for it.
+        sdk_root_invalid_issue = _sdk_root_flag_unresolved_issue(sdk_root, resolved_sdk)
 
         if from_example is not None:
             template_id, files = _plan_from_example(from_example, som, resolved_sdk)
@@ -981,8 +1227,10 @@ def init(
             outcome.issues.append(divergence_issue)
         if foreign_issue is not None:
             outcome.issues.append(foreign_issue)
+        if sdk_root_invalid_issue is not None:
+            outcome.issues.append(sdk_root_invalid_issue)
     except InitError as err:
-        _emit_error(json_mode, err)
+        _emit_error(json_mode, err, resolved_sdk)
         return
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring
         # Nothing gets to replace the envelope with a traceback. `typer.Exit`
@@ -996,10 +1244,11 @@ def init(
                 f"init failed unexpectedly: {err.__class__.__name__}: {err}",
                 ExitCode.INTERNAL_FAILURE,
             ),
+            resolved_sdk,
         )
         return
 
-    _emit_outcome(json_mode, outcome)
+    _emit_outcome(json_mode, outcome, resolved_sdk)
 
 
 # tan-cli#261: adds the two oracle `GlobalArgs` flags this command was still

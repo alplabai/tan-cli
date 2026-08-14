@@ -53,11 +53,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from . import sdk_compat
 from .loader import _load_yaml
-from .models import OrchestratorError, SdkRevisionUnknown
+from .models import OrchestratorError, SdkRevisionNotBuildable, SdkRevisionUnknown
 from .paths import METADATA_ROOT, REPO
 from .som_metadata import _sku_family
 
@@ -171,18 +169,36 @@ def _hwrev_pad_route_overrides(
     ``pad_routes:`` then applies verbatim).  Applying these is what makes
     the composed route table differ between revisions of one SKU.
 
-    Raises `SdkRevisionUnknown` when `hw_rev` is set but isn't a key in the
-    family table (alp-sdk #1025's `carrier-netlist` / `composed-route-table`
-    half).  Before that fix an unrecognised `hw_rev` fell through to `{}`
-    here, so the composed table silently emitted with base (production) pad
-    routing instead of naming the wrong-hardware problem: this emit path
-    resolves its own SoM/board data independently of
-    `loader.load_board_yaml`, so it needs its own gate -- `loader`'s own
-    existence check, `_check_hw_rev_exists`, only runs inside
-    `load_board_yaml` and never reaches this path. Same predicate
-    (`sdk_compat.revision_known`), same error type and message shape as
-    that gate's SoM-side refusal, so a caller does not see two different
-    shapes of the same problem depending on which `--emit` mode it used.
+    Raises `SdkRevisionUnknown` when `hw_rev` isn't a key in the family
+    table, and `SdkRevisionNotBuildable` when it IS a key but its `status:`
+    refuses a build (`reserved`/`tbd`/status-less -- alp-sdk #1025's
+    existence + status halves; the status half by `1a91a232`, ported here
+    tan-cli#485). This emit path resolves its own SoM/board data
+    independently of `loader.load_board_yaml`, so both gates need their own
+    copy here -- before tan-cli#485, `--target carrier-netlist` /
+    `composed-route-table` emitted a full route table for a `reserved`
+    hw_rev while `tan build` refused the same input. Same predicates
+    (`sdk_compat.revision_known`/`revision_buildable`), same error TYPE and
+    MESSAGE SHAPE as `loader.load_board_yaml`'s SoM-side refusals -- the
+    `status_repr` construction below is `loader._status_repr` INLINED, not
+    imported, so a caller does not see two different shapes of the same
+    problem depending on which path resolved it; keep the two in sync by
+    hand if either one's message wording changes.
+
+    Reads the table through ``sdk_compat.load_family_table()`` rather than
+    its own ``yaml.safe_load``, so both independent readers of this file
+    agree about what a damaged one means (#563).  This site used to do
+    ``yaml.safe_load(...) or {}``, and that ``or {}`` FAILED OPEN on the
+    two shapes that parse without raising: an EMPTY file and a file
+    TRUNCATED above its ``hw_revisions:`` block both yielded ``{}``, both
+    gates above then read "nothing to judge", and ``--emit
+    composed-route-table`` shipped a wrong-hardware artefact at exit 0 for
+    an hw_rev that does not exist -- the exact outcome the two gates below
+    exist to prevent.  An unparseable table escaped as a raw
+    ``yaml.ScannerError`` traceback: a refusal, but not a diagnosable one.
+    The shared reader turns all of those into one coded
+    ``OrchestratorError`` naming the file.  An ABSENT table still returns
+    ``{}`` there and stays benign here.
     """
     if not hw_rev:
         return []
@@ -190,15 +206,24 @@ def _hwrev_pad_route_overrides(
         family = _sku_family(sku)
     except ValueError:
         return []
-    path = metadata_root / "e1m_modules" / family / "hw-revisions.yaml"
-    if not path.is_file():
+    data = sdk_compat.load_family_table(metadata_root, family)
+    if not data:
+        # Absent table only: `load_family_table` raises on every
+        # present-but-unusable shape, so reaching here with a falsy
+        # `data` means the family genuinely ships no table.
         return []
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if sdk_compat.revision_known(data, hw_rev) is False:
         available = sorted((data.get("hw_revisions") or {}).keys())
         raise SdkRevisionUnknown(
             f"SoM {sku} hw_rev {hw_rev!r} is not a known hardware "
             f"revision. Available hw_rev(s) for {sku}: {available}.")
+    if sdk_compat.revision_buildable(data, hw_rev) is False:
+        status = (data.get("hw_revisions") or {}).get(hw_rev, {}).get("status")
+        status_repr = f"status: {status!r}" if status is not None else \
+            "carries no `status:` key"
+        raise SdkRevisionNotBuildable(
+            f"SoM {sku} hw_rev {hw_rev!r} exists but is not buildable "
+            f"({status_repr}).")
     rev = (data.get("hw_revisions") or {}).get(hw_rev) or {}
     overrides = rev.get("pad_route_overrides") or []
     return [e for e in overrides

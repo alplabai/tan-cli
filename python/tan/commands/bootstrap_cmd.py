@@ -78,6 +78,7 @@ from tan.commands.sdk_cmd import (
     global_default_pointer_fix_hint,
     project_pin_issue,
 )
+from tan.core.atomic_write import atomic_write_text
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_REL_PATH,
     DEFAULT_WORKSPACE_DIR_NAME,
@@ -99,6 +100,7 @@ from tan.core.bootstrap import (
     die,
     fallback_facts,
     get_manifest_path,
+    manifest_points_at,
     in_play_runtimes,
     next_steps_block,
     optional_libs_block,
@@ -116,6 +118,7 @@ from tan.core.bootstrap import (
     reported_missing,
     resolve_workspace_target,
     resolve_zephyr_pin,
+    same_directory,
     set_manifest_path,
     venv_exe_names,
     windows_python_not_runnable,
@@ -126,7 +129,9 @@ from tan.core.bootstrap import (
     yocto_only_refusal,
     zephyr_requirements_hint,
 )
+from tan.core.fs_confine import resolve_confined
 from tan.core.global_flags import accept_global_flags
+from tan.core.scaffold import sdk_pointer_json
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -173,20 +178,6 @@ def _native(path: Path | str) -> str:
     Windows copy-paste blocks."""
     rendered = str(path)
     return rendered.replace("/", "\\") if os.name == "nt" else rendered
-
-
-def _same_directory(a: Path, b: Path) -> bool:
-    """True when `a` and `b` name the same directory. `realpath` when both exist
-    (the reliable answer); a lexical `normpath`+`normcase` comparison when either
-    does not -- e.g. a stale config's target SDK version since pruned."""
-    try:
-        if a.exists() and b.exists():
-            return os.path.realpath(a) == os.path.realpath(b)
-    except OSError:
-        pass
-    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(
-        os.path.normpath(str(b))
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -426,17 +417,32 @@ class PythonFloor:
     manifest: tuple[int, int]
 
 
-def resolve_python_floor(facts: BootstrapFacts) -> PythonFloor:
+def resolve_python_floor(facts: BootstrapFacts, *, zephyr_base_adopts: bool) -> PythonFloor:
     """The EFFECTIVE Python floor: the highest anything in the build chain
     enforces.
 
     `zephyr_python_floor` is imported from `tan.commands.doctor_cmd` and called
-    with the SAME argument doctor passes it (`$ZEPHYR_BASE`, else tan's built-in
-    `PYTHON_MINIMUM_REQUIRED` pin) -- not re-derived here. That is the whole
-    mechanism keeping the two commands' verdicts identical: a second reader with
-    its own rule is exactly the drift this port keeps hitting, and `doctor`
-    reporting Pass on a host `bootstrap` refuses (or the reverse) is worse than
-    either verdict alone.
+    with the SAME argument doctor passes it (`$ZEPHYR_BASE`, else the manifest's
+    own `zephyr.pythonMinVersion` when `facts` carries one (tan-cli#606), else
+    tan's built-in `PYTHON_MINIMUM_REQUIRED` pin) -- not re-derived here. That
+    is the whole mechanism keeping the two commands' verdicts identical: a
+    second reader with its own rule is exactly the drift this port keeps
+    hitting, and `doctor` reporting Pass on a host `bootstrap` refuses (or the
+    reverse) is worse than either verdict alone.
+
+    `zephyr_base_adopts` (tan-cli#495 defect 2) gates whether `$ZEPHYR_BASE` is
+    consulted AT ALL: the caller passes `_zephyr_base_will_adopt`'s own verdict,
+    already computed 130-odd lines earlier for the relocation guard, so a tree
+    `_select_workspace` is about to IGNORE never sets the floor. Before it, an
+    exported `$ZEPHYR_BASE` naming a foreign or incompatible tree still set both
+    the enforced floor and its reported SOURCE, so `bootstrap.python-floor-skew`
+    attributed the floor to a `python.cmake` inside the tree the very next
+    warning (`bootstrap.zephyr-base-incompatible`) said was being ignored -- and
+    a fork whose `PYTHON_MINIMUM_REQUIRED` exceeds tan's own pin hard-refused
+    `bootstrap.python-too-old` / exit 1 before `_select_workspace` ever ran, so
+    the envelope never disclosed the tree was being discarded and the remedy
+    ("install a newer Python") named the wrong fix -- the real one is
+    `unset ZEPHYR_BASE`. `doctor` closed the identical class in tan-cli#301.
 
     Skipped: reading the workspace's OWN `zephyr/cmake/modules/python.cmake`
     when one already exists. On the path that matters -- a fresh host, nothing
@@ -445,7 +451,10 @@ def resolve_python_floor(facts: BootstrapFacts) -> PythonFloor:
     bootstrapped Zephyr is found to LOWER the floor below tan's pin.
     """
     manifest_floor = facts.python_min_version
-    zephyr_floor, zephyr_source = zephyr_python_floor(_env("ZEPHYR_BASE"))
+    zephyr_floor, zephyr_source = zephyr_python_floor(
+        _env("ZEPHYR_BASE") if zephyr_base_adopts else None,
+        manifest_zephyr_floor=facts.zephyr_python_min_version,
+    )
     effective = max(manifest_floor, zephyr_floor)
     source = (
         zephyr_source
@@ -531,7 +540,17 @@ class Runner:
         if self.clear_zephyr_base:
             env.pop("ZEPHYR_BASE", None)
         if extra_env:
-            env.update(extra_env)
+            # `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` (`FORCE_GIT_LONG_PATHS_ENV`'s
+            # shape) are APPENDED onto whatever ad hoc git config chain the caller
+            # already exported, never merged at index 0 -- tan-cli#495 defect 5.
+            # `GIT_CONFIG_COUNT` is consumed by that append, never copied through.
+            # Every other `extra_env` key still overwrites, unchanged.
+            key_0 = extra_env.get("GIT_CONFIG_KEY_0")
+            if key_0 is not None:
+                _append_git_config_override(env, key_0, extra_env.get("GIT_CONFIG_VALUE_0", ""))
+            for key, value in extra_env.items():
+                if key not in _GIT_CONFIG_SLOT_0:
+                    env[key] = value
         return env
 
     def run(
@@ -887,11 +906,49 @@ def _west_argv(venv: VenvBin, args: list[str]) -> list[str]:
 #: scope (system/global/local) without touching any of them, and it is
 #: inherited by every child process `west update`'s own children spawn, so
 #: it reaches every project git touches in one shot.
+#: The literal `"1"`/`"_0"` below name the SHAPE `Runner._env` recognises, NOT
+#: the index this override lands at: `_append_git_config_override` (tan-cli#495
+#: defect 5) appends it after whatever `GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n`
+#: chain the caller's own environment already carries.
 FORCE_GIT_LONG_PATHS_ENV = {
     "GIT_CONFIG_COUNT": "1",
     "GIT_CONFIG_KEY_0": "core.longpaths",
     "GIT_CONFIG_VALUE_0": "true",
 }
+
+#: The three keys `Runner._env` routes through `_append_git_config_override`
+#: instead of copying verbatim.
+_GIT_CONFIG_SLOT_0 = ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")
+
+
+def _append_git_config_override(env: dict[str, str], key: str, value: str) -> None:
+    """Append one git ad hoc config override (`key=value`, e.g.
+    `core.longpaths=true`) onto `env`'s EXISTING `GIT_CONFIG_COUNT` /
+    `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` chain, in place.
+
+    tan-cli#495 defect 5. `Runner._env` used to merge `FORCE_GIT_LONG_PATHS_ENV`
+    with a bare `dict.update`, which claims index 0 and resets `GIT_CONFIG_COUNT`
+    to `1` unconditionally. A corporate host or CI runner exporting git's own
+    documented override -- `GIT_CONFIG_COUNT=2` with a `KEY_0`/`VALUE_0`
+    `http.proxy` pair and a `KEY_1`/`VALUE_1` mirror `insteadOf` pair -- lost
+    BOTH: `KEY_0`/`VALUE_0` overwritten, and `KEY_1`/`VALUE_1` left in the
+    environment but past the reset COUNT, so git never reads them. Every
+    `git clone`/`git fetch` inside `west update` then goes direct and tan dies
+    with `west update failed` naming github.com rather than the setting it
+    deleted.
+
+    A non-integer or negative inherited `GIT_CONFIG_COUNT` is treated as 0 --
+    git itself fatals on one ("bogus count in GIT_CONFIG_COUNT"), so there is
+    nothing there to preserve, and this must not raise out of a step whose whole
+    job is to make `west update` work.
+    """
+    try:
+        count = max(int(env.get("GIT_CONFIG_COUNT", "0")), 0)
+    except ValueError:
+        count = 0
+    env[f"GIT_CONFIG_KEY_{count}"] = key
+    env[f"GIT_CONFIG_VALUE_{count}"] = value
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
 
 
 def west_phase(
@@ -1083,7 +1140,7 @@ def reconcile_west_manifest_path(sdk_root: str) -> tuple[str, str | None, str | 
         # No `[manifest] path` line carries no pointer to reconcile; `west`
         # itself is what complains about that.
         return "not-applicable", None, None
-    if _same_directory(topdir / current.strip(), sdk_path):
+    if same_directory(topdir / current.strip(), sdk_path):
         return "already-matches", current, None
     new_rel = sdk_path.name
     if not new_rel:
@@ -1091,21 +1148,22 @@ def reconcile_west_manifest_path(sdk_root: str) -> tuple[str, str | None, str | 
     rewritten = set_manifest_path(contents, new_rel)
     if rewritten is None:
         return "failed", current, "no [manifest] path line to rewrite"
-    # Atomic replace: write a sibling temp in the same `.west/`, then rename
-    # over `config`. That file is the topdir's ONLY manifest pointer, shared by
-    # every SDK version under it -- a crash mid-write must not leave it
-    # truncated, which would break `west` for all of them.
-    tmp_path = config_path.with_name(f"config.{os.getpid()}.tan-tmp")
+    # Atomic AND durable replace (`atomic_write_text`, tan-cli#516): write a
+    # sibling temp in the same `.west/`, `fsync` it, then rename over `config`.
+    # That file is the topdir's ONLY manifest pointer, shared by every SDK
+    # version under it -- a crash mid-write, or a crash between a successful
+    # rename and the temp's data actually reaching stable storage, must not
+    # leave it truncated or empty, which would break `west` for all of them.
+    # This used to be a bare `Path.write_text` + `os.replace` with no `fsync`
+    # of either the content or the rename -- atomic with respect to the NAME
+    # only, so a power loss in the window could leave a successfully-renamed
+    # empty or partial file; ext4's `auto_da_alloc` heuristic masked this on
+    # the common Linux case, but not on XFS/btrfs/APFS/NTFS/network mounts.
     try:
-        tmp_path.write_text(rewritten, encoding="utf-8", newline="")
-        os.replace(tmp_path, config_path)
+        atomic_write_text(str(config_path), rewritten)
     except OSError as err:
         # Worth naming on Windows: a `config` open in another process, or marked
         # read-only, fails the replace even though writing the temp succeeded.
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return "failed", current, str(err)
     return "rewrote", current, new_rel
 
@@ -1189,6 +1247,43 @@ def _list_entries(parent: Path) -> list[str] | None:
         return [entry.name for entry in parent.iterdir()]
     except OSError:
         return None
+
+
+def _relocation_target_occupied(target: Path, checkout_name: str, venv_dir_name: str) -> bool:
+    """Whether `target` -- the directory the auto-relocation is about to move
+    the checkout INTO -- holds content foreign enough to still refuse the move
+    (tan-cli#495 defect 3).
+
+    The call site used to test raw non-emptiness, which counts the `.venv`
+    `rollback_relocation_after` DELIBERATELY leaves behind after a failed run
+    as "content of its own" -- so the identical retry of the documented
+    quickstart's first command, once the network is back, refused with
+    `bootstrap.workspace-guard` / exit 2 and told the customer to hand-delete a
+    directory tan itself had created seconds earlier. Reuses
+    `parent_needs_workspace_guard`'s predicate rather than a second, narrower
+    one: `checkout_name` and `venv_dir_name` are exactly the two entries a
+    COMPLETED relocation leaves under `target`, so the exemption that already
+    lets the checkout's own parent hold "nothing but the checkout [and]
+    bootstrap's OWN venv" applies here one level down. An exempted
+    `<target>/<checkout_name>` is not a hole: `relocate_checkout` refuses that
+    destination outright, by name, before any `mkdir`/`os.rename`.
+
+    NO `.west` exemption, deliberately, so a half-built west workspace under
+    `target` still refuses. Two cuts of one were tried on the earlier wave of
+    this branch and both were reverted: waving through ANY `.west/config`
+    admits an unrelated customer workspace, and requiring its `[manifest] path`
+    to name `checkout_name` proves nothing either, because `west init -l
+    <alp-sdk>` writes that same literal name for essentially every customer.
+    A real identity check (git remote, resolved path) is its own scope; until
+    one lands, refusing is the safe failure mode -- relocating a customer's
+    checkout into someone else's workspace is not.
+    """
+    entries = _list_entries(target)
+    if entries is None:
+        # Unreadable tells us nothing (see `_list_entries`), and the real
+        # problem surfaces at the first write. Same fall-through as before.
+        return False
+    return parent_needs_workspace_guard(entries, checkout_name, venv_dir_name, False)
 
 
 def default_relocation_target(
@@ -1368,7 +1463,7 @@ def relocate_checkout(
     flag that reports a planned destination must never be the thing that
     creates it.
     """
-    if _same_directory(repo_root.parent, target_parent):
+    if same_directory(repo_root.parent, target_parent):
         return repo_root, None
     checkout_name = repo_root.name
     if not checkout_name:
@@ -1637,26 +1732,55 @@ class Outcome:
 
 
 def _refusal(
-    exit_code: ExitCode, code: str, lines: list[str], data: dict[str, object]
+    exit_code: ExitCode,
+    code: str,
+    lines: list[str],
+    data: dict[str, object],
+    issues: list[Issue] | None = None,
 ) -> Outcome:
-    """A refusal before any step ran: ONE `bootstrap.<code>` issue whose message
-    is `" ".join(lines)`, and those same lines as the text output (which is what
+    """A refusal before any LATER step ran: the `bootstrap.<code>` issue whose
+    message is `" ".join(lines)`, ON TOP of whatever warnings the run had
+    already recorded -- those same lines as the text output (which is what
     `doctor --build --fix` and `build`'s auto-bootstrap surface).
 
     The join is why `data.missingPrerequisites` has to exist: an install command
     contains the same spaces the join used, so the split is not recoverable.
+
+    `issues` mirrors `_fatal`'s own parameter and the same reasoning applies:
+    it is ALWAYS `log.take_issues()` at a call site reachable after a
+    `log.warn(...)` (tan-cli#491 defect 10 fixed exactly this loss on `_fatal`;
+    the `host_python is None` refusal below is the one `_refusal` call site
+    that comes after `log.warn("yocto-host", ...)` / `log.warn(*skew)`, and
+    would otherwise discard both silently, the same way the relocation refusal
+    once did). It defaults to `None` because most `_refusal` call sites in this
+    file run before `log` has recorded anything, so passing nothing there is a
+    correct no-op, not an oversight -- unlike `_fatal`, where `issues` has no
+    default and every call site must say so explicitly.
     """
     return Outcome(
         exit_code,
         data,
-        [Issue(f"bootstrap.{code}", "error", " ".join(lines))],
+        [*(issues or []), Issue(f"bootstrap.{code}", "error", " ".join(lines))],
         list(lines),
     )
 
 
 def _fatal(message: str, data: dict[str, object], issues: list[Issue]) -> Outcome:
     """A failing STEP: the fatal message as a `bootstrap.failed` error issue, on
-    top of whatever warnings the run had already recorded."""
+    top of whatever warnings the run had already recorded.
+
+    `issues` is ALWAYS `log.take_issues()` at the call site. It is a parameter
+    rather than something this helper reads off the log itself because the log
+    is `_run`-local, and passing `[]` is therefore a silent, well-typed way to
+    throw the run's warnings away: tan-cli#491 defect 10, where the relocation
+    refusal did exactly that and emitted `bootstrap.failed` alone.
+    `bootstrap.python-floor-skew` fires on EVERY run against the shipped
+    alp-sdk manifest (declared 3.10, effective floor 3.12) and
+    `bootstrap.yocto-host` on any non-Linux host with a Yocto core in play --
+    both were printed to stderr in text mode and never reached `issues[]`,
+    which is the print-only failure `Log`'s own docstring says it exists to
+    prevent. There is no fatal path that legitimately wants an empty list.
+    """
     return Outcome(
         ExitCode.RUNTIME_FAILURE,
         data,
@@ -1763,21 +1887,8 @@ def _existing_workspace_facts(repo_root: Path) -> tuple[str, bool, bool] | None:
     return (
         version_file,
         _is_dir(top / ".west"),
-        _manifest_points_at(top, repo_root),
+        manifest_points_at(top, repo_root),
     )
-
-
-def _manifest_points_at(topdir: Path, repo_root: Path) -> bool:
-    """Whether `<topdir>/.west/config`'s `[manifest] path` resolves to
-    `repo_root`. west and the venv are not set up yet at this point, so the
-    config is read directly rather than shelling `west config manifest.path`."""
-    config = _read_text(topdir / ".west" / "config")
-    if config is None:
-        return False
-    rel = get_manifest_path(config)
-    if rel is None:
-        return False
-    return _same_directory(topdir / rel.strip(), repo_root)
 
 
 @dataclass(frozen=True)
@@ -1886,6 +1997,28 @@ def _select_workspace(
     return WorkspacePlan(clear_zephyr_base=True)
 
 
+def _existing_venv_bin_dir(facts: BootstrapFacts, paths: RunPaths, is_windows: bool) -> str:
+    """The venv bin sub-directory that EXISTS under `paths.venv_dir` -- `bin` or
+    `Scripts` -- falling back to the host's own layout when neither is there.
+
+    tan-cli#495 defect 7: `--print-env` rendered its activation hint from
+    `facts.venv_bin_dir(is_windows)`, the HOST-keyed name, so a workspace
+    `.venv` created under git-bash/Windows (a `Scripts/` layout) and then read
+    from a POSIX host printed `source "<venv>/bin/activate"` -- a path that does
+    not exist -- while the SAME run's `Next steps:` block, which reads the
+    existence-derived `venv.bin_dir`, printed `Scripts`. The mirror case (a
+    `bin/` venv read from Windows) is the same defect the other way round; it is
+    exactly the split-layout host `Workspace.venv_bin()`'s docstring says that
+    resolver was written for, so this delegates to it rather than growing a
+    second copy of its directory-wins probe. On a fresh host, where neither
+    directory exists yet, the fallback is the old behaviour unchanged.
+    """
+    workspace = Workspace(
+        is_windows, facts, paths.repo_root, paths.workspace_dir, paths.venv_dir
+    )
+    return workspace.venv_bin().bin_dir
+
+
 def _print_env_outcome(
     *, paths: RunPaths, sdk_root: str, facts: BootstrapFacts, pin: str,
     pin_issue: Issue | None, foreign_issue: Issue | None, flags: dict[str, bool],
@@ -1920,7 +2053,8 @@ def _print_env_outcome(
         if zephyr_base is not None:
             top = Path(zephyr_base).parent
             print_paths = RunPaths(paths.repo_root, top, top / facts.venv_dir_name)
-    text = print_env_block(facts, print_paths.tokens(), facts.venv_bin_dir(is_windows), is_windows)
+    bin_dir = _existing_venv_bin_dir(facts, print_paths, is_windows)
+    text = print_env_block(facts, print_paths.tokens(), bin_dir, is_windows)
     print_project = reported_project
     if print_paths is not paths:
         print_project = Project.resolved(
@@ -1956,6 +2090,14 @@ class RelocationUndo:
     project: Project
     workspace_dir: Path
     venv_dir: Path
+    #: tan-cli#644: the project's own `.alp/sdk-path` root this run rewrote to
+    #: follow the relocated checkout, and its bytes before the rewrite --
+    #: `None` unless the SDK this run moved was resolved through the
+    #: `projectPin` tier AND the rewrite actually happened (a tier of
+    #: `globalDefault`/`discovery`/`none`/`sdkRootFlag` has no project pin of
+    #: its own to touch, and a rewrite that itself failed left nothing to undo).
+    project_pin_root: str | None = None
+    previous_project_pin: bytes | None = None
 
 
 def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see below
@@ -2195,11 +2337,14 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             target = default_relocation_target(
                 paths.repo_root, paths.workspace_dir, facts.venv_dir_name
             )
-            if target is not None and _list_entries(target):
+            if target is not None and _relocation_target_occupied(
+                target, paths.repo_root.name, facts.venv_dir_name
+            ):
                 # The one case that still refuses (tan-cli#302): `target` --
                 # the directory the auto-relocation below would move the
                 # checkout INTO -- already exists and already holds content of
-                # its own. Auto-relocating there anyway would be the exact
+                # its own -- FOREIGN to this checkout and its own venv, since
+                # tan-cli#495 defect 3. Auto-relocating there anyway is the
                 # "wrote into a directory without asking" hazard this guard
                 # exists to prevent, one level down. An ABSENT or genuinely
                 # EMPTY `target` (the ordinary case) falls straight through to
@@ -2270,7 +2415,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         source_topdir = paths.repo_root.parent
         if target is not None and _is_file(
             source_topdir / ".west" / "config"
-        ) and _manifest_points_at(source_topdir, paths.repo_root):
+        ) and manifest_points_at(source_topdir, paths.repo_root):
             return (
                 _refusal(
                     ExitCode.VALIDATION_FAILURE,
@@ -2320,7 +2465,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # would refuse a board that can bootstrap its Zephyr cores.
         log.warn("yocto-host", yocto_mixed_warning())
 
-    floor = resolve_python_floor(facts)
+    floor = resolve_python_floor(facts, zephyr_base_adopts=zephyr_base_adopts)
     skew = python_floor_skew_warning(
         floor.manifest, floor.effective, floor.source, from_manifest=facts.from_manifest
     )
@@ -2347,12 +2492,18 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # Unreachable: `check_prerequisites` sets exactly one of the two. Stated
         # as a refusal rather than an `assert` (stripped under `-O`) or a bare
         # fall-through, because the alternative is spawning `None -m venv`.
+        # `issues=log.take_issues()`: this refusal is reached AFTER the
+        # `yocto-host` and `python-floor-skew` warnings above may have fired,
+        # so dropping the log here would be the same tan-cli#491 defect 10
+        # `_fatal` was fixed for -- the "Unreachable:" note above is the only
+        # thing that has kept it from mattering in practice.
         return (
             _refusal(
                 ExitCode.INTERNAL_FAILURE,
                 "internal-failure",
                 ["the prerequisite gate returned neither an interpreter nor a refusal"],
                 payload(),
+                issues=log.take_issues(),
             ),
             reported_project,
             sdk,
@@ -2368,7 +2519,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # the checkout or repoint the machine-global default SDK.
         new_root, error = relocate_checkout(paths.repo_root, target, dry_run=dry_run)
         if error is not None:
-            return _fatal(error, payload(), []), reported_project, sdk
+            # `log.take_issues()`, never `[]` -- see `_fatal` (tan-cli#491 d10).
+            return _fatal(error, payload(), log.take_issues()), reported_project, sdk
         if new_root is not None and str(new_root) != str(paths.repo_root):
             old_root = sdk_root
             # Snapshotted BEFORE anything below is mutated (tan-cli#284):
@@ -2405,13 +2557,6 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             root = _rebase(root, old_root, sdk_root)
             board_path = _rebase(board_path, old_root, sdk_root)
             reported_project = Project.resolved(root, board_path)
-            relocation_undo = RelocationUndo(
-                old_root=old_root,
-                previous_pointer=previous_pointer,
-                project=old_project,
-                workspace_dir=old_workspace_dir,
-                venv_dir=old_venv_dir,
-            )
             if not dry_run:
                 # `written_for=root` closes tan-cli#464: this pointer is
                 # machine-global and last-writer-wins across every project
@@ -2420,15 +2565,35 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 # warned it is reading someone else's answer
                 # (`sdk_cmd.global_default_foreign_project_issue`), rather
                 # than silently resolving it at `ok: true`, `issues: []`. A
-                # directory-scoped project pin here (tried and reverted,
-                # tan-cli#464 review) is NOT the fix: this directory is
-                # bootstrap's cwd, the workspace PARENT in the quickstart --
-                # not a project -- and a bootstrap from `$HOME` would have
-                # pinned `~/.alp/sdk-path` inside tan's OWN machine-global
-                # config dir, silencing the warning for essentially every
-                # project the user owns. `tan init`'s `_pin_sdk` remains the
-                # one place that writes a real project's `.alp/sdk-path`.
+                # directory-scoped project pin UNCONDITIONALLY here (tried and
+                # reverted, tan-cli#464 review) is still not the fix: bootstrap's
+                # cwd is the workspace PARENT in the documented quickstart --
+                # not necessarily a project -- and writing one at `$HOME` would
+                # pin `~/.alp/sdk-path` inside tan's OWN machine-global config
+                # dir, silencing the warning for essentially every project the
+                # user owns.
                 _write_global_sdk_pointer(sdk_root, written_for=root)
+            # tan-cli#644: narrower than that rejected idea -- REWRITE an
+            # EXISTING project pin, and only when `active_tier == "projectPin"`
+            # means this project already had a working pin naming exactly the
+            # checkout that just moved. `tan init` remains the only place that
+            # WRITES a pin where none existed; this only keeps one an earlier
+            # `tan init` already wrote pointing at the checkout `tan bootstrap`
+            # just relocated -- the project's own pin stays authoritative, per
+            # the issue's own reasoning, rather than silently ceding to
+            # whichever project's `globalDefault` write happens to win last.
+            previous_project_pin, project_pin_root = _relocate_project_pin(
+                active_tier, root, old_project.root, sdk_root, dry_run
+            )
+            relocation_undo = RelocationUndo(
+                old_root=old_root,
+                previous_pointer=previous_pointer,
+                project=old_project,
+                workspace_dir=old_workspace_dir,
+                venv_dir=old_venv_dir,
+                project_pin_root=project_pin_root,
+                previous_project_pin=previous_project_pin,
+            )
 
     log.line(f"Repo root:       {_native(paths.repo_root)}")
     if is_windows:
@@ -2476,7 +2641,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             return
         moved_to = paths.repo_root
         undo = _undo_relocation(
-            relocation_undo.old_root, moved_to, relocation_undo.previous_pointer
+            relocation_undo.old_root,
+            moved_to,
+            relocation_undo.previous_pointer,
+            relocation_undo.project_pin_root,
+            relocation_undo.previous_project_pin,
         )
         if undo.moved_back:
             # The checkout itself is back; anything the failed step already
@@ -2654,6 +2823,25 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         bootstrap_issues = [pin_issue, *bootstrap_issues]
     if foreign_issue is not None:
         bootstrap_issues = [foreign_issue, *bootstrap_issues]
+    # tan-cli#677: `pin_issue`/`foreign_issue` reached `bootstrap_issues`
+    # (the JSON envelope) above and stopped there. `log.warn`-recorded
+    # warnings (e.g. `bootstrap.python-floor-skew`) print live to stderr AS
+    # THEY FIRE, via `Log.line`, so they are already in `text` above by the
+    # time this function returns -- these two are computed once, up front
+    # (before `Log` even exists, since they gate nothing), specifically NOT
+    # through `log.warn` (which would misname their shared, unprefixed
+    # `sdk.*` code `bootstrap.*` -- see the comment at their computation).
+    # That made them the one pair the text surface never saw: `doctor` and
+    # `init` both render them, `bootstrap` -- the command that WRITES
+    # `~/.alp/sdk-default` in the first place -- silently didn't. Prefixed
+    # `{severity}: {message}`, matching `Log.line`'s own `bootstrap: ` shape
+    # closely enough to read as one stream, and PREPENDED so they read
+    # before the run's own progress lines, exactly the order they hold in
+    # `bootstrap_issues`.
+    warning_lines = [
+        f"{issue.severity}: {issue.message}" for issue in (pin_issue, foreign_issue) if issue
+    ]
+    text = warning_lines + text
     return (
         Outcome(exit_code, planned_payload(), bootstrap_issues, text),
         reported_project,
@@ -2735,6 +2923,105 @@ def _read_global_sdk_pointer() -> bytes | None:
         return None
 
 
+def _project_pin_file(project_root: str) -> Path:
+    """`<project_root>/.alp/sdk-path` -- the exact file `tan init`'s `_pin_sdk`
+    writes (`init_cmd.py`) and `sdk_cmd.resolve_sdk_tiered` reads back as the
+    `projectPin` tier."""
+    return Path(project_root) / ".alp" / "sdk-path"
+
+
+def _read_project_pin(project_root: str) -> bytes | None:
+    """The project's own pin bytes before this run rewrites them, or `None`
+    when absent. Snapshotted immediately before the rewrite, mirroring
+    `_read_global_sdk_pointer` -- best-effort: a snapshot that could not be
+    taken degrades the rollback, not this read."""
+    try:
+        pointer = _project_pin_file(project_root)
+        return pointer.read_bytes() if pointer.is_file() else None
+    except Exception:  # noqa: BLE001 -- best-effort, like _read_global_sdk_pointer
+        return None
+
+
+def _write_project_sdk_pointer(project_root: str, sdk_root: str) -> bool:
+    """tan-cli#644: keep the project's own `.alp/sdk-path` pin authoritative
+    across a relocation this run performs. Reached only when the checkout this
+    run just moved was resolved through the `projectPin` tier -- i.e. the
+    project already had a working pin naming exactly the checkout that moved
+    -- so leaving it unrewritten would report `bootstrap` success while
+    quietly regressing the project to the stale-pin state `sdk.
+    project-pin-unresolved` discloses on every later command. Chosen over
+    revising `init`'s promise (the issue's other coherent answer) because the
+    project's own pin, not the machine-global default, is documented and
+    expected to be the authoritative one for THIS project -- the same
+    precedence `resolve_sdk_root_ladder` already gives it over `globalDefault`.
+
+    Shares `tan.core.scaffold.sdk_pointer_json`'s exact format with `tan
+    init`'s `_pin_sdk` -- same file, same shape, same reader
+    (`sdk_cmd.resolve_sdk_tiered`) -- and the same confinement guard
+    (`tan.core.fs_confine.resolve_confined`) every other active-project writer
+    uses, so a symlinked `.alp` cannot carry this write outside the project
+    either.
+
+    Best-effort, like `_write_global_sdk_pointer`: a permission error or a
+    full disk here degrades to the SAME broken-pin state `sdk.
+    project-pin-unresolved` already discloses on the next command, not a
+    failed bootstrap -- the checkout itself already moved successfully by the
+    time this runs. Returns whether the write actually happened, so the
+    caller records rollback state only for a pin it truly touched.
+    """
+    try:
+        pointer = resolve_confined(Path(project_root), _project_pin_file(project_root))
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(sdk_pointer_json(sdk_root), encoding="utf-8")
+    except Exception:  # noqa: BLE001 -- best-effort by contract
+        return False
+    return True
+
+
+def _relocate_project_pin(
+    active_tier: str, root: str, restore_root: str, sdk_root: str, dry_run: bool
+) -> tuple[bytes | None, str | None]:
+    """`_run`'s own call site for the tan-cli#644 fix, pulled out of the
+    relocation block itself so that block stays readable and this stays unit-
+    testable on its own: snapshot the project's pin bytes BEFORE a possible
+    rewrite (mirroring `previous_pointer`'s before/after-the-mutation
+    discipline for the global default, just above in `_run`), then -- for a
+    `dry_run` or a tier other than `projectPin` -- rewrite nothing.
+
+    `root` and `restore_root` are deliberately DIFFERENT paths when the
+    project lives INSIDE the checkout being relocated: by the time `_run`
+    calls this, `root` has already been rebased onto the NEW (post-
+    relocation) checkout location -- the pin must be READ and WRITTEN there,
+    since that is where the project (and any existing pin file) actually sits
+    on disk right now. `restore_root`, in contrast, is the PRE-relocation
+    project root (`old_project.root`, captured before the rebase, mirroring
+    how `old_root`/`old_project` are already snapshotted before their own
+    mutations) -- the location `_undo_relocation` moves the checkout BACK to
+    FIRST, before it ever calls `_restore_project_pin`. Recording `root`
+    itself as `project_pin_root` (tried and reverted on review) made a
+    rolled-back relocation write the restored pin at a path the checkout had
+    already vacated, raising ENOENT and reproducing the exact stale-pin
+    defect tan-cli#644 exists to close -- just via the rollback path instead
+    of a completed run.
+
+    Returns `(previous_project_pin, project_pin_root)`: the bytes a rollback
+    should restore, and the PRE-relocation project root a rollback should
+    restore them under. `project_pin_root` is `None` whenever nothing was
+    written (wrong tier, `dry_run`, or `_write_project_sdk_pointer` itself
+    failed) -- exactly the signal `_undo_relocation` needs to skip a project
+    pin this run never touched, the same way `relocation_undo.project_pin_root`
+    already gates it.
+    """
+    if active_tier != "projectPin":
+        return None, None
+    previous_project_pin = _read_project_pin(root)
+    if dry_run:
+        return previous_project_pin, None
+    if _write_project_sdk_pointer(root, sdk_root):
+        return previous_project_pin, restore_root
+    return previous_project_pin, None
+
+
 @dataclass(frozen=True)
 class RelocationUndoResult:
     """`_undo_relocation`'s outcome, as TWO independent facts rather than one
@@ -2759,20 +3046,55 @@ class RelocationUndoResult:
     detail: str | None
 
 
+def _restore_project_pin(
+    project_pin_root: str | None, previous_project_pin: bytes | None
+) -> str | None:
+    """tan-cli#644: the project-pin sibling of `_undo_relocation`'s global
+    pointer restore, pulled into its own function for the same readability
+    reason `_relocate_project_pin` was. `None` (no-op, no failure) whenever
+    `project_pin_root` is `None` -- this run's SDK did not resolve through the
+    `projectPin` tier, or the rewrite itself never happened, so there is
+    nothing here to put back. Returns a short failure string on an `OSError`,
+    or `None` on success/no-op -- the caller appends it into the same
+    `failures` list the global pointer restore already builds."""
+    if project_pin_root is None:
+        return None
+    try:
+        pin = _project_pin_file(project_pin_root)
+        if previous_project_pin is None:
+            pin.unlink(missing_ok=True)
+        else:
+            pin.write_bytes(previous_project_pin)
+    except OSError as err:
+        return f"the project's .alp/sdk-path pin could not be restored: {err}"
+    return None
+
+
 def _undo_relocation(
-    old_root: str, current_repo_root: Path, previous_pointer: bytes | None
+    old_root: str,
+    current_repo_root: Path,
+    previous_pointer: bytes | None,
+    project_pin_root: str | None = None,
+    previous_project_pin: bytes | None = None,
 ) -> RelocationUndoResult:
     """Rollback of a relocation THIS run performed, for when a step after it
     -- `ensure_venv` or `west_phase` -- turns out to be the fallible one
     after all (tan-cli#284): move the checkout back to where it was, and
-    restore (or remove) the global default-SDK pointer this run overwrote.
+    restore (or remove) the global default-SDK pointer this run overwrote --
+    plus, tan-cli#644, the project's own `.alp/sdk-path` pin, when THIS run
+    also rewrote that (`project_pin_root` is `None` whenever it did not).
+    Restoring the project pin matters here for the same reason restoring the
+    global pointer already did: the checkout is moving back to `old_root`, so
+    a pin left naming the vacated `sdk_root` this run set would be exactly
+    the stale, unresolvable pin tan-cli#644 exists to stop leaving behind --
+    just introduced by the rollback instead of by a completed relocation.
 
     `moved_back=False` means `relocate_checkout` itself refused -- e.g.
     because the vacated original path was recreated in the meantime, which
     `relocate_checkout`'s own already-exists guard reports as an error, not a
     silent no-op -- and the checkout is still at `current_repo_root`.
     `moved_back=True` means the checkout IS back at `old_root`, whether or
-    not the pointer restore that follows it (attempted only once the move
+    not the pointer restores that follow it (attempted only once the move
     itself succeeded, since a pointer aimed at a checkout that did NOT
     actually move back would be worse than leaving it alone) also succeeded.
     The caller (`rollback_relocation_after`) uses `moved_back` to decide
@@ -2781,6 +3103,7 @@ def _undo_relocation(
     _new_root, move_error = relocate_checkout(current_repo_root, Path(old_root).parent)
     if move_error is not None:
         return RelocationUndoResult(moved_back=False, detail=move_error)
+    failures: list[str] = []
     try:
         pointer = _home_alp_dir() / "sdk-default"
         if previous_pointer is None:
@@ -2788,10 +3111,12 @@ def _undo_relocation(
         else:
             pointer.write_bytes(previous_pointer)
     except OSError as err:
-        return RelocationUndoResult(
-            moved_back=True,
-            detail=f"the default SDK pointer could not be restored: {err}",
-        )
+        failures.append(f"the default SDK pointer could not be restored: {err}")
+    project_pin_failure = _restore_project_pin(project_pin_root, previous_project_pin)
+    if project_pin_failure is not None:
+        failures.append(project_pin_failure)
+    if failures:
+        return RelocationUndoResult(moved_back=True, detail="; ".join(failures))
     return RelocationUndoResult(moved_back=True, detail=None)
 
 
@@ -2897,7 +3222,20 @@ def bootstrap(
                 "bootstrap", reported, outcome.data, outcome.issues, outcome.exit_code, sdk=sdk
             )
         )
-    elif print_env:
+    elif print_env and outcome.exit_code == ExitCode.SUCCESS:
+        # The success gate is tan-cli#495 defect 4. `_print_env_outcome` is the
+        # ONLY `--print-env` path that returns `ExitCode.SUCCESS`, so this
+        # condition is exactly "the env block was really rendered". Keyed on the
+        # bare FLAG, every refusal computed BEFORE the `--print-env`
+        # short-circuit landed here too -- `sdk-root-unresolved`, `manifest`,
+        # `workspace-invalid`, `workspace-guard`, `enclosing-west-workspace`,
+        # `workspace-orphan-refused`, `print-env-workspace-conflict` and the
+        # `internal-failure` catch-all above -- so at rc=2 the terminal showed
+        # NOTHING (stderr empty) and `env.sh` received refusal PROSE carrying
+        # `(` and backticks, which `sh -n` rejects and any shell that does parse
+        # it treats as command substitution. Measured against the oracle: it
+        # puts these on stderr with stdout empty.
+        #
         # STDOUT, not stderr. This block is meant to be redirected --
         # `tan bootstrap --print-env > env.sh` -- so on stderr the redirect
         # target is empty while the lines still appear on the terminal: it

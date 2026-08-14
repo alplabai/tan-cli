@@ -2,13 +2,15 @@
 #
 # The first-install gate (tan-cli#207).
 #
-# Every other workflow here tests `tan` from a cargo checkout. `ci.yml` runs the
-# four cargo gates; `parity.yml` builds a `target/debug/tan` and points it at a
-# west workspace it assembled BY HAND (`west init -l` / `west update` /
-# `west zephyr-export`), then builds an example that already existed in the SDK.
-# Neither ever ran `install.sh`, `tan bootstrap` or `tan init` -- before this
-# file, a grep for tan subcommand invocations across `.github` returned three
-# COMMENT lines (`parity.yml`) and no `run:` step at all.
+# Every other workflow here tests `tan` from a SOURCE checkout. `ci.yml` runs
+# the pytest suite; `parity.yml` pip-installs `python/` and points the `tan`
+# console script at a west workspace it assembled BY HAND (`west init -l` /
+# `west update` / `west zephyr-export`), then builds an example that already
+# existed in the SDK. (Until tan-cli#269 both did the same thing with a
+# `cargo build --bin tan`; only the provenance of the binary changed.) Neither
+# ever ran `install.sh`, `tan bootstrap` or `tan init` -- before this file, a
+# grep for tan subcommand invocations across `.github` returned three COMMENT
+# lines (`parity.yml`) and no `run:` step at all.
 #
 # So the entire environment-provisioning path a first-install customer walks had
 # no signal: installer -> venv -> west workspace -> scaffold -> build. A
@@ -76,6 +78,13 @@ concurrency:
   group: getting-started-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  # Least privilege by default (tan-cli#435). The install step's own comment
+  # already states the requirement verbatim -- "`contents: read` is enough to
+  # list public releases" -- it just had no block to say it in. The token is
+  # there to lift the UNAUTHENTICATED per-IP rate limit, not to write.
+  contents: read
+
 jobs:
   first-install:
     name: "first install -- install.sh -> bootstrap -> init -> build"
@@ -85,7 +94,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: checkout tan-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # ---- 1. the installer, as a shell script ----------------------------
 
@@ -95,6 +106,15 @@ jobs:
       # preinstalled on ubuntu-latest.
       - name: shellcheck install.sh
         run: shellcheck --shell=sh install.sh
+
+      # scripts/tan-surface/*.sh (tan-cli#475) is bash, not the installer's
+      # POSIX sh -- same "nothing lints this" gap install.sh had before the
+      # step above, closed the same way. Not driven end-to-end here (it needs
+      # a real alp-sdk checkout, an optionally-bootstrapped west workspace,
+      # and a real build, well beyond what this job's own steps already set
+      # up); this only proves the shell itself stays clean.
+      - name: shellcheck scripts/tan-surface
+        run: shellcheck -S warning scripts/tan-surface/*.sh
 
       # ---- 2. host prerequisites ------------------------------------------
 
@@ -122,7 +142,7 @@ jobs:
       # about the documented path working on a realistic host; "does Zephyr
       # v4.4.1 support the newest CPython released this month" is a different
       # question and does not belong on this job's critical path.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -304,8 +324,9 @@ jobs:
       # bootstrap's real work. A dedicated parent is also what the guard's own
       # remedy tells a customer to create.
       - name: clone alp-sdk into a dedicated workspace parent
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-workspace/alp-sdk
@@ -413,7 +434,8 @@ jobs:
           # The workflow equivalent of the `source <venv>/bin/activate` line
           # `tan bootstrap --print-env` prints -- a customer runs it, so this job
           # runs it. It is not here to cover for tan's own venv discovery; that
-          # has its own tests (crates/tan-cli/src/venv.rs), and the subject of
+          # has its own tests (`python/tests/`; the retired Rust oracle's lived in
+          # `crates/tan-cli/src/venv.rs`), and the subject of
           # THIS job is the documented customer path.
           with open(os.environ["GITHUB_PATH"], "a") as fh:
               fh.write(os.path.join(d["venvDir"], "bin") + "\n")
@@ -492,8 +514,39 @@ jobs:
           # runner, not part of the remedy tan prints. The command under test is
           # still `west sdk install --version <v> -t arm-zephyr-eabi`; a customer
           # on a home IP has their own unauthenticated quota and needs no token.
-          west sdk install --version "${version}" -t arm-zephyr-eabi \
-              --personal-access-token "${GH_TOKEN}"
+          # Retry the whole install (tan-cli#689). The GH_TOKEN above lifts the
+          # API rate limit on `fetch_releases`, but that is only the FIRST
+          # network call this makes. `setup.sh -t arm-zephyr-eabi` then fetches
+          # the GNU toolchain separately, and no token affects that leg:
+          #
+          #   Installing 'arm-zephyr-eabi' GNU toolchain ...
+          #   ERROR: GNU toolchain download failed
+          #   FATAL ERROR: command ".../setup.sh -t arm-zephyr-eabi -h" failed
+          #
+          # observed 2026-08-12 on PR #688 (`gh pr view 688 --repo
+          # alplabai/tan-cli --json files`: python/tan/planner/{kconfig,
+          # libraries,validate}.py, the ci.yml and parity.yml SDK-ref pins,
+          # and test_planner_relocation_freshness.py's matching hash re-pin)
+          # -- nothing in that diff reaches a toolchain download.
+          #
+          # Same reasoning this repo already applied to `sdk list --online` in
+          # clean-host.yml: "A gate that goes red for a reason unrelated to its
+          # subject stops being read." Three attempts, backing off; still fails
+          # loudly if the network is genuinely unavailable.
+          for attempt in 1 2 3; do
+            if west sdk install --version "${version}" -t arm-zephyr-eabi \
+                   --personal-access-token "${GH_TOKEN}"; then
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::west sdk install failed 3 times -- this is a real \
+          failure, not a transient fetch." >&2
+              exit 1
+            fi
+            echo "::warning::west sdk install attempt ${attempt}/3 failed; \
+          retrying in $((attempt * 15))s" >&2
+            sleep $((attempt * 15))
+          done
 
       # ---- 8. tan init ------------------------------------------------------
 
@@ -780,7 +833,7 @@ jobs:
 
       - name: upload first-install logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: first-install-logs
           path: |

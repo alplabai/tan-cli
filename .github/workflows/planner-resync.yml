@@ -1,0 +1,379 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# ADR-0020 remediation, the half that was never built (alp-sdk#855): PROPOSE the
+# `tan/planner/` re-sync an alp-sdk planner change owes, instead of waiting for
+# a human to discover it.
+#
+# The DETECTION half already exists and works:
+#
+#   * alp-sdk `.github/workflows/dispatch-tan-parity.yml` fires a
+#     `repository_dispatch` (`alp-sdk-planner-change`) on every push to its
+#     dev/main that touches the contract surface;
+#   * `parity.yml` here listens for it and runs both seams against the pushed
+#     ref, so `python/tests/gates/test_planner_relocation_freshness.py` goes RED
+#     within minutes of alp-sdk moving;
+#   * `parity.yml`'s "pin freshness (warn only)" step warns on PR runs when
+#     `PINNED_SDK_TAG` has fallen behind.
+#
+# What none of that does is say what the FIX is. Every catch so far
+# (tan-cli#320, #485, #543, #493/#591) has been hand-carried: read the upstream
+# diff, retype the delta into `tan/planner/`, recompute two sha256 tables by
+# hand, move two commit pins. That is the loop this workflow closes.
+#
+# WHY THIS EXISTS SEPARATELY FROM parity.yml
+# ------------------------------------------
+# `parity.yml` is a GATE: it must stay read-only and must go red. Giving it
+# `contents: write` + `pull-requests: write` so it could also open a PR would
+# hand those permissions to every seam1/seam2/python-tests job on every PR,
+# including ones that check out and execute an alp-sdk ref chosen by the
+# dispatch payload. This job does one thing, holds the write scope for that one
+# thing, and runs on triggers a fork cannot reach.
+#
+# TRIGGERS -- both, deliberately
+# -----------------------------
+#   * `repository_dispatch` gives LATENCY: the proposal lands minutes after
+#     alp-sdk pushes, using the sender that ALREADY EXISTS. No new alp-sdk
+#     credential, no new secret anywhere -- alp-sdk's dispatcher mints its own
+#     short-lived App token and this repo's side needs only the default
+#     GITHUB_TOKEN.
+#   * `schedule` is the BACKSTOP, and it is not redundant. The sender's `paths:`
+#     filter covers `scripts/alp_orchestrate/**`, `metadata/**`,
+#     `examples/**/board.yaml`, `tests/parity/**` -- and MISSES most of the
+#     hand-port sources. Measured over alp-sdk's last 400 commits touching a
+#     tracked hand-port source: 7 of 29 matched none of those paths and
+#     therefore fired NO dispatch at all, including `98807809` (the missing
+#     `CONFIG_USE_DT_CODE_PARTITION=y`, one of the two defects tan-cli#279 cites
+#     as having shipped before anything noticed) and `cb7f64ae` (alp-sdk
+#     #1125/#1126, a path-traversal fix). A companion alp-sdk change widens that
+#     list, but a path filter is a thing that can be wrong again, and the
+#     dispatch API answers 204 whether or not anything is listening. The cron
+#     needs no alp-sdk credential and no path list to be right, so it catches
+#     the class rather than the instance.
+#
+# BOTH TRIGGERS ONLY FIRE FROM THE DEFAULT BRANCH'S COPY OF THIS FILE. That is
+# GitHub's rule for `schedule` and `repository_dispatch` alike, and it is the
+# #194 failure this repo already ate once (see parity.yml's own note). Measured
+# 2026-08-10: `gh api repos/alplabai/tan-cli -q .default_branch` -> `dev`, so
+# this goes live when it lands on `dev`. If the default branch ever moves to
+# `main`, this workflow silently stops running -- there is no signal for that
+# beyond the absence of runs.
+#
+# WHAT IT PRODUCES
+# ----------------
+# A PR against `dev` on the fixed branch `auto/planner-resync`, force-pushed so
+# it always reflects the CURRENT delta rather than accumulating. It NEVER
+# merges: a re-sync can carry behavioural change under a clean merge -- the
+# #608 re-sync changed `-B "."` and silently satisfied tan-cli#561 without the
+# subject line mentioning it -- so a human reads the diff, and rewrites the
+# machine-written placeholder the script leaves above each moved pin.
+#
+# WHEN IT CANNOT DO THE JOB
+# -------------------------
+# It says so and fails, rather than opening a green PR that quietly dropped a
+# file. `planner_resync.py` exits 1 when part of the re-sync needs a human (a
+# 3-way conflict, a changed hand-port source, a new/removed upstream module)
+# and 2 when the inputs are not fit to reason over (a pin disagreeing with its
+# own hash table). Either way the PR is still opened WITH the blockers named,
+# the pins covering them stay put, and this job goes red.
+#
+# TOKEN + THE RECURSION GUARD, stated plainly
+# -------------------------------------------
+# This uses the default GITHUB_TOKEN. No new secret is required and none is
+# committed. The cost is GitHub's own recursion guard: a PR opened by
+# GITHUB_TOKEN does not trigger `pull_request` workflows, so the re-sync PR's
+# own `ci.yml`/`parity.yml` runs do NOT start by themselves. That is why the
+# "Run the freshness gate against the re-synced tree" step below exists and
+# why its verdict is written into the PR body: the proposal carries its own
+# evidence. A reviewer who wants the full suite closes and reopens the PR (or
+# pushes an empty commit), which is a one-click cost paid by a human who was
+# going to read the diff anyway -- deliberately preferred over minting a
+# longer-lived App/PAT credential for a bot that opens PRs.
+
+name: planner-resync
+
+run-name: >-
+  ${{ github.event_name == 'repository_dispatch'
+      && format('planner-resync (alp-sdk {0})', github.event.client_payload.sdk_ref)
+      || '' }}
+
+on:
+  repository_dispatch:
+    types: [alp-sdk-planner-change]
+  schedule:
+    # 05:23 UTC daily. Off the hour on purpose: GitHub's scheduler queues
+    # heavily at :00 and a delayed cron is a delayed proposal.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      sdk_ref:
+        description: "alp-sdk ref to re-sync TO (default: origin/dev)"
+        type: string
+        default: "origin/dev"
+      open_pr:
+        description: "Open/refresh the PR (uncheck for a dry run in the job summary only)"
+        type: boolean
+        default: true
+
+concurrency:
+  # One proposal at a time. Two runs racing would force-push the same branch
+  # from two different alp-sdk refs and the PR would describe neither.
+  group: planner-resync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  propose:
+    name: "propose · tan/planner re-sync"
+    runs-on: ubuntu-latest
+    steps:
+      # THE ONE CHECKOUT IN THIS REPOSITORY THAT KEEPS ITS CREDENTIAL, and it
+      # must: the `propose` step below runs `git push -q -f origin` against the
+      # `auto/planner-resync` branch through the remote THIS checkout leaves
+      # configured -- no later step sets up a token remote of its own. Adding
+      # `persist-credentials: false` here does not fail the job at checkout
+      # time; it fails several minutes later at the push, after the re-sync has
+      # already been computed and committed, and the PR is then never opened.
+      # Every other checkout in this repository sets it false (tan-cli#435).
+      - name: Check out tan-cli dev (the branch the re-sync targets)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      # fetch-depth 0: the script reads blobs at THREE different pinned
+      # commits, the oldest of which (STRICT_LOADERS_PINNED_SDK_COMMIT,
+      # 26b0040e) is far older than the other two. A shallow clone makes
+      # `git show <pin>:<path>` fail, which the script reports as "the bound
+      # checkout cannot be the one this gate was pinned against" -- a correct
+      # refusal, but for the wrong reason.
+      - name: Check out alp-sdk (full history -- three pins are read)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: alplabai/alp-sdk
+          path: alp-sdk
+          fetch-depth: 0
+
+      # `client_payload.*` is attacker-controlled by construction -- anyone able
+      # to POST a `repository_dispatch` picks every field -- so it is carried in
+      # as an ENV VAR, never interpolated into the shell, and then matched
+      # against an allow-list pattern before it reaches `git`. Without both,
+      # `sdk_ref: "x; curl ... | sh"` executes in a job that holds
+      # `contents: write` on this repo. `inputs.sdk_ref` gets the same treatment:
+      # `workflow_dispatch` needs only write access, which is a wider set than
+      # the people who may push to `dev`.
+      - name: Resolve the alp-sdk ref to re-sync to
+        id: ref
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          PAYLOAD_REF: ${{ github.event.client_payload.sdk_ref }}
+          INPUT_REF: ${{ inputs.sdk_ref }}
+        run: |
+          set -euo pipefail
+          case "${EVENT}" in
+            repository_dispatch) ref="${PAYLOAD_REF:-}" ;;
+            workflow_dispatch)   ref="${INPUT_REF:-}" ;;
+            *)                   ref="" ;;
+          esac
+          [ -n "${ref}" ] || ref='origin/dev'
+          # Allow-list, not a deny-list: a git ref needs none of the characters
+          # a shell or an argument-injection needs. `origin/dev`, a 40-hex SHA
+          # and `v0.15.0-rc1` all match; anything with a space, quote, `$`,
+          # backtick, semicolon, or a leading `-` does not.
+          # NOT `grep -qE`. grep is LINE-oriented, so `printf '%s' "$ref" |
+          # grep -qE '^...$'` returns 0 when ANY line matches: a payload of
+          # `dev\nref=attacker` passes on its first line, and the second line
+          # then lands in `$GITHUB_OUTPUT` as its own key -- the precise
+          # injection this guard exists to refuse. `case` tests the WHOLE
+          # string, newline included. Measured both ways before choosing.
+          case "${ref}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing an alp-sdk ref that is not a plain git ref: ${ref}"
+              exit 1 ;;
+          esac
+          if [ "${#ref}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk ref longer than 201 characters: ${ref}"
+            exit 1
+          fi
+          # A dispatched SHA lands on alp-sdk dev OR main; both are fetched by
+          # the checkout above, but resolve it here so a payload naming a ref
+          # this clone cannot see fails HERE, with the ref in the message,
+          # rather than inside the script as a per-file "gone from the bound
+          # SDK checkout".
+          sha="$(git -C alp-sdk rev-parse "${ref}^{commit}")"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "requested=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Re-syncing to alp-sdk ${ref} (${sha})"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Propose the re-sync
+        id: resync
+        shell: bash
+        # `continue-on-error` is wrong here (it hides the conclusion); the exit
+        # code is captured and re-raised by the final step instead, so the PR
+        # still gets opened when the answer is "a human must finish this".
+        run: |
+          set -uo pipefail
+          python python/scripts/planner_resync.py \
+            --sdk-root "${GITHUB_WORKSPACE}/alp-sdk" \
+            --to "${{ steps.ref.outputs.sha }}" \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --apply \
+            --markdown "${RUNNER_TEMP}/resync.md" \
+            --json "${RUNNER_TEMP}/resync.json"
+          rc=$?
+          echo "rc=${rc}" >> "$GITHUB_OUTPUT"
+          cat "${RUNNER_TEMP}/resync.md" >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      # The gate is the thing that fails when a re-sync is owed, so running it
+      # here is what turns "the script applied something" into "the thing that
+      # was red is now green". Its three roots are three DIFFERENT alp-sdk
+      # commits (tan-cli#296: two audits with two pins need two checkouts;
+      # #485 added a third) -- read back out of the gate file AFTER the apply,
+      # so this measures the pins the PR actually proposes, not the ones it
+      # started from. Worktrees off the one full clone, so it costs no network.
+      - name: Run the freshness gate against the re-synced tree
+        id: gate
+        if: steps.resync.outputs.rc != '2'
+        shell: bash
+        run: |
+          set -uo pipefail
+          gate=python/tests/gates/test_planner_relocation_freshness.py
+          pin() { grep -oE "^$1 = \"[0-9a-f]{40}\"" "$gate" | grep -oE '[0-9a-f]{40}'; }
+          for spec in "PINNED_SDK_COMMIT:sdk-mirror" \
+                      "HAND_PORT_PINNED_SDK_COMMIT:sdk-handport" \
+                      "STRICT_LOADERS_PINNED_SDK_COMMIT:sdk-strict"; do
+            name="${spec%%:*}"; dir="${spec##*:}"
+            sha="$(pin "$name")"
+            if [ -z "$sha" ]; then
+              echo "::error::could not read ${name} out of ${gate}"
+              echo "verdict=UNKNOWN (could not read ${name})" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git -C alp-sdk worktree add --detach "${GITHUB_WORKSPACE}/${dir}" "$sha" >/dev/null
+          done
+          python -m pip install --quiet -e ./python
+          python -m pip install --quiet pytest
+          set +e
+          ( cd python && \
+            ALP_SDK_ROOT="${GITHUB_WORKSPACE}/sdk-mirror" \
+            ALP_SDK_HAND_PORT_ROOT="${GITHUB_WORKSPACE}/sdk-handport" \
+            ALP_SDK_STRICT_LOADERS_ROOT="${GITHUB_WORKSPACE}/sdk-strict" \
+            python -m pytest tests/gates/test_planner_relocation_freshness.py \
+                             tests/gates/test_planner_resync.py -q ) \
+            > "${RUNNER_TEMP}/gate.txt" 2>&1
+          rc=$?
+          set -e
+          tail -40 "${RUNNER_TEMP}/gate.txt"
+          if [ "$rc" -eq 0 ]; then
+            echo "verdict=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=FAIL (exit ${rc})" >> "$GITHUB_OUTPUT"
+          fi
+          # The worktrees are inside the repo checkout only by path; remove
+          # them so `git status` below sees the re-sync and nothing else.
+          for dir in sdk-mirror sdk-handport sdk-strict; do
+            git -C alp-sdk worktree remove --force "${GITHUB_WORKSPACE}/${dir}" || true
+          done
+
+      - name: Open or refresh the proposal PR
+        id: pr
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.open_pr }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_SHA: ${{ steps.ref.outputs.sha }}
+          RC: ${{ steps.resync.outputs.rc }}
+          GATE_VERDICT: ${{ steps.gate.outputs.verdict }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain -- python/)" ]; then
+            echo "Nothing to propose -- tan/planner is level with alp-sdk ${SDK_SHA}."
+            echo "opened=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          branch=auto/planner-resync
+          git config user.name  "alp-sdk planner re-sync"
+          git config user.email "noreply@alplab.ai"
+          git checkout -q -B "${branch}"
+          git add -A python/
+          short="${SDK_SHA:0:8}"
+          # Commit subject carries NO issue-closing keyword. GitHub builds a
+          # squash message out of the COMMITS and parses `fixes #n` inside
+          # backticks and code fences alike, so a re-sync that merely MENTIONS
+          # the tan issue an upstream fix addresses would close it on merge
+          # without anyone deciding to.
+          git commit -q -m "chore(planner): propose the re-sync owed to alp-sdk ${short}
+
+          Machine-proposed by python/scripts/planner_resync.py. See the PR body
+          for what merged, what was flagged for manual porting, and which pins
+          moved. Refs alplabai/alp-sdk#855."
+          git push -q -f origin "${branch}"
+
+          {
+            cat "${RUNNER_TEMP}/resync.md"
+            echo
+            echo "---"
+            echo
+            echo "### This proposal's own checks"
+            echo
+            echo "| check | result |"
+            echo "| --- | --- |"
+            echo "| \`planner_resync.py\` exit | \`${RC}\` (0 clean · 1 needs a human · 2 refused) |"
+            echo "| freshness gate + resync tests, run in the proposing job | ${GATE_VERDICT:-not run} |"
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "**This PR does not auto-merge and must not be squashed unread.**"
+            echo "A clean 3-way merge can still carry behavioural change, and the"
+            echo "block above each moved pin is a machine-written placeholder that"
+            echo "records only WHAT moved. Replace it with the audited narrative"
+            echo "before merging."
+            echo
+            echo "Because the PR was opened by \`GITHUB_TOKEN\`, GitHub's recursion"
+            echo "guard means its own \`ci.yml\`/\`parity.yml\` runs did not start"
+            echo "automatically -- close and reopen the PR, or push an empty commit,"
+            echo "to get the full suite."
+            echo
+            echo "Refs alplabai/alp-sdk#855 (ADR-0020's cross-repo remediation)."
+          } > "${RUNNER_TEMP}/body.md"
+
+          existing="$(gh pr list --head "${branch}" --base dev --state open \
+                        --json number -q '.[0].number' || true)"
+          title="chore(planner): re-sync owed to alp-sdk ${short}"
+          if [ -n "${existing}" ]; then
+            gh pr edit "${existing}" --title "${title}" --body-file "${RUNNER_TEMP}/body.md"
+            echo "url=$(gh pr view "${existing}" --json url -q .url)" >> "$GITHUB_OUTPUT"
+          else
+            url="$(gh pr create --base dev --head "${branch}" \
+                     --title "${title}" --body-file "${RUNNER_TEMP}/body.md")"
+            echo "url=${url}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "opened=true" >> "$GITHUB_OUTPUT"
+
+      # Last, so the PR exists before this job goes red. A re-sync that needs a
+      # human is a REAL finding and must not be reported as success -- but the
+      # proposal is more useful than the red X, so it lands first.
+      - name: Verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc='${{ steps.resync.outputs.rc }}'
+          case "${rc}" in
+            0) echo "Re-sync clean (or nothing owed)." ;;
+            1) echo "::error::a re-sync is owed and part of it needs a human -- see ${{ steps.pr.outputs.url || 'the job summary' }}. The pins covering the unresolved half did NOT move, so the freshness gate stays red until someone ports it."; exit 1 ;;
+            2) echo "::error::planner_resync.py REFUSED to propose anything (a pin disagrees with its own hash table, or the alp-sdk checkout is unusable) -- see the job summary."; exit 1 ;;
+            *) echo "::error::planner_resync.py did not report an exit code"; exit 1 ;;
+          esac
+          if [ '${{ steps.gate.outputs.verdict }}' != 'PASS' ] && [ '${{ steps.pr.outputs.opened }}' = 'true' ]; then
+            echo "::error::the re-sync applied cleanly but the freshness gate did not pass against it (${{ steps.gate.outputs.verdict }}) -- do not merge the proposal on the strength of a clean apply."
+            exit 1
+          fi

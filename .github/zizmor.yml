@@ -1,0 +1,56 @@
+# zizmor policy (tan-cli#435).
+#
+# THE POLICY IS ONE LINE: the gate runs `zizmor --min-severity medium`, and
+# this file is its reviewed baseline. It is deliberately ONE entry long.
+# Anything added here is a decision someone defends in review, not a way to
+# turn a red run green.
+#
+# WHY SEVERITY AND NOT CONFIDENCE. The obvious tightening --
+# `--min-confidence medium` on top -- was measured and REJECTED: all 26
+# `artipacked` findings (a checkout leaving its credential in `.git/config`)
+# carry Low confidence, so that flag silently drops the entire audit that
+# half this issue was about. A gate that cannot fail on the defect it was
+# written for is decoration. Severity alone keeps `artipacked` (medium),
+# `excessive-permissions` (medium), `unpinned-uses` (high) and
+# `template-injection` (high) all voting.
+#
+# NON-VACUITY, MEASURED. zizmor 1.29.0, same invocation, `--no-config`:
+#
+#   this branch      rc=0    no findings at or above medium
+#   dev @ 01374d4    rc=14   165 findings -- 63 unpinned-uses,
+#                            12 excessive-permissions, 6 template-injection,
+#                            26 artipacked
+#
+# NOT IGNORED, ON PURPOSE. The informational/low findings that survive are
+# left visible rather than suppressed: eight low-confidence
+# `template-injection` hits on step outputs this repository produces itself
+# (`steps.floor.outputs.version` from pyproject, `steps.ref.outputs.sha` from
+# `git rev-parse`, `steps.gate.outputs.verdict` from `planner_resync.py`), one
+# `artipacked` on the single checkout that must keep its credential because it
+# pushes (`planner-resync.yml`, commented in place), and `superfluous-actions`
+# on the release publisher. `--min-severity medium` already keeps them out of
+# the verdict, so listing them here would only hide them from a human reading
+# the full report -- `zizmor .github/workflows/` with no flags still shows all
+# 52.
+#
+# ONE MORE THING A REVIEWER SHOULD KNOW: these ignores are LINE-SCOPED, so
+# they rot when the lines move. They rot LOUDLY -- the finding comes back and
+# the gate goes red -- which is the failure direction to prefer, but it does
+# mean a rebase that shifts `release.yml` or `planner-resync.yml` may need the
+# numbers re-derived. Re-derive them by running the gate, never by widening an
+# entry to the whole file.
+rules:
+  artipacked:
+    ignore:
+      # The tan-cli `dev` checkout in `planner-resync.yml`, which MUST keep its
+      # credential: the `propose` step runs `git push -q -f origin` through the
+      # remote this checkout leaves configured, and no later step sets up a
+      # token remote of its own. The step carries the same explanation inline,
+      # so a reader hits it from either direction.
+      #
+      # This entry also makes the gate answer the same offline as online.
+      # Measured with zizmor 1.29.0: `--no-online-audits` reports this site at
+      # medium while a networked run does not, so without the entry the gate's
+      # verdict would depend on whether the GitHub API answered -- and a gate
+      # that goes red on someone else's rate limit gets ignored, then removed.
+      - planner-resync.yml:140:9

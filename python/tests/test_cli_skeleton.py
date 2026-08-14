@@ -6,7 +6,7 @@ import pytest
 from typer.main import get_command
 
 from tan.cli import app
-from tests.parity.oracle import empty_tool_inventory
+from tests.conftest import empty_tool_inventory
 
 #: `python/` -- `python -m tan` resolves the package off `os.getcwd()` (`-m`
 #: prepends the CURRENT WORKING DIRECTORY to `sys.path`, not the script's own
@@ -220,11 +220,35 @@ def test_format_before_another_global_flag_no_longer_aborts_the_whole_reorder(tm
     pre-subcommand `--format` back when a hand-written allowlist in `cli.py`
     decided that (deleted by tan-cli#378), so this argv isolates the reorder
     fix from that separate, unrelated refusal -- `--preview` so the command
-    never writes `launch.json` anywhere."""
+    never writes `launch.json` anywhere.
+
+    tan-cli#476 half (b) changed what this argv EXITS with, not what it
+    measures. `tmp_path` is an empty scratch directory, so with no
+    `--target-kind` given `debug-config` now refuses
+    (`debug-config.target-kind-unresolved`, exit 2) instead of silently
+    defaulting to a `native-host` draft. The old `returncode == 0` was only
+    ever a proxy for "the relocated flag reached the command's own dispatch";
+    pinning it here would pin the #476 defect.
+
+    The replacement is the NON-VACUOUS form (tan-cli#476 REVIEW round). The
+    first attempt was `all(i["code"].startswith("debug-config.") for i in
+    env["issues"])`, which is `True` for an EMPTY list -- and empty is exactly
+    what this argv produced on the pre-#476 tree (measured: `exit 0`,
+    `issues: []`), so it passed against both trees and could not fail on the
+    behaviour it was written for. Requiring at least one issue AND every code
+    to be `debug-config`'s own makes it fail both ways it should: on a
+    reorder regression the stranded `--sdk-root` mints a Click-level
+    `cli.parse-error` (not a `debug-config.` code), and on a #476 regression
+    there is no issue at all. It deliberately does NOT pin
+    `target-kind-unresolved` by name -- that belongs in
+    `test_debug_config_command.py`, and this file should survive a wording or
+    code refinement over there."""
     p = run("--format", "json", "--sdk-root", "X", "debug-config", "--preview", cwd=tmp_path)
     env = json.loads(p.stdout)
     assert env["command"] == "debug-config", env
-    assert p.returncode == 0, (p.returncode, env)
+    codes = [i["code"] for i in env["issues"]]
+    assert codes, env
+    assert all(c.startswith("debug-config.") for c in codes), codes
 
 
 # --------------------------------------------------------------------------
@@ -323,8 +347,7 @@ _ALL_COMMANDS = sorted(get_command(app).commands)
 def _run_isolated(*argv, cwd: Path, home: Path) -> subprocess.CompletedProcess:
     """Like `run()` above, but with `HOME`/`USERPROFILE` redirected at a
     scratch directory (so a developer's real `~/.alp/sdk-default` cannot make
-    a command resolve an SDK it otherwise would not, the same isolation
-    `tests/parity/oracle.py`'s own `_env` applies) and `PATH` pinned to
+    a command resolve an SDK it otherwise would not) and `PATH` pinned to
     `empty_tool_inventory` (so a `west`-forwarding command -- `lock`/
     `migrate`/`quality` -- cannot spawn a REAL `west` this replay host happens
     to have installed; every other command's PATH probes, e.g. `doctor`'s
@@ -396,3 +419,40 @@ def test_envelope_shape_gate_still_covers_the_full_registered_surface():
         f"{set(_ENVELOPE_SHAPE_EXEMPT) - set(_ALL_COMMANDS)} is exempted but no "
         "longer a registered command -- stale entry."
     )
+
+
+def test_every_registered_command_declares_a_help_panel():
+    """Drift guard: a command registered without a panel silently falls into
+    Typer's default "Commands" box, which is the flat 32-item list this
+    grouping exists to replace. Derived from the registration table rather
+    than a hand-kept name list, for the same reason `_SUBCOMMAND_NAMES` is."""
+    from tan.cli import app
+
+    unpanelled = sorted(
+        info.name for info in app.registered_commands if not info.rich_help_panel
+    )
+    assert unpanelled == []
+
+
+def test_help_renders_the_six_panels():
+    p = run("--help")
+    assert p.returncode == 0
+    for panel in (
+        "Setup",
+        "Start a project",
+        "Configure",
+        "Build & run",
+        "Hardware",
+        "Inspect & author",
+    ):
+        assert panel in p.stdout, f"missing panel: {panel}"
+
+
+def test_bare_invocation_points_a_new_user_somewhere():
+    """"a command is required" is true and useless. A first-time user needs
+    the three verbs that get them from nothing to a running build."""
+    p = run()
+    assert p.returncode == 2
+    assert p.stdout == ""          # unchanged: stdout is the envelope channel
+    assert "tan doctor" in p.stderr
+    assert "tan init" in p.stderr

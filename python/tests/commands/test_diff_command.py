@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -45,32 +44,20 @@ from tan.commands.diff_cmd import (
 )
 from tan.commands.diff_cmd import diff as diff_command
 
-from tests.parity.oracle import resolve_oracle_for_skipif
-
 app = typer.Typer()
 app.command("diff")(diff_command)
 
 runner = CliRunner()
 
-#: The oracle binary, resolved by the ONE resolver in the suite -- see the
-#: fuller comment on the same line in `test_pinmux_command.py`. This module
-#: carried the second, byte-identical copy of the release-first walk. Its own
-#: oracle case passed against BOTH binaries, so the stale pick was invisible
-#: here: a real `diff` envelope divergence introduced between `tan 0.3.1` and
-#: the pinned `tan 0.4.1` would have been measured against the wrong baseline
-#: and reported green (tan-cli#393).
-_ORACLE = resolve_oracle_for_skipif()
-_ORACLE_REQUIRED = pytest.mark.skipif(
-    _ORACLE is None,
-    reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
+#: The oracle's own `diff.schema-violation` message for the case below, as
+#: recorded from `tan 0.4.1` while a binary still existed (tan-cli#269 has
+#: since deleted `crates/`). A literal, because it is a MEASUREMENT: it is
+#: what the shipped Rust CLI printed, and the divergence pinned below is only
+#: meaningful against the real text.
+_ORACLE_IOT_WRONG_TYPE_MESSAGE = (
+    'board.yaml is not valid YAML: iot.wifi: invalid type: string "yes", '
+    "expected a boolean at line 3 column 9"
 )
-
-
-def _run_oracle(argv: list[str], cwd: Path) -> tuple[int, dict]:
-    proc = subprocess.run(
-        [_ORACLE, *argv], capture_output=True, text=True, encoding="utf-8", cwd=cwd
-    )
-    return proc.returncode, json.loads(proc.stdout)
 
 
 def _project(tmp_path: Path, board_yaml_text: str) -> Path:
@@ -259,38 +246,29 @@ def test_iot_wrong_type_is_a_schema_violation_not_a_false_accept(tmp_path: Path)
     )
 
 
-@_ORACLE_REQUIRED
 def test_iot_wrong_type_message_is_a_known_divergence_from_the_oracle(tmp_path: Path) -> None:
-    """Exit code and issue CODE now match the oracle exactly (see
+    """Exit code and issue CODE match the oracle exactly (see
     `test_iot_wrong_type_is_a_schema_violation_not_a_false_accept` for the
     behavioural fix). The MESSAGE does not, and is not expected to:
     `_typed_nested` reports the same generic `expected X, got Y` shape every
     OTHER `_typed_field` check in this module uses (see its module
     docstring's scope note -- none of them claims to reproduce `serde_yaml`'s
     exact wording), where the oracle's struct-typed deserialize embeds the
-    offending value and a line/column. Pinned literally on BOTH sides'
-    message, per this repo's own convention for a deliberate divergence
-    (`tests/parity/test_oracle_parity.py`'s `..._is_a_known_divergence_from_
-    the_oracle` cases) -- a change to either wording, or the two converging,
-    must fail this test rather than pass it silently.
+    offending value and a line/column. Pinned against the RECORDED oracle
+    message (`_ORACLE_IOT_WRONG_TYPE_MESSAGE`) rather than a live spawn, since
+    tan-cli#269 deleted the binary -- but pinned literally all the same, per
+    this repo's convention for a deliberate divergence: a change to this
+    port's wording, or the two converging, must fail this test rather than
+    pass it silently.
     """
     proj = _project(tmp_path, 'schemaVersion: 1\niot:\n  wifi: "yes"\n')
     argv = ["--project", str(proj), "--format", "json"]
     result = runner.invoke(app, argv)
     p_out = json.loads(result.stdout)
-    r_code, r_out = _run_oracle(["diff", *argv], tmp_path)
 
-    assert result.exit_code == r_code == 2
-    assert p_out["issues"][0]["code"] == r_out["issues"][0]["code"] == "diff.schema-violation"
-    assert r_out["issues"][0]["message"] == (
-        'board.yaml is not valid YAML: iot.wifi: invalid type: string "yes", '
-        "expected a boolean at line 3 column 9"
-    )
-    assert p_out["issues"][0]["message"] != r_out["issues"][0]["message"]
-    # Everything OUTSIDE the message is a real match, not coincidentally
-    # unchecked -- exit code (asserted above), the issue code (asserted
-    # above), and `data` (unchanged: false, no changes, same schema version).
-    assert p_out["data"] == r_out["data"]
+    assert result.exit_code == 2
+    assert p_out["issues"][0]["code"] == "diff.schema-violation"
+    assert p_out["issues"][0]["message"] != _ORACLE_IOT_WRONG_TYPE_MESSAGE
 
 
 def test_inference_backend_non_string_scalar_is_not_falsely_pruned(tmp_path: Path) -> None:
@@ -315,6 +293,116 @@ def test_inference_default_arena_kib_wrong_type_is_a_schema_violation(tmp_path: 
     mismatch on the oracle, not a leniently-coerced string. Byte-matches the
     oracle's exit code and issue code (message approximated, as elsewhere)."""
     proj = _project(tmp_path, 'schemaVersion: 1\ninference:\n  default_arena_kib: "512"\n')
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "diff.schema-violation"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#570 / tan-cli#571 -- `os`/`preset` scalar leniency and the
+# `schemaVersion` u32 ceiling. Both were measured directly against
+# `target/debug/tan.exe` (tan 0.4.1) before `crates/` was deleted (tan-cli#269);
+# the exact inputs/outputs below are the recorded measurements from each
+# issue body, reproduced here as fixed points this port must keep matching.
+# ---------------------------------------------------------------------------
+
+
+def test_v2_os_boolean_scalar_is_accepted_and_stringified(tmp_path: Path) -> None:
+    """tan-cli#570: `os: true` used to refuse outright (`_typed_field` demanded
+    a Python `str`) even though the oracle's `String`-typed field coerces any
+    scalar. Measured against the oracle: `changes == [{"path": "os",
+    "kind": "removed", "before": "true"}]` at exit 0."""
+    proj = _project(tmp_path, "schemaVersion: 2\nos: true\nsom:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    assert envelope["data"]["changes"] == [{"path": "os", "kind": "removed", "before": "true"}]
+
+
+def test_v2_os_integer_scalar_is_accepted_and_stringified(tmp_path: Path) -> None:
+    """tan-cli#570, the `os: 5` case: measured `before == "5"` on the oracle."""
+    proj = _project(tmp_path, "schemaVersion: 2\nos: 5\nsom:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["changes"] == [{"path": "os", "kind": "removed", "before": "5"}]
+
+
+def test_v1_os_boolean_scalar_no_longer_refuses_the_real_libraries_change(
+    tmp_path: Path,
+) -> None:
+    """tan-cli#570's second half: at schema version 1, `os` is never read, so
+    the old false refusal did not just reject a harmless field -- it hid the
+    genuine `libraries` prune the command exists to report. Measured on the
+    oracle: `changes == [{"path": "libraries", "kind": "removed",
+    "before": []}]` at exit 0."""
+    proj = _project(tmp_path, "schemaVersion: 1\nos: true\nlibraries: []\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["changes"] == [{"path": "libraries", "kind": "removed", "before": []}]
+
+
+def test_preset_non_string_scalar_no_longer_refuses(tmp_path: Path) -> None:
+    """tan-cli#570: `preset` is checked for top-level shape only (never
+    diffed), but the old strict `str` check still refused a bare scalar like
+    `preset: 1.0` outright. `preset` never contributes a diff entry either
+    way, so the only observable effect of the fix is exit 0 instead of 2."""
+    proj = _project(tmp_path, "schemaVersion: 1\npreset: 1.0\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+
+
+def test_os_list_scalar_is_still_a_schema_violation(tmp_path: Path) -> None:
+    """The tan-cli#570 leniency is bounded: a `list`/`dict` is a shape no
+    `String` field can ever hold, so it must still refuse -- only bare
+    scalars (bool/int/float/etc.) gained the new leniency."""
+    proj = _project(tmp_path, "schemaVersion: 2\nos: [zephyr]\nsom:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "diff.schema-violation"
+
+
+def test_schema_version_above_u32_max_is_refused_not_treated_as_v2(tmp_path: Path) -> None:
+    """tan-cli#571: `schemaVersion` is `u32` in the Rust model, but the port's
+    guard only checked the lower bound, so a value above `u32::MAX` fell
+    through `schema_version_ok` (still a Python `int`) and was silently
+    treated as `>= 2`. Measured against the oracle:
+    `schemaVersion: 4294967296` is exit 2 `diff.schema-violation`; the
+    pre-fix port was exit 0 with a fabricated `os` removal entry."""
+    proj = _project(tmp_path, "schemaVersion: 4294967296\nos: zephyr\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["data"]["changes"] == []
+    assert envelope["issues"][0]["code"] == "diff.schema-violation"
+
+
+def test_schema_version_at_u32_max_is_still_accepted(tmp_path: Path) -> None:
+    """The boundary the refusal-only test above cannot prove on its own: a
+    value just INSIDE the valid range (`u32::MAX` itself) must still be
+    accepted, not rejected by an off-by-one ceiling. Measured against the
+    oracle: `schemaVersion: 4294967295` is exit 0, `changes == [{"path": "os",
+    "kind": "removed", "before": "zephyr"}]` -- identical to the port."""
+    proj = _project(tmp_path, "schemaVersion: 4294967295\nos: zephyr\nsom:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    assert envelope["data"]["changes"] == [{"path": "os", "kind": "removed", "before": "zephyr"}]
+
+
+def test_schema_version_negative_is_still_refused(tmp_path: Path) -> None:
+    """Control from tan-cli#571's own body: `schemaVersion: -1` agrees on
+    both sides at exit 2 already, before and after this fix -- the ceiling
+    added here must not disturb the existing floor check."""
+    proj = _project(tmp_path, "schemaVersion: -1\nos: zephyr\n")
     result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
     assert result.exit_code == 2
     envelope = json.loads(result.stdout)
@@ -414,7 +502,9 @@ def test_sdk_schema_violation_refuses_the_diff_instead_of_reporting_clean(
             "sys.exit(1)\n"
         ),
     )
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
     )
@@ -439,7 +529,9 @@ def test_sdk_clean_verdict_leaves_a_real_comparison_untouched(
     sdk = _stub_sdk(
         tmp_path, validator_body="import sys\nsys.stdout.write('board.yaml: clean\\n')\n"
     )
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
     )
@@ -474,7 +566,9 @@ def test_sdk_validator_timeout_refuses_instead_of_reporting_clean(
     tan-cli#262 shape (exit 2, not a launch failure)."""
     proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
     sdk = _stub_sdk(tmp_path, validator_body="import time\ntime.sleep(30)\n")
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     monkeypatch.setattr(diff_cmd, "VALIDATOR_TIMEOUT_S", 1)
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
@@ -498,7 +592,9 @@ def test_sdk_validator_unstartable_interpreter_refuses_instead_of_reporting_clea
     proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
     sdk = _stub_sdk(tmp_path, validator_body="import sys\nsys.exit(0)\n")
     absent = str(tmp_path / "no-such-interpreter")
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: absent)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (absent, True)
+    )
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
     )
@@ -530,7 +626,9 @@ def test_sdk_validator_crash_is_reported_as_failed_not_schema_violation(
             "'slots'\")\n"
         ),
     )
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     result = runner.invoke(
         app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
     )
@@ -538,6 +636,49 @@ def test_sdk_validator_crash_is_reported_as_failed_not_schema_violation(
     envelope = json.loads(result.stdout)
     assert envelope["issues"][0]["code"] == "diff.failed"
     assert "unexpected keyword argument 'slots'" in envelope["issues"][0]["message"]
+
+
+def test_a_missing_module_crash_without_a_workspace_venv_names_bootstrap(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """tan-cli#652's mirror on the `diff` side: `_reject_if_sdk_validator_disagrees`
+    threads `used_workspace_venv` from `_planner_python_resolution` through to
+    `_spawn_validator`/`_synthesised_finding` exactly like `validate_cmd` does
+    (see `test_validate_command.py::test_a_missing_module_crash_without_a_workspace_venv_names_bootstrap`,
+    the sibling this test mirrors). Before this test existed, deleting the
+    `used_workspace_venv=used_workspace_venv` keyword from the
+    `_spawn_validator` call at `diff_cmd.py:655` left the whole suite green --
+    proof the diff half of the fix had no coverage of its own."""
+    proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
+    stderr = (
+        "Traceback (most recent call last):\n"
+        '  File "/sdk/scripts/validate_board_yaml.py", line 7, in <module>\n'
+        "    import jsonschema\n"
+        "ModuleNotFoundError: No module named 'jsonschema'\n"
+    )
+    sdk = _stub_sdk(
+        tmp_path,
+        validator_body=(
+            "import sys\n"
+            f"sys.stderr.write({stderr!r})\n"
+            "sys.exit(1)\n"
+        ),
+    )
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, False)
+    )
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "diff.failed"
+    message = envelope["issues"][0]["message"]
+    # The real remedy, named -- not a raw ModuleNotFoundError quoted at the
+    # user with no actionable next step.
+    assert "tan bootstrap" in message
+    assert "jsonschema" in message
+    assert "Last line of validator output" not in message
 
 
 def test_sdk_validator_below_the_floor_refuses_before_spawning(
@@ -556,7 +697,9 @@ def test_sdk_validator_below_the_floor_refuses_before_spawning(
     proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
     marker = tmp_path / "validator-ran"
     sdk = _stub_sdk(tmp_path, validator_body=f"open({str(marker)!r}, 'w').close()\n")
-    monkeypatch.setattr(diff_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setattr(
+        diff_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
     monkeypatch.setattr(
         diff_cmd,
         "_python_too_old",
@@ -651,4 +794,43 @@ def test_parse_fields_rejects_wrong_typed_iot():
 
 def test_parse_fields_default_document_is_v1_with_nothing_to_prune():
     assert _parse_fields(None) == (1, None, None, None, None)
+
+
+def test_parse_fields_os_boolean_and_integer_scalars_coerce_to_string():
+    """tan-cli#570 at the `_parse_fields` level, matching the CLI-level
+    fixtures above but pinning `os_value` directly rather than through the
+    `os` diff entry it feeds."""
+    assert _parse_fields({"schemaVersion": 2, "os": True})[1] == "true"
+    assert _parse_fields({"schemaVersion": 2, "os": False})[1] == "false"
+    assert _parse_fields({"schemaVersion": 2, "os": 5})[1] == "5"
+
+
+def test_parse_fields_os_list_or_dict_still_refuses():
+    for bad_os in ([1], {"a": 1}):
+        try:
+            _parse_fields({"schemaVersion": 2, "os": bad_os})
+        except ParseFailure as failure:
+            assert failure.code == "schema-violation"
+            assert "os" in failure.message
+        else:
+            raise AssertionError(f"expected a ParseFailure for os={bad_os!r}")
+
+
+def test_parse_fields_schema_version_above_u32_max_refuses():
+    """tan-cli#571: the ceiling `_parse_fields` itself must enforce, not just
+    the CLI envelope built on top of it."""
+    try:
+        _parse_fields({"schemaVersion": 4294967296, "os": "zephyr"})
+    except ParseFailure as failure:
+        assert failure.code == "schema-violation"
+        assert "schemaVersion" in failure.message
+    else:
+        raise AssertionError("expected a ParseFailure")
+
+
+def test_parse_fields_schema_version_at_u32_max_is_accepted():
+    """The boundary case: `u32::MAX` itself must still parse cleanly."""
+    effective_version, os_value, *_rest = _parse_fields({"schemaVersion": 4294967295, "os": "z"})
+    assert effective_version == 4294967295
+    assert os_value == "z"
     assert _parse_fields({}) == (1, None, None, None, None)

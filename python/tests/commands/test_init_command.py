@@ -26,7 +26,9 @@ from pathlib import Path
 
 import pytest
 import typer
+import yaml
 
+from tan.commands.init_cmd import overwrite_refusal_message
 from tan.core.scaffold import TEMPLATE_IDS
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
@@ -407,6 +409,127 @@ def test_cores_rejects_a_core_id_already_declared_by_the_scaffold(tmp_path):
     assert "a32_cluster" in issue(env)["message"]
     assert "os: off" in issue(env)["message"]  # de-quoted from the vendored `os: "off"`
     assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_rejects_a_zephyr_companion_that_is_not_the_app_core(tmp_path):
+    """tan-cli#643: `--cores m55_he:zephyr` on the default `zephyr-app`
+    template (whose app core is `m55_hp`) used to be silently accepted as a
+    COMPANION addition -- an app-less `m55_he` spliced in beside the app the
+    caller never asked to keep, plus an unrequested default RPMsg carve-out
+    -- at `ok:true`/`issues:[]`. A single-core request became a two-core
+    project on the wrong core with no signal at all. It must now refuse:
+    `splice_companion_cores` cannot give a companion an `app:`, so a `zephyr`
+    companion is always inert, and inert-but-accepted is exactly the shape
+    that misread the caller's intent here."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_he:zephyr",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.invalid-cores"
+    assert "m55_he" in issue(env)["message"]
+    assert "m55_hp" in issue(env)["message"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_rejects_a_baremetal_companion_that_is_not_the_app_core(tmp_path):
+    """tan-cli#643 follow-up: `--cores m55_he:baremetal` reaches the same
+    dead end as the `zephyr` case above by a different door.
+    `splice_companion_cores` cannot give a companion an `app:` either way, so
+    an app-less `os: baremetal` slice would plan to `ok:true`/`issues:[]`
+    here and only fail later, at `tan build`, against
+    `_enforce_loader_rules` ("os: baremetal requires `app:`") -- against a
+    board.yaml the customer never edited by hand. Refuse it at `init` time
+    like the `zephyr` case, not two commands downstream."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_he:baremetal",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.invalid-cores"
+    assert "m55_he" in issue(env)["message"]
+    assert "m55_hp" in issue(env)["message"]
+    assert "requests baremetal" in issue(env)["message"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_rejects_a_yocto_companion_on_a_cortex_m_id(tmp_path):
+    """tan-cli#645 round-3: `--cores m55_he:yocto` reaches the identical
+    #643 dead end as the `zephyr`/`baremetal` cases above by a FOURTH door.
+    `m55_he` is a Cortex-M id (per every SoM topology's `m`-prefix
+    convention); the planner's `_enforce_os_matches_core_class` refuses a
+    Cortex-M core running Yocto exactly as hard as it refuses a Cortex-A
+    core running Zephyr. Measured before this refusal existed: `tan init`
+    planned this to `ok:true`/`issues:[]`, and `tan validate` on the result
+    then raised `validate.schema-violation` ("its runtime is determined by
+    the core class ... got os: 'yocto'"). Refuse at `init` time instead."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_he:yocto",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.invalid-cores"
+    assert "m55_he" in issue(env)["message"]
+    assert "m55_hp" in issue(env)["message"]
+    assert "requests yocto" in issue(env)["message"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_still_accepts_a_yocto_companion_on_a_cortex_a_id(tmp_path):
+    """The new Cortex-M/yocto refusal must not catch the Cortex-A case that
+    was always the genuinely-honored one: `a55_cluster` (an `a`-prefixed id)
+    requesting `yocto` still splices in cleanly."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "a55_cluster:yocto",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert "  a55_cluster:\n    os: yocto\n    image: alp-image-edge\n" in board
+
+
+def test_cores_off_companion_round_trips_as_a_yaml_string(tmp_path):
+    """tan-cli#645 round-3: an unquoted `os: off` is a YAML 1.1 boolean
+    keyword (`yaml.safe_load("os: off")` -> `{"os": False}`), so a companion
+    spliced in at `:off` used to write a bool where the schema requires the
+    string `"off"` -- `ok:true` at `init`, then a
+    `validate.schema-violation` ("False is not of type 'string'") on the
+    very next command. `splice_companion_cores` now quotes it like every
+    vendored scaffold already does."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_he:off",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    board_text = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert '  m55_he:\n    os: "off"\n' in board_text
+    parsed = yaml.safe_load(board_text)
+    assert parsed["cores"]["m55_he"]["os"] == "off"
+
+
+def test_cores_still_accepts_the_app_core_itself_at_zephyr(tmp_path):
+    """The companion-zephyr refusal must not catch the app core naming
+    itself: `--cores m55_hp:zephyr` on `zephyr-app` (app core `m55_hp`) is
+    the documented no-op/reinforcement case, not a conflict."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_hp:zephyr",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert "m55_he" not in board
 
 
 def test_cores_is_ignored_on_the_from_example_path(tmp_path):
@@ -898,3 +1021,335 @@ def test_pin_sdk_still_works_when_the_project_root_itself_is_a_symlink(tmp_path)
     assert env["data"]["sdkPinned"] == sdk.as_posix()
     pointer = json.loads((real_project / ".alp" / "sdk-path").read_text(encoding="utf-8"))
     assert pointer["sdkPath"] == sdk.as_posix()
+
+
+def test_would_overwrite_names_the_files_and_offers_preview(tmp_path):
+    """"One or more files" is the one fact the user already knows. The command
+    holds the FileChange list; naming the paths and offering --preview is what
+    turns a dead end into a next step."""
+    from tan.core.scaffold import FileChange
+
+    changes = [
+        FileChange(relative_path="board.yaml", kind="update"),
+        FileChange(relative_path="src/main.c", kind="new"),
+    ]
+    message = overwrite_refusal_message(changes)
+
+    assert "board.yaml" in message
+    assert "src/main.c" not in message      # only the "update" kind collides
+    assert "--preview" in message
+    assert "--force" in message
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#494 defect 10 -- a removed cwd
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(WINDOWS, reason="Windows refuses to remove a process's own cwd")
+def test_a_preview_still_answers_from_a_cwd_that_has_been_removed(tmp_path):
+    """`Path.cwd()` was called unguarded, so a cwd deleted out from under the
+    process -- the extension re-spawning `tan` into a directory the user just
+    renamed, or a CI step clearing its scratch dir -- turned the whole command
+    into `init.internal-failure` / exit 5 with an empty envelope.
+
+    Measured against the frozen oracle on the same argv in the same removed
+    cwd: `target/debug/tan` exits 0 and emits the full 8-file preview, and so
+    does this port's own `tan clean`. The fallback is
+    `current_dir().unwrap_or_else(|_| PathBuf::from("."))`, which
+    `clean_cmd._cli_workspace_root` and `presets_cmd.resolve_project_paths`
+    already spell out; `init` -- the command that also PINS its answer into
+    `.alp/sdk-path` -- was the one that skipped it.
+
+    The child removes its OWN cwd (`subprocess` needs the directory to exist at
+    spawn time), then runs the real `python -m tan`, so this exercises the argv
+    parsing and stdout framing too, not just the helper.
+    """
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+        ),
+    }
+    proc = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import os, runpy, sys\n"
+            "os.rmdir(os.getcwd())\n"
+            "sys.argv = ['tan', 'init', '--preview', '--template', 'minimal-app',"
+            " '--format', 'json']\n"
+            "runpy.run_module('tan', run_name='__main__')\n",
+        ],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(gone), env=env,
+    )
+    body = envelope(proc)
+
+    assert proc.returncode == 0, body["issues"]
+    assert body["ok"] is True
+    assert body["issues"] == []
+    assert body["data"]["preview"] is True
+    assert [c["relativePath"] for c in body["data"]["fileChanges"]], body["data"]
+    assert not gone.exists()
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#579 -- a SoM family with no vendored scaffold tree
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
+)
+def test_an_nxp_som_is_refused_instead_of_getting_the_alif_tree(template_id, tmp_path):
+    """**tan-cli#579.** Measured on `dev` before this fix, for every one of
+    these four templates::
+
+        tan init --som E1M-NX9101 --template sensor-starter --format json
+        -> exit 0, ok true, issues []
+        -> board.yaml is the Alif tree verbatim (preset: e1m-evk,
+           chips: [tmp112], "Reads the TMP112 temperature sensor on BRD_I2C"),
+           with only `sku:`/`cores:` retargeted
+
+    tan-cli#583 had already fixed the CORE id (it emits `m33` for NXP), which
+    made the artefact MORE plausible, not less: the remaining files -- README,
+    `src/main.c`, `prj.conf`, `CMakeLists.txt` -- stayed byte-identical to the
+    Alif render, and `CMakeLists.txt` still passes `--core m55_hp` to the SDK
+    loader, contradicting the `m33` in the board.yaml beside it.
+    """
+    proc = run_tan(
+        "init", "--som", "E1M-NX9101", "--template", template_id, "--format", "json",
+        cwd=tmp_path,
+    )
+    body = envelope(proc)
+
+    assert proc.returncode == 2, body
+    assert body["ok"] is False
+    assert [i["code"] for i in body["issues"]] == ["init.som-unsupported"]
+    assert "E1M-NX9101" in body["issues"][0]["message"]
+    # The refusal must write NOTHING -- not a half-Alif project, not `.alp/`.
+    assert list(tmp_path.iterdir()) == [], "a refused init must not touch disk"
+
+
+def test_the_nxp_refusal_names_a_template_that_does_work(tmp_path):
+    """The escape hatch is real, not just named: `minimal-app` is tan's own
+    vendor-neutral template and scaffolds this SoM correctly."""
+    refused = envelope(
+        run_tan("init", "--som", "E1M-NX9101", "--template", "sensor-starter",
+                "--format", "json", cwd=tmp_path)
+    )
+    assert "minimal-app" in refused["issues"][0]["message"]
+
+    proc = run_tan(
+        "init", "--som", "E1M-NX9101", "--template", "minimal-app", "--format", "json",
+        cwd=tmp_path,
+    )
+    body = envelope(proc)
+
+    assert proc.returncode == 0, body["issues"]
+    board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert "sku: E1M-NX9101" in board
+    assert "  m33:\n" in board
+
+
+def test_the_refusal_is_a_coded_issue_in_text_mode_too(tmp_path):
+    """Text mode still gets the message on stderr and the same exit code -- no
+    traceback, no empty stdout."""
+    proc = run_tan(
+        "init", "--som", "E1M-NX9101", "--template", "sensor-starter", cwd=tmp_path
+    )
+
+    assert proc.returncode == 2
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "E1M-NX9101" in proc.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_alif_family_sku_that_is_not_the_tree_sku_still_scaffolds(tmp_path):
+    """Scope guard on the refusal: it is per-FAMILY, not per-SKU. E1M-AEN301
+    is a different Ensemble part from the tree's own E1M-AEN801, and the Alif
+    tree is genuinely its family's scaffold -- it must keep working."""
+    proc = run_tan(
+        "init", "--som", "E1M-AEN301", "--template", "sensor-starter", "--format", "json",
+        cwd=tmp_path,
+    )
+    body = envelope(proc)
+
+    assert proc.returncode == 0, body["issues"]
+    assert "sku: E1M-AEN301" in (tmp_path / "board.yaml").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# the envelope's `sdk` block (tan-cli#491 defect 5)
+# ---------------------------------------------------------------------------
+
+
+def _init_sdk_argv(sdk: Path, *extra: str) -> tuple[str, ...]:
+    return ("init", "--template", "minimal-app", "--sdk-root", str(sdk), "--format", "json", *extra)
+
+
+def test_every_init_outcome_carries_the_sdk_block(tmp_path):
+    """tan-cli#491 defect 5. `init` passed no `sdk=` to `Envelope(...)` at all,
+    so the key was ABSENT from all four outcomes -- preview, successful write,
+    overwrite-guard refusal, and every `_emit_error` -- while the frozen v0.4.1
+    oracle answers the identical argv with `sdk:{root,sourceTier}` (the `init`
+    capture in `tests/fixtures/oracle_captures/test_oracle_parity.json`:
+    `"sdk": {"root": "../rust-sdk", "sourceTier": "sdkRootFlag"}`). It was the
+    only field naming WHICH checkout a run is about to permanently pin --
+    `data.sdkPinned` is `null` on three of the four.
+
+    All four asserted as ONE case, deliberately: the defect was that they
+    DISAGREED with the oracle uniformly, and a fix to one path alone would
+    leave the same hole on the other three.
+
+    `root` is the ABSOLUTE path, not the `./sdk` typed -- `_Sdk.display`'s own
+    tan-cli#263 divergence, which this field only reports."""
+    sdk = _sdk_checkout(tmp_path / "sdk")
+    expected = {"root": sdk.as_posix(), "sourceTier": "sdkRootFlag"}
+
+    preview = envelope(run_tan(*_init_sdk_argv(sdk, "--preview"), cwd=tmp_path))
+    assert preview.get("sdk") == expected, preview
+
+    written = envelope(run_tan(*_init_sdk_argv(sdk), cwd=tmp_path))
+    assert written.get("sdk") == expected, written
+    assert written["data"]["sdkPinned"] == sdk.as_posix()
+
+    (tmp_path / "board.yaml").write_text("# local edit\n", encoding="utf-8")
+    refused = envelope(run_tan(*_init_sdk_argv(sdk), cwd=tmp_path))
+    assert refused["exitCode"] == 3, refused
+    assert [i["code"] for i in refused["issues"]] == ["init.would-overwrite"]
+    assert refused.get("sdk") == expected, refused
+
+    failed = envelope(
+        run_tan(
+            "init", "--template", "nope", "--sdk-root", str(sdk), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert [i["code"] for i in failed["issues"]] == ["init.invalid-template"]
+    assert failed.get("sdk") == expected, failed
+
+
+def test_the_sdk_block_reports_the_discovery_tier_too(tmp_path):
+    """The tier is the half `_resolve_sdk_root` was dropping. With no
+    `--sdk-root` the wide ladder answers from the child `<ws>/alp-sdk`, and
+    `sourceTier` must say `discovery` -- a block that hardcoded `sdkRootFlag`
+    would pass the case above and be wrong here.
+
+    HOME is redirected so a real `~/.alp/sdk-default` cannot answer the
+    `globalDefault` tier first and change the expected tier."""
+    _sdk_checkout(tmp_path / "alp-sdk")
+    project = tmp_path / "proj"
+    project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            "init", "--template", "minimal-app", "--preview", "--format", "json",
+            cwd=project,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["sdk"] == {
+        "root": (tmp_path / "alp-sdk").as_posix(),
+        "sourceTier": "discovery",
+    }, env
+
+
+def test_an_sdk_root_that_is_not_a_checkout_reports_no_sdk_block(tmp_path):
+    """The block is gated on the loader marker, matching
+    `build_output.resolve_project_context` ("only what core's own loader-marker
+    check accepted"). `_pin_sdk` silently declines to pin a non-checkout, so
+    reporting `sdk` here would advertise a checkout that is about to be pinned
+    and is not -- and `data.sdkPinned` proves it was not.
+
+    tan-cli#642: this is the exact repro -- an unresolvable `--sdk-root` --
+    and it must no longer be silent about it: `ok:true`/`exitCode:0` (the
+    project still scaffolds), but a coded warning names the path that failed
+    to resolve, and the project is still written with no `.alp/sdk-path`."""
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            *_init_sdk_argv(typo),
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert "sdk" not in env, env
+    assert env["data"]["sdkPinned"] is None
+    assert not (tmp_path / ".alp" / "sdk-path").exists()
+    assert [i["code"] for i in env["issues"]] == ["init.sdk-root-invalid"]
+    warning = env["issues"][0]
+    assert warning["severity"] == "warning"
+    assert str(typo) in warning["message"]
+    assert "sdkPinned" not in warning["message"]  # sanity: the path, not the field name
+
+
+def test_sdk_root_unresolved_is_silent_when_no_sdk_root_was_passed_at_all(tmp_path):
+    """`init.sdk-root-invalid` is scoped to an EXPLICIT `--sdk-root` that
+    failed to resolve -- not to the ordinary case of no `--sdk-root` at all,
+    which every other ladder tier already handles on its own terms (or not,
+    by design: `minimal-app` scaffolds with no SDK reachable at all)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            "init", "--template", "minimal-app", "--format", "json",
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert env["data"]["sdkPinned"] is None
+    assert env["issues"] == []
+
+
+def test_sdk_root_invalid_fires_for_an_sdk_root_a_bootstrap_relocation_broke(tmp_path):
+    """tan-cli#642's more realistic route: nobody types a nonsense path, but a
+    previously-valid `--sdk-root` can stop resolving between calls -- e.g.
+    once `tan bootstrap` has relocated it. Simulated here by pointing
+    `--sdk-root` at a directory that was NEVER a checkout to begin with (the
+    observable shape -- 'the marker file is not there right now' -- is
+    identical either way; `_is_sdk_checkout` cannot distinguish 'never was'
+    from 'moved out from under this run')."""
+    relocated_away = tmp_path / "sdk-relocated-elsewhere"
+    relocated_away.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            *_init_sdk_argv(relocated_away),
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert env["data"]["sdkPinned"] is None
+    codes = [i["code"] for i in env["issues"]]
+    assert "init.sdk-root-invalid" in codes, env["issues"]
+
+
+def test_an_error_before_the_sdk_resolves_leaves_the_key_absent(tmp_path):
+    """`_emit_error`'s `sdk` defaults to `None` because both handlers can be
+    reached before `_resolve_sdk_root` has run. Proven with `--project` naming
+    a path that is a FILE: `os.path.abspath` succeeds, the scaffold write
+    refuses, and the envelope must still be an envelope."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            "init", "--template", "nope", "--project", str(blocker), "--format", "json",
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert "sdk" not in env, env
+    assert [i["code"] for i in env["issues"]] == ["init.invalid-template"]

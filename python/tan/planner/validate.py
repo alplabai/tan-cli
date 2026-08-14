@@ -12,31 +12,51 @@ seam. The OS-class taxonomy comes from topology.py.
 
 from __future__ import annotations
 
+import json
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from . import libraries as _library_layer
 from .models import OrchestratorError, Slice
-from .paths import REPO
+from .paths import METADATA_ROOT, REPO
 from .topology import _core_os_choices, _cross_class_os
 
 if TYPE_CHECKING:
     from .models import BoardProject  # noqa: F401
 
 
-# Curated `libraries:` enum, mirrored from
-# metadata/schemas/board.schema.json `cores.<id>.libraries.items.enum`.
-# Used by _validate_consistency() to reject `extra_libraries:` slugs
-# that collide with the curated set (the curated library MUST be
-# declared via `libraries:` -- the escape hatch is for non-curated
-# entries only).
-_CURATED_LIBRARIES: frozenset[str] = frozenset({
-    "etl", "fmt", "nlohmann_json", "doctest", "lvgl",
-    "mbedtls", "cmsis_dsp", "littlefs", "tflite_micro",
-    "u8g2", "gfx_compat", "madgwick_ahrs", "pid", "modbus",
-    "coremqtt_sn", "libcoap", "nanopb",
-    "libwebsockets", "jsmn", "bearssl", "minimp3", "opus",
-    "catch2",
-})
+def _curated_library_names(metadata_root: Path) -> frozenset[str]:
+    """The curated `libraries:` set, derived from the real registry instead
+    of hand-listed (alp-sdk #1197 WS6-c #610 §6): every
+    metadata/libraries/<name>.yaml manifest is reachable either via its
+    legacy token in metadata/library-aliases-v1.json
+    (`aliases: {token: canonical}`) or, absent an alias entry, via its own
+    name with hyphens folded to underscores.  This is the same reachability
+    rule alp-sdk's scripts/check_library_registry.py `_registry_vs_curated`
+    cross-checks this set against, so the two can no longer drift the way the
+    old hand-maintained frozenset did (9 curated libraries silently missing).
+    Used by `_validate_consistency()` to reject `extra_libraries:` slugs
+    that collide with the curated set (the curated library MUST be
+    declared via `libraries:` -- the escape hatch is for non-curated
+    entries only).
+
+    *metadata_root* is the BOUND alp-sdk checkout's `metadata/` -- the
+    registry is a fact and facts did not relocate (ADR-0017)."""
+    libdir = metadata_root / "libraries"
+    if not libdir.is_dir():
+        return frozenset()
+    manifests = {p.stem for p in libdir.glob("*.yaml")}
+    alias_p = metadata_root / "library-aliases-v1.json"
+    aliases: dict[str, str] = {}
+    if alias_p.is_file():
+        doc = json.loads(alias_p.read_text(encoding="utf-8"))
+        aliases = doc.get("aliases") or {}
+    reverse_alias = {canonical: token for token, canonical in aliases.items()}
+    return frozenset(reverse_alias.get(m, m.replace("-", "_")) for m in manifests)
+
+
+_CURATED_LIBRARIES: frozenset[str] = _curated_library_names(METADATA_ROOT)
 
 
 def _boot_signing_supported_for_family(
@@ -90,8 +110,10 @@ def _validate_consistency(project: "BoardProject") -> None:
     2. `boot.signing.algorithm:` must be in the SoM family's supported
        set (see `_boot_signing_supported_for_family`).  Unknown
        families pass through (don't block on missing capability data).
-    3. `cores.<id>.iot.tls: true` requires `libraries:` (curated) OR
-       `extra_libraries:` (open-set) to include `mbedtls` or `bearssl`.
+    3. `cores.<id>.iot.tls: true` requires `libraries:` (curated,
+       project-wide OR `cores:`-scoped -- both channels checked via
+       `libraries.scoped_names`, #1359 follow-up) OR `extra_libraries:`
+       (open-set) to include `mbedtls` or `bearssl`.
     4. WARNING (not error): `cores.<id>.inference.default_arena_kib`
        larger than `cores.<id>.memory.heap_kib`; inference may OOM.
     5. WARNING (not error): `cores.<id>.power.sleep_mode != disabled`
@@ -202,7 +224,7 @@ def _validate_consistency(project: "BoardProject") -> None:
     for core_id, slice_ in project.cores.items():
         if not (slice_.iot or {}).get("tls"):
             continue
-        libs = set(slice_.libraries or [])
+        libs = set(_library_layer.scoped_names(project, slice_=slice_))
         extras = {e.get("name") for e in slice_.extra_libraries
                   if isinstance(e.get("name"), str)}
         if not (libs & _TLS_PROVIDERS) and not (extras & _TLS_PROVIDERS):

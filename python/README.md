@@ -12,8 +12,16 @@ name is reserved in `pyproject.toml` and has never been published, so
 PyPI job: publishing there is a separate decision nobody has taken
 (`.github/workflows/release.yml`).
 
+On a PEP 668 host (Debian/Ubuntu, including stock `ubuntu:24.04`), installing
+straight into the system interpreter refuses with
+`error: externally-managed-environment`; install into a virtual environment
+instead. Debian/Ubuntu's `python3` package does not include `venv` either --
+`sudo apt-get install -y python3-venv` first, on those hosts:
+
 ```bash
 git clone https://github.com/alplabai/tan-cli && cd tan-cli
+python3 -m venv .venv && source .venv/bin/activate   # Linux / macOS
+py -m venv .venv && .venv\Scripts\Activate.ps1        # Windows
 python3 -m pip install ./python     # Linux / macOS
 py -m pip install ./python          # Windows
 ```

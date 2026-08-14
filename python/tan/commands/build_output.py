@@ -112,7 +112,7 @@ def resolve_project_context(
     # envelope's `sdk` must not: `resolve_cli_project_context` only records what
     # core's own loader-marker check accepted.
     sdk = (
-        SdkInfo(to_posix(active.path), active.tier)
+        SdkInfo.from_resolution(to_posix(active.path), active)
         if active.path is not None and _has_loader(active.path)
         else None
     )

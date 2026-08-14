@@ -56,6 +56,46 @@ def is_sdk_root(path: Path | str) -> bool:
         return False
 
 
+def rejected_sdk_root_message(sdk_root: str, consequence: str) -> str:
+    """The `<command>.sdk-root-unresolved` message for a `--sdk-root` the
+    loader-marker check REJECTED, naming the value the caller typed.
+
+    `--sdk-root` is TERMINAL (I-31), so a path without `scripts/alp_project.py`
+    resolves to nothing rather than falling through to a lower tier. Five
+    commands (`generate`, `model build`, `new-som`, `pinmux`, `validate`) still
+    dropped the rejected path on the floor, and four of those (all but
+    `pinmux`) answered with the SAME string they use when no flag was given at
+    all -- "Use --sdk-root, place the project near an alp-sdk checkout, ...",
+    i.e. recommending the flag the caller had just passed -- with the failing
+    value nowhere in the envelope and nowhere in the stderr text either.
+    `pinmux` used a message of its own with the same gap (tan-cli#497 defect
+    7). A user who typos `--sdk-root ~/alp-sdk-typo` was told to pass
+    `--sdk-root`, and could not see WHICH path had been rejected or why, on the
+    one surface that knew both.
+
+    `consequence` is the caller's own "and so this is what you got instead"
+    clause, because it differs per command (no pinmux table read, nothing
+    generated, nothing validated) and is the half a reader acts on. The
+    remediation clause is deliberately NOT carried into it: naming the rejected
+    path IS the remediation here.
+
+    The no-flag branch is deliberately left alone at every call site. There is
+    no typed value to name on it, and for `presets` its exact string is
+    byte-pinned by the `presets-no-sdk` golden envelope.
+
+    NOTE FOR WHOEVER MERGES SECOND: tan-cli#620 adds a same-named helper to
+    `tan/commands/sdk_cmd.py` for `examples`/`presets`, with this same body.
+    The two must be collapsed onto this one -- `tan.core` imports no command
+    module, so this is the direction that cannot cycle (see the module
+    docstring), and `SDK_MARKER` already lives here.
+    """
+    marker = "/".join(SDK_MARKER)
+    return (
+        f'alp-sdk root is unresolved: --sdk-root "{sdk_root}" is not an alp-sdk '
+        f"checkout ({marker} not found under it). {consequence}"
+    )
+
+
 def yaml_kind(value: Any) -> str:
     """A short YAML-ish type name for an error message -- not a claim of
     matching serde's exact wording (see `diff_cmd`'s module docstring for the

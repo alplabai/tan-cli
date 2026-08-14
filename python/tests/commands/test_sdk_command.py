@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import typer
 
 from tan.commands.sdk_cmd import (
     _fetch_releases,
@@ -486,7 +487,11 @@ def test_a_dead_network_returns_a_message_never_an_exception(
     def boom(*_args, **_kwargs):
         raise raised
 
-    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.urlopen", boom)
+    # `OpenerDirector.open`, not `urlopen`: tan-cli#497 builds an EXPLICIT
+    # opener (its own `ProxyHandler`, because urllib's env-derived one ignores
+    # `ALL_PROXY` on an https request), so the module-level `urlopen` is no
+    # longer the call this path makes.
+    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.OpenerDirector.open", boom)
     releases, error = _fetch_releases()
     assert releases == []
     assert error is not None and expect_in_message in error
@@ -501,7 +506,7 @@ def test_the_tls_hint_does_not_assert_a_proxy_with_no_evidence_for_one():
     network that also hides a REAL proxy misconfiguration by sending the one
     population likely to have one down the wrong path too. This message must
     name the alternative instead of asserting a single cause."""
-    message = describe_network_error("certificate verify failed")
+    message = describe_network_error("certificate verify failed", proxy_used=False)
     assert "usually" not in message.lower()
     assert "corporate CA" in message
     assert "trust" in message.lower() and ("load" in message.lower() or "ca" in message.lower())
@@ -732,3 +737,328 @@ def test_the_notes_cell_is_still_truncated_to_sixty_characters():
     lines = format_release_table([_release("v1.0.0", "x" * 200)])
     assert "x" * 60 in lines[1]
     assert "x" * 61 not in lines[1]
+
+
+# --------------------------------------------------------------------------
+# The shared wrap seam (`tan.core.text_layout.wrap_lines` via
+# `tan.env.wrap_width`), adopted here after `doctor` (PR #480) and `explain`.
+# `wrap_lines` is pure logic and lives (and is unit-tested generically) in
+# `tan.core.text_layout` -- `test_text_layout.py` covers the mechanism.
+# What is worth asserting here is composition: `sdk current`'s own
+# assembled report going through it correctly, on a real terminal and a
+# piped one.
+#
+# There is no per-line exemption any more (an earlier version of this seam
+# kept `  path`/`  version`/`  state`/issue rows unwrapped via a
+# `_RECORD_LINE_PREFIXES` classification table, on the theory that a piped
+# reader might grep them) -- that reader can never observe a wrapped line in
+# the first place: `wrap_width()` returns a width only when stderr IS a
+# tty, and any pipe that could grep these lines makes stderr not a tty,
+# which already returns `None` and disables wrapping wholesale (see
+# `test_current_text_mode_does_not_wrap_off_a_terminal` below).
+# --------------------------------------------------------------------------
+
+
+def test_wrap_lines_wraps_the_no_sdk_next_steps_line():
+    """The measured baseline this task's brief names verbatim: bare `tan sdk
+    current`'s "To get started, ..." line is 137 columns unwrapped."""
+    from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS  # noqa: PLC0415
+    from tan.core.text_layout import wrap_lines  # noqa: PLC0415
+
+    lines = ["No active SDK configured for this workspace.", f"To get started, {NO_SDK_NEXT_STEPS}."]
+    assert len(lines[1]) == 137
+
+    wrapped = wrap_lines(lines, 100)
+    assert not any(len(line) > 100 for line in wrapped)
+    # Reassembled, the wrapped text is still the exact original sentence.
+    # `.strip()` peels off the two-space hanging indent `wrap_lines` puts on
+    # a continuation line (item 5's fix) before rejoining with a single
+    # space -- not a blanket `.replace("  ", " ")`, which would also (and
+    # wrongly) collapse a legitimate double space inside the body itself,
+    # were there one (there is not, in `NO_SDK_NEXT_STEPS` -- verified).
+    assert " ".join(line.strip() for line in wrapped) == " ".join(lines)
+
+
+def test_wrap_lines_now_wraps_the_fixed_fields_too():
+    """Contract change from this task: `  path`/`  version`/`  state` are no
+    longer exempt from wrapping (see the section comment above) -- on a
+    real terminal narrower than the line, this now wraps like any other,
+    with `break_long_words=False` still keeping the path token itself
+    intact on its own line rather than mangled mid-character."""
+    from tan.commands.sdk_cmd import format_readiness_block  # noqa: PLC0415
+    from tan.core.text_layout import wrap_lines  # noqa: PLC0415
+
+    report = {
+        "sdkPath": "/very/long/nested/checkout/path/" + "segment/" * 10 + "alp-sdk",
+        "version": "0.14.0",
+        "state": "ready",
+        "issues": [],
+    }
+    lines = format_readiness_block("Active SDK", report)
+    wrapped = wrap_lines(lines, 60)
+    assert wrapped != lines, "the long path line must actually wrap now"
+    assert any(report["sdkPath"] in line for line in wrapped), (
+        "the path token itself must survive whole"
+    )
+
+
+def test_wrap_lines_wraps_an_issue_sentence_but_keeps_the_quoted_path_whole():
+    from tan.commands.sdk_cmd import format_readiness_block  # noqa: PLC0415
+    from tan.core.text_layout import wrap_lines  # noqa: PLC0415
+
+    long_path = "/nested/" + "segment/" * 8 + "checkout"
+    report = {
+        "sdkPath": long_path,
+        "version": None,
+        "state": "missing",
+        "issues": [f'scripts/alp_project.py not found — "{long_path}" is not a valid Alp SDK root.'],
+    }
+    lines = format_readiness_block("Active SDK", report)
+    wrapped = wrap_lines(lines, 60)
+    assert not any(len(line) > 60 for line in wrapped if long_path not in line)
+    assert any(long_path in line for line in wrapped), "the path token itself must survive whole"
+
+
+def test_current_text_mode_wraps_on_a_real_terminal(monkeypatch, capsys, tmp_path, isolated_home):
+    """End to end through `_run_current` itself (not just the pure helper):
+    forces `sys.stderr.isatty()` True and a fixed terminal width, same
+    technique `test_size_command.py`'s own `NO_COLOR` test uses."""
+    import shutil
+
+    from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, _run_current  # noqa: PLC0415
+
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    with pytest.raises(typer.Exit):
+        _run_current(json_mode=False, sdk_root=None, workspace_root=workspace)
+
+    err = capsys.readouterr().err
+    lines = err.splitlines()
+    assert not any(len(line) > 100 for line in lines)
+    # The advice sentence survived, reassembled across its wrapped lines.
+    assert NO_SDK_NEXT_STEPS.split(",")[0] in " ".join(lines)
+
+
+def test_current_text_mode_does_not_wrap_off_a_terminal(tmp_path, isolated_home):
+    """`isolated_home`'s `run_tan` subprocess pipes stderr, which is never a
+    tty -- the 137-column line from the task's own measured baseline must
+    come back exactly as before."""
+    proc = run_tan("sdk", "current", cwd=tmp_path)
+    assert proc.returncode == 0
+    long_line = (
+        "To get started, get an alp-sdk checkout "
+        "(`git clone https://github.com/alplabai/alp-sdk`), then point tan at "
+        "it with `--sdk-root <path>`."
+    )
+    assert long_line in proc.stderr.splitlines()
+    assert len(long_line) == 137
+
+
+# ── tan-cli#497 defect 1: the quickstart child checkout ──────────────────────
+
+
+def test_current_sees_the_child_checkout_the_acting_commands_resolve(tmp_path, isolated_home):
+    """tan-cli#497 defect 1. `resolve_sdk_tiered` alone has NO candidate for a
+    CHILD `<ws>/alp-sdk` -- the README Quickstart cwd, straight after
+    `git clone https://github.com/alplabai/alp-sdk`.
+
+    Measured there before the fix: `sdkPath: null`, `sourceTier: "none"`, no
+    `sdk` key, `issues: []`, and the text telling someone standing beside a
+    checkout to go clone one -- while `tan doctor` in the SAME cwd reported that
+    checkout at `sourceTier: "discovery"`. `sdk current` is the one command
+    whose entire job is "which SDK am I on?", so it must answer what
+    `build`/`doctor`/`validate` would act on. Asserted AGAINST
+    `resolve_sdk_root_ladder` itself rather than a hardcoded tier, so the two
+    cannot drift apart again."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    child = make_sdk_root(workspace / "alp-sdk", version="0.14.0")
+
+    from tan.commands.build_cmd import resolve_sdk_root_ladder
+
+    expected = resolve_sdk_root_ladder(None, workspace)
+    assert expected.path is not None and Path(expected.path) == child
+
+    doc = envelope(run_tan("sdk", "current", "--format", "json", cwd=workspace))
+    assert doc["data"]["sdkPath"] == str(child)
+    assert doc["data"]["sourceTier"] == expected.tier == "discovery"
+    # POSIX separators, not the host's: `SdkInfo.as_dict` normalises `sdk.root`
+    # unconditionally (mirrors `sdk_report.rs`'s `root.replace('\\', "/")`), so
+    # `data.sdkPath` and `sdk.root` deliberately differ in separator style on
+    # Windows. Asserting `str(child)` here would pin the platform-native form
+    # and bake back the bug `SdkInfo.as_dict`'s own comment names.
+    assert doc["sdk"] == {"root": str(child).replace("\\", "/"), "sourceTier": "discovery"}
+    assert doc["data"]["readiness"]["version"] == "0.14.0"
+    # The "go clone one" text is exactly what must NOT be printed here.
+    text = run_tan("sdk", "current", cwd=workspace)
+    assert "git clone" not in text.stderr + text.stdout
+
+
+def test_current_still_answers_none_when_there_really_is_no_checkout(tmp_path, isolated_home):
+    """The other half: the fall-through tail may only ADD an answer where there
+    was none. An empty workspace must still report `sourceTier: "none"` with no
+    `sdk` key -- the shape the `sdk-current-no-sdk` golden pins."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    doc = envelope(run_tan("sdk", "current", "--format", "json", cwd=workspace))
+    assert doc["data"]["sdkPath"] is None
+    assert doc["data"]["sourceTier"] == "none"
+    assert "sdk" not in doc
+
+
+# ── tan-cli#497 defect 8: ALL_PROXY must actually steer the request ──────────
+
+
+def test_all_proxy_is_installed_on_the_opener_urllib_would_have_ignored(monkeypatch):
+    """tan-cli#497 defect 8. `urlopen` derives its proxies from
+    `getproxies_environment()`, which maps `ALL_PROXY` to the key `all`;
+    `ProxyHandler` then installs an `all_open` method that `OpenerDirector._open`
+    -- dispatching on `req.type`, i.e. `"https"` -- never calls.
+
+    Measured live against the GitHub Releases API before the fix:
+    `HTTPS_PROXY` at a closed port failed as it should (rc 1,
+    `[Errno 111] Connection refused`), while `ALL_PROXY` at the SAME closed port
+    connected DIRECTLY and returned rc 0 with 13 releases -- the mandated proxy
+    silently bypassed. This asserts the handler tan builds itself carries the
+    value under a key an `https://` request actually dispatches on."""
+    import urllib.request
+
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:45999")
+
+    seen = {}
+    real_build_opener = urllib.request.build_opener
+
+    def capture(*handlers):
+        for handler in handlers:
+            if isinstance(handler, urllib.request.ProxyHandler):
+                seen["proxies"] = dict(handler.proxies)
+        return real_build_opener(*handlers)
+
+    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.build_opener", capture)
+    monkeypatch.setattr(
+        "tan.commands.sdk_cmd.urllib.request.OpenerDirector.open",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("connect: refused")),
+    )
+
+    releases, error = _fetch_releases()
+    assert releases == []
+    assert seen["proxies"] == {"http": "http://127.0.0.1:45999",
+                               "https": "http://127.0.0.1:45999"}
+    # A proxy WAS used, so the connect-failure hint is earned here.
+    assert error is not None and "ALL_PROXY/HTTPS_PROXY/NO_PROXY" in error
+
+
+def test_no_proxy_sends_the_request_direct_and_stops_blaming_the_proxy(monkeypatch):
+    """The second wrong-blame case. `_proxy_configured()` was a bare env scan,
+    so a `NO_PROXY` that correctly exempts the target still had the failure of
+    the resulting DIRECT connection hinted at a proxy that had no part in it.
+    Measured: `HTTPS_PROXY` at a closed port with `NO_PROXY=api.github.com`
+    returns rc 0 and the release list, so the proxy really is out of the
+    picture."""
+    import urllib.request
+
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:45999")
+    monkeypatch.setenv("NO_PROXY", "api.github.com")
+
+    seen = {}
+    real_build_opener = urllib.request.build_opener
+
+    def capture(*handlers):
+        for handler in handlers:
+            if isinstance(handler, urllib.request.ProxyHandler):
+                seen["proxies"] = dict(handler.proxies)
+        return real_build_opener(*handlers)
+
+    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.build_opener", capture)
+    monkeypatch.setattr(
+        "tan.commands.sdk_cmd.urllib.request.OpenerDirector.open",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("connect: refused")),
+    )
+
+    releases, error = _fetch_releases()
+    assert releases == []
+    # DIRECT: an EMPTY handler, not urllib's env-derived fallback.
+    assert seen["proxies"] == {}
+    assert error is not None and "ALL_PROXY/HTTPS_PROXY/NO_PROXY" not in error
+
+
+def test_a_socks_proxy_is_refused_rather_than_silently_bypassed(monkeypatch):
+    """urllib carries no SOCKS transport where the oracle's ureq does (measured:
+    the oracle dialled a `socks5://` `ALL_PROXY`). Falling back to a direct
+    connection would silently circumvent the only egress a locked-down host
+    has -- so this refuses, naming the variable, the scheme and the two ways
+    out. No network call is made at all, which is what the un-patched opener
+    here proves."""
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+
+    releases, error = _fetch_releases()
+    assert releases == []
+    assert error == (
+        "Alp SDK: ALL_PROXY names a socks5:// proxy, which this build of tan "
+        "cannot route through (its HTTP client has no socks5 transport). Unset "
+        "ALL_PROXY, or point it at an http:// or https:// proxy, or add "
+        "api.github.com to NO_PROXY to allow a direct connection."
+    )
+
+
+def test_the_socks_refusal_names_the_variable_that_actually_won(monkeypatch):
+    """Review round on #620. The first cut said "Set `HTTPS_PROXY` to an http://
+    or https:// proxy" -- which CANNOT take effect, because
+    `HTTPS_PROXY_ENV_VARS` puts `ALL_PROXY` ahead of `HTTPS_PROXY` and the
+    selection never reaches it. Measured:
+    `ALL_PROXY=socks5://127.0.0.1:45997 HTTPS_PROXY=http://127.0.0.1:45996
+    tan sdk list --online` gave the identical refusal at rc 1 with NEITHER
+    socket touched.
+
+    That is the same self-defeating-remediation class as tan-cli#497 defect 7,
+    which this branch fixes two commands away -- so the remediation must name
+    the variable the selection ACTUALLY read, and offer unsetting it."""
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:45997")
+    # The variable the reader would otherwise be sent to set, still losing.
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:45996")
+
+    _, error = _fetch_releases()
+    assert error is not None
+    assert "Unset ALL_PROXY, or point it at an http:// or https:// proxy" in error
+    # Naming the LOSING variable as the fix is what made the old text unusable.
+    assert "Set HTTPS_PROXY" not in error
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "`os.environ` is case-INSENSITIVE on Windows, so `https_proxy` and "
+        "`HTTPS_PROXY` are the same variable there -- `_proxy_variable_name` "
+        "still finds a value under `HTTPS_PROXY` first (it precedes `https_proxy` "
+        "in HTTPS_PROXY_ENV_VARS) and correctly names IT, so the case actually "
+        "exercised is 'which of two case-insensitive aliases for the ONE set "
+        "variable does the message print', not 'which variable won' -- a "
+        "question this platform cannot ask. Coverage for the real feature (the "
+        "message names whichever env var actually won) stays load-bearing on "
+        "POSIX, where the two spellings are genuinely distinct variables."
+    ),
+)
+def test_the_socks_refusal_names_https_proxy_when_that_is_what_won(monkeypatch):
+    """The other half: the variable is not hardcoded. With only `https_proxy`
+    set, IT is what the selection read, so it is what the remediation must
+    name -- telling this reader to unset `ALL_PROXY` would be the same
+    unusable instruction pointed the other way."""
+    for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("https_proxy", "socks5h://127.0.0.1:45997")
+
+    _, error = _fetch_releases()
+    assert error is not None
+    assert error.startswith("Alp SDK: https_proxy names a socks5h:// proxy")
+    assert "Unset https_proxy, or point it at an http:// or https:// proxy" in error

@@ -17,6 +17,7 @@ file (I-26).
 from __future__ import annotations
 
 import json
+import math
 import re
 import struct
 from dataclasses import dataclass, field
@@ -231,6 +232,57 @@ def budget_note_only(note: str) -> MemoryBudget:
     return MemoryBudget(None, None, note)
 
 
+def _saturating_u64(value: float) -> int:
+    """Rust's `as u64` cast for a FINITE input -- truncate toward zero, 0 at or
+    below zero, `u64::MAX` above it -- and 0, never a number, for a NON-FINITE
+    one.
+
+    That cast used to sit outside its caller's `try` (tan-cli#499 defect 8), so
+    an infinite `mram_mb` / `soc_flash_mb` / `tcm_kb` / `sram_banks_kb` entry --
+    which `json.loads` produces for an `Infinity` literal or an overflowing
+    `1e400` in a SoC JSON -- collapsed the whole `tan size` run into
+    `size.internal-failure` at exit 5, with `data.slices` EMPTY (every other
+    slice's measurement discarded) and `project` null. Python's `int()` refuses
+    `inf` (`OverflowError: cannot convert float infinity to integer`) where
+    Rust's cast does not, so the two cases have to be separated by hand.
+
+    **Where the boundary sits, and why it is NOT "saturate everything"
+    (tan-cli#499 REVIEW).** The first version of this fix answered `+inf` with
+    `u64::MAX`, arguing continuity across the f64 range. Measured, that
+    manufactures a confidently WRONG budget at `ok:true`, which is the exact
+    failure class this issue exists to close:
+
+        # SoC JSON with "mram_mb": 1e400
+        this branch, before:  exit 0 ok:true  flash.total 18446744073709551615
+        tan 0.4.1:            exit 0 ok:true  flash.total null,
+                              budget_note "unreadable SoM preset for E1M-AEN801"
+
+    16 EiB of flash, stated as fact, on a manifest a customer could then read as
+    "plenty of room". So the saturation is BOUNDED to the inputs where the
+    oracle demonstrably saturates -- the finite ones:
+
+        # SoC JSON with "mram_mb": 1e300   (finite; serde_json reads it)
+        this branch:  exit 0  flash.total 18446744073709551615
+        tan 0.4.1:    exit 0  flash.total 18446744073709551615   <- byte-identical
+
+    A NON-finite value is not a point on that curve: serde_json refuses `1e400`
+    / `Infinity` / `NaN` outright, so there is no oracle answer to be continuous
+    WITH. Those join the negative/NaN arm at 0 -- this module's own "unresolved"
+    value (`_region_resolved` treats 0 as unresolved, `classify` skips it,
+    `budget_fully_known()` is False for it), so the envelope reports `pct: null`
+    and no budget rather than a fabricated maximum. A residual divergence from
+    the oracle stays (`total: 0` vs `total: null` plus a note); it is upstream
+    of this file and NOT fixed here -- see the PR's "Not fixed" section.
+    """
+    if value != value or value <= 0:  # NaN, -inf, and every non-positive
+        return 0
+    if value == float("inf"):
+        # NOT `_U64_MAX`: see the docstring. An input the oracle's own reader
+        # refuses is answered "no budget", not "the largest budget there is".
+        return 0
+    return min(int(value), _U64_MAX)
+
+
 def _mb_to_bytes(mb: float) -> int:
     """Megabytes -> bytes with Rust's `as u64` cast semantics: truncate toward
     zero, and saturate a negative or NaN input to 0. A `Some(0)` total counts as
@@ -240,9 +292,7 @@ def _mb_to_bytes(mb: float) -> int:
         value = float(mb) * 1024.0 * 1024.0
     except (TypeError, ValueError, OverflowError):
         return 0
-    if value != value or value <= 0:  # NaN or non-positive
-        return 0
-    return min(int(value), _U64_MAX)
+    return _saturating_u64(value)
 
 
 def _kib_to_bytes(kib: float) -> int:
@@ -250,15 +300,24 @@ def _kib_to_bytes(kib: float) -> int:
         value = float(kib) * 1024.0
     except (TypeError, ValueError, OverflowError):
         return 0
-    if value != value or value <= 0:
-        return 0
-    return min(int(value), _U64_MAX)
+    return _saturating_u64(value)
 
 
 def sram_banks(variant: dict) -> list[tuple[str, float]]:
     """A SoC-JSON variant's `sram_banks_kb` as ordered `(name, kib)` pairs,
-    dropping non-numeric entries. Insertion order is the wire order, so the
-    first-matching-bank rule in [`resolve_budget`] is deterministic."""
+    dropping non-numeric and unrepresentable entries. Insertion order is the
+    wire order, so the first-matching-bank rule in [`resolve_budget`] is
+    deterministic.
+
+    A JSON integer too large for an f64 is DROPPED, not crashed on
+    (tan-cli#499 defect 8): `float(10**400)` raises `OverflowError: int too
+    large to convert to float`, which took the whole `tan size` run to
+    `size.internal-failure` at exit 5. Dropping matches what `_mb_to_bytes`
+    already does with the identical value -- its own `float()` raises inside a
+    `try` and it returns the unresolved 0 -- so both regions answer "no budget"
+    for an unrepresentable integer rather than one crashing and one not. A
+    non-finite FLOAT is passed through and reaches the same answer one level
+    down: [`_saturating_u64`] resolves it to 0, not to `u64::MAX`."""
     raw = variant.get("sram_banks_kb")
     if not isinstance(raw, dict):
         return []
@@ -266,7 +325,11 @@ def sram_banks(variant: dict) -> list[tuple[str, float]]:
     for name, value in raw.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
-        out.append((str(name), float(value)))
+        try:
+            kib = float(value)
+        except OverflowError:
+            continue
+        out.append((str(name), kib))
     return out
 
 
@@ -291,22 +354,81 @@ def resolve_variant(
     return None
 
 
+def slot0_bytes_for_core(
+    core_id: str, memory_map: list[dict] | None
+) -> int | None:
+    """This core's OWN slot0 window from the SoM preset's `memory_map`, in
+    bytes -- `None` when the preset declares none for it (tan-cli#747).
+
+    Since alp-sdk#1445/#1069 a dual-M55 AEN SoM gives each core a disjoint
+    slot0 (`he_slot0` at 0x80010000, `hp_slot0` at 0x802b0000, 2688 KiB
+    each), and only that window is linkable by that core. The whole-MRAM
+    figure is the sum of every partition INCLUDING the other core's, so it
+    is nobody's budget.
+
+    Matched on the `<role>_slot0` name, role being the core id's last
+    segment -- the same `core_id.split("_")[-1]` the SDK's own
+    `gen_zephyr_board` uses to pick a role's window, not a second spelling
+    that could drift from it. `accessible_from`, when the entry declares
+    one, must name this core: a window some other core owns is not a budget
+    for this one, and silently accepting it would reintroduce exactly the
+    cross-core confusion #1069 exists to prevent.
+    """
+    role = core_id.rsplit("_", 1)[-1]
+    if not role:
+        return None
+    want = f"{role}_slot0"
+    for entry in memory_map or []:
+        if not isinstance(entry, dict) or entry.get("name") != want:
+            continue
+        accessible = entry.get("accessible_from")
+        if isinstance(accessible, list) and accessible and core_id not in accessible:
+            continue
+        size_kib = entry.get("size_kib")
+        # bool is an int in Python; a `size_kib: true` is malformed, not 1 KiB.
+        if isinstance(size_kib, bool) or not isinstance(size_kib, (int, float)):
+            continue
+        if size_kib <= 0 or not math.isfinite(float(size_kib)):
+            continue
+        return int(size_kib) * 1024
+    return None
+
+
 def resolve_budget(
     core_id: str,
     mram_mb: float | None,
     soc_flash_mb: float | None,
     sram_banks_kb: list[tuple[str, float]],
     soc_cores: list[tuple[str, float | None]],
+    memory_map: list[dict] | None = None,
 ) -> MemoryBudget:
     """The FLASH/RAM budget for one core, from values a caller already read out
-    of the SoM preset + SoC JSON. FLASH: variant `mram_mb`, else SoC
+    of the SoM preset + SoC JSON. FLASH: this core's own `<role>_slot0` window
+    from the SoM `memory_map`, else variant `mram_mb`, else SoC
     `soc_flash_mb` (with a note). RAM: the `*_DTCM` bank whose name contains the
     core token, else the core's `tcm_kb` (with a note). Anything unresolvable
-    stays `None` -- the caller renders `unknown`, never a guessed number."""
+    stays `None` -- the caller renders `unknown`, never a guessed number.
+
+    FLASH prefers the per-core window for the reason the RAM half below has
+    always resolved per core: a shared total is not a budget. Measured before
+    the fix, `E1M-AEN801` reported BOTH M55s against 5767168 B (the whole
+    5.5 MB MRAM) while each image links into 2752512 B, so utilisation read
+    2.0% where the linker said 4.22%, and `over_budget` could never fire --
+    an image would have to exceed the whole part, which it cannot, because
+    mcuboot + both slot0s + reserved + storage + atoc already fill it
+    (tan-cli#747).
+
+    `memory_map` defaults to `None` so every existing caller keeps today's
+    behaviour exactly; a SoM that declares no per-role window (single-M55
+    parts, non-AEN families, presets predating alp-sdk#1445) still falls
+    through to `mram_mb` with no note, byte-identical to before."""
     notes: list[str] = []
 
-    if mram_mb is not None:
-        flash_total: int | None = _mb_to_bytes(mram_mb)
+    slot0_total = slot0_bytes_for_core(core_id, memory_map)
+    if slot0_total is not None:
+        flash_total: int | None = slot0_total
+    elif mram_mb is not None:
+        flash_total = _mb_to_bytes(mram_mb)
     elif soc_flash_mb is not None:
         notes.append("flash=soc_flash_mb")
         flash_total = _mb_to_bytes(soc_flash_mb)

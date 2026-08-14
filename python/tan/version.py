@@ -37,4 +37,13 @@
 # `contract/issue-codes.json` (`doctor.boardYaml`, `support-
 # bundle.gdbserverBackend`, ...) -- all `"reserved"`/`"consumer": "none"`, so
 # the rename is free. See CHANGELOG.md's `## [0.5.1]` entry.
-TAN_VERSION = "0.5.1"
+#
+# v0.5.1 published 2026-08-05, so this tree moves on the same day: leaving
+# TAN_VERSION at "0.5.1" is the exact state `--not-released` exists to refuse,
+# and it turned `version-identity` red on every open PR the moment that tag
+# appeared. `0.5.2-rc1.dev0` is the spelling that check prescribes -- a `.devN`
+# tail on the NEXT pre-release -- and it promises neither a 0.5.2 nor an rc1:
+# PEP 440 reads `X.devN` as "before X", so a 0.6.0 next release still sorts
+# above it. Its CHANGELOG home is `## [0.5.2] — Unreleased`, because a
+# development version documents the release it heads for, never itself.
+TAN_VERSION = "0.6.0-rc1"

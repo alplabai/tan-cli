@@ -48,23 +48,111 @@ NOT PORTED, and honest about it: `--quiet` (Rust suppresses the `- <detail>`
 lines with it). The Python port carries no `--quiet` on any command, and one
 command-local copy would be a worse surface than a clean refusal -- passing it
 is a Click usage error naming the unknown flag.
+
+**`--code` is a THIRD selector, and the one mode that reads a checkout**
+(ADR-0020 end-state B). `tan explain --code ALP-B003` resolves an
+alp-sdk diagnostic / `ALP_ERR_*` code out of the bound checkout's
+`metadata/error-catalog.json` -- the lookup half of alp-sdk's
+`scripts/alp_cli/explain.py`, whose retirement this enables. A FLAG on this
+verb, not a new command: alp-sdk spells it `alp explain <code>` too, so the
+muscle memory transfers and the ambiguity guard already here extends to it.
+Not the positional, which already means TEMPLATE -- sniffing "does this
+argument look like a code?" is exactly the ambiguous-input class
+`explain.positional-template-conflict` refuses.
+
+The other three paths stay BYTE-IDENTICAL, deliberately: `--code` adds no
+line to the overview and no key to `data.available` (the `explain-overview`
+golden pins both, and `--help` already lists the flag), and
+`data.diagnostic`/`data.suggestions` appear on the `--code` path ALONE -- the
+extension reads a `data` key it does not find with a `?? []` fallback, so an
+absent key is the honest shape for a mode that did not run. I-32 therefore
+still holds where it was measured to matter: with no alp-sdk anywhere,
+`tan init`'s templates are still explainable. With no checkout resolvable
+`--code` REFUSES (`explain.sdk-root-unresolved`) rather than answering from a
+vendored copy -- the code list is alp-sdk's fact (I-26/ADR-0017), and a baked
+copy would answer confidently out of date.
+
+DIVERGENCE from `alp_cli/explain.py`, measured by running both against the same
+alp-sdk `origin/dev` worktree, and each one deliberate
+(`faultdecode_cmd.py:14-26` is the precedent for documenting it here):
+
+* **Field VALUES are verbatim; the frame around them is tan's.** `explain.py`
+  writes `<CODE>  (<kind>)` with two spaces then `  <label>: <value>` per
+  field; this writes `explain: <CODE> (<kind>)` then `- <label>: <value>`,
+  because that is the ONE shape every `explain` selector renders in and a
+  per-mode renderer would make two commands out of one. Same fields, same
+  order, same omissions, same text.
+* **stderr, not stdout.** `explain.py` `click.echo`s to stdout; every `tan`
+  command's human text goes to stderr because stdout is the envelope channel.
+* **`--format json` wraps; `explain.py --json` does not.** The raw entry
+  `explain.py` printed as its whole document is `data.diagnostic` here,
+  byte-for-byte, so the payload survives the wrapping intact -- the same
+  divergence, for the same reason, as `tan faultdecode --format json`.
+* **NOT PORTED: `--no-color`.** `explain.py` paints the header cyan and each
+  label yellow; `tan explain` has never coloured any selector's output, so
+  there is nothing for a `--no-color` to turn off. The flag still PARSES (it
+  is one of the ten global flags) and is simply inert here, as on every other
+  `tan` command that emits no colour.
+* **The `doc:` value stays repo-relative** (`docs/diagnostics/ALP-B003.md`),
+  exactly as the catalogue holds it. Joining it onto the resolved checkout
+  would be a value alp-sdk never wrote; `sdk.root` in the same envelope is
+  what a consumer joins it against.
+* **The no-near-miss sentence is tan's own wording, not `explain.py`'s.**
+  `explain.py` prints ``unknown code 'ZZZ' -- run `alp explain` against a
+  code from metadata/error-catalog.json`` -- its own binary name and
+  subcommand, which cannot be repeated verbatim from a `tan`-only install;
+  this prints `` explain: unknown code 'ZZZ' -- pass a code from the SDK's
+  metadata/error-catalog.json.`` instead (`_unknown_code_line`). Only the
+  WITH-SUGGESTIONS miss sentence is verbatim from `explain.py`.
+* **The whole JSON MISS document, not just the hit path.** `alp_cli explain
+  <bad> --json` prints `{"error": "unknown-code", "code": ..., "suggestions":
+  [...]}` as its ENTIRE stdout document for a miss. `tan explain --code <bad>
+  --format json` wraps instead, the same as the hit path: `data.diagnostic`
+  is `null` (never the bare `"error"` shape), `data.suggestions` carries the
+  shortlist, and the reason lives in `issues[0]` (`explain.code-unknown`) --
+  not folded into `data` the way `explain.py`'s single-document miss is.
 """
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import typer
 
+from tan.core import error_catalog
 from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import TemplateDataError, vendored_library_names_for
-from tan.envelope import Envelope, Issue, Project, emit
+from tan.core.text_layout import wrap_lines
+from tan.env import wrap_width
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
+
+#: An unrecognised `[TEMPLATE]`/`--template` value shaped like a diagnostic
+#: code (`ALP-B003`, `ALP_ERR_NO_BACKEND`) rather than a template id. The
+#: overview deliberately never lists `--code` (it would break the golden), so
+#: `--help` was the ONLY way to discover it -- a caller who typed the
+#: alp-sdk spelling minus the flag got "unknown template" with no pointer at
+#: the flag that would have worked. Anchored (not a bare `search`) so an id
+#: that merely CONTAINS one of these shapes mid-string doesn't false-positive.
+_LOOKS_LIKE_A_DIAGNOSTIC_CODE = re.compile(r"^(ALP-B\d+|ALP_ERR_.+)$", re.IGNORECASE)
+
+
+def _code_hint(value: str) -> str:
+    """The extra sentence appended to `explain.template-unknown`'s text line
+    when `value` is shaped like a diagnostic code -- empty string otherwise,
+    so every other rejected template keeps its existing, golden-pinned
+    wording verbatim."""
+    if _LOOKS_LIKE_A_DIAGNOSTIC_CODE.match(value):
+        return f" Looking for a diagnostic code? Use --code {value} instead."
+    return ""
 
 
 @dataclass(frozen=True)
@@ -345,6 +433,7 @@ class ExplainError(Exception):
         *,
         exit_code: ExitCode = ExitCode.RUNTIME_FAILURE,
         selector_value: str = "",
+        extra_data: dict | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -352,6 +441,10 @@ class ExplainError(Exception):
         self.text_line = text_line
         self.exit_code = exit_code
         self.selector_value = selector_value
+        #: Keys folded into the failure envelope's `data` -- only the `--code`
+        #: miss uses it, to carry `suggestions` next to the refusal instead of
+        #: burying the shortlist in an issue message a consumer must re-parse.
+        self.extra_data = extra_data or {}
 
 
 @dataclass
@@ -362,6 +455,10 @@ class _Result:
     value: str
     summary: str
     details: list[str] = field(default_factory=list)
+    #: `--code` only: the catalogue entry verbatim plus an (empty on a hit)
+    #: suggestion list, folded into `data`. Empty for every other selector, so
+    #: their envelopes keep the exact key set the golden pins.
+    extra_data: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +515,18 @@ def _generation_target_details(target: GenerationTarget) -> list[str]:
         f"Preview label: {target.preview_label}",
         f"Preview language: {target.preview_language_id}",
     ]
+
+
+def _print_detail_lines(details: list[str], width: int | None) -> None:
+    """`- <detail>` per entry, to stderr -- hard-wrapped past `width` when it
+    is not `None` (a real terminal; see `tan.env.wrap_width`), unwrapped
+    verbatim off one (piped/redirected, or non-interactive) -- the property
+    `tan explain | grep` and every existing golden depend on. Every detail
+    wraps the same way; see `tan.core.text_layout.wrap_lines` for why there
+    is no longer a "record-shaped" exemption here.
+    """
+    for line in wrap_lines([f"- {detail}" for detail in details], width):
+        print(line, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +600,7 @@ def resolve(template: str | None, target: str | None) -> _Result:
             "explain.template-unknown",
             f"Unknown template '{template}'.",
             f"explain: unknown template '{template}'. Run tan explain without "
-            f"selectors to list available topics.",
+            f"selectors to list available topics.{_code_hint(template)}",
             selector_value=template,
         )
 
@@ -515,6 +624,111 @@ def resolve(template: str | None, target: str | None) -> _Result:
     return _overview()
 
 
+def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[Path, SdkInfo]:
+    """The checkout `--code` reads, via the NARROW ladder (`--sdk-root` >
+    `.alp/sdk-path` > `~/.alp/sdk-default` > discovery), walked from the
+    `--project`-resolved workspace root -- `os.path.join(cwd, project)`, the
+    same join `build_cmd.build`/`run_cmd.run`/`inspect_cmd.inspect` use, so an
+    absolute `--project` replaces the cwd outright rather than nesting under it.
+
+    Narrow because `explain` is not one of the four commands the oracle routes
+    wide (`init`/`generate`/`examples`/`renode`), so following the
+    thirteen-command majority makes `tan explain --code` answer out of the same
+    checkout `tan validate` used in the same directory -- the only reason to
+    look a code up while a build is failing. `--project` IS read here (unlike
+    every other selector on this command, see `explain`'s docstring): it is the
+    one input this whole ladder exists to resolve against, and the twelve other
+    `resolve_sdk_root_ladder` call sites all pass a `--project`-derived root,
+    not the bare CWD -- accepting the flag and then resolving from the CWD
+    anyway is the accepted-but-ignored input class this command refuses
+    everywhere else (`explain`'s `--sdk-root` rationale).
+
+    Raises `ExplainError` when no tier resolves anything, INCLUDING when
+    `--sdk-root` (the terminal tier) points at a directory that resolves but
+    carries no `SDK_MARKER` -- `resolve_sdk_root_ladder` itself does not check
+    that for its terminal tier (I-31: a typo'd flag must not fall through to a
+    lower tier), so an unmarked `--sdk-root` would otherwise reach
+    `resolve_code` and misreport as `explain.catalog-unreadable` ("run the
+    generator" in a checkout that was never one) instead of naming the real
+    problem. Either way this is a refusal naming what it could not find, never
+    an empty answer. Both imports are LOCAL so the three SDK-free paths keep
+    paying nothing for a mode they never enter.
+    """
+    from tan.commands.build_cmd import resolve_sdk_root_ladder
+    from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+    from tan.core.shapes import SDK_MARKER
+
+    cwd = Path.cwd()
+    workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
+    resolution = resolve_sdk_root_ladder(sdk_root_arg, workspace_root)
+    if resolution.path is None or not resolution.path.joinpath(*SDK_MARKER).exists():
+        raise ExplainError(
+            "explain.sdk-root-unresolved",
+            f"alp-sdk root is unresolved, so no diagnostic catalogue could be "
+            f"read -- {NO_SDK_NEXT_STEPS}.",
+            f"explain: alp-sdk root is unresolved, so no diagnostic catalogue "
+            f"could be read -- {NO_SDK_NEXT_STEPS}.",
+            selector_value=code.strip(),
+        )
+    return resolution.path, SdkInfo.from_resolution(str(resolution.path), resolution)
+
+
+def _unknown_code_line(code: str, suggestions: list[str]) -> str:
+    """The difflib shortlist when there is one, otherwise a pointer at the
+    catalogue that holds every real code.
+
+    Only the WITH-SUGGESTIONS branch is `explain.py`'s own miss sentence,
+    verbatim. The no-near-miss branch is tan's OWN wording, not a port: measured
+    against alp-sdk `origin/dev`, `explain.py` there prints ``unknown code
+    'ZZZ' -- run `alp explain` against a code from metadata/error-
+    catalog.json`` (its own binary name, its own subcommand spelling), which
+    this port cannot repeat verbatim -- there is no `alp explain` in a
+    `tan`-only install. See the module DIVERGENCE list above.
+    """
+    if suggestions:
+        return f"explain: unknown code '{code}'; did you mean: " + ", ".join(suggestions) + "?"
+    return (
+        f"explain: unknown code '{code}' -- pass a code from the SDK's "
+        f"metadata/error-catalog.json."
+    )
+
+
+def resolve_code(code: str, sdk_root: Path) -> _Result:
+    """The explanation for one `ALP_ERR_*` / `ALP-Bxxx` code out of `sdk_root`.
+
+    Raises `ExplainError` for an unreadable catalogue and for an unknown code.
+    The miss carries its shortlist in `data.suggestions` as well as in the text
+    line, so a consumer gets the recovery options structured instead of having
+    to re-parse a sentence.
+    """
+    try:
+        codes = error_catalog.load_codes(sdk_root)
+    except error_catalog.CatalogUnreadable as err:
+        raise ExplainError(
+            "explain.catalog-unreadable",
+            f"{err.detail} ({err.path}).",
+            f"explain: {err.detail} ({err.path}).",
+            selector_value=code.strip(),
+        ) from None
+    key, suggestions = error_catalog.lookup(codes, code)
+    if key is None:
+        raise ExplainError(
+            "explain.code-unknown",
+            f"Unknown diagnostic code '{code}'.",
+            _unknown_code_line(code, suggestions),
+            selector_value=code.strip(),
+            extra_data={"diagnostic": None, "suggestions": suggestions},
+        )
+    entry = codes[key]
+    return _Result(
+        kind="diagnostic-code",
+        value=key,
+        summary=error_catalog.summary_line(entry),
+        details=error_catalog.detail_lines(entry),
+        extra_data={"diagnostic": entry, "suggestions": []},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Envelope assembly
 # ---------------------------------------------------------------------------
@@ -531,19 +745,34 @@ def _available() -> dict:
     }
 
 
-def _data(*, kind: str, value: str, summary: str, details: list[str]) -> dict:
+def _data(
+    *, kind: str, value: str, summary: str, details: list[str], extra: dict | None = None
+) -> dict:
+    """`extra` is MERGED LAST and is empty on every path but `--code`: the
+    `explain-overview` golden pins this key set exactly, so a key that appears
+    unconditionally is a wire change for three selectors that gained nothing."""
     return {
         "schemaVersion": DATA_SCHEMA_VERSION,
         "selector": {"kind": kind, "value": value},
         "summary": summary,
         "details": details,
         "available": _available(),
+        **(extra or {}),
     }
 
 
-def _emit(json_mode: bool, data: dict, issues: list[Issue], exit_code: ExitCode) -> None:
-    """Write the one envelope (JSON) and exit. `project` is always null/null:
-    explain is project-agnostic -- it reads no board.yaml and no checkout."""
+def _emit(
+    json_mode: bool,
+    data: dict,
+    issues: list[Issue],
+    exit_code: ExitCode,
+    sdk: SdkInfo | None = None,
+) -> None:
+    """Write the one envelope (JSON) and exit. `project` is always null/null --
+    explain reads no board.yaml on ANY path, `--code` included: a diagnostic
+    code is a property of the SDK, not of a project. `sdk` is populated only
+    when `--code` resolved a checkout, which is also the only path that can
+    carry the shared `sdk.*` resolution advisories `Envelope` appends."""
     if json_mode:
         emit(
             Envelope(
@@ -552,6 +781,7 @@ def _emit(json_mode: bool, data: dict, issues: list[Issue], exit_code: ExitCode)
                 data,
                 issues,
                 exit_code,
+                sdk=sdk,
             )
         )
     raise typer.Exit(int(exit_code))
@@ -575,23 +805,42 @@ def explain(
         metavar="EMIT",
         help="Generation output target to explain (e.g. zephyr-conf, zephyr-board).",
     ),
-    project: str = typer.Option(  # accepted, not read; see below
+    code: str = typer.Option(
+        None,
+        "--code",
+        metavar="CODE",
+        help="alp-sdk diagnostic or error code to explain (e.g. ALP-B003, "
+        "ALP_ERR_NO_BACKEND). Reads the bound SDK checkout.",
+    ),
+    project: str = typer.Option(  # read by --code ONLY; see below
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
     ),
-    sdk_root: str = typer.Option(  # accepted, not read; see below
+    sdk_root: str = typer.Option(  # read by --code ONLY; see below
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Explain a project/module template or a generation target.
 
-    `--project`/`--sdk-root` are declared, not consumed: `explain` is
-    project-agnostic (it reads no board.yaml and no checkout, and the oracle's
-    `project` stays `null`/`null` regardless of either flag's value), but
-    clap makes both `global = true` in Rust, so `tan --sdk-root X explain` /
-    `tan --project X explain` must not be parse errors -- verified against the
-    oracle. `alp-sdk-vscode/src/ideHub/newProjectFlowPanel.ts:188` invokes
-    exactly the `--sdk-root` shape.
+    `--project` is declared on EVERY path but consumed by `--code` ALONE
+    (`bind_sdk`): `--template`/`--target` are project-agnostic (they read no
+    board.yaml, and the oracle's `project` stays `null`/`null` regardless of
+    either flag's value on those two paths), but clap makes both `global =
+    true` in Rust, so `tan --sdk-root X explain` / `tan --project X explain`
+    must not be parse errors -- verified against the oracle. The reported
+    envelope `project` key STILL stays `null`/`null` even on `--code`
+    (`_emit`'s own docstring): `--project` there only picks WHICH checkout the
+    SDK ladder resolves, the same role it plays for `tan validate`/`tan
+    build`, it is not itself echoed as a project root. Accepting the flag and
+    then resolving from the bare CWD regardless of its value would be the
+    accepted-but-ignored input class this command refuses everywhere else --
+    which is exactly what an earlier version of `bind_sdk` did (tan-cli#627
+    review). `alp-sdk-vscode/src/ideHub/newProjectFlowPanel.ts:188` invokes
+    exactly the `--sdk-root` shape. `--sdk-root` IS consumed, but only by
+    `--code` (`bind_sdk`): it is the terminal tier of the SDK ladder (I-31),
+    and the alternative -- accepting the flag that names the checkout the
+    catalogue lives in and then discovering a different one -- is the
+    accepted-but-ignored input class this command refuses elsewhere.
 
     `[TEMPLATE]` (the positional) is a PORT-ONLY convenience, not oracle
     behavior: the real `crates/tan-cli` `ExplainArgs` has no positional field,
@@ -619,13 +868,61 @@ def explain(
         )
         return
 
+    # Captured BEFORE the fold below overwrites `template`: whether it was the
+    # positional that supplied it (`--template` itself was absent), needed by
+    # the `--code` clash message just below so it names what the caller
+    # actually typed, the same way `explain.positional-template-conflict`
+    # above already does.
+    template_via_positional = template is None and template_arg is not None
+
     if template is None:
         template = template_arg
 
+    code = _clean(code)
+    if code is not None and (_clean(template) is not None or _clean(target) is not None):
+        # FIRST, ahead of `resolve()`'s own template-vs-target check, so
+        # `--template X --target Y --code Z` reports THIS message: it is the
+        # accurate one for three selectors, where the pair's ("use either
+        # --template or --target") names only two of them. The pair keeps its
+        # own golden-pinned message on every input that reaches it, which is
+        # every input with no `--code`. Same issue code for both -- one name
+        # for "you named more than one thing to explain".
+        #
+        # `template_selector_name` names the POSITIONAL when that is what set
+        # `template` (`tan explain minimal-app --code ALP-B003`): the fixed
+        # wording named `--template` unconditionally there, even though the
+        # caller never typed that flag -- the same accepted-but-ignored-input
+        # confusion `explain.positional-template-conflict` exists to avoid.
+        # `--target` stays fixed either way; it has no positional form.
+        template_selector_name = (
+            "the positional template id" if template_via_positional else "--template"
+        )
+        _fail(
+            json_mode,
+            ExplainError(
+                "explain.ambiguous-selector",
+                f"Use --code on its own; it cannot be combined with "
+                f"{template_selector_name} or --target.",
+                f"explain: use --code on its own, not combined with "
+                f"{template_selector_name} or --target.",
+            ),
+        )
+        return
+
+    sdk: SdkInfo | None = None
     try:
-        result = resolve(template, target)
+        if code is not None:
+            # Two statements, not one: `bind_sdk` raising leaves `sdk` None
+            # (the tuple never binds), which is exactly what the failure
+            # envelope should report -- nothing was resolved. A `resolve_code`
+            # failure below DOES carry the checkout it read, so the reader can
+            # see WHICH catalogue answered "unknown".
+            sdk_root_path, sdk = bind_sdk(sdk_root, project, code)
+            result = resolve_code(code, sdk_root_path)
+        else:
+            result = resolve(template, target)
     except ExplainError as err:
-        _fail(json_mode, err)
+        _fail(json_mode, err, sdk)
         return
     except TemplateDataError as err:
         # A broken tan installation (the vendored tree did not ship), not a
@@ -654,17 +951,21 @@ def explain(
                 f"explain failed unexpectedly: {err.__class__.__name__}: {err}",
                 f"explain: failed unexpectedly: {err.__class__.__name__}: {err}",
                 exit_code=ExitCode.INTERNAL_FAILURE,
-                selector_value=(template or target or "").strip(),
+                selector_value=(template or target or code or "").strip(),
             ),
+            sdk,
         )
         return
 
     if not json_mode:
         # stderr, in both formats: stdout is the envelope channel and nothing
         # else. Matches Rust's `emit()`, which `eprintln!`s every text line.
+        # The summary header is a short, bounded "<label> (<id>)" -- never
+        # observed over any real width, so it is never run through
+        # `wrap_block`; `_print_detail_lines` is where the actual wrap
+        # decision lives.
         print(f"explain: {result.summary}", file=sys.stderr)
-        for detail in result.details:
-            print(f"- {detail}", file=sys.stderr)
+        _print_detail_lines(result.details, wrap_width())
     _emit(
         json_mode,
         _data(
@@ -672,24 +973,40 @@ def explain(
             value=result.value,
             summary=result.summary,
             details=result.details,
+            extra=result.extra_data,
         ),
         [],
         ExitCode.SUCCESS,
+        sdk,
     )
 
 
-def _fail(json_mode: bool, err: ExplainError) -> None:
+def _fail(json_mode: bool, err: ExplainError, sdk: SdkInfo | None = None) -> None:
     """The error envelope. Note the asymmetry with the success path, which is
     contract: `selector.kind` reverts to `overview` and summary/details go
     EMPTY even though the caller named a selector, because nothing was
     explained. `data.available` stays populated."""
     if not json_mode:
-        print(err.text_line, file=sys.stderr)
+        # A refusal sentence, not a record -- `--template`/`--target` echo
+        # the CALLER's own (unbounded-length) input back into it (e.g.
+        # "unknown template '<whatever was typed>'"), so this is the one
+        # `explain` text line genuinely able to run long on a hostile or
+        # just-long argument, not only in the two catalogue commands this
+        # task is scoped to.
+        for line in wrap_lines([err.text_line], wrap_width()):
+            print(line, file=sys.stderr)
     _emit(
         json_mode,
-        _data(kind="overview", value=err.selector_value, summary="", details=[]),
+        _data(
+            kind="overview",
+            value=err.selector_value,
+            summary="",
+            details=[],
+            extra=err.extra_data,
+        ),
         [Issue(err.code, "error", err.message)],
         err.exit_code,
+        sdk,
     )
 
 
@@ -697,7 +1014,7 @@ def _fail(json_mode: bool, err: ExplainError) -> None:
 # still missing (`--all`/`--board-yaml`/`--ci`/`--no-color`/
 # `--non-interactive`/`--quiet`/`--verbose`) on top of `--target`, already
 # declared and read above; see `tan.core.global_flags`. `--project`/
-# `--sdk-root` are ALSO declared already (accepted, not read -- see
+# `--sdk-root` are ALSO declared already (read by `--code` alone -- see
 # `explain`'s own docstring); the decorator leaves both untouched the same
 # way it leaves `--target` untouched.
 explain = accept_global_flags(explain)

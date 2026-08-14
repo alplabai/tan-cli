@@ -55,20 +55,38 @@ def _load_sdk_compat_standalone():
     """Load `sdk_compat.py` directly, bypassing `tan.planner`'s package
     `__init__` (whose eager import chain reads several
     `metadata/registries/*` files and therefore needs a bound SDK root).
-    `sdk_compat` itself imports only re/pathlib/typing/yaml, so the pure
+    `sdk_compat` itself imports only re/pathlib/typing/yaml plus
+    `.models` (for `OrchestratorError`, the refusal an unusable family
+    table raises -- tan-cli#563), and `models` is pure dataclasses, so the
     comparison logic below needs no SDK, no env var, and no bound root --
     only the loader-level tests (through the `planner` fixture) do.
+
+    That one relative import is why this loads the file under a SYNTHETIC
+    parent package rooted at `tan/planner/` rather than as a bare module:
+    `from .models import ...` has to resolve to something, and resolving it
+    through the real `tan.planner` would drag in the very `__init__` this
+    helper exists to avoid.
     """
     import importlib.util
+    import sys
+    import types
 
     import tan
 
+    planner_dir = Path(tan.__file__).parent / "planner"
+    pkg_name = "tan_planner_standalone"
+    if pkg_name not in sys.modules:
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [str(planner_dir)]
+        sys.modules[pkg_name] = pkg
+
     spec = importlib.util.spec_from_file_location(
-        "tan_sdk_compat_standalone",
-        Path(tan.__file__).parent / "planner" / "sdk_compat.py",
+        f"{pkg_name}.sdk_compat",
+        planner_dir / "sdk_compat.py",
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -359,7 +377,14 @@ def test_an_aen_zephyr_slice_publishes_its_jlink_flash_device(planner, tmp_path)
     method, args = _slice_flash_recipe(project.cores["m55_hp"])
 
     assert method == "zephyr_west_flash"
-    assert args == {"jlink_flash_device": "AE822FA0E5597LS0_M55_HE"}
+    # alp-sdk#1374 added slot0_load_address to the same published block; both
+    # are sourced facts, so assert the whole contract rather than one key.
+    assert args == {
+        "jlink_flash_device": "AE822FA0E5597LS0_M55_HE",
+        "slot0_load_address": "0x802b0000",
+        "expect_dpidr": "0x4C013477",
+        "jlink_device": "Cortex-M55",
+    }
 
 
 def test_a_slice_whose_variant_publishes_no_profile_keeps_empty_flash_args(planner):

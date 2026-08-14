@@ -29,6 +29,7 @@ Three levels, because the hard constraints sit at three levels:
 """
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
@@ -104,21 +105,19 @@ def test_enabled_heartbeat_ticks_after_silence_then_clears_on_output(monkeypatch
     it (a `\\r`-clear) before relaying, so it never mixes into the stream it
     was standing in for.
 
-    `shutil.get_terminal_size` is pinned wide (see
+    `terminal_width` is pinned wide (see
     `test_heartbeat_line_never_wraps_on_a_narrow_terminal` for the narrow
     case this test does NOT cover): unpinned, it reads the REAL terminal --
     `COLUMNS`, on a host/CI runner that exports one, or the actual tty width
     otherwise -- and a value narrower than the ~110-char message below would
     truncate `"still building"` itself out of the line before this test's own
     content assertion ever runs, failing for a reason unrelated to the code
-    under test."""
+    under test. Patched on `build_cmd`'s own name (tan-cli#564): the module
+    imports the helper BY VALUE, so patching `tan.env.terminal_width` would
+    not be seen here."""
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_SILENCE_THRESHOLD_S", 0.05)
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_TICK_S", 0.02)
-    monkeypatch.setattr(
-        build_cmd.shutil,
-        "get_terminal_size",
-        lambda fallback=(80, 24): os.terminal_size((120, 24)),
-    )
+    monkeypatch.setattr(build_cmd, "terminal_width", lambda fallback: 120)
     fake_stderr = io.StringIO()
     monkeypatch.setattr(sys, "stderr", fake_stderr)
 
@@ -156,11 +155,7 @@ def test_heartbeat_line_never_wraps_on_a_narrow_terminal(monkeypatch):
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_SILENCE_THRESHOLD_S", 0.02)
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_TICK_S", 0.01)
     width = 40  # narrower than the old hardcoded 88-column pad
-    monkeypatch.setattr(
-        build_cmd.shutil,
-        "get_terminal_size",
-        lambda fallback=(80, 24): os.terminal_size((width, 24)),
-    )
+    monkeypatch.setattr(build_cmd, "terminal_width", lambda fallback: width)
     term = _FakeTerminal(width)
     monkeypatch.setattr(sys, "stderr", term)
 
@@ -170,6 +165,117 @@ def test_heartbeat_line_never_wraps_on_a_narrow_terminal(monkeypatch):
 
     assert len(term.rows) == 1, term.rows
     assert all(len(row) <= width for row in term.rows), term.rows
+
+
+def test_heartbeat_width_measures_stderr_not_stdout(monkeypatch):
+    """tan-cli#564: `tan build > log.txt` from a 70-column terminal. The
+    heartbeat is armed on `stderr_is_tty()` and writes to stderr, but the
+    width used to come from `shutil.get_terminal_size`, i.e.
+    `sys.__stdout__` -- whose ioctl raises `OSError [Errno 25] Inappropriate
+    ioctl for device` once stdout is redirected, so the measurement fell to
+    its hard-coded 80-column fallback and `_heartbeat_line_width()` returned
+    79 instead of 69. `_tick` writes `message.ljust(width)`, so a 79-char row
+    on a 70-column screen soft-wraps, `\\r` rewinds only the last physical
+    row, and the "still building" line stacks a fresh row per tick -- the
+    tan-cli#287 defect this width computation exists to remove."""
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.delenv("LINES", raising=False)
+
+    class _StderrOnPty:
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 2
+
+    def _sized(fd: int) -> os.terminal_size:
+        if fd == 2:
+            return os.terminal_size((70, 24))
+        raise OSError(errno.ENOTTY, "Inappropriate ioctl for device")
+
+    monkeypatch.setattr(sys, "stderr", _StderrOnPty())
+    monkeypatch.setattr(os, "get_terminal_size", _sized)
+
+    assert build_cmd._heartbeat_line_width() == 69
+
+
+def test_dispatch_does_not_crash_arming_the_heartbeat_when_stderr_is_none(monkeypatch):
+    """tan-cli#488 round 5 class sweep: `_dispatch` computes `_Heartbeat`'s
+    `enabled=` with a bare `sys.stderr.isatty()` (tan-cli#287), the exact
+    unguarded shape `tan.core.consent.can_prompt` was fixed for -- `sys.stderr`
+    can be `None` (a process launched with its standard handles detached: a
+    GUI launcher, a `pythonw`-style spawn, or a shell that closed fd 2 before
+    exec), and a bare `.isatty()` on it raises `AttributeError: 'NoneType'
+    object has no attribute 'isatty'` before a single slice ever dispatches --
+    caught only by `build()`'s outer `except Exception` and reported as a
+    fabricated `build.internal-failure` for a detached-stdio `tan build` that
+    should simply run with the heartbeat disabled.
+
+    An empty-slices plan is enough to reach the `with _Heartbeat(...)` line
+    without needing a real toolchain or Zephyr tree -- `execute_slices` on a
+    zero-slice plan returns immediately, so this stays a real call into
+    `_dispatch`, not a stand-in for it."""
+    from tan.core.build_plan import BuildPlan
+
+    plan = BuildPlan(
+        schema_version=1,
+        generated_by="test",
+        board_yaml="board.yaml",
+        sku="sku",
+        build_root="build",
+        slices=[],
+        shared_artefacts=[],
+        warnings=[],
+    )
+    monkeypatch.setattr(sys, "stderr", None)
+
+    outcomes, issues = build_cmd._dispatch(plan, [], build_cmd.Path("/tmp"), None, None, json_mode=False)
+
+    assert outcomes == []
+    assert issues == []
+
+
+def test_dispatch_does_not_crash_arming_the_heartbeat_when_stderr_has_no_isatty(monkeypatch):
+    """tan-cli#488 round 6: the round-5 guard above (the test immediately
+    above this one) only stopped a `None` `sys.stderr` from crashing this
+    line -- it never covered a `sys.stderr` that EXISTS and simply has no
+    `.isatty()` method, which is exactly what `tan.cli.main` installs under
+    `--format json` (`_TeeStderr`: `write`/`flush`/`getvalue` only). Every
+    `tan run --format json` against a real project crashed here with
+    `AttributeError: '_TeeStderr' object has no attribute 'isatty'` --
+    `run_cmd._run` calls `_build` with no `json_mode` of its own, so
+    `_dispatch` always saw the `json_mode=False` default and reached the
+    bare `.isatty()` unconditionally (measured against the real binary,
+    exit 5, `run.internal-failure`, before a single slice dispatched). This
+    is the one shape `test_dispatch_does_not_crash_arming_the_heartbeat_when_
+    stderr_is_none` above cannot catch: monkeypatching `sys.stderr` to
+    `None` never exercises a stderr that has attributes but not this one."""
+
+    class _NoIsatty:
+        def write(self, _text: str) -> int:  # pragma: no cover - never called
+            return 0
+
+        def flush(self) -> None:  # pragma: no cover - never called
+            pass
+
+    from tan.core.build_plan import BuildPlan
+
+    plan = BuildPlan(
+        schema_version=1,
+        generated_by="test",
+        board_yaml="board.yaml",
+        sku="sku",
+        build_root="build",
+        slices=[],
+        shared_artefacts=[],
+        warnings=[],
+    )
+    monkeypatch.setattr(sys, "stderr", _NoIsatty())
+
+    outcomes, issues = build_cmd._dispatch(plan, [], build_cmd.Path("/tmp"), None, None, json_mode=False)
+
+    assert outcomes == []
+    assert issues == []
 
 
 # --- CLI, subprocess: the JSON path is untouched -------------------------

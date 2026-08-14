@@ -54,10 +54,15 @@ from typing import Any
 import typer
 
 from tan.commands.build_cmd import _planner_python
-from tan.commands.build_output import resolve_metadata_sdk_root, resolve_project_context
+from tan.commands.build_output import (
+    ProjectContext,
+    resolve_metadata_sdk_root,
+    resolve_project_context,
+)
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
+from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -291,18 +296,23 @@ def _python_too_old(python: str, floor: tuple[int, int]) -> str | None:
 
 def _run_build(
     *,
-    board: str,
+    context: ProjectContext,
     out: str,
     metadata_root: str | None,
-    project: str | None,
     sdk_root: str | None,
 ) -> tuple[Project, SdkInfo | None, dict, list[Issue], ExitCode]:
-    # `--board` plays the role `--board-yaml` does everywhere else, so the
-    # SAME project-context resolution applies (I-31); the envelope's `project`
-    # and `sdk` fields come from this ONE resolution, matching `size`/`image`
-    # (`build_output.resolve_project_context`'s own doc: the envelope's `sdk`
-    # block must be what THIS resolution produced, never a second lookup).
-    context = resolve_project_context(project, board, sdk_root)
+    """`--board` plays the role `--board-yaml` does everywhere else, so the
+    SAME project-context resolution applies (I-31); the envelope's `project`
+    and `sdk` fields come from that ONE resolution, matching `size`/`image`
+    (`build_output.resolve_project_context`'s own doc: the envelope's `sdk`
+    block must be what THAT resolution produced, never a second lookup).
+
+    tan-cli#497 defect 3: the `resolve_project_context` call used to live at
+    the top of this function, which meant its `broken_project_pin` /
+    `foreign_global_default_for` were unreachable from `model`'s own
+    `except ModelError` handler -- so the pin warning was dropped on the
+    refusal paths as well as the happy one. It is now resolved by the caller
+    and handed in, so the ONE resolution feeds every exit."""
     workspace_root = Path(context.workspace_root)
     board_path = Path(context.board_yaml)
     reported_project = context.project()
@@ -318,11 +328,18 @@ def _run_build(
     if resolved_sdk is None:
         raise ModelError(
             "model.sdk-root-unresolved",
+            # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the value.
+            # The no-flag message below opens with "Use --sdk-root" -- exactly
+            # the flag the caller just typed -- and the rejected path appeared
+            # nowhere else in the envelope, since `resolve_metadata_sdk_root`
+            # returning `None` is also what leaves the `sdk` block absent.
+            rejected_sdk_root_message(sdk_root, "No models were built.")
+            if sdk_root
             # `tan sdk switch` refuses in this build (tan-cli#305) -- kept the
             # two mechanisms that actually work here (`--sdk-root`, placing
             # the project near a checkout) and swapped the third for
             # NO_SDK_NEXT_STEPS's honest "how to get one at all".
-            "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+            else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
             f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
             ExitCode.VALIDATION_FAILURE,
         )
@@ -472,14 +489,29 @@ def model(
         if json_mode:
             emit(Envelope("model", project_, data, issues, exit_code, sdk=sdk))
         else:
+            # tan-cli#497 defect 3: warnings LEAD. `issues` now carries the
+            # SDK-resolution pair, which is a fact about the whole run --
+            # which checkout answered -- not a per-model outcome, so it must
+            # be readable before the result lines rather than buried under
+            # them. `{severity}: {message}`, the shape `build`/`run`/`kconfig`
+            # print a resolution warning with, so the same workspace reads
+            # the same way whichever command a developer runs.
+            warnings = [i for i in issues if i.severity != "error"]
+            errors = [i for i in issues if i.severity == "error"]
+            for issue in warnings:
+                print(f"{issue.severity}: {issue.message}", file=sys.stderr)
             for path in data.get("built", []):
                 print(f"built {path}", file=sys.stderr)
-            if not data.get("built") and not issues:
+            # `not issues` before -- the same thing until `issues` started
+            # carrying those warnings. A board with no `models:` and a broken
+            # project pin must still be told nothing was declared; a warning
+            # is not a reason to withhold the only line this run had to say.
+            if not data.get("built") and not errors:
                 print(
                     "model: no `models:` declared in board.yaml; nothing to build.",
                     file=sys.stderr,
                 )
-            for issue in issues:
+            for issue in errors:
                 print(f"model: {issue.message}", file=sys.stderr)
         raise typer.Exit(int(exit_code))
 
@@ -500,12 +532,32 @@ def model(
         )
         return
 
+    # tan-cli#497 defect 3: `model build` was the only `resolve_project_context`
+    # caller that read `.workspace_root`/`.board_yaml`/`.project()`/`.sdk` off
+    # the returned context and NONE of the three resolution facts -- so it
+    # alone dropped BOTH `sdk.project-pin-unresolved` (tan-cli#263) and
+    # `sdk.global-default-foreign-project` (tan-cli#464), in JSON and text
+    # alike, while `size` and `image` reported them from the same directory
+    # through the same resolver. That matters most here: the `.alpmodel`
+    # packages are compiled against `<resolved checkout>/metadata`, i.e.
+    # against that checkout's target/backend table for `som.sku`.
+    #
+    # Resolved HERE rather than inside `_run_build` so the warnings survive a
+    # `ModelError` too -- `project_pin_issue`'s contract is "shared by EVERY
+    # caller of `resolve_sdk_tiered`", not "every caller that got as far as a
+    # successful build".
+    sdk_issues: list[Issue] = []
     try:
+        context = resolve_project_context(project, board, sdk_root)
+        sdk_issues = sdk_resolution_issues(
+            context.broken_project_pin,
+            context.sdk_source_tier,
+            context.foreign_global_default_for,
+        )
         project_, sdk, data, issues, exit_code = _run_build(
-            board=board,
+            context=context,
             out=out,
             metadata_root=metadata_root,
-            project=project,
             sdk_root=sdk_root,
         )
     except ModelError as err:
@@ -513,7 +565,7 @@ def model(
             Project(root=None, board_yaml=None),
             None,
             {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []},
-            [Issue(err.code, "error", err.message)],
+            [*sdk_issues, Issue(err.code, "error", err.message)],
             err.exit_code,
         )
         return
@@ -523,17 +575,18 @@ def model(
             None,
             {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []},
             [
+                *sdk_issues,
                 Issue(
                     "model.internal-failure",
                     "error",
                     f"model build failed unexpectedly: {type(err).__name__}: {err}",
-                )
+                ),
             ],
             ExitCode.INTERNAL_FAILURE,
         )
         return
 
-    finish(project_, sdk, data, issues, exit_code)
+    finish(project_, sdk, data, [*sdk_issues, *issues], exit_code)
 
 
 # tan-cli#261: adds the seven oracle `GlobalArgs` flags this command is

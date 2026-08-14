@@ -196,3 +196,187 @@ def test_with_venv_on_path_does_not_mutate_the_caller_s_dict():
     venv_west = r"C:\ws\.venv\Scripts\west.exe" if os.name == "nt" else "/ws/.venv/bin/west"
     with_venv_on_path(original, venv_west)
     assert original == {"PATH": "/plan/toolchain/bin"}
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#495 defect 1: step 1's UPWARD WALK had no manifest guard at all, so
+# the two resolvers that jointly decide "which west" disagreed on a dirty host.
+# ---------------------------------------------------------------------------
+
+
+def _plant_foreign_topdir(directory: Path) -> None:
+    """A west topdir whose manifest is emphatically not alp-sdk's, plus a
+    west-capable `.venv` -- an ordinary upstream `west init` workspace."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / ".west").mkdir()
+    (directory / ".west" / "config").write_text(
+        "[manifest]\npath = zephyr\nfile = west.yml\n", encoding="utf-8"
+    )
+    _plant_west_capable_venv(directory / ".venv")
+
+
+def test_find_workspace_venv_walks_past_an_ancestor_west_topdir_that_is_not_the_sdks(
+    tmp_path, monkeypatch
+):
+    """**tan-cli#495 defect 1.** Step 1 accepted ANY ancestor `.venv` holding a
+    `west`, with no `sdk_root` involvement -- while `west_workspace_dir`
+    rejects that same ancestor via its tan-cli#307 `manifest_ok` guard. So a
+    project nested under an unrelated `zephyrproject` got its `west` BINARY
+    from the foreign venv and its `cwd` from the correct workspace, and that
+    interpreter is what tan bakes into every Zephyr slice as
+    `-DPython3_EXECUTABLE`.
+
+    The canonical `<sdk-parent>/.venv` (step 3) is planted here too, so this
+    pins the RESOLUTION ORDER: the walk must step over the foreign topdir and
+    reach it, not merely decline the foreign one.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    foreign = tmp_path / "zephyrproject"
+    _plant_foreign_topdir(foreign)
+    project = foreign / "my-project"
+    project.mkdir()
+
+    sdk = tmp_path / "sdk-parent" / "alp-sdk"
+    sdk.mkdir(parents=True)
+    _plant_west_capable_venv(sdk.parent / ".venv")
+
+    assert find_workspace_venv(str(project), str(sdk)) == sdk.parent / ".venv"
+
+
+def test_find_workspace_venv_still_takes_an_ancestor_topdir_that_is_the_sdks(
+    tmp_path, monkeypatch
+):
+    """The guard is a narrowing, not a blanket refusal on `.west`: the ordinary
+    layout -- the project inside the SDK's OWN workspace -- must still resolve
+    at step 1, and must still WIN over the step-3 fallback."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    workspace = tmp_path / "alp-workspace"
+    sdk = workspace / "alp-sdk"
+    sdk.mkdir(parents=True)
+    (workspace / ".west").mkdir()
+    (workspace / ".west" / "config").write_text(
+        "[manifest]\npath = alp-sdk\nfile = west.yml\n", encoding="utf-8"
+    )
+    _plant_west_capable_venv(workspace / ".venv")
+    project = workspace / "my-project"
+    project.mkdir()
+
+    assert find_workspace_venv(str(project), str(sdk)) == workspace / ".venv"
+
+
+def test_find_workspace_venv_still_takes_a_project_local_venv_with_no_west_dir(
+    tmp_path, monkeypatch
+):
+    """The reason the guard is conditional on the directory HOLDING a `.west`
+    rather than a naive mirror of tan-cli#307's `manifest_ok`. A plain project
+    directory with a `.venv` and no `.west` makes no claim to be a workspace,
+    so it is judged on its venv alone -- exactly as before. This is the shape
+    tan-cli#307's own e2e test plants at `build_root/.venv`; requiring a
+    matching manifest outright would have rejected it.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk = tmp_path / "sdk-parent" / "alp-sdk"
+    sdk.mkdir(parents=True)
+    _plant_west_capable_venv(sdk.parent / ".venv")
+
+    project = tmp_path / "build-root"
+    project.mkdir()
+    _plant_west_capable_venv(project / ".venv")
+
+    assert find_workspace_venv(str(project), str(sdk)) == project / ".venv"
+
+
+def test_find_workspace_venv_takes_a_foreign_ancestor_topdir_when_sdk_root_is_unresolved(
+    tmp_path, monkeypatch
+):
+    """No `sdk_root` means nothing to verify the manifest against, so the old
+    unconditional accept stands -- the same "nothing to check" fallback
+    `_zephyr_base_venv` and `west_workspace_dir.manifest_ok` already apply.
+    Without this the guard would regress CI and the contract harness, which
+    routinely run with no resolvable SDK."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    foreign = tmp_path / "zephyrproject"
+    _plant_foreign_topdir(foreign)
+    project = foreign / "my-project"
+    project.mkdir()
+
+    assert find_workspace_venv(str(project), None) == foreign / ".venv"
+
+
+def test_find_workspace_venv_agrees_with_west_workspace_dir_on_the_same_dirty_host(
+    tmp_path, monkeypatch
+):
+    """The defect stated as the invariant it broke, since either resolver alone
+    looks defensible: on one tree, the venv that supplies the `west` BINARY and
+    the topdir that supplies its `cwd` must come from the same workspace.
+    Before the fix `find_workspace_venv` returned the foreign
+    `zephyrproject/.venv` while `west_workspace_dir` returned the SDK's
+    workspace -- one command, two Zephyrs.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    foreign = tmp_path / "zephyrproject"
+    _plant_foreign_topdir(foreign)
+    project = foreign / "my-project"
+    project.mkdir()
+
+    workspace = tmp_path / "alp-workspace"
+    sdk = workspace / "alp-sdk"
+    sdk.mkdir(parents=True)
+    (workspace / ".west").mkdir()
+    (workspace / ".west" / "config").write_text(
+        "[manifest]\npath = alp-sdk\nfile = west.yml\n", encoding="utf-8"
+    )
+    _plant_west_capable_venv(workspace / ".venv")
+
+    resolved_venv = find_workspace_venv(str(project), str(sdk))
+    resolved_topdir = venv_module.west_workspace_dir(str(project), sdk)
+
+    assert resolved_venv == workspace / ".venv"
+    assert resolved_topdir is not None
+    assert Path(resolved_topdir) == workspace
+    assert resolved_venv.parent == Path(resolved_topdir)
+
+
+def test_a_tan_provenance_record_does_not_make_a_directory_a_foreign_topdir(
+    tmp_path, monkeypatch
+):
+    """The regression the full suite caught in defect 1's first cut, which
+    tested for the `.west` DIRECTORY rather than `.west/config`.
+
+    tan writes its own provenance record to `<workspace>/.west/tan-workspace-sdk`
+    (`bootstrap_cmd.record_workspace_sdk`), so a workspace holding that record
+    but no west config has a `.west` directory and is NOT a topdir. The first
+    cut judged it foreign and refused its venv, which took `tan doctor`'s
+    `venvProvenance` check out of the report entirely -- three doctor tests
+    went from pass to `StopIteration`, because the check was not failing, it
+    was absent.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk = tmp_path / "alp-sdk"
+    sdk.mkdir()
+    workspace = tmp_path / "ws"
+    _plant_west_capable_venv(workspace / ".venv")
+    (workspace / ".west").mkdir()
+    (workspace / ".west" / "tan-workspace-sdk").write_text("{}", encoding="utf-8")
+
+    assert find_workspace_venv(str(workspace), str(sdk)) == workspace / ".venv"
+
+
+def test_a_real_west_config_alongside_the_record_is_still_judged(tmp_path, monkeypatch):
+    """...and the narrowing does not disarm the guard: once a real
+    `.west/config` is there naming someone else's manifest, the directory is a
+    topdir again and its venv is refused, provenance record or not."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk = tmp_path / "sdk-parent" / "alp-sdk"
+    sdk.mkdir(parents=True)
+    _plant_west_capable_venv(sdk.parent / ".venv")
+
+    workspace = tmp_path / "ws"
+    _plant_west_capable_venv(workspace / ".venv")
+    (workspace / ".west").mkdir()
+    (workspace / ".west" / "tan-workspace-sdk").write_text("{}", encoding="utf-8")
+    (workspace / ".west" / "config").write_text(
+        "[manifest]\npath = zephyr\nfile = west.yml\n", encoding="utf-8"
+    )
+
+    assert find_workspace_venv(str(workspace), str(sdk)) == sdk.parent / ".venv"

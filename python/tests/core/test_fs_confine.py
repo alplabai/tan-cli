@@ -12,7 +12,53 @@ import pytest
 
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 
-WINDOWS = os.name == "nt"
+
+def _case_insensitive_root(parent: Path) -> Path:
+    """Create `<parent>/Project` and hand it back if -- and only if -- this
+    volume also reaches it as `<parent>/PROJECT`; raise otherwise.
+
+    ONE function, used by both the capability probe and the test itself, so
+    the probe cannot drift into probing a different operation than the one
+    the test performs (the shape tan-cli#580 introduced in
+    `tests/test_envelope_surrogate.py`).
+
+    PROBED, not inferred from `os.name`. The guard here used to be
+    `skipif(os.name != "nt")` with the reason "Windows-only path shape", while
+    the assertion's own comment named the real requirement correctly -- *a
+    filesystem whose path comparison folds case*. Case-insensitivity is a
+    FILESYSTEM property, not a Windows one: APFS, the macOS default, is
+    case-insensitive too, and macOS is a platform this repo ships and runs
+    pytest on. So the one path shape where case matters went unexercised
+    there, and being over-restrictive rather than under-, it could never turn
+    CI red on its own (tan-cli#587).
+
+    `samefile` rather than `exists()`: a FUSE or network mount can answer a
+    differently-cased lookup with a DIFFERENT directory, and a probe that
+    accepted that would let the assertion below pass while exercising nothing.
+    """
+    root = parent / "Project"
+    root.mkdir()
+    upper = parent / "PROJECT"
+    if not upper.exists() or not os.path.samefile(upper, root):
+        raise ValueError(
+            f"'{upper}' does not name the directory created as '{root}'; this "
+            f"volume's path comparison is case-sensitive"
+        )
+    return root
+
+
+@pytest.fixture
+def case_insensitive_root(tmp_path):
+    """A `Project/` directory on a volume that also reaches it as `PROJECT/`,
+    or a skip naming the filesystem behaviour that was missing.
+
+    `return`, not `yield`: a `yield` inside the `try` would also swallow a
+    `ValueError` raised by the TEST body and report it as a skip.
+    """
+    try:
+        return _case_insensitive_root(tmp_path)
+    except ValueError as err:
+        pytest.skip(str(err))
 
 
 def test_a_target_inside_root_resolves_and_returns(tmp_path):
@@ -54,13 +100,46 @@ def test_a_sibling_sharing_the_root_name_as_a_string_prefix_is_still_an_escape(
         resolve_confined(root, decoy / "file.txt")
 
 
-@pytest.mark.skipif(not WINDOWS, reason="Windows-only path shape")
-def test_mixed_case_is_not_an_escape_on_windows(tmp_path):
-    root = tmp_path / "Project"
-    root.mkdir()
-    # Same real path, different case -- Windows path comparison folds case.
-    mixed_case_target = Path(str(tmp_path).upper()) / "PROJECT" / "board.yaml"
+def test_mixed_case_is_not_an_escape_on_a_case_insensitive_volume(
+    case_insensitive_root,
+):
+    """Runs wherever the volume folds case -- NTFS, APFS, any case-insensitive
+    mount -- not wherever `os.name == "nt"` (tan-cli#587)."""
+    root = case_insensitive_root
+    # Same real directory, different spelling. Only the component the probe
+    # actually proved foldable is re-cased -- the Windows-only version
+    # upper-cased the WHOLE of `tmp_path`, which a probe cannot vouch for:
+    # case-insensitivity is per-VOLUME, and `tmp_path`'s ancestors can sit on
+    # a different one (they do on a case-insensitive mount under a
+    # case-sensitive root, which is how this was reproduced on Linux).
+    mixed_case_target = root.parent / "PROJECT" / "board.yaml"
 
     resolved = resolve_confined(root, mixed_case_target)
 
-    assert resolved == (root / "board.yaml").resolve()
+    # `samefile` on the PARENT, not `==` on the leaf: the return keeps the
+    # caller's spelling, and `PurePosixPath.__eq__` is case-sensitive, so an
+    # `==` here would fail on APFS for a path that is provably inside `root`.
+    # `board.yaml` itself is never created, hence the parent.
+    assert resolved.name == "board.yaml"
+    assert os.path.samefile(resolved.parent, root)
+
+
+def test_a_differently_cased_sibling_is_still_an_escape(tmp_path):
+    """The identity fallback must not degrade into case folding: on a
+    case-SENSITIVE volume `Project` and `PROJECT` are two different
+    directories and the second is an escape from the first. On a
+    case-insensitive one this second `mkdir` is the one that cannot happen,
+    so the case never arises there -- hence the skip rather than an
+    inverted assertion."""
+    root = tmp_path / "Project"
+    root.mkdir()
+    try:
+        (tmp_path / "PROJECT").mkdir()
+    except FileExistsError:
+        pytest.skip(
+            "this volume's path comparison folds case, so a distinct "
+            "'PROJECT' sibling cannot exist alongside 'Project'"
+        )
+
+    with pytest.raises(PathEscapeError):
+        resolve_confined(root, tmp_path / "PROJECT" / "board.yaml")
