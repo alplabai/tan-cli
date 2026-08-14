@@ -16,10 +16,11 @@
 #     13-19 s on macOS (unsigned re-extracted .dylibs get re-verified by the OS
 #     on every load). $INSTALL_DIR/tan is then a thin launcher script, not the
 #     binary itself -- the unpacked freeze lives in $INSTALL_DIR/tan-cli-lib/.
-#   * Every tag published BEFORE v0.5.0 -- including v0.4.1, which is what
-#     `latest` resolves to today, and the v0.5.0-rc4 pre-release -- publishes a
-#     RAW executable under the same triple with no extension. That one is
-#     installed as-is, no launcher and no tan-cli-lib/.
+#   * Every tag published BEFORE v0.5.0 -- v0.4.1 and the v0.5.0-rc4
+#     pre-release -- publishes a RAW executable under the same triple with no
+#     extension. That one is installed as-is, no launcher and no tan-cli-lib/.
+#     `latest` resolves to v0.5.1 today, so the no-argument install takes the
+#     archive path; the raw path is reached only via --version on an older tag.
 #
 #   curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh
 #   ./install.sh [--version vX.Y.Z] [--dir <path>] [--system]
@@ -292,10 +293,11 @@ fi
 # WHICH SHAPE does this release publish? (tan-cli#356)
 #
 # From v0.5.0 an asset is a .tar.gz of a --onedir freeze (tan-cli#349). Every
-# tag published before it -- v0.4.1, which is what `latest` resolves to today,
-# and the v0.5.0-rc4 pre-release -- publishes a RAW executable under the same
-# triple with no extension. Requesting the archive unconditionally 404s on
-# every tag that exists right now, which is what #356 reported.
+# tag published before it -- v0.4.1 and the v0.5.0-rc4 pre-release -- publishes
+# a RAW executable under the same triple with no extension. `latest` resolves to
+# v0.5.1 today, so both shapes are installable and neither name can be assumed:
+# requesting the archive unconditionally 404'd on every tag that existed when
+# #356 was reported.
 #
 # Decided by asking the release ITSELF which name it carries, through the
 # checksums.txt just fetched: that file lists every asset in the release, it
