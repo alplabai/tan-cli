@@ -209,6 +209,20 @@ def test_confirmed_install_commands_refuses_a_compound_command():
     assert confirmed_install_commands(install, lambda _binary: True) == {}
 
 
+def test_confirmed_install_commands_refuses_a_bare_ampersand_and_a_newline():
+    """tan-cli#760 review round 3, NIT: measured to slip past the round-2
+    list -- `apt-get install -y cmake & rm -rf /` (a single backgrounding
+    `&`, not `&&`) and a bare newline (`"apt-get update\\napt-get install -y
+    cmake"`) both confirmed as if they were one safe command."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    ampersand = {"cmake": "apt-get install -y cmake & rm -rf /"}
+    assert confirmed_install_commands(ampersand, lambda _binary: True) == {}
+
+    newline = {"cmake": "apt-get update\napt-get install -y cmake"}
+    assert confirmed_install_commands(newline, lambda _binary: True) == {}
+
+
 def test_leading_binary_agrees_with_run_fixs_own_shlex_split():
     """tan-cli#760 review MINOR 2: the guard must parse a command exactly the
     way `--fix` (`doctor_cmd.run_fix`) will -- `run_fix` calls

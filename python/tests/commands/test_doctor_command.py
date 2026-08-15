@@ -482,6 +482,24 @@ def test_prerequisites_check_available_guards_missing_but_not_fix_missing():
     ]
 
 
+def test_check_built_with_only_missing_falls_back_to_it_for_fix_missing():
+    """tan-cli#760 review round 3, MINOR: a `hostPrerequisites` Check built
+    with `missing=` and no `fix_missing=` (a 9th construction site nobody
+    remembered to pair) must not silently disable `--fix` -- it must fail
+    SAFE at pre-#760 behaviour (the two fields equal), never silent."""
+    missing = [{"tool": "ninja", "command": "brew install ninja"}]
+    check = doctor_cmd.Check(
+        "hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host"
+    )
+    assert check.fix_missing == missing
+
+    # A Check that carries neither (every non-`hostPrerequisites` check)
+    # stays `None`, not `[]` -- `reported_missing`'s own "checked, nothing
+    # missing" spelling must not be manufactured here.
+    clean = doctor_cmd.Check("somethingElse", "pass", "ok", scope="host")
+    assert clean.fix_missing is None
+
+
 # ---------------------------------------------------------------------------
 # tan-cli#760: `data.missingPrerequisites[].command` must never hand back a
 # line that cannot run. Measured on fedora:42/archlinux:latest/rockylinux:9:
@@ -3549,19 +3567,23 @@ def test_doctor_fix_explains_a_missing_installer_in_both_text_and_json(monkeypat
     verdict reaching only one of them is the same bug wearing a different
     hat. `can_prompt` is stubbed for the reason the section header above
     gives: `CliRunner`'s pipes are never a tty."""
-    missing = [{"tool": "ninja", "command": "brew install ninja"}]
-    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
-    # input (`fix_missing`) from the envelope's guarded `missing` -- this
-    # stub simulates the ordinary CONFIRMED case, where the two are equal,
-    # exactly as `prerequisites_check` leaves them when `available` confirms
-    # the command (or is not given at all).
+    # DIVERGENT on purpose (tan-cli#760 review round 3, MAJOR): `missing`
+    # (the envelope) carries a NULLED command and `fix_missing` (`--fix`'s
+    # own input) carries the real one -- the one shape that can actually
+    # catch `doctor()` reading the wrong field. A stub where the two agree
+    # cannot fail if `--fix` is silently re-wired from `fix_missing` back to
+    # `missing`: mutation-tested by flipping `c.fix_missing` -> `c.missing`
+    # at the `run_fix(...)` call site and confirming this exact assertion
+    # (`doctor.fix-installer-not-found`, `brew` in `json_detail`) goes red,
+    # since `run_fix(missing)` would see `command: None` for `ninja` and
+    # silently skip it instead of reporting the installer as unresolved.
     stub_checks = [
         doctor_cmd.Check(
             "hostPrerequisites",
             "fail",
             "ninja missing",
-            missing=missing,
-            fix_missing=missing,
+            missing=[{"tool": "ninja", "command": None}],
+            fix_missing=[{"tool": "ninja", "command": "brew install ninja"}],
             scope="host",
         )
     ]

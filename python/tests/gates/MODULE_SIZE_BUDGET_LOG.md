@@ -141,3 +141,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/bootstrap_cmd.py: 3263 -> 3277
     - tan/commands/doctor_cmd.py: 4014 -> 4087
     - tan/core/bootstrap.py: 2172 -> 2269
+- 2026-08-15 -- tan-cli#760 review round 3: mutation-provable --fix wiring test (Check.fix_missing fallback in __post_init__, corrected fix_installer_not_found_check/run_fix docstrings, hardened shell-metacharacter denylist)
+    - tan/commands/doctor_cmd.py: 4087 -> 4114
+    - tan/core/bootstrap.py: 2269 -> 2275
