@@ -122,7 +122,20 @@ if [ -z "${ZEPHYR_SDK_INSTALL_DIR:-}" ]; then
 fi
 [ -n "${ZEPHYR_SDK_INSTALL_DIR:-}" ] && echo "  sdk:  $ZEPHYR_SDK_INSTALL_DIR" || echo "  sdk:  none found (build leg will be reported, not silently skipped)"
 
-cd "$WORK/proj"
+# GUARDED, and it has to be: line 12 sets `-uo pipefail` deliberately WITHOUT
+# `-e`, so the harness keeps scoring after an individual assertion fails. That
+# choice makes an unchecked `cd` far more dangerous here than in an ordinary
+# script -- a failed `cd` does not stop the run, it relocates the REST of it.
+# Every relative path below (the alp-sdk clone, `./alp-sdk`, the scaffolded
+# project, the build outputs) would then resolve against whatever directory the
+# shell happened to be in, and the harness would report a full set of results
+# about a tree that is not the one under test -- the worst failure mode this
+# harness has, because it looks exactly like a real run. tan-cli#506.
+cd "$WORK/proj" || {
+	echo "ABORT: could not cd into $WORK/proj -- every path below is relative to it," >&2
+	echo "       so continuing would measure a different tree and report it as this one." >&2
+	exit 2
+}
 
 # tan must sit BESIDE alp-sdk/ -- the documented quickstart layout, and
 # load-bearing for #323 (bootstrap only plans a relocation when the directory
