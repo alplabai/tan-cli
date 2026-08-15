@@ -44,7 +44,26 @@ if [ -e "$WORK" ]; then
   echo "       re-run after removing it; continuing would measure stale state." >&2
   exit 2
 fi
-mkdir -p "$WORK/home" "$WORK/proj"
+# Guarded (tan-cli#506): `set -e` is deliberately off in this harness, so an
+# unguarded failure here -- a read-only or full filesystem, a quota, `$WORK`
+# on a path this user cannot write -- sails straight past, and `export HOME`
+# on the next line then points at a directory that does not exist.
+#
+# MEASURED, so the claim is the right size: the unguarded version does NOT
+# report green. Run with `$WORK` under an unwritable parent it printed two
+# `mkdir: ... Permission denied` lines, carried on, and ended
+# `0 passed, 4 failed (ABORTED at the clone)` at exit 1. The defect is the
+# DIAGNOSIS, not a false pass -- "aborted at the clone" reads as a tan
+# regression and gets triaged as one, when nothing about tan was ever
+# exercised. This aborts at the real cause with exit 2, which the harness
+# already uses for "cannot run" as distinct from exit 1's "checks failed".
+# That distinction is what makes an unattended scheduled run (tan-cli#754)
+# triageable from the Actions tab alone.
+mkdir -p "$WORK/home" "$WORK/proj" || {
+  echo "ABORT: could not create the sandbox under $WORK" >&2
+  echo "       (read-only filesystem, quota, or an unwritable parent)" >&2
+  exit 2
+}
 export HOME="$WORK/home"; export USERPROFILE="$WORK/home"
 unset ALP_SDK_ROOT ZEPHYR_BASE ALP_FLASH_FORCE 2>/dev/null || true
 git config --global core.longpaths true 2>/dev/null || true
@@ -122,7 +141,25 @@ if [ -z "${ZEPHYR_SDK_INSTALL_DIR:-}" ]; then
 fi
 [ -n "${ZEPHYR_SDK_INSTALL_DIR:-}" ] && echo "  sdk:  $ZEPHYR_SDK_INSTALL_DIR" || echo "  sdk:  none found (build leg will be reported, not silently skipped)"
 
-cd "$WORK/proj"
+# The BACKSTOP, not the first line of defence (tan-cli#506). `$WORK/proj` is
+# created ~90 lines above and that `mkdir -p` now aborts on failure, so what
+# reaches here is the narrower case: the directory disappearing or turning
+# unreadable in between. Kept as its own guard rather than folded into that
+# check because the consequence differs -- `set -e` is deliberately OFF in
+# this harness (one failing check must not abort the remaining thirty-odd),
+# so a bare `cd` that fails carries on in whatever directory the script was
+# already in, and every assertion below then measures a tree nobody chose.
+# Not claimed here as a silent-green hole: the one failure mode actually
+# reproduced (see the mkdir guard's own note) ended red, just misattributed.
+# The point of both guards is that an unattended scheduled run (tan-cli#754)
+# reports WHY it could not run, rather than a number that reads like a tan
+# regression.
+cd "$WORK/proj" || {
+  printf 'FATAL: cannot cd into %s -- refusing to run the suite from %s, where\n' \
+    "$WORK/proj" "$PWD"
+  printf '       every check below would measure the wrong tree (tan-cli#506).\n'
+  exit 2
+}
 
 # tan must sit BESIDE alp-sdk/ -- the documented quickstart layout, and
 # load-bearing for #323 (bootstrap only plans a relocation when the directory

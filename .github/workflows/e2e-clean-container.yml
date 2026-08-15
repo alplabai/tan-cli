@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The clean-container e2e, on a schedule (tan-cli#754).
+#
+# `scripts/e2e-full.sh` (78 KB, 33 assertions) and its two wrappers
+# `e2e-container.sh` / `e2e-linux-freeze.sh` were referenced by NO workflow at
+# all. The most thorough clean-machine harness in the repo ran only when
+# somebody remembered to type it. `e2e-container.sh`'s own header records that
+# it caught two release-blocking defects in the first minute inside a bare
+# `ubuntu:24.04` -- tan-cli#354 (`CERTIFICATE_VERIFY_FAILED` on every HTTPS
+# call, shipped in every RC) and tan-cli#355 -- that every green developer-host
+# run had missed. That is the value that was sitting idle.
+#
+# WHAT THIS COVERS THAT NOTHING ELSE DOES: `dev` x `dev`.
+# `release-combination.yml` tests a published tan against a published alp-sdk.
+# `parity.yml` reaches `dev` only under `repository_dispatch`, fired by an
+# alp-sdk push through a path filter. `clean-host.yml` and
+# `getting-started.yml` start from a stock `ubuntu-latest` that ALREADY has
+# git, cmake, python3 and curl -- the exact condition tan-cli#687 reported, and
+# the reason a "clean host" job on a GitHub runner is not a clean host. This
+# job starts from `ubuntu:24.04` carrying ca-certificates, git and python3 and
+# nothing else; providing the rest is `tan bootstrap`'s job, and whether it
+# does is the thing under test.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEDULE FIRES FROM THE DEFAULT BRANCH ONLY. READ THIS BEFORE ASSUMING IT RAN.
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub evaluates `schedule:` against the DEFAULT branch's copy of a workflow
+# file. This repo merges to `dev` first and `dev` -> `main` only after testing,
+# so between this file landing on `dev` and the next `dev` -> `main` merge the
+# cron below does NOTHING -- no run, no failure, no notification. alp-sdk's
+# `onramp-clean-container.yml` carries a comment calling its own weekly cron
+# "currently a no-op" for exactly this reason, and tan-cli#754 flagged it as a
+# hazard to encode rather than rediscover.
+#
+# `workflow_dispatch` is therefore not a convenience here, it is the only way
+# to run this from a branch. Until this file is on `main`, dispatch it by hand
+# against the branch you care about, and do not read a quiet Actions tab as
+# green.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY WEEKLY AND NOT NIGHTLY
+# ─────────────────────────────────────────────────────────────────────────────
+# Measured on `dev` @ `3f39f340` (tan-cli#754): 5m22s wall clock for the
+# harness, `west sdk install` taking 30s of its 1200s timeout, 33 assertions
+# passing. Add the freeze and this job is roughly 15 minutes. Cheap per run --
+# but it exercises network paths (`west sdk install`, the alp-sdk clone, apt)
+# whose failures are usually the network's rather than tan's, and a job that
+# cries wolf nightly gets muted. Weekly, plus dispatch-on-demand, is the
+# cadence that keeps a red X meaning something. Raise it if a real regression
+# ever slips a week.
+name: e2e-clean-container
+
+on:
+  schedule:
+    # 04:17 UTC on Mondays. Deliberately not on the hour: GitHub queues
+    # scheduled jobs and the top of the hour is the most contended slot.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      alp_sdk_ref:
+        description: "alp-sdk ref the harness clones (branch, tag or SHA)"
+        type: string
+        default: "dev"
+      image:
+        description: "container image to run the bare-host scenarios in"
+        type: string
+        default: "ubuntu:24.04"
+
+# Never cancel a scheduled run in favour of a dispatched one: they answer
+# different questions and both results are wanted.
+concurrency:
+  group: e2e-clean-container-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  # Reads this repository and the public `alplabai/alp-sdk`; writes nothing.
+  contents: read
+
+jobs:
+  e2e:
+    name: "clean container e2e (dev x ${{ inputs.alp_sdk_ref || 'dev' }})"
+    runs-on: ubuntu-latest
+    # The harness's own budget is ~6 min and the freeze ~5; 45 leaves room for
+    # a slow `west sdk install` (its internal timeout is 1200s = 20 min)
+    # without letting a hung run burn an hour.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12" # pyproject's requires-python floor
+
+      # Frozen ON THE RUNNER, not in the old-glibc container release.yml uses.
+      # That container exists so a published asset does not ship a glibc floor
+      # no supported distro meets; here the only consumer is the
+      # `ubuntu:24.04` below, whose glibc is the runner's own. Freezing in
+      # slim-bullseye would test a DIFFERENT binary than this job is about.
+      # If this job is ever pointed at an older image, this is the step that
+      # has to change with it.
+      - name: freeze tan
+        shell: bash
+        working-directory: python
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/freeze-venv
+          /tmp/freeze-venv/bin/python -m pip install --quiet --upgrade pip
+          /tmp/freeze-venv/bin/python -m pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+          PYTHON=/tmp/freeze-venv/bin/python bash scripts/build_binary.sh
+
+      # `build_binary.sh` is --onedir since tan-cli#349: the launcher needs its
+      # `_internal/` sibling, so the TREE is what gets handed to the harness,
+      # never the bare executable. Asserted rather than assumed -- a silent
+      # layout change would otherwise surface inside `e2e-container.sh` as a
+      # confusing usage error twenty lines later.
+      - name: check the freeze is where the harness expects
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x python/dist/tan/tan || {
+            echo "::error::python/dist/tan/tan is missing or not executable after build_binary.sh -- the onedir layout moved (tan-cli#349 put it here); e2e-container.sh takes the TREE, not the executable."
+            ls -la python/dist || true
+            exit 1
+          }
+          python/dist/tan/tan --version
+
+      - name: e2e in a pristine container
+        shell: bash
+        env:
+          ALP_SDK_REF: ${{ inputs.alp_sdk_ref || 'dev' }}
+          IMAGE: ${{ inputs.image || 'ubuntu:24.04' }}
+          # Left at the script's own default unless a dispatch overrides it, so
+          # this job cannot silently diverge from a hand-run of the same
+          # harness -- the tan-cli#358 failure mode (a second, drifted copy).
+          ZEPHYR_SDK_INSTALL_TIMEOUT: "1200"
+        run: |
+          set -euo pipefail
+          bash scripts/e2e-container.sh python/dist/tan "$IMAGE"
