@@ -183,6 +183,20 @@ monitor = ["pyserial>=3.5"]
 # floors.
 model-io = ["tflite>=2.10", "flatbuffers>=23.1.21"]
 
+# Full host model-compile toolchain: adds the Arm Vela compiler `vela` needs
+# for `tan.model.adapters.ethos_u.VelaAdapter.compile()` (`shutil.which("vela")`
+# is the runtime gate; this extra is what puts it on PATH). NOT required for
+# `tan model build` to run -- every vendor adapter shells its compiler as an
+# external binary, never a Python import, so a bare `pip install alp-tan`
+# still works and only that one NPU backend's compile step is unavailable
+# (`is_available()` reports False; `doctor`/`check` explain why). Pins mirror
+# alp-sdk's own `model-compile` extra exactly (due to be dropped from
+# alp-sdk's `pyproject.toml` once `scripts/alp_model/` is deleted -- ADR-0028
+# Task 6) rather than inventing new floors. DEEPX's `dxcom` and DRP-AI's TVM
+# have no such extra on either side -- both are license-gated vendor
+# toolchains with no PyPI wheel to pin.
+model-compile = ["ethos-u-vela>=3.9", "tflite>=2.10", "flatbuffers>=23.1.21"]
+
 [project.urls]
 Homepage = "https://github.com/alplabai/tan-cli"
 Repository = "https://github.com/alplabai/tan-cli"

@@ -594,8 +594,8 @@ HAND_PORT_PINNED_SDK_COMMIT = "bd8be484680cf5aa1c1ac0e8b38d84128b5a279d"  # alp-
 #: taken directly from the `d00dbdc1` checkout this HAND_PORT_PINNED_SDK_COMMIT
 #: already names, so pinning it here re-freezes nothing unaudited either.
 #:
-#: The eight `scripts/alp_cli/{diagnostic_format,validate,new_som,doctor,
-#: explain,monitor,model,validator}.py` entries below close the same blind
+#: The seven `scripts/alp_cli/{diagnostic_format,validate,new_som,doctor,
+#: explain,monitor,validator}.py` entries below close the same blind
 #: spot (tan-cli#560 review, minor 2): each is named as a hand-port source in
 #: a comment somewhere under `python/tan/` --
 #: `tan/output_format.py`/`tan/commands/validate_cmd.py`
@@ -603,8 +603,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "bd8be484680cf5aa1c1ac0e8b38d84128b5a279d"  # alp-
 #: `tan/commands/new_som_cmd.py` (`new_som.py`),
 #: `tan/commands/doctor_cmd.py`/`tan/core/doctor_libraries.py` (`doctor.py`),
 #: `tan/core/error_catalog.py`/`tan/commands/explain_cmd.py` (`explain.py`),
-#: `tan/commands/monitor_cmd.py` (`monitor.py`), and
-#: `tan/commands/model_cmd.py` (`model.py`). `scripts/alp_cli/validator.py`'s
+#: `tan/commands/monitor_cmd.py` (`monitor.py`). `scripts/alp_cli/validator.py`'s
 #: `load_board_schema`/`iter_schema_errors` are hand-ported into
 #: `tan/planner/loader.py` (that file's own docstring: "RELOCATED from
 #: alp-sdk's scripts/alp_cli/validator.py, the last module-scope import this
@@ -613,7 +612,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "bd8be484680cf5aa1c1ac0e8b38d84128b5a279d"  # alp-
 #: `scripts/alp_orchestrate/loader.py`), so this is the SAME split-heritage
 #: shape `sentinels.py` set the precedent for: a hand-port INTO an
 #: already-tracked file still needs its own SDK-side source hashed. None of
-#: these eight sources live under `tan/planner/` themselves, so like
+#: these seven sources live under `tan/planner/` themselves, so like
 #: `faultdecode.py` they are deliberately NOT added to `HAND_PORT_SOURCES`
 #: either. sha256 taken directly from the `d00dbdc1` checkout
 #: HAND_PORT_PINNED_SDK_COMMIT already names, and each verified unchanged
@@ -626,6 +625,13 @@ HAND_PORT_PINNED_SDK_COMMIT = "bd8be484680cf5aa1c1ac0e8b38d84128b5a279d"  # alp-
 #: covered by that one entry -- `HAND_PORT_HASHES` is keyed by the alp-sdk
 #: source path, not by the consuming `tan` file, so a second key for the same
 #: path would be a no-op duplicate, not a new audit.
+#:
+#: `scripts/alp_cli/model.py` was originally an eighth member of the group
+#: above (the tan-cli#560 review's total was nine, counting "the ninth
+#: source" above alongside it). ADR-0028 relocated the engine it hand-ported
+#: (`tan.model`) into tan and deleted the alp-sdk original, so it left
+#: `HAND_PORT_HASHES` -- see the comment at its former table entry, a few
+#: lines below, for why that is a correct removal and not drift.
 HAND_PORT_HASHES: dict[str, str] = {
     "scripts/gen_zephyr_board.py": "083018a76a774d6ea37da87d3d8dda6eda4515c5cd924ebf0b5a141c9ba2cf9b",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
@@ -644,7 +650,9 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_cli/doctor.py": "f2faa07cecbbffc1bcfb510210e3f24d96a3ad6864eef8f3fe92f93886ddacd5",
     "scripts/alp_cli/explain.py": "b9e05d32896d1e0855f1c040b581b3e77869b4b03b15371c125757be1e0e09fe",
     "scripts/alp_cli/monitor.py": "1f67ee1372c73e2bd76b5c9338c141e31accdef1e206b7a64806cf8eb691c0e2",
-    "scripts/alp_cli/model.py": "a51be0a8d3a16bd408bb57d01f049175406b73cc48ab9346d39555c3aa5b1925",
+    # `scripts/alp_cli/model.py` was here. ADR-0028 relocated the engine into
+    # `tan/model/` and deleted the alp-sdk original, so there is no upstream
+    # file left to pin -- this is the entry LEAVING the table, not drifting.
     "scripts/alp_cli/validator.py": "8dac2e4d3799fe67feceb74e587f23b5e8b44a40df2805220632f8edae26a421",
 }
 
