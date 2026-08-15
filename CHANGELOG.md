@@ -5,6 +5,20 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.6.0] — Unreleased
+
+### Fixed
+
+- **`version-identity`'s `not-a-released-version` check went red on every PR
+  opened against `dev` the moment `v0.6.0-rc1` was tagged.** `dev`'s tip kept
+  `TAN_VERSION = "0.6.0-rc1"`, the exact string the published tag already
+  claimed, so two different builds answered `tan 0.6.0-rc1` and no bug report
+  could tell them apart -- the state `version_check.py --not-released` exists
+  to refuse. Reddened #762 and #763, neither of which touched a version file.
+  `TAN_VERSION` moves to `0.6.0-rc2.dev0`, the same `.devN`-tail-on-the-next-
+  pre-release spelling this file has used for the same recurrence twice
+  before (`0.5.0-rc5.dev0`, `0.5.2-rc1.dev0`).
+
 ## [0.6.0-rc1] — 2026-08-14
 
 ### Added
