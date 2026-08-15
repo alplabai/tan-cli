@@ -186,6 +186,14 @@ def test_drpai_available_when_the_env_var_names_a_built_install(tmp_path, monkey
     green (rc=0), because no test on the "available" branch booby-trapped
     subprocess; this one does."""
     _force_all_unavailable(monkeypatch)
+    # `_drpai_status` also gates on `shutil.which("python3")` (the interpreter
+    # `DrpaiAdapter.compile()` shells the tutorial script with) -- resolve
+    # only that one name so this "everything drpai needs is present" case
+    # stays green, without loosening `_force_all_unavailable`'s blanket None
+    # for every other tool this file's other tests rely on.
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/python3" if name == "python3" else None
+    )
     tvm_home = tmp_path / "drpai-tvm"
     script_dir = tvm_home / "tutorials"
     script_dir.mkdir(parents=True)
@@ -198,7 +206,17 @@ def test_drpai_available_when_the_env_var_names_a_built_install(tmp_path, monkey
     monkeypatch.setattr(subprocess, "run", _boom)
     monkeypatch.setattr(subprocess, "Popen", _boom)
     result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
-    row = _rows(envelope(result))["drpai"]
+    doc = envelope(result)
+    # Assert the envelope actually resolved BEFORE indexing into
+    # `data.backends` -- a caught spawn trips `model_cmd.py`'s broad
+    # `except Exception`, which swallows the `AssertionError` raised by
+    # `_boom` above and re-emits it as an `ok=false` envelope with an EMPTY
+    # `data.backends` list. Indexing straight into `_rows(doc)["drpai"]`
+    # would then fail with a `KeyError: 'drpai'` that names none of that --
+    # this assertion makes the actual trap (a subprocess spawn) the thing
+    # that prints, not an unrelated-looking `KeyError`.
+    assert result.exit_code == 0, doc
+    row = _rows(doc)["drpai"]
     assert row["available"] is True
     assert row["reason"] is None
 
@@ -221,6 +239,32 @@ def test_drpai_env_var_directory_without_tutorial_script_stays_unavailable_with_
     assert row["reason"] is not None
     assert "ALP_DRPAI_TVM_HOME" in row["reason"]
     assert "compile_onnx_model_quant.py" in row["reason"]
+    assert str(tvm_home) in row["reason"]
+
+
+def test_drpai_built_tree_without_python3_on_path_stays_unavailable_with_caveat(
+    tmp_path, monkeypatch
+):
+    """`DrpaiAdapter.compile()` shells the tutorial script with `python3`
+    (`cmd = ["python3", str(script), ...]`, `tan/model/adapters/drpai.py`) --
+    a host with a fully BUILT toolchain tree (the env var set, the tutorial
+    script present) but no `python3` on PATH must NOT read green either; it
+    is the same false-green class as the missing-tutorial-script case above,
+    one dependency further out."""
+    _force_all_unavailable(monkeypatch)
+    tvm_home = tmp_path / "drpai-tvm"
+    script_dir = tvm_home / "tutorials"
+    script_dir.mkdir(parents=True)
+    (script_dir / "compile_onnx_model_quant.py").write_text("# stub\n")
+    monkeypatch.setenv("ALP_DRPAI_TVM_HOME", str(tvm_home))
+    # `_force_all_unavailable` already stubs `shutil.which` to return None
+    # for every name, "python3" included -- no further patching needed to
+    # simulate its absence.
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["drpai"]
+    assert row["available"] is False
+    assert row["reason"] is not None
+    assert "python3" in row["reason"]
     assert str(tvm_home) in row["reason"]
 
 
@@ -269,6 +313,13 @@ def test_drpai_degraded_version_string_surfaces_as_none(tmp_path, monkeypatch):
     backend must be guarded the same way: never surfaced as if it were a
     real version."""
     _force_all_unavailable(monkeypatch)
+    # `_drpai_status` also gates on `shutil.which("python3")`; resolve only
+    # that name so the "otherwise fully built" tree this test needs reads
+    # available (see the same override in
+    # test_drpai_available_when_the_env_var_names_a_built_install).
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/python3" if name == "python3" else None
+    )
     tvm_home = tmp_path / "drpai-tvm"
     script_dir = tvm_home / "tutorials"
     script_dir.mkdir(parents=True)
@@ -282,6 +333,9 @@ def test_drpai_degraded_version_string_surfaces_as_none(tmp_path, monkeypatch):
 
 def test_drpai_real_version_is_reported(tmp_path, monkeypatch):
     _force_all_unavailable(monkeypatch)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/python3" if name == "python3" else None
+    )
     tvm_home = tmp_path / "drpai-tvm"
     script_dir = tvm_home / "tutorials"
     script_dir.mkdir(parents=True)

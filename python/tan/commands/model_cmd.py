@@ -425,37 +425,53 @@ def _deepx_dxm1_status() -> tuple[bool, str | None]:
 def _drpai_status() -> tuple[bool, str | None]:
     """`drpai`'s doctor verdict -- gated on what `DrpaiAdapter.compile()`
     actually needs under `$ALP_DRPAI_TVM_HOME`: the vendor tutorial script
-    `tutorials/compile_onnx_model_quant.py` it spawns
-    (`tan/model/adapters/drpai.py`'s own `cmd = ["python3", str(script),
-    ...]`), NOT just the bare directory `DrpaiAdapter.is_available()`/
-    `_tvm_home()` check for.
+    `tutorials/compile_onnx_model_quant.py` it spawns AND the `python3`
+    interpreter it shells that script with (`tan/model/adapters/drpai.py`'s
+    own `cmd = ["python3", str(script), ...]`), NOT just the bare directory
+    `DrpaiAdapter.is_available()`/`_tvm_home()` check for.
 
     A customer who points `ALP_DRPAI_TVM_HOME` at an unpacked-but-unbuilt
     checkout (the tutorials/ tree not yet present, or laid out differently)
     got `available: true` from the bare directory check, then a vendor-script
-    failure on the next real build. Deliberately NOT a change to
-    `DrpaiAdapter.is_available()`/`_tvm_home()` themselves -- same reasoning
-    as `_deepx_dxm1_status` above: this is doctor's own, narrower question.
+    failure on the next real build -- and a host with a BUILT tree but no
+    `python3` on PATH hit the exact same false-green class one dependency
+    further out, still reading green right up until that same `model build`
+    failed. Deliberately NOT a change to `DrpaiAdapter.is_available()`/
+    `_tvm_home()` themselves -- same reasoning as `_deepx_dxm1_status` above:
+    this is doctor's own, narrower question. `python3` is deliberately NOT
+    `BACKEND_TOOLS["drpai"]` (see that dict's own comment: naming an
+    interpreter present on essentially every host tells a customer nothing
+    actionable) -- it is checked here as a `compile()` prerequisite, not
+    reported as *the* tool this row names.
 
     Read-only: `_tvm_home()` (env var + `Path.is_dir`) + `Path.is_file` on the
-    tutorial script path, never a subprocess.
+    tutorial script path + `shutil.which("python3")`, never a subprocess.
 
     Returns `(available, reason)`, same shape as `_deepx_dxm1_status`: `None`
     reason falls back to `_UNAVAILABLE_REASONS["drpai"]`'s generic reason
     (env var not set at all); an explicit caveat when the var names a real
-    directory but the tutorial script isn't under it.
+    directory but the tutorial script isn't under it, or when both are
+    present but `python3` is not on PATH.
     """
     tvm_home = _drpai_tvm_home()
     if tvm_home is None:
         return False, None
     script = tvm_home / "tutorials" / "compile_onnx_model_quant.py"
-    if script.is_file():
-        return True, None
-    return False, (
-        f"ALP_DRPAI_TVM_HOME={tvm_home} is set, but tutorials/"
-        "compile_onnx_model_quant.py was not found under it -- point it at "
-        "a BUILT rzv_drp-ai_tvm install, not an unpacked/incomplete tree"
-    )
+    if not script.is_file():
+        return False, (
+            f"ALP_DRPAI_TVM_HOME={tvm_home} is set, but tutorials/"
+            "compile_onnx_model_quant.py was not found under it -- point it at "
+            "a BUILT rzv_drp-ai_tvm install, not an unpacked/incomplete tree"
+        )
+    if shutil.which("python3") is None:
+        return False, (
+            f"ALP_DRPAI_TVM_HOME={tvm_home} and tutorials/"
+            "compile_onnx_model_quant.py are both present, but python3 is "
+            "not on PATH -- DrpaiAdapter.compile() shells `python3 "
+            "<script> ...` (tan/model/adapters/drpai.py), so this "
+            "environment would still fail `model build`"
+        )
+    return True, None
 
 
 def _probe_backend(backend: str) -> tuple[bool, str | None]:
