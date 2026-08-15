@@ -26,8 +26,8 @@ from tests.conftest import sdk_root
 SDK = sdk_root()
 
 
-def _op(name: str, macs: int = 0) -> OpDesc:
-    return OpDesc(op=name, macs=macs)
+def _op(name: str, macs: int = 0, *, op_namespace: str = "tflite") -> OpDesc:
+    return OpDesc(op=name, macs=macs, op_namespace=op_namespace)
 
 
 def _write_table(root: Path, backend: str, filename: str, *, variant: str,
@@ -103,15 +103,18 @@ def test_the_deepx_answer_would_change_if_a_table_existed(tmp_path):
     """Proves the absence checked above is load-bearing, not incidental: point
     metadata_root at a tree that DOES carry a deepx_dxm1 table and the verdict
     changes from undetermined to a real per-op score."""
+    # op_namespace="onnx": these ops stand in for a (not-yet-built) ONNX
+    # extractor's output -- the table's own op_namespace must match THIS,
+    # not just the src_format= the caller happens to pass.
     without_table = analyze_backend(backend="deepx_dxm1", src_format="onnx",
-                                     ops=[_op("Conv")], metadata_root=tmp_path)
+                                     ops=[_op("Conv", op_namespace="onnx")], metadata_root=tmp_path)
     assert without_table.npu_coverage == "undetermined"
 
     with_table_root = tmp_path / "with-table"
     _write_table(with_table_root, "deepx_dxm1", "onnx-i8@dxcom-2.3.0.json",
                  variant="onnx-i8", op_namespace="onnx", supported=["Conv"])
     with_table = analyze_backend(backend="deepx_dxm1", src_format="onnx",
-                                  ops=[_op("Conv")], metadata_root=with_table_root)
+                                  ops=[_op("Conv", op_namespace="onnx")], metadata_root=with_table_root)
     assert with_table.npu_coverage == "full-eligible"
     assert with_table.ops[0].status == "npu-eligible"
     assert with_table.ops[0].reason != "no-table-for-backend"
@@ -145,6 +148,24 @@ def test_op_namespace_mismatch_refuses_the_comparison_rather_than_guessing(tmp_p
                            metadata_root=tmp_path, variant="u55")
     assert rep.npu_coverage == "undetermined"
     assert rep.ops[0].reason == "no-table-for-backend"
+
+
+def test_namespace_guard_compares_against_the_ops_actual_vocabulary_not_src_format(tmp_path):
+    # The table's op_namespace ("onnx") equals @src_format ("onnx") here, so
+    # a guard that compared table-vs-src_format (the pre-fix behaviour) would
+    # let this through -- but the ops actually carry TFLite-spelled names
+    # (OpDesc.op_namespace defaults to "tflite"), e.g. a caller whose
+    # src_format claim doesn't match what was really extracted. Scoring
+    # "CONV_2D" against an onnx-vocabulary supported_ops=["Conv"] table
+    # fabricates a cpu-only negative -- the guard must compare against the
+    # ops' OWN vocabulary and refuse.
+    _write_table(tmp_path, "drpai", "onnx-i8@translator-1.12.json", variant="onnx-i8",
+                 op_namespace="onnx", supported=["Conv"])
+    ops = [OpDesc(op="CONV_2D", op_namespace="tflite")]
+    rep = analyze_backend(backend="drpai", src_format="onnx", ops=ops, metadata_root=tmp_path)
+    assert rep.npu_coverage == "undetermined"
+    assert rep.ops[0].reason == "no-table-for-backend"
+    assert rep.npu_coverage != "cpu-only"
 
 
 def test_no_table_covers_the_requested_variant(tmp_path):
@@ -261,6 +282,23 @@ def test_compute_pct_is_none_when_no_macs_are_computable(tmp_path):
     assert rep.compute_on_npu_pct_max is None
 
 
+def test_compute_pct_100_with_partial_coverage_surfaces_uncosted_ops_in_notes(tmp_path):
+    # Every cpu-certain op costs 0 MACs (SOFTMAX/TOPK_V2 aren't conv/dense,
+    # so the estimator never prices them) -- the MAC-weighted denominator
+    # excludes them entirely, so the ONE priced op (the eligible CONV_2D)
+    # reads as 100% even though npu_coverage is "partial" and real, uncosted
+    # CPU compute exists. The number must NOT be silently clamped away from
+    # 100.0 -- that would hide the gap -- but `notes` must say so plainly.
+    _write_table(tmp_path, "ethos_u", "dummy@vela-1.0.0.json", variant="dummy",
+                 supported=["CONV_2D"])              # SOFTMAX/TOPK_V2 NOT listed
+    ops = [_op("CONV_2D", macs=1_000_000), _op("SOFTMAX", macs=0), _op("TOPK_V2", macs=0)]
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=ops,
+                           metadata_root=tmp_path, variant="dummy")
+    assert rep.npu_coverage == "partial"
+    assert rep.compute_on_npu_pct_max == pytest.approx(100.0)     # not silently clamped
+    assert any("compute_on_npu_pct_max" in n and "excluded" in n for n in rep.notes)
+
+
 def test_full_eligible_and_cpu_only_coverage_labels(tmp_path):
     _write_table(tmp_path, "ethos_u", "dummy@vela-1.0.0.json", variant="dummy",
                  supported=["CONV_2D"])
@@ -318,3 +356,70 @@ def test_the_word_fits_never_appears_in_a_static_screen_report(tmp_path):
                     for o in rep.ops],
         }).lower()
         assert "fits" not in blob, f"retired 'fits' vocabulary leaked into: {blob}"
+
+
+# ---------------------------------------------------------------------------
+# The two adapter registries (this module's own + build.py's) must agree
+# ---------------------------------------------------------------------------
+
+def test_analyze_and_build_adapter_registries_agree():
+    """`analyze.py`'s `_ADAPTERS` is a deliberate second instantiation of
+    `build.py`'s own registry (see the module-level comment above `_ADAPTERS`
+    in analyze.py for why it isn't a shared import). Nothing else pins them
+    equal -- an adapter added, or an `accepts()` changed, on one side alone
+    would make `analyze_backend` either raise `unknown backend` or report
+    `format-not-accepted` for a format `build_model()` accepts just fine.
+    Compared by (class, backend, which of the three known formats it
+    accepts), not by identity -- the two lists are legitimately different
+    objects."""
+    from tan.model import analyze as analyze_mod
+    from tan.model import build as build_mod
+
+    def _fingerprint(adapters):
+        return sorted(
+            (type(a).__name__, a.backend,
+             tuple(fmt for fmt in ("tflite", "onnx", "pte") if a.accepts(fmt)))
+            for a in adapters
+        )
+
+    assert _fingerprint(analyze_mod._ADAPTERS) == _fingerprint(build_mod._ADAPTERS)
+
+
+# ---------------------------------------------------------------------------
+# Soft-fail promises that must not raise (an explicit-but-null YAML/JSON
+# block, or a table document that parses but isn't an object)
+# ---------------------------------------------------------------------------
+
+def test_resolve_ethos_u_variant_tolerates_an_explicit_null_inference_block(tmp_path):
+    modules_dir = tmp_path / "e1m_modules"
+    modules_dir.mkdir()
+    # `inference:` with no value parses to {"inference": None}, not a missing
+    # key -- resolve_ethos_u_variant's own docstring promises soft-fail (None),
+    # not an AttributeError from `.get()` on that None.
+    (modules_dir / "E1M-FAKE999.yaml").write_text("inference:\nsom: {}\n", encoding="utf-8")
+    assert resolve_ethos_u_variant("E1M-FAKE999", metadata_root=tmp_path) is None
+
+
+def test_resolve_table_tolerates_an_explicit_null_applies_to_block(tmp_path):
+    d = tmp_path / "npu_ops" / "ethos_u"
+    d.mkdir(parents=True)
+    (d / "u55@vela-1.0.0.json").write_text(json.dumps({
+        "applies_to": None, "op_namespace": "tflite", "supported_ops": ["CONV_2D"],
+    }))
+    # A null applies_to can never match a requested variant -- it must read
+    # as "no table covers u55" (undetermined), not raise.
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                           metadata_root=tmp_path, variant="u55")
+    assert rep.npu_coverage == "undetermined"
+    assert rep.ops[0].reason == "no-table-for-backend"
+
+
+def test_load_table_rejects_a_parseable_non_dict_json_document(tmp_path):
+    from tan.model.analyze import _load_table
+    path = tmp_path / "array.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    # json.loads("[1, 2, 3]") raises neither OSError nor ValueError -- the
+    # OLD except-only guard let a non-dict document straight through to the
+    # first caller's .get(), an uncaught AttributeError rather than the
+    # clean "no table" _load_table promises.
+    assert _load_table(path) is None

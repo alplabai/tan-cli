@@ -21,9 +21,9 @@ from .manifest import Tensor
 # an unmapped type (e.g. INT64/BOOL) reads as "tflite:<code>" rather than a
 # silently wrong "f32" -- the SDK Tensor.dtype vocabulary has no such types.
 # Built by reflecting on tflite.TensorType rather than hand-transcribing the
-# numeric codes (INT16 is 7, INT8 is 9 -- NOT 5/7 as a naive reading of
-# schema.fbs declaration order would suggest; a hardcoded literal here is
-# exactly the transcription trap this sidesteps).
+# numeric codes: the codes are non-contiguous with the SDK dtype vocabulary
+# (six wanted types out of eleven declared), so a hand-maintained literal
+# would need to track schema.fbs by hand for no benefit over reflection.
 _DTYPE_WANTED = {"FLOAT32": "f32", "FLOAT16": "f16", "INT32": "int32",
                   "UINT8": "uint8", "INT16": "int16", "INT8": "int8"}
 
@@ -91,6 +91,12 @@ class OpDesc:
     inputs: list[TensorDesc] = field(default_factory=list)
     outputs: list[TensorDesc] = field(default_factory=list)
     macs: int = 0          # best-effort static estimate; 0 when not computable
+    # The vocabulary `op` is spelled in -- "tflite" today (the only extractor
+    # that exists); "onnx" once ONNX extraction lands. `tan.model.analyze`
+    # compares THIS against a support table's own `op_namespace`, never the
+    # caller-supplied `src_format`, so a mislabelled format cannot make two
+    # incomparable op vocabularies look like a match.
+    op_namespace: str = "tflite"
 
 
 def extract_ops(source: Path, *, raw: bytes | None = None) -> list[OpDesc]:
@@ -133,7 +139,8 @@ def extract_ops(source: Path, *, raw: bytes | None = None) -> list[OpDesc]:
             out_tensors = [_tensor_desc(model, g, op.Outputs(j), dtype_names)
                            for j in range(op.OutputsLength()) if op.Outputs(j) >= 0]
             ops.append(OpDesc(op=name, inputs=in_tensors, outputs=out_tensors,
-                               macs=_estimate_macs(name, in_tensors, out_tensors)))
+                               macs=_estimate_macs(name, in_tensors, out_tensors),
+                               op_namespace="tflite"))
         return ops
     except Exception:
         return []                       # malformed / unexpected schema -> no metadata
@@ -153,6 +160,46 @@ def _tensor_desc(model, g, idx: int, dtype_names: dict[int, str]) -> TensorDesc:
                        is_const=nbytes > 0)
 
 
+# Positional index of the filter/weights input tensor per TFLite operator
+# kernel (kFilterTensor / kWeightsTensor in the TFLite C++ kernels), keyed by
+# builtin-op name. NOT "the first const input of the expected rank" -- that
+# heuristic silently grabs whichever constant happens to come first once a
+# graph has been const-folded, which shadows the real filter and can inflate
+# the MAC estimate by many times (see test_conv_2d_filter_is_selected_
+# positionally_not_by_first_matching_const). Every op below carries its
+# activation input at index 0 (never optional), so this position never shifts
+# under an absent-optional-input reindex.
+_FILTER_INPUT_INDEX = {
+    "FULLY_CONNECTED": 1,     # kInputTensor=0, kWeightsTensor=1, kBiasTensor=2 (optional)
+    "CONV_2D": 1,             # kInputTensor=0, kFilterTensor=1, kBiasTensor=2 (optional)
+    "DEPTHWISE_CONV_2D": 1,   # kInputTensor=0, kFilterTensor=1, kBiasTensor=2 (optional)
+    "TRANSPOSE_CONV": 1,      # kOutputShapeTensor=0, kWeightsTensor=1, kDataInputTensor=2, kBiasTensor=3 (optional)
+}
+
+# TRANSPOSE_CONV alone needs the INPUT activation positionally too (its
+# filter is applied per input position, not per output position -- see the
+# formula below), and that activation is not at index 0 the way it is for
+# every other op here.
+_ACTIVATION_INPUT_INDEX = {
+    "TRANSPOSE_CONV": 2,      # kDataInputTensor
+}
+
+
+def _filter_weight(op_name: str, inputs: list[TensorDesc], rank: int) -> TensorDesc | None:
+    idx = _FILTER_INPUT_INDEX.get(op_name)
+    if idx is None or idx >= len(inputs):
+        return None
+    w = inputs[idx]
+    return w if w.is_const and len(w.shape) == rank else None
+
+
+def _elem_count(shape: list[int]) -> int:
+    n = 1
+    for d in shape:
+        n *= max(int(d), 0)
+    return n
+
+
 def _estimate_macs(op_name: str, inputs: list[TensorDesc], outputs: list[TensorDesc]) -> int:
     """Best-effort MAC count from static shapes for the compute-dominant op
     kinds (conv/dense); 0 for everything else. MAC weighting exists to stop
@@ -161,26 +208,37 @@ def _estimate_macs(op_name: str, inputs: list[TensorDesc], outputs: list[TensorD
     screening heuristic, same stance as the rest of this module."""
     if not outputs:
         return 0
-    out_elems = 1
-    for d in outputs[0].shape:
-        out_elems *= max(int(d), 0)
+    out_elems = _elem_count(outputs[0].shape)
     if out_elems == 0:
         return 0
 
-    def _const_weight(rank: int) -> TensorDesc | None:
-        return next((t for t in inputs if t.is_const and len(t.shape) == rank), None)
-
     if op_name == "FULLY_CONNECTED":
-        w = _const_weight(2)               # [out_features, in_features]
+        w = _filter_weight(op_name, inputs, 2)             # [out_features, in_features]
         return out_elems * w.shape[-1] if w else 0
-    if op_name in ("CONV_2D", "TRANSPOSE_CONV"):
-        w = _const_weight(4)               # [out_c, kh, kw, in_c] (OHWI)
+    if op_name == "CONV_2D":
+        w = _filter_weight(op_name, inputs, 4)              # [out_c, kh, kw, in_c] (OHWI)
         if w is None:
             return 0
         _, kh, kw, in_c = w.shape
         return out_elems * kh * kw * in_c
+    if op_name == "TRANSPOSE_CONV":
+        # Unlike CONV_2D, the filter slides over the INPUT (the op upsamples:
+        # output is stride-larger than input), so costing off out_elems -- as
+        # CONV_2D correctly does -- over-counts by stride^2. Cost off the
+        # actual input-activation tensor's element count instead.
+        w = _filter_weight(op_name, inputs, 4)              # [out_c, kh, kw, in_c] (OHWI)
+        if w is None:
+            return 0
+        out_c, kh, kw, _ = w.shape
+        act_idx = _ACTIVATION_INPUT_INDEX[op_name]
+        if act_idx >= len(inputs):
+            return 0
+        in_elems = _elem_count(inputs[act_idx].shape)
+        if in_elems == 0:
+            return 0
+        return in_elems * kh * kw * out_c
     if op_name == "DEPTHWISE_CONV_2D":
-        w = _const_weight(4)               # [1, kh, kw, out_c]
+        w = _filter_weight(op_name, inputs, 4)              # [1, kh, kw, out_c]
         if w is None:
             return 0
         _, kh, kw, _ = w.shape
