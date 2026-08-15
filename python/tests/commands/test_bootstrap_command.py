@@ -2323,6 +2323,48 @@ def test_the_posix_refusal_keeps_the_oracle_line_and_adds_the_doctor_fix_remedy(
     ]
 
 
+def test_check_prerequisites_nulls_the_command_when_the_package_manager_is_absent(monkeypatch):
+    """tan-cli#760, end to end through `check_prerequisites` (the function
+    `tan bootstrap` actually calls). Measured on fedora:42/archlinux:latest/
+    rockylinux:9: none of the three has `apt-get`, yet alp-sdk's
+    `prerequisites.install.linux` is six `sudo apt-get install -y ...` lines
+    -- so on a host where NOTHING is on PATH (tools absent AND `apt-get`
+    absent), every `MissingPrerequisite.command` this call produces must be
+    `None`, never the unrunnable string that used to reach `alp-sdk-vscode`'s
+    Fix button byte-identical to a real Debian host."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    monkeypatch.setattr(bootstrap_cmd, "on_path", lambda _name: None)
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None and refusal.code == "prerequisites-missing"
+    assert refusal.missing, "the real manifest's Linux tool list must not be empty"
+    assert all(m.command is None for m in refusal.missing)
+
+
+def test_check_prerequisites_keeps_the_command_when_apt_get_is_confirmed(monkeypatch):
+    """The other half of tan-cli#760: a real Debian/Ubuntu host DOES have
+    `apt-get`, so the guard must not strip a command that can actually run
+    there -- dropping every entry unconditionally would just trade one wrong
+    answer (a command that never runs) for another (no command shown even
+    where one works)."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    monkeypatch.setattr(
+        bootstrap_cmd, "on_path", lambda name: "/usr/bin/apt-get" if name == "apt-get" else None
+    )
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None
+    by_tool = {m.tool: m.command for m in refusal.missing}
+    assert by_tool["cmake"] == "sudo apt-get install -y cmake"
+    assert by_tool["ninja"] == "sudo apt-get install -y ninja-build"
+
+
 def test_the_tool_less_refusals_carry_their_own_codes_and_report_null():
     """A `{tool, command}` pair cannot represent "the Python you have is 3.10", so
     these must not report under `prerequisites-missing` -- a consumer keying on

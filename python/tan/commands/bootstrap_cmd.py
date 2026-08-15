@@ -95,6 +95,7 @@ from tan.core.bootstrap import (
     Tokens,
     capture_tail,
     completion_verdict,
+    confirmed_install_commands,
     decide_workspace_reuse,
     detect_host_os,
     die,
@@ -486,7 +487,14 @@ def check_prerequisites(
     ]
     if missing:
         refuse = windows_refusal if is_windows else posix_refusal
-        return None, refuse(missing, install)
+        # tan-cli#760: don't hand out a command whose own package manager is
+        # not on THIS host's PATH -- measured on fedora/archlinux/rockylinux,
+        # every entry in alp-sdk's `prerequisites.install.linux` is
+        # `sudo apt-get install -y ...` and none of those hosts has `apt-get`.
+        confirmed = confirmed_install_commands(
+            install, lambda binary: on_path(binary) is not None
+        )
+        return None, refuse(missing, confirmed)
 
     # Probe against the floor that will actually be ENFORCED. Probing to a lower
     # bar would stop at the first candidate clearing 3.10 (`py -3`, often the

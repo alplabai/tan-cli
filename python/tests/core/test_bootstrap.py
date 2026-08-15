@@ -115,6 +115,87 @@ def test_a_tool_the_manifest_has_no_command_for_does_not_imply_elevation():
 
 
 # ---------------------------------------------------------------------------
+# tan-cli#760: `data.missingPrerequisites[].command` must never hand back a
+# line that cannot run. Measured on fedora:42/archlinux:latest/rockylinux:9:
+# alp-sdk's `prerequisites.install.linux` is six `sudo apt-get install -y
+# ...` lines and none of those hosts has `apt-get` on PATH -- byte-identical
+# to the `debian:12` output before this guard existed.
+# ---------------------------------------------------------------------------
+
+
+def test_leading_binary_strips_a_literal_sudo_prefix():
+    """The parsing half of the guard, isolated: it has to agree with
+    `doctor_cmd.run_fix`'s own `sudo ` strip (tan-cli#650) about which binary
+    a command actually spawns, or the guard and the spawn could disagree
+    about what "confirmed" means."""
+    from tan.core.bootstrap import leading_binary
+
+    assert leading_binary("sudo apt-get install -y cmake") == "apt-get"
+    assert leading_binary("brew install cmake") == "brew"
+    assert leading_binary("winget install -e --id Kitware.CMake") == "winget"
+    assert leading_binary("   ") == ""
+
+
+def test_confirmed_install_commands_drops_a_command_whose_binary_is_absent():
+    """The core of the guard: on a host with no `apt-get` (Fedora/Arch/Rocky),
+    every `sudo apt-get ...` entry the manifest carries must be dropped from
+    the dict -- which downstream readers (`install.get(tool)`, in
+    `_structured_missing`/`hint_line`/`doctor_cmd.prerequisites_check`) then
+    see as `None`, never a string. A test that never saw `command: null`
+    escape this function would not have caught tan-cli#760."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {
+        "cmake": "sudo apt-get install -y cmake",
+        "ninja": "sudo apt-get install -y ninja-build",
+    }
+    confirmed = confirmed_install_commands(install, lambda binary: binary == "dnf")
+    assert confirmed == {}
+
+
+def test_confirmed_install_commands_keeps_a_command_whose_binary_is_present():
+    """The other half: a real Debian/Ubuntu host DOES have `apt-get`, so the
+    guard must not drop a command just because it CAN be wrong on some other
+    host -- only when it actually is, on THIS one."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {
+        "cmake": "sudo apt-get install -y cmake",
+        "ninja": "sudo apt-get install -y ninja-build",
+    }
+    confirmed = confirmed_install_commands(install, lambda binary: binary == "apt-get")
+    assert confirmed == install
+
+
+def test_posix_refusal_gives_a_host_neutral_hint_when_no_command_is_confirmed():
+    """Item 2 of tan-cli#760. `install` here is already in the POST-guard
+    shape (every entry dropped, exactly what `confirmed_install_commands`
+    leaves on a host it could not confirm `apt-get` on) -- so the `--fix`
+    hint must stop promising an install it cannot perform, and must name the
+    MISSING TOOLS rather than guess a package name (a guessed name here would
+    be the identical defect this issue fixes, just moved to a different OS).
+    """
+    from tan.core.bootstrap import posix_refusal
+
+    lines = posix_refusal(["cmake", "ninja"], {}).lines
+    assert "cmake" in lines[1] and "ninja" in lines[1]
+    assert "package manager" in lines[1]
+    assert "to install them from the SDK's manifest" not in lines[1]
+    assert "prints the exact command" not in lines[1]
+
+
+def test_posix_refusal_keeps_the_confirmed_wording_when_a_command_survives():
+    """No regression on the ordinary, confirmed-host case: at least one
+    missing tool with a real command still gets the existing (non-host-
+    neutral) hints, unchanged."""
+    from tan.core.bootstrap import posix_refusal
+
+    lines = posix_refusal(["cmake", "ninja"], {"cmake": "sudo apt-get install -y cmake"}).lines
+    assert "prints the exact command" in lines[1]
+    assert "has no confirmed install command" not in lines[1]
+
+
+# ---------------------------------------------------------------------------
 # tan-cli#495 defect 6: `manualInstallHints.posix.note` was dropped at parse,
 # at render, AND in the fallback -- three places, so no single one of them
 # looked like a gap.

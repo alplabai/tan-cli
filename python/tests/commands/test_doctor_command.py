@@ -462,6 +462,108 @@ def test_missing_prerequisites_carry_the_frozen_code_and_the_install_commands():
     assert "sudo apt-get install -y ninja-build" in (check.fix or "")
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#760: `data.missingPrerequisites[].command` must never hand back a
+# line that cannot run. Measured on fedora:42/archlinux:latest/rockylinux:9:
+# alp-sdk's `prerequisites.install.linux` is six `sudo apt-get install -y
+# ...` lines and none of those hosts has `apt-get` on PATH.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_nulls_the_install_command_when_its_own_package_manager_is_absent(
+    tmp_path, monkeypatch
+):
+    """The primary defect, reproduced end to end through `_collect` (what
+    `tan doctor --format json` actually calls): with nothing on PATH -- the
+    prerequisite tools AND `apt-get` both absent, the Fedora/Arch/Rocky shape
+    -- `hostPrerequisites.missing[].command` must be `null`, not the
+    `sudo apt-get ...` line a Debian host would get."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "cmake": "sudo apt-get install -y cmake",
+                    "ninja": "sudo apt-get install -y ninja-build",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    assert prereq.status == "fail"
+    assert prereq.missing
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] is None
+    assert by_tool["ninja"] is None
+    # The prose fix line must not dangle the unrunnable command either.
+    assert "apt-get" not in (prereq.fix or "")
+
+
+def test_collect_keeps_the_install_command_when_apt_get_is_confirmed(tmp_path, monkeypatch):
+    """The other half: a real Debian/Ubuntu host has `apt-get`, so the guard
+    must not drop a command that host can actually run."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "cmake": "sudo apt-get install -y cmake",
+                    "ninja": "sudo apt-get install -y ninja-build",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: "/usr/bin/apt-get" if name == "apt-get" else None
+    )
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] == "sudo apt-get install -y cmake"
+    assert by_tool["ninja"] == "sudo apt-get install -y ninja-build"
+
+
+def test_fix_cannot_execute_a_command_the_guard_dropped(tmp_path, monkeypatch):
+    """Item 3 of tan-cli#760, end to end: `--fix` (`run_fix`) reads exactly
+    the `hostPrerequisites.missing` dict the guard already nulled -- so on a
+    root Fedora/Rocky container it must not even attempt `apt-get`.
+    `subprocess.run` is patched to explode if `run_fix` reaches it at all --
+    a stronger assertion than "happened not to fail this time" -- but only
+    once `_collect` itself (which legitimately spawns `python3 -c ...` to
+    probe the interpreter) is done with it."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["cmake"],
+            "pythonMinVersion": "3.10",
+            "install": {"linux": {"cmake": "sudo apt-get install -y cmake"}},
+        },
+    )
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)  # cmake AND apt-get absent
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    assert prereq.missing == [{"tool": "cmake", "command": None}]
+
+    def _must_not_spawn(*args, **kwargs):
+        raise AssertionError("run_fix must not spawn a command the guard dropped")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _must_not_spawn)
+    fix_checks = doctor_cmd.run_fix(prereq.missing)
+    assert fix_checks == []
+
+
 def test_macos_reads_its_own_prerequisites_list_not_posixs(tmp_path, monkeypatch):
     """tan-cli#488 defect 2: a stock Mac has neither `wget` nor a standalone
     `xz`, and alp-sdk v0.14.0 declares a separate `prerequisites.macos` that

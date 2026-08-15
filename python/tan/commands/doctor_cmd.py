@@ -150,6 +150,7 @@ from tan.core.bootstrap import (
     MissingPrerequisite,
     PrereqFailure,
     WorkspaceSdkRecord,
+    confirmed_install_commands,
     parse_west_zephyr_pin,
     parse_workspace_sdk_record,
     parse_zephyr_version_file,
@@ -3524,7 +3525,17 @@ def _collect(
     per_tool = install.get(platform_key) if isinstance(install, dict) else None
     if not isinstance(per_tool, dict):
         per_tool = {}
-    resolved_install = {k: v for k, v in per_tool.items() if isinstance(v, str)}
+    # tan-cli#760: an install command whose own package manager is not on
+    # THIS host's PATH is not a fix -- it's a second wrong answer instead of
+    # the first (measured on fedora/archlinux/rockylinux: alp-sdk's Linux
+    # table is six `sudo apt-get install -y ...` lines and none of those
+    # hosts has `apt-get`). Confirmed here, once, so both the envelope's
+    # `data.missingPrerequisites[].command` and `--fix`'s own input
+    # (`Check.missing`, read from the SAME dict below) agree.
+    resolved_install = confirmed_install_commands(
+        {k: v for k, v in per_tool.items() if isinstance(v, str)},
+        lambda binary: on_path(binary) is not None,
+    )
     missing_tools = [tool for tool in required if on_path(tool) is None]
     # tan-cli#294 finding 3: reintroduces tan-cli#161. Only reachable once the
     # tool list itself is clean AND a Python actually ran -- mirrors

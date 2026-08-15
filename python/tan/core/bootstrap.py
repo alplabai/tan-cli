@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -938,6 +939,49 @@ class PrereqFailure:
     missing: tuple[MissingPrerequisite, ...] = ()
 
 
+def leading_binary(command: str) -> str:
+    """The program name a shell would actually invoke for one of the
+    manifest's install one-liners -- stripping a literal leading `sudo `
+    exactly as `--fix` (`doctor_cmd.run_fix`) does before it ever spawns
+    anything, so the confirmation guard below and the real spawn agree about
+    which binary is in question. `""` for a blank command: nothing to
+    confirm, and callers treat an empty name as "not available" rather than
+    probing it."""
+    stripped = command.strip()
+    if stripped.startswith("sudo "):
+        stripped = stripped[len("sudo ") :].lstrip()
+    return stripped.split(maxsplit=1)[0] if stripped else ""
+
+
+def confirmed_install_commands(
+    install: dict[str, str], available: Callable[[str], bool]
+) -> dict[str, str]:
+    """`install`, keeping only the entries whose own leading binary
+    `available` confirms on THIS host -- the tan-cli#760 guard.
+
+    Every `MissingPrerequisite.command` this port emits is built by looking a
+    tool up in a dict shaped exactly like `install` (`_structured_missing`,
+    `doctor_cmd.prerequisites_check`); this is the ONE place that decides
+    which of those commands may be handed out at all. Measured on
+    `fedora:42`/`archlinux:latest`/`rockylinux:9`: alp-sdk's Linux table is
+    six `sudo apt-get install -y ...` lines and none of those hosts has
+    `apt-get` on PATH, so every entry is dropped here and the tool downgrades
+    to `command: null` everywhere that dict is read -- never a string a
+    consumer (a human, `alp-sdk-vscode`'s Fix button, or tan's own `--fix`)
+    could run and fail on.
+
+    Pure: `available` is injected rather than a real PATH probe, keeping this
+    module's "no IO" contract (see the module docstring). Callers pass the
+    real check -- `on_path(binary) is not None` -- from `bootstrap_cmd`/
+    `doctor_cmd`, both of which already own a hardened PATH walk."""
+    out: dict[str, str] = {}
+    for tool, command in install.items():
+        binary = leading_binary(command)
+        if binary and available(binary):
+            out[tool] = command
+    return out
+
+
 def _structured_missing(
     missing: list[str], install: dict[str, str]
 ) -> tuple[MissingPrerequisite, ...]:
@@ -1000,13 +1044,30 @@ _DOCTOR_FIX_HINT_NEEDS_ELEVATION = (
 
 
 def _doctor_fix_hint(missing: list[str], install: dict[str, str]) -> str:
-    """Which of the two hints above is true for THESE tools on THIS host.
+    """Which of the three hints is true for THESE tools on THIS host.
 
     Only the commands reachable for the MISSING tools are considered: a `sudo`
     entry belonging to some tool that is already present says nothing about
     what `--fix` will do in this run. A tool the manifest has no command for
     cannot need elevation either -- it contributes generic advice, not a spawn.
-    """
+
+    tan-cli#760 adds the third shape. `install` here has already been through
+    `confirmed_install_commands`, so by the time this runs "no entry for tool
+    X" means "no command this host can actually run" -- which, when it is
+    true of EVERY missing tool, means `--fix` has nothing to do at all. The
+    two hints above both promise otherwise ("it prints the exact command for
+    each tool from the SDK's manifest"), which is exactly the unrunnable-
+    remedy defect this guard exists to close, just moved from the structured
+    field into this prose line instead. Name the tools that are missing; a
+    guessed package NAME here would be the identical defect against a
+    different OS/distro (see `zephyr_requirements_hint` for the precedent)."""
+    confirmed = [tool for tool in missing if install.get(tool) is not None]
+    if not confirmed:
+        return (
+            "`tan doctor --build --fix` has no confirmed install command for "
+            f"this host: {', '.join(missing)}.  Install them with your OS's "
+            "package manager and put them on PATH, then re-run."
+        )
     return (
         _DOCTOR_FIX_HINT_NEEDS_ELEVATION
         if any(install.get(tool, "").split(maxsplit=1)[:1] == ["sudo"] for tool in missing)

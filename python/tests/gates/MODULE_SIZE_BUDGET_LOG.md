@@ -132,3 +132,8 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 255 -> 256
 - 2026-08-14 -- rebase onto #745: recompute after tan-cli#744's planner growth and tan-cli#747/#746 landed in the same budget
     - function_count_budget: 256 -> 257
+- 2026-08-15 -- tan-cli#760: PATH-confirmation guard for install commands (bootstrap.py leading_binary/confirmed_install_commands, wired through bootstrap_cmd.check_prerequisites and doctor_cmd._collect)
+    - tan/commands/bootstrap_cmd.py: 3255 -> 3263
+    - tan/commands/doctor_cmd.py: 4003 -> 4014
+    - tan/core/bootstrap.py: 2111 -> 2172
+    - function_count_budget: 257 -> 258
