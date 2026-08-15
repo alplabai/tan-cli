@@ -188,6 +188,23 @@ def test_empty_ops_is_undetermined_even_with_a_resolvable_table(tmp_path):
     assert rep.ops == []
 
 
+def test_empty_ops_does_not_cite_a_table_whose_namespace_disagrees_with_src_format(tmp_path):
+    # ops=[] means there is no extracted vocabulary to check the table
+    # against -- but the table's own op_namespace ("onnx") still visibly
+    # disagrees with the caller's src_format claim ("tflite"), the only
+    # vocabulary evidence available in this case. Citing that table as "the"
+    # table found would be misleading even though nothing gets scored either
+    # way -- must fall back to the no-table report (table=None), not the
+    # empty-ops report.
+    _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55",
+                 op_namespace="onnx", supported=["CONV_2D"])
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=[],
+                           metadata_root=tmp_path, variant="u55")
+    assert rep.npu_coverage == "undetermined"
+    assert rep.table is None
+    assert rep.ops == []
+
+
 # ---------------------------------------------------------------------------
 # Table resolution against the REAL alp-sdk metadata (ALP_SDK_ROOT-gated)
 # ---------------------------------------------------------------------------
@@ -245,11 +262,27 @@ def test_u85_and_u55_resolve_different_real_tables_and_the_17_op_delta_is_visibl
 def test_real_deepx_dxm1_has_no_table_and_is_undetermined():
     variant = resolve_ethos_u_variant("E1M-V2M101", metadata_root=_META)
     assert variant is None            # deepx_dxm1 carries no ethos_u_variant
-    rep = analyze_backend(backend="deepx_dxm1", src_format="onnx", ops=[_op("Conv")],
-                           metadata_root=_META)
+    rep = analyze_backend(backend="deepx_dxm1", src_format="onnx",
+                           ops=[_op("Conv", op_namespace="onnx")], metadata_root=_META)
     assert rep.npu_coverage == "undetermined"
     assert rep.ops[0].reason == "no-table-for-backend"
     assert rep.npu_coverage != "cpu-only"
+
+
+@pytestmark_real_sdk
+def test_real_drpai_table_surfaces_uncosted_cpu_op_count_alongside_the_headline_pct():
+    # Live on real data, not synthetic (the real drpai table lists "Conv" but
+    # not "NonMaxSuppression"): a headline compute_on_npu_pct_max of 100.0
+    # alongside npu_coverage="partial" is a caveat that must survive as a
+    # STRUCTURED field, not just prose in `notes`, for a consumer that reads
+    # the float alone.
+    ops = [_op("Conv", macs=100, op_namespace="onnx"),
+           _op("NonMaxSuppression", macs=0, op_namespace="onnx")]
+    rep = analyze_backend(backend="drpai", src_format="onnx", ops=ops, metadata_root=_META)
+    assert rep.npu_coverage == "partial"
+    assert rep.compute_on_npu_pct_max == pytest.approx(100.0)
+    assert rep.uncosted_cpu_op_count == 1
+    assert any("compute_on_npu_pct_max" in n and "excluded" in n for n in rep.notes)
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +321,9 @@ def test_compute_pct_100_with_partial_coverage_surfaces_uncosted_ops_in_notes(tm
     # excludes them entirely, so the ONE priced op (the eligible CONV_2D)
     # reads as 100% even though npu_coverage is "partial" and real, uncosted
     # CPU compute exists. The number must NOT be silently clamped away from
-    # 100.0 -- that would hide the gap -- but `notes` must say so plainly.
+    # 100.0 -- that would hide the gap -- but `notes` must say so plainly, AND
+    # `uncosted_cpu_op_count` (a structured field, not just prose) must carry
+    # the same caveat for a consumer that doesn't render `notes`.
     _write_table(tmp_path, "ethos_u", "dummy@vela-1.0.0.json", variant="dummy",
                  supported=["CONV_2D"])              # SOFTMAX/TOPK_V2 NOT listed
     ops = [_op("CONV_2D", macs=1_000_000), _op("SOFTMAX", macs=0), _op("TOPK_V2", macs=0)]
@@ -296,7 +331,17 @@ def test_compute_pct_100_with_partial_coverage_surfaces_uncosted_ops_in_notes(tm
                            metadata_root=tmp_path, variant="dummy")
     assert rep.npu_coverage == "partial"
     assert rep.compute_on_npu_pct_max == pytest.approx(100.0)     # not silently clamped
+    assert rep.uncosted_cpu_op_count == 2                          # SOFTMAX + TOPK_V2
     assert any("compute_on_npu_pct_max" in n and "excluded" in n for n in rep.notes)
+
+
+def test_uncosted_cpu_op_count_is_zero_when_nothing_is_uncosted(tmp_path):
+    _write_table(tmp_path, "ethos_u", "dummy@vela-1.0.0.json", variant="dummy",
+                 supported=["CONV_2D"])
+    rep = analyze_backend(backend="ethos_u", src_format="tflite",
+                           ops=[_op("CONV_2D", macs=10)], metadata_root=tmp_path,
+                           variant="dummy")
+    assert rep.uncosted_cpu_op_count == 0
 
 
 def test_full_eligible_and_cpu_only_coverage_labels(tmp_path):
@@ -328,8 +373,10 @@ def _all_representative_reports(metadata_root: Path) -> list[BackendReport]:
         analyze_backend(backend="deepx_dxm1", src_format="onnx", ops=[_op("Conv")],
                         metadata_root=metadata_root),                               # no table
         analyze_backend(backend="ethos_u", src_format="tflite",
-                        ops=[_op("CONV_2D", macs=10), _op("RESHAPE", macs=5)],
-                        metadata_root=metadata_root, variant="dummy"),               # partial
+                        ops=[_op("CONV_2D", macs=10), _op("RESHAPE", macs=5),
+                             _op("SOFTMAX", macs=0)],
+                        metadata_root=metadata_root, variant="dummy"),               # partial,
+                                                                                      # carries _uncosted_macs_note
         analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D", macs=10)],
                         metadata_root=metadata_root, variant="dummy"),               # full-eligible
     ]

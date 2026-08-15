@@ -292,3 +292,31 @@ def test_transpose_conv_costs_off_input_elements_not_output(tmp_path):
     # out_elems(1*16*16*16=4096) * kh*kw*in_c(3*3*3=27) = 110592 -- exactly
     # a stride^2 (2^2 = 4) over-count of the correct value.
     assert ops[0].macs == 27648
+
+
+def test_transpose_conv_is_not_zeroed_by_a_zero_element_output_shape(tmp_path):
+    """TRANSPOSE_CONV's formula never reads out_elems (see the test above),
+    so a declared output shape that happens to compute to 0 elements (a
+    dynamic/-1 dim, or a genuinely empty output tensor) must not zero out an
+    otherwise fully-computable in_elems * kh * kw * out_c estimate -- the
+    out_elems==0 early-return exists for the OTHER three ops
+    (FULLY_CONNECTED/CONV_2D/DEPTHWISE_CONV_2D), which do cost off out_elems,
+    and must not vestigially short-circuit this one too."""
+    pytest.importorskip("tflite")
+    import tflite as t
+    raw = _build_single_op_model(
+        builtin_op=t.BuiltinOperator.TRANSPOSE_CONV,
+        tensors=[
+            ([4], t.TensorType.INT32, b"\x00" * 16),                        # output_shape (kOutputShapeTensor=0)
+            ([16, 3, 3, 3], t.TensorType.INT8, b"\x01" * (16 * 3 * 3 * 3)),  # filter (kWeightsTensor=1, OHWI)
+            ([1, 8, 8, 3], t.TensorType.INT8, b""),                         # input activation (kDataInputTensor=2)
+            ([1, 0, 16, 16], t.TensorType.INT8, b""),                       # output: a 0 dim -> 0 elements
+        ],
+        op_inputs=[0, 1, 2], op_outputs=[3],
+    )
+    ops = extract_ops(tmp_path / "tconv-zero-out.tflite", raw=raw)
+    assert len(ops) == 1 and ops[0].op == "TRANSPOSE_CONV"
+    # Same in_elems(192) * kh(3) * kw(3) * out_c(16) = 27648 as the healthy
+    # case above -- the (irrelevant) zero-element output shape must not
+    # collapse this to 0.
+    assert ops[0].macs == 27648

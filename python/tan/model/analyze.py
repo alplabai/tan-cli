@@ -98,6 +98,15 @@ class BackendReport:
     table: str | None         # the table file that answered, or None
     npu_coverage: str          # "full-eligible" | "partial" | "cpu-only" | "undetermined"
     compute_on_npu_pct_max: float | None   # MAC-weighted UPPER bound, 0-100
+    # cpu-certain ops with an unpriced (macs=0) MAC estimate -- excluded from
+    # compute_on_npu_pct_max's denominator, so a nonzero count here is a
+    # machine-readable caveat on that percentage: it can read 100.0 while real,
+    # uncosted CPU compute exists. Structured so the caveat survives into an
+    # envelope consumer that reads compute_on_npu_pct_max but doesn't render
+    # `notes` (prose). 0 whenever no such op exists, including every report
+    # variant that never reached scoring (format-not-accepted, no-table,
+    # empty-ops) -- there, no cpu-certain verdict was determined at all.
+    uncosted_cpu_op_count: int = 0
     ops: list[OpVerdict] = field(default_factory=list)
     basis: str = "static-screen"          # the only basis this module ever emits
     confidence: str = "screening"          # "certain" | "screening"
@@ -228,7 +237,14 @@ def _coverage_label(verdicts: list[OpVerdict]) -> str:
     return "partial" if any_eligible else "cpu-only"
 
 
-def _uncosted_macs_note(verdicts: list[OpVerdict], pct: float | None) -> str | None:
+def _uncosted_op_count(verdicts: list[OpVerdict]) -> int:
+    """Count of cpu-certain ops `_estimate_macs` could not price (macs=0) --
+    also the source of the `uncosted_cpu_op_count` report field, so the note
+    below and the structured field always agree."""
+    return sum(1 for v in verdicts if v.status == "cpu-certain" and v.macs == 0)
+
+
+def _uncosted_macs_note(uncosted: int, pct: float | None) -> str | None:
     """compute_on_npu_pct_max's denominator only counts ops `_estimate_macs`
     could price (conv/dense); a cpu-certain op outside that set (macs=0)
     leaves the denominator entirely, so the percentage can read 100.0 while
@@ -236,10 +252,7 @@ def _uncosted_macs_note(verdicts: list[OpVerdict], pct: float | None) -> str | N
     "partial". Never clamp for this -- clamping hides the exact gap this
     module exists to surface -- return a note instead, or None when there is
     nothing uncosted (or no MAC-weighted number was computed at all)."""
-    if pct is None:
-        return None
-    uncosted = sum(1 for v in verdicts if v.status == "cpu-certain" and v.macs == 0)
-    if not uncosted:
+    if pct is None or not uncosted:
         return None
     return (f"{uncosted} cpu-certain op(s) carry no static MAC estimate (outside "
             f"the conv/dense-only estimator) and are excluded from "
@@ -264,14 +277,20 @@ def analyze_backend(*, backend: str, src_format: str, ops: Sequence[OpDesc],
         return _format_not_accepted_report(backend, src_format, ops, variant)
 
     resolved = _resolve_table(metadata_root, backend, variant)
-    if resolved is not None and ops and resolved[1].get("op_namespace") != ops[0].op_namespace:
-        # The table speaks a different operator vocabulary than @ops was
-        # ACTUALLY walked in (OpDesc.op_namespace) -- compared against that,
-        # never against @src_format, which is caller-supplied and independent
-        # of what extraction really produced. Skipped when @ops is empty:
-        # there is no vocabulary to compare, and the empty-ops report below
-        # answers "nothing to score" regardless of table match.
-        resolved = None
+    if resolved is not None:
+        # The table must speak the SAME operator vocabulary as what will be
+        # compared against it -- @ops' own op_namespace when there are ops to
+        # compare (never @src_format, which is caller-supplied and
+        # independent of what extraction really produced), or, when @ops is
+        # empty and there is no extracted vocabulary to check, @src_format as
+        # the best available surrogate. Always run this -- even for the
+        # empty-ops case, where nothing gets scored either way -- because
+        # citing a table whose op_namespace demonstrably disagrees with the
+        # only vocabulary evidence available is misleading regardless of
+        # whether anything was scored against it.
+        actual_namespace = ops[0].op_namespace if ops else src_format
+        if resolved[1].get("op_namespace") != actual_namespace:
+            resolved = None
 
     if resolved is None:
         return _no_table_report(backend, ops, variant)
@@ -288,12 +307,13 @@ def analyze_backend(*, backend: str, src_format: str, ops: Sequence[OpDesc],
              f"cannot verify -- the model will run either way, an unsupported "
              f"op falls back to the CPU silently rather than failing. Only a "
              f"real compile proves NPU execution."]
-    uncosted_note = _uncosted_macs_note(verdicts, pct)
+    uncosted = _uncosted_op_count(verdicts)
+    uncosted_note = _uncosted_macs_note(uncosted, pct)
     if uncosted_note:
         notes.append(uncosted_note)
 
     return BackendReport(
         backend=backend, variant=variant, table=str(table_path),
         npu_coverage=_coverage_label(verdicts), compute_on_npu_pct_max=pct,
-        ops=verdicts, notes=notes,
+        uncosted_cpu_op_count=uncosted, ops=verdicts, notes=notes,
     )

@@ -91,12 +91,16 @@ class OpDesc:
     inputs: list[TensorDesc] = field(default_factory=list)
     outputs: list[TensorDesc] = field(default_factory=list)
     macs: int = 0          # best-effort static estimate; 0 when not computable
-    # The vocabulary `op` is spelled in -- "tflite" today (the only extractor
-    # that exists); "onnx" once ONNX extraction lands. `tan.model.analyze`
+    # The vocabulary `op` is spelled in -- "tflite" (the only extractor that
+    # exists today) or "onnx" once ONNX extraction lands. `tan.model.analyze`
     # compares THIS against a support table's own `op_namespace`, never the
     # caller-supplied `src_format`, so a mislabelled format cannot make two
-    # incomparable op vocabularies look like a match.
-    op_namespace: str = "tflite"
+    # incomparable op vocabularies look like a match. Required kw_only, no
+    # default: a silent "tflite" default let a caller build an ONNX-spelled
+    # OpDesc that still claimed the TFLite vocabulary, which the namespace
+    # guard in analyze.py then trusted -- every construction site (extractor
+    # or test) must say which vocabulary it means.
+    op_namespace: str = field(kw_only=True)
 
 
 def extract_ops(source: Path, *, raw: bytes | None = None) -> list[OpDesc]:
@@ -166,9 +170,13 @@ def _tensor_desc(model, g, idx: int, dtype_names: dict[int, str]) -> TensorDesc:
 # heuristic silently grabs whichever constant happens to come first once a
 # graph has been const-folded, which shadows the real filter and can inflate
 # the MAC estimate by many times (see test_conv_2d_filter_is_selected_
-# positionally_not_by_first_matching_const). Every op below carries its
-# activation input at index 0 (never optional), so this position never shifts
-# under an absent-optional-input reindex.
+# positionally_not_by_first_matching_const). Every op below carries a
+# MANDATORY (never optional) tensor at index 0 -- the activation for
+# FULLY_CONNECTED/CONV_2D/DEPTHWISE_CONV_2D, kOutputShapeTensor for
+# TRANSPOSE_CONV -- so the filter index below never shifts under an
+# absent-optional-input reindex; only the trailing bias tensor is ever
+# optional (see _ACTIVATION_INPUT_INDEX below for TRANSPOSE_CONV's one
+# further wrinkle: its activation isn't at index 0 the way it is here).
 _FILTER_INPUT_INDEX = {
     "FULLY_CONNECTED": 1,     # kInputTensor=0, kWeightsTensor=1, kBiasTensor=2 (optional)
     "CONV_2D": 1,             # kInputTensor=0, kFilterTensor=1, kBiasTensor=2 (optional)
@@ -208,6 +216,28 @@ def _estimate_macs(op_name: str, inputs: list[TensorDesc], outputs: list[TensorD
     screening heuristic, same stance as the rest of this module."""
     if not outputs:
         return 0
+
+    if op_name == "TRANSPOSE_CONV":
+        # Unlike CONV_2D, the filter slides over the INPUT (the op upsamples:
+        # output is stride-larger than input), so costing off the output
+        # element count -- as CONV_2D correctly does -- over-counts by
+        # stride^2. Cost off the actual input-activation tensor's element
+        # count instead -- this branch never reads out_elems, so it must sit
+        # ahead of (not behind) the out_elems==0 guard below: an output shape
+        # that happens to compute to 0 elements (e.g. a dynamic dim) must not
+        # zero out a fully-computable in_elems * kh * kw * out_c estimate.
+        w = _filter_weight(op_name, inputs, 4)              # [out_c, kh, kw, in_c] (OHWI)
+        if w is None:
+            return 0
+        out_c, kh, kw, _ = w.shape
+        act_idx = _ACTIVATION_INPUT_INDEX[op_name]
+        if act_idx >= len(inputs):
+            return 0
+        in_elems = _elem_count(inputs[act_idx].shape)
+        if in_elems == 0:
+            return 0
+        return in_elems * kh * kw * out_c
+
     out_elems = _elem_count(outputs[0].shape)
     if out_elems == 0:
         return 0
@@ -221,22 +251,6 @@ def _estimate_macs(op_name: str, inputs: list[TensorDesc], outputs: list[TensorD
             return 0
         _, kh, kw, in_c = w.shape
         return out_elems * kh * kw * in_c
-    if op_name == "TRANSPOSE_CONV":
-        # Unlike CONV_2D, the filter slides over the INPUT (the op upsamples:
-        # output is stride-larger than input), so costing off out_elems -- as
-        # CONV_2D correctly does -- over-counts by stride^2. Cost off the
-        # actual input-activation tensor's element count instead.
-        w = _filter_weight(op_name, inputs, 4)              # [out_c, kh, kw, in_c] (OHWI)
-        if w is None:
-            return 0
-        out_c, kh, kw, _ = w.shape
-        act_idx = _ACTIVATION_INPUT_INDEX[op_name]
-        if act_idx >= len(inputs):
-            return 0
-        in_elems = _elem_count(inputs[act_idx].shape)
-        if in_elems == 0:
-            return 0
-        return in_elems * kh * kw * out_c
     if op_name == "DEPTHWISE_CONV_2D":
         w = _filter_weight(op_name, inputs, 4)              # [1, kh, kw, out_c]
         if w is None:
