@@ -132,3 +132,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 255 -> 256
 - 2026-08-14 -- rebase onto #745: recompute after tan-cli#744's planner growth and tan-cli#747/#746 landed in the same budget
     - function_count_budget: 256 -> 257
+- 2026-08-15 -- tan-cli#756: hand-port alp-sdk#1446's _aen_require_disjoint_slot0 into tan/planner/zephyr_board.py -- a dual-M55 AEN SoM with no per-role <role>_slot0 region is now refused at emit time instead of silently sharing one MRAM slot0 address
+    - tan/planner/loader.py: 1301 -> 1313
+    - tan/planner/zephyr_board.py: 1433 -> 1486
+    - function_count_budget: 257 -> 258

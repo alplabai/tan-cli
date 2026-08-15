@@ -886,18 +886,30 @@ def _validate_topology_cores(
                 f"`topology.{core_id}` is set)")
         expect_dpidr, jlink_device = _resolve_flow_d_preflight(
             variant_debug, core_id)
-        # VALUE, not presence -- deliberately unlike the `flash_args`
-        # emit, and matching alp-sdk's own gate (tan-cli#744). A variant
-        # declaring `jlink_flash_device: null` (e4.json is the live case)
-        # has NO J-Link profile, so Flow D cannot run and there is no
-        # slot0-XIP load address to publish. tan-cli#737 briefly made this
-        # ride the same presence promotion as the emit; that emitted a
-        # slot0_load_address alp-sdk does not, and the byte-parity suite
-        # caught it on `usb-host-storage` (E1M-AEN401) the moment a
-        # declared-null variant existed.
+        # PRESENCE, not value -- the same promotion the `flash_args` emit
+        # uses, because alp-sdk#1444/#1446 (`86260edc`, "complete the Flow D
+        # truthiness fix") moved this gate to presence upstream.
+        #
+        # It used to be VALUE here, deliberately: tan-cli#744 matched
+        # alp-sdk's own gate of the day, and tan-cli#737's presence
+        # promotion had to be reverted because it emitted a
+        # `slot0_load_address` alp-sdk did not. That rationale expired when
+        # upstream flipped -- the byte-parity suite then caught the SAME
+        # example from the other side: `usb-host-storage` (E1M-AEN401)
+        # `--emit system-manifest` line 19, sdk emitting
+        # `slot0_load_address: '0x802b0000'` where tan emitted nothing
+        # (tan-cli#756, measured against alp-sdk 88318e75 on all three OSes).
+        #
+        # Presence is also the coherent half of the pair: a declared
+        # `jlink_flash_device: null` (e4.json is the live case) reaches
+        # `flash_args` AS a present null so the consumer's presence check
+        # (`flash_plan._fa_has_key`) refuses loudly, and the slot0 window a
+        # Flow D write would target travels with it instead of vanishing.
+        # An ABSENT key still resolves nothing, on both gates.
         slot0_load_address = (
             _resolve_slot0_load_address(som_preset, core_id)
-            if jlink_flash_device else None)
+            if (jlink_flash_device_declared or jlink_flash_device is not None)
+            else None)
         slice_ = _slice_from_resolved(
             core_id, resolved,
             soc_core_type=soc_core_type_by_id.get(core_id, ""),
