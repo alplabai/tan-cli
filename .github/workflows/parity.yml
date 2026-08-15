@@ -1773,13 +1773,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install alp-tan[monitor] + pytest
+      - name: install alp-tan[monitor,model-io] + pytest
         shell: bash
         working-directory: python
         run: |
           set -euo pipefail
           python -m pip install --quiet --upgrade pip
-          python -m pip install --quiet -e ".[monitor]" pytest pytest-shard
+          # `model-io` (tflite + flatbuffers) is added here, not to ci.yml's bare
+          # `pip install -e ./python` (that shape is load-bearing for
+          # test_declared_dependencies.py -- see ci.yml's own comment). This job
+          # binds ALP_SDK_ROOT, so it is where tests/model/test_tensorio.py's
+          # tflite parse path actually gets exercised instead of skipping in
+          # every tan CI run.
+          python -m pip install --quiet -e ".[monitor,model-io]" pytest pytest-shard
 
       # The `python-tests` job below (the one wired into branch protection --
       # see .github/workflows/ci.yml's header for the full tan-cli#392 note and
