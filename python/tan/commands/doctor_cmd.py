@@ -294,6 +294,14 @@ class Check:
     reason `missing` is not: it exists purely for `--fix`'s in-process input,
     never the wire.
 
+    A `hostPrerequisites` Check built with only `missing=` (omitting
+    `fix_missing=`) is not left silently `--fix`-disabled: `__post_init__`
+    falls back to `missing` itself when `fix_missing` is `None`, matching
+    `prerequisites_check`'s own `available=None` behaviour -- the two fields
+    equal, pre-#760's shape. A future 9th construction site that forgets the
+    pairing therefore fails SAFE (pre-#760 `--fix` behaviour) rather than
+    silently.
+
     `scope` (tan-cli#549) is `host` or `project` -- see `tan.core.doctor_scope`
     for the two definitions and the judgement calls. REQUIRED and KEYWORD-ONLY,
     which is the enforcement mechanism itself: a check authored without one is
@@ -328,6 +336,18 @@ class Check:
                 f"doctor check {self.name!r} declares scope {self.scope!r}; "
                 f"the wire vocabulary is {CHECK_SCOPES}"
             )
+        # tan-cli#760 review round 3, MINOR: a `hostPrerequisites` Check
+        # authored with only `missing=` (a 9th call site nobody remembered to
+        # pair with `fix_missing=`) must not silently disable `--fix` --
+        # `object.__setattr__` because `Check` is frozen, and this is the one
+        # place a divergent-by-omission construction can still be caught and
+        # repaired rather than reddening `run_fix` with a `None` input. Falls
+        # back to `missing` itself, matching `prerequisites_check`'s own
+        # `available=None` behaviour (pre-#760: the two fields identical) --
+        # fails SAFE at pre-#760 `--fix` behaviour, never silent. A no-op
+        # when `missing` is also `None` (every non-`hostPrerequisites` Check).
+        if self.fix_missing is None:
+            object.__setattr__(self, "fix_missing", self.missing)
 
     def as_dict(self) -> dict:
         # `scope` between `status` and `detail`: the three machine-read fields
@@ -2986,10 +3006,12 @@ def fix_installer_not_found_check(installer: str, tools: list[str]) -> Check:
     Named `fix:{installer}` rather than `fix:{tool}` for the same reason --
     the subject of this verdict is the installer, and one name per absent
     installer is what keeps the grouping legible in the text report. No
-    `fix` field: the per-tool install commands are not runnable until the
-    installer exists, and `hostPrerequisites` already carries each one
-    verbatim (`data.missingPrerequisites[].command`), so repeating a
-    command that cannot run would be worse than pointing at it.
+    `fix` field, and no "see `hostPrerequisites` above" either (tan-cli#760
+    review round 3, MINOR): the per-tool commands are not runnable until the
+    installer exists, and this Check fires precisely when that installer is
+    unconfirmed -- the exact condition under which `hostPrerequisites.
+    missing[].command` is `null` too, so pointing at it would be false on
+    the one host this Check describes.
     """
     named = ", ".join(tools)
     many = len(tools) > 1
@@ -3002,8 +3024,7 @@ def fix_installer_not_found_check(installer: str, tools: list[str]) -> Check:
         f"`--fix` ran no repair for {named}: the manifest installs "
         f"{'them' if many else 'it'} with `{installer}`, which is not on "
         f"PATH. {remedy} Or install {'those tools' if many else named} with a "
-        f"package manager this host already has -- `hostPrerequisites` above "
-        f"names {'each' if many else 'its'} exact install command.",
+        f"package manager this host already has.",
         code="doctor.fix-installer-not-found",
         scope="host",
     )
@@ -3041,10 +3062,16 @@ def run_fix(
     `hostPrerequisites` already reported missing, either run its manifest
     install command (no elevation needed -- Tier A) or refuse and name it
     (needs `sudo` -- Tier B), never both, never neither. `missing` is that
-    check's OWN structured field (`Check.missing`, `{tool, command}` pairs)
-    -- never a second, independently recomputed tool/command list, so this
-    can only ever act on exactly what the report already told the customer
-    was wrong.
+    check's OWN structured field -- but `Check.fix_missing`, NOT `Check.
+    missing` (tan-cli#760 review round 3, MINOR: this used to say `Check.
+    missing`, which stopped being true the moment tan-cli#760 split the two).
+    `fix_missing` is the RAW twin: `missing` (`data.missingPrerequisites`,
+    the envelope) nulls a command whose own installer this host cannot
+    confirm, and feeding THAT to `run_fix` would silently disable the Tier B
+    diagnosis below the moment a tool's command is unconfirmed -- the exact
+    regression tan-cli#760's own review caught. Never a second,
+    independently recomputed tool/command list either way, so this can only
+    ever act on exactly what `prerequisites_check` already computed.
 
     A tool with `command=None` (the manifest names no install command for
     it) is skipped outright: nothing to run, nothing to refuse, and the
