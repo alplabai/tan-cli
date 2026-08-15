@@ -119,6 +119,14 @@ requires-python = ">=3.12"
 # absent or its platform verifier fails. Both are module-scope imports inside
 # `tan/net.py`, so both must be REQUIRED per the reasoning right below this
 # comment.
+# `cbor2` arrived WITH the relocated model engine (ADR-0028 Task 2,
+# `tan/model/manifest.py`): `.alpmodel` is a CBOR container, and
+# `Manifest.to_cbor`/`from_cbor` do a module-scope `import cbor2 as _cbor2` --
+# not lazy, not guarded -- so it is REQUIRED, matching alp-sdk's own
+# classification of the same distribution in its own `pyproject.toml`
+# (`cbor2>=5.0`, alongside PyYAML/jsonschema/click, never under
+# `optional-dependencies`). `tests/gates/test_declared_dependencies.py` fails on
+# this exact shape otherwise -- an eager import of an undeclared distribution.
 dependencies = [
   "typer>=0.26,<0.28",
   "rich>=13",
@@ -127,6 +135,7 @@ dependencies = [
   "click>=8.1",
   "truststore>=0.9",
   "certifi>=2024.2.2",
+  "cbor2>=5.0",
 ]
 
 # `pyserial` is OPTIONAL, not required: only `tan monitor` needs it, and a serial
@@ -158,6 +167,21 @@ classifiers = [
 # `[project.*]` TABLES below it.
 [project.optional-dependencies]
 monitor = ["pyserial>=3.5"]
+# Lightweight TFLite read/parse deps for `tan.model.tensorio.extract_io` (tensor
+# I/O extraction from a .tflite flatbuffer) -- pure-Python, no compiler toolchain.
+# `tflite` is a genuinely LAZY, guarded import (`tensorio.py`'s
+# `try: import tflite / except ImportError: return [], []`), so it stays an
+# extra rather than a required dependency -- `extract_io` degrades to "no I/O
+# metadata" rather than failing when it is absent. `flatbuffers` is not imported
+# by name anywhere under `tan/` (so `test_declared_dependencies.py` does not
+# require it), but it is `tflite`'s own declared runtime dependency (measured:
+# `pip show tflite` -> `Requires: flatbuffers, numpy`) -- pinned explicitly here,
+# not left to a transitive resolve, so `pip install alp-tan[model-io]` is a
+# working reader and not just a gate-satisfying stub. Pins mirror alp-sdk's own
+# `model-io` extra exactly (its `pyproject.toml`'s entry, due to be dropped once
+# `scripts/alp_model/` is deleted -- ADR-0028 Task 6) rather than inventing new
+# floors.
+model-io = ["tflite>=2.10", "flatbuffers>=23.1.21"]
 
 [project.urls]
 Homepage = "https://github.com/alplabai/tan-cli"
