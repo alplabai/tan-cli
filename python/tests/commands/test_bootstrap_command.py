@@ -57,6 +57,7 @@ from tan.core.bootstrap import (
     STALE,
     WINDOWS,
     BootstrapManifestError,
+    MissingPrerequisite,
     Tokens,
     WorkspaceSdkRecord,
     capture_tail,
@@ -2321,6 +2322,90 @@ def test_the_posix_refusal_keeps_the_oracle_line_and_adds_the_doctor_fix_remedy(
     assert [m.command for m in refusal.missing] == [
         "sudo apt-get install -y cmake", "sudo apt-get install -y ninja-build"
     ]
+
+
+def test_check_prerequisites_nulls_the_command_when_the_package_manager_is_absent(monkeypatch):
+    """tan-cli#760, end to end through `check_prerequisites` (the function
+    `tan bootstrap` actually calls). Measured on fedora:42/archlinux:latest/
+    rockylinux:9: none of the three has `apt-get`, yet alp-sdk's
+    `prerequisites.install.linux` is six `sudo apt-get install -y ...` lines
+    -- so on a host where NOTHING is on PATH (tools absent AND `apt-get`
+    absent), every `MissingPrerequisite.command` this call produces must be
+    `None`, never the unrunnable string that used to reach `alp-sdk-vscode`'s
+    Fix button byte-identical to a real Debian host."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    monkeypatch.setattr(bootstrap_cmd, "on_path", lambda _name: None)
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None and refusal.code == "prerequisites-missing"
+    assert refusal.missing, "the real manifest's Linux tool list must not be empty"
+    assert all(m.command is None for m in refusal.missing)
+
+
+def test_check_prerequisites_keeps_the_command_when_apt_get_is_confirmed(monkeypatch):
+    """The other half of tan-cli#760: a real Debian/Ubuntu host DOES have
+    `apt-get`, so the guard must not strip a command that can actually run
+    there -- dropping every entry unconditionally would just trade one wrong
+    answer (a command that never runs) for another (no command shown even
+    where one works)."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    # `sudo` itself must be confirmed too (tan-cli#760 review MINOR 3) -- a
+    # host with `apt-get` but no `sudo` is not actually a Debian/Ubuntu one
+    # this remedy works on. Every OTHER tool stays absent (`None`, matching
+    # `on_path`'s real `str | None` contract -- a bare bool broke downstream
+    # `is not None` presence checks) so the `missing` branch is the one this
+    # test actually exercises.
+    monkeypatch.setattr(
+        bootstrap_cmd,
+        "on_path",
+        lambda name: f"/usr/bin/{name}" if name in {"apt-get", "sudo"} else None,
+    )
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None
+    by_tool = {m.tool: m.command for m in refusal.missing}
+    assert by_tool["cmake"] == "sudo apt-get install -y cmake"
+    assert by_tool["ninja"] == "sudo apt-get install -y ninja-build"
+
+
+def test_check_prerequisites_nulls_the_venv_unusable_command_when_apt_get_is_absent(
+    monkeypatch,
+):
+    """tan-cli#760 review MAJOR 2 / Closes #765: `posix_venv_unusable()`'s
+    hardcoded `sudo apt-get install -y python3-venv` reached the bootstrap
+    envelope completely unguarded before this fix -- measured on a host with
+    nothing on PATH, `refusal.missing` carried the RAW command. The
+    structural claim "this is the ONE place that decides" was false; this
+    proves the second call site is now guarded too, with NO signature
+    change to `posix_venv_unusable` itself."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    # Every required tool present (so the missing-tools branch is never
+    # reached) EXCEPT the installer commands (`apt-get`/`sudo`), which are
+    # absent -- the venv-incapable branch is the only one this test exercises.
+    # `str | None`, matching `on_path`'s real contract -- a bare bool broke
+    # downstream `is not None` presence checks elsewhere on this path.
+    monkeypatch.setattr(
+        bootstrap_cmd,
+        "on_path",
+        lambda name: None if name in {"apt-get", "sudo"} else f"/usr/bin/{name}",
+    )
+    monkeypatch.setattr(
+        bootstrap_cmd, "probe_host_python", lambda _floor: HostPython(("python3",), (3, 12))
+    )
+    monkeypatch.setattr(bootstrap_cmd, "python_venv_capable", lambda _python: False)
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None and refusal.code == "venv-unusable"
+    assert refusal.missing == (MissingPrerequisite("python3-venv", None),)
 
 
 def test_the_tool_less_refusals_carry_their_own_codes_and_report_null():

@@ -460,6 +460,190 @@ def test_missing_prerequisites_carry_the_frozen_code_and_the_install_commands():
     assert check.status == "fail"
     assert check.code == "bootstrap.prerequisites-missing"
     assert "sudo apt-get install -y ninja-build" in (check.fix or "")
+    # `available=None` (this call's default): no guard at all, so `missing`
+    # and `fix_missing` are identical -- pre-tan-cli#760 behaviour exactly.
+    assert check.missing == check.fix_missing
+
+
+def test_prerequisites_check_available_guards_missing_but_not_fix_missing():
+    """tan-cli#760 review MAJOR 1, at the unit level: passing `available`
+    guards `missing` (the envelope) but `fix_missing` (`--fix`'s own input)
+    stays the RAW command regardless."""
+    check = doctor_cmd.prerequisites_check(
+        checked=["git", "cmake", "python3", "ninja"],
+        missing=["ninja"],
+        install={"ninja": "sudo apt-get install -y ninja-build"},
+        source="alp-sdk metadata/bootstrap.json",
+        available=lambda _binary: False,
+    )
+    assert check.missing == [{"tool": "ninja", "command": None}]
+    assert check.fix_missing == [
+        {"tool": "ninja", "command": "sudo apt-get install -y ninja-build"}
+    ]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#760: `data.missingPrerequisites[].command` must never hand back a
+# line that cannot run. Measured on fedora:42/archlinux:latest/rockylinux:9:
+# alp-sdk's `prerequisites.install.linux` is six `sudo apt-get install -y
+# ...` lines and none of those hosts has `apt-get` on PATH.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_nulls_the_install_command_when_its_own_package_manager_is_absent(
+    tmp_path, monkeypatch
+):
+    """The primary defect, reproduced end to end through `_collect` (what
+    `tan doctor --format json` actually calls): with nothing on PATH -- the
+    prerequisite tools AND `apt-get` both absent, the Fedora/Arch/Rocky shape
+    -- `hostPrerequisites.missing[].command` must be `null`, not the
+    `sudo apt-get ...` line a Debian host would get."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    # Pinned explicitly (not "whatever this runner's real platform happens to
+    # be"): `_collect` reads `install.linux` only when `sys.platform` is NOT
+    # `"darwin"`, and this suite runs on macOS CI too -- an unpinned
+    # `sys.platform` there would read `install.macos` (absent below) instead,
+    # passing this assertion for the wrong reason.
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "cmake": "sudo apt-get install -y cmake",
+                    "ninja": "sudo apt-get install -y ninja-build",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    assert prereq.status == "fail"
+    assert prereq.missing
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] is None
+    assert by_tool["ninja"] is None
+    # tan-cli#760 review MINOR 4: the prose fix line must not dangle the
+    # unrunnable command either, and must still name the tools.
+    assert "apt-get" not in (prereq.fix or "")
+    assert "cmake" in (prereq.fix or "") and "ninja" in (prereq.fix or "")
+
+
+def test_collect_keeps_the_install_command_when_apt_get_is_confirmed(tmp_path, monkeypatch):
+    """The other half: a real Debian/Ubuntu host has `apt-get`, so the guard
+    must not drop a command that host can actually run."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "cmake": "sudo apt-get install -y cmake",
+                    "ninja": "sudo apt-get install -y ninja-build",
+                }
+            },
+        },
+    )
+    # `sudo` itself must be confirmed too (tan-cli#760 review MINOR 3). `str |
+    # None`, matching `on_path`'s real contract: `_collect` also calls
+    # `on_path("west")` and feeds a truthy result straight to `subprocess.run`
+    # as an argv entry, so a bare `True` here crashes with `not str, bytes or
+    # os.PathLike`.
+    monkeypatch.setattr(
+        doctor_cmd,
+        "on_path",
+        lambda name: f"/usr/bin/{name}" if name in {"apt-get", "sudo"} else None,
+    )
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] == "sudo apt-get install -y cmake"
+    assert by_tool["ninja"] == "sudo apt-get install -y ninja-build"
+
+
+def test_collect_separates_the_envelope_from_fixs_own_input(tmp_path, monkeypatch):
+    """tan-cli#760 review MAJOR 1: `missing` (the envelope's `data.
+    missingPrerequisites`) and `fix_missing` (`--fix`'s own input) must NOT
+    be the same value once a command is unconfirmed -- `missing` degrades to
+    `command: null`, but `fix_missing` stays the RAW command so `run_fix` can
+    still do its own tan-cli#360 diagnosis."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["cmake"],
+            "pythonMinVersion": "3.10",
+            "install": {"linux": {"cmake": "sudo apt-get install -y cmake"}},
+        },
+    )
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)  # cmake AND apt-get absent
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    assert prereq.missing == [{"tool": "cmake", "command": None}]
+    assert prereq.fix_missing == [
+        {"tool": "cmake", "command": "sudo apt-get install -y cmake"}
+    ]
+
+
+def test_fix_still_reports_installer_not_found_on_the_host_the_guard_covers(
+    tmp_path, monkeypatch
+):
+    """tan-cli#760 review MAJOR 1, reproduced through `_collect` + `run_fix`
+    -- not a hand-built dict, unlike the pre-existing tan-cli#360 tests this
+    guard risked silently regressing. Exactly the review's own repro: a Mac
+    with no Homebrew. Before the fix, feeding `run_fix` the CONFIRMED
+    (already-nulled) `missing` dict made it skip the entry outright
+    (`command is None` -> `continue`) and return `[]` -- a silent `--fix`
+    no-op, the precise defect tan-cli#360 exists to prevent. `--fix` must
+    still report `doctor.fix-installer-not-found`, and `subprocess.run` is
+    patched to explode if `run_fix` ever reaches it -- #360's own `on_path`
+    check refuses the spawn before that, so this is a stronger assertion
+    than "happened not to fail this time"."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "darwin")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "macos": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "macos": {
+                    "cmake": "brew install cmake",
+                    "ninja": "brew install ninja",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)  # nothing on PATH, brew included
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    # The envelope stays honest -- tan-cli#760's own fix, unregressed.
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] is None
+    # `--fix`'s OWN input is the RAW command.
+    raw_by_tool = {m["tool"]: m["command"] for m in prereq.fix_missing}
+    assert raw_by_tool["cmake"] == "brew install cmake"
+
+    def _must_not_spawn(*args, **kwargs):
+        raise AssertionError("run_fix must not spawn an unresolvable installer")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _must_not_spawn)
+    fix_checks = doctor_cmd.run_fix(prereq.fix_missing)
+    assert len(fix_checks) == 1, fix_checks
+    assert fix_checks[0].code == "doctor.fix-installer-not-found"
+    assert fix_checks[0].name == "fix:brew"
 
 
 def test_macos_reads_its_own_prerequisites_list_not_posixs(tmp_path, monkeypatch):
@@ -3366,7 +3550,21 @@ def test_doctor_fix_explains_a_missing_installer_in_both_text_and_json(monkeypat
     hat. `can_prompt` is stubbed for the reason the section header above
     gives: `CliRunner`'s pipes are never a tty."""
     missing = [{"tool": "ninja", "command": "brew install ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
     monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
@@ -3500,7 +3698,21 @@ def test_doctor_fix_invokes_run_fix_and_folds_its_checks_into_the_report_when_co
     replaced by `pass` (the feature unwired entirely): `run_fix` would never
     be called and its Check would never reach `data.checks`/`issues`."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
 
@@ -3530,7 +3742,21 @@ def test_doctor_fix_guard_honours_ci_even_in_text_mode(monkeypatch, tmp_path):
     that condition, and text mode makes `not json_mode` true) and against
     `if fix or True` (guard deleted, always runs)."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
 
     calls = []
@@ -3550,7 +3776,21 @@ def test_doctor_fix_guard_honours_no_tty_the_same_way_ci_does(monkeypatch, tmp_p
     output but never passed `--ci`) must refuse `--fix` the same way `--ci`
     does."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
 
     calls = []
@@ -3670,7 +3910,21 @@ def test_doctor_fix_with_stderr_none_does_not_crash_before_reaching_fix_suppress
 
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     real_stderr_box: list[object] = []
 
     def _collect_stub(*a, **k):  # noqa: ARG001
@@ -3730,7 +3984,21 @@ def test_doctor_fix_with_stdin_none_does_not_crash_before_reaching_fix_suppresse
     lands exactly where a real detached-stdio host already has
     `sys.stdin is None` by the time `--fix`'s consent gate is evaluated."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
 
     def _collect_stub(*a, **k):  # noqa: ARG001
         doctor_cmd.sys.stdin = None
@@ -3754,7 +4022,21 @@ def test_doctor_fix_format_json_is_no_longer_a_silent_no_op(monkeypatch, tmp_pat
     Now it must carry a `doctor.fix-suppressed` issue naming why, even though
     `run_fix` itself is never called."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     calls = []
     monkeypatch.setattr(doctor_cmd, "run_fix", lambda m: calls.append(m) or [])
@@ -3792,7 +4074,21 @@ def test_doctor_fix_suppressed_notice_reaches_text_mode_not_just_json(monkeypatc
     branch, so an issues-only entry like `fix_suppressed_issue` never
     reached stderr at all outside `--format json`."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.chdir(tmp_path)
 
@@ -4034,7 +4330,21 @@ def test_doctor_fix_passes_a_real_on_check_to_run_fix_in_text_mode_and_none_unde
     must NOT print `--fix` checks under `--format json` -- the same `stream`
     gate `_collect` is given, applied consistently to the second caller."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
 

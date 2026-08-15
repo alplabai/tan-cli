@@ -150,6 +150,7 @@ from tan.core.bootstrap import (
     MissingPrerequisite,
     PrereqFailure,
     WorkspaceSdkRecord,
+    confirm_missing,
     parse_west_zephyr_pin,
     parse_workspace_sdk_record,
     parse_zephyr_version_file,
@@ -274,7 +275,24 @@ class Check:
     serialized by `as_dict()` below, unlike every other field: it does not
     ride on the per-check JSON at all (mirroring Rust's `DoctorCheck`, which
     has no such field either), only on the report-level
-    `data.missingPrerequisites` `doctor()` builds from it.
+    `data.missingPrerequisites` `doctor()` builds from it. Since tan-cli#760
+    it is the tan-cli#760-CONFIRMED half: a tool whose manifest command's own
+    leading binary (`sudo` included) does not resolve on this host's PATH
+    reports `command: null` here, never a string a human or `alp-sdk-
+    vscode`'s Fix button could run and fail on.
+
+    `fix_missing` is `missing`'s RAW twin, tan-cli#760 review MAJOR 1: it
+    carries the SAME `{tool, command}` pairs `missing` would carry with no
+    confirmation guard applied at all, and is what `doctor()`'s `--fix`
+    branch feeds `run_fix` -- never `missing` itself. `run_fix` has done its
+    OWN PATH resolution and reported `doctor.fix-installer-not-found` since
+    tan-cli#360; feeding it the CONFIRMED (already-nulled) dict instead would
+    turn that diagnosis into a silent no-op the moment the installer itself
+    is unconfirmed -- exactly the `--fix` silence #360 exists to prevent, on
+    the very host (a fresh Mac with no Homebrew, a Windows image with no
+    usable winget) #360 was written for. Also NOT serialized, for the same
+    reason `missing` is not: it exists purely for `--fix`'s in-process input,
+    never the wire.
 
     `scope` (tan-cli#549) is `host` or `project` -- see `tan.core.doctor_scope`
     for the two definitions and the judgement calls. REQUIRED and KEYWORD-ONLY,
@@ -294,6 +312,7 @@ class Check:
     fix: str | None = None
     code: str | None = None
     missing: list[dict[str, str | None]] | None = None
+    fix_missing: list[dict[str, str | None]] | None = None
     scope: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
@@ -773,6 +792,8 @@ def prerequisites_check(
     install: dict[str, str],
     source: str,
     venv_refusal: PrereqFailure | None = None,
+    *,
+    available: Callable[[str], bool] | None = None,
 ) -> Check:
     """`hostPrerequisites` -- the manifest's own tool list, on PATH, PLUS
     (Linux only) whether the interpreter's `venv` module can actually create
@@ -788,28 +809,67 @@ def prerequisites_check(
     Before this, `tan doctor` probed bare PATH presence and never
     `ensurepip`, so it passed on a host that then died at `tan bootstrap`
     time. `venv_refusal.missing` (`{tool: "python3-venv", command: ...}`)
-    folds into this check's own `missing` field alongside any tool-presence
-    entries, so one `data.missingPrerequisites` list (finding 4) carries
-    both failure shapes -- never two.
+    folds into this check's own `missing`/`fix_missing` fields alongside any
+    tool-presence entries, so one `data.missingPrerequisites` list
+    (finding 4) carries both failure shapes -- never two.
+
+    `available` (tan-cli#760 + review #765) is the PATH-confirmation guard --
+    `install` here is RAW, exactly as the manifest declares it, and `install`
+    itself is used UNGUARDED to build `fix_missing`, the field `--fix`
+    (`doctor_cmd.run_fix`) actually consumes. `missing` -- `data.
+    missingPrerequisites`, the customer-facing field -- is the CONFIRMED
+    projection of the same entries: `available(binary)` decides whether a
+    command's own leading binary (`sudo` included) resolves on this host
+    before it is ever handed out as `command`, never `None`. `available=None`
+    (every direct caller before tan-cli#760, and every existing unit test of
+    this function) means `missing` and `fix_missing` are identical -- no
+    guard at all, matching this function's pre-#760 behaviour exactly.
+
+    This split exists because `run_fix` has done its OWN on_path resolution
+    and reported `doctor.fix-installer-not-found` since tan-cli#360: handing
+    it the CONFIRMED (already-nulled) dict instead of the raw one would make
+    every unconfirmed installer a silent `--fix` no-op -- trading away the
+    #360 diagnostic for the #760 fix, on the exact hosts (a fresh Mac with no
+    Homebrew, a Windows image with no usable winget) #360 exists for
+    (tan-cli#760 review, MAJOR 1).
     """
-    entries = tuple(MissingPrerequisite(tool, install.get(tool)) for tool in missing)
+    raw_entries = tuple(MissingPrerequisite(tool, install.get(tool)) for tool in missing)
     if venv_refusal is not None:
-        entries = entries + venv_refusal.missing
+        raw_entries = raw_entries + venv_refusal.missing
+    fix_missing = reported_missing(raw_entries)
+
+    entries = raw_entries if available is None else confirm_missing(raw_entries, available)
     missing_data = reported_missing(entries)
+    confirmed_commands = [m.command for m in entries if m.tool in missing and m.command]
 
     if missing:
-        commands = [install[tool] for tool in missing if tool in install]
+        # tan-cli#760 review MINOR 4: `tan bootstrap`'s sibling refusal
+        # (`bootstrap.posix_refusal`/`_doctor_fix_hint`) already stops
+        # promising a remedy it cannot perform when NO missing tool has a
+        # confirmed command; this Check's own `fix` prose gets the same
+        # treatment, naming the tools rather than falling silent.
+        if confirmed_commands:
+            fix_text = (
+                "Install the missing prerequisites, then run `tan bootstrap`."
+                f"  {'; '.join(confirmed_commands)}"
+            )
+        elif available is not None:
+            fix_text = (
+                f"tan has no confirmed install command for this host: "
+                f"{', '.join(missing)}. Install them with your OS's package "
+                f"manager and put them on PATH, then run `tan bootstrap`."
+            )
+        else:
+            fix_text = "Install the missing prerequisites, then run `tan bootstrap`."
         return Check(
             "hostPrerequisites",
             "fail",
             f"missing from PATH: {', '.join(missing)} ({source}).",
-            (
-                "Install the missing prerequisites, then run `tan bootstrap`."
-                + ("  " + "; ".join(commands) if commands else "")
-            ),
+            fix_text,
             # FROZEN (contract/issue-codes.json).
             code="bootstrap.prerequisites-missing",
             missing=missing_data,
+            fix_missing=fix_missing,
             scope="host",
         )
     if venv_refusal is not None:
@@ -820,6 +880,7 @@ def prerequisites_check(
             "Install the missing prerequisites, then run `tan bootstrap`.",
             code=f"bootstrap.{venv_refusal.code}",
             missing=missing_data,
+            fix_missing=fix_missing,
             scope="host",
         )
     return Check(
@@ -3524,6 +3585,12 @@ def _collect(
     per_tool = install.get(platform_key) if isinstance(install, dict) else None
     if not isinstance(per_tool, dict):
         per_tool = {}
+    # RAW -- `prerequisites_check` below does its OWN tan-cli#760 PATH
+    # confirmation (`available=`) to build the customer-facing `missing`
+    # field; this dict stays unguarded because it is also the source of
+    # `fix_missing`, `--fix`'s (`run_fix`'s) own input -- see
+    # `prerequisites_check`'s docstring and tan-cli#760 review MAJOR 1 for
+    # why those two must NOT be the same value.
     resolved_install = {k: v for k, v in per_tool.items() if isinstance(v, str)}
     missing_tools = [tool for tool in required if on_path(tool) is None]
     # tan-cli#294 finding 3: reintroduces tan-cli#161. Only reachable once the
@@ -3539,7 +3606,17 @@ def _collect(
     ):
         venv_refusal = posix_venv_unusable()
     _add(
-        prerequisites_check(required, missing_tools, resolved_install, source, venv_refusal)
+        prerequisites_check(
+            required,
+            missing_tools,
+            resolved_install,
+            source,
+            venv_refusal,
+            # tan-cli#760: confirmed -- not merely present, not GUESSED --
+            # against THIS host's real PATH walk (`on_path`, already used
+            # above for the tool-presence probe itself).
+            available=lambda binary: on_path(binary) is not None,
+        )
     )
 
     west_exe = on_path("west")
@@ -3881,8 +3958,15 @@ def doctor(
         # deliberately does not.
         fix_allowed = fix and can_prompt(non_interactive=non_interactive, ci=ci, json_mode=json_mode)
         if fix_allowed:
+            # `fix_missing`, NEVER `missing`: tan-cli#760 review MAJOR 1.
+            # `missing` is the CONFIRMED, customer-facing field (`data.
+            # missingPrerequisites`) and nulls a command whose own installer
+            # this host cannot confirm; `run_fix` needs the RAW commands to
+            # do its OWN on_path resolution and keep reporting tan-cli#360's
+            # `doctor.fix-installer-not-found` diagnosis on the hosts #360
+            # exists for, instead of a silent no-op.
             missing_for_fix = next(
-                (c.missing for c in checks if c.name == "hostPrerequisites"), None
+                (c.fix_missing for c in checks if c.name == "hostPrerequisites"), None
             )
             if missing_for_fix:
                 # These checks stream too, same as every check `_collect`
