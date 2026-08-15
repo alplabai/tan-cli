@@ -25,6 +25,7 @@ WOULD have spawned; `test_a_dry_run_writes_nothing` is what keeps that honest.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -306,25 +307,28 @@ def test_the_effective_floor_refuses_a_host_the_manifest_would_accept():
     assert "declares only 3.10" in line
 
 
-#: The two literal fragments `scripts/e2e-full.sh`'s Scenario-B "was this
-#: bootstrap.python-too-old refusal actually EARNED" check regexes out of
-#: this exact message (tan-cli#757 review) -- `"... found"` and
-#: `"needs >= ..."` bracket the two version numbers it compares. Pinned here
-#: because nothing else pins the COUPLING: the test above keys on the
-#: assembled sentence for one concrete number pair, not on the wording the
-#: harness depends on, and no workflow runs `e2e-full.sh` at all (`grep -rn
-#: e2e-full.sh .github/workflows/` finds nothing), so a reword here would
-#: leave every CI job green while the harness's regex silently stops
-#: matching. That degrades safe (every case falls to `NOPARSE`, a scored
-#: failure, never a silent skip) but still stops checking what it claims to
-#: check. Reword the message and this fails, naming the file to update.
-E2E_FLOOR_FOUND_PHRASE = "found"
-E2E_FLOOR_NEEDS_PHRASE = "needs >="
+#: The harness's OWN regex (`scripts/e2e-full.sh`'s Scenario-B FLOOR_CHECK,
+#: verbatim), not a paraphrase of it -- a loose substring pin (a prior
+#: version of this constant pinned the bare word `"found"`) is exactly the
+#: defect class this whole PR is about, just relocated into the test: three
+#: of six candidate rewords that break the harness's structural match (an
+#: added patch component, a restructure keeping both words, a swapped
+#: clause order) left a substring-only pin GREEN (tan-cli#757 review,
+#: second pass). Compare `E2E_DIVERGENCE_PHRASE` above -- a five-word
+#: fragment chosen because it cannot survive a reword -- this constant now
+#: matches that bar by construction: it cannot pass unless the STRUCTURE the
+#: harness parses (two `X.Y` pairs bracketed by "found" ... "needs >=") is
+#: still there. Nothing else pins this: no workflow runs `e2e-full.sh` at
+#: all (`grep -rn e2e-full.sh .github/workflows/` finds nothing), so a
+#: reword would otherwise leave every CI job green while the harness's
+#: regex silently stops matching. Reword the message and this fails, naming
+#: the file to update.
+E2E_FLOOR_CHECK_REGEX = r"Python (\d+)\.(\d+) found.*needs >= (\d+)\.(\d+)"
 
 
 def test_e2e_full_sh_floor_wording_survives_in_the_refusal_message():
-    """tan-cli#757 review MINOR 5. See `E2E_FLOOR_FOUND_PHRASE` /
-    `E2E_FLOOR_NEEDS_PHRASE` above for why this is pinned separately from
+    """tan-cli#757 review MINOR 5 (second pass). See `E2E_FLOOR_CHECK_REGEX`
+    above for why this is pinned separately from
     `test_the_effective_floor_refuses_a_host_the_manifest_would_accept`."""
     facts = parse_bootstrap_manifest(REAL_MANIFEST)
     floor = PythonFloor(effective=(3, 12), source="zephyr python.cmake", manifest=(3, 10))
@@ -333,14 +337,21 @@ def test_e2e_full_sh_floor_wording_survives_in_the_refusal_message():
         floor_source=floor.source, manifest_floor=floor.manifest,
     )
     line = refusal.lines[0]
-    for phrase in (E2E_FLOOR_FOUND_PHRASE, E2E_FLOOR_NEEDS_PHRASE):
-        assert phrase in line, (
-            f"scripts/e2e-full.sh regexes {phrase!r} out of this message to "
-            f"confirm a bootstrap.python-too-old refusal was actually earned "
-            f"(found < floor) before honouring it as a reason to skip the rest "
-            f"of Scenario B. Update scripts/e2e-full.sh's FLOOR_CHECK regex in "
-            f"the same change.\n\nmessage was: {line!r}"
-        )
+    match = re.search(E2E_FLOOR_CHECK_REGEX, line)
+    assert match is not None, (
+        f"scripts/e2e-full.sh's FLOOR_CHECK regex {E2E_FLOOR_CHECK_REGEX!r} no "
+        f"longer matches this message. That regex is what confirms a "
+        f"bootstrap.python-too-old refusal was actually EARNED (found < floor) "
+        f"before honouring it as a reason to skip the rest of Scenario B -- a "
+        f"reword here silently stops that check, degrading safe (every case "
+        f"falls to NOPARSE, a scored failure) but not correctly. Update "
+        f"scripts/e2e-full.sh's FLOOR_CHECK regex in the same change.\n\n"
+        f"message was: {line!r}"
+    )
+    found = (int(match.group(1)), int(match.group(2)))
+    effective = (int(match.group(3)), int(match.group(4)))
+    assert found == (3, 10), f"regex extracted the wrong 'found' pair: {found!r}"
+    assert effective == (3, 12), f"regex extracted the wrong 'floor' pair: {effective!r}"
 
 
 def test_the_skew_case_suppresses_the_manifests_own_install_command():
