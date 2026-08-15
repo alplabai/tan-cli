@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`tan model build` -- compile + package `board.yaml`'s `models:` block into
-`.alpmodel` packages.
+"""`tan model build`/`tan model doctor` -- compile + package `board.yaml`'s
+`models:` block into `.alpmodel` packages, and report NPU-compiler toolchain
+availability.
 
 Port of `scripts/alp_cli/model.py` (51 lines): the board.yaml discovery,
 per-model source/compile-option path resolution, and the `built <path>`
@@ -48,6 +49,27 @@ in-process, per model, there is no boundary across which a result can go
 missing: either the call returns a path (recorded as built) or raises
 (caught and reported as `model.build-failed`). There is no third outcome left
 to guard against, so the guard is gone, not silently dropped.
+
+**`doctor` is the diagnostic half ADR-0028 makes tan responsible for.** With
+the compiler-adapter engine relocated here, tan is the customer's only
+surface for "why did my compile produce nothing" -- `model doctor` answers
+that ahead of a build by reporting, per registered backend, whether its
+toolchain is installed and, if not, an ACTIONABLE reason (`tan.core.
+model_doctor`). It is READ-ONLY: every adapter's `is_available()` is a
+`shutil.which`/env-var check today, never a spawn, and `_run_doctor` below
+never calls one that isn't. An unavailable toolchain is the expected, common
+case, not a failure -- `_run_doctor` always resolves to `ExitCode.SUCCESS`;
+reporting absence is the feature, not a reason to fail the run. A board.yaml
+and a resolvable alp-sdk checkout are NOT required: this command intends to
+run on the exact host where something else already broke, so an unresolved
+`--sdk-root` is folded into a `model.doctor-sdk-unresolved` WARNING rather
+than the `model.sdk-root-unresolved` ERROR `build` uses for the same
+situation -- the backend rows below it are unaffected by a missing SDK either
+way, since none of them reads `metadata/**`.
+
+`tan model check` -- a fit verdict against a board's declared models and
+`metadata/npu_ops/` -- is a DIFFERENT, not-yet-approved command and is not
+implemented here.
 """
 
 from __future__ import annotations
@@ -65,14 +87,28 @@ from tan.commands.build_output import (
 )
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
+from tan.core.model_doctor import backend_row, registry_backends
 from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
-from tan.model.build import build_model
+from tan.model.adapters.drpai import _compiler_version as _drpai_compiler_version
+from tan.model.adapters.drpai import _tvm_home as _drpai_tvm_home
+from tan.model.adapters.ethos_u import _vela_version
+from tan.model.build import _ADAPTERS, build_model
 from tan.output_format import FORMAT_HELP, OutputFormat
 
-#: `data.schemaVersion` for this command's payload.
+#: `data.schemaVersion` for `build`'s payload.
 DATA_SCHEMA_VERSION = "1"
+
+#: `data.schemaVersion` for `doctor`'s payload -- versioned independently of
+#: `build`'s (a different `data` shape entirely: `backends[]`, not `built[]`).
+DOCTOR_DATA_SCHEMA_VERSION = "1"
+
+#: `SUBCOMMANDS` names every subcommand this command accepts, in the order the
+#: unknown-subcommand refusal lists them. `tan model check` (a fit verdict
+#: against `metadata/npu_ops/`) is a separate, not-yet-approved command and is
+#: deliberately absent.
+SUBCOMMANDS = ("build", "doctor")
 
 
 class ModelError(Exception):
@@ -298,8 +334,104 @@ def _run_build(
     return reported_project, sdk_info, data, issues, exit_code
 
 
+def _backend_version(backend: str, *, available: bool) -> str | None:
+    """Best-effort compiler-version string for an AVAILABLE backend --
+    READ-ONLY, never a spawn (module doc). `None` whenever no non-spawning
+    probe exists, or the one that does answers a DEGRADED sentinel rather
+    than a real version:
+
+    * `ethos_u` -- `_vela_version()` reads `importlib.metadata`, no
+      subprocess. It returns the bare literal `"vela"` when the
+      `ethos-u-vela` distribution's metadata is absent
+      (`except PackageNotFoundError`) -- that is a degraded answer, not a
+      version, so it is reported here as `None` rather than surfaced as if
+      it were one.
+    * `drpai` -- `_compiler_version(tvm_home)` reads a version file inside
+      the toolchain checkout (`tan/model/adapters/drpai.py`), also no
+      subprocess.
+    * `deepx_dxm1` -- `_dxcom_version()` is the only version probe DeepxAdapter
+      has, and it SPAWNS (`subprocess.run(["dxcom", "-v"], ...)`,
+      `tan/model/adapters/deepx.py`). `doctor` must never invoke a compiler,
+      so this backend's version is always unknown here, never guessed at.
+    * `cpu` -- no external tool at all (`BACKEND_TOOLS["cpu"] is None`), so
+      no version to report.
+    """
+    if not available:
+        return None
+    if backend == "ethos_u":
+        version = _vela_version()
+        return None if version == "vela" else version
+    if backend == "drpai":
+        tvm_home = _drpai_tvm_home()
+        return _drpai_compiler_version(tvm_home) if tvm_home is not None else None
+    return None
+
+
+def _run_doctor(
+    *,
+    context: ProjectContext,
+    sdk_root: str | None,
+) -> tuple[Project, SdkInfo | None, dict, list[Issue], ExitCode]:
+    """One row per registered compiler-backend, per the module doc: READ-ONLY,
+    spawns nothing, and never fails the run -- an unavailable toolchain is
+    reported, not refused. A board.yaml is not read at all: unlike `build`,
+    `doctor` has no per-model work to resolve, only host-toolchain facts that
+    hold regardless of which (if any) project this was run from.
+
+    The SDK root is still resolved, mirroring `_run_build` (module doc), but
+    ONLY to decide whether `model.doctor-sdk-unresolved` belongs in `issues`
+    -- a WARNING, never the VALIDATION_FAILURE `_run_build` raises for the
+    same non-resolution, since nothing below actually needs it: no backend
+    row reads `metadata/**`.
+    """
+    reported_project = context.project()
+    sdk_info = context.sdk
+
+    issues: list[Issue] = []
+    resolved_sdk = resolve_metadata_sdk_root(sdk_root, context.workspace_root)
+    if resolved_sdk is None:
+        issues.append(
+            Issue(
+                "model.doctor-sdk-unresolved",
+                "warning",
+                (
+                    rejected_sdk_root_message(
+                        sdk_root, "Backend availability below is unaffected."
+                    )
+                    if sdk_root
+                    else "alp-sdk root is unresolved. Use --sdk-root, place the project "
+                    f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. Backend "
+                    "availability below is unaffected."
+                ),
+            )
+        )
+
+    rows = []
+    for backend in registry_backends(_ADAPTERS):
+        available = any(a.is_available() for a in _ADAPTERS if a.backend == backend)
+        version = _backend_version(backend, available=available)
+        rows.append(backend_row(backend, available=available, version=version))
+
+    data: dict[str, Any] = {
+        "schemaVersion": DOCTOR_DATA_SCHEMA_VERSION,
+        "backends": [row.as_dict() for row in rows],
+    }
+    return reported_project, sdk_info, data, issues, ExitCode.SUCCESS
+
+
+def _empty_data(subcommand: str | None) -> dict[str, Any]:
+    """The `data` shape for a refusal that never reached `_run_build`/
+    `_run_doctor` -- each subcommand's OWN empty payload shape, not a
+    generic stand-in, so a consumer parsing `data.backends`/`data.built`
+    off a refusal envelope gets the same shape it would from a run that
+    resolved nothing."""
+    if subcommand == "doctor":
+        return {"schemaVersion": DOCTOR_DATA_SCHEMA_VERSION, "backends": []}
+    return {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []}
+
+
 def model(
-    subcommand: str = typer.Argument(None, metavar="SUBCOMMAND", help="build."),
+    subcommand: str = typer.Argument(None, metavar="SUBCOMMAND", help="build | doctor."),
     board: str = typer.Option(
         # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
         # option, not a second option -- it is what `build`, `run`, `kconfig`,
@@ -329,7 +461,8 @@ def model(
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
-    """Compile + package board.yaml `models:` into `.alpmodel` packages."""
+    """Compile + package board.yaml `models:` into `.alpmodel` packages
+    (`build`), or report NPU-compiler toolchain availability (`doctor`)."""
     json_mode = output_format == "json"
 
     def finish(
@@ -353,32 +486,51 @@ def model(
             errors = [i for i in issues if i.severity == "error"]
             for issue in warnings:
                 print(f"{issue.severity}: {issue.message}", file=sys.stderr)
-            for path in data.get("built", []):
-                print(f"built {path}", file=sys.stderr)
-            # `not issues` before -- the same thing until `issues` started
-            # carrying those warnings. A board with no `models:` and a broken
-            # project pin must still be told nothing was declared; a warning
-            # is not a reason to withhold the only line this run had to say.
-            if not data.get("built") and not errors:
-                print(
-                    "model: no `models:` declared in board.yaml; nothing to build.",
-                    file=sys.stderr,
-                )
+            if "backends" in data:
+                # `doctor`: one line per backend, in registry order --
+                # unavailable rows carry their reason inline, so a scrollback
+                # answers "why not" without a second command.
+                for row in data["backends"]:
+                    tool = row["tool"] or "-"
+                    if row["available"]:
+                        version = f", version={row['version']}" if row["version"] else ""
+                        print(
+                            f"{row['backend']}: available (tool={tool}{version})",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"{row['backend']}: unavailable (tool={tool}) -- {row['reason']}",
+                            file=sys.stderr,
+                        )
+            else:
+                for path in data.get("built", []):
+                    print(f"built {path}", file=sys.stderr)
+                # `not issues` before -- the same thing until `issues` started
+                # carrying those warnings. A board with no `models:` and a
+                # broken project pin must still be told nothing was declared;
+                # a warning is not a reason to withhold the only line this
+                # run had to say.
+                if not data.get("built") and not errors:
+                    print(
+                        "model: no `models:` declared in board.yaml; nothing to build.",
+                        file=sys.stderr,
+                    )
             for issue in errors:
                 print(f"model: {issue.message}", file=sys.stderr)
         raise typer.Exit(int(exit_code))
 
-    if subcommand != "build":
+    if subcommand not in SUBCOMMANDS:
         finish(
             Project(root=None, board_yaml=None),
             None,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []},
+            _empty_data(subcommand),
             [
                 Issue(
                     "model.unknown-subcommand",
                     "error",
                     f"Unknown model subcommand: {'(none)' if subcommand is None else subcommand}. "
-                    "Available: build.",
+                    f"Available: {', '.join(SUBCOMMANDS)}.",
                 )
             ],
             ExitCode.RUNTIME_FAILURE,
@@ -407,17 +559,23 @@ def model(
             context.sdk_source_tier,
             context.foreign_global_default_for,
         )
-        project_, sdk, data, issues, exit_code = _run_build(
-            context=context,
-            out=out,
-            metadata_root=metadata_root,
-            sdk_root=sdk_root,
-        )
+        if subcommand == "doctor":
+            project_, sdk, data, issues, exit_code = _run_doctor(
+                context=context,
+                sdk_root=sdk_root,
+            )
+        else:
+            project_, sdk, data, issues, exit_code = _run_build(
+                context=context,
+                out=out,
+                metadata_root=metadata_root,
+                sdk_root=sdk_root,
+            )
     except ModelError as err:
         finish(
             Project(root=None, board_yaml=None),
             None,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []},
+            _empty_data(subcommand),
             [*sdk_issues, Issue(err.code, "error", err.message)],
             err.exit_code,
         )
@@ -426,13 +584,13 @@ def model(
         finish(
             Project(root=None, board_yaml=None),
             None,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []},
+            _empty_data(subcommand),
             [
                 *sdk_issues,
                 Issue(
                     "model.internal-failure",
                     "error",
-                    f"model build failed unexpectedly: {type(err).__name__}: {err}",
+                    f"model {subcommand} failed unexpectedly: {type(err).__name__}: {err}",
                 ),
             ],
             ExitCode.INTERNAL_FAILURE,

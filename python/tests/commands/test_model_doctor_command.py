@@ -1,0 +1,354 @@
+# SPDX-License-Identifier: Apache-2.0
+"""`tan model doctor` -- per-backend NPU-compiler toolchain availability.
+
+Exercises the REAL adapter registry (`tan.model.build._ADAPTERS`), not a
+monkeypatched stand-in: the whole point of this command is that
+`is_available()` never spawns, and the only way to prove that is to run the
+real probes with `subprocess.run`/`Popen` booby-trapped (see
+`test_doctor_never_spawns_a_subprocess` below).
+
+`tan model check` -- a fit verdict against a board's declared models and
+`metadata/npu_ops/` -- is a separate, not-yet-approved command; nothing here
+reads a board.yaml or `metadata/`.
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import typer
+from typer.testing import CliRunner
+
+from tan.commands import model_cmd
+from tan.commands.model_cmd import model
+
+app = typer.Typer(add_completion=False)
+app.command("model")(model)
+
+runner = CliRunner()
+
+
+def envelope(result):
+    assert result.stdout.count("\n") == 1, result.stdout
+    return json.loads(result.stdout)
+
+
+def _force_all_unavailable(monkeypatch) -> None:
+    """No `vela`/`dxcom` on PATH, no DRP-AI/DeepX env var set -- the
+    deterministic "fresh host" state every host-independent assertion below
+    needs, regardless of what happens to be installed on the machine actually
+    running the suite."""
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.delenv("ALP_DRPAI_TVM_HOME", raising=False)
+    monkeypatch.delenv("ALP_DEEPX_SDK_HOME", raising=False)
+
+
+def _rows(doc) -> dict[str, dict]:
+    return {row["backend"]: row for row in doc["data"]["backends"]}
+
+
+# --------------------------------------------------------------------------
+# shape + the fixed four backends, in registry order
+# --------------------------------------------------------------------------
+
+
+def test_json_shape_carries_one_row_per_backend(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    assert result.exit_code == 0
+    doc = envelope(result)
+    assert doc["command"] == "model"
+    assert doc["ok"] is True
+    backends = doc["data"]["backends"]
+    assert [row["backend"] for row in backends] == ["cpu", "ethos_u", "drpai", "deepx_dxm1"]
+    for row in backends:
+        assert set(row) == {"backend", "tool", "available", "version", "reason"}
+
+
+def test_cpu_is_always_available_with_no_tool_and_no_reason(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["cpu"]
+    assert row == {
+        "backend": "cpu",
+        "tool": None,
+        "available": True,
+        "version": None,
+        "reason": None,
+    }
+
+
+# --------------------------------------------------------------------------
+# per-backend availability + exact, actionable reason strings
+# --------------------------------------------------------------------------
+
+
+def test_ethos_u_unavailable_reason_is_exact(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["ethos_u"]
+    assert row["tool"] == "vela"
+    assert row["available"] is False
+    assert row["version"] is None
+    assert row["reason"] == "vela not on PATH; pip install ethos-u-vela"
+
+
+def test_ethos_u_available_when_vela_is_on_path(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["ethos_u"]
+    assert row["available"] is True
+    assert row["reason"] is None
+
+
+def test_deepx_dxm1_unavailable_reason_is_exact(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["deepx_dxm1"]
+    assert row["tool"] == "dxcom"
+    assert row["available"] is False
+    assert row["version"] is None
+    assert row["reason"] == "dxcom not on PATH; license-gated, Linux-only"
+
+
+def test_deepx_dxm1_available_when_dxcom_is_on_path(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/dxcom" if name == "dxcom" else None
+    )
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["deepx_dxm1"]
+    assert row["available"] is True
+    assert row["reason"] is None
+
+
+def test_deepx_dxm1_available_via_alp_deepx_sdk_home(tmp_path, monkeypatch):
+    """`DeepxAdapter.is_available()`'s SECOND arm -- an SDK home directory,
+    not just a PATH hit -- must also flip the row available with no reason."""
+    _force_all_unavailable(monkeypatch)
+    sdk_home = tmp_path / "deepx-sdk"
+    sdk_home.mkdir()
+    monkeypatch.setenv("ALP_DEEPX_SDK_HOME", str(sdk_home))
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["deepx_dxm1"]
+    assert row["available"] is True
+    assert row["reason"] is None
+
+
+def test_drpai_unavailable_names_the_real_env_var(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["drpai"]
+    assert row["tool"] == "compile_onnx_model_quant.py"
+    assert row["available"] is False
+    assert row["version"] is None
+    assert "ALP_DRPAI_TVM_HOME" in row["reason"]
+
+
+def test_drpai_available_when_the_env_var_names_a_real_directory(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    tvm_home = tmp_path / "drpai-tvm"
+    tvm_home.mkdir()
+    monkeypatch.setenv("ALP_DRPAI_TVM_HOME", str(tvm_home))
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["drpai"]
+    assert row["available"] is True
+    assert row["reason"] is None
+
+
+def test_drpai_env_var_pointing_at_a_non_directory_stays_unavailable(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    not_a_dir = tmp_path / "not-a-dir.txt"
+    not_a_dir.write_text("x")
+    monkeypatch.setenv("ALP_DRPAI_TVM_HOME", str(not_a_dir))
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["drpai"]
+    assert row["available"] is False
+
+
+# --------------------------------------------------------------------------
+# version: best-effort, and the vela degraded-sentinel rule
+# --------------------------------------------------------------------------
+
+
+def test_ethos_u_degraded_vela_version_string_surfaces_as_none(tmp_path, monkeypatch):
+    """`_vela_version()` returns the bare literal `"vela"` when the
+    `ethos-u-vela` distribution's metadata is absent -- a DEGRADED answer,
+    never surfaced as if it were a real version."""
+    _force_all_unavailable(monkeypatch)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    monkeypatch.setattr(model_cmd, "_vela_version", lambda: "vela")
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["ethos_u"]
+    assert row["available"] is True
+    assert row["version"] is None
+
+
+def test_ethos_u_real_vela_version_is_reported(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    monkeypatch.setattr(model_cmd, "_vela_version", lambda: "vela 3.9.0")
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["ethos_u"]
+    assert row["version"] == "vela 3.9.0"
+
+
+def test_deepx_dxm1_version_is_never_probed_even_when_available(tmp_path, monkeypatch):
+    """DeepxAdapter's only version probe (`_dxcom_version`) spawns
+    `dxcom -v` -- doctor must never invoke a compiler, so this backend's
+    version stays `None` even when it is available, with no subprocess call
+    attempted to find out."""
+    _force_all_unavailable(monkeypatch)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/dxcom" if name == "dxcom" else None
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("model doctor must not spawn a subprocess")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(subprocess, "Popen", _boom)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["deepx_dxm1"]
+    assert row["available"] is True
+    assert row["version"] is None
+
+
+# --------------------------------------------------------------------------
+# never spawns -- the real adapter registry, booby-trapped
+# --------------------------------------------------------------------------
+
+
+def test_doctor_never_spawns_a_subprocess(tmp_path, monkeypatch):
+    """The REAL `_ADAPTERS` registry, no adapter mocked out: every
+    `is_available()` today is a `shutil.which`/env-var check, and this proves
+    it by making a spawn a test failure rather than trusting the reading."""
+
+    def _boom(*a, **k):
+        raise AssertionError("model doctor must not spawn a subprocess")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(subprocess, "Popen", _boom)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    assert result.exit_code == 0
+    assert envelope(result)["ok"] is True
+
+
+# --------------------------------------------------------------------------
+# a missing/broken SDK root is a reason, never a crash
+# --------------------------------------------------------------------------
+
+
+def test_unresolvable_sdk_root_yields_a_reported_reason_not_a_traceback(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    result = runner.invoke(
+        app,
+        ["doctor", "--project", str(tmp_path), "--sdk-root", str(typo), "--format", "json"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    assert doc["issues"][0]["code"] == "model.doctor-sdk-unresolved"
+    assert doc["issues"][0]["severity"] == "warning"
+    assert str(typo) in doc["issues"][0]["message"]
+    # the backend rows are unaffected by the unresolved SDK root
+    assert len(doc["data"]["backends"]) == 4
+
+
+def test_no_sdk_at_all_still_reports_full_backend_rows(tmp_path, monkeypatch):
+    """No `--sdk-root`, no project pin, no global default, no sibling
+    checkout near `tmp_path` -- doctor still answers in full; an alp-sdk
+    checkout is not a precondition for a toolchain-availability report."""
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(
+        app,
+        ["doctor", "--project", str(tmp_path), "--format", "json"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    assert "sdk" not in doc
+    assert [row["backend"] for row in doc["data"]["backends"]] == [
+        "cpu", "ethos_u", "drpai", "deepx_dxm1",
+    ]
+    codes = [i["code"] for i in doc["issues"]]
+    assert "model.doctor-sdk-unresolved" in codes
+
+
+def test_the_internal_failure_catch_all_still_covers_doctor(tmp_path, monkeypatch):
+    """The same outer `except Exception` `model build` already relies on --
+    pinned here for `doctor` too, so a genuinely unexpected failure is a coded
+    issue, never a bare traceback out of the CLI."""
+
+    def boom(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(model_cmd, "_run_doctor", boom)
+    result = runner.invoke(app, ["doctor", "--project", str(tmp_path), "--format", "json"])
+    assert result.exit_code == 5
+    doc = envelope(result)
+    assert doc["issues"][-1]["code"] == "model.internal-failure"
+    assert "model doctor failed unexpectedly" in doc["issues"][-1]["message"]
+    assert doc["data"] == {"schemaVersion": model_cmd.DOCTOR_DATA_SCHEMA_VERSION, "backends": []}
+
+
+# --------------------------------------------------------------------------
+# every backend unavailable is still a healthy exit
+# --------------------------------------------------------------------------
+
+
+def test_every_backend_unavailable_is_still_ok_true_exit_0(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(
+        app,
+        ["doctor", "--project", str(tmp_path), "--format", "json"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    non_cpu = [row for row in doc["data"]["backends"] if row["backend"] != "cpu"]
+    assert non_cpu and all(row["available"] is False for row in non_cpu)
+    assert all(row["reason"] for row in non_cpu)
+
+
+# --------------------------------------------------------------------------
+# text mode
+# --------------------------------------------------------------------------
+
+
+def test_text_mode_reports_one_readable_line_per_backend(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(
+        app, ["doctor", "--project", str(tmp_path)], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    assert any(ln.startswith("cpu: available") for ln in lines)
+    assert any(
+        ln.startswith("ethos_u: unavailable") and "pip install ethos-u-vela" in ln
+        for ln in lines
+    )
+    assert any(
+        ln.startswith("deepx_dxm1: unavailable") and "license-gated" in ln for ln in lines
+    )
+    assert any(ln.startswith("drpai: unavailable") and "ALP_DRPAI_TVM_HOME" in ln for ln in lines)
+
+
+# --------------------------------------------------------------------------
+# `doctor` joins `build` in the unknown-subcommand help text
+# --------------------------------------------------------------------------
+
+
+def test_unknown_subcommand_lists_both_build_and_doctor(tmp_path):
+    result = runner.invoke(app, ["bogus", "--format", "json"], catch_exceptions=False)
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["message"].endswith("Available: build, doctor.")
