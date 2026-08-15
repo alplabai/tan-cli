@@ -520,12 +520,12 @@ def test_text_mode_drops_the_reason_clause_entirely_when_reason_is_none(tmp_path
 
 
 # --------------------------------------------------------------------------
-# `doctor` joins `build` in the unknown-subcommand help text
+# `doctor` joins `build`/`check` in the unknown-subcommand help text
 # --------------------------------------------------------------------------
 
 
-def test_unknown_subcommand_lists_both_build_and_doctor(tmp_path):
+def test_unknown_subcommand_lists_build_doctor_and_check(tmp_path):
     result = runner.invoke(app, ["bogus", "--format", "json"], catch_exceptions=False)
     assert result.exit_code == 1
     doc = envelope(result)
-    assert doc["issues"][0]["message"].endswith("Available: build, doctor.")
+    assert doc["issues"][0]["message"].endswith("Available: build, doctor, check.")

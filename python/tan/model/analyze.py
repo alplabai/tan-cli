@@ -96,7 +96,10 @@ class BackendReport:
     backend: str              # cpu | ethos_u | drpai | deepx_dxm1
     variant: str | None       # u85 | u55 | u65 | None
     table: str | None         # the table file that answered, or None
-    npu_coverage: str          # "full-eligible" | "partial" | "cpu-only" | "undetermined"
+    npu_coverage: str          # "full-eligible" | "partial" | "cpu-only" | "undetermined" --
+                               # plus "fits", but ONLY when basis == "compiled" (tan.model.check's
+                               # `--exact` path, tan-cli#782 Task 6). analyze_backend() itself
+                               # never emits "fits" -- basis stays "static-screen" here always.
     compute_on_npu_pct_max: float | None   # MAC-weighted UPPER bound, 0-100
     # cpu-certain ops with an unpriced (macs=0) MAC estimate -- excluded from
     # compute_on_npu_pct_max's denominator, so a nonzero count here is a

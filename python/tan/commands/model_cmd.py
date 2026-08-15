@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`tan model build`/`tan model doctor` -- compile + package `board.yaml`'s
-`models:` block into `.alpmodel` packages, and report NPU-compiler toolchain
-availability.
+"""`tan model build`/`tan model doctor`/`tan model check` -- compile +
+package `board.yaml`'s `models:` block into `.alpmodel` packages, report
+NPU-compiler toolchain availability, and statically screen a declared model's
+NPU eligibility against the SoM's own support tables.
 
 Port of `scripts/alp_cli/model.py` (51 lines): the board.yaml discovery,
 per-model source/compile-option path resolution, and the `built <path>`
@@ -73,9 +74,14 @@ than the `model.sdk-root-unresolved` ERROR `build` uses for the same
 situation -- the backend rows below it are unaffected by a missing SDK either
 way, since none of them reads `metadata/**`.
 
-`tan model check` -- a fit verdict against a board's declared models and
-`metadata/npu_ops/` -- is a DIFFERENT, not-yet-approved command and is not
-implemented here.
+**`check` is the static NPU-eligibility screen ADR-0028's amendment adds
+(tan-cli#782).** `tan.model.check`/`tan.model.analyze` do the actual work
+(resolving @sku's real NPU backends, walking a model's ops, scoring them);
+this module only resolves the board.yaml the same way `build` does, calls
+that engine per declared model, and shapes the envelope. `check`'s exit code
+is ALWAYS `SUCCESS` for a run that completed -- `partial`/`cpu-only`/
+`undetermined` are the feature this command exists to report, never a
+failure. See `tan.model.check`'s own module doc for `--exact`.
 """
 
 from __future__ import annotations
@@ -95,6 +101,7 @@ from tan.commands.build_output import (
 )
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
+from tan.core.model_check import backend_report_as_dict, render_check_text
 from tan.core.model_doctor import backend_row, registry_backends
 from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -103,6 +110,7 @@ from tan.model.adapters.drpai import _compiler_version as _drpai_compiler_versio
 from tan.model.adapters.drpai import _tvm_home as _drpai_tvm_home
 from tan.model.adapters.ethos_u import _vela_version
 from tan.model.build import _ADAPTERS, build_model
+from tan.model.check import check_model_backends, resolve_check_backends
 from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for `build`'s payload.
@@ -112,11 +120,13 @@ DATA_SCHEMA_VERSION = "1"
 #: `build`'s (a different `data` shape entirely: `backends[]`, not `built[]`).
 DOCTOR_DATA_SCHEMA_VERSION = "1"
 
+#: `data.schemaVersion` for `check`'s payload -- versioned independently of
+#: the other two for the same reason (`models[].backends[]`, a third shape).
+CHECK_DATA_SCHEMA_VERSION = "1"
+
 #: `SUBCOMMANDS` names every subcommand this command accepts, in the order the
-#: unknown-subcommand refusal lists them. `tan model check` (a fit verdict
-#: against `metadata/npu_ops/`) is a separate, not-yet-approved command and is
-#: deliberately absent.
-SUBCOMMANDS = ("build", "doctor")
+#: unknown-subcommand refusal lists them.
+SUBCOMMANDS = ("build", "doctor", "check")
 
 
 class ModelError(Exception):
@@ -215,6 +225,79 @@ def _load_board(path: Path) -> dict[str, Any]:
     return doc
 
 
+def _require_sku(board_doc: dict, board_path: Path) -> str:
+    """`board.yaml`'s `som.sku` -- shared by `build` and `check`, both of
+    which need a real SKU before they can resolve anything metadata-shaped
+    (a compile target, or a NPU support table)."""
+    som = board_doc.get("som")
+    sku = som.get("sku") if isinstance(som, dict) else None
+    if not isinstance(sku, str) or not sku:
+        raise ModelError(
+            "model.board-yaml-invalid",
+            f"{board_path}: som.sku is missing.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    return sku
+
+
+def _require_models_list(board_doc: dict, board_path: Path) -> list:
+    """`board.yaml`'s `models:` -- `[]` when absent (a board that declares no
+    models is valid, not an error), a `ModelError` when present but not a
+    list."""
+    models = board_doc.get("models") or []
+    if not isinstance(models, list):
+        raise ModelError(
+            "model.board-yaml-invalid",
+            f"{board_path}: `models:` must be a list.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    return models
+
+
+def _require_model_entry(m: Any, board_path: Path) -> None:
+    """Every `models:` entry needs `name` and `source` -- `build`'s own
+    per-model `compile:` block is optional and stays that command's own
+    concern; this is the shape floor both `build` and `check` share."""
+    if not isinstance(m, dict) or "name" not in m or "source" not in m:
+        raise ModelError(
+            "model.board-yaml-invalid",
+            f"{board_path}: every `models:` entry needs `name` and `source`.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+
+
+def _require_metadata_sdk_root(sdk_root: str | None, workspace_root: str, no_models_msg: str) -> Path:
+    """`resolve_metadata_sdk_root`, or a coded `model.sdk-root-unresolved`
+    refusal -- shared by `build` and `check`, whose only difference is the
+    trailing "no models were {built,checked}" clause (tan-cli#497 defect 7:
+    a REJECTED `--sdk-root` names the value it rejected)."""
+    resolved_sdk = resolve_metadata_sdk_root(sdk_root, workspace_root)
+    if resolved_sdk is None:
+        raise ModelError(
+            "model.sdk-root-unresolved",
+            rejected_sdk_root_message(sdk_root, no_models_msg)
+            if sdk_root
+            # `tan sdk switch` refuses in this build (tan-cli#305) -- kept the
+            # two mechanisms that actually work here (`--sdk-root`, placing
+            # the project near a checkout) and swapped the third for
+            # NO_SDK_NEXT_STEPS's honest "how to get one at all".
+            else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+            f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    return resolved_sdk
+
+
+def _resolve_metadata_dir(metadata_root: str | None, resolved_sdk: Path, workspace_root: Path) -> Path:
+    """`<sdk-root>/metadata` unless `--metadata-root` overrides it -- shared
+    by `build` and `check`, both of which read `metadata/**` for the same
+    resolved SKU."""
+    metadata_dir = Path(metadata_root) if metadata_root else resolved_sdk / "metadata"
+    if metadata_root and not metadata_dir.is_absolute():
+        metadata_dir = workspace_root / metadata_dir
+    return metadata_dir
+
+
 def _run_build(
     *,
     context: ProjectContext,
@@ -245,42 +328,11 @@ def _run_build(
     # supply `metadata/`, in which case `sdk_info` stays absent while the
     # build still runs against it -- same divergence `tan size`'s budget
     # resolution already allows.
-    resolved_sdk = resolve_metadata_sdk_root(sdk_root, context.workspace_root)
-    if resolved_sdk is None:
-        raise ModelError(
-            "model.sdk-root-unresolved",
-            # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the value.
-            # The no-flag message below opens with "Use --sdk-root" -- exactly
-            # the flag the caller just typed -- and the rejected path appeared
-            # nowhere else in the envelope, since `resolve_metadata_sdk_root`
-            # returning `None` is also what leaves the `sdk` block absent.
-            rejected_sdk_root_message(sdk_root, "No models were built.")
-            if sdk_root
-            # `tan sdk switch` refuses in this build (tan-cli#305) -- kept the
-            # two mechanisms that actually work here (`--sdk-root`, placing
-            # the project near a checkout) and swapped the third for
-            # NO_SDK_NEXT_STEPS's honest "how to get one at all".
-            else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
-            f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
-            ExitCode.VALIDATION_FAILURE,
-        )
+    resolved_sdk = _require_metadata_sdk_root(sdk_root, context.workspace_root, "No models were built.")
 
     board_doc = _load_board(board_path)
-    som = board_doc.get("som")
-    sku = som.get("sku") if isinstance(som, dict) else None
-    if not isinstance(sku, str) or not sku:
-        raise ModelError(
-            "model.board-yaml-invalid",
-            f"{board_path}: som.sku is missing.",
-            ExitCode.VALIDATION_FAILURE,
-        )
-    models = board_doc.get("models") or []
-    if not isinstance(models, list):
-        raise ModelError(
-            "model.board-yaml-invalid",
-            f"{board_path}: `models:` must be a list.",
-            ExitCode.VALIDATION_FAILURE,
-        )
+    sku = _require_sku(board_doc, board_path)
+    models = _require_models_list(board_doc, board_path)
 
     data: dict[str, Any] = {"schemaVersion": DATA_SCHEMA_VERSION, "sku": sku, "built": []}
     if not models:
@@ -290,11 +342,7 @@ def _run_build(
     out_dir = Path(out)
     if not out_dir.is_absolute():
         out_dir = workspace_root / out_dir
-    metadata_dir = (
-        Path(metadata_root) if metadata_root else resolved_sdk / "metadata"
-    )
-    if metadata_root and not metadata_dir.is_absolute():
-        metadata_dir = workspace_root / metadata_dir
+    metadata_dir = _resolve_metadata_dir(metadata_root, resolved_sdk, workspace_root)
 
     # Validate + prepare every model BEFORE building any of them -- an invalid
     # `models:` entry refuses the whole run with no partial build, matching
@@ -302,12 +350,7 @@ def _run_build(
     # payload and never itself built anything.
     prepared: list[tuple[str, Path, dict | None]] = []
     for m in models:
-        if not isinstance(m, dict) or "name" not in m or "source" not in m:
-            raise ModelError(
-                "model.board-yaml-invalid",
-                f"{board_path}: every `models:` entry needs `name` and `source`.",
-                ExitCode.VALIDATION_FAILURE,
-            )
+        _require_model_entry(m, board_path)
         source = (base / m["source"]).resolve()
         prepared.append((m["name"], source, _resolve_compile(m.get("compile"), base)))
 
@@ -339,6 +382,82 @@ def _run_build(
             built.append(str(out_path))
     data["built"] = built
     exit_code = ExitCode.SUCCESS if not issues else ExitCode.WRITE_FAILURE
+    return reported_project, sdk_info, data, issues, exit_code
+
+
+def _check_one_model(name: str, source: Path, backends: list[str], sku: str,
+                      metadata_dir: Path, exact: bool) -> dict | Issue:
+    """One declared model's `check` result: the serialised `{name, source,
+    backends}` block on success, or a coded `model.check-failed` Issue on any
+    failure (an unreadable/unparseable source, most commonly) -- never a
+    traceback, matching `build`'s own per-model `model.build-failed` shape so
+    one bad model in a multi-model board.yaml does not abort the batch."""
+    try:
+        reports = check_model_backends(backends=backends, sku=sku, source=source,
+                                        metadata_root=metadata_dir, exact=exact)
+    except Exception as err:  # noqa: BLE001 -- a per-model failure is a coded issue, not a traceback
+        return Issue("model.check-failed", "error", f"model '{name}': {type(err).__name__}: {err}")
+    return {"name": name, "source": str(source),
+            "backends": [backend_report_as_dict(r) for r in reports]}
+
+
+def _require_check_backends(sku: str, metadata_dir: Path, board_path: Path) -> list[str]:
+    """`resolve_check_backends`, or a coded `model.check-sku-unresolved`
+    refusal -- a board-level fact about `som.sku`, reported once for the
+    whole run rather than once per declared model."""
+    try:
+        return resolve_check_backends(sku, metadata_root=metadata_dir)
+    except (FileNotFoundError, ValueError) as err:
+        raise ModelError(
+            "model.check-sku-unresolved",
+            f"{board_path}: could not resolve NPU backends for som.sku {sku!r}: {err}",
+            ExitCode.VALIDATION_FAILURE,
+        ) from err
+
+
+def _run_check(
+    *,
+    context: ProjectContext,
+    metadata_root: str | None,
+    sdk_root: str | None,
+    exact: bool,
+) -> tuple[Project, SdkInfo | None, dict, list[Issue], ExitCode]:
+    """Static NPU-eligibility screen for every model `board.yaml` declares --
+    same project-context/SDK-root resolution shape as `_run_build` (see its
+    own docstring for why that resolution happens in the caller). `ok` stays
+    `True`/exit 0 for a run that completed, whatever the verdicts read --
+    reporting `undetermined`/`cpu-only` IS the feature; only a run that could
+    not complete (an unresolved SKU, a per-model read failure) is non-zero."""
+    workspace_root = Path(context.workspace_root)
+    board_path = Path(context.board_yaml)
+    reported_project = context.project()
+    sdk_info = context.sdk
+
+    resolved_sdk = _require_metadata_sdk_root(sdk_root, context.workspace_root, "No models were checked.")
+
+    board_doc = _load_board(board_path)
+    sku = _require_sku(board_doc, board_path)
+    models = _require_models_list(board_doc, board_path)
+
+    data: dict[str, Any] = {
+        "schemaVersion": CHECK_DATA_SCHEMA_VERSION, "sku": sku, "exact": exact, "models": [],
+    }
+    if not models:
+        return reported_project, sdk_info, data, [], ExitCode.SUCCESS
+
+    base = board_path.parent
+    metadata_dir = _resolve_metadata_dir(metadata_root, resolved_sdk, workspace_root)
+    backends = _require_check_backends(sku, metadata_dir, board_path)
+
+    issues: list[Issue] = []
+    model_reports: list[dict] = []
+    for m in models:
+        _require_model_entry(m, board_path)
+        source = (base / m["source"]).resolve()
+        result = _check_one_model(m["name"], source, backends, sku, metadata_dir, exact)
+        (issues if isinstance(result, Issue) else model_reports).append(result)
+    data["models"] = model_reports
+    exit_code = ExitCode.SUCCESS if not issues else ExitCode.RUNTIME_FAILURE
     return reported_project, sdk_info, data, issues, exit_code
 
 
@@ -544,17 +663,19 @@ def _run_doctor(
 
 def _empty_data(subcommand: str | None) -> dict[str, Any]:
     """The `data` shape for a refusal that never reached `_run_build`/
-    `_run_doctor` -- each subcommand's OWN empty payload shape, not a
-    generic stand-in, so a consumer parsing `data.backends`/`data.built`
-    off a refusal envelope gets the same shape it would from a run that
-    resolved nothing."""
+    `_run_doctor`/`_run_check` -- each subcommand's OWN empty payload shape,
+    not a generic stand-in, so a consumer parsing `data.backends`/
+    `data.built`/`data.models` off a refusal envelope gets the same shape it
+    would from a run that resolved nothing."""
     if subcommand == "doctor":
         return {"schemaVersion": DOCTOR_DATA_SCHEMA_VERSION, "backends": []}
+    if subcommand == "check":
+        return {"schemaVersion": CHECK_DATA_SCHEMA_VERSION, "sku": None, "exact": False, "models": []}
     return {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []}
 
 
 def model(
-    subcommand: str = typer.Argument(None, metavar="SUBCOMMAND", help="build | doctor."),
+    subcommand: str = typer.Argument(None, metavar="SUBCOMMAND", help="build | doctor | check."),
     board: str = typer.Option(
         # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
         # option, not a second option -- it is what `build`, `run`, `kconfig`,
@@ -582,10 +703,17 @@ def model(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
+    exact: bool = typer.Option(
+        False,
+        "--exact",
+        help="With `check`: attempt a real compile (Ethos-U only, via `vela`) "
+        "instead of the static screen. Ignored by `build`/`doctor`.",
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Compile + package board.yaml `models:` into `.alpmodel` packages
-    (`build`), or report NPU-compiler toolchain availability (`doctor`)."""
+    (`build`), report NPU-compiler toolchain availability (`doctor`), or
+    statically screen a declared model's NPU eligibility (`check`)."""
     json_mode = output_format == "json"
 
     def finish(
@@ -631,6 +759,18 @@ def model(
                             f"{row['backend']}: unavailable (tool={tool}){suffix}",
                             file=sys.stderr,
                         )
+            elif "models" in data:
+                # `check`: rendered from the SAME serialised `data` dict
+                # `--format json` emits (`tan.core.model_check.render_check_text`),
+                # the identical one-source-two-renderers split `doctor`'s own
+                # branch above already uses.
+                if not data.get("models") and not errors:
+                    print(
+                        "model check: no `models:` declared in board.yaml; nothing to check.",
+                        file=sys.stderr,
+                    )
+                for line in render_check_text(data):
+                    print(line, file=sys.stderr)
             else:
                 for path in data.get("built", []):
                     print(f"built {path}", file=sys.stderr)
@@ -691,6 +831,13 @@ def model(
             project_, sdk, data, issues, exit_code = _run_doctor(
                 context=context,
                 sdk_root=sdk_root,
+            )
+        elif subcommand == "check":
+            project_, sdk, data, issues, exit_code = _run_check(
+                context=context,
+                metadata_root=metadata_root,
+                sdk_root=sdk_root,
+                exact=exact,
             )
         else:
             project_, sdk, data, issues, exit_code = _run_build(

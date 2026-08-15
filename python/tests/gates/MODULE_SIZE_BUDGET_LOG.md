@@ -146,3 +146,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/core/bootstrap.py: 2269 -> 2275
 - 2026-08-15 -- ADR-0028 Task 2: relocate the alp-sdk model engine (13 modules, 1029 lines) into tan.model verbatim; two of its already-existing over-50-line functions move with it
     - function_count_budget: 258 -> 260
+- 2026-08-15 -- tan-cli#782: model_cmd.py grows past 800 wiring `tan model check` (a third subcommand's board.yaml/SDK resolution, per-model dispatch and envelope shaping, matching build/doctor's own shape); function_count_budget's 260->261 is a PRE-EXISTING drift from the model-doctor merge (25443c4), not from this change -- measured before any edit in this session, fixed here since it blocks a green gate.
+    - tan/commands/model_cmd.py: new entry at 893
+    - function_count_budget: 260 -> 261

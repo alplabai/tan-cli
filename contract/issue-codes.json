@@ -1860,6 +1860,22 @@
       "note": "tan-cli#781: `model doctor`'s own SDK-unresolved case, distinct from `model.sdk-root-unresolved` above -- `doctor` folds an unresolved/rejected `--sdk-root` into a WARNING (the backend-availability rows it reports do not read `metadata/**` at all and are unaffected), where `build` raises a `ModelError` at `error` severity and refuses outright for the same input. Reusing `model.sdk-root-unresolved` at a different severity across the two subcommands would make one code mean two different things on the wire; this is a separate literal instead. A plain `Issue(\"model.doctor-sdk-unresolved\", ...)` construction in `_run_doctor`, not a `ModelError` (`doctor` never raises for this). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.check-sku-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#782: `model check`'s board-level SKU refusal -- `resolve_check_backends` (`tan.model.check`) raised `FileNotFoundError`/`ValueError` resolving `som.sku`'s real NPU backends (no SoM preset, a malformed `silicon:` ref, or no SoC spec on disk), reported once for the whole run via a `ModelError` rather than once per declared model. Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.check-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#782: `model check`'s per-model failure -- an unreadable/unparseable declared model source, most commonly -- caught around `check_model_backends()` and reported as a coded issue rather than a traceback, mirroring `model.build-failed`'s exact shape so one bad model in a multi-model board.yaml does not abort the batch. A plain `Issue(\"model.check-failed\", ...)` construction in `_check_one_model`, not a `ModelError` (the run continues to the next model). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",

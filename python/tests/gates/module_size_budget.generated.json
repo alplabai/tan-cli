@@ -15,6 +15,7 @@
     "tan/commands/flash_cmd.py": 3971,
     "tan/commands/generate_cmd.py": 1348,
     "tan/commands/init_cmd.py": 1258,
+    "tan/commands/model_cmd.py": 893,
     "tan/commands/new_som_cmd.py": 1361,
     "tan/commands/renode_cmd.py": 1533,
     "tan/commands/sdk_cmd.py": 1415,
@@ -30,6 +31,6 @@
     "tan/planner/template.py": 1436,
     "tan/planner/zephyr_board.py": 1433
   },
-  "function_count_budget": 260,
+  "function_count_budget": 261,
   "function_worst_budget": 747
 }
