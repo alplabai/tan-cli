@@ -1852,6 +1852,14 @@
       "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.doctor-sdk-unresolved",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#781: `model doctor`'s own SDK-unresolved case, distinct from `model.sdk-root-unresolved` above -- `doctor` folds an unresolved/rejected `--sdk-root` into a WARNING (the backend-availability rows it reports do not read `metadata/**` at all and are unaffected), where `build` raises a `ModelError` at `error` severity and refuses outright for the same input. Reusing `model.sdk-root-unresolved` at a different severity across the two subcommands would make one code mean two different things on the wire; this is a separate literal instead. A plain `Issue(\"model.doctor-sdk-unresolved\", ...)` construction in `_run_doctor`, not a `ModelError` (`doctor` never raises for this). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",
