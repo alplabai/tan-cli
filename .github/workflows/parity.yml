@@ -1017,6 +1017,59 @@ jobs:
           fi
           exit 0
 
+      # THE THIRD PIN'S ALARM (tan-cli#761). Until this step existed,
+      # `STRICT_LOADERS_PINNED_SDK_COMMIT` was the only one of the three pins
+      # with no live-vs-`dev` counterpart, and its always-run sibling
+      # (`test_strict_loaders_matches_its_pinned_sdk_source`, asserted PASSED
+      # by node id above) is a TAUTOLOGY on its own: the `resolve strict-loaders
+      # audit commit` / `clone alp-sdk at the strict-loaders audit commit`
+      # steps check out alp-sdk at the very SHA the hash was taken from, so the
+      # only failure that check can produce is a hand-typed hash typo. Real
+      # upstream drift in `scripts/strict_loaders.py` was unreachable by
+      # anything in this file.
+      #
+      # THE DISPATCH ALARM IS THE REAL DRIFT SIGNAL -- for all three pins, not
+      # just this one. Every one of the three always-run assertions binds its
+      # root to its OWN pin and therefore compares a pin against itself; each
+      # proves its table is internally consistent (the mis-typed-hash case) and
+      # nothing about whether upstream moved. A green `pull_request` run is
+      # NOT drift coverage, and reading it as such is the specific mistake this
+      # comment exists to prevent. Only `repository_dispatch` runs bind
+      # `${{ github.workspace }}/alp-sdk` -- the ref alp-sdk just pushed -- and
+      # only these three warn-only steps look at it.
+      #
+      # Warn, not fail, and deliberately so: this pin is FROZEN at the commit
+      # that introduced alp-sdk#1127 (see the gate file's own STRICT_LOADERS_*
+      # block), so a difference here means "upstream moved, re-audit the
+      # hand-port", never "this PR is broken". Whether the warn-only posture
+      # should change at all is tan-cli#509's decision, not this step's.
+      #
+      # Costs nothing today: `scripts/strict_loaders.py` has had exactly one
+      # commit in alp-sdk's history and live `dev` still hashes to
+      # STRICT_LOADERS_HASH. That is the argument FOR adding it now rather than
+      # after -- the thing it guards is a security-shaped hand-port (the
+      # duplicate-key-rejecting loaders wired into `tan/planner/loader.py`'s
+      # `_load_yaml`/`_load_json` to close the silent-SKU-retarget hazard), so
+      # a silent divergence re-opens that hazard in tan while alp-sdk believes
+      # it is closed.
+      - name: strict-loaders freshness vs live alp-sdk (alarm, warn only)
+        if: github.event_name == 'repository_dispatch'
+        continue-on-error: true
+        working-directory: python
+        env:
+          ALP_SDK_STRICT_LOADERS_ROOT: ${{ github.workspace }}/alp-sdk
+        run: |
+          # `<nodeid> PASSED`, not rc -- see the two sibling steps above for
+          # why. The test skips when ALP_SDK_STRICT_LOADERS_ROOT does not
+          # resolve, and a skip is rc=0.
+          set +e
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_strict_loaders_matches_its_pinned_sdk_source -v 2>&1 | tee /tmp/strict-loaders-alarm.log
+          set -e
+          if ! grep -qF "test_planner_relocation_freshness.py::test_strict_loaders_matches_its_pinned_sdk_source PASSED" /tmp/strict-loaders-alarm.log; then
+            echo "::warning::scripts/strict_loaders.py no longer matches STRICT_LOADERS_HASH at alp-sdk ${{ steps.sdk_ref.outputs.ref }}, OR this alarm could not run -- either the file moved upstream, or ALP_SDK_STRICT_LOADERS_ROOT did not resolve and the test SKIPPED. Read the pytest output above to tell which. The always-run job cannot see the drift case: it binds ALP_SDK_STRICT_LOADERS_ROOT to STRICT_LOADERS_PINNED_SDK_COMMIT, so it compares the pin against itself. Non-blocking by design: re-audit tan/planner/strict_loaders.py against the new upstream, then re-pin STRICT_LOADERS_PINNED_SDK_COMMIT/STRICT_LOADERS_HASH in python/tests/gates/test_planner_relocation_freshness.py. This one guards a security-shaped hand-port (alp-sdk#1127's duplicate-key-rejecting loaders, tan-cli#485) -- diff before assuming the divergence is cosmetic."
+          fi
+          exit 0
+
   # seam2 -- the half of ADR-0020's parity contract seam1 cannot reach.
   #
   # seam1 proves the PLAN's SHAPE is stable. It never runs tan and never
