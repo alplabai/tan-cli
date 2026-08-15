@@ -479,6 +479,12 @@ def test_collect_nulls_the_install_command_when_its_own_package_manager_is_absen
     -- `hostPrerequisites.missing[].command` must be `null`, not the
     `sudo apt-get ...` line a Debian host would get."""
     monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    # Pinned explicitly (not "whatever this runner's real platform happens to
+    # be"): `_collect` reads `install.linux` only when `sys.platform` is NOT
+    # `"darwin"`, and this suite runs on macOS CI too -- an unpinned
+    # `sys.platform` there would read `install.macos` (absent below) instead,
+    # passing this assertion for the wrong reason.
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
     _write_bootstrap_json(
         tmp_path,
         {
@@ -509,6 +515,7 @@ def test_collect_keeps_the_install_command_when_apt_get_is_confirmed(tmp_path, m
     """The other half: a real Debian/Ubuntu host has `apt-get`, so the guard
     must not drop a command that host can actually run."""
     monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
     _write_bootstrap_json(
         tmp_path,
         {
@@ -542,6 +549,7 @@ def test_fix_cannot_execute_a_command_the_guard_dropped(tmp_path, monkeypatch):
     once `_collect` itself (which legitimately spawns `python3 -c ...` to
     probe the interpreter) is done with it."""
     monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
     _write_bootstrap_json(
         tmp_path,
         {
