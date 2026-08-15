@@ -481,10 +481,12 @@ def test_the_windows_walk_never_considers_the_bare_extensionless_name(tool, expe
     """The ONE deliberate Windows-arm behaviour change tan-cli#567 makes,
     pinned so the next reader cannot mistake it for an accident.
 
-    `doctor_cmd.on_path`, one of the five hand-rolled lookups #532
-    consolidates, tries `exts = [""] + PATHEXT` -- the bare, EXTENSIONLESS
-    name first, ahead of every suffixed sibling. `tool_lookup` does not, and
-    that is not an oversight in the consolidation:
+    `doctor_cmd.on_path`, the last of the five hand-rolled lookups #532
+    consolidates, USED TO try `exts = [""] + PATHEXT` -- the bare,
+    EXTENSIONLESS name first, ahead of every suffixed sibling. `tool_lookup`
+    does not, and that is not an oversight in the consolidation. Since #532
+    `on_path` delegates here, so this is now the behaviour the doctor and
+    `faultdecode_cmd` get as well:
 
     * It is what the ORACLE does. `crates/tan-cli/src/util.rs::find_on_path`
       is `if has_ext { dir.join(command) } else { for ext in &exts { ... } }`

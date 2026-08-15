@@ -164,6 +164,7 @@ from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
+from tan.core.tool_lookup import resolve_tool
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -437,37 +438,36 @@ def probe(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> str | None:
 
 
 def on_path(command: str) -> str | None:
-    """Resolve `command` against `$PATH` ONLY, returning its full path.
+    """Resolve `command` against `$PATH`, returning its full path.
 
     NOT `shutil.which`: on Windows that inserts `os.curdir` ahead of PATH
     (documented Windows search order), so a project checked out with its own
     `west.exe`/`openocd.exe` at its root would be reported as this host's
     tooling -- and a later flow would spawn exactly that project-controlled
-    binary. `crate::util::command_on_path` walks PATH by hand for this reason;
-    so does this.
+    binary.
+
+    ONE LOOKUP, NOT A SIXTH COPY (tan-cli#532). This used to hand-roll the
+    walk; it now delegates to `tan.core.tool_lookup.resolve_tool`, which
+    `build/execute.py`, `flash_cmd.py` and `size_cmd.py` already call.
+    `faultdecode_cmd` reaches the lookup THROUGH here, so this retires the
+    last two of the five copies. Only the FINDING is shared -- the signature
+    stays `str | None` so each caller keeps its own policy about a miss; ask
+    `resolve_tool` directly for its `searched` record.
+
+    WINDOWS BEHAVIOUR CHANGED, deliberately: the old copy's `[""] + %PATHEXT%`
+    accepted a bare extension-less `%PATH%` file ahead of every suffixed
+    sibling, and `resolve_tool` never tries the bare name. Reasoning and the
+    oracle comparison are in `tool_lookup`'s docstring; pinned by
+    `test_bare_argv0_spawn.py::
+    test_the_windows_walk_never_considers_the_bare_extensionless_name`, and
+    the delegation itself by `test_doctor_on_path_consolidation.py`. POSIX is
+    unaffected.
+
+    `os.environ`, not a threaded env: this is the doctor's HOST probe. Paths
+    resolving against a constructed environment (a workspace venv prepended)
+    call `resolve_tool` with that env and never come through here.
     """
-    raw = os.environ.get("PATH") or ""
-    if os.name == "nt":
-        exts = [""] + [
-            e
-            for e in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
-            if e
-        ]
-    else:
-        exts = [""]
-    for directory in raw.split(os.pathsep):
-        if not directory:
-            continue
-        for ext in exts:
-            candidate = Path(directory) / (command + ext)
-            try:
-                if candidate.is_file() and os.access(candidate, os.X_OK):
-                    return str(candidate)
-            except OSError:
-                # A PATH entry on a dead network share, a name too long for the
-                # filesystem: skip the entry, never fail the command.
-                continue
-    return None
+    return resolve_tool(command, os.environ).resolved
 
 
 def _read_text(path: Path) -> str | None:
