@@ -1,0 +1,211 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The isolated clean-machine e2e gate (tan-cli#754).
+#
+# ===========================================================================
+# WHY THIS FILE EXISTS
+# ===========================================================================
+#
+# `scripts/e2e-container.sh`, `scripts/e2e-full.sh` and
+# `scripts/e2e-linux-freeze.sh` were referenced by NO workflow at all
+# (`grep -rn "e2e-container\|e2e-full\|e2e-linux-freeze" .github/` returned
+# nothing). The most thorough clean-machine harness in the repo ran only when
+# someone remembered to invoke it by hand.
+#
+# What it covers that nothing else does: **`dev` x `dev`**. `parity.yml`
+# reaches `dev` only under `repository_dispatch` from an alp-sdk path-filtered
+# push; `release-combination.yml` tests release x release; `clean-host.yml` and
+# `getting-started.yml` both start from a stock `ubuntu-latest` that already
+# ships `git`, `cmake`, `python3` and `curl` -- the exact condition tan-cli#687
+# reported. `e2e-container.sh` starts from a bare `ubuntu:24.04` carrying only
+# `ca-certificates git python3`, because providing the rest is `tan bootstrap`'s
+# job and whether it does is the thing under test.
+#
+# `e2e-container.sh`'s own header records that this shape caught two
+# release-blocking defects every green developer-host run had missed
+# (tan-cli#354 -- `CERTIFICATE_VERIFY_FAILED` on every HTTPS call, reproduced on
+# the published v0.5.0-rc4 asset, so it had shipped in every RC; and
+# tan-cli#355), in the first minute inside a bare container.
+#
+# ===========================================================================
+# THE `schedule:` HAZARD DOES NOT APPLY HERE -- checked, not assumed
+# ===========================================================================
+#
+# A cron fires only from the DEFAULT branch's copy of a workflow. tan-cli#754
+# flagged this by analogy with alp-sdk's `onramp-clean-container.yml`, which
+# documents its own weekly cron as "currently a no-op" for exactly that reason.
+#
+# That analogy does not carry: alp-sdk's default branch is not the branch that
+# workflow lands on, whereas **this repo's default branch IS `dev`**
+# (`gh repo view alplabai/tan-cli --json defaultBranchRef` -> `dev`), which is
+# also where this PR lands. So the schedule below genuinely fires once merged.
+# If the default branch is ever repointed to `main`, this cron silently stops
+# firing and this comment is the thing to re-read.
+#
+# ===========================================================================
+# WHY THE FREEZE IS BUILT IN `python:3.12-slim-bullseye`
+# ===========================================================================
+#
+# Same reason `release.yml` and `clean-host.yml` do it: freezing on a modern
+# host links that host's glibc and ships a floor no supported distro meets.
+# This is not theoretical -- a freeze built on glibc 2.39 fails to start on
+# `debian:11` with
+#
+#   [PYI-1:ERROR] Failed to load Python shared library
+#   '/opt/tan/_internal/libpython3.12.so.1.0': /lib/x86_64-linux-gnu/libm.so.6:
+#   version `GLIBC_2.38' not found
+#
+# and `debian:11` is 2.31, `rockylinux:9` 2.34, `ubuntu:22.04` 2.35. Note the
+# floor lives in the BUNDLED `_internal/libpython3.12.so.1.0`, not in the
+# PyInstaller launcher -- `objdump -T` on the launcher alone reports
+# `GLIBC_2.14` for both a bullseye and a modern-host freeze and tells you
+# nothing. Build it the way the shipped asset is built or the run measures the
+# build method rather than the product.
+#
+# ===========================================================================
+# WHAT A GREEN RUN OF THIS DOES NOT PROVE
+# ===========================================================================
+#
+#   * Anything about a non-Debian distro. The container job runs `ubuntu:24.04`
+#     by default. `e2e-container.sh` takes the image as its second argument and
+#     `workflow_dispatch` exposes it, but `e2e-full.sh` gates Scenario B on its
+#     own `CAN_APT` check, so a `fedora:*`/`archlinux` run exercises Scenario A
+#     only. Measured on those images: 19 passed / 0 failed, of which Scenario A
+#     contributed 2/0 against `ubuntu:24.04`'s 4/0, with Scenario B never run.
+#     A much thinner pass, not a clean bill of health for that distro.
+#   * A REPEATABLE `dev` x `dev` result. `e2e-full.sh` clones `--branch dev`
+#     fresh per run, so a scheduled run samples whatever `dev` is at that
+#     moment. In one multi-hour round alp-sdk `dev` moved THREE times
+#     (`33374319` -> `b5fe22aa` -> `e9aea71b`), which is enough to make two
+#     cells of the same round non-comparable. The resolved SHA is printed as
+#     `alp-sdk ref=dev sha=<40 hex>` -- read it before comparing two runs, and
+#     pin `alp_sdk_ref` on a dispatch when a comparison is the point.
+#   * Native Windows first-install. `install.ps1` -> `bootstrap` -> `init` ->
+#     `build` on a real Windows host is reachable by no container and by no
+#     workflow in this repo; `clean-host.yml` smokes the Windows freeze only.
+#
+# The three harness-accuracy defects this round also found (tan-cli#757 stale
+# `bsA2` issue code, #758 `tail -c 400` severing the `Traceback` header, #759
+# root-only `CAN_APT`) were fixed in tan-cli#762 and are NOT limitations of
+# this job -- `bsA2` now accepts either correct code, the truncation path greps
+# for the header first, and `CAN_APT` reports `mode=root/sudo/unhealthy/none`.
+# The shellcheck job below exists to keep that class from returning: these
+# scripts are bash, not the installer's POSIX sh, and were linted by nothing.
+
+name: e2e-container
+
+on:
+  schedule:
+    # Nightly. Existing crons in this repo are 05:23 (planner-resync) and
+    # 06:40 (release-combination); this sits clear of both.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "container image to run the harness in (default ubuntu:24.04)"
+        required: false
+        default: "ubuntu:24.04"
+      alp_sdk_ref:
+        description: "alp-sdk ref the harness clones (tag/branch/SHA; default dev)"
+        required: false
+        default: "dev"
+  pull_request:
+    # Targeted, NOT a general skip. getting-started.yml is deliberately not
+    # paths-filtered because a docs-only PR can still break bootstrap; this is
+    # the opposite case -- the expensive job's subject IS these files, so a PR
+    # that edits the harness should run it. Every other PR still gets the
+    # shellcheck job below, which is not filtered.
+    paths:
+      - "scripts/e2e-container.sh"
+      - "scripts/e2e-full.sh"
+      - "scripts/e2e-linux-freeze.sh"
+      - ".github/workflows/e2e-container.yml"
+
+# Same rule as ci.yml/getting-started.yml: a newer push to a PR supersedes the
+# run in flight; a scheduled or manually dispatched run is never cancelled.
+concurrency:
+  group: e2e-container-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  # Least privilege by default (tan-cli#435). The harness clones alp-sdk over
+  # anonymous HTTPS and needs nothing from this repo's token beyond checkout.
+  contents: read
+
+jobs:
+  # Seconds, every PR. The three scripts are bash, not the installer's POSIX
+  # sh, and were linted by nothing -- the same gap install.sh had before
+  # getting-started.yml closed it, closed the same way and at the same
+  # severity (`-S warning`, matching that file's `scripts/tan-surface/*.sh`
+  # step). All three are clean at this severity as of this commit; the one
+  # finding that existed (SC2164, an unguarded `cd` in e2e-full.sh -- half of
+  # tan-cli#506) is fixed in the same PR that adds this job, so it lands green
+  # rather than red.
+  shellcheck:
+    name: "shellcheck: the e2e scripts"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck scripts/e2e-*.sh
+        run: shellcheck -S warning scripts/e2e-container.sh scripts/e2e-full.sh scripts/e2e-linux-freeze.sh
+
+  container:
+    name: "clean container: ${{ github.event.inputs.image || 'ubuntu:24.04' }}"
+    runs-on: ubuntu-latest
+    # tan-cli#754 measured a full run at 5m22s including `west sdk install`
+    # (30s against its own 1200s timeout) and a real ARM build. 45 gives room
+    # for a slow toolchain fetch without letting a hung run burn an hour.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The freeze is built in an OLD-glibc container (see the header). This is
+      # the same recipe clean-host.yml and release.yml use; `.[monitor]` matches
+      # them too -- an extra a frozen binary advertises in --help must actually
+      # be bundled.
+      - name: freeze tan (python:3.12-slim-bullseye)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/python:/src" -w /src python:3.12-slim-bullseye bash -euc '
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends binutils
+            python -m venv /tmp/venv
+            /tmp/venv/bin/pip install --quiet --upgrade pip
+            /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+            PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
+          '
+
+      # `--version` on the freeze BEFORE handing it to the harness: a tree that
+      # exists but cannot run turns every assertion below into a misattributed
+      # failure. tan-cli#717 was exactly that shape (a freeze reported OK and
+      # exited 0 while unable to start); e2e-linux-freeze.sh gained the same
+      # check, and this job is the other producer of a freeze.
+      - name: the freeze is runnable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x python/dist/tan/tan
+          python/dist/tan/tan --version
+
+      - name: e2e-container.sh (bare container, scenario A + B)
+        shell: bash
+        env:
+          ALP_SDK_REF: ${{ github.event.inputs.alp_sdk_ref || 'dev' }}
+          ZEPHYR_SDK_VERSION: "1.0.1"
+          ZEPHYR_SDK_INSTALL_TIMEOUT: "1200"
+        run: |
+          set -euo pipefail
+          bash scripts/e2e-container.sh python/dist/tan "${{ github.event.inputs.image || 'ubuntu:24.04' }}"
+
+      # No upload-artifact step, deliberately. `e2e-container.sh` runs the
+      # harness with `docker run --rm` and the working tree lives inside that
+      # container, so nothing survives on the runner to upload -- the step
+      # output IS the artefact. An upload step here would either publish an
+      # empty archive or need the harness changed to bind-mount its workdir
+      # out, which is a bigger change than wiring up the job.
