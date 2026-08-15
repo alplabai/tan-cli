@@ -441,7 +441,7 @@ env:
   #
   # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
   # predates every commit this bump exists to pick up.
-  PINNED_SDK_TAG: e9aea71bfb2f2f86c3fc4015b91842a1c73bb6ea
+  PINNED_SDK_TAG: 88318e759958529fbbd8fe9d481373681c0fa78d
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

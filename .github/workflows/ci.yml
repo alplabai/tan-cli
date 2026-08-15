@@ -316,7 +316,7 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: e9aea71bfb2f2f86c3fc4015b91842a1c73bb6ea
+          ref: 88318e759958529fbbd8fe9d481373681c0fa78d
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
