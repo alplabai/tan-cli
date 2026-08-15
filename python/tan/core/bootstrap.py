@@ -957,8 +957,14 @@ _OPAQUE_WRAPPER_BINARIES = frozenset(
 #: install -y cmake` would confirm only the FIRST command, then hand out the
 #: whole two-command line as if the second had been checked too. Refuse
 #: outright on any of these rather than half-confirm (tan-cli#760 review,
-#: MINOR 1). None of today's six manifest commands use one.
-_SHELL_METACHARACTERS = ("&&", "||", ";", "|", "`", "$(")
+#: MINOR 1). `"&"` alone (a single backgrounding operator, e.g. `apt-get
+#: install -y cmake & rm -rf /`) already contains `"&&"` as a substring, so
+#: listing both would be redundant; `"|"` likewise already covers `"||"`.
+#: `"\n"` closes the same class of gap a real shell would hit at a bare
+#: newline (`"apt-get update\napt-get install -y cmake"`) -- tan-cli#760
+#: review round 3, NIT: both were measured to slip past the pre-round-3 list.
+#: None of today's six manifest commands use any of these.
+_SHELL_METACHARACTERS = ("&", ";", "|", "`", "$(", "\n")
 
 
 def leading_binary(command: str) -> str:

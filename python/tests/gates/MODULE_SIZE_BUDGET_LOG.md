@@ -141,6 +141,9 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/bootstrap_cmd.py: 3263 -> 3277
     - tan/commands/doctor_cmd.py: 4014 -> 4087
     - tan/core/bootstrap.py: 2172 -> 2269
+- 2026-08-15 -- tan-cli#760 review round 3: mutation-provable --fix wiring test (Check.fix_missing fallback in __post_init__, corrected fix_installer_not_found_check/run_fix docstrings, hardened shell-metacharacter denylist)
+    - tan/commands/doctor_cmd.py: 4087 -> 4114
+    - tan/core/bootstrap.py: 2269 -> 2275
 - 2026-08-15 -- tan-cli#756: hand-port alp-sdk#1446's _aen_require_disjoint_slot0 into tan/planner/zephyr_board.py -- a dual-M55 AEN SoM with no per-role <role>_slot0 region is now refused at emit time instead of silently sharing one MRAM slot0 address
     - tan/planner/loader.py: 1301 -> 1313
     - tan/planner/zephyr_board.py: 1433 -> 1486
