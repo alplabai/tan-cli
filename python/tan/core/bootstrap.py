@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -939,47 +940,140 @@ class PrereqFailure:
     missing: tuple[MissingPrerequisite, ...] = ()
 
 
+#: Program names this guard refuses to accept as "the confirmed installer",
+#: even when `available` says yes -- tan-cli#760 review, MINOR 1. Every one
+#: of these is a universally-present WRAPPER that can front an absent real
+#: installer without this guard ever seeing it: `env FOO=bar apt-get ...` and
+#: `sh -c '...'` both resolve their OWN leading token to one of these, so
+#: `available("env")` (true on nearly every host) would confirm a command
+#: whose real dependency was never checked at all. Harmless against today's
+#: manifest (none of the six shipped commands use a wrapper); load-bearing
+#: the moment landing (b) adds a real per-distro command table.
+_OPAQUE_WRAPPER_BINARIES = frozenset(
+    {"env", "sh", "bash", "dash", "zsh", "ksh", "eval", "exec"}
+)
+
+#: Shell composition this guard cannot see past -- `apt-get update && apt-get
+#: install -y cmake` would confirm only the FIRST command, then hand out the
+#: whole two-command line as if the second had been checked too. Refuse
+#: outright on any of these rather than half-confirm (tan-cli#760 review,
+#: MINOR 1). None of today's six manifest commands use one.
+_SHELL_METACHARACTERS = ("&&", "||", ";", "|", "`", "$(")
+
+
 def leading_binary(command: str) -> str:
     """The program name a shell would actually invoke for one of the
     manifest's install one-liners -- stripping a literal leading `sudo `
     exactly as `--fix` (`doctor_cmd.run_fix`) does before it ever spawns
-    anything, so the confirmation guard below and the real spawn agree about
-    which binary is in question. `""` for a blank command: nothing to
-    confirm, and callers treat an empty name as "not available" rather than
-    probing it."""
+    anything, and parsing the rest with `shlex.split`, the SAME parser
+    `run_fix` itself calls on the (sudo-stripped) command before resolving
+    `argv[0]` -- so whatever this returns is provably the same token
+    `run_fix` would try to resolve, quoting included, not merely a similar
+    one (tan-cli#760 review, MINOR 2: `str.split` disagreed with `run_fix`'s
+    `shlex.split` on a quoted path). `""` for a blank command, or one
+    `shlex` cannot parse at all (an unterminated quote) -- nothing to
+    confirm either way, and callers treat an empty name as "not available"
+    rather than guessing at a half-token."""
     stripped = command.strip()
     if stripped.startswith("sudo "):
         stripped = stripped[len("sudo ") :].lstrip()
-    return stripped.split(maxsplit=1)[0] if stripped else ""
+    if not stripped:
+        return ""
+    try:
+        parts = shlex.split(stripped)
+    except ValueError:
+        return ""
+    return parts[0] if parts else ""
+
+
+def _confirmed(command: str, available: Callable[[str], bool]) -> bool:
+    """Whether `command` -- one manifest install one-liner -- is safe to hand
+    a consumer as a real, runnable command on THIS host. The tan-cli#760
+    guard's one decision point, shared by `confirmed_install_commands`
+    (dict shape) and `confirm_missing` (`MissingPrerequisite` tuple shape)
+    below -- there is exactly one place that decides this, even though there
+    are now two entry points for the two shapes a caller needs it in.
+
+    Refuses outright, never half-confirms, on a shell metacharacter
+    (`_SHELL_METACHARACTERS`) or an opaque wrapper leading binary
+    (`_OPAQUE_WRAPPER_BINARIES`) -- tan-cli#760 review MINOR 1.
+
+    When the command is `sudo`-prefixed, `sudo` itself is confirmed too, not
+    only the program after it: a stock `debian:12` image has `apt-get` but
+    does NOT ship `sudo` by default, so confirming `apt-get` alone would
+    still hand out a command that fails with `sudo: not found`
+    (tan-cli#760 review, MINOR 3).
+
+    This still is not an exhaustive runnability proof -- a PATH-shadowing
+    binary, a permissions error, an environment quirk are all beyond what a
+    PATH lookup can promise. What it DOES guarantee: every program name this
+    command would need to spawn is confirmed present, or the command is
+    refused rather than handed out as if it were checked."""
+    if any(meta in command for meta in _SHELL_METACHARACTERS):
+        return False
+    stripped = command.strip()
+    needs_sudo = stripped.startswith("sudo ")
+    binary = leading_binary(command)
+    if not binary or binary in _OPAQUE_WRAPPER_BINARIES:
+        return False
+    if needs_sudo and not available("sudo"):
+        return False
+    return available(binary)
 
 
 def confirmed_install_commands(
     install: dict[str, str], available: Callable[[str], bool]
 ) -> dict[str, str]:
-    """`install`, keeping only the entries whose own leading binary
-    `available` confirms on THIS host -- the tan-cli#760 guard.
+    """`install`, keeping only the entries `_confirmed` (above) accepts on
+    THIS host -- the tan-cli#760 guard's dict-shaped entry point.
 
     Every `MissingPrerequisite.command` this port emits is built by looking a
     tool up in a dict shaped exactly like `install` (`_structured_missing`,
-    `doctor_cmd.prerequisites_check`); this is the ONE place that decides
-    which of those commands may be handed out at all. Measured on
+    `doctor_cmd.prerequisites_check`) or, for a `PrereqFailure` already built
+    (`posix_venv_unusable()`), via `confirm_missing`'s tuple-shaped twin
+    below -- `_confirmed` is the one decision both apply. Measured on
     `fedora:42`/`archlinux:latest`/`rockylinux:9`: alp-sdk's Linux table is
     six `sudo apt-get install -y ...` lines and none of those hosts has
     `apt-get` on PATH, so every entry is dropped here and the tool downgrades
-    to `command: null` everywhere that dict is read -- never a string a
-    consumer (a human, `alp-sdk-vscode`'s Fix button, or tan's own `--fix`)
-    could run and fail on.
+    to `command: null` everywhere that dict then feeds the CUSTOMER-FACING
+    surfaces -- `data.missingPrerequisites[].command`, which a human reads
+    and `alp-sdk-vscode`'s Fix button sends verbatim to a terminal. (`tan
+    doctor --fix` itself does its OWN PATH resolution and must NOT read a
+    guarded dict -- see `doctor_cmd.prerequisites_check`'s `fix_missing`.)
 
     Pure: `available` is injected rather than a real PATH probe, keeping this
     module's "no IO" contract (see the module docstring). Callers pass the
     real check -- `on_path(binary) is not None` -- from `bootstrap_cmd`/
     `doctor_cmd`, both of which already own a hardened PATH walk."""
-    out: dict[str, str] = {}
-    for tool, command in install.items():
-        binary = leading_binary(command)
-        if binary and available(binary):
-            out[tool] = command
-    return out
+    return {
+        tool: command for tool, command in install.items() if _confirmed(command, available)
+    }
+
+
+def confirm_missing(
+    missing: tuple[MissingPrerequisite, ...], available: Callable[[str], bool]
+) -> tuple[MissingPrerequisite, ...]:
+    """`missing` -- an already-built `PrereqFailure.missing`/`{tool, command}`
+    sequence, such as `posix_venv_unusable()` returns -- with any entry
+    `_confirmed` (above) rejects degraded to `command: None`. The tuple-
+    shaped twin of `confirmed_install_commands`, for a caller that already
+    has `MissingPrerequisite` objects rather than the `install` dict they
+    were built from (tan-cli#760 review MAJOR 2 / tan-cli#765:
+    `posix_venv_unusable()`'s hardcoded `sudo apt-get install -y
+    python3-venv` reached the envelope completely unguarded before this
+    existed -- the confirmation guard was never actually "the ONE place"
+    that decided what got handed out; this closes that gap without changing
+    `posix_venv_unusable`'s own signature).
+
+    An entry whose `command` is already `None` passes through unchanged --
+    nothing to confirm, and re-checking it would be a wasted PATH probe."""
+    out: list[MissingPrerequisite] = []
+    for m in missing:
+        if m.command is not None and not _confirmed(m.command, available):
+            out.append(MissingPrerequisite(m.tool, None))
+        else:
+            out.append(m)
+    return tuple(out)
 
 
 def _structured_missing(
@@ -1054,13 +1148,16 @@ def _doctor_fix_hint(missing: list[str], install: dict[str, str]) -> str:
     tan-cli#760 adds the third shape. `install` here has already been through
     `confirmed_install_commands`, so by the time this runs "no entry for tool
     X" means "no command this host can actually run" -- which, when it is
-    true of EVERY missing tool, means `--fix` has nothing to do at all. The
-    two hints above both promise otherwise ("it prints the exact command for
-    each tool from the SDK's manifest"), which is exactly the unrunnable-
-    remedy defect this guard exists to close, just moved from the structured
-    field into this prose line instead. Name the tools that are missing; a
-    guessed package NAME here would be the identical defect against a
-    different OS/distro (see `zephyr_requirements_hint` for the precedent)."""
+    true of EVERY missing tool, means `--fix` cannot INSTALL anything for
+    them here (it may still report a diagnostic, e.g. `tan doctor --fix`'s
+    own `doctor.fix-installer-not-found` -- this hint is about the remedy,
+    not that separate command's full behaviour). The two hints above both
+    promise an install ("it prints the exact command for each tool from the
+    SDK's manifest"), which is exactly the unrunnable-remedy defect this
+    guard exists to close, just moved from the structured field into this
+    prose line instead. Name the tools that are missing; a guessed package
+    NAME here would be the identical defect against a different OS/distro
+    (see `zephyr_requirements_hint` for the precedent)."""
     confirmed = [tool for tool in missing if install.get(tool) is not None]
     if not confirmed:
         return (

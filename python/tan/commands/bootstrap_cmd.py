@@ -95,6 +95,7 @@ from tan.core.bootstrap import (
     Tokens,
     capture_tail,
     completion_verdict,
+    confirm_missing,
     confirmed_install_commands,
     decide_workspace_reuse,
     detect_host_os,
@@ -465,6 +466,15 @@ def resolve_python_floor(facts: BootstrapFacts, *, zephyr_base_adopts: bool) -> 
     return PythonFloor(effective, source, manifest_floor)
 
 
+def _on_path_available(binary: str) -> bool:
+    """The tan-cli#760 confirmation predicate `check_prerequisites` injects
+    into every guarded refusal it builds -- a real PATH walk, not a guess;
+    see `confirmed_install_commands`/`confirm_missing` in `tan.core.bootstrap`
+    for what "confirmed" actually checks (leading binary, `sudo` included,
+    never a wrapper or a shell-composed line)."""
+    return on_path(binary) is not None
+
+
 def check_prerequisites(
     facts: BootstrapFacts, host: str, floor: PythonFloor
 ) -> tuple[HostPython | None, PrereqFailure | None]:
@@ -479,22 +489,23 @@ def check_prerequisites(
     The version gate applies on BOTH platforms and against the EFFECTIVE floor
     -- see the module docstring. The oracle applies it on Windows only, against
     the manifest's, which is the live bug this port exists to fix.
+
+    `install` is CONFIRMED once here (tan-cli#760: a command whose own
+    package manager this host cannot confirm on PATH becomes `command: null`
+    everywhere below) and every refusal this function returns reads that
+    confirmed dict uniformly -- `tan bootstrap` has no `--fix` counterpart to
+    preserve a separate diagnosis for (unlike `tan doctor`; see
+    `doctor_cmd.prerequisites_check`'s `fix_missing` split), so there is no
+    RAW variant to keep here.
     """
     is_windows = host == WINDOWS
-    install = facts.install_for_host(host)
+    install = confirmed_install_commands(facts.install_for_host(host), _on_path_available)
     missing = [
         tool for tool in facts.prerequisites(host) if not _prereq_present(tool, is_windows)
     ]
     if missing:
         refuse = windows_refusal if is_windows else posix_refusal
-        # tan-cli#760: don't hand out a command whose own package manager is
-        # not on THIS host's PATH -- measured on fedora/archlinux/rockylinux,
-        # every entry in alp-sdk's `prerequisites.install.linux` is
-        # `sudo apt-get install -y ...` and none of those hosts has `apt-get`.
-        confirmed = confirmed_install_commands(
-            install, lambda binary: on_path(binary) is not None
-        )
-        return None, refuse(missing, confirmed)
+        return None, refuse(missing, install)
 
     # Probe against the floor that will actually be ENFORCED. Probing to a lower
     # bar would stop at the first candidate clearing 3.10 (`py -3`, often the
@@ -517,7 +528,10 @@ def check_prerequisites(
     # a Debian/Ubuntu packaging split, not a general POSIX one -- macOS/BSD
     # pythons ship `ensurepip` in the base install.
     if host == LINUX and not python_venv_capable(python):
-        return None, posix_venv_unusable()
+        refusal = posix_venv_unusable()
+        return None, PrereqFailure(
+            refusal.code, refusal.lines, confirm_missing(refusal.missing, _on_path_available)
+        )
     return python, None
 
 

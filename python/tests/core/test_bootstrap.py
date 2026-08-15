@@ -154,17 +154,101 @@ def test_confirmed_install_commands_drops_a_command_whose_binary_is_absent():
 
 
 def test_confirmed_install_commands_keeps_a_command_whose_binary_is_present():
-    """The other half: a real Debian/Ubuntu host DOES have `apt-get`, so the
-    guard must not drop a command just because it CAN be wrong on some other
-    host -- only when it actually is, on THIS one."""
+    """The other half: a real Debian/Ubuntu host DOES have `apt-get` (and
+    `sudo` -- see the MINOR 3 test below for the host that has one but not
+    the other), so the guard must not drop a command just because it CAN be
+    wrong on some other host -- only when it actually is, on THIS one."""
     from tan.core.bootstrap import confirmed_install_commands
 
     install = {
         "cmake": "sudo apt-get install -y cmake",
         "ninja": "sudo apt-get install -y ninja-build",
     }
-    confirmed = confirmed_install_commands(install, lambda binary: binary == "apt-get")
+    confirmed = confirmed_install_commands(
+        install, lambda binary: binary in {"apt-get", "sudo"}
+    )
     assert confirmed == install
+
+
+def test_confirmed_install_commands_also_confirms_sudo_itself():
+    """tan-cli#760 review MINOR 3: a stock `debian:12` image has `apt-get`
+    but does NOT ship `sudo` by default -- confirming only the post-sudo
+    binary would still hand out a command that fails with `sudo: not
+    found`. `apt-get` alone must not be enough."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {"cmake": "sudo apt-get install -y cmake"}
+    assert confirmed_install_commands(install, lambda binary: binary == "apt-get") == {}
+    assert (
+        confirmed_install_commands(install, lambda binary: binary in {"apt-get", "sudo"})
+        == install
+    )
+
+
+def test_confirmed_install_commands_refuses_a_wrapper_that_would_falsely_confirm():
+    """tan-cli#760 review MINOR 1: `env FOO=bar apt-get ...` resolves its OWN
+    leading token to `env` -- universally present -- without ever confirming
+    the real installer (`apt-get`) it wraps. Confirming `env` alone must not
+    be enough to hand the command out; the review names this as the live
+    risk for landing (b)'s dnf/pacman tables, harmless only because none of
+    today's six manifest commands use a wrapper."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {"cmake": "env FOO=bar apt-get install -y cmake"}
+    # `env` genuinely IS on this host; the real installer, `apt-get`, is not.
+    assert confirmed_install_commands(install, lambda binary: binary == "env") == {}
+
+
+def test_confirmed_install_commands_refuses_a_compound_command():
+    """`a && b` only ever confirms `a` -- refuse outright rather than
+    half-confirm a command this guard cannot see past (tan-cli#760 review
+    MINOR 1)."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {"cmake": "apt-get update && apt-get install -y cmake"}
+    assert confirmed_install_commands(install, lambda _binary: True) == {}
+
+
+def test_leading_binary_agrees_with_run_fixs_own_shlex_split():
+    """tan-cli#760 review MINOR 2: the guard must parse a command exactly the
+    way `--fix` (`doctor_cmd.run_fix`) will -- `run_fix` calls
+    `shlex.split(effective_command)`, and `str.split` disagreed with it on a
+    quoted path (`"C:\\Program Files\\WinGet\\winget.exe" install ...`),
+    where the guard could confirm/refuse a DIFFERENT token than the one that
+    actually gets spawned."""
+    import shlex
+
+    from tan.core.bootstrap import leading_binary
+
+    command = '"C:\\Program Files\\WinGet\\winget.exe" install -e --id Foo'
+    assert leading_binary(command) == shlex.split(command)[0]
+
+
+def test_confirm_missing_nulls_an_unconfirmed_entrys_command():
+    """`confirm_missing` is `confirmed_install_commands`'s tuple-shaped twin
+    -- tan-cli#760 review MAJOR 2 / tan-cli#765: `posix_venv_unusable()`
+    builds a `MissingPrerequisite` directly, with no `install` dict for
+    `confirmed_install_commands` to filter, so this is the guard's OTHER
+    entry point."""
+    from tan.core.bootstrap import MissingPrerequisite, confirm_missing
+
+    missing = (MissingPrerequisite("python3-venv", "sudo apt-get install -y python3-venv"),)
+    guarded = confirm_missing(missing, lambda binary: binary == "dnf")
+    assert guarded == (MissingPrerequisite("python3-venv", None),)
+
+
+def test_confirm_missing_keeps_a_confirmed_entrys_command_and_a_tool_less_ones_none():
+    """The other half, plus the pass-through case: an entry whose `command`
+    is already `None` (a tool-less refusal has no install command at all)
+    must not be re-probed or altered."""
+    from tan.core.bootstrap import MissingPrerequisite, confirm_missing
+
+    missing = (
+        MissingPrerequisite("python3-venv", "sudo apt-get install -y python3-venv"),
+        MissingPrerequisite("dtc", None),
+    )
+    guarded = confirm_missing(missing, lambda binary: binary in {"apt-get", "sudo"})
+    assert guarded == missing
 
 
 def test_posix_refusal_gives_a_host_neutral_hint_when_no_command_is_confirmed():

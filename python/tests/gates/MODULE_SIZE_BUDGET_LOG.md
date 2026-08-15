@@ -137,3 +137,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/doctor_cmd.py: 4003 -> 4014
     - tan/core/bootstrap.py: 2111 -> 2172
     - function_count_budget: 257 -> 258
+- 2026-08-15 -- tan-cli#760 review fixes: MAJOR 1 (Check.fix_missing split, prerequisites_check's available param), MAJOR 2/Closes #765 (confirm_missing guards posix_venv_unusable at both call sites), MINOR 1/2/3 (wrapper+metachar refusal, shlex parity, sudo confirmation), MINOR 4 (doctor's own host-neutral fix hint), MINOR 5 (bootstrap_cmd guards windows_python_not_runnable/python_too_old too)
+    - tan/commands/bootstrap_cmd.py: 3263 -> 3277
+    - tan/commands/doctor_cmd.py: 4014 -> 4087
+    - tan/core/bootstrap.py: 2172 -> 2269
