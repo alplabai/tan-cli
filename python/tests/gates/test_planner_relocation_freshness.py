@@ -352,7 +352,7 @@ from tests.conftest import sdk_root
 #: comment for the breakdown. `STRICT_LOADERS_PINNED_SDK_COMMIT` does NOT
 #: move, same reasoning as above: `scripts/strict_loaders.py` does not
 #: appear in the `a3173305..d00dbdc1` diff at all.
-PINNED_SDK_COMMIT = "bd8be484680cf5aa1c1ac0e8b38d84128b5a279d"  # alp-sdk origin/dev
+PINNED_SDK_COMMIT = "2d9699cc779babf0893312d6880584dd248d2273"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -369,11 +369,11 @@ PINNED_HASHES: dict[str, str] = {
     "kconfig.py": "4c4a5abea3b1316d66e01f8bcd2e32411c28863179c9983746c06be52e415d30",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "bf4fd845248067f7713ce270ced265ba2a2c981f91f34911fe446849e9f57a5d",
-    "loader.py": "1c131af28d744531bdee708abf16708976ee18164416a268fa3833a117c60011",
+    "loader.py": "1dc9fb7a75c454e601584e6b50d77a7edaae38859ae4587997c6dc7888948552",
     "manifest.py": "f38de96a9626672bc08f181e09b3a545d8dc846c0423cc6e9dd08c3b96a87d1d",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
     "models.py": "e84bb25c5121ea96d9971df8ce69218b3eb025f9dad8f3d6286fba1b232241d1",
-    "orchestrator.py": "e0c41ce6f0d5db14961ce1d83a9e9eb09e1f2414a6ff05945fc9b2f814ebb21e",
+    "orchestrator.py": "cb6a38e1a2f4200b16da93c1b11512c6e59b963e8e08279d801b8d38e57c3002",
     "partition.py": "7f37224ff1aa05dd6d943424a664bc4d115dc05853762072854d43ea3628591c",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",

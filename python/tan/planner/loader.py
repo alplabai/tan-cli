@@ -886,18 +886,18 @@ def _validate_topology_cores(
                 f"`topology.{core_id}` is set)")
         expect_dpidr, jlink_device = _resolve_flow_d_preflight(
             variant_debug, core_id)
-        # VALUE, not presence -- deliberately unlike the `flash_args`
-        # emit, and matching alp-sdk's own gate (tan-cli#744). A variant
-        # declaring `jlink_flash_device: null` (e4.json is the live case)
-        # has NO J-Link profile, so Flow D cannot run and there is no
-        # slot0-XIP load address to publish. tan-cli#737 briefly made this
-        # ride the same presence promotion as the emit; that emitted a
-        # slot0_load_address alp-sdk does not, and the byte-parity suite
-        # caught it on `usb-host-storage` (E1M-AEN401) the moment a
-        # declared-null variant existed.
+        # PRESENCE, not value -- this has flipped twice, so read #737/#744
+        # before flipping it back. tan-cli#737 used presence while alp-sdk
+        # keyed on the VALUE, emitting an address alp-sdk did not; the
+        # byte-parity suite caught it on `usb-host-storage` (E1M-AEN401) and
+        # tan-cli#744 reverted to the value. alp-sdk then moved the OTHER way
+        # in `86260edc` ("complete the Flow D truthiness fix", #1444/#1446),
+        # promoting this exact site -- so the value form now emits nothing
+        # where alp-sdk emits an address. test_planner_emit_parity.py decides.
         slot0_load_address = (
             _resolve_slot0_load_address(som_preset, core_id)
-            if jlink_flash_device else None)
+            if (jlink_flash_device_declared or jlink_flash_device is not None)
+            else None)
         slice_ = _slice_from_resolved(
             core_id, resolved,
             soc_core_type=soc_core_type_by_id.get(core_id, ""),
