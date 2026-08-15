@@ -4,115 +4,75 @@
 
 Port of `scripts/alp_cli/model.py` (51 lines): the board.yaml discovery,
 per-model source/compile-option path resolution, and the `built <path>`
-summary all move here, in-process, exactly as they read there. What does NOT
-move is `alp_model.build.build_model` itself -- the compiler-adapter engine
-(CPU/Vela/DRP-AI/DeepX, `scripts/alp_model/`) that does the actual work. That
-engine needs vendor NPU-compiler tooling only the SDK checkout's own Python
-environment carries (DeepX's `dxcom` is license-gated), so this command
-resolves the SDK checkout and its Python the same way `generate_cmd`'s
-spawned-emitter escape hatch does, then runs ONE small driver script under it
-(`_DRIVER`) that imports `alp_model.build` and calls it per model, reporting
-back over stdout as one JSON document.
+summary all move here, in-process, exactly as they read there. Also
+in-process, since ADR-0028: `tan.model.build.build_model` itself -- the
+compiler-adapter engine (CPU/Vela/DRP-AI/DeepX) that does the actual work,
+relocated verbatim from alp-sdk's `scripts/alp_model/` into `tan.model`. This
+command calls it directly, per model, no subprocess involved.
+
+Earlier revisions of this file spawned a `python -c` driver under the SDK
+checkout's own interpreter, on the premise that the vendor NPU-compiler
+tooling was only reachable from that checkout's Python environment. That
+premise was never accurate: every adapter resolves its own tool with
+`shutil.which` and spawns an external binary -- `adapters/ethos_u.py`
+(`shutil.which("vela")`, `cmd = ["vela", ...]`), `adapters/deepx.py`
+(`shutil.which("dxcom")`, `cmd = ["dxcom", "-m", ...]`), `adapters/drpai.py`
+likewise -- so what building a model actually needs is `vela`/`dxcom` on
+PATH, a host fact, not a checkout fact. The one genuine Python-environment
+dependency, `adapters/ethos_u.py`'s `_vela_version()`, already degrades
+gracefully (`except PackageNotFoundError: return "vela"`), costing a less
+precise `compiler_version` string and nothing else. **This module still
+resolves the SDK root** (via `resolve_metadata_sdk_root`) -- not for its
+Python, but because `tan.model.build.build_model` reads alp-sdk's
+`metadata/**` at call time (ADR-0017: metadata stays in alp-sdk).
 
 This is a REAL implementation, not a forward: it never spawns `python -m
 alp_cli`, so `alp_cli` stops being load-bearing for `tan model` (the point of
 this port -- see `crates/tan-cli/src/commands/sdk_cli.rs`'s module doc for
-what it is replacing). Unlike that Rust forwarder, a resolvable SDK is
-required unconditionally -- `alp_model` lives under `<sdk>/scripts`, and there
-is no path that avoids importing it.
+what it is replacing).
 
-**Deliberate divergence 1 from the oracle**: `alp_cli/model.py` has no
-try/except around `build_model()` at all, so a build failure (e.g. "no blob
-compiled for model") tracebacks the whole click command. Every command in
-this port instead resolves to a coded issue, never a traceback (the
-established rule -- see `generate_cmd`'s module doc) -- so a per-model
-failure here is caught in the driver and reported as a `model.build-failed`
-issue, and the run continues to the next model rather than aborting the
-whole batch.
+**Deliberate divergence 1 from the oracle survives ADR-0028**: `alp_cli/
+model.py` has no try/except around `build_model()` at all, so a build failure
+(e.g. "no blob compiled for model") tracebacks the whole click command. Every
+command in this port instead resolves to a coded issue, never a traceback
+(the established rule -- see `generate_cmd`'s module doc) -- so a per-model
+failure here is caught around the direct `build_model()` call and reported as
+a `model.build-failed` issue, and the run continues to the next model rather
+than aborting the whole batch.
 
-**Deliberate divergence 2 from the oracle**: the oracle has no equivalent of
-a spawned driver at all (it calls `build_model()` in-process), so it cannot
-observe a driver that exits 0 having silently produced no result for a
-declared model. This port can, and treats that as a failure: an empty/short
-`_DRIVER` stdout is never coerced to `{}` (an empty document now falls
-through to the same `JSONDecodeError` branch a malformed one already does),
-and a driver that reports fewer `results` than models it was handed raises
-`model.internal-failure` naming the missing model(s) rather than silently
-reporting `built: []` -- indistinguishable otherwise from the legitimate
-no-models no-op above.
+**Deliberate divergence 2 from the oracle is RETIRED with the driver it
+existed for.** It used to guard against a spawned driver that exited 0 having
+silently produced no result for a declared model -- a failure mode only a
+subprocess boundary could produce. With `build_model()` called directly,
+in-process, per model, there is no boundary across which a result can go
+missing: either the call returns a path (recorded as built) or raises
+(caught and reported as `model.build-failed`). There is no third outcome left
+to guard against, so the guard is gone, not silently dropped.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import _planner_python
 from tan.commands.build_output import (
     ProjectContext,
     resolve_metadata_sdk_root,
     resolve_project_context,
 )
-from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.model.build import build_model
 from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
-
-#: Seconds the compile driver may run. Generous -- a cold NPU-compiler
-#: invocation (Vela, DRP-AI, DeepX) can be slow, and several models may be
-#: queued in one run. Bounded regardless, so a wedged vendor tool cannot hang
-#: a `--format json` consumer with no envelope and no error.
-_BUILD_TIMEOUT_S = 1800
-
-#: Driver run under the resolved SDK's Python, with `PYTHONPATH` pointed at
-#: `<sdk>/scripts` so `alp_model` resolves. Reads one JSON payload on stdin
-#: (`{"models": [{"name", "source", "sku", "outDir", "metadataRoot",
-#: "compileOpts"}]}`), writes one JSON document to stdout
-#: (`{"results": [{"name", "ok", "path"|"error"}]}`). No argv, no env beyond
-#: what the caller already sets -- keeping the driver's own surface to a
-#: single stdin/stdout contract is what lets it stay this short.
-_DRIVER = """
-import json, sys
-from pathlib import Path
-
-payload = json.loads(sys.stdin.read())
-results = []
-try:
-    from alp_model.build import build_model
-except Exception as err:
-    print(json.dumps({"importError": f"{type(err).__name__}: {err}"}))
-    sys.exit(0)
-
-for m in payload["models"]:
-    try:
-        out = build_model(
-            sku=payload["sku"],
-            name=m["name"],
-            source=Path(m["source"]),
-            out_dir=Path(payload["outDir"]),
-            metadata_root=Path(payload["metadataRoot"]),
-            compile_opts=m.get("compileOpts"),
-        )
-        results.append({"name": m["name"], "ok": True, "path": str(out)})
-    except Exception as err:
-        results.append({
-            "name": m["name"], "ok": False,
-            "error": f"{type(err).__name__}: {err}",
-        })
-print(json.dumps({"results": results}))
-"""
 
 
 class ModelError(Exception):
@@ -211,99 +171,6 @@ def _load_board(path: Path) -> dict[str, Any]:
     return doc
 
 
-def _run_driver(python: str, sdk_scripts: Path, payload: dict) -> dict:
-    """Spawn `_DRIVER` under `python` with `<sdk>/scripts` prepended to
-    `PYTHONPATH`, feed `payload` on stdin, and parse its one line of stdout.
-    Raises `ModelError` for every way the spawn itself can fail; a per-model
-    build failure is NOT one of those -- it comes back inside the parsed
-    result and is turned into an issue by the caller."""
-    pythonpath = os.pathsep.join(
-        [str(sdk_scripts), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
-    )
-    env = {**os.environ, "PYTHONPATH": pythonpath}
-    try:
-        out = subprocess.run(
-            [python, "-c", _DRIVER],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            timeout=_BUILD_TIMEOUT_S,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as err:
-        raise ModelError(
-            "model.build-timeout",
-            f"model build timed out after {_BUILD_TIMEOUT_S}s.",
-            ExitCode.RUNTIME_FAILURE,
-        ) from err
-    except OSError as err:
-        raise ModelError(
-            "model.internal-failure",
-            f"failed to launch `{python}`: {err}",
-            ExitCode.RUNTIME_FAILURE,
-        ) from err
-    if out.returncode != 0:
-        stderr = (out.stderr or "").strip()
-        raise ModelError(
-            "model.internal-failure",
-            f"model build driver exited with code {out.returncode}: "
-            f"{stderr or '(no output)'}",
-            ExitCode.RUNTIME_FAILURE,
-        )
-    # The last non-empty line, not the whole of stdout -- mirrors the same
-    # defence `_python_too_old` already applies one screen up in this file,
-    # against a future adapter `print()` or an inherited-stdout vendor tool
-    # polluting the one JSON document the driver is meant to write. Empty
-    # stdout (nothing printed at all -- a driver that silently produced
-    # nothing) falls through to `json.loads("")`, which raises
-    # `JSONDecodeError` below rather than being papered over as `{}`: a
-    # driver that exits 0 having produced nothing is a failure, not a
-    # legitimate no-op.
-    lines = [line for line in (out.stdout or "").splitlines() if line.strip()]
-    try:
-        return json.loads(lines[-1] if lines else "")
-    except json.JSONDecodeError as err:
-        raise ModelError(
-            "model.internal-failure",
-            f"model build driver produced unparsable output: {err}",
-            ExitCode.INTERNAL_FAILURE,
-        ) from err
-
-
-def _python_too_old(python: str, floor: tuple[int, int]) -> str | None:
-    """A message when `python` is below `floor`, else `None` -- also for
-    "could not tell" (a missing/broken interpreter surfaces on its own at the
-    real spawn). Mirrors `generate_cmd._python_too_old`; `floor` is the
-    resolved SDK's OWN declared floor from
-    `doctor_cmd.resolve_manifest_python_floor` -- not a second hardcoded 3.10
-    that could drift from the manifest's, or from `generate_cmd`'s own copy."""
-    try:
-        out = subprocess.run(
-            [python, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
-    if out.returncode != 0:
-        return None
-    try:
-        major, minor = (int(p) for p in out.stdout.strip().splitlines()[-1].split(".")[:2])
-    except (IndexError, ValueError):
-        return None
-    if (major, minor) >= floor:
-        return None
-    return (
-        f"Python {major}.{minor} found at `{python}`, but alp-sdk requires Python "
-        f"{floor[0]}.{floor[1]}+. Put a newer `python` first on PATH."
-    )
-
-
 def _run_build(
     *,
     context: ProjectContext,
@@ -331,7 +198,7 @@ def _run_build(
     # The metadata-reading resolution is DELIBERATELY separate and wider
     # (`build_output.resolve_metadata_sdk_root`'s own doc): a child/sibling
     # checkout the project-context tier chain does not consider can still
-    # supply `alp_model`, in which case `sdk_info` stays absent while the
+    # supply `metadata/`, in which case `sdk_info` stays absent while the
     # build still runs against it -- same divergence `tan size`'s budget
     # resolution already allows.
     resolved_sdk = resolve_metadata_sdk_root(sdk_root, context.workspace_root)
@@ -385,7 +252,11 @@ def _run_build(
     if metadata_root and not metadata_dir.is_absolute():
         metadata_dir = workspace_root / metadata_dir
 
-    driver_models = []
+    # Validate + prepare every model BEFORE building any of them -- an invalid
+    # `models:` entry refuses the whole run with no partial build, matching
+    # the pre-ADR-0028 shape where this same loop only assembled the driver
+    # payload and never itself built anything.
+    prepared: list[tuple[str, Path, dict | None]] = []
     for m in models:
         if not isinstance(m, dict) or "name" not in m or "source" not in m:
             raise ModelError(
@@ -394,62 +265,34 @@ def _run_build(
                 ExitCode.VALIDATION_FAILURE,
             )
         source = (base / m["source"]).resolve()
-        driver_models.append({
-            "name": m["name"],
-            "source": str(source),
-            "compileOpts": _resolve_compile(m.get("compile"), base),
-        })
+        prepared.append((m["name"], source, _resolve_compile(m.get("compile"), base)))
 
-    python = _planner_python(str(workspace_root), str(resolved_sdk))
-    floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
-    too_old = _python_too_old(python, floor)
-    if too_old is not None:
-        raise ModelError("model.python-too-old", too_old, ExitCode.RUNTIME_FAILURE)
-
-    payload = {
-        "sku": sku,
-        "outDir": str(out_dir),
-        "metadataRoot": str(metadata_dir),
-        "models": driver_models,
-    }
-    result = _run_driver(python, resolved_sdk / "scripts", payload)
-
-    if "importError" in result:
-        raise ModelError(
-            "model.internal-failure",
-            f"could not import alp_model from {resolved_sdk / 'scripts'}: "
-            f"{result['importError']}",
-            ExitCode.INTERNAL_FAILURE,
-        )
-
-    driver_results = result.get("results", [])
-    if len(driver_results) != len(driver_models):
-        # A driver that exits 0 but reports fewer results than models it was
-        # asked to build is a failure, not a partial success -- otherwise a
-        # wedged/short-circuited driver is indistinguishable from the
-        # legitimate no-models no-op (both would report `ok: true`).
-        reported = {r.get("name") for r in driver_results if isinstance(r, dict)}
-        missing = [m["name"] for m in driver_models if m["name"] not in reported]
-        raise ModelError(
-            "model.internal-failure",
-            f"model build driver reported {len(driver_results)} of "
-            f"{len(driver_models)} model(s); missing: {', '.join(missing)}.",
-            ExitCode.INTERNAL_FAILURE,
-        )
-
+    # Deliberate divergence 1 from the oracle (see module doc): a per-model
+    # `build_model()` failure is caught here and reported as a coded
+    # `model.build-failed` issue, and the loop continues to the next model
+    # rather than aborting the whole batch.
     issues: list[Issue] = []
     built: list[str] = []
-    for r in driver_results:
-        if r.get("ok"):
-            built.append(r["path"])
-        else:
+    for name, source, compile_opts in prepared:
+        try:
+            out_path = build_model(
+                sku=sku,
+                name=name,
+                source=source,
+                out_dir=out_dir,
+                metadata_root=metadata_dir,
+                compile_opts=compile_opts,
+            )
+        except Exception as err:  # noqa: BLE001 -- a per-model failure is a coded issue, not a traceback
             issues.append(
                 Issue(
                     "model.build-failed",
                     "error",
-                    f"model '{r.get('name')}': {r.get('error', 'build failed')}",
+                    f"model '{name}': {type(err).__name__}: {err}",
                 )
             )
+        else:
+            built.append(str(out_path))
     data["built"] = built
     exit_code = ExitCode.SUCCESS if not issues else ExitCode.WRITE_FAILURE
     return reported_project, sdk_info, data, issues, exit_code
