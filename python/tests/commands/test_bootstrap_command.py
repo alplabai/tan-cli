@@ -306,6 +306,43 @@ def test_the_effective_floor_refuses_a_host_the_manifest_would_accept():
     assert "declares only 3.10" in line
 
 
+#: The two literal fragments `scripts/e2e-full.sh`'s Scenario-B "was this
+#: bootstrap.python-too-old refusal actually EARNED" check regexes out of
+#: this exact message (tan-cli#757 review) -- `"... found"` and
+#: `"needs >= ..."` bracket the two version numbers it compares. Pinned here
+#: because nothing else pins the COUPLING: the test above keys on the
+#: assembled sentence for one concrete number pair, not on the wording the
+#: harness depends on, and no workflow runs `e2e-full.sh` at all (`grep -rn
+#: e2e-full.sh .github/workflows/` finds nothing), so a reword here would
+#: leave every CI job green while the harness's regex silently stops
+#: matching. That degrades safe (every case falls to `NOPARSE`, a scored
+#: failure, never a silent skip) but still stops checking what it claims to
+#: check. Reword the message and this fails, naming the file to update.
+E2E_FLOOR_FOUND_PHRASE = "found"
+E2E_FLOOR_NEEDS_PHRASE = "needs >="
+
+
+def test_e2e_full_sh_floor_wording_survives_in_the_refusal_message():
+    """tan-cli#757 review MINOR 5. See `E2E_FLOOR_FOUND_PHRASE` /
+    `E2E_FLOOR_NEEDS_PHRASE` above for why this is pinned separately from
+    `test_the_effective_floor_refuses_a_host_the_manifest_would_accept`."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 12), source="zephyr python.cmake", manifest=(3, 10))
+    refusal = python_too_old(
+        (3, 10), floor.effective, facts.install_for_host(LINUX),
+        floor_source=floor.source, manifest_floor=floor.manifest,
+    )
+    line = refusal.lines[0]
+    for phrase in (E2E_FLOOR_FOUND_PHRASE, E2E_FLOOR_NEEDS_PHRASE):
+        assert phrase in line, (
+            f"scripts/e2e-full.sh regexes {phrase!r} out of this message to "
+            f"confirm a bootstrap.python-too-old refusal was actually earned "
+            f"(found < floor) before honouring it as a reason to skip the rest "
+            f"of Scenario B. Update scripts/e2e-full.sh's FLOOR_CHECK regex in "
+            f"the same change.\n\nmessage was: {line!r}"
+        )
+
+
 def test_the_skew_case_suppresses_the_manifests_own_install_command():
     """`sudo apt-get install -y python3` installs 3.10 on Ubuntu 22.04 -- the
     exact version being refused. Printing the manifest's command in the skew case
