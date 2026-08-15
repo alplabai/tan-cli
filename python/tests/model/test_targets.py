@@ -1,18 +1,16 @@
-# tests/scripts/test_alp_model_targets.py
+# SPDX-License-Identifier: Apache-2.0
 """som.sku -> SoM preset -> SoC npus[] -> compile targets.
 
-`resolve_targets` pulls `tan.planner.som_metadata.resolve_soc_path` -- the one
-external symbol the relocated engine needs (ADR-0028 Task 2) -- which makes
-`tan.model.targets` a submodule of the `tan.planner` PACKAGE. `tan.planner`'s
-`__init__` reads real `metadata/registries/*` content at IMPORT time
-(`tan/planner_root.py`), so `from tan.model.targets import resolve_targets`
-cannot even be evaluated before a REAL alp-sdk checkout is bound -- not just
-to resolve the real SoM presets these tests assert against (`_META`), but to
-import at all. Bind + import happen together, at module scope, guarded by the
-same `SDK is None` check `pytestmark` skips on, so an unbound run never
-reaches the import line -- matching
-`tests/planner/test_sdk_capability.py`'s documented reason for the same
-shape."""
+`resolve_targets` pulls `resolve_soc_path` from the leaf module `tan.soc_ref`
+(ADR-0028 Task 2 follow-up decoupling: `tan.model` no longer imports
+`tan.planner`, see `test_model_package_imports.py`) -- so
+`from tan.model.targets import resolve_targets` imports fine with no SDK
+bound at all. What these tests need a bound, real alp-sdk checkout for is the
+DATA, not the import: `_META` must resolve real, committed SoM presets
+(`E1M-AEN701.yaml`, `E1M-V2N101.yaml`, ...) and SoC JSON under
+`metadata/socs/` -- a throwaway fixture tree has none of that content. Bind +
+resolve happen together, at module scope, guarded by the same `SDK is None`
+check `pytestmark` skips on."""
 import pytest
 
 from tan.planner_root import bind_sdk_root
@@ -23,8 +21,9 @@ SDK = sdk_root()
 pytestmark = pytest.mark.skipif(
     SDK is None,
     reason="ALP_SDK_ROOT is not set (or does not point at a real alp-sdk "
-           "checkout) -- resolve_targets needs both a real metadata/ tree "
-           "(SoM presets, SoC JSON) and a bound tan.planner to import at all.",
+           "checkout) -- resolve_targets imports fine standalone, but these "
+           "tests assert against real committed SoM presets and SoC JSON "
+           "that only exist in a bound metadata/ tree.",
 )
 
 if SDK is not None:

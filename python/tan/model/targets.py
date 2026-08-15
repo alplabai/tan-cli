@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# scripts/alp_model/targets.py
 """Derive .alpmodel compile targets from a SoM SKU (silicon-determined).
 
 Targets come from the host SoC's npus[] *and* from any on-module discrete
@@ -14,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from tan.planner.som_metadata import resolve_soc_path
+from tan.soc_ref import resolve_soc_path
 
 
 @dataclass(frozen=True)
