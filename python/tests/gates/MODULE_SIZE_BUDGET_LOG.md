@@ -144,3 +144,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-15 -- tan-cli#760 review round 3: mutation-provable --fix wiring test (Check.fix_missing fallback in __post_init__, corrected fix_installer_not_found_check/run_fix docstrings, hardened shell-metacharacter denylist)
     - tan/commands/doctor_cmd.py: 4087 -> 4114
     - tan/core/bootstrap.py: 2269 -> 2275
+- 2026-08-15 -- ADR-0028 Task 2: relocate the alp-sdk model engine (13 modules, 1029 lines) into tan.model verbatim; two of its already-existing over-50-line functions move with it
+    - function_count_budget: 258 -> 260
