@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# scripts/alp_model/adapters/executorch.py
 """ExecuTorch passthrough adapter (host model compiler).
 
 ExecuTorch programs are exported ahead of time on the ML-engineer's side

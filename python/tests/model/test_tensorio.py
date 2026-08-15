@@ -1,4 +1,4 @@
-# tests/scripts/test_alp_model_tensorio.py
+# SPDX-License-Identifier: Apache-2.0
 """TFLite tensor-I/O extraction into Stage-1a Tensor records."""
 from pathlib import Path
 

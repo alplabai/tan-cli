@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# scripts/alp_model/adapters/drpai.py
 """Renesas DRP-AI compiler adapter (host model compiler).
 
 DRP-AI uses the DRP-AI TVM toolchain (github.com/renesas-rz/rzv_drp-ai_tvm),

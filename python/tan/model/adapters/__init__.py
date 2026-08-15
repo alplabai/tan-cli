@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# scripts/alp_model/adapters/__init__.py
 """Compiler-adapter interface: one adapter per backend toolchain."""
 from __future__ import annotations
 from abc import ABC, abstractmethod

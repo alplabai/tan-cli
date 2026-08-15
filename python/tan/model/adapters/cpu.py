@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# scripts/alp_model/adapters/cpu.py
 """CPU/TFLM passthrough adapter: the model runs as-is on reference kernels."""
 from __future__ import annotations
 from pathlib import Path

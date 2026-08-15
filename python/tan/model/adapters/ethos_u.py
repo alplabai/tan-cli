@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# scripts/alp_model/adapters/ethos_u.py
 """Arm Ethos-U (Vela) compiler adapter.
 
 Wraps the `vela` CLI from `ethos-u-vela` (the `model-compile` optional

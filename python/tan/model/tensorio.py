@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# scripts/alp_model/tensorio.py
 """Extract model input/output tensor descriptors for the .alpmodel manifest.
 
 Parses a TFLite flatbuffer's first subgraph I/O into Stage-1a `Tensor` records
 (dtype/rank/shape/scale/zp -> mirrors alp_inference_tensor_t). Best-effort:
 returns ([], []) when the source isn't a .tflite, the `tflite` reader (from the
-`model-compile` extra) isn't installed, or the bytes don't parse -- the model
+`model-io` extra) isn't installed, or the bytes don't parse -- the model
 still packages, just without I/O metadata (compile-what's-available)."""
 from __future__ import annotations
 from pathlib import Path

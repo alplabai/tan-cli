@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# scripts/alp_model/adapters/deepx.py
 """DEEPX DX-M1 compiler adapter (host model compiler).
 
 DEEPX's compiler is the proprietary, license-gated `dx-com` Python wheel

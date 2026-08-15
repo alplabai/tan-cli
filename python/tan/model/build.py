@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# scripts/alp_model/build.py
 """Build driver: SKU + source model -> .alpmodel package (compile-what's-available).
 
 Resolves the SoM's targets, runs each *available* compiler adapter, and assembles

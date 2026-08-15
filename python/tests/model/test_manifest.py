@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tan.model.manifest round-trip serialisation."""
 import json
 import cbor2

@@ -1,4 +1,4 @@
-# tests/scripts/test_alp_model_adapters.py
+# SPDX-License-Identifier: Apache-2.0
 """Compiler adapters: interface + CPU passthrough."""
 import os
 import shutil
