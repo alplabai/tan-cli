@@ -44,7 +44,26 @@ if [ -e "$WORK" ]; then
   echo "       re-run after removing it; continuing would measure stale state." >&2
   exit 2
 fi
-mkdir -p "$WORK/home" "$WORK/proj"
+# Guarded (tan-cli#506, the other half of the `cd "$WORK/proj"` guard below):
+# `set -e` is deliberately off in this harness, so an unguarded failure here
+# -- a read-only or full filesystem, a quota, `$WORK` on a path this user
+# cannot write -- sails past silently, and `export HOME` on the next line then
+# points at a directory that was never created.
+#
+# MEASURED against current `dev`, which already has the `cd "$WORK/proj"`
+# guard 90 lines below: an unwritable `$WORK` does NOT run all the way into a
+# misattributed tan failure any more -- that guard already catches it and
+# exits 2. But the diagnosis it prints names the wrong site: "could not cd
+# into $WORK/proj", when the real cause is THIS `mkdir` failing 90 lines
+# earlier and being silently outlived. For an unattended nightly run
+# (tan-cli#754), the Actions tab should name the actual failing operation at
+# the actual line, not rely on a guard further down the script to catch the
+# same root cause under someone else's name.
+mkdir -p "$WORK/home" "$WORK/proj" || {
+  echo "ABORT: could not create the sandbox under $WORK" >&2
+  echo "       (read-only filesystem, quota, or an unwritable parent)" >&2
+  exit 2
+}
 export HOME="$WORK/home"; export USERPROFILE="$WORK/home"
 unset ALP_SDK_ROOT ZEPHYR_BASE ALP_FLASH_FORCE 2>/dev/null || true
 git config --global core.longpaths true 2>/dev/null || true
