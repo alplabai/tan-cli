@@ -15,6 +15,7 @@ import pytest
 
 from tan.model.adapters import CompilerAdapter, Blob
 from tan.model.adapters.cpu import CpuAdapter
+from tan.model.adapters.executorch import ExecutorchAdapter
 from tan.model.package import read_package
 from tan.planner_root import bind_sdk_root
 from tests.conftest import sdk_root
@@ -116,15 +117,31 @@ def test_build_model_default_registry_reaches_executorch_adapter_for_pte_source(
     assert ethos_u and all(c.status in ("skipped", "incompatible") for c in ethos_u)
 
 
-def test_build_model_default_registry_tflite_source_still_uses_cpu_adapter(tmp_path):
+def test_build_model_cpu_backend_adapters_tflite_source_uses_cpu_adapter(tmp_path):
     # Guards the by_backend grouping: registering ExecutorchAdapter must not
     # steal the "cpu" backend key from CpuAdapter for an ordinary .tflite build
     # (a naive `{a.backend: a for a in registry}` dict would let the later
     # entry in _ADAPTERS silently win here).
+    #
+    # Pinned to just the two "cpu"-tier adapters -- NOT adapters=None (the
+    # real default registry, as the sibling .pte test above deliberately
+    # uses). The default registry also carries VelaAdapter, which DOES
+    # accept .tflite and IS invoked for real whenever `vela` happens to be on
+    # PATH; the dummy `TFL3-DUMMY` bytes below are not a parseable
+    # flatbuffer, so a present vela genuinely fails to compile them and
+    # build_model() (which does not catch adapter.compile() exceptions --
+    # a real compile failure is meant to fail the build loudly, not vanish
+    # into a coverage skip) raises -- flipping this test red only on hosts
+    # that happen to have vela installed (tan-cli#784). This test's
+    # only claim is the cpu-vs-cpu backend-key collision, so its registry is
+    # pinned to reproduce exactly that collision, deterministically, on every
+    # host; default-registry reachability is the sibling test's job above,
+    # and ethos_u's own real-tool behaviour belongs to test_adapters.py /
+    # test_vela_yolo_internal.py.
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-DUMMY")
     out = build_model(sku="E1M-AEN801", name="demo", source=src, out_dir=tmp_path,
-                      metadata_root=_META)   # default registry
+                      metadata_root=_META, adapters=[CpuAdapter(), ExecutorchAdapter()])
     mft, blobs = read_package(out.read_bytes())
     cpu = [t for t in mft.targets if t.backend == "cpu"]
     assert len(cpu) == 1
