@@ -132,7 +132,18 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 255 -> 256
 - 2026-08-14 -- rebase onto #745: recompute after tan-cli#744's planner growth and tan-cli#747/#746 landed in the same budget
     - function_count_budget: 256 -> 257
+- 2026-08-15 -- tan-cli#760: PATH-confirmation guard for install commands (bootstrap.py leading_binary/confirmed_install_commands, wired through bootstrap_cmd.check_prerequisites and doctor_cmd._collect)
+    - tan/commands/bootstrap_cmd.py: 3255 -> 3263
+    - tan/commands/doctor_cmd.py: 4003 -> 4014
+    - tan/core/bootstrap.py: 2111 -> 2172
+    - function_count_budget: 257 -> 258
+- 2026-08-15 -- tan-cli#760 review fixes: MAJOR 1 (Check.fix_missing split, prerequisites_check's available param), MAJOR 2/Closes #765 (confirm_missing guards posix_venv_unusable at both call sites), MINOR 1/2/3 (wrapper+metachar refusal, shlex parity, sudo confirmation), MINOR 4 (doctor's own host-neutral fix hint), MINOR 5 (bootstrap_cmd guards windows_python_not_runnable/python_too_old too)
+    - tan/commands/bootstrap_cmd.py: 3263 -> 3277
+    - tan/commands/doctor_cmd.py: 4014 -> 4087
+    - tan/core/bootstrap.py: 2172 -> 2269
 - 2026-08-15 -- tan-cli#756: hand-port alp-sdk#1446's _aen_require_disjoint_slot0 into tan/planner/zephyr_board.py -- a dual-M55 AEN SoM with no per-role <role>_slot0 region is now refused at emit time instead of silently sharing one MRAM slot0 address
     - tan/planner/loader.py: 1301 -> 1313
     - tan/planner/zephyr_board.py: 1433 -> 1486
-    - function_count_budget: 257 -> 258
+    - function_count_budget: raised on this branch from 257 to 258; the final count after merging tan-cli#760 is recorded by the merge-resync entry below
+- 2026-08-15 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 258 -> 259

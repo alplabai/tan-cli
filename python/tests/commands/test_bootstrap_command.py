@@ -25,6 +25,7 @@ WOULD have spawned; `test_a_dry_run_writes_nothing` is what keeps that honest.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,7 @@ from tan.core.bootstrap import (
     STALE,
     WINDOWS,
     BootstrapManifestError,
+    MissingPrerequisite,
     Tokens,
     WorkspaceSdkRecord,
     capture_tail,
@@ -304,6 +306,53 @@ def test_the_effective_floor_refuses_a_host_the_manifest_would_accept():
     # Names the SKEW, or a customer greps the manifest, reads 3.10 and concludes
     # tan is broken.
     assert "declares only 3.10" in line
+
+
+#: The harness's OWN regex (`scripts/e2e-full.sh`'s Scenario-B FLOOR_CHECK,
+#: verbatim), not a paraphrase of it -- a loose substring pin (a prior
+#: version of this constant pinned the bare word `"found"`) is exactly the
+#: defect class this whole PR is about, just relocated into the test: three
+#: of six candidate rewords that break the harness's structural match (an
+#: added patch component, a restructure keeping both words, a swapped
+#: clause order) left a substring-only pin GREEN (tan-cli#757 review,
+#: second pass). Compare `E2E_DIVERGENCE_PHRASE` above -- a five-word
+#: fragment chosen because it cannot survive a reword -- this constant now
+#: matches that bar by construction: it cannot pass unless the STRUCTURE the
+#: harness parses (two `X.Y` pairs bracketed by "found" ... "needs >=") is
+#: still there. Nothing else pins this: no workflow runs `e2e-full.sh` at
+#: all (`grep -rn e2e-full.sh .github/workflows/` finds nothing), so a
+#: reword would otherwise leave every CI job green while the harness's
+#: regex silently stops matching. Reword the message and this fails, naming
+#: the file to update.
+E2E_FLOOR_CHECK_REGEX = r"Python (\d+)\.(\d+) found.*needs >= (\d+)\.(\d+)"
+
+
+def test_e2e_full_sh_floor_wording_survives_in_the_refusal_message():
+    """tan-cli#757 review MINOR 5 (second pass). See `E2E_FLOOR_CHECK_REGEX`
+    above for why this is pinned separately from
+    `test_the_effective_floor_refuses_a_host_the_manifest_would_accept`."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 12), source="zephyr python.cmake", manifest=(3, 10))
+    refusal = python_too_old(
+        (3, 10), floor.effective, facts.install_for_host(LINUX),
+        floor_source=floor.source, manifest_floor=floor.manifest,
+    )
+    line = refusal.lines[0]
+    match = re.search(E2E_FLOOR_CHECK_REGEX, line)
+    assert match is not None, (
+        f"scripts/e2e-full.sh's FLOOR_CHECK regex {E2E_FLOOR_CHECK_REGEX!r} no "
+        f"longer matches this message. That regex is what confirms a "
+        f"bootstrap.python-too-old refusal was actually EARNED (found < floor) "
+        f"before honouring it as a reason to skip the rest of Scenario B -- a "
+        f"reword here silently stops that check, degrading safe (every case "
+        f"falls to NOPARSE, a scored failure) but not correctly. Update "
+        f"scripts/e2e-full.sh's FLOOR_CHECK regex in the same change.\n\n"
+        f"message was: {line!r}"
+    )
+    found = (int(match.group(1)), int(match.group(2)))
+    effective = (int(match.group(3)), int(match.group(4)))
+    assert found == (3, 10), f"regex extracted the wrong 'found' pair: {found!r}"
+    assert effective == (3, 12), f"regex extracted the wrong 'floor' pair: {effective!r}"
 
 
 def test_the_skew_case_suppresses_the_manifests_own_install_command():
@@ -2321,6 +2370,90 @@ def test_the_posix_refusal_keeps_the_oracle_line_and_adds_the_doctor_fix_remedy(
     assert [m.command for m in refusal.missing] == [
         "sudo apt-get install -y cmake", "sudo apt-get install -y ninja-build"
     ]
+
+
+def test_check_prerequisites_nulls_the_command_when_the_package_manager_is_absent(monkeypatch):
+    """tan-cli#760, end to end through `check_prerequisites` (the function
+    `tan bootstrap` actually calls). Measured on fedora:42/archlinux:latest/
+    rockylinux:9: none of the three has `apt-get`, yet alp-sdk's
+    `prerequisites.install.linux` is six `sudo apt-get install -y ...` lines
+    -- so on a host where NOTHING is on PATH (tools absent AND `apt-get`
+    absent), every `MissingPrerequisite.command` this call produces must be
+    `None`, never the unrunnable string that used to reach `alp-sdk-vscode`'s
+    Fix button byte-identical to a real Debian host."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    monkeypatch.setattr(bootstrap_cmd, "on_path", lambda _name: None)
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None and refusal.code == "prerequisites-missing"
+    assert refusal.missing, "the real manifest's Linux tool list must not be empty"
+    assert all(m.command is None for m in refusal.missing)
+
+
+def test_check_prerequisites_keeps_the_command_when_apt_get_is_confirmed(monkeypatch):
+    """The other half of tan-cli#760: a real Debian/Ubuntu host DOES have
+    `apt-get`, so the guard must not strip a command that can actually run
+    there -- dropping every entry unconditionally would just trade one wrong
+    answer (a command that never runs) for another (no command shown even
+    where one works)."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    # `sudo` itself must be confirmed too (tan-cli#760 review MINOR 3) -- a
+    # host with `apt-get` but no `sudo` is not actually a Debian/Ubuntu one
+    # this remedy works on. Every OTHER tool stays absent (`None`, matching
+    # `on_path`'s real `str | None` contract -- a bare bool broke downstream
+    # `is not None` presence checks) so the `missing` branch is the one this
+    # test actually exercises.
+    monkeypatch.setattr(
+        bootstrap_cmd,
+        "on_path",
+        lambda name: f"/usr/bin/{name}" if name in {"apt-get", "sudo"} else None,
+    )
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None
+    by_tool = {m.tool: m.command for m in refusal.missing}
+    assert by_tool["cmake"] == "sudo apt-get install -y cmake"
+    assert by_tool["ninja"] == "sudo apt-get install -y ninja-build"
+
+
+def test_check_prerequisites_nulls_the_venv_unusable_command_when_apt_get_is_absent(
+    monkeypatch,
+):
+    """tan-cli#760 review MAJOR 2 / Closes #765: `posix_venv_unusable()`'s
+    hardcoded `sudo apt-get install -y python3-venv` reached the bootstrap
+    envelope completely unguarded before this fix -- measured on a host with
+    nothing on PATH, `refusal.missing` carried the RAW command. The
+    structural claim "this is the ONE place that decides" was false; this
+    proves the second call site is now guarded too, with NO signature
+    change to `posix_venv_unusable` itself."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    # Every required tool present (so the missing-tools branch is never
+    # reached) EXCEPT the installer commands (`apt-get`/`sudo`), which are
+    # absent -- the venv-incapable branch is the only one this test exercises.
+    # `str | None`, matching `on_path`'s real contract -- a bare bool broke
+    # downstream `is not None` presence checks elsewhere on this path.
+    monkeypatch.setattr(
+        bootstrap_cmd,
+        "on_path",
+        lambda name: None if name in {"apt-get", "sudo"} else f"/usr/bin/{name}",
+    )
+    monkeypatch.setattr(
+        bootstrap_cmd, "probe_host_python", lambda _floor: HostPython(("python3",), (3, 12))
+    )
+    monkeypatch.setattr(bootstrap_cmd, "python_venv_capable", lambda _python: False)
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None and refusal.code == "venv-unusable"
+    assert refusal.missing == (MissingPrerequisite("python3-venv", None),)
 
 
 def test_the_tool_less_refusals_carry_their_own_codes_and_report_null():
