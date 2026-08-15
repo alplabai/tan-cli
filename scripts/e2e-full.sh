@@ -272,6 +272,26 @@ jrun() {
   fi
 }
 
+# A captured-output excerpt for `note`, safe against tan-cli#758: a
+# tail-only truncation severs `Traceback (most recent call last):` -- the
+# ALWAYS-first line of a Python traceback -- so a `tail -c N` excerpt of a
+# real crash silently reads as clean. Silent in the dangerous direction: a
+# traceback that DID occur then reads, in the report, as one that did not.
+# Keeps BOTH ends (a `head` as well as the `tail`) rather than choosing one,
+# and calls the fact out explicitly whenever the header is present, so it
+# survives even on a capture so large neither excerpt alone would reach it.
+excerpt() {
+  local f="$1"
+  if grep -qF 'Traceback (most recent call last):' "$f" 2>/dev/null; then
+    printf 'TRACEBACK PRESENT -- excerpt is head+tail, not the whole capture:\n'
+    head -c 200 "$f" 2>/dev/null
+    printf '\n...\n'
+    tail -c 400 "$f" 2>/dev/null
+  else
+    tail -c 400 "$f" 2>/dev/null
+  fi
+}
+
 ########################  FRESH HOST  ########################
 echo; echo "############ FRESH HOST ############"
 
@@ -529,16 +549,37 @@ missing_prereqs() {
   done
   printf '%s' "${_m# }"
 }
+# Probe rather than assume, the same shape e2e-container.sh:52-65 already
+# uses for the Docker daemon (tan-cli#759): try the real operation directly,
+# then again under `sudo -n`, and RECORD which path (if any) actually worked.
+# The OLD gate matched literal root only and never attempted sudo, so a
+# non-root host with passwordless sudo -- `NOPASSWD:ALL`, the shape a real
+# customer running behind sudo actually has -- scored byte-identical to a
+# non-root host with no escalation path at all, and Scenario B (the only leg
+# that reaches a real ARM ELF) was reachable ONLY as root.
+#
+# `apt-get check` is the probe operation, not `apt-get install`/`update`: it
+# needs the SAME dpkg/apt lock a real install needs (so it genuinely fails
+# Permission-denied for a user who cannot self-provision), but -- unlike
+# `update` -- touches neither the network nor the package-list cache, so the
+# probe itself has no side effect worth naming, the same role `docker info`
+# plays in the pattern this copies.
 CAN_APT=0
-if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && command -v apt-get >/dev/null 2>&1; then
-  CAN_APT=1
+APT_MODE=none
+APT="apt-get"
+if command -v apt-get >/dev/null 2>&1; then
+  if apt-get check >/dev/null 2>&1; then
+    CAN_APT=1; APT_MODE=root; APT="apt-get"
+  elif sudo -n apt-get check >/dev/null 2>&1; then
+    CAN_APT=1; APT_MODE=sudo; APT="sudo apt-get"
+  fi
 fi
 # Interpolated, not a hardcoded "cmake/ninja/xz/wget": that literal is only
 # true for the old always-POSIX-four set this section replaces, and would
 # misreport what was actually probed on Windows or macOS.
 HOST_PREREQS_LABEL="$(echo "$HOST_PREREQS" | tr ' ' '/')"
 have_prereqs && note "$HOST_PREREQS_LABEL already present" || note "$HOST_PREREQS_LABEL NOT present"
-note "root + apt-get available (can self-provision): $CAN_APT"
+note "apt-get available for self-provisioning: $CAN_APT (mode=$APT_MODE: root/sudo/none)"
 
 # What follows used to be one unconditional "real bootstrap -> #299 doctor ->
 # init + build" block that ASSUMED a toolchain and scored a correct refusal on
@@ -614,6 +655,82 @@ PY
   fi
 }
 
+# bsA2's ONE bootstrap attempt after the bare-host tool set is installed can
+# CORRECTLY land on either of two refusals, not one (tan-cli#757). Once
+# cmake/ninja/xz/wget are present, `tan bootstrap` next probes the resolved
+# Python against the EFFECTIVE floor (the higher of alp-sdk's manifest and
+# Zephyr's own `PYTHON_MINIMUM_REQUIRED`, `python/tan/commands/bootstrap_cmd.py`
+# `resolve_python_floor`) BEFORE it ever gets to the venv check:
+#
+#   * below the floor              -> bootstrap.python-too-old (tool-less)
+#   * clears the floor, no venv    -> bootstrap.venv-unusable (names python3-venv)
+#
+# Which one is correct is a property of the HOST's system Python, not of tan --
+# measured identical on ubuntu:22.04, debian:12 and debian:11 (all below the
+# 3.12 effective floor) against a tan build already proven correct there. A
+# single hardcoded expectation can therefore only ever pass on a host at or
+# above the floor (in practice, only ubuntu:24.04), and the old bsA2 assertion
+# did exactly that -- reddening every Debian-family host below it for a
+# refusal tan was RIGHT to make.
+#
+# Accepting "either" does not mean accepting "anything": each branch still
+# demands its own positive evidence -- venv-unusable must name python3-venv
+# (unchanged from before), and python-too-old must carry the floor-comparison
+# wording the refusal always emits ("needs >="), not just a bare code with no
+# message. A bootstrap that exits non-zero for some THIRD, unrelated reason
+# (env/exit/ok mismatch, or neither code present) still fails this exactly as
+# it did before.
+check_bootstrap_python_gate() {
+  local label="$1"
+  local out="$WORK/$label.out" err="$WORK/$label.err"
+  "$TAN" bootstrap --sdk-root ./alp-sdk --non-interactive --format json >"$out" 2>"$err"
+  local rc=$?
+  local esz; esz=$(wc -c <"$err" | tr -d ' ')
+  note "$label: exit=$rc stderr=${esz}B"
+  if [ "$rc" -eq 0 ]; then
+    bada "$label: bootstrap unexpectedly exited 0"
+    note "$(head -c 300 "$out")"
+    return
+  fi
+  [ "$esz" -eq 0 ] && oka "$label: 0-byte stderr" || bada "$label: stderr not empty (${esz}B)"
+  local verdict
+  verdict=$(python3 - "$out" "$rc" <<'PY'
+import json, sys
+path, rc = sys.argv[1], int(sys.argv[2])
+try:
+    d = json.load(open(path))
+except Exception as e:
+    print("PARSEFAIL:" + str(e)); raise SystemExit
+if d.get("exitCode") != rc:
+    print(f"EXITMISMATCH:{d.get('exitCode')}"); raise SystemExit
+if d.get("ok") is not False:
+    print(f"OKMISMATCH:{d.get('ok')}"); raise SystemExit
+issues = d.get("issues") or []
+venv = next((i for i in issues if i.get("code") == "bootstrap.venv-unusable"), None)
+old = next((i for i in issues if i.get("code") == "bootstrap.python-too-old"), None)
+if venv is not None:
+    msg = venv.get("message", "")
+    print("OK:venv-unusable" if "python3-venv" in msg else "MISSING:venv-unusable:python3-venv")
+elif old is not None:
+    msg = old.get("message", "")
+    print("OK:python-too-old" if "needs >=" in msg else "MISSING:python-too-old:floor-wording")
+else:
+    print("NOCODE")
+PY
+)
+  case "$verdict" in
+    OK:*)
+      oka "$label: envelope carries bootstrap.${verdict#OK:} (the refusal this host's Python actually earns)"
+      ;;
+    PARSEFAIL:*)    bada "$label: stdout is not a single JSON envelope"; note "$(head -c 300 "$out")" ;;
+    EXITMISMATCH:*) bada "$label: envelope.exitCode=${verdict#EXITMISMATCH:} but process exited $rc"; note "$(head -c 300 "$out")" ;;
+    OKMISMATCH:*)   bada "$label: exit $rc but envelope ok=${verdict#OKMISMATCH:}"; note "$(head -c 300 "$out")" ;;
+    NOCODE)         bada "$label: envelope carries neither bootstrap.venv-unusable nor bootstrap.python-too-old"; note "$(head -c 300 "$out")" ;;
+    MISSING:*)      bada "$label: $verdict"; note "$(head -c 300 "$out")" ;;
+    *)              bada "$label: unrecognised verdict '$verdict'"; note "$(head -c 300 "$out")" ;;
+  esac
+}
+
 ########################  SCENARIO A: bare host refuses precisely  ########################
 echo; echo "############ SCENARIO A: bare host (no build toolchain) ############"
 if have_prereqs; then
@@ -630,13 +747,16 @@ else
   MISSING_PREREQS=$(missing_prereqs)
   check_bootstrap_refusal bsA1 prerequisites-missing $MISSING_PREREQS
   if [ "$CAN_APT" -eq 1 ]; then
-    note "A: installing cmake ninja-build xz-utils wget (apt package names for the bare-host set; missing: $MISSING_PREREQS)"
-    apt-get install -y -qq --no-install-recommends cmake ninja-build xz-utils wget \
+    note "A: installing cmake ninja-build xz-utils wget via '$APT' (mode=$APT_MODE; missing: $MISSING_PREREQS)"
+    # shellcheck disable=SC2086  # $APT is deliberately word-split ("sudo apt-get")
+    $APT install -y -qq --no-install-recommends cmake ninja-build xz-utils wget \
       >"$WORK/apt-a.log" 2>&1
-    check_bootstrap_refusal bsA2 venv-unusable python3-venv
+    # Either bootstrap.venv-unusable or bootstrap.python-too-old is a correct
+    # refusal here -- see check_bootstrap_python_gate's own comment (tan-cli#757).
+    check_bootstrap_python_gate bsA2
   else
-    note "A: no root apt-get in this environment -- cannot install the missing"
-    note "   tools to progress to the venv-unusable stage; that half of Scenario A"
+    note "A: no apt-get privilege in this environment (mode=$APT_MODE) -- cannot install the"
+    note "   missing tools to progress past prerequisites-missing; that half of Scenario A"
     note "   is NOT RUN (not scored as a pass)."
   fi
 fi
@@ -648,7 +768,7 @@ HAVE_PROJECT=0
 SDK_OK=0
 RUN_SDK=no
 if ! have_prereqs && [ "$CAN_APT" -ne 1 ]; then
-  note "B: NOT RUN -- host lacks $HOST_PREREQS_LABEL and cannot self-provision (no root apt-get)"
+  note "B: NOT RUN -- host lacks $HOST_PREREQS_LABEL and cannot self-provision (apt-get privilege: $APT_MODE)"
 else
   if [ "$CAN_APT" -eq 1 ]; then
     # `file` is NOT one tan names, and it is required anyway: the Zephyr SDK's
@@ -665,8 +785,9 @@ else
     # Installed here so scenario B can reach a real ARM ELF. That tan's own
     # prerequisite list omits it -- and that the SDK's failure never names it --
     # is a separate customer-facing gap, filed as tan-cli#424.
-    note "B: installing cmake ninja-build xz-utils wget python3-venv file"
-    apt-get install -y -qq --no-install-recommends \
+    note "B: installing cmake ninja-build xz-utils wget python3-venv file via '$APT' (mode=$APT_MODE)"
+    # shellcheck disable=SC2086  # $APT is deliberately word-split ("sudo apt-get")
+    $APT install -y -qq --no-install-recommends \
       cmake ninja-build xz-utils wget python3-venv file >"$WORK/apt-b.log" 2>&1
   fi
 
@@ -678,12 +799,43 @@ else
   ESZ=$(wc -c <"$WORK/bsB.err" | tr -d ' ')
   OKVAL=$(jget "$WORK/bsB.out" ok)
   note "bootstrap: exit=$RC ok=$OKVAL stderr=${ESZ}B took $((T1-T0))s"
+  # A host below the EFFECTIVE Python floor is refused CORRECTLY right here
+  # (bootstrap.python-too-old) -- tan-cli#757. That is not a defect: measured
+  # identical on ubuntu:22.04, debian:12 and debian:11 (all below the 3.12
+  # floor) against a tan build already proven correct there, and Scenario B's
+  # whole premise -- provisioning makes bootstrap succeed -- cannot hold once
+  # the floor legitimately refuses. Detected from the envelope's own issue
+  # code, not re-derived from a host python3 --version probe here: re-deriving
+  # the floor computation (manifest vs Zephyr's PYTHON_MINIMUM_REQUIRED,
+  # `resolve_python_floor`) in bash is exactly the hand-copied-tuple drift the
+  # HOST_PREREQS block above already had to fix once.
+  B_FLOOR_REFUSAL=0
   if [ "$RC" -eq 0 ] && [ "$OKVAL" = "True" ] && [ "$ESZ" -eq 0 ]; then
     okb "B: bootstrap ok:true, exit 0, 0-byte stderr"
   else
-    badb "B: bootstrap failed (exit $RC ok=$OKVAL stderr=${ESZ}B)"
-    note "$(head -c 400 "$WORK/bsB.out")"
+    HAS_FLOOR_CODE=$(python3 - "$WORK/bsB.out" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print("no"); raise SystemExit
+codes = [i.get("code") for i in (d.get("issues") or [])]
+print("yes" if "bootstrap.python-too-old" in codes else "no")
+PY
+)
+    if [ "$HAS_FLOOR_CODE" = "yes" ]; then
+      B_FLOOR_REFUSAL=1
+      note "B: bootstrap correctly refused -- host Python is below the effective floor"
+      note "   (bootstrap.python-too-old); the rest of scenario B is NOT RUN (not scored)."
+    else
+      badb "B: bootstrap failed (exit $RC ok=$OKVAL stderr=${ESZ}B)"
+      note "$(head -c 400 "$WORK/bsB.out")"
+    fi
   fi
+
+  if [ "$B_FLOOR_REFUSAL" -eq 1 ]; then
+    note "B: skipping west/doctor/init/SDK/build/flash -- bootstrap never produced a workspace"
+  else
   WS=$(jget "$WORK/bsB.out" data.workspaceDir); note "workspace=$WS"
   # The venv layout is per-platform: POSIX puts console scripts in `bin/`,
   # Windows in `Scripts/` with a `.exe` suffix. tan itself gets this right --
@@ -757,7 +909,7 @@ PY
       fi
       T1=$(date +%s)
       note "west sdk install: $((T1-T0))s (timeout ${SDK_TIMEOUT}s), exit-ok=$SDK_OK"
-      [ "$SDK_OK" -eq 1 ] || note "$(tail -c 400 "$WORK/sdkinstall.err" 2>/dev/null)"
+      [ "$SDK_OK" -eq 1 ] || note "$(excerpt "$WORK/sdkinstall.err")"
       # `west sdk install` can extract a full, usable SDK into the sandbox
       # $HOME and THEN fail at a later step -- missing file(1) (the host-tools
       # gap documented above) or the `timeout "$SDK_TIMEOUT"` mid-extract --
@@ -824,9 +976,9 @@ PY
           fi
         else
           # file(1) absent is a HOST gap, not an artefact defect -- reachable
-          # on a non-Debian/minimal POSIX host (CAN_APT=0, since :587 below
-          # only apt-installs `file` when root+apt-get are both available)
-          # that still carries a working toolchain of its own. The old code
+          # on a non-Debian/minimal POSIX host (CAN_APT=0, since the apt
+          # install above only runs when CAN_APT gates it, tan-cli#759) that
+          # still carries a working toolchain of its own. The old code
           # fed "file(1) unavailable" into the same `grep -qi "ELF.*ARM"`,
           # which can never match, scoring a genuine ARM ELF as
           # `badb "artefact is not an ARM ELF"`.
@@ -979,6 +1131,7 @@ PY
     esac
     [ "$FB" != "NONE" ] && okb "B: flash resolved the project's board.yaml" \
       || badb "B: flash resolved no board.yaml -- it is not looking at the built project"
+  fi
   fi
 fi
 echo "--- scenario B: $PASS_B passed, $FAIL_B failed ---"
