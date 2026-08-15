@@ -60,21 +60,36 @@ BACKEND_TOOLS: dict[str, str | None] = {
 #: `is_available()`; never an install instruction this repo cannot support.
 _UNAVAILABLE_REASONS: dict[str, str] = {
     # VelaAdapter.is_available(): shutil.which("vela") is not None
-    # (tan/model/adapters/ethos_u.py). "ethos-u-vela" is the PyPI package
-    # that ships the `vela` console script -- also this repo's own
-    # `model-compile` optional dependency.
-    "ethos_u": "vela not on PATH; pip install ethos-u-vela",
-    # DeepxAdapter.is_available(): shutil.which("dxcom") or
-    # ALP_DEEPX_SDK_HOME pointing at a directory
-    # (tan/model/adapters/deepx.py). Its module doc: the dx-com wheel "is
-    # not redistributable" and is "verified -- Linux x86_64, CPython 3.12"
-    # only, so "license-gated, Linux-only" is what a customer needs to know
-    # before chasing a `pip install` that does not exist for them.
+    # (tan/model/adapters/ethos_u.py). This repo's own pinned path is the
+    # `model-compile` extra (`pyproject.toml`: `ethos-u-vela>=3.9`), which
+    # carries the floor -- name it instead of a bare `pip install
+    # ethos-u-vela` that could drift from that pin.
+    "ethos_u": "vela not on PATH; pip install alp-tan[model-compile]",
+    # deepx_dxm1's row is NOT `DeepxAdapter.is_available()` (see
+    # `_deepx_dxm1_status` in `tan.commands.model_cmd`): that adapter method
+    # ORs in a second arm -- `ALP_DEEPX_SDK_HOME` pointing at a directory --
+    # that `DeepxAdapter.compile()` never reads (it always shells the bare
+    # `dxcom` off PATH), so gating on it reported this row green on hosts
+    # where the next `model build` immediately raised `FileNotFoundError:
+    # 'dxcom'`. This default reason covers the case neither PATH nor the env
+    # var is set; the ALP_DEEPX_SDK_HOME-set-but-no-dxcom case gets its own
+    # caveat reason from `_deepx_dxm1_status`, passed through `backend_row`'s
+    # `reason` override below. Its module doc: the dx-com wheel "is not
+    # redistributable" and is "verified -- Linux x86_64, CPython 3.12" only,
+    # so "license-gated, Linux-only" is what a customer needs to know before
+    # chasing a `pip install` that does not exist for them.
     "deepx_dxm1": "dxcom not on PATH; license-gated, Linux-only",
-    # DrpaiAdapter.is_available(): _tvm_home(), which reads exactly this one
-    # env var (tan/model/adapters/drpai.py's own `_tvm_home()`). Its module
-    # doc: the toolchain is "large and account-/source-gated ... so it is
-    # NOT bundled" -- there is no pip/apt install to name here either.
+    # drpai's row is likewise NOT the bare `DrpaiAdapter.is_available()`
+    # (see `_drpai_status` in `tan.commands.model_cmd`): that adapter method
+    # only checks `ALP_DRPAI_TVM_HOME` names a directory, never that the
+    # vendor tutorial script `DrpaiAdapter.compile()` actually spawns
+    # (`tutorials/compile_onnx_model_quant.py`) exists under it, so an
+    # unpacked-but-unbuilt toolchain tree reported green here too. This
+    # default reason covers the case the env var isn't set at all; the
+    # var-set-but-script-missing case gets its own caveat reason from
+    # `_drpai_status`. Its module doc: the toolchain is "large and
+    # account-/source-gated ... so it is NOT bundled" -- there is no
+    # pip/apt install to name here either.
     "drpai": (
         "ALP_DRPAI_TVM_HOME not set to a built rzv_drp-ai_tvm install; "
         "account-gated toolchain, not bundled"
@@ -103,7 +118,9 @@ class BackendRow:
         }
 
 
-def backend_row(backend: str, *, available: bool, version: str | None) -> BackendRow:
+def backend_row(
+    backend: str, *, available: bool, version: str | None, reason: str | None = None
+) -> BackendRow:
     """Assemble one row from an ALREADY-PROBED `available`/`version` pair.
 
     Pure -- no IO here at all, real or otherwise; the caller did the probing.
@@ -111,13 +128,22 @@ def backend_row(backend: str, *, available: bool, version: str | None) -> Backen
     works" note on a green row); `version` is discarded when `available` is
     False even if the caller passed one in, since an unavailable backend has
     no running toolchain for a version to describe.
+
+    `reason` is an explicit override for `_UNAVAILABLE_REASONS[backend]`'s
+    default, used when the caller's own probe (`_deepx_dxm1_status`/
+    `_drpai_status` in `tan.commands.model_cmd`) found a more specific
+    situation than "nothing at all is set" -- e.g. the toolchain env var IS
+    set but the thing `compile()` actually needs under/via it is still
+    absent. `None` (the default) falls back to the generic per-backend
+    reason, same as before this parameter existed.
     """
+    fallback_reason = reason if reason is not None else _UNAVAILABLE_REASONS.get(backend)
     return BackendRow(
         backend=backend,
         tool=BACKEND_TOOLS.get(backend),
         available=available,
         version=version if available else None,
-        reason=None if available else _UNAVAILABLE_REASONS.get(backend),
+        reason=None if available else fallback_reason,
     )
 
 

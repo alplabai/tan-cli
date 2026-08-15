@@ -57,7 +57,13 @@ that ahead of a build by reporting, per registered backend, whether its
 toolchain is installed and, if not, an ACTIONABLE reason (`tan.core.
 model_doctor`). It is READ-ONLY: every adapter's `is_available()` is a
 `shutil.which`/env-var check today, never a spawn, and `_run_doctor` below
-never calls one that isn't. An unavailable toolchain is the expected, common
+never calls one that isn't. `_run_doctor` does not always take that
+`is_available()` verdict verbatim, though: `deepx_dxm1` and `drpai` each get
+a NARROWER doctor-side probe (`_deepx_dxm1_status`/`_drpai_status` below)
+that checks what `compile()` actually reads/spawns, because each adapter's
+`is_available()` ORs in a signal `compile()` never acts on -- reporting a row
+green there meant the very next `model build` failed anyway. Still read-only,
+still never a spawn. An unavailable toolchain is the expected, common
 case, not a failure -- `_run_doctor` always resolves to `ExitCode.SUCCESS`;
 reporting absence is the feature, not a reason to fail the run. A board.yaml
 and a resolvable alp-sdk checkout are NOT required: this command intends to
@@ -74,6 +80,8 @@ implemented here.
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -348,7 +356,11 @@ def _backend_version(backend: str, *, available: bool) -> str | None:
       it were one.
     * `drpai` -- `_compiler_version(tvm_home)` reads a version file inside
       the toolchain checkout (`tan/model/adapters/drpai.py`), also no
-      subprocess.
+      subprocess. It returns the bare literal `"drp-ai_tvm"` when none of
+      `setup/version` / `version` / `VERSION` is found under `tvm_home` --
+      that is the identical degraded-sentinel shape `ethos_u` guards above,
+      so it gets the same guard: reported here as `None` rather than
+      surfaced as if it were a real version.
     * `deepx_dxm1` -- `_dxcom_version()` is the only version probe DeepxAdapter
       has, and it SPAWNS (`subprocess.run(["dxcom", "-v"], ...)`,
       `tan/model/adapters/deepx.py`). `doctor` must never invoke a compiler,
@@ -363,8 +375,103 @@ def _backend_version(backend: str, *, available: bool) -> str | None:
         return None if version == "vela" else version
     if backend == "drpai":
         tvm_home = _drpai_tvm_home()
-        return _drpai_compiler_version(tvm_home) if tvm_home is not None else None
+        if tvm_home is None:
+            return None
+        version = _drpai_compiler_version(tvm_home)
+        return None if version == "drp-ai_tvm" else version
     return None
+
+
+def _deepx_dxm1_status() -> tuple[bool, str | None]:
+    """`deepx_dxm1`'s doctor verdict -- gated on what `DeepxAdapter.compile()`
+    actually needs (the bare `dxcom` off PATH: `cmd = ["dxcom", "-m", ...]`,
+    `tan/model/adapters/deepx.py`), NOT `DeepxAdapter.is_available()`.
+
+    That adapter method ORs in a second arm -- `ALP_DEEPX_SDK_HOME` naming a
+    directory -- that `compile()` never reads at all, so a row gated on it
+    reported `available: true` on a host with the env var pointed at an
+    empty directory and no `dxcom` anywhere, and the very next `model build`
+    raised `FileNotFoundError: [Errno 2] No such file or directory: 'dxcom'`.
+    Deliberately NOT a change to `DeepxAdapter.is_available()` itself --
+    `tan.model.build.build_model` uses that method for a different decision
+    (whether to attempt this backend at all) that this env-var arm is
+    legitimate for; this is doctor's own, narrower "would compile() actually
+    run" question, answered without spawning anything.
+
+    Read-only: `shutil.which` + `os.environ.get` + `Path.is_dir`, the exact
+    same primitives `is_available()` itself uses, never a subprocess.
+
+    Returns `(available, reason)`. `reason` is `None` when either `dxcom` is
+    on PATH (row is available, no reason needed) or neither PATH nor the env
+    var carries any signal at all (the caller falls back to
+    `_UNAVAILABLE_REASONS["deepx_dxm1"]`'s generic reason). When the env var
+    IS set to a real directory but `dxcom` still isn't on PATH, `reason`
+    carries an explicit caveat -- the var is set, but it is not what
+    `compile()` reads -- rather than silently reporting green.
+    """
+    if shutil.which("dxcom"):
+        return True, None
+    sdk_home = os.environ.get("ALP_DEEPX_SDK_HOME")
+    if sdk_home and Path(sdk_home).is_dir():
+        return False, (
+            f"ALP_DEEPX_SDK_HOME={sdk_home} is set, but dxcom is not on PATH; "
+            "DeepxAdapter.compile() always shells the bare `dxcom` off PATH "
+            "and never reads ALP_DEEPX_SDK_HOME, so this environment would "
+            "still fail `model build`"
+        )
+    return False, None
+
+
+def _drpai_status() -> tuple[bool, str | None]:
+    """`drpai`'s doctor verdict -- gated on what `DrpaiAdapter.compile()`
+    actually needs under `$ALP_DRPAI_TVM_HOME`: the vendor tutorial script
+    `tutorials/compile_onnx_model_quant.py` it spawns
+    (`tan/model/adapters/drpai.py`'s own `cmd = ["python3", str(script),
+    ...]`), NOT just the bare directory `DrpaiAdapter.is_available()`/
+    `_tvm_home()` check for.
+
+    A customer who points `ALP_DRPAI_TVM_HOME` at an unpacked-but-unbuilt
+    checkout (the tutorials/ tree not yet present, or laid out differently)
+    got `available: true` from the bare directory check, then a vendor-script
+    failure on the next real build. Deliberately NOT a change to
+    `DrpaiAdapter.is_available()`/`_tvm_home()` themselves -- same reasoning
+    as `_deepx_dxm1_status` above: this is doctor's own, narrower question.
+
+    Read-only: `_tvm_home()` (env var + `Path.is_dir`) + `Path.is_file` on the
+    tutorial script path, never a subprocess.
+
+    Returns `(available, reason)`, same shape as `_deepx_dxm1_status`: `None`
+    reason falls back to `_UNAVAILABLE_REASONS["drpai"]`'s generic reason
+    (env var not set at all); an explicit caveat when the var names a real
+    directory but the tutorial script isn't under it.
+    """
+    tvm_home = _drpai_tvm_home()
+    if tvm_home is None:
+        return False, None
+    script = tvm_home / "tutorials" / "compile_onnx_model_quant.py"
+    if script.is_file():
+        return True, None
+    return False, (
+        f"ALP_DRPAI_TVM_HOME={tvm_home} is set, but tutorials/"
+        "compile_onnx_model_quant.py was not found under it -- point it at "
+        "a BUILT rzv_drp-ai_tvm install, not an unpacked/incomplete tree"
+    )
+
+
+def _probe_backend(backend: str) -> tuple[bool, str | None]:
+    """`(available, reason override)` for one backend row -- `deepx_dxm1` and
+    `drpai` each get a NARROWER probe than the adapter's own `is_available()`
+    (see `_deepx_dxm1_status`/`_drpai_status`'s own docs): `is_available()`
+    reports green on a signal `compile()` doesn't actually act on, so gating
+    a row on it can report available when the next `model build` would
+    immediately fail. Every other backend keeps the plain `is_available()`
+    OR across its registered adapters, with no reason override."""
+    if backend == "deepx_dxm1":
+        return _deepx_dxm1_status()
+    if backend == "drpai":
+        return _drpai_status()
+    available = any(a.is_available() for a in _ADAPTERS if a.backend == backend)
+    return available, None
 
 
 def _run_doctor(
@@ -408,9 +515,9 @@ def _run_doctor(
 
     rows = []
     for backend in registry_backends(_ADAPTERS):
-        available = any(a.is_available() for a in _ADAPTERS if a.backend == backend)
+        available, reason = _probe_backend(backend)
         version = _backend_version(backend, available=available)
-        rows.append(backend_row(backend, available=available, version=version))
+        rows.append(backend_row(backend, available=available, version=version, reason=reason))
 
     data: dict[str, Any] = {
         "schemaVersion": DOCTOR_DATA_SCHEMA_VERSION,
@@ -499,8 +606,13 @@ def model(
                             file=sys.stderr,
                         )
                     else:
+                        # A backend with no `_UNAVAILABLE_REASONS` entry (and
+                        # no doctor-side caveat) carries `reason: None` --
+                        # drop the `-- ...` clause entirely rather than
+                        # rendering the Python literal `None` into the line.
+                        suffix = f" -- {row['reason']}" if row["reason"] else ""
                         print(
-                            f"{row['backend']}: unavailable (tool={tool}) -- {row['reason']}",
+                            f"{row['backend']}: unavailable (tool={tool}){suffix}",
                             file=sys.stderr,
                         )
             else:

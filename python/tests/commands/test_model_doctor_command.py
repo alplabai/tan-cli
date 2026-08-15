@@ -23,6 +23,7 @@ from typer.testing import CliRunner
 
 from tan.commands import model_cmd
 from tan.commands.model_cmd import model
+from tan.core import model_doctor
 
 app = typer.Typer(add_completion=False)
 app.command("model")(model)
@@ -92,7 +93,7 @@ def test_ethos_u_unavailable_reason_is_exact(tmp_path, monkeypatch):
     assert row["tool"] == "vela"
     assert row["available"] is False
     assert row["version"] is None
-    assert row["reason"] == "vela not on PATH; pip install ethos-u-vela"
+    assert row["reason"] == "vela not on PATH; pip install alp-tan[model-compile]"
 
 
 def test_ethos_u_available_when_vela_is_on_path(tmp_path, monkeypatch):
@@ -125,10 +126,36 @@ def test_deepx_dxm1_available_when_dxcom_is_on_path(tmp_path, monkeypatch):
     assert row["reason"] is None
 
 
-def test_deepx_dxm1_available_via_alp_deepx_sdk_home(tmp_path, monkeypatch):
+def test_deepx_dxm1_alp_deepx_sdk_home_alone_stays_unavailable_with_caveat(tmp_path, monkeypatch):
     """`DeepxAdapter.is_available()`'s SECOND arm -- an SDK home directory,
-    not just a PATH hit -- must also flip the row available with no reason."""
+    not just a PATH hit -- flips THAT method true, but `DeepxAdapter.compile()`
+    never reads `ALP_DEEPX_SDK_HOME` at all (it always shells the bare `dxcom`
+    off PATH): a doctor row gated on `is_available()` alone reported this
+    green with no `dxcom` anywhere, and the very next `model build` raised
+    `FileNotFoundError: [Errno 2] No such file or directory: 'dxcom'`
+    (measured). The row must stay unavailable, with a reason that explains
+    the var is set but not what `compile()` reads -- never silently green."""
     _force_all_unavailable(monkeypatch)
+    sdk_home = tmp_path / "deepx-sdk"
+    sdk_home.mkdir()
+    monkeypatch.setenv("ALP_DEEPX_SDK_HOME", str(sdk_home))
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["deepx_dxm1"]
+    assert row["available"] is False
+    assert row["reason"] is not None
+    assert "ALP_DEEPX_SDK_HOME" in row["reason"]
+    assert "dxcom" in row["reason"]
+    assert str(sdk_home) in row["reason"]
+
+
+def test_deepx_dxm1_dxcom_on_path_wins_even_with_alp_deepx_sdk_home_set(tmp_path, monkeypatch):
+    """The PATH fact is what actually matters -- `dxcom` on PATH flips the row
+    available (with no caveat) regardless of whether `ALP_DEEPX_SDK_HOME` is
+    also set."""
+    _force_all_unavailable(monkeypatch)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/dxcom" if name == "dxcom" else None
+    )
     sdk_home = tmp_path / "deepx-sdk"
     sdk_home.mkdir()
     monkeypatch.setenv("ALP_DEEPX_SDK_HOME", str(sdk_home))
@@ -148,15 +175,53 @@ def test_drpai_unavailable_names_the_real_env_var(tmp_path, monkeypatch):
     assert "ALP_DRPAI_TVM_HOME" in row["reason"]
 
 
-def test_drpai_available_when_the_env_var_names_a_real_directory(tmp_path, monkeypatch):
+def test_drpai_available_when_the_env_var_names_a_built_install(tmp_path, monkeypatch):
+    """`ALP_DRPAI_TVM_HOME` naming a real directory is not enough on its own
+    -- `DrpaiAdapter.compile()` spawns the vendor tutorial script
+    `tutorials/compile_onnx_model_quant.py` under it, so the row only goes
+    green once that script is actually there (a BUILT install, not just an
+    existing directory). Also proves the no-spawn invariant on this specific
+    branch -- MINOR 3: a mutation that inserted a live `subprocess.run` call
+    into `adapters/drpai.py::_compiler_version` previously left this file
+    green (rc=0), because no test on the "available" branch booby-trapped
+    subprocess; this one does."""
+    _force_all_unavailable(monkeypatch)
+    tvm_home = tmp_path / "drpai-tvm"
+    script_dir = tvm_home / "tutorials"
+    script_dir.mkdir(parents=True)
+    (script_dir / "compile_onnx_model_quant.py").write_text("# stub\n")
+    monkeypatch.setenv("ALP_DRPAI_TVM_HOME", str(tvm_home))
+
+    def _boom(*a, **k):
+        raise AssertionError("model doctor must not spawn a subprocess")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(subprocess, "Popen", _boom)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["drpai"]
+    assert row["available"] is True
+    assert row["reason"] is None
+
+
+def test_drpai_env_var_directory_without_tutorial_script_stays_unavailable_with_caveat(
+    tmp_path, monkeypatch
+):
+    """A customer pointing `ALP_DRPAI_TVM_HOME` at an unpacked-but-unbuilt
+    tree (the directory exists, but `tutorials/compile_onnx_model_quant.py`
+    -- the script `compile()` actually spawns -- does not) must NOT get a
+    silently green row; the reason explains the var is set but the tutorial
+    script wasn't found under it."""
     _force_all_unavailable(monkeypatch)
     tvm_home = tmp_path / "drpai-tvm"
     tvm_home.mkdir()
     monkeypatch.setenv("ALP_DRPAI_TVM_HOME", str(tvm_home))
     result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
     row = _rows(envelope(result))["drpai"]
-    assert row["available"] is True
-    assert row["reason"] is None
+    assert row["available"] is False
+    assert row["reason"] is not None
+    assert "ALP_DRPAI_TVM_HOME" in row["reason"]
+    assert "compile_onnx_model_quant.py" in row["reason"]
+    assert str(tvm_home) in row["reason"]
 
 
 def test_drpai_env_var_pointing_at_a_non_directory_stays_unavailable(tmp_path, monkeypatch):
@@ -194,6 +259,38 @@ def test_ethos_u_real_vela_version_is_reported(tmp_path, monkeypatch):
     result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
     row = _rows(envelope(result))["ethos_u"]
     assert row["version"] == "vela 3.9.0"
+
+
+def test_drpai_degraded_version_string_surfaces_as_none(tmp_path, monkeypatch):
+    """`_compiler_version()` (`tan.model.adapters.drpai`) falls back to the
+    bare literal `"drp-ai_tvm"` when none of `setup/version` / `version` /
+    `VERSION` is found under the toolchain checkout -- the identical
+    degraded-answer shape `ethos_u`'s `_vela_version()` returns, and this
+    backend must be guarded the same way: never surfaced as if it were a
+    real version."""
+    _force_all_unavailable(monkeypatch)
+    tvm_home = tmp_path / "drpai-tvm"
+    script_dir = tvm_home / "tutorials"
+    script_dir.mkdir(parents=True)
+    (script_dir / "compile_onnx_model_quant.py").write_text("# stub\n")
+    monkeypatch.setenv("ALP_DRPAI_TVM_HOME", str(tvm_home))
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["drpai"]
+    assert row["available"] is True
+    assert row["version"] is None
+
+
+def test_drpai_real_version_is_reported(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    tvm_home = tmp_path / "drpai-tvm"
+    script_dir = tvm_home / "tutorials"
+    script_dir.mkdir(parents=True)
+    (script_dir / "compile_onnx_model_quant.py").write_text("# stub\n")
+    (tvm_home / "VERSION").write_text("1.2.3\n")
+    monkeypatch.setenv("ALP_DRPAI_TVM_HOME", str(tvm_home))
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _rows(envelope(result))["drpai"]
+    assert row["version"] == "drp-ai_tvm 1.2.3"
 
 
 def test_deepx_dxm1_version_is_never_probed_even_when_available(tmp_path, monkeypatch):
@@ -333,13 +430,39 @@ def test_text_mode_reports_one_readable_line_per_backend(tmp_path, monkeypatch):
     lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
     assert any(ln.startswith("cpu: available") for ln in lines)
     assert any(
-        ln.startswith("ethos_u: unavailable") and "pip install ethos-u-vela" in ln
+        ln.startswith("ethos_u: unavailable") and "pip install alp-tan[model-compile]" in ln
         for ln in lines
     )
     assert any(
         ln.startswith("deepx_dxm1: unavailable") and "license-gated" in ln for ln in lines
     )
     assert any(ln.startswith("drpai: unavailable") and "ALP_DRPAI_TVM_HOME" in ln for ln in lines)
+
+
+def test_text_mode_drops_the_reason_clause_entirely_when_reason_is_none(tmp_path, monkeypatch):
+    """NIT: a backend with no `_UNAVAILABLE_REASONS` entry and no doctor-side
+    caveat carries `reason: None` -- the text line must drop the `-- ...`
+    clause rather than rendering the Python literal `None` into it."""
+    _force_all_unavailable(monkeypatch)
+    monkeypatch.setattr(
+        model_cmd,
+        "backend_row",
+        lambda backend, **kw: model_doctor.BackendRow(
+            backend=backend,
+            tool=model_doctor.BACKEND_TOOLS.get(backend),
+            available=False,
+            version=None,
+            reason=None,
+        ),
+    )
+    result = runner.invoke(
+        app, ["doctor", "--project", str(tmp_path)], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    ethos_u_lines = [ln for ln in lines if ln.startswith("ethos_u:")]
+    assert ethos_u_lines == ["ethos_u: unavailable (tool=vela)"]
+    assert "None" not in ethos_u_lines[0]
 
 
 # --------------------------------------------------------------------------
