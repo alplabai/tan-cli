@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import pytest
 from tan.model.manifest import Manifest, Target
 from tan.model.package import write_package, read_package, MAGIC
@@ -60,9 +61,10 @@ _needs_bound_sdk = pytest.mark.skipif(
 def test_committed_fixture_matches_generator():
     raw = build_fixture_bytes()
     on_disk = (_SDK / "tests/fixtures/alpmodel/minimal.alpmodel").read_bytes()
-    assert raw == on_disk, "regenerate: python -m tan.model._gen_fixture"
+    assert raw == on_disk, "regenerate: python -m tan.model._gen_fixture --root <alp-sdk-checkout>"
     header = (_SDK / "tests/unit/alpmodel_reader/src/fixture.h").read_text()
-    assert to_c_header(raw) == header, "regenerate: python -m tan.model._gen_fixture"
+    assert to_c_header(raw) == header, \
+        "regenerate: python -m tan.model._gen_fixture --root <alp-sdk-checkout>"
 
 
 @_needs_bound_sdk
@@ -75,7 +77,7 @@ def test_committed_onnx_cpu_fixture_matches_generator():
     header = (_SDK / "tests/yocto/onnx_cpu_fixture.h").read_text()
     assert to_c_header(raw, array_name="k_onnx_cpu_alpmodel",
                         guard="ALP_MODEL_ONNX_CPU_FIXTURE_H") == header, \
-        "regenerate: python -m tan.model._gen_fixture"
+        "regenerate: python -m tan.model._gen_fixture --root <alp-sdk-checkout>"
 
 
 def test_bad_magic_rejected():
