@@ -16,10 +16,12 @@ engine is tan's now. A proof living in alp-sdk would detect that break late, in
 a different repo, on a different release train.
 
 Because this test only ever runs on a maintainer's box, it is one release away
-from being no proof at all if nobody runs it. `cutting-a-tan-release` is a
-maintainer-box operation where the fixtures ARE present, so the release
-checklist asserts this test (and its Vela sibling) reported PASSED, not
-skipped, before a release is cut.
+from being no proof at all if nobody runs it. NOTE: whether
+`cutting-a-tan-release`'s checklist asserts this test (and its Vela sibling)
+report PASSED, not skipped, before a release is cut is a release-checklist
+change still OWED to that skill (it lives in the alp-lab plugin, outside this
+repo) -- not yet made, so no release gate currently enforces that either test
+ran. Today this test running is a maintainer choice, not a guarantee.
 
 NOTE: a real yolo11n compile takes ~5 min at dxcom's default opt_level.
 

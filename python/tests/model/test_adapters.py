@@ -597,7 +597,7 @@ def test_deepx_real_compile_of_tiny_fixture(tmp_path):
     from tan-cli's `python/`) AND host RAM clears dxcom's ~15 GiB floor; skips
     otherwise (always in cloud CI). Mirrors test_vela_real_compile_of_tiny_fixture.
     The real-yolo11n
-    counterpart lives in tests/scripts/test_deepx_yolo_internal.py (gated on the
+    counterpart lives in tests/model/test_deepx_yolo_internal.py (gated on the
     alp-sdk-internal sibling)."""
     import json
     import numpy as np
