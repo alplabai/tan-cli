@@ -199,9 +199,19 @@ jobs:
           ALP_SDK_REF: ${{ github.event.inputs.alp_sdk_ref || 'dev' }}
           ZEPHYR_SDK_VERSION: "1.0.1"
           ZEPHYR_SDK_INSTALL_TIMEOUT: "1200"
+          # Through `env:`, never interpolated into the `run:` block. A
+          # `${{ }}` expansion inside `run:` is substituted into the script
+          # BEFORE the shell sees it, so a dispatch input containing shell
+          # metacharacters expands into code rather than into an argument --
+          # zizmor's `template-injection` audit, at high confidence, and the
+          # one high finding this repo's workflow-security gate reported.
+          # `workflow_dispatch` needs write access, so the blast radius is
+          # small, but the safe form costs nothing and is what the sibling
+          # ALP_SDK_REF line above already does.
+          IMAGE: ${{ github.event.inputs.image || 'ubuntu:24.04' }}
         run: |
           set -euo pipefail
-          bash scripts/e2e-container.sh python/dist/tan "${{ github.event.inputs.image || 'ubuntu:24.04' }}"
+          bash scripts/e2e-container.sh python/dist/tan "$IMAGE"
 
       # No upload-artifact step, deliberately. `e2e-container.sh` runs the
       # harness with `docker run --rm` and the working tree lives inside that
