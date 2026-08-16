@@ -118,6 +118,7 @@ from tan.core.plan_exec import (
     SdkStampAction,
     assemble_slice_env,
     cross_drive_source_refusal,
+    missing_tool_message,
     resolve_action,
     sdk_stamp_action,
     sdk_stamp_key,
@@ -870,7 +871,7 @@ def _missing_post_tool(
     step is refused at parse time, `tan.core.build_plan._post_commands`) and
     `unknownBackend` is a per-slice fact decided before any step runs."""
     action = resolve_action(policy, "missing_tool", PolicyAction.SKIP)
-    short = f"{where} cannot run: tool `{tool}` not found"
+    short = f"{where} cannot run: {missing_tool_message(tool)}"
     return _PostOutcome(
         "skipped" if action is PolicyAction.SKIP else "failed",
         None,
@@ -1269,13 +1270,13 @@ def execute_slices(
                 _skip_or_fail(
                     sl.core_id,
                     resolve_action(policy, "missing_tool", PolicyAction.SKIP),
-                    f"tool `{tool}` not found -- searched {resolution.searched}",
+                    f"{missing_tool_message(tool)} -- searched {resolution.searched}",
                     # tan-cli#510 review round 3, MAJOR: the full searched-PATH
                     # text stays in `message` (this run's stdout + envelope
                     # `reason`) but must NOT reach the persisted
                     # `system-manifest.yaml` -- see [`SliceOutcome.
                     # manifest_message`]'s own docstring.
-                    manifest_message=f"tool `{tool}` not found",
+                    manifest_message=missing_tool_message(tool),
                 )
             )
             continue

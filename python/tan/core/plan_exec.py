@@ -231,7 +231,24 @@ CROSS_DRIVE_MSG = "west build cannot span two Windows drives"
 #: name (not two independent "tool `" / "` not found" substring checks
 #: with no adjacency requirement between them) so an unrelated message that
 #: happens to contain both fragments separately cannot false-positive.
-MISSING_TOOL_RE = re.compile(r"tool `[^`]*` not found")
+_MISSING_TOOL_PREFIX = "tool `"
+_MISSING_TOOL_SUFFIX = "` not found"
+MISSING_TOOL_RE = re.compile(
+    re.escape(_MISSING_TOOL_PREFIX) + r"[^`]*" + re.escape(_MISSING_TOOL_SUFFIX)
+)
+
+
+def missing_tool_message(tool: str) -> str:
+    """The one place `` tool `{tool}` not found `` is spelled. Every producer
+    in `tan.commands.build.execute` (the slice's own `command` precheck AND
+    `_missing_post_tool`'s post-build-step refusal) MUST build its message
+    through this function rather than hand-writing the literal -- MISSING_TOOL_RE
+    above is built from the exact same `_MISSING_TOOL_PREFIX`/`_MISSING_TOOL_SUFFIX`
+    pair, so a wording edit made only at a call site (not here) silently stops
+    `build_cmd._missing_tool_issues` from promoting that producer's refusals
+    into `issues[]` again -- the exact #801 regression this coupling exists to
+    prevent."""
+    return f"{_MISSING_TOOL_PREFIX}{tool}{_MISSING_TOOL_SUFFIX}"
 
 
 @dataclass(frozen=True)

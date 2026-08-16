@@ -31,6 +31,7 @@ from tan.core.build_plan import parse_build_plan
 from tan.commands.build.configure_inputs import (
     discover_configure_inputs,
     read_configure_inputs_stamp,
+    resolve_zephyr_discovery_dir,
     write_configure_inputs_stamp,
 )
 import tan.commands.build.execute as execute_module
@@ -96,6 +97,65 @@ def test_stamp_round_trips_including_the_empty_set(tmp_path):
 
 def test_unstamped_reads_as_no_signal(tmp_path):
     assert read_configure_inputs_stamp(tmp_path) is None
+
+
+# --------------------------------------------- resolve_zephyr_discovery_dir
+
+
+def test_self_contained_app_dir_with_its_own_cmakelists_is_returned_as_is(tmp_path):
+    """A self-contained `app:` (the non-split layout) carries its own
+    `CMakeLists.txt` -- no parent fallback needed."""
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "CMakeLists.txt").write_text("", encoding="utf-8")
+
+    assert resolve_zephyr_discovery_dir(str(app_dir), tmp_path) == app_dir
+
+
+def test_split_layout_app_dir_falls_back_to_the_parent_with_cmakelists(tmp_path):
+    """tan-cli#798: the scaffolded `app: ./src` layout -- `app_dir` itself
+    has no `CMakeLists.txt`, its parent does."""
+    proj = tmp_path / "proj"
+    app_dir = proj / "src"
+    app_dir.mkdir(parents=True)
+    (proj / "CMakeLists.txt").write_text("", encoding="utf-8")
+
+    assert resolve_zephyr_discovery_dir("src", proj) == proj
+
+
+def test_relative_app_dir_anchors_on_build_root_not_cwd(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    app_dir = proj / "src"
+    app_dir.mkdir(parents=True)
+    (proj / "CMakeLists.txt").write_text("", encoding="utf-8")
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert resolve_zephyr_discovery_dir("src", proj) == proj
+
+
+def test_absolute_app_dir_is_never_re_anchored(tmp_path):
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "CMakeLists.txt").write_text("", encoding="utf-8")
+
+    unrelated_root = tmp_path / "unrelated"
+    unrelated_root.mkdir()
+
+    assert resolve_zephyr_discovery_dir(str(app_dir), unrelated_root) == app_dir
+
+
+def test_neither_app_dir_nor_its_parent_carries_a_cmakelists_returns_app_dir(tmp_path):
+    """No CMakeLists.txt anywhere -- returned as-is, same as the pre-#798
+    behaviour; the caller's own existence/emptiness handling covers this,
+    not this function raising or guessing further up the tree."""
+    proj = tmp_path / "proj"
+    app_dir = proj / "src"
+    app_dir.mkdir(parents=True)
+
+    assert resolve_zephyr_discovery_dir("src", proj) == app_dir
 
 
 # ---------------------------------------- _maybe_reset_stale_configure_cache
@@ -303,6 +363,14 @@ def test_relative_app_dir_anchors_on_build_root_not_process_cwd(tmp_path, monkey
     )
     assert args == ["-UDTC_OVERLAY_FILE", "-UCONF_FILE"]
     assert len(issues) == 1
+    # tan-cli#798 review, MAJOR 2: without asserting the reset's CAUSE, this
+    # test cannot distinguish "found app.overlay at the anchored parent"
+    # from "resolved to a nonexistent dir and found nothing at all" -- an
+    # un-anchored `elsewhere/src` also differs from the `{"prj.conf"}`
+    # baseline (it globs to `frozenset()`), so the reset fires either way and
+    # a reverted `build_root` anchoring still passes this assertion alone.
+    assert "added" in issues[0].message
+    assert "app.overlay" in issues[0].message
 
 
 # --------------------------------------------------------- end-to-end (spawn)

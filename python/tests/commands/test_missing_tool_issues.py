@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import json
 
-from tan.commands.build.execute import SliceOutcome
+from tan.commands.build.execute import SliceOutcome, _missing_post_tool
 from tan.commands.build_cmd import _missing_tool_issues
 from tan.core.build_plan import parse_build_plan
+from tan.core.plan_exec import ExecutionPolicy, PolicyAction
 
 
 def _plan(core_ids: list[str]) -> str:
@@ -94,6 +95,28 @@ def test_a_failed_post_build_step_missing_tool_case_is_an_error_severity():
     assert len(issues) == 1
     assert issues[0].severity == "error"
     assert issues[0].message == f"slice `c1` failed: {message}"
+
+
+def test_the_real_post_tool_producer_message_promotes_not_a_hand_written_copy():
+    """tan-cli#801 review finding 4: every other test in this file hand-writes
+    the post-step message string rather than driving `_missing_post_tool`
+    (the actual producer) -- which means a wording edit at that producer,
+    with no matching edit here, would still pass a suite built entirely of
+    hand-copied literals. This test feeds `_missing_post_tool(...).message`
+    straight into `_missing_tool_issues`, so the two are coupled through the
+    real code path instead of through two independently maintained strings."""
+    plan = parse_build_plan(_plan(["c1"]))
+    policy = ExecutionPolicy(missing_tool=PolicyAction.SKIP)
+    where = "slice `c1` post-build step 1 of 1 (`gcc --version`)"
+    outcome = _missing_post_tool(where, "gcc", "/usr/bin:/bin", policy)
+    outcomes = [SliceOutcome("c1", outcome.status, outcome.exit_code, outcome.message)]
+
+    issues = _missing_tool_issues(plan, outcomes)
+
+    assert len(issues) == 1
+    assert issues[0].code == "build.missing-tool"
+    assert issues[0].severity == "warning"
+    assert issues[0].message == f"slice `c1` skipped: {outcome.message}"
 
 
 def test_an_unrelated_failure_is_never_mistaken_for_a_missing_tool():

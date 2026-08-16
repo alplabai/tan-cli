@@ -76,7 +76,16 @@ def resolve_zephyr_discovery_dir(app_dir: str, build_root: Path) -> Path:
     convention -- 96 of 105 alp-sdk example core entries use it). Neither
     directory existing is reported as-is; the caller's own existence checks
     (`discover_configure_inputs` returns the empty set for a missing dir)
-    already handle that case correctly without this function raising."""
+    already handle that case correctly without this function raising.
+
+    Unlike `build_cmd._substituted_app_dirs`, this does NOT carry an
+    `app_dir_path.is_dir()` precondition before falling back to the parent --
+    a nonexistent `app_dir` whose parent happens to carry a `CMakeLists.txt`
+    globs the parent here. Deliberately left unguarded: this function's only
+    caller runs on slices that already survived `_missing_app_dirs`
+    (`build.app-dir-missing` already failed a nonexistent `appDir` before
+    `execute_slices` dispatches it), so the divergence is unreachable in
+    practice, not merely tolerated."""
     app_dir_path = Path(app_dir)
     if not app_dir_path.is_absolute():
         app_dir_path = build_root / app_dir_path
