@@ -150,3 +150,8 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: raised on this branch from 257 to 258; the final count after merging tan-cli#760 is recorded by the merge-resync entry below
 - 2026-08-15 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 258 -> 259
+- 2026-08-16 -- tan-cli#760 second half (alp-sdk#1464/#1471): install.linux is now package-manager-keyed; bootstrap.py gains normalize_linux_install/select_linux_install/detect_linux_pm + wider BootstrapFacts.install typing, bootstrap_cmd.py/doctor_cmd.py wire package-manager detection into check_prerequisites/_collect
+    - tan/commands/bootstrap_cmd.py: 3277 -> 3286
+    - tan/commands/doctor_cmd.py: 4114 -> 4131
+    - tan/core/bootstrap.py: 2275 -> 2400
+    - function_count_budget: 259 -> 260
