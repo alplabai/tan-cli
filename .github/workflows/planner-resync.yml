@@ -221,6 +221,13 @@ jobs:
         # still gets opened when the answer is "a human must finish this".
         run: |
           set -uo pipefail
+          # `set -uo pipefail` alone does NOT clear the `-e` GitHub's bash
+          # wrapper applies (`bash --noprofile --norc -e -o pipefail {0}`), so
+          # without `set +e` here the script's normal exit 1 ("a re-sync is
+          # owed") or exit 2 ("Refused") would kill the step before `rc=$?`
+          # ever runs (tan-cli#793). `set +e` for the call, `set -e` after, so
+          # `rc=$?` and everything downstream keep expecting normal semantics.
+          set +e
           python python/scripts/planner_resync.py \
             --sdk-root "${GITHUB_WORKSPACE}/alp-sdk" \
             --to "${{ steps.ref.outputs.sha }}" \
@@ -229,8 +236,16 @@ jobs:
             --markdown "${RUNNER_TEMP}/resync.md" \
             --json "${RUNNER_TEMP}/resync.json"
           rc=$?
+          set -e
           echo "rc=${rc}" >> "$GITHUB_OUTPUT"
-          cat "${RUNNER_TEMP}/resync.md" >> "$GITHUB_STEP_SUMMARY"
+          # `|| echo` rather than relying on `set -e` staying off past this
+          # line: an unhandled non-`Refused` exception in the script (rc=1
+          # with no markdown written) must not let a bare `cat` kill the step
+          # AFTER `rc` is already in `$GITHUB_OUTPUT` -- that would re-create
+          # this issue's own "red X with no explanation" and skip both
+          # "Open or refresh the proposal PR" and "Verdict" (tan-cli#793).
+          cat "${RUNNER_TEMP}/resync.md" >> "$GITHUB_STEP_SUMMARY" || \
+            echo "_planner_resync.py wrote no markdown -- see the step log_" >> "$GITHUB_STEP_SUMMARY"
           exit 0
 
       # The gate is the thing that fails when a re-sync is owed, so running it
@@ -252,7 +267,14 @@ jobs:
                       "HAND_PORT_PINNED_SDK_COMMIT:sdk-handport" \
                       "STRICT_LOADERS_PINNED_SDK_COMMIT:sdk-strict"; do
             name="${spec%%:*}"; dir="${spec##*:}"
+            # `pin` is a `grep | grep` pipeline; under `pipefail` a no-match
+            # makes the whole pipeline (and thus this assignment) exit
+            # nonzero, and plain `set -e` would kill the step here -- before
+            # the `if [ -z "$sha" ]` guard below ever runs (tan-cli#793).
+            # `set +e` around just the assignment keeps that guard reachable.
+            set +e
             sha="$(pin "$name")"
+            set -e
             if [ -z "$sha" ]; then
               echo "::error::could not read ${name} out of ${gate}"
               echo "verdict=UNKNOWN (could not read ${name})" >> "$GITHUB_OUTPUT"

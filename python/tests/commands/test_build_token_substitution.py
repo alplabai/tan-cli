@@ -310,7 +310,11 @@ def test_git_short_head_does_not_attribute_an_enclosing_repos_commit(tmp_path):
     `sdkCommit` with the app repo's commit, and the split-brain guard in
     `apply_plan_token_substitution` compares the wrong repository's HEAD.
     """
-    from tan.commands.build.token_substitution import _is_own_git_checkout, git_short_head
+    from tan.commands.build.token_substitution import (
+        _is_own_git_checkout,
+        _resolve_git_executable,
+        git_short_head,
+    )
 
     def git(*args):
         return subprocess.run(
@@ -325,10 +329,13 @@ def test_git_short_head_does_not_attribute_an_enclosing_repos_commit(tmp_path):
     vendored_sdk = tmp_path / "vendor" / "alp-sdk"
     vendored_sdk.mkdir(parents=True)
 
+    git_exe = _resolve_git_executable()
+    assert git_exe is not None
+
     # Pre-fix: this returned `outer_head` (the enclosing app repo's HEAD).
     assert git_short_head(vendored_sdk) == ""
-    assert _is_own_git_checkout(vendored_sdk) is False
-    assert _is_own_git_checkout(tmp_path) is True
+    assert _is_own_git_checkout(vendored_sdk, git_exe) is False
+    assert _is_own_git_checkout(tmp_path, git_exe) is True
 
     # And the split-brain guard must not fire off that misattribution: a plan
     # captured with no real signal (`sdkCommit` from a checkout `git_short_head`

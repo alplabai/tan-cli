@@ -16,6 +16,7 @@ lands HERE is what has no oracle counterpart:
 No case touches hardware: nothing here spawns a probe or a flash tool against a
 device, and the Flow D cases all stop at a refusal or a confirm-gated no-op.
 """
+import inspect
 import json
 import os
 import stat
@@ -366,6 +367,52 @@ boot_order: []
     assert payload["ok"] is False
     assert codes(payload) == ["flash.slice-skipped", "flash.nothing-flashed"]
     assert payload["data"]["entries"] == []
+
+
+def test_core_filter_matching_nothing_fails_flash(tmp_path):
+    """tan-cli#807: a `--core` naming nothing in the manifest used to report
+    `ok: true`/exit 0 with an empty `entries[]` and only a `warning`-severity
+    `flash.nothing-matched` -- a mistyped `--core` printed a completed flash
+    over an untouched board on the machine-readable channel. `$?`/`ok` must
+    now say so. Scoped to the FILTERED case only -- the unfiltered empty-
+    manifest path (`test_manifest_holds_non_utf8_bytes`) stays warning/exit 0."""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--core", "app_typo", manifest=OK_SLICE
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert codes(payload) == ["flash.nothing-matched"]
+    assert payload["issues"][0]["severity"] == "error"
+    assert payload["data"]["entries"] == []
+
+
+def test_helper_filter_matching_nothing_fails_flash(tmp_path):
+    """tan-cli#807, the `--helper` half of the same hole."""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--helper", "nope_typo", manifest=OK_SLICE
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert codes(payload) == ["flash.nothing-matched"]
+    assert payload["issues"][0]["severity"] == "error"
+    assert payload["data"]["entries"] == []
+
+
+def test_unfiltered_empty_manifest_still_only_warns(tmp_path):
+    """tan-cli#807: the unfiltered "no usable slices at all" case is
+    DELIBERATELY unchanged -- no `--core`/`--helper` was supplied, so there is
+    no filter to have mistyped. Companion to `test_manifest_holds_non_utf8_
+    bytes`, pinned directly against the `flash.nothing-matched` shape rather
+    than a UTF-8 edge case."""
+    manifest = "schema_version: 1\nhw_info: {sku: S}\nslices: []\nhelper_mcus: []\nboot_order: []\n"
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert codes(payload) == ["flash.nothing-matched"]
+    assert payload["issues"][0]["severity"] == "warning"
 
 
 # ── tan-cli#487 defect 7: an entry-level skip must not be diagnosed as
@@ -4442,10 +4489,18 @@ def test_flow_d_preflight_an_unrecognised_banner_falls_back_to_the_wiring_messag
     **tan-cli#373**: no DP ID was reported here, so this must get the
     ORIGINAL probe-selection/`jlink_serial` sentence -- not #369's
     cloned-serial text, which only applies when a board DID answer with a
-    different ID (the wrong-DP-ID test below covers that one)."""
+    different ID (the wrong-DP-ID test below covers that one).
+
+    **tan-cli#795 review, minor**: this banner matches neither `_DP_ID_RE`
+    nor either `_CONNECT_FAILED_*_RE` -- distinct from the target-level-
+    refusal test below, which DOES match `_CONNECT_FAILED_TARGET_RE` -- so it
+    must carry the "could not recognise the connect banner" clause naming
+    that this is an unparsed banner, not a confirmed wiring diagnosis. The
+    remediation stays byte-for-byte the same either way."""
     _stub_flow_d_probe(monkeypatch, tmp_path, stdout="some unrecognised probe banner\n")
     message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
     assert message is not None
+    assert "could not recognise the connect banner" in message
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "re-enumerat" not in message
     assert "CLONED serial" not in message
@@ -4480,6 +4535,10 @@ def test_flow_d_preflight_a_target_level_cannot_connect_keeps_the_wiring_message
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "re-enumerat" not in message
     assert "CLONED serial" not in message
+    # tan-cli#795 review, minor: a genuine `_CONNECT_FAILED_TARGET_RE` match
+    # is NOT the "could not recognise the connect banner" case -- this IS a
+    # confirmed target-level refusal, so it must not carry that clause.
+    assert "could not recognise the connect banner" not in message
 
 
 def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypatch, tmp_path):
@@ -4508,6 +4567,107 @@ def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypa
     assert "tan-cli#353" in message
     assert "re-enumerat" not in message
     assert "CLONED serial" not in message
+
+
+def test_flow_d_preflight_expect_dpidr_round_trips_a_bare_yaml_integer():
+    """tan-cli#795(a): an UNQUOTED `expect_dpidr: 0x0BE12477` in a manifest or
+    SoM-preset YAML parses (PyYAML's `0x...` handling, `yaml.safe_load`) to
+    the Python int `199304311` -- exactly like an unquoted `base`/
+    `atoc_address`/`slot0_load_address`. Before the fix, `validate_flow_d_
+    preflight_args` read `expect_dpidr` with `as_hex_address=False` and
+    decayed it to the decimal string `"199304311"`, which then never matches
+    the probe's hex-formatted banner even on the CORRECT board. Must
+    round-trip back to `"0x0BE12477"`, the way the sibling address fields
+    already do."""
+    prepared = flash_plan.flow_d_preflight_script(
+        flow_d_inputs(expect_dpidr=0x0BE12477, jlink_device="Generic-Attach")
+    )
+    assert prepared is not None
+    _, expected = prepared
+    assert expected == "0x0BE12477"
+
+
+def test_parse_system_manifest_expect_dpidr_unquoted_hex_round_trips():
+    """tan-cli#795(a), the manifest-fixture case named in the issue's
+    suggested fix: an `alif_mram_jlink` slice whose `flash_args.expect_dpidr`
+    is written as a bare, unquoted hex literal must still arm the wrong-board
+    guard with the correct 32-bit value once read back out of the real
+    `parse_system_manifest` -> `validate_flow_d_preflight_args` path, not
+    silently decay to a decimal string that then refuses the correct board."""
+    manifest = """schema_version: 1
+hw_info: {sku: E1M-AEN801}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: a.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_address: "0x8057F5B0",
+                expect_dpidr: 0x0BE12477, jlink_device: Cortex-M55}}
+helper_mcus: []
+boot_order: []
+"""
+    parsed = flash_plan.parse_system_manifest(manifest)
+    slc = parsed.slices[0]
+    # The raw parse itself decayed the unquoted literal to an int -- confirms
+    # the fixture actually exercises the bare-YAML-integer shape the issue
+    # describes, not an already-quoted string that would round-trip trivially.
+    assert slc.flash_args["expect_dpidr"] == 0x0BE12477
+    assert isinstance(slc.flash_args["expect_dpidr"], int)
+    expected, read_device = flash_plan.validate_flow_d_preflight_args(slc.flash_args)
+    assert expected == "0x0BE12477"
+    assert read_device == "Cortex-M55"
+
+
+def test_dp_id_matches_rejects_a_truncated_expected_id():
+    """tan-cli#795(b): the prior unanchored substring match (`_hex_in`, since
+    replaced by `_dp_id_matches`) accepted a truncated `expected` that
+    happened to appear as a substring of the banner's hex ID -- `0x2477`
+    matched `Found SW-DP with ID 0x0BE12477`. The parsed-value compare must
+    not."""
+    banner = "Connecting to target via SWD\nFound SW-DP with ID 0x0BE12477\n"
+    assert flash_cmd._dp_id_matches("0x2477", banner) is False
+    assert flash_cmd._dp_id_matches("0x0BE12477", banner) is True
+
+
+def test_dp_id_matches_rejects_arms_shared_jep106_designer_field():
+    """`0x477` is ARM's own JEP106 designer field, shared by every ARM SW-DP
+    -- the widest form of the same truncation hole."""
+    banner = "Connecting to target via SWD\nFound SW-DP with ID 0x0BE12477\n"
+    assert flash_cmd._dp_id_matches("0x477", banner) is False
+
+
+def test_expect_dpidr_width_refusal_rejects_a_truncated_id():
+    """tan-cli#795(b): a manifest `expect_dpidr` that is not a full 32-bit / 8
+    hex-digit value must be refused at PLAN time, in `flash_plan.
+    validate_flow_d_preflight_args` beside its `validate_address` call --
+    `validate_address` itself stays a generic charset check shared with
+    `base` and friends, so the width rule lives in its own function instead,
+    called from the same plan-time site."""
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan._validate_expect_dpidr_width("0x2477", "alif_mram_jlink")
+    assert "expect_dpidr" in str(raised.value)
+    assert "32-bit" in str(raised.value)
+
+
+def test_expect_dpidr_width_refusal_accepts_a_full_width_id():
+    flash_plan._validate_expect_dpidr_width("0x0BE12477", "alif_mram_jlink")
+
+
+def test_flow_d_preflight_refuses_a_truncated_expect_dpidr_before_probing(monkeypatch, tmp_path):
+    """End to end: `_flow_d_preflight` must refuse a truncated `expect_dpidr`
+    (tan-cli#795(b)) even though the stubbed banner reports the FULL id the
+    truncated value is a prefix of -- proving the width guard runs before,
+    and independently of, the banner comparison."""
+    _stub_flow_d_probe(
+        monkeypatch,
+        tmp_path,
+        stdout="Connecting to target via SWD\nFound SW-DP with ID 0x0BE12477\n",
+    )
+    args = {**FLOW_D_ARGS, "expect_dpidr": "0x2477", "jlink_device": "Generic-Attach"}
+    inputs = FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
+    message = flash_cmd._flow_d_preflight(inputs)
+    assert message is not None
+    assert "expect_dpidr" in message
+    assert "32-bit" in message
 
 
 def test_flow_d_needs_jlink_on_path_for_a_real_run():
@@ -4584,6 +4744,38 @@ boot_order: []
     assert entry["status"] == "failed"
     assert "expect_dpidr" in entry["message"]
     assert "jlink_device" in entry["message"]
+    codes = {issue["code"] for issue in payload["issues"]}
+    assert "flash.entry-failed" in codes
+
+
+def test_flow_d_dry_run_surfaces_a_truncated_expect_dpidr_as_a_failure(tmp_path):
+    """tan-cli#795 review: the width rule must run at the SAME plan-time call
+    site as the half-armed-pair check above, not only inside `_flow_d_
+    preflight` at real-write-probe time -- otherwise a truncated
+    `expect_dpidr` (here `0x477`, ARM's own JEP106 designer field, shared by
+    every ARM SW-DP) is invisible to a preview: `tan flash --dry-run` used to
+    report `ok: true` / exit 0 / no issues for exactly this manifest, silently
+    disarming the wrong-board guard `flash_plan.py`'s own docstring promises
+    runs at plan time."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_address: "0x8057F5B0",
+                expect_dpidr: "0x477", jlink_device: Cortex-M55}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["ok"] is False
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "expect_dpidr" in entry["message"]
+    assert "32-bit" in entry["message"]
     codes = {issue["code"] for issue in payload["issues"]}
     assert "flash.entry-failed" in codes
 
@@ -7811,6 +8003,24 @@ def test_confirm_flag_arms_the_gate_like_the_env_var(tmp_path):
     # which is the proof the gate opened: an unarmed run previews instead.
     assert payload["data"]["entries"][0]["status"] != "planned"
     assert "flash.confirm-required" not in codes(payload)
+
+
+def test_confirm_help_names_which_backends_are_gated_vs_unconditional():
+    """tan-cli#796: `--confirm`'s help used to claim, unqualified, that
+    without it "every slice is previewed, nothing is written" -- true for
+    only 3 of the 6 flash backends. `zephyr_west_flash`, `baremetal_cmake_
+    flash` and `swd_probe` write the attached device unconditionally, with or
+    without `--confirm`. The reworded help must name the gated backends, name
+    the unconditional ones, and point at `--dry-run` as the preview that
+    works on every backend -- not claim blanket coverage again."""
+    sig = inspect.signature(flash_cmd.flash)
+    help_text = sig.parameters["confirm"].default.help
+    for gated in ("yocto_wic", "xspi_flashwriter", "alif_mram_jlink"):
+        assert gated in help_text, help_text
+    for unconditional in ("zephyr_west_flash", "baremetal_cmake_flash", "swd_probe"):
+        assert unconditional in help_text, help_text
+    assert "--dry-run" in help_text
+    assert "every slice is previewed, nothing is written" not in help_text
 
 
 def test_the_confirm_message_names_every_spelling_that_arms_the_gate(tmp_path):

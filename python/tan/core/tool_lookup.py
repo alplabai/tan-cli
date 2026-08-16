@@ -37,7 +37,11 @@ suffixed sibling. Three reasons the oracle's shape is the one to consolidate on:
   `if has_ext { dir.join(command) } else { for ext in &exts { ... } }` -- no
   bare candidate. The oracle is the fixed point this port is measured against,
   and `build/execute.py::_resolve_tool` (the copy this module IS) already
-  agreed with it. Only `on_path` did not.
+  agreed with it. Only `on_path` did not -- and since tan-cli#532 it no
+  longer exists as a separate walk: `doctor_cmd.on_path` delegates here, so
+  the divergence this section describes is now historical, and the behaviour
+  change it records has taken effect for the doctor and `faultdecode_cmd`
+  as well.
 * **Windows itself never selects one for a bare identity.** `CreateProcess`
   with `lpApplicationName=NULL` appends ONLY `.exe` to an unqualified name and
   does not consult `%PATHEXT%` at all -- the documented reason

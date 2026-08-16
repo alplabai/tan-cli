@@ -37,6 +37,7 @@ from typer.testing import CliRunner
 from tan.cli import app
 from tan.commands import doctor_cmd
 from tan.core.bootstrap import venv_layout, workspace_sdk_record_json
+from tan.core.tool_lookup import ToolResolution
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``.
@@ -135,6 +136,31 @@ def test_no_runnable_interpreter_is_its_own_frozen_code():
     check = doctor_cmd.python_check(found=None, floor=(3, 12), floor_source="zephyr")
     assert check.status == "fail"
     assert check.code == "bootstrap.python-not-runnable"
+
+
+def test_probe_host_python_returns_the_resolved_path_alongside_the_display_spelling():
+    """tan-cli#797 major finding: `_probe_host_python` must carry the
+    PATH-RESOLVED interpreter path as a third element, not just the display
+    spelling + version `python_check` reads -- `_posix_venv_capable`'s
+    `ensurepip` probe needs that resolved path as `executable=` rather than
+    re-deriving (and bare-spawning) argv from the display spelling. Runs the
+    REAL host Python, no mocks: the one property under test is the shape of
+    the return value, not any particular version."""
+    found = doctor_cmd._probe_host_python((0, 0))
+    assert found is not None, "no host Python resolved at all -- cannot exercise this"
+    assert len(found) == 3, found
+    display, version, resolved = found
+    assert isinstance(display, str) and display
+    assert isinstance(version, tuple) and len(version) == 2
+    assert isinstance(resolved, str) and os.path.isabs(resolved), (
+        f"the resolved path is not absolute: {resolved!r}"
+    )
+    assert os.path.isfile(resolved), resolved
+    # python_check only ever reads the first two elements -- the call site
+    # slices `found[:2]` before handing it in, and that slice must still be
+    # exactly what python_check's own contract expects.
+    check = doctor_cmd.python_check(found[:2], floor=(0, 0), floor_source="test")
+    assert check.status == "pass", check.detail
 
 
 def test_zephyr_floor_is_read_from_the_real_cmake_when_the_workspace_resolves(tmp_path):
@@ -1066,11 +1092,16 @@ def test_west_check_probes_the_resolved_path_not_a_bare_name_reprobe(tmp_path, m
     resolved = "/opt/onpath/west"
     monkeypatch.setattr(doctor_cmd, "on_path", lambda name: resolved if name == "west" else None)
 
-    def _fake_probe(argv, timeout=doctor_cmd.PROBE_TIMEOUT_S):
+    def _fake_probe(argv, timeout=doctor_cmd.PROBE_TIMEOUT_S, executable=None):
         if argv == [resolved, "--version"]:
             return "West version: v1.5.0\n"
         if argv == ["west", "--version"]:
             return "West version: v9.99.0\n"  # the rogue binary's answer
+        # tan-cli#797: `probe` now takes an `executable=` keyword (every
+        # caller inside `_collect`, including `_probe_host_python`, passes
+        # one) -- the fake's signature has to accept it or `_collect` raises
+        # a `TypeError` reaching this call site, unrelated to what this test
+        # actually pins (the `west` call site's own resolution).
         return None
 
     monkeypatch.setattr(doctor_cmd, "probe", _fake_probe)
@@ -2382,6 +2413,18 @@ def test_zephyr_sdk_host_check_names_wsl2_for_windows_on_arm_and_a_different_rem
 
 
 def test_macos_rosetta_translated_reads_the_sysctl_probe(monkeypatch):
+    """`_macos_rosetta_translated` now resolves `sysctl` through
+    `resolve_tool` before probing it (tan-cli#797) -- pin THAT resolution too,
+    not just `probe`, so this test asserts the probe's verdict rather than
+    whatever `sysctl` inventory the CI host running it happens to have. A
+    `windows-latest` runner has no `sysctl` on PATH at all: without this pin,
+    `resolve_tool` returns `resolved=None` there and the function short-
+    circuits to `False` regardless of what `probe` says, which is exactly the
+    host-dependent failure mode this pin exists to close off."""
+    monkeypatch.setattr(
+        doctor_cmd, "resolve_tool", lambda *a, **k: ToolResolution("sysctl", "stub")
+    )
+
     monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "1\n")
     assert doctor_cmd._macos_rosetta_translated() is True
 
@@ -2397,9 +2440,16 @@ def test_host_os_arch_tags_corrects_x86_64_to_aarch64_under_rosetta(monkeypatch)
     reports `macos-x86_64` from `platform.machine()` alone -- a FALSE hard
     refusal (`zephyrSdkAvailableForHost` fail, exit 4, "build on a Linux
     host") on a host the pinned SDK fully serves as `macos-aarch64`.
-    Rosetta's own sysctl corrects it."""
+    Rosetta's own sysctl corrects it.
+
+    `resolve_tool` is pinned resolved too (tan-cli#797) so this exercises the
+    probe's verdict, not the running host's `sysctl` inventory -- see
+    `test_macos_rosetta_translated_reads_the_sysctl_probe`."""
     monkeypatch.setattr(doctor_cmd.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(doctor_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        doctor_cmd, "resolve_tool", lambda *a, **k: ToolResolution("sysctl", "stub")
+    )
     monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "1\n")
     assert doctor_cmd._host_os_arch_tags() == ("macos", "aarch64")
 
@@ -2407,9 +2457,15 @@ def test_host_os_arch_tags_corrects_x86_64_to_aarch64_under_rosetta(monkeypatch)
 def test_host_os_arch_tags_leaves_a_native_intel_mac_alone(monkeypatch):
     """The other state of the same probe: a REAL Intel Mac (not translated)
     must still report `macos-x86_64` -- the unserved host this check is
-    supposed to fail."""
+    supposed to fail.
+
+    `resolve_tool` is pinned resolved too (tan-cli#797) -- see
+    `test_macos_rosetta_translated_reads_the_sysctl_probe`."""
     monkeypatch.setattr(doctor_cmd.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(doctor_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        doctor_cmd, "resolve_tool", lambda *a, **k: ToolResolution("sysctl", "stub")
+    )
     monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "0\n")
     assert doctor_cmd._host_os_arch_tags() == ("macos", "x86_64")
 
@@ -3375,8 +3431,9 @@ def test_sdk_provenance_check_does_not_attribute_an_enclosing_repos_commit(tmp_p
     assert check.detail == "alp-sdk 0.42.0", check.detail
     # `_is_own_git_checkout` unit-level, directly: proves the guard itself,
     # not just its downstream effect on the assembled detail string.
-    assert doctor_cmd._is_own_git_checkout(str(vendored_sdk)) is False
-    assert doctor_cmd._is_own_git_checkout(str(tmp_path)) is True
+    git_exe = doctor_cmd._resolve_git_executable()
+    assert doctor_cmd._is_own_git_checkout(str(vendored_sdk), git_exe) is False
+    assert doctor_cmd._is_own_git_checkout(str(tmp_path), git_exe) is True
 
 
 def test_sdk_provenance_check_reads_the_sdk_version_file_when_present(tmp_path):

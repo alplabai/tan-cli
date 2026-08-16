@@ -26,11 +26,21 @@ from pathlib import Path
 
 import pytest
 
-from tan.commands import flash_cmd, size_cmd
+from tan.commands import doctor_cmd, flash_cmd, size_cmd
 from tan.commands.build import execute as execute_module
 from tan.core.bootstrap import venv_layout
 from tan.core.flash_plan import FlashInputs, FlashPlan
 from tan.core.tool_lookup import ToolResolution, windows_candidate_names
+from tan.planner_root import bind_sdk_root
+from tests.conftest import sdk_root
+
+#: `tan.planner.buildplan` needs SOME bound alp-sdk root at import time
+#: (`tan/planner_root.py`) even though `_sdk_commit`'s own spawn-hazard
+#: assertions below read only this checkout's `.git`, never the bound
+#: tree's `metadata/**` -- same `ALP_SDK_ROOT`-gated skip every other
+#: `tan.planner` import in this suite carries (e.g.
+#: `tests/planner/test_zephyr_board_disjoint_slot0.py`).
+_PLANNER_SDK = sdk_root()
 
 
 def createprocess_would_load(argv0: str, executable: str | None, cwd: str, path: str) -> str:
@@ -90,7 +100,14 @@ def hostile(tmp_path, monkeypatch):
     realbin = tmp_path / "realbin"
     project = tmp_path / "hostile-project"
     project.mkdir()
-    for name in ("dd", "gunzip", "size", "taskkill", "JLinkExe"):
+    # "git"/"py"/"python"/"python3"/"sysctl" added for tan-cli#797: `doctor_cmd`'s
+    # SDK-provenance + host-Python + macOS-Rosetta probes join the scenario the
+    # rest of this file already set up for `dd`/`gunzip`/`size`/`taskkill`/
+    # `JLinkExe`.
+    for name in (
+        "dd", "gunzip", "size", "taskkill", "JLinkExe",
+        "git", "py", "python", "python3", "sysctl",
+    ):
         _executable(realbin, name)
         _executable(project, name)
     monkeypatch.setenv("PATH", str(realbin))
@@ -481,10 +498,12 @@ def test_the_windows_walk_never_considers_the_bare_extensionless_name(tool, expe
     """The ONE deliberate Windows-arm behaviour change tan-cli#567 makes,
     pinned so the next reader cannot mistake it for an accident.
 
-    `doctor_cmd.on_path`, one of the five hand-rolled lookups #532
-    consolidates, tries `exts = [""] + PATHEXT` -- the bare, EXTENSIONLESS
-    name first, ahead of every suffixed sibling. `tool_lookup` does not, and
-    that is not an oversight in the consolidation:
+    `doctor_cmd.on_path`, the last of the five hand-rolled lookups #532
+    consolidates, USED TO try `exts = [""] + PATHEXT` -- the bare,
+    EXTENSIONLESS name first, ahead of every suffixed sibling. `tool_lookup`
+    does not, and that is not an oversight in the consolidation. Since #532
+    `on_path` delegates here, so this is now the behaviour the doctor and
+    `faultdecode_cmd` get as well:
 
     * It is what the ORACLE does. `crates/tan-cli/src/util.rs::find_on_path`
       is `if has_ext { dir.join(command) } else { for ext in &exts { ... } }`
@@ -631,3 +650,324 @@ def test_taskkill_program_never_resolves_the_current_directory(hostile):
     assert resolved is not None
     assert Path(resolved).parent == realbin
     assert not str(resolved).startswith(str(project))
+
+
+# ── tan doctor: SDK-provenance git + host-Python probes (tan-cli#797) ───────
+
+
+def test_doctor_resolve_git_executable_answers_the_path_copy(hostile):
+    """`_resolve_git_executable` is the ONE lookup all four doctor git call
+    sites below now share -- it must answer the PATH copy, never the
+    project's own decoy `git`."""
+    _project, realbin = hostile
+    resolved = doctor_cmd._resolve_git_executable()
+    assert resolved is not None
+    assert Path(resolved).parent == realbin
+
+
+def test_doctor_is_own_git_checkout_spawns_the_resolved_git(hostile, spy):
+    """Fails before the fix, where `argv[0]` is the bare `'git'` and no
+    `executable=` is pinned -- `CreateProcess` would then load the project's
+    own decoy to answer "is this SDK checkout its own git repo"."""
+    project, realbin = hostile
+    git_exe = doctor_cmd._resolve_git_executable()
+
+    doctor_cmd._is_own_git_checkout(str(project), git_exe)
+
+    assert spy.argvs, "_is_own_git_checkout never spawned git"
+    argv0, executable = spy.argvs[-1][0], spy.executables[-1]
+    assert executable is not None, "the spawn pinned no executable"
+    assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+    assert argv0 == "git", f"the child's own argv[0] became {argv0!r}"
+
+
+def test_doctor_git_short_commit_and_behind_upstream_spawn_the_resolved_git(hostile, spy):
+    """The two callers layered on top of `_is_own_git_checkout` -- each is its
+    own `probe()` call and must resolve independently rather than falling
+    back to a bare spawn once the guard above has passed."""
+    project, realbin = hostile
+    git_exe = doctor_cmd._resolve_git_executable()
+
+    doctor_cmd._git_short_commit(str(project), git_exe)
+    doctor_cmd._git_behind_upstream(str(project), git_exe)
+
+    assert len(spy.argvs) >= 2, spy.argvs
+    for argv, executable in zip(spy.argvs, spy.executables):
+        assert argv[0] == "git", argv
+        assert executable is not None, "a git spawn pinned no executable"
+        assert Path(executable).parent == realbin
+
+
+def test_doctor_git_core_longpaths_spawns_the_resolved_git(hostile, spy):
+    """`_git_core_longpaths` is the one site that was spawned raw via
+    `subprocess.run`, with no `probe()` and no `executable=` at all. Pre-fix
+    this raised `AttributeError: module 'tan.commands.doctor_cmd' has no
+    attribute '_resolve_git_executable'` -- the whole helper is new -- never
+    reaching the `executable is None` assertion below; that assertion is
+    what pins the fix itself, not the pre-fix failure mode."""
+    project, realbin = hostile
+    git_exe = doctor_cmd._resolve_git_executable()
+
+    doctor_cmd._git_core_longpaths(git_exe)
+
+    assert spy.argvs, "_git_core_longpaths never spawned git"
+    argv0, executable = spy.argvs[-1][0], spy.executables[-1]
+    assert executable is not None, "the spawn pinned no executable"
+    assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+    assert argv0 == "git", f"the child's own argv[0] became {argv0!r}"
+
+
+def test_doctor_git_functions_degrade_gracefully_when_git_is_absent(tmp_path, monkeypatch, spy):
+    """The not-found case: `git` on nobody's PATH must never crash `tan
+    doctor`, and must never fall back to spawning the bare identity -- the
+    exact hazard the resolution exists to close. A doctor that raises because
+    git is missing is worse than the bug this fixes."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    git_exe = doctor_cmd._resolve_git_executable()
+    assert git_exe is None
+
+    assert doctor_cmd._is_own_git_checkout(str(tmp_path), git_exe) is False
+    assert doctor_cmd._git_short_commit(str(tmp_path), git_exe) is None
+    assert doctor_cmd._git_behind_upstream(str(tmp_path), git_exe) is None
+    assert doctor_cmd._git_core_longpaths(git_exe) is None
+    assert spy.argvs == [], f"a bare git was spawned despite resolving to nothing: {spy.argvs}"
+
+    # And the whole envelope-facing check degrades to a plain "pass" with no
+    # commit/skew attributed, rather than raising out of `_collect`.
+    check = doctor_cmd.sdk_provenance_check(str(tmp_path))
+    assert check.status == "pass"
+    assert "@" not in check.detail, check.detail
+
+
+def test_doctor_probe_host_python_spawns_the_resolved_interpreter(hostile, spy):
+    """`_python_candidates()` used to hand `probe()` the bare `'py'`/`'python'`/
+    `'python3'` identity; fails before the fix on the same `executable is
+    None` assertion the rest of this file uses. Every candidate the fixture
+    made resolvable gets spawned (empty stdout never parses as a version, so
+    `_probe_host_python` tries them all) -- checked, not just the last."""
+    project, realbin = hostile
+
+    doctor_cmd._probe_host_python((0, 0))
+
+    assert spy.argvs, "_probe_host_python never spawned an interpreter"
+    for argv, executable in zip(spy.argvs, spy.executables):
+        assert argv[0] in ("py", "python", "python3"), (
+            f"the child's own argv[0] became {argv[0]!r}"
+        )
+        assert executable is not None, "an interpreter spawn pinned no executable"
+        assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+
+
+def test_doctor_probe_host_python_skips_a_candidate_that_does_not_resolve(
+    tmp_path, monkeypatch, spy
+):
+    """No candidate on PATH at all: every one is skipped outright rather than
+    handed to `subprocess` unresolved, and the function answers `None` instead
+    of raising."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    assert doctor_cmd._probe_host_python((0, 0)) is None
+    assert spy.argvs == [], f"an unresolved interpreter candidate was spawned: {spy.argvs}"
+
+
+def test_doctor_posix_venv_capable_spawns_the_resolved_interpreter(hostile, spy):
+    """tan-cli#797 major finding: `_posix_venv_capable`'s own `ensurepip`
+    probe used to hand `subprocess.run` the BARE argv `_probe_host_python`
+    had just resolved and then discarded (`python_found[0].split()` at the
+    `_collect` call site) -- a resolve-then-spawn-something-else divergence
+    on the one platform this guard runs on at all (`sys.platform.startswith
+    ("linux")`). Fails before the fix on the same `executable is None`
+    assertion the rest of this file uses.
+
+    `executable` is resolved directly here, the same way `_probe_host_python`
+    resolves `candidate[0]`, rather than round-tripping through
+    `_probe_host_python` itself: the `spy` stand-in's empty stdout never
+    parses as a version (see `test_doctor_probe_host_python_spawns_the_
+    resolved_interpreter`'s own docstring), so `_probe_host_python` always
+    answers `None` under this fixture -- this test pins `_posix_venv_capable`
+    in isolation instead."""
+    project, realbin = hostile
+    executable = doctor_cmd.resolve_tool("python3", os.environ).resolved
+    assert executable is not None, "fixture interpreter never resolved"
+
+    doctor_cmd._posix_venv_capable(["python3"], executable=executable)
+
+    assert spy.argvs, "_posix_venv_capable never spawned an interpreter"
+    argv0, spawned_executable = spy.argvs[-1][0], spy.executables[-1]
+    assert spawned_executable is not None, "the ensurepip probe pinned no executable"
+    assert Path(spawned_executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+    assert argv0 == "python3", f"the child's own argv[0] became {argv0!r}"
+
+
+def test_collect_threads_probe_host_pythons_resolved_path_into_posix_venv_capable(
+    monkeypatch,
+):
+    """tan-cli#797 review MINOR: the test above pins `_posix_venv_capable` in
+    isolation, with the resolved `executable` handed in BY THE TEST -- it
+    proves the parameter works, not that the CALL SITE inside `_collect`
+    (`doctor_cmd.py`, the `venv_refusal` block) actually threads
+    `_probe_host_python`'s resolved third element through. Before the fix
+    that call site was
+    `_posix_venv_capable(python_found[0].split())` -- the bare display
+    spelling `_probe_host_python` had just resolved and then discarded,
+    reintroducing the exact regression #797 exists to close, invisibly to a
+    suite that only ever calls `_posix_venv_capable` directly. Revert
+    `doctor_cmd.py`'s call site to that bare form and this test fails; the
+    isolated test above does not."""
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    # Every prerequisite tool "found" so the `venv_refusal` branch is reached
+    # (it is gated on `not missing_tools`) regardless of this host's real PATH.
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(
+        doctor_cmd,
+        "_probe_host_python",
+        lambda floor: ("python3", (3, 12), "/resolved/bin/python3"),
+    )
+    captured: dict[str, object] = {}
+
+    def _spy_posix_venv_capable(argv, executable=None):
+        captured["argv"] = argv
+        captured["executable"] = executable
+        return True
+
+    monkeypatch.setattr(doctor_cmd, "_posix_venv_capable", _spy_posix_venv_capable)
+
+    doctor_cmd._collect(None)
+
+    assert captured, "_collect never reached the venv_refusal call site"
+    assert captured["executable"] == "/resolved/bin/python3", (
+        "_collect handed _posix_venv_capable something other than "
+        f"_probe_host_python's resolved path: {captured}"
+    )
+
+
+def test_doctor_macos_rosetta_translated_spawns_the_resolved_sysctl(hostile, spy):
+    """`_macos_rosetta_translated`'s `sysctl` probe is resolved through
+    `tool_lookup.resolve_tool` the same as this module's git/Python probes
+    (tan-cli#797 minor finding) -- not a Windows-reachable hazard (POSIX
+    `execvp` never searches cwd the way `CreateProcess` does), but left bare
+    it was the one inconsistent spawn in an otherwise fully-resolved module."""
+    project, realbin = hostile
+
+    doctor_cmd._macos_rosetta_translated()
+
+    assert spy.argvs, "_macos_rosetta_translated never spawned sysctl"
+    argv0, executable = spy.argvs[-1][0], spy.executables[-1]
+    assert executable is not None, "the sysctl probe pinned no executable"
+    assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+    assert argv0 == "sysctl", f"the child's own argv[0] became {argv0!r}"
+
+
+def test_doctor_macos_rosetta_translated_degrades_when_sysctl_is_absent(
+    tmp_path, monkeypatch, spy
+):
+    """`sysctl` on nobody's PATH answers `False`, never a bare fallback
+    spawn or a crash."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    assert doctor_cmd._macos_rosetta_translated() is False
+    assert spy.argvs == [], f"a bare sysctl was spawned despite resolving to nothing: {spy.argvs}"
+
+
+# ── tan build: SDK-provenance git (tan-cli#797) ─────────────────────────────
+
+
+def test_build_token_substitution_git_short_head_spawns_the_resolved_git(hostile, spy):
+    """`token_substitution.git_short_head`/`_is_own_git_checkout` run on the
+    BUILD path with the process cwd set to the CUSTOMER project -- the
+    Windows-reachable strong form of the hazard this file otherwise pins only
+    for `tan doctor`/`tan flash`/`tan size`. Fails before the fix on the
+    same `executable is None` assertion as the rest of this module."""
+    from tan.commands.build import token_substitution
+
+    project, realbin = hostile
+
+    token_substitution.git_short_head(project)
+
+    assert spy.argvs, "git_short_head never spawned git"
+    for argv, executable in zip(spy.argvs, spy.executables):
+        assert argv[0] == "git", argv
+        assert executable is not None, "a git spawn pinned no executable"
+        assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+
+
+def test_build_token_substitution_git_functions_degrade_when_git_is_absent(
+    tmp_path, monkeypatch, spy
+):
+    """`git` on nobody's PATH must never crash a build or fall back to a bare
+    spawn -- the exact hazard the resolution exists to close."""
+    from tan.commands.build import token_substitution
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    git_exe = token_substitution._resolve_git_executable()
+    assert git_exe is None
+    assert token_substitution._is_own_git_checkout(tmp_path, git_exe) is False
+    assert token_substitution.git_short_head(tmp_path) == ""
+    assert spy.argvs == [], f"a bare git was spawned despite resolving to nothing: {spy.argvs}"
+
+
+@pytest.mark.skipif(
+    _PLANNER_SDK is None,
+    reason="ALP_SDK_ROOT is not set (or does not point at a real alp-sdk "
+           "checkout) -- importing tan.planner.buildplan requires SOME "
+           "bound root (tan/planner_root.py), even though _sdk_commit's own "
+           "spawn-hazard assertions below read only this checkout's .git.",
+)
+def test_planner_buildplan_sdk_commit_spawns_the_resolved_git(hostile, spy):
+    """`buildplan._sdk_commit` feeds the emitted plan's `sdkCommit` and, like
+    `token_substitution.git_short_head` above, runs with the process cwd set
+    to the CUSTOMER's project (`tan build` is invoked from there, not from
+    the SDK checkout) -- the same Windows-reachable strong form of the
+    cwd-shadowing hazard, not just the doctor-side weak form. Fails before
+    the fix on the same `executable is None` assertion as the rest of this
+    module."""
+    bind_sdk_root(_PLANNER_SDK)
+    from tan.planner import buildplan
+
+    project, realbin = hostile
+
+    buildplan._sdk_commit()
+
+    assert spy.argvs, "_sdk_commit never spawned git"
+    for argv, executable in zip(spy.argvs, spy.executables):
+        assert argv[0] == "git", argv
+        assert executable is not None, "a git spawn pinned no executable"
+        assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+
+
+@pytest.mark.skipif(
+    _PLANNER_SDK is None,
+    reason="ALP_SDK_ROOT is not set (or does not point at a real alp-sdk "
+           "checkout) -- see test_planner_buildplan_sdk_commit_spawns_the_"
+           "resolved_git above.",
+)
+def test_planner_buildplan_sdk_commit_degrades_when_git_is_absent(tmp_path, monkeypatch, spy):
+    """`git` on nobody's PATH must never crash a `tan build` emit or fall back
+    to a bare spawn -- the exact hazard the resolution exists to close."""
+    bind_sdk_root(_PLANNER_SDK)
+    from tan.planner import buildplan
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    assert buildplan._sdk_commit() is None
+    assert spy.argvs == [], f"a bare git was spawned despite resolving to nothing: {spy.argvs}"
+
