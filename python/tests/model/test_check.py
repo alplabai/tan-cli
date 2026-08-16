@@ -561,11 +561,16 @@ def test_a_refused_footprint_is_not_reported_as_a_failed_compile(tmp_path, monke
     # The real message, verbatim from a real refusal on an ALIF ENSEMBLE part
     # (ethos-u-vela 5.1.0, tiny_int8.tflite at ethos-u85-256, silicon_ref
     # `alif:ensemble:e8`, a SoC spec with no `npu_toolchain.vela` -- since
-    # alp-sdk #1470 that is what it takes to reach this branch): 603
+    # alp-sdk #1470 that is what it takes to reach this branch): 618
     # characters, one line. Deliberately the LONGER of the two shapes -- the
-    # same refusal on `nxp:imx9:imx93` is 500 characters because it carries no
-    # vendor clause at all (tan-cli#789 review (g)) -- since truncation is
-    # what this test is about.
+    # same message with a non-Alif `silicon_ref` is 499 characters because it
+    # carries no vendor clause at all (tan-cli#789 review (g)) -- since
+    # truncation is what this test is about. Both figures re-measured off the
+    # live template
+    # when the vendor clause was reworded to name the `System_Config` rather
+    # than the whole profile (tan-cli#789 review MINOR 4); a literal that has
+    # drifted from what `_refuse_zero_sram_footprint` actually emits stops
+    # being evidence about truncation.
     refusal = VelaFootprintRefused(
         "vela compiled cleanly for ethos-u85-256 (1/1 operators on the NPU) but "
         "reported 0 KiB SRAM: its working set went to dram 0.27 KiB under "
@@ -573,9 +578,9 @@ def test_a_refused_footprint_is_not_reported_as_a_failed_compile(tmp_path, monke
         "profile. Refused because alp-sdk's on-device selector accepts req_sram_kib "
         "== 0 against ANY arena size (src/backends/inference/alp_model_select.c). "
         "No module vela profile was resolved for this part, so vela chose its own; "
-        "on this Alif Ensemble part it lives in the proprietary ensemble_vela.ini "
-        "alp-sdk does not redistribute. `tan model build` skips this target and "
-        "still builds the SKU's others.")
+        "on this Alif Ensemble part its System_Config lives in the proprietary "
+        "ensemble_vela.ini alp-sdk does not redistribute. `tan model build` skips "
+        "this target and still builds the SKU's others.")
 
     def _refuse(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
                 vela_memory_mode=None, vela_system_config=None):

@@ -49,20 +49,30 @@ def _vela_profile(soc: dict) -> tuple[str | None, str | None]:
         option --system-config=Ethos_U85_SRAM_Only: Section
         System_Config.Ethos_U85_SRAM_Only not found in Vela config file'
 
-    So a `system_config` is carried ONLY when the block does not set
-    `system_config_requires_vendor_config` -- a key the SoC schema makes
-    REQUIRED, so falsy here means an author said "no vendor file needed", not
-    that they forgot. An ABSENT `system_config` is likewise "nothing to pass",
-    never "no vendor config needed": no Alif or NXP spec names one today (an
-    Alif System_Config describes one CORE SUBSYSTEM, not a die), so this branch
-    yields None for every part currently shipped -- correct, and the mechanism
-    is here for the spec that eventually does carry a built-in one."""
+    So a `system_config` is carried ONLY when the block declares
+    `system_config_requires_vendor_config` EXPLICITLY FALSE. It fails CLOSED,
+    not open: an ABSENT key withholds the name, exactly as `true` does. The
+    defence for reading it as falsy was that alp-sdk's SoC schema makes the key
+    `required` -- true today, but enforced in the OTHER repo, against a
+    checkout tan binds at an arbitrary version (`ALP_SDK_ROOT`, any tag or
+    branch a user has on disk). That is the same cross-repo drift class
+    `tests/gates/test_planner_relocation_freshness.py` exists for, and here the
+    failure mode is not a stale hash: an unannotated `system_config` would walk
+    straight onto vela's command line and turn a build into a hard rc=1. `is
+    False` is the only reading under which a spec that never made the promise
+    cannot make it by omission.
+
+    An ABSENT `system_config` is likewise "nothing to pass", never "no vendor
+    config needed": no Alif or NXP spec names one today (an Alif System_Config
+    describes one CORE SUBSYSTEM, not a die), so this branch yields None for
+    every part currently shipped -- correct, and the mechanism is here for the
+    spec that eventually does carry a built-in one."""
     block = soc.get("npu_toolchain")
     vela = block.get("vela") if isinstance(block, dict) else None
     if not isinstance(vela, dict):
         return None, None
     memory_mode = vela.get("memory_mode") or None
-    if vela.get("system_config_requires_vendor_config"):
+    if vela.get("system_config_requires_vendor_config") is not False:
         return memory_mode, None
     return memory_mode, vela.get("system_config") or None
 

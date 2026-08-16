@@ -163,9 +163,9 @@ _VELA_ERR_NOTE_BUDGET = 200
 #: in the text report AND the JSON envelope carried the diagnosis with none of
 #: the remediation, which is the whole reason the refusal was reworded
 #: (tan-cli#789 review BLOCKER 2 / MINOR 5). The number is measured, not
-#: guessed: a real `ethos-u85-256` refusal is 591 characters, and a
+#: guessed: a real `ethos-u85-256` refusal is 621 characters, and a
 #: deliberately maximal one (three memory areas at five significant figures,
-#: the longest profile name vela emits, four-digit op counts) is 659 --
+#: the longest profile name vela emits, four-digit op counts) is 688 --
 #: `test_the_refusal_note_budget_covers_a_maximal_refusal` builds exactly that
 #: and fails if a future message outgrows this. Still bounded and still
 #: word-boundary-truncated with a trailing marker, so the one-line guarantee

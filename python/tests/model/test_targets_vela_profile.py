@@ -79,6 +79,30 @@ def test_a_vendor_gated_system_config_is_dropped_and_the_memory_mode_is_kept(tmp
     assert spec.vela_system_config is None
 
 
+def test_an_undeclared_vendor_requirement_withholds_the_system_config(tmp_path):
+    """tan-cli#789 review MINOR 5: the guard must fail CLOSED.
+
+    Reading the key with `.get()` treated an ABSENT
+    `system_config_requires_vendor_config` as "no vendor config needed" and let
+    the name onto vela's command line. The defence was that alp-sdk's SoC
+    schema declares the key `required` -- but that constraint is enforced in
+    the OTHER repo, against whatever checkout `ALP_SDK_ROOT` happens to point
+    at (any tag or branch on the user's disk), which is precisely the cross-repo
+    drift class `tests/gates/test_planner_relocation_freshness.py` exists for.
+    Here the consequence is not a stale hash: a `system_config` that turns out
+    to need a vendor `.ini` is vela rc=1, `Section System_Config.<name> not
+    found in Vela config file`, i.e. a hard build failure rather than a
+    degradation. Only an explicit `False` is a promise; omission is not."""
+    spec = _ethos_u(tmp_path, {
+        "memory_mode": "Sram_Only",
+        "system_config": "Ethos_U85_SRAM_Only",
+        # `system_config_requires_vendor_config` deliberately ABSENT
+        "source": "vendors/fake/README.md:1-2",
+    })
+    assert spec.vela_memory_mode == "Sram_Only"      # the Arm built-in still flows
+    assert spec.vela_system_config is None           # ... the unvouched name does not
+
+
 def test_an_absent_system_config_is_nothing_to_pass(tmp_path):
     """Missing means "this part names none", NEVER "no vendor config needed"
     -- the shape every shipped Alif and NXP spec is in today."""

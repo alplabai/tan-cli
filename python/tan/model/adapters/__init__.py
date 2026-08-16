@@ -33,13 +33,15 @@ class Blob:
     # `--system-config` still does not, because the SoM-authoritative names
     # live only in a proprietary .ini alp-sdk does not redistribute. Surfaced
     # rather than swallowed so a compile tuned to vela's own bandwidth model
-    # -- or, when no memory mode was resolvable at all, to vela's DRAM-backed
-    # default on a module that has no DRAM -- cannot be mistaken for a
-    # module-authoritative one; `tan.model.check`'s `_report_from_vela_
-    # compile` carries them into `BackendReport.notes` and so into the JSON
-    # envelope. Never a substitute for failing: a figure that cannot be
-    # derived is refused (`ethos_u._refuse_zero_sram_footprint`), not
-    # caveated.
+    # -- or, under a memory mode whose const area sits on the arena's OTHER
+    # AXI port (`Shared_Sram`), one whose WEIGHTS vela's default system config
+    # placed as well, or, when no memory mode was resolvable at all, one sent
+    # to vela's DRAM-backed default on a module that has no DRAM -- cannot be
+    # mistaken for a module-authoritative one; `tan.model.check`'s
+    # `_report_from_vela_compile` carries them into `BackendReport.notes` and
+    # so into the JSON envelope. Never a substitute for failing: a figure that
+    # cannot be derived is refused (`ethos_u._refuse_zero_sram_footprint`),
+    # not caveated.
     caveats: tuple[str, ...] = ()
 
 
