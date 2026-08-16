@@ -192,7 +192,7 @@ def test_build_model_skips_backend_missing_compile_config(tmp_path):
         requires_compile_opts = True
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
             raise AssertionError("must not compile without opts")
     src = tmp_path / "m.tflite"; src.write_bytes(b"TFL3-X")
     out = build_model(sku="E1M-V2M101", name="demo", source=src, out_dir=tmp_path,
@@ -210,7 +210,7 @@ def test_build_model_passes_compile_opts_to_adapter(tmp_path):
         requires_compile_opts = True
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
             seen["opts"] = opts
             return Blob(format="drpai_dir", payload=b"RT", arena_bytes=0)
     src = tmp_path / "m.tflite"; src.write_bytes(b"TFL3-X")
@@ -299,7 +299,45 @@ def test_a_refused_target_does_not_take_the_rest_of_the_package_with_it(tmp_path
     assert refused[0].status == "skipped"
     assert "reported 0 KiB SRAM" in refused[0].reason
     assert "Ethos_U85_SYS_DRAM_Mid" in refused[0].reason
-    assert "ensemble_vela.ini" in refused[0].reason         # ... and what to do about it
+    # ... and what to do about it. E1M-AEN801's preset is `silicon:
+    # alif:ensemble:e8`, so this SKU is exactly where the proprietary-profile
+    # pointer belongs (tan-cli#789 review (g); the NXP counterpart is pinned
+    # by `test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file`).
+    assert "ensemble_vela.ini" in refused[0].reason
+
+
+@_needs_vela
+def test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file(tmp_path):
+    """THE (g) GUARD, end to end through a REAL vela process.
+
+    `E1M-NX9101` is an NXP i.MX 93. Measured, `ethos-u-vela` 5.1.0 over the
+    committed `tiny_int8.tflite`, its single `ethos-u65-256` target refuses
+    with the profile it really resolved (`Ethos_U65_Client_Server /
+    Dedicated_Sram_384KB`, `dram 0.11 KiB`) -- and then, until this fix, the
+    remedy sentence told that customer the profile "lives in the proprietary
+    ensemble_vela.ini", an Alif Ensemble file that has nothing to do with
+    their silicon (alp-sdk's own i.MX 93 vela invocation involves no
+    proprietary `.ini` at all -- `vendors/nxp-imx93/README.md`). Naming the
+    profile per run (MAJOR 3) fixed only the first half of the sentence.
+
+    The `cpu` target still ships, which is the other half of the per-target
+    contract: one refused accelerator target must never empty the package."""
+    src = tmp_path / _TINY_INT8.name
+    shutil.copy(_TINY_INT8, src)
+    out = build_model(sku="E1M-NX9101", name="tiny", source=src, out_dir=tmp_path,
+                      metadata_root=_META)          # default registry: real vela + cpu
+    mft, _ = read_package(out.read_bytes())
+    assert [t.backend for t in mft.targets] == ["cpu"]
+
+    refused = [c for c in mft.coverage if c.accel_config == "ethos-u65-256"]
+    assert len(refused) == 1 and refused[0].status == "skipped"
+    reason = refused[0].reason
+    assert "Ethos_U65_Client_Server" in reason              # the profile it DID resolve
+    assert "ensemble_vela.ini" not in reason               # ... and no Alif file after it
+    assert "Alif" not in reason and "alif" not in reason
+    # The part-independent remedy is intact for this SKU too.
+    assert "No module vela profile was supplied and tan cannot pass one yet." in reason
+    assert "`tan model build` skips this target and still builds the SKU's others." in reason
 
 
 @_needs_vela
@@ -373,11 +411,11 @@ def test_only_the_footprint_refusal_is_absorbed_a_real_compile_failure_still_fai
         backend = "ethos_u"
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
             raise VelaFootprintRefused(f"refused {accel_config}")
 
     class _Crashes(_Refuses):
-        def compile(self, source, *, accel_config, out_dir, opts=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
             raise RuntimeError(f"vela failed for {accel_config}: segmentation fault")
 
     src = tmp_path / "m.tflite"
@@ -404,7 +442,7 @@ def test_an_unknown_accelerator_placement_is_not_treated_as_zero(tmp_path):
         backend = "drpai"
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
             return Blob(format="drpai_dir", payload=b"RT", arena_bytes=4096,
                         req_sram_kib=4)             # npu_op_count stays None
 

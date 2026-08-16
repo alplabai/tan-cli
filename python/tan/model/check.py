@@ -52,7 +52,7 @@ from pathlib import Path
 from .adapters import Blob
 from .adapters.ethos_u import VelaAdapter, VelaFootprintRefused
 from .analyze import BackendReport, OpVerdict, analyze_backend, resolve_ethos_u_variant
-from .targets import resolve_targets
+from .targets import TargetSpec, resolve_targets
 from .tensorio import extract_ops, tflite_reader_available
 
 
@@ -271,14 +271,16 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
         note = ("--exact was requested, but vela is not on PATH (pip install "
                  "alp-tan[model-compile]); reporting the static screen instead.")
         return replace(report, notes=[*report.notes, note])
-    accel_config = _headline_ethos_u_accel_config(sku, metadata_root)
-    if accel_config is None:
+    target = _headline_ethos_u_target(sku, metadata_root)
+    if target is None:
         note = ("--exact could not resolve an Ethos-U accelerator config for "
                  "this SKU; reporting the static screen instead.")
         return replace(report, notes=[*report.notes, note])
+    accel_config = target.accel_config
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            blob = VelaAdapter().compile(source, accel_config=accel_config, out_dir=Path(tmp))
+            blob = VelaAdapter().compile(source, accel_config=accel_config, out_dir=Path(tmp),
+                                         silicon_ref=target.silicon_ref)
     except VelaFootprintRefused as err:
         return _footprint_refused_note(report, err)
     except Exception as err:  # noqa: BLE001 -- a failed exact compile degrades, it never crashes
@@ -371,22 +373,27 @@ def _vela_placement_unreadable(report: BackendReport, blob: Blob, accel_config: 
     return replace(report, notes=[*report.notes, note, *blob.caveats])
 
 
-def _headline_ethos_u_accel_config(sku: str, metadata_root: Path) -> str | None:
-    """The accel_config `--exact` hands `vela`: `resolve_ethos_u_variant`'s
-    own PRIMARY variant, at the highest `mac_per_cycle` config resolved for
-    it -- an arbitrary but deterministic tiebreak for a SoM shipping more
-    than one NPU at the same variant (E1M-AEN701's `alif:ensemble:e7` lists a
+def _headline_ethos_u_target(sku: str, metadata_root: Path) -> TargetSpec | None:
+    """The target `--exact` hands `vela`: `resolve_ethos_u_variant`'s own
+    PRIMARY variant, at the highest `mac_per_cycle` config resolved for it --
+    an arbitrary but deterministic tiebreak for a SoM shipping more than one
+    NPU at the same variant (E1M-AEN701's `alif:ensemble:e7` lists a
     high-perf U55 at 256 MAC/cycle alongside a high-efficiency U55 at 128,
     `metadata/socs/alif/ensemble/e7.json`'s own `npus[]`). There is no
     per-SKU "preferred accel_config" field in the metadata this could read
     instead of guessing; None when the variant itself doesn't resolve
-    (drpai/deepx_dxm1 SoMs) or no target matches it."""
+    (drpai/deepx_dxm1 SoMs) or no target matches it.
+
+    Returns the whole `TargetSpec` rather than just its `accel_config` so the
+    caller can hand `silicon_ref` to the adapter alongside it (tan-cli#789
+    review (g)): both come off the SAME resolved target, so `--exact` can
+    never describe one target's accelerator with another's vendor."""
     variant = resolve_ethos_u_variant(sku, metadata_root=metadata_root)
     if variant is None:
         return None
     prefix = f"ethos-{variant}-"
-    candidates = [s.accel_config for s in resolve_targets(sku, metadata_root=metadata_root)
+    candidates = [s for s in resolve_targets(sku, metadata_root=metadata_root)
                   if s.backend == "ethos_u" and s.accel_config.startswith(prefix)]
     if not candidates:
         return None
-    return max(candidates, key=lambda c: int(c.rsplit("-", 1)[-1]))
+    return max(candidates, key=lambda s: int(s.accel_config.rsplit("-", 1)[-1]))

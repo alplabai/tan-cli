@@ -43,7 +43,8 @@ class ExecutorchAdapter(CompilerAdapter):
         # `models[].source` description names it explicitly (see there).
         return src_format == "pte"
 
-    def compile(self, source: Path, *, accel_config: str, out_dir: Path, opts: dict | None = None) -> Blob:
+    def compile(self, source: Path, *, accel_config: str, out_dir: Path,
+                opts: dict | None = None, silicon_ref: str | None = None) -> Blob:
         payload = source.read_bytes()
         return Blob(format="executorch", payload=payload, arena_bytes=0,
                     compiler_version="passthrough")

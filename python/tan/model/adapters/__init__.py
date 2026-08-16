@@ -60,10 +60,22 @@ class CompilerAdapter(ABC):
 
     @abstractmethod
     def compile(self, source: Path, *, accel_config: str, out_dir: Path,
-                opts: dict | None = None) -> Blob:
+                opts: dict | None = None, silicon_ref: str | None = None) -> Blob:
         """Compile @source for @accel_config; return the Blob.
 
         @opts is the per-model compile config for this backend
         (board.yaml `models[].compile.<backend>`), with any path values already
         resolved to absolute paths by the caller; None when the backend needs
-        no per-model config (cpu, ethos_u)."""
+        no per-model config (cpu, ethos_u).
+
+        @silicon_ref is the `<vendor>:<family>:<part>` ref of the silicon this
+        target runs on -- `TargetSpec.silicon_ref`, straight out of the SoM
+        preset's `silicon:` (`alif:ensemble:e8`, `nxp:imx9:imx93`, ...) -- for
+        an adapter whose DIAGNOSTICS are vendor-specific even though its
+        compile is not. Today only `VelaAdapter` reads it, to name Alif's
+        proprietary `ensemble_vela.ini` in a footprint refusal on an Alif
+        Ensemble part and NOT on the NXP i.MX 93 (tan-cli#789 review (g)).
+        `None` means the caller could not resolve one; an adapter must then
+        stay vendor-neutral, never guess a vendor from an accelerator config
+        or a compiler-reported profile name. It is NOT a compile input: no
+        adapter may change the artifact it emits based on this."""

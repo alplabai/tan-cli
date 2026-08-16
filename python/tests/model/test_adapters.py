@@ -320,7 +320,12 @@ def test_the_refusal_prescribes_nothing_tan_cannot_actually_do(tmp_path, monkeyp
     `tan/` passes either flag, and alp-sdk's `board.schema.json` declares
     `models[].compile` as `additionalProperties: false` over
     `deepx_dxm1`/`drpai`, so there is no `ethos_u` key to route a profile
-    through. Every clause must now be true and point at something real."""
+    through. Every clause must now be true and point at something real.
+
+    `silicon_ref="alif:ensemble:e8"` is E1M-AEN801's own `silicon:` value
+    (metadata/e1m_modules/E1M-AEN801.yaml) -- the `ensemble_vela.ini` pointer
+    is asserted here BECAUSE this is an Alif Ensemble part, and the sibling
+    test below asserts its absence on the NXP one (tan-cli#789 review (g))."""
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
@@ -341,7 +346,8 @@ def test_the_refusal_prescribes_nothing_tan_cannot_actually_do(tmp_path, monkeyp
 
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     with pytest.raises(VelaFootprintRefused) as exc:
-        VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path)
+        VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path,
+                              silicon_ref="alif:ensemble:e8")
     msg = str(exc.value)
     assert "--system-config" not in msg and "--memory-mode" not in msg
     # ... and instead, the three things that ARE true:
@@ -379,11 +385,111 @@ def test_the_refusal_names_the_profile_the_run_reported_not_a_hardcoded_alif_one
 
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     with pytest.raises(VelaFootprintRefused) as exc:
-        VelaAdapter().compile(src, accel_config="ethos-u65-256", out_dir=tmp_path)
+        VelaAdapter().compile(src, accel_config="ethos-u65-256", out_dir=tmp_path,
+                              silicon_ref="nxp:imx9:imx93")
     msg = str(exc.value)
     assert "ethos-u65-256" in msg
     assert "Ethos_U65_Client_Server" in msg
     assert "Ethos_U85" not in msg               # the SKU that refuses here is not Alif's
+
+
+def _refuse_on(accel_config, profile, silicon_ref, tmp_path, monkeypatch):
+    """One defaulted-profile refusal for @accel_config/@profile on @silicon_ref.
+
+    The stdout is the real vela 5.1.0 shape (both "No ... specified" warnings
+    plus the network-summary block); the summary CSV puts the whole working
+    set in DRAM, which is what makes it a refusal."""
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-INPUT")
+
+    def fake_run(cmd, capture_output, text, timeout):
+        out = _out_dir_of(cmd)
+        (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
+        (out / f"m_summary_{profile}.csv").write_text(
+            "sram_memory_used,dram_memory_used\n0.0,0.109375\n", encoding="utf-8")
+        return _FakeProc(stdout=(
+            f"Warning: No system configuration specified. Using a default of "
+            f"{profile}. Compilation may be invalid or non-optimal.\n"
+            f"Warning: No memory mode specified. Using a default of "
+            f"Dedicated_Sram_384KB. Compilation may be invalid or non-optimal.\n"
+            f"System configuration             {profile}\n"
+            f"Memory mode                      Dedicated_Sram_384KB\n"
+            f"CPU operators = 0 (0.0%)\n"
+            f"NPU operators = 1 (100.0%)\n"))
+
+    monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
+    with pytest.raises(VelaFootprintRefused) as exc:
+        VelaAdapter().compile(src, accel_config=accel_config, out_dir=tmp_path,
+                              silicon_ref=silicon_ref)
+    return str(exc.value)
+
+
+@pytest.mark.parametrize("silicon_ref", [
+    pytest.param("nxp:imx9:imx93", id="E1M-NX9101-nxp-imx93"),   # the part this is about
+    pytest.param(None, id="caller-could-not-resolve-a-silicon-ref"),
+])
+def test_a_non_alif_refusal_never_names_an_alif_file(tmp_path, monkeypatch, silicon_ref):
+    """tan-cli#789 review (g): the REMEDY was Alif-specific for every part.
+
+    `_profile_clause` was fixed per-run in the previous round (MAJOR 3), but
+    `_refusal_remedy` still returned, unconditionally, "for Alif Ensemble
+    parts it lives in the proprietary ensemble_vela.ini alp-sdk does not
+    redistribute" -- so an `ethos-u65-256` refusal on `E1M-NX9101` correctly
+    derived `Ethos_U65_Client_Server / Dedicated_Sram_384KB` and then still
+    sent an NXP customer after an Alif file. alp-sdk's own i.MX 93 vela
+    invocation involves no proprietary `.ini` at all (`vendors/nxp-imx93/
+    README.md`), so that pointer is not merely unhelpful there, it is wrong.
+
+    `None` is parametrized alongside it because "I could not resolve the
+    vendor" must behave like "not Alif", never like "probably Alif": the
+    fallback is silence about vendors, not a guess.
+
+    What must SURVIVE for every part is the pair of clauses that are true for
+    all of them -- no profile was supplied, tan cannot pass one, and the rest
+    of the SKU still builds."""
+    msg = _refuse_on("ethos-u65-256", "Ethos_U65_Client_Server", silicon_ref,
+                     tmp_path, monkeypatch)
+    assert "ensemble_vela.ini" not in msg                    # THE regression (g)
+    assert "Alif" not in msg and "alif" not in msg
+    assert "does not redistribute" not in msg
+    # ... while the part-independent half of the remedy is untouched:
+    assert "No module vela profile was supplied and tan cannot pass one yet." in msg
+    assert "`tan model build` skips this target and still builds the SKU's others." in msg
+    assert "Ethos_U65_Client_Server" in msg                  # still the run's own profile
+    assert "\n" not in msg
+
+
+def test_an_alif_ensemble_refusal_still_names_the_proprietary_profile_file(
+        tmp_path, monkeypatch):
+    """The other side of (g): gating the clause must not delete it.
+
+    Every Alif Ensemble SKU's preset carries `silicon: alif:ensemble:<part>`
+    (E1M-AEN401 `e4`, E1M-AEN601 `e6`, E1M-AEN801 `e8`), and for those the
+    pointer is the only thing that explains WHY tan cannot fix the footprint
+    itself. The match is on that ref prefix -- authored SoM metadata -- not on
+    the accel config or on vela's profile name, both of which describe an Arm
+    IP block and say nothing about who built the part."""
+    for part in ("e4", "e6", "e8"):
+        msg = _refuse_on("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid",
+                         f"alif:ensemble:{part}", tmp_path, monkeypatch)
+        assert "on this Alif Ensemble part it lives in the proprietary " \
+               "ensemble_vela.ini alp-sdk does not redistribute" in msg
+        assert "`tan model build` skips this target and still builds the SKU's others." in msg
+        assert "\n" not in msg
+
+
+def test_the_vendor_clause_is_not_derived_from_the_vela_profile_name(tmp_path, monkeypatch):
+    """The signal is the SoM's silicon ref, never the compiler's profile name.
+
+    `Ethos_U85_SYS_DRAM_Mid` is an Arm/vela built-in that any vendor's U85
+    part resolves to, so keying the Alif clause off it (or off `ethos-u85-*`)
+    would be semantically wrong AND would re-break the NXP case the moment a
+    non-Alif U85 module ships. Same profile, same accel config, different
+    vendor -> no vendor clause."""
+    msg = _refuse_on("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid", "nxp:imx9:imx93",
+                     tmp_path, monkeypatch)
+    assert "Ethos_U85_SYS_DRAM_Mid" in msg          # the profile IS the U85 default
+    assert "ensemble_vela.ini" not in msg           # ... and it still proves nothing
 
 
 def test_two_runs_sharing_one_out_dir_never_read_each_others_summary(tmp_path, monkeypatch):
@@ -544,16 +650,20 @@ def test_vela_real_compile_for_e8_accel_configs(tmp_path, accel_config):
 
 
 @pytest.mark.skipif(shutil.which("vela") is None, reason="vela (ethos-u-vela) not installed")
-@pytest.mark.parametrize("accel_config,profile", [
+@pytest.mark.parametrize("accel_config,profile,silicon_ref,alif", [
     # E1M-AEN401 (E4) / E1M-AEN601 (E6) / E1M-AEN801 (E8) -- Alif Ensemble.
-    ("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid / Dedicated_Sram_384KB"),
+    ("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid / Dedicated_Sram_384KB",
+     "alif:ensemble:e8", True),
     # E1M-NX9101 -- NXP i.MX 93. NOT an Alif part, and a DIFFERENT default
     # profile: hardcoding the U85 one would blame an Alif memory model for an
-    # NXP refusal (tan-cli#789 review MAJOR 3).
-    ("ethos-u65-256", "Ethos_U65_Client_Server / Dedicated_Sram_384KB"),
+    # NXP refusal (tan-cli#789 review MAJOR 3), and naming Alif's proprietary
+    # profile file in the remedy does the same thing one sentence later
+    # (review (g)).
+    ("ethos-u65-256", "Ethos_U65_Client_Server / Dedicated_Sram_384KB",
+     "nxp:imx9:imx93", False),
 ])
 def test_vela_real_dram_default_profile_compile_refuses_a_zero_footprint(
-        tmp_path, accel_config, profile):
+        tmp_path, accel_config, profile, silicon_ref, alif):
     """The two accel configs whose BUILT-IN default profile is DRAM-backed,
     through a REAL vela process.
 
@@ -577,11 +687,13 @@ def test_vela_real_dram_default_profile_compile_refuses_a_zero_footprint(
     src = tmp_path / "tiny.tflite"
     shutil.copy(_ROOT / "tests/fixtures/models/tiny_int8.tflite", src)
     with pytest.raises(VelaFootprintRefused) as exc:
-        VelaAdapter().compile(src, accel_config=accel_config, out_dir=tmp_path)
+        VelaAdapter().compile(src, accel_config=accel_config, out_dir=tmp_path,
+                              silicon_ref=silicon_ref)
     msg = str(exc.value)
     assert f"vela compiled cleanly for {accel_config}" in msg   # the compile DID succeed
     assert "operators on the NPU" in msg
     assert "reported 0 KiB SRAM" in msg
+    assert ("ensemble_vela.ini" in msg) is alif    # the vendor clause, through REAL vela
     assert profile in msg                          # the profile THIS run resolved
     assert "\n" not in msg                         # one line: it lands in a note
 

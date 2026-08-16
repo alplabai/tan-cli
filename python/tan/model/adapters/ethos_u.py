@@ -59,7 +59,24 @@ and reports a real footprint. Nor is it confined to tiny fixtures:
 `keyword_scrambled_8bit.tflite` (29 KB, 6/15 partial placement) refuses on
 `E1M-AEN801` too. `_refuse_zero_sram_footprint` therefore names the profile the
 run ITSELF reported (`_parse_vela_profile`), never a hardcoded Alif one -- an
-NXP user must not read an error blaming `Ethos_U85_SYS_DRAM_Mid`."""
+NXP user must not read an error blaming `Ethos_U85_SYS_DRAM_Mid`.
+
+...AND NEITHER IS THE REMEDY (tan-cli#789 review (g)). Naming the profile per
+run only half-closed that: the REMEDY sentence still told every reader the
+profile "lives in the proprietary ensemble_vela.ini", which is an Alif fact.
+alp-sdk's own i.MX 93 vela invocation carries no proprietary `.ini` at all --
+verbatim from `vendors/nxp-imx93/README.md`: `vela --accelerator-config
+ethos-u65-256 --output-dir build/vela-imx93 --memory-mode Shared_Sram
+mobilenet_v2_quantised.tflite`. So on an NXP part that clause sent the reader
+after another vendor's file, which is not what their silicon needs and not
+where their profile comes from. The clause is now gated on
+@silicon_ref -- the SoM preset's own `silicon:` ref reaching `compile()`
+(`alif:ensemble:e8` vs `nxp:imx9:imx93`, via `TargetSpec.silicon_ref`), a real
+signal -- and NOT on the vela profile name, which is a property of the
+accelerator config rather than of the vendor. Note the Shared_Sram line above
+is NOT restated as advice: `compile()` still passes no `--memory-mode` and has
+no way to, and prescribing a flag tan cannot pass is the defect review BLOCKER
+2 removed (see `_refusal_remedy`)."""
 from __future__ import annotations
 import csv
 import math
@@ -108,6 +125,15 @@ _MEM_USED_RE = re.compile(r"^(.+)_memory_used$")
 # metadata; anything outside this set is folded to "_" so a malformed
 # accel_config can never walk out of @out_dir.
 _UNSAFE_DIR_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+# The one vendor whose vela profile tan can point at by name. `silicon_ref` is
+# `<vendor>:<family>:<part>` straight from the SoM preset's `silicon:` key
+# (metadata/e1m_modules/E1M-AEN801.yaml -> `alif:ensemble:e8`), so this is a
+# family match on authored metadata, not a guess from an accel_config or from
+# vela's own profile name -- `ethos-u55-*`/`Ethos_U55_High_End_Embedded` say
+# nothing about who built the part. Anything else (`nxp:imx9:imx93`, a future
+# vendor, or an unresolved None) gets no vendor clause at all.
+_ALIF_ENSEMBLE_REF_PREFIX = "alif:ensemble:"
 
 
 class VelaFootprintRefused(RuntimeError):
@@ -249,7 +275,7 @@ def _profile_clause(system_config: str | None, memory_mode: str | None,
     return f"{named}, vela's BUILT-IN default profile" if defaulted else named
 
 
-def _refusal_remedy(defaulted: bool) -> str:
+def _refusal_remedy(defaulted: bool, silicon_ref: str | None) -> str:
     """What the reader can actually DO -- which today is: nothing to this
     target, and the rest of the SKU still builds.
 
@@ -261,18 +287,32 @@ def _refusal_remedy(defaulted: bool) -> str:
     `additionalProperties: false` over `deepx_dxm1`/`drpai` -- there is no
     `ethos_u` key to route a profile through. Adding one is an alp-sdk schema
     change (ADR-0028 leaves `metadata/schemas/` with alp-sdk), so this states
-    the real position instead of promising a flag that does not exist."""
+    the real position instead of promising a flag that does not exist.
+
+    The `ensemble_vela.ini` pointer is likewise stated only where it is TRUE
+    (tan-cli#789 review (g)). It was unconditional, so the `ethos-u65-256`
+    refusal on `E1M-NX9101` -- an NXP i.MX 93, whose alp-sdk-documented vela
+    invocation involves no proprietary `.ini` whatsoever -- sent that reader
+    hunting an Alif file. Gated on @silicon_ref, the SoM preset's own
+    `silicon:` ref, so `None` (caller could not resolve one) and every
+    non-Alif vendor get the two clauses that hold for ALL parts and no vendor
+    file at all. The first sentence stays vendor-neutral by construction: it
+    says a profile was not supplied and cannot be passed, which is a fact
+    about tan, not about anyone's silicon."""
     if not defaulted:
         return "`tan model build` skips this target and still builds the SKU's others."
-    return ("No module vela profile was supplied and tan cannot pass one yet; for Alif "
-            "Ensemble parts it lives in the proprietary ensemble_vela.ini alp-sdk does "
-            "not redistribute. `tan model build` skips this target and still builds the "
-            "SKU's others.")
+    where = ""
+    if silicon_ref and silicon_ref.startswith(_ALIF_ENSEMBLE_REF_PREFIX):
+        where = ("; on this Alif Ensemble part it lives in the proprietary "
+                 "ensemble_vela.ini alp-sdk does not redistribute")
+    return (f"No module vela profile was supplied and tan cannot pass one yet{where}. "
+            f"`tan model build` skips this target and still builds the SKU's others.")
 
 
 def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int | None,
                                 used: dict[str, float], system_config: str | None,
-                                memory_mode: str | None, defaulted: bool) -> NoReturn:
+                                memory_mode: str | None, defaulted: bool,
+                                silicon_ref: str | None) -> NoReturn:
     """A successful compile that placed operators on the NPU but reports no
     SRAM working set is a refusal, not a zero.
 
@@ -309,7 +349,8 @@ def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int
         f"but reported 0 KiB SRAM: {where} under "
         f"{_profile_clause(system_config, memory_mode, defaulted)}. Refused because alp-sdk's "
         f"on-device selector accepts req_sram_kib == 0 against ANY arena size "
-        f"(src/backends/inference/alp_model_select.c). {_refusal_remedy(defaulted)}")
+        f"(src/backends/inference/alp_model_select.c). "
+        f"{_refusal_remedy(defaulted, silicon_ref)}")
 
 
 def _default_profile_caveats(defaulted: bool, system_config: str | None,
@@ -356,7 +397,11 @@ class VelaAdapter(CompilerAdapter):
     def accepts(self, src_format: str) -> bool:
         return src_format == "tflite"
 
-    def compile(self, source: Path, *, accel_config: str, out_dir: Path, opts: dict | None = None) -> Blob:
+    def compile(self, source: Path, *, accel_config: str, out_dir: Path,
+                opts: dict | None = None, silicon_ref: str | None = None) -> Blob:
+        # @silicon_ref reaches ONLY the refusal wording (`_refusal_remedy`) --
+        # the vela command line below is byte-identical with and without it,
+        # so no vendor can ever get a different artifact out of this adapter.
         run_dir = _run_dir(out_dir, accel_config)
         run_dir.mkdir(parents=True, exist_ok=True)
         cmd = ["vela", str(source), "--accelerator-config", accel_config,
@@ -384,7 +429,7 @@ class VelaAdapter(CompilerAdapter):
             _refuse_zero_sram_footprint(accel_config=accel_config, npu_ops=npu_ops,
                                         cpu_ops=cpu_ops, used=used,
                                         system_config=system_config, memory_mode=memory_mode,
-                                        defaulted=defaulted)
+                                        defaulted=defaulted, silicon_ref=silicon_ref)
         return Blob(format="vela_tflite", payload=produced.read_bytes(),
                     arena_bytes=arena, compiler_version=_vela_version(),
                     req_sram_kib=sram_kib, cpu_op_count=cpu_ops, npu_op_count=npu_ops,

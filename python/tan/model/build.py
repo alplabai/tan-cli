@@ -159,8 +159,14 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
                                      f"{spec.backend} does not accept .{src_fmt}"))
             continue
         try:
+            # `spec.silicon_ref` is passed for the adapter's DIAGNOSTICS, not
+            # its output -- see `CompilerAdapter.compile`. It is what lets a
+            # vela footprint refusal name Alif's proprietary profile file on
+            # an Alif Ensemble target and stay silent about it on the NXP
+            # i.MX 93 (tan-cli#789 review (g)).
             blob = adapter.compile(source, accel_config=spec.accel_config,
-                                   out_dir=out_dir, opts=backend_opts)
+                                   out_dir=out_dir, opts=backend_opts,
+                                   silicon_ref=spec.silicon_ref)
         except VelaFootprintRefused as err:
             # ONE target's refusal, not the package's. See the module docstring.
             coverage.append(Coverage(spec.backend, spec.accel_config, "skipped", str(err)))
