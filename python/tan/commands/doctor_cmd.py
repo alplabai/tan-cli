@@ -151,11 +151,14 @@ from tan.core.bootstrap import (
     PrereqFailure,
     WorkspaceSdkRecord,
     confirm_missing,
+    detect_linux_pm,
+    normalize_linux_install,
     parse_west_zephyr_pin,
     parse_workspace_sdk_record,
     parse_zephyr_version_file,
     posix_venv_unusable,
     reported_missing,
+    select_linux_install,
 )
 from tan.core.consent import can_prompt
 from tan.core.doctor_libraries import LibraryReport, inspect_selection
@@ -3609,9 +3612,23 @@ def _collect(
     required = [t for t in required if isinstance(t, str)]
     install = facts.get("install")
     platform_key = "windows" if os.name == "nt" else ("macos" if sys.platform == "darwin" else "linux")
-    per_tool = install.get(platform_key) if isinstance(install, dict) else None
-    if not isinstance(per_tool, dict):
-        per_tool = {}
+    if platform_key == "linux":
+        # `install["linux"]` is package-manager-keyed, not tool-keyed like
+        # `macos`/`windows` (alp-sdk#1464 / tan-cli#760's second half) --
+        # `facts` is the RAW parsed manifest dict (`_load_manifest`), a
+        # separate reader from `tan.core.bootstrap.parse_bootstrap_manifest`,
+        # so it needs the SAME normalize/select reconciliation that reader
+        # applies, not a flat `.get(platform_key)` (which would silently
+        # return `{}` for every Linux tool, apt included).
+        linux_pm = detect_linux_pm(lambda binary: on_path(binary) is not None)
+        per_tool = select_linux_install(
+            normalize_linux_install(install.get("linux") if isinstance(install, dict) else None),
+            linux_pm,
+        )
+    else:
+        per_tool = install.get(platform_key) if isinstance(install, dict) else None
+        if not isinstance(per_tool, dict):
+            per_tool = {}
     # RAW -- `prerequisites_check` below does its OWN tan-cli#760 PATH
     # confirmation (`available=`) to build the customer-facing `missing`
     # field; this dict stays unguarded because it is also the source of

@@ -587,12 +587,107 @@ def test_collect_keeps_the_install_command_when_apt_get_is_confirmed(tmp_path, m
     assert by_tool["ninja"] == "sudo apt-get install -y ninja-build"
 
 
+def test_collect_resolves_a_real_dnf_command_on_a_fedora_shaped_host(tmp_path, monkeypatch):
+    """tan-cli#760's second half (alp-sdk#1464/#1471), through `tan doctor`'s
+    OWN raw-manifest reader (`_load_manifest`/`_collect`) -- a SEPARATE
+    implementation from `tan.core.bootstrap.parse_bootstrap_manifest`, which
+    had the identical defect: `install.get("linux")` read directly as a flat
+    tool -> command map, so a nested `{"apt": {...}, "dnf": {...}}` manifest
+    filtered to `{}` for EVERY Linux tool here, on EVERY Linux host -- not
+    just non-Debian ones. `dnf` (+ `sudo`) confirmed, `apt-get` absent.
+
+    Verified to FAIL against pre-fix code: pre-fix, `per_tool =
+    install.get("linux")` is the nested dict itself; the `isinstance(v, str)`
+    filter drops both `"apt"` and `"dnf"` (their values are dicts), so
+    `resolved_install` is `{}` and `cmake`'s command comes back `None`, not
+    the real `dnf` line asserted below.
+    """
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "apt": {
+                        "cmake": "sudo apt-get install -y cmake",
+                        "ninja": "sudo apt-get install -y ninja-build",
+                    },
+                    "dnf": {
+                        "cmake": "sudo dnf install -y cmake",
+                        # No `ninja` -- alp-sdk#1464's deliberate dnf gap.
+                    },
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: f"/usr/bin/{name}" if name in {"dnf", "sudo"} else None
+    )
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] == "sudo dnf install -y cmake"
+    assert by_tool["ninja"] is None
+    assert "ninja-build" not in (prereq.detail or "")
+    assert "ninja-build" not in (prereq.fix or "")
+
+
+def test_collect_still_resolves_apt_on_a_manifest_that_also_carries_dnf(tmp_path, monkeypatch):
+    """The Debian-side regression check for the SAME raw-reader defect: even
+    on a modern, PM-keyed manifest, an apt-confirmed host must still get its
+    real `apt` command -- proving the fix reads the manifest, rather than
+    happening to null everything on every shape.
+
+    Verified to FAIL against pre-fix code for the same structural reason as
+    the `dnf` test above: the nested `install.linux` filters to `{}`
+    regardless of which package manager is on PATH, so `cmake`'s command
+    comes back `None` here too, pre-fix.
+    """
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "apt": {"cmake": "sudo apt-get install -y cmake"},
+                    "dnf": {"cmake": "sudo dnf install -y cmake"},
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cmd,
+        "on_path",
+        lambda name: f"/usr/bin/{name}" if name in {"apt-get", "sudo"} else None,
+    )
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] == "sudo apt-get install -y cmake"
+
+
 def test_collect_separates_the_envelope_from_fixs_own_input(tmp_path, monkeypatch):
     """tan-cli#760 review MAJOR 1: `missing` (the envelope's `data.
     missingPrerequisites`) and `fix_missing` (`--fix`'s own input) must NOT
     be the same value once a command is unconfirmed -- `missing` degrades to
     `command: null`, but `fix_missing` stays the RAW command so `run_fix` can
-    still do its own tan-cli#360 diagnosis."""
+    still do its own tan-cli#360 diagnosis.
+
+    `apt-get` (only) is confirmed on PATH -- tan-cli#760's second half needs a
+    package manager DETECTED before `install.linux` resolves to anything at
+    all (`detect_linux_pm`), so leaving it absent here (as an earlier version
+    of this test did) collapses `fix_missing` to `null` too and stops proving
+    the thing this test is about. `sudo` and `cmake` itself both stay absent,
+    which is what still nulls `missing` below (`confirm_missing`'s own `sudo`
+    check inside `prerequisites_check`, unaffected by any of this)."""
     monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
     monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
     _write_bootstrap_json(
@@ -603,7 +698,9 @@ def test_collect_separates_the_envelope_from_fixs_own_input(tmp_path, monkeypatc
             "install": {"linux": {"cmake": "sudo apt-get install -y cmake"}},
         },
     )
-    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)  # cmake AND apt-get absent
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: "/usr/bin/apt-get" if name == "apt-get" else None
+    )
 
     checks = doctor_cmd._collect(str(tmp_path))
     prereq = next(c for c in checks if c.name == "hostPrerequisites")

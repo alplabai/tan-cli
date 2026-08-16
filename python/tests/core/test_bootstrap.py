@@ -294,6 +294,129 @@ def test_posix_refusal_keeps_the_confirmed_wording_when_a_command_survives():
 
 
 # ---------------------------------------------------------------------------
+# tan-cli#760's second half (alp-sdk#1464 / #1471): `install.linux` is now
+# PACKAGE-MANAGER-keyed. None of `detect_linux_pm`, `normalize_linux_install`,
+# `select_linux_install`, or `install_for_host`'s `linux_pm` parameter exist
+# pre-fix at all -- every test below is an `ImportError`/`TypeError` there,
+# never merely a wrong value.
+# ---------------------------------------------------------------------------
+
+
+def test_detect_linux_pm_prefers_apt_and_never_probes_pacman():
+    """Order MUST agree with alp-sdk's own two detectors
+    (`scripts/bootstrap.sh`'s `LINUX_PM` block, `scripts/alp_cli/doctor.py`'s
+    `_prereq_linux_pm()`): `apt-get` checked before `dnf`, and a `pacman`-only
+    host (Arch) resolves to `None`, not a guess -- `install.linux` ships no
+    `pacman` sub-map at all."""
+    from tan.core.bootstrap import LINUX_PM_APT, LINUX_PM_DNF, detect_linux_pm
+
+    assert detect_linux_pm(lambda b: b in {"apt-get", "dnf"}) == LINUX_PM_APT
+    assert detect_linux_pm(lambda b: b == "dnf") == LINUX_PM_DNF
+    assert detect_linux_pm(lambda b: b == "pacman") is None
+    assert detect_linux_pm(lambda _b: False) is None
+
+
+def test_normalize_linux_install_recognises_the_pm_keyed_shape():
+    """The alp-sdk#1471 shape: every top-level value is a dict, keyed by
+    package manager -- passed through with non-string keys/values dropped,
+    the same defensive filter `_resolve_install_commands` already applies to
+    `macos`/`windows`."""
+    from tan.core.bootstrap import normalize_linux_install
+
+    raw = {
+        "apt": {"cmake": "sudo apt-get install -y cmake"},
+        "dnf": {"cmake": "sudo dnf install -y cmake", 7: "dropped: non-string key"},
+        7: {"cmake": "dropped: non-string pm key"},
+    }
+    normalized = normalize_linux_install(raw)
+    assert normalized == {
+        "apt": {"cmake": "sudo apt-get install -y cmake"},
+        "dnf": {"cmake": "sudo dnf install -y cmake"},
+    }
+
+
+def test_normalize_linux_install_reads_a_legacy_flat_manifest_as_apt():
+    """**Design decision (4).** A manifest predating alp-sdk#1471 declares
+    `install.linux` as a FLAT tool -> command map -- unconditionally Debian's,
+    the only content that key has ever carried until #1464 gave it a
+    package-manager dimension at all. Read here AS `apt`'s sub-map: a NEW tan
+    against an OLD `--sdk-root` still gets a real apt host working exactly as
+    it always did, and `select_linux_install` (below) never leaks it to a
+    `dnf`/other caller."""
+    from tan.core.bootstrap import LINUX_PM_APT, normalize_linux_install
+
+    legacy = {
+        "git": "sudo apt-get install -y git",
+        "cmake": "sudo apt-get install -y cmake",
+    }
+    assert normalize_linux_install(legacy) == {LINUX_PM_APT: legacy}
+
+
+def test_normalize_linux_install_degrades_malformed_or_empty_input_to_empty():
+    from tan.core.bootstrap import normalize_linux_install
+
+    assert normalize_linux_install(None) == {}
+    assert normalize_linux_install({}) == {}
+    assert normalize_linux_install("not a dict") == {}
+    # Not the legacy flat shape either -- `None` is neither a sub-map (the new
+    # shape) nor a command string (the legacy one), so this key contributes
+    # nothing under either reading.
+    assert normalize_linux_install({"apt": None}) == {}
+
+
+def test_select_linux_install_never_serves_one_pms_data_for_another():
+    from tan.core.bootstrap import select_linux_install
+
+    normalized = {
+        "apt": {"cmake": "sudo apt-get install -y cmake"},
+        "dnf": {"cmake": "sudo dnf install -y cmake"},
+    }
+    assert select_linux_install(normalized, "apt") == {"cmake": "sudo apt-get install -y cmake"}
+    assert select_linux_install(normalized, "dnf") == {"cmake": "sudo dnf install -y cmake"}
+    # No confirmed package manager -- empty, never a guess, and never falls
+    # back to whichever PM happens to be listed first.
+    assert select_linux_install(normalized, None) == {}
+    # A PM this manifest ships no sub-map for at all (Arch's `pacman`).
+    assert select_linux_install(normalized, "pacman") == {}
+
+
+def test_install_for_host_linux_needs_an_explicit_confirmed_package_manager():
+    """`install_for_host(LINUX)` with no `linux_pm` -- every call site before
+    tan-cli#760's second half -- must be an EMPTY map, not silently `apt`'s
+    data: a caller that has not confirmed a package manager on this host must
+    not get one anyway."""
+    from tan.core.bootstrap import LINUX, MACOS, fallback_facts
+
+    facts = fallback_facts((3, 12))
+    assert facts.install_for_host(LINUX) == {}
+    assert facts.install_for_host(LINUX, linux_pm=None) == {}
+    # Unaffected: `macos`/`windows` need no PM hop at all.
+    assert facts.install_for_host(MACOS) != {}
+
+
+def test_install_for_host_linux_selects_the_right_package_managers_submap():
+    from tan.core.bootstrap import LINUX, LINUX_PM_APT, LINUX_PM_DNF, fallback_facts
+
+    facts = fallback_facts((3, 12))
+    custom = {
+        **facts.install,
+        LINUX: {
+            LINUX_PM_APT: {"cmake": "sudo apt-get install -y cmake"},
+            LINUX_PM_DNF: {"cmake": "sudo dnf install -y cmake"},
+        },
+    }
+    facts = type(facts)(**{**vars(facts), "install": custom})
+
+    assert facts.install_for_host(LINUX, linux_pm=LINUX_PM_APT) == {
+        "cmake": "sudo apt-get install -y cmake"
+    }
+    assert facts.install_for_host(LINUX, linux_pm=LINUX_PM_DNF) == {
+        "cmake": "sudo dnf install -y cmake"
+    }
+    assert facts.install_for_host(LINUX, linux_pm="pacman") == {}
+
+
+# ---------------------------------------------------------------------------
 # tan-cli#495 defect 6: `manualInstallHints.posix.note` was dropped at parse,
 # at render, AND in the fallback -- three places, so no single one of them
 # looked like a gap.

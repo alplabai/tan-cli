@@ -150,6 +150,11 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: raised on this branch from 257 to 258; the final count after merging tan-cli#760 is recorded by the merge-resync entry below
 - 2026-08-15 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 258 -> 259
+- 2026-08-16 -- tan-cli#760 second half (alp-sdk#1464/#1471): install.linux is now package-manager-keyed; bootstrap.py gains normalize_linux_install/select_linux_install/detect_linux_pm + wider BootstrapFacts.install typing, bootstrap_cmd.py/doctor_cmd.py wire package-manager detection into check_prerequisites/_collect
+    - tan/commands/bootstrap_cmd.py: 3277 -> 3286
+    - tan/commands/doctor_cmd.py: 4114 -> 4131
+    - tan/core/bootstrap.py: 2275 -> 2400
+    - function_count_budget: 259 -> 260
 - 2026-08-15 -- ADR-0028 Task 2: relocate the alp-sdk model engine (13 modules, 1029 lines) into tan.model verbatim; two of its already-existing over-50-line functions move with it
     - function_count_budget: 258 -> 260
 - 2026-08-15 -- tan-cli#782: model_cmd.py grows past 800 wiring `tan model check` (a third subcommand's board.yaml/SDK resolution, per-model dispatch and envelope shaping, matching build/doctor's own shape); function_count_budget's 260->261 is a PRE-EXISTING drift from the model-doctor merge (25443c4), not from this change -- measured before any edit in this session, fixed here since it blocks a green gate.
@@ -168,3 +173,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/model_cmd.py: 938 -> 1011
     - tan/model/adapters/ethos_u.py: new entry at 886
     - function_count_budget: 266 -> 268
+- 2026-08-16 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/model_cmd.py: new entry at 1011
+    - tan/model/adapters/ethos_u.py: new entry at 886
+    - function_count_budget: 260 -> 269
