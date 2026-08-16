@@ -699,6 +699,67 @@ def test_ps1_bad_payload_on_upgrade_leaves_previous_install_working(release_serv
 
 
 @windows_only
+def test_ps1_backup_rename_failure_mid_block_rolls_back(release_server, tmp_path):
+    """tan-cli#794: the three backup renames at install.ps1:531-545 (now folded
+    into the same try as the commit) used to run with NO catch of their own --
+    the only enclosing construct was the file-wide `try {`/`finally {}`, whose
+    `finally` only wipes the temp stem -- so a `Move-Item` throwing partway
+    through left whatever had already been renamed (here, `tan.cmd` ->
+    `tan.cmd.bak`) stranded, printed a raw PowerShell exception instead of the
+    rollback message, and left `tan` unresolved on PATH.
+
+    Fabricates a "previous install" directly (three marker files/dirs) rather
+    than installing for real first -- the backup block only Test-Path/Move-Item
+    the paths, it never reads their content, so this is a faithful and much
+    cheaper repro of the mid-backup-window failure than reproducing the
+    original issue's cwd-locks-a-directory trigger. `icacls /deny ...:(D)`
+    denies DELETE rights on `tan.exe` specifically, which is what `Move-Item`
+    needs on the SOURCE side of a same-volume rename -- so the FIRST rename
+    (`tan.cmd` -> `tan.cmd.bak`) succeeds and the SECOND one throws, which is
+    exactly the "already renamed one thing, now failing on the next" shape the
+    issue describes. The deny ACE is always removed again in `finally`, even on
+    an assertion failure, so pytest's own `tmp_path` teardown can still delete
+    the tree.
+    """
+    dest = tmp_path / "prog"
+    dest.mkdir()
+    (dest / "tan.cmd").write_text("PREVIOUS-CMD-MARKER")
+    (dest / "tan.exe").write_bytes(b"PREVIOUS-EXE-MARKER")
+    lib_dir = dest / "tan-cli-lib"
+    lib_dir.mkdir()
+    (lib_dir / "marker.txt").write_text("PREVIOUS-LIB-MARKER")
+
+    exe = dest / "tan.exe"
+    deny = subprocess.run(
+        ["icacls", str(exe), "/deny", "Everyone:(D)"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert deny.returncode == 0, f"could not set up the deny-delete ACE: {deny.stdout}\n{deny.stderr}"
+
+    try:
+        result = _install_ps1(release_server, dest, tmp_path, "-Version", "v0.4.1")
+
+        assert result.returncode != 0
+        combined = result.stdout + result.stderr
+        # The rollback path this issue adds coverage for -- not a raw exception.
+        assert "previous installation restored" in combined
+        assert "tan' still works as before" in combined
+        # tan.cmd must be back in place, byte-for-byte, not stranded as .bak.
+        assert (dest / "tan.cmd").read_text() == "PREVIOUS-CMD-MARKER"
+        assert not (dest / "tan.cmd.bak").exists()
+        # tan.exe was never actually moved (the throw happened ON its rename),
+        # so it is untouched, and no stray .bak sits beside it.
+        assert (dest / "tan.exe").read_bytes() == b"PREVIOUS-EXE-MARKER"
+        assert not (dest / "tan.exe.bak").exists()
+        # The LibDir rename is never reached -- the throw happens one rename
+        # before it -- so it too must be completely untouched.
+        assert (lib_dir / "marker.txt").read_text() == "PREVIOUS-LIB-MARKER"
+        assert not (dest / "tan-cli-lib.bak").exists()
+    finally:
+        subprocess.run(["icacls", str(exe), "/reset"], capture_output=True, text=True, timeout=30)
+
+
+@windows_only
 def test_ps1_temp_execute_denied_retries_staging_inside_dest_dir(release_server, tmp_path):
     """tan-cli#490, Windows half: a host-level "no execute from here" refusal
     over the staging location -- the same shape an AppLocker / Software

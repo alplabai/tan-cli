@@ -521,6 +521,14 @@ try {
 	# tan.cmd sitting beside it) -- whichever one is not being installed is
 	# backed up and only discarded once the new install is proven in place,
 	# never deleted up front.
+	#
+	# The three renames below and the payload swap that follows are ONE
+	# critical section, all inside the same try below (tan-cli#794): a
+	# Move-Item failing partway through the BACKUP renames is exactly as
+	# dangerous as one failing while placing the new payload -- either way the
+	# user can be left without a `tan` on PATH -- so both must land in the
+	# same $commitError/Restore-Previous rollback path rather than the backup
+	# renames running bare ahead of the only try/catch in this script.
 	# -------------------------------------------------------------------------
 	$destCmdBak = "$destCmd.bak"
 	$destExeBak = "$destExe.bak"
@@ -528,24 +536,12 @@ try {
 	$hadDestCmdBackup = $false
 	$hadDestExeBackup = $false
 	$hadLibBackup = $false
-	if (Test-Path -LiteralPath $destCmd) {
-		Remove-Item -LiteralPath $destCmdBak -Force -ErrorAction SilentlyContinue
-		Move-Item -LiteralPath $destCmd -Destination $destCmdBak -Force
-		$hadDestCmdBackup = $true
-	}
-	if (Test-Path -LiteralPath $destExe) {
-		Remove-Item -LiteralPath $destExeBak -Force -ErrorAction SilentlyContinue
-		Move-Item -LiteralPath $destExe -Destination $destExeBak -Force
-		$hadDestExeBackup = $true
-	}
-	if (Test-Path -LiteralPath $LibDir) {
-		Remove-Item -LiteralPath $libDirBak -Recurse -Force -ErrorAction SilentlyContinue
-		Move-Item -LiteralPath $LibDir -Destination $libDirBak -Force
-		$hadLibBackup = $true
-	}
 
 	function Restore-Previous {
-		# Restores every backup taken above; returns whether it fully succeeded.
+		# Restores every backup taken below; returns whether it fully succeeded.
+		# Defined ABOVE the backup block (not just above its own call site) so
+		# that a throw from the very first backup rename can still roll back
+		# whatever partial state that rename itself left behind.
 		$ok = $true
 		Remove-Item -LiteralPath $destCmd -Force -ErrorAction SilentlyContinue
 		Remove-Item -LiteralPath $destExe -Force -ErrorAction SilentlyContinue
@@ -608,6 +604,22 @@ try {
 
 	$commitError = $null
 	try {
+		if (Test-Path -LiteralPath $destCmd) {
+			Remove-Item -LiteralPath $destCmdBak -Force -ErrorAction SilentlyContinue
+			Move-Item -LiteralPath $destCmd -Destination $destCmdBak -Force
+			$hadDestCmdBackup = $true
+		}
+		if (Test-Path -LiteralPath $destExe) {
+			Remove-Item -LiteralPath $destExeBak -Force -ErrorAction SilentlyContinue
+			Move-Item -LiteralPath $destExe -Destination $destExeBak -Force
+			$hadDestExeBackup = $true
+		}
+		if (Test-Path -LiteralPath $LibDir) {
+			Remove-Item -LiteralPath $libDirBak -Recurse -Force -ErrorAction SilentlyContinue
+			Move-Item -LiteralPath $LibDir -Destination $libDirBak -Force
+			$hadLibBackup = $true
+		}
+
 		if ($layout -eq "archive") {
 			Move-Item -LiteralPath (Join-Path $stage "tan") -Destination $LibDir -Force
 
