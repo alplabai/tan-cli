@@ -441,6 +441,11 @@ env:
   #
   # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
   # predates every commit this bump exists to pick up.
+  # THROWAWAY test touch for tan-cli#820's pin-move-verify sender -- proving
+  # the real `detect` step reports `touched=true` on a genuine PR push, and
+  # that the fail-closed "no App secret" branch fires through that real
+  # path, not just a unit test. Reverted in the very next commit; no actual
+  # pin value below is changed.
   PINNED_SDK_TAG: 88318e759958529fbbd8fe9d481373681c0fa78d
 
 permissions:
