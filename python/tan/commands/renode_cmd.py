@@ -1365,14 +1365,17 @@ def _run_sim(
     _announce_ready(json_mode, timeout)
 
     # Hold the sockets open until the timeout, failing if Renode dies first.
-    early_exit: int | None = None
+    # Poll at least once up front (do-while shape) -- at `timeout == 0` the
+    # deadline below is already in the past the instant it's computed, so a
+    # `while time.monotonic() < deadline:` guard alone would skip the loop
+    # body entirely and never call proc.poll(), leaving early_exit stuck at
+    # None forever (tan-cli#804). The child's exit code must still be
+    # observable even when the hold window is zero-length.
+    early_exit: int | None = proc.poll()
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        code = proc.poll()
-        if code is not None:
-            early_exit = code
-            break
+    while early_exit is None and time.monotonic() < deadline:
         time.sleep(0.25)
+        early_exit = proc.poll()
 
     _teardown_sim(monitor, proc)
     _close_quietly(ctrl_sock, uart_sock)

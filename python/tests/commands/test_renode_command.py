@@ -122,6 +122,7 @@ def _write_fake_sim_renode(
     preamble: list[str] | None = None,
     exit_after_s: float | None = None,
     exit_code: int = 0,
+    exit_after_first_echo_code: int | None = None,
 ) -> None:
     """A fake `renode` on PATH for `--sim-mode` tests: an interactive stub
     that answers just enough of the monitor line protocol for
@@ -147,6 +148,15 @@ def _write_fake_sim_renode(
     `renode.sim-exited-early` on a session whose `drain_boot` already
     succeeded, distinct from `renode.sim-monitor-failed` (which fires when
     the child is gone before `drain_boot` ever gets a reply).
+
+    `exit_after_first_echo_code` exits SYNCHRONOUSLY, in the same thread,
+    right after answering the very first `echo "<sentinel>"` -- i.e. right
+    after `drain_boot`'s own round trip succeeds -- instead of on a timer.
+    That makes the child ALREADY exited by the time `_run_sim_mode` reaches
+    its post-boot `proc.poll()`, deterministically, rather than racing a
+    sleep against it; used for the `--timeout 0` regression (tan-cli#804),
+    where the hold loop polls only once and a timer-based exit can't be
+    trusted to land before that single poll.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     impl = bin_dir / "_fake_sim_renode_impl.py"
@@ -156,6 +166,11 @@ def _write_fake_sim_renode(
         "daemon=True).start()\n"
         if exit_after_s is not None
         else ""
+    )
+    echo_action_src = (
+        f"print(s[6:-1]); sys.stdout.flush(); os._exit({exit_after_first_echo_code})"
+        if exit_after_first_echo_code is not None
+        else "print(s[6:-1]); sys.stdout.flush(); continue"
     )
     body = f'''\
 import os, sys, time, threading
@@ -169,7 +184,7 @@ while True:
         break
     s = raw.rstrip("\\r\\n").strip()
     if s.startswith('echo "') and s.endswith('"'):
-        print(s[6:-1]); sys.stdout.flush(); continue
+        {echo_action_src}
     if s == "quit":
         sys.exit(0)
     parts = s.split()
@@ -1156,6 +1171,38 @@ def test_sim_mode_exited_early_after_drain_boot_succeeded(tmp_path: Path):
         "E1M-V2N101",
         "--timeout",
         "5",
+        "--format",
+        "json",
+        path_override=str(fake_bin),
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.sim-exited-early"
+    assert "exit code 9" in envelope["issues"][0]["message"]
+
+
+def test_sim_mode_timeout_zero_still_reports_exited_early(tmp_path: Path):
+    """tan-cli#804: the hold loop used to compute
+    `deadline = time.monotonic() + timeout` and then guard on
+    `while time.monotonic() < deadline:` -- at `--timeout 0` the deadline is
+    already in the past the instant it's read, so the loop body (the only
+    place `proc.poll()` was called) never ran even once, `early_exit` stayed
+    `None`, and `renode.sim-exited-early` was structurally unreachable no
+    matter how the child actually exited. The fix polls once up front so a
+    child that is ALREADY dead by the time `_run_sim_mode` reaches the hold
+    is still caught even at a zero-length hold."""
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(fake_bin, exit_after_first_echo_code=9)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "0",
         "--format",
         "json",
         path_override=str(fake_bin),
