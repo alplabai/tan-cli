@@ -10,7 +10,7 @@
     "tan/commands/clean_cmd.py": 1110,
     "tan/commands/debug_config_cmd.py": 1949,
     "tan/commands/diff_cmd.py": 882,
-    "tan/commands/doctor_cmd.py": 4036,
+    "tan/commands/doctor_cmd.py": 4035,
     "tan/commands/explain_cmd.py": 1020,
     "tan/commands/flash_cmd.py": 3960,
     "tan/commands/generate_cmd.py": 1348,
