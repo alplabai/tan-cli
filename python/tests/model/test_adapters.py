@@ -166,13 +166,56 @@ def test_vela_adapter_compile_raises_when_output_file_missing(tmp_path, monkeypa
         VelaAdapter().compile(src, accel_config="ethos-u55-128", out_dir=tmp_path)
 
 
-def test_parse_vela_summary_extracts_sram_and_arena(tmp_path):
-    (tmp_path / "m_summary_internal.csv").write_text(
-        "network,sram_memory_used,arena_cache_size\n"
-        "m,262144,131072\n", encoding="utf-8")
-    arena, sram_kib = _parse_vela_summary(tmp_path, "m")
-    assert sram_kib == 256        # 262144 bytes -> 256 KiB
-    assert arena == 131072
+# A real vela summary CSV -- captured verbatim from an actual
+# `vela --accelerator-config ethos-u85-256` run (ethos-u-vela via a venv's
+# `bin/vela`) compiling the public alp-sdk fixture
+# tests/fixtures/models/person_detect_int8.tflite -- not hand-typed, so this
+# fixture cannot silently drift out of sync with vela's real column names or
+# units the way a hand-authored CSV once did (the unit bug this test exists
+# to catch: every `<mem_area>_memory_used` column vela writes is already in
+# KiB, `ethosu/vela/stats_writer.py:123`, NOT bytes).
+_REAL_VELA_SUMMARY_CSV = (
+    "experiment,network,accelerator_configuration,system_config,memory_mode,"
+    "core_clock,arena_cache_size,sram_bandwidth,dram_bandwidth,"
+    "on_chip_flash_bandwidth,off_chip_flash_bandwidth,weights_storage_area,"
+    "feature_map_storage_area,inferences_per_second,batch_size,inference_time,"
+    "passes_before_fusing,passes_after_fusing,sram_memory_used,"
+    "dram_memory_used,on_chip_flash_memory_used,off_chip_flash_memory_used,"
+    "total_original_weights,total_npu_encoded_weights,"
+    "sram_feature_map_read_bytes,sram_feature_map_write_bytes,"
+    "sram_weight_read_bytes,sram_weight_write_bytes,sram_total_bytes,"
+    "dram_feature_map_read_bytes,dram_feature_map_write_bytes,"
+    "dram_weight_read_bytes,dram_weight_write_bytes,dram_total_bytes,"
+    "on_chip_flash_feature_map_read_bytes,on_chip_flash_feature_map_write_bytes,"
+    "on_chip_flash_weight_read_bytes,on_chip_flash_weight_write_bytes,"
+    "on_chip_flash_total_bytes,off_chip_flash_feature_map_read_bytes,"
+    "off_chip_flash_feature_map_write_bytes,off_chip_flash_weight_read_bytes,"
+    "off_chip_flash_weight_write_bytes,off_chip_flash_total_bytes,nn_macs,"
+    "nn_tops,cycles_npu,cycles_sram_access,cycles_dram_access,"
+    "cycles_on_chip_flash_access,cycles_off_chip_flash_access,cycles_total\n"
+    "default,person_detect_int8,Ethos_U85_256,Ethos_U85_SYS_DRAM_Mid,"
+    "Dedicated_Sram_384KB,1000000000.0,384.0,29.802322387695312,"
+    "11.175870895385742,14.901161193847656,14.901161193847656,DRAM,DRAM,"
+    "5501.821102785022,1,0.000181758,44,44,72.734375,237.796875,0.0,0.0,"
+    "207984,205472,415443,269082,62176,38192,815933,89920,0,220352,0,323072,"
+    "0,0,0,0,0,0,0,0,0,0,7077252,0.077875548806655,136025,25669,150119,0,0,"
+    "181758\n"
+)
+
+
+def test_parse_vela_summary_converts_kib_columns_not_bytes(tmp_path):
+    """`sram_memory_used`=72.734375 in this real CSV is genuinely *KiB*
+    (vela divides by 1024.0 before writing it) -- _parse_vela_summary must
+    convert it to real bytes for arena_bytes, round the KiB requirement UP
+    (never truncate, or a model that doesn't fit could pass the device-side
+    gate as if it did), and must never source either figure from
+    `arena_cache_size`=384.0 (a build-time cache-capacity knob, not this
+    model's requirement)."""
+    (tmp_path / "person_detect_int8_summary_x.csv").write_text(
+        _REAL_VELA_SUMMARY_CSV, encoding="utf-8")
+    arena, sram_kib = _parse_vela_summary(tmp_path, "person_detect_int8")
+    assert arena == 74480          # round(72.734375 * 1024), NOT 384
+    assert sram_kib == 73          # ceil(72.734375), NOT 0 and NOT floored to 72
 
 
 def test_parse_vela_summary_absent_returns_zeros(tmp_path):

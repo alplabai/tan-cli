@@ -7,11 +7,12 @@ feeds `tan.model.analyze`'s static NPU-eligibility screen (ADR-0028 amendment):
 per-operator name + shape/const-ness + a best-effort MAC estimate, so the
 screen can weight coverage by compute rather than by op count.
 
-Both are best-effort with the SAME contract: return an empty result when the
-source isn't a .tflite, the `tflite` reader (from the `model-io` extra) isn't
-installed, or the bytes don't parse -- never raise. The model still packages
-(or scores as `undetermined`), just without this metadata
-(compile-what's-available)."""
+Both raise `OSError` when the source cannot be read (missing file,
+permission error, ...) -- that is a real failure, never swallowed. Otherwise
+both are best-effort: `[]` (or `[], []`) for a source that IS readable but
+isn't a .tflite, for a missing `tflite` reader (from the `model-io` extra),
+or for bytes that don't parse. The model still packages (or scores as
+`undetermined`), just without this metadata (compile-what's-available)."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,18 +55,20 @@ def _dtype_name(dtype_names: dict[int, str], code: int) -> str:
 
 
 def extract_io(source: Path, *, raw: bytes | None = None) -> tuple[list[Tensor], list[Tensor]]:
-    if source.suffix.lower() != ".tflite":
-        return [], []                       # ONNX I/O extraction is a later follow-up
     # Reuse the caller's already-read bytes when provided (build_model reads the
     # source once for the manifest sha); an OSError on our own read is a real
     # failure, not a parse problem -- read (or take the caller's bytes) BEFORE
-    # the `tflite` import check below, so "the source is unreadable" is never
-    # masked by "the reader isn't installed". Both would otherwise collapse to
-    # the identical `[], []`, which silently hides a real missing/unreadable
-    # source on exactly the bare-install (no `model-io` extra) host this
-    # degrade path exists for.
+    # *any* format-dependent short-circuit below (the suffix check included),
+    # so "the source is unreadable" is never masked by "the reader isn't
+    # installed" OR by "this isn't a .tflite source". All three would
+    # otherwise collapse to the identical `[], []`, which silently hides a
+    # real missing/unreadable source -- on a bare-install host (no `model-io`
+    # extra) for .tflite, and on EVERY host for .onnx, since ONNX I/O
+    # extraction has no reader yet at all.
     if raw is None:
         raw = source.read_bytes()
+    if source.suffix.lower() != ".tflite":
+        return [], []                       # ONNX I/O extraction is a later follow-up
     try:
         import tflite
     except ImportError:
@@ -126,19 +129,18 @@ class OpDesc:
 
 def extract_ops(source: Path, *, raw: bytes | None = None) -> list[OpDesc]:
     """Walk a TFLite flatbuffer's first subgraph into `OpDesc`s for the static
-    NPU-eligibility screen. Same best-effort contract as `extract_io`: `[]` for
-    a non-.tflite source, a missing `tflite` reader, or unparseable bytes --
-    never raises. ONNX operator extraction is a follow-on; a `.onnx` source
-    always returns `[]` here, so `tan.model.analyze` reports `undetermined`
-    for the ONNX-ingesting backends rather than guessing."""
-    if source.suffix.lower() != ".tflite":
-        return []
-    # Same ordering fix as extract_io above, for the same reason: read (or
-    # take the caller's bytes) BEFORE checking whether `tflite` is importable,
-    # so an unreadable/missing source still raises rather than being masked
-    # by "the reader isn't installed" on a bare-install host.
+    NPU-eligibility screen. Raises `OSError` when @source cannot be read --
+    a real failure, surfaced regardless of format. Otherwise best-effort:
+    `[]` for a readable non-.tflite source (ONNX extraction is a follow-on),
+    a missing `tflite` reader, or unparseable bytes."""
+    # Read (or take the caller's bytes) BEFORE any format-dependent
+    # short-circuit -- suffix check included -- so an unreadable/missing
+    # source raises regardless of extension, rather than a `.onnx` source
+    # reading identically to "this model genuinely has no operators".
     if raw is None:
         raw = source.read_bytes()
+    if source.suffix.lower() != ".tflite":
+        return []
     try:
         import tflite
     except ImportError:

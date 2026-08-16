@@ -19,6 +19,7 @@ placement from the mere absence of an exception -- see `tan.model.check`'s
 `cpu_op_count`."""
 from __future__ import annotations
 import csv
+import math
 import re
 import shutil
 import subprocess
@@ -46,8 +47,28 @@ def _vela_version() -> str:
 
 
 def _parse_vela_summary(out_dir: Path, stem: str) -> tuple[int, int]:
-    """Best-effort (arena_bytes, peak_sram_kib) from vela's <stem>_summary_*.csv.
-    Returns (0, 0) when the summary is missing or unparseable."""
+    """Best-effort (arena_bytes, req_sram_kib) from vela's <stem>_summary_*.csv.
+
+    Every `<mem_area>_memory_used` column in vela's summary CSV is already in
+    KiB, not bytes (`memory_used[...] / 1024.0`,
+    ethosu/vela/stats_writer.py:123 in write_summary_metrics_csv_common) --
+    despite the raw CSV values looking byte-scale at a glance (e.g.
+    `72.734375`). The model's actual arena requirement is its SRAM working
+    set, `sram_memory_used`: the scratch region alp-sdk's `alp_model_open()`
+    `arena`/`arena_bytes` sizes at runtime for the default Shared/Dedicated
+    SRAM memory modes. `arena_cache_size` (`arch.arena_cache_size / 1024`,
+    stats_writer.py:107) is a DIFFERENT column -- the accelerator config's
+    configured cache capacity, a build-time knob unrelated to any one
+    model's footprint -- and must never be read here.
+
+    req_sram_kib is rounded UP (ceil, never floor/truncate): the device-side
+    fit gate (`t->req_sram_kib <= e->arena_sram_kib`,
+    src/backends/inference/alp_model_select.c) must never under-report a
+    model's requirement, or a model that doesn't actually fit could pass the
+    gate as if it did.
+
+    Returns (0, 0) when the summary is missing, unparseable, or reports no
+    SRAM usage (e.g. a full CPU-fallback compile)."""
     matches = sorted(out_dir.glob(f"{stem}_summary_*.csv"))
     if not matches:
         return 0, 0
@@ -66,9 +87,10 @@ def _parse_vela_summary(out_dir: Path, stem: str) -> tuple[int, int]:
                     continue
         return 0.0
 
-    sram_bytes = _num(lambda k: "sram" in k and "used" in k)
-    arena = _num(lambda k: "arena" in k) or sram_bytes
-    return int(arena), int(sram_bytes // 1024)
+    sram_kib = _num(lambda k: "sram" in k and "used" in k)
+    if sram_kib <= 0:
+        return 0, 0
+    return round(sram_kib * 1024), math.ceil(sram_kib)
 
 
 def _parse_vela_placement(stdout: str) -> tuple[int, int] | None:

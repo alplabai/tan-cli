@@ -21,6 +21,7 @@ import pytest
 
 from tan.model import check as check_mod
 from tan.model.adapters import Blob
+from tan.model.analyze import BackendReport, OpVerdict
 from tan.model.check import (
     _headline_ethos_u_accel_config,
     check_model_backends,
@@ -146,6 +147,22 @@ def test_check_model_backends_propagates_an_unreadable_source(tmp_path):
                               source=tmp_path / "missing.tflite", metadata_root=tmp_path, exact=False)
 
 
+def test_check_model_backends_propagates_an_unreadable_onnx_source(tmp_path):
+    # The .onnx twin of the test above (MAJOR-1 review): the suffix
+    # short-circuit in tensorio.extract_ops used to return `[]` for ANY
+    # non-.tflite source before ever touching the filesystem, so a
+    # board.yaml naming a nonexistent .onnx source on a drpai/deepx_dxm1 SKU
+    # silently reported `"ok":true` with a verdict-shaped "nothing to score"
+    # note instead of `model.check-failed` -- on exactly the ONNX-ingesting
+    # backends that are the V2N/V2M headline. extract_ops now reads @source
+    # before any suffix check, so this raises identically to the .tflite case.
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:multi")
+    _write_soc(tmp_path, "fake:soc:multi", [{"type": "drp-ai3", "subtype": "drp", "mac_per_cycle": 1}])
+    with pytest.raises(OSError):
+        check_model_backends(backends=["drpai"], sku="E1M-FAKE",
+                              source=tmp_path / "missing.onnx", metadata_root=tmp_path, exact=False)
+
+
 # ---------------------------------------------------------------------------
 # MAJOR 2 review: a missing `tflite` reader must not read identically to "this
 # model genuinely has no operators" -- both hit extract_ops() -> [], but only
@@ -247,7 +264,8 @@ def test_exact_runs_the_real_compiler_and_returns_basis_compiled(tmp_path, monke
     assert rep.confidence == "certain"
     assert rep.npu_coverage == "fits"          # the ONLY basis allowed to say this
     assert rep.ops == []
-    assert rep.compute_on_npu_pct_max == 100.0
+    assert rep.compute_on_npu_pct_max is None  # MAC-weighted field: never set at basis "compiled"
+    assert rep.npu_placement_pct_real == 100.0 # the real, op-count placement instead
     assert "vela 3.9.0" in rep.notes[0]
     assert "123" in rep.notes[0] and "4" in rep.notes[0]
 
@@ -284,7 +302,8 @@ def test_exact_never_reports_fits_when_vela_places_zero_ops_on_the_npu(tmp_path,
     assert rep.confidence == "certain"
     assert rep.npu_coverage == "cpu-only"           # never "fits" at 0% placement
     assert rep.npu_coverage != "fits"
-    assert rep.compute_on_npu_pct_max == 0.0
+    assert rep.compute_on_npu_pct_max is None       # MAC-weighted field: never set at basis "compiled"
+    assert rep.npu_placement_pct_real == 0.0        # the real, op-count placement instead
     # the static per-op verdicts are KEPT, not thrown away as `ops: []`
     assert rep.ops and rep.ops[0].op == "FULLY_CONNECTED"
     assert "0/1" in rep.notes[0] and "0%" in rep.notes[0]
@@ -310,9 +329,69 @@ def test_exact_reports_partial_and_keeps_the_static_per_op_verdicts(tmp_path, mo
     assert rep.basis == "compiled"
     assert rep.npu_coverage == "partial"
     assert rep.npu_coverage != "fits"
-    assert rep.compute_on_npu_pct_max == 50.0
+    assert rep.compute_on_npu_pct_max is None       # MAC-weighted field: never set at basis "compiled"
+    assert rep.npu_placement_pct_real == 50.0       # the real, op-count placement instead
     assert rep.ops and rep.ops[0].op == "FULLY_CONNECTED"     # kept, not discarded
     assert "1/2" in rep.notes[0] and "50%" in rep.notes[0]
+
+
+def test_exact_carries_uncosted_cpu_op_count_through_a_kept_partial_report(tmp_path, monkeypatch):
+    # MINOR review: the compiled BackendReport (`ops=report.ops` kept on a
+    # partial/cpu-only real compile) used to leave `uncosted_cpu_op_count` at
+    # its dataclass default (0) even though the very verdicts it just kept
+    # can carry cpu-certain/macs=0 ops the static screen already counted --
+    # measured 2 such ops kept while `uncostedCpuOpCount` still read 0.
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
+    _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    static_report = BackendReport(
+        backend="ethos_u", variant="u55", table="/x/u55@vela-1.0.0.json",
+        npu_coverage="partial", compute_on_npu_pct_max=66.67, uncosted_cpu_op_count=2,
+        ops=[
+            OpVerdict(op="CONV_2D", status="npu-eligible", reason="constraint-unchecked", macs=1000),
+            OpVerdict(op="SOFTMAX", status="cpu-certain", reason="op-not-in-table", macs=0),
+            OpVerdict(op="TOPK_V2", status="cpu-certain", reason="op-not-in-table", macs=0),
+        ],
+        basis="static-screen", confidence="screening", notes=[],
+    )
+    monkeypatch.setattr(check_mod, "analyze_backend", lambda **kw: static_report)
+
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None):
+        return Blob(format="vela_tflite", payload=b"x", arena_bytes=100,
+                    compiler_version="vela 5.1.0", req_sram_kib=1,
+                    cpu_op_count=1, npu_op_count=2)
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _fake_compile)
+    reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                    metadata_root=tmp_path, exact=True)
+    rep = reports[0]
+    assert rep.basis == "compiled"
+    assert rep.npu_coverage == "partial"
+    assert rep.uncosted_cpu_op_count == 2           # carried through, not defaulted to 0
+
+
+def test_exact_fits_report_has_no_uncosted_cpu_op_count_since_ops_is_empty(tmp_path, monkeypatch):
+    # The complementary "fits" case: ops=[] (nothing fell back), so there is
+    # no kept cpu-certain verdict left to count -- 0 is correct here, not a
+    # regression of the fix above.
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
+    _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
+    _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55",
+                 supported=["FULLY_CONNECTED"])
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None):
+        return Blob(format="vela_tflite", payload=b"x", arena_bytes=123,
+                    compiler_version="vela 3.9.0", req_sram_kib=4,
+                    cpu_op_count=0, npu_op_count=1)
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _fake_compile)
+    reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                    metadata_root=tmp_path, exact=True)
+    rep = reports[0]
+    assert rep.npu_coverage == "fits"
+    assert rep.ops == []
+    assert rep.uncosted_cpu_op_count == 0
 
 
 def test_exact_degrades_to_the_static_screen_when_placement_cannot_be_parsed(tmp_path, monkeypatch):
@@ -360,7 +439,8 @@ def test_exact_real_vela_compile_of_a_model_it_rejects_never_reports_fits(tmp_pa
     assert rep.basis == "compiled"                  # the real compile DID run and succeed
     assert rep.npu_coverage != "fits"                # the exact overclaim this fix removes
     assert rep.npu_coverage == "cpu-only"
-    assert rep.compute_on_npu_pct_max == 0.0
+    assert rep.compute_on_npu_pct_max is None       # MAC-weighted field: never set at basis "compiled"
+    assert rep.npu_placement_pct_real == 0.0        # the real, op-count placement instead
     assert rep.ops and rep.ops[0].op == "FULLY_CONNECTED"      # kept, not `ops: []`
 
 
@@ -379,6 +459,72 @@ def test_exact_degrades_on_a_vela_compile_failure(tmp_path, monkeypatch):
                                     metadata_root=tmp_path, exact=True)
     assert reports[0].basis == "static-screen"          # degraded, not crashed
     assert any(n.startswith("--exact") and "vela failed" in n for n in reports[0].notes)
+
+
+def test_exact_truncates_a_multiline_vela_traceback_to_one_short_line(tmp_path, monkeypatch):
+    # MAJOR 2 review: a failed vela subprocess's RuntimeError can wrap its
+    # own raw, multi-line stderr verbatim (measured: a 750-character,
+    # 9-newline Python traceback) -- that must never land whole in a note.
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
+    _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
+    _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55",
+                 supported=["FULLY_CONNECTED"])
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    traceback_text = "Traceback (most recent call last):\n" + "\n".join(
+        f"  File \"vela/x.py\", line {i}, in fn" for i in range(9)) + "\nValueError: bad tensor shape"
+
+    def _boom(self, source, *, accel_config, out_dir, opts=None):
+        raise RuntimeError(traceback_text)
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _boom)
+    reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                    metadata_root=tmp_path, exact=True)
+    note = next(n for n in reports[0].notes if n.startswith("--exact"))
+    assert "\n" not in note                             # never a raw multi-line traceback
+    assert "vela/x.py" not in note                       # first line only, not the frame body
+    assert "ValueError: bad tensor shape" not in note     # ... nor the trailing exception line
+    assert note.startswith("--exact compile with vela failed (Traceback")
+
+
+def test_exact_never_spawns_vela_for_a_format_it_does_not_ingest(tmp_path, monkeypatch):
+    # MAJOR 2 review, the actual bug: the old guard
+    # (`report.ops and report.ops[0].reason == "format-not-accepted"`) was
+    # dead code for exactly ethos_u's own non-.tflite case -- extract_ops
+    # never extracts operators from a .onnx source, so report.ops was always
+    # [] and the guard never fired, letting VelaAdapter().compile() actually
+    # be invoked on a source vela cannot ingest at all.
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
+    _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
+    onnx_source = tmp_path / "model.onnx"
+    onnx_source.write_bytes(b"not-a-real-onnx-file")
+
+    def _must_not_run(self, *a, **kw):
+        raise AssertionError("VelaAdapter.compile must not run for a format it does not accept")
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _must_not_run)
+    reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=onnx_source,
+                                    metadata_root=tmp_path, exact=True)
+    rep = reports[0]
+    assert rep.npu_coverage == "undetermined"
+    assert rep.basis == "static-screen"
+    assert "does not ingest" in rep.notes[0]              # the ORDINARY format-not-accepted note
+    assert not any("vela" in n.lower() for n in rep.notes)
+
+
+@pytest.mark.skipif(shutil.which("vela") is None, reason="vela (ethos-u-vela) not installed")
+def test_exact_with_real_vela_installed_still_never_runs_it_on_an_onnx_source(tmp_path):
+    # Same proof as above, with the real `vela` binary on PATH (not mocked
+    # away): before the fix this actually spawned vela on the .onnx source
+    # and surfaced its raw failure text as a note.
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
+    _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
+    onnx_source = tmp_path / "model.onnx"
+    onnx_source.write_bytes(b"not-a-real-onnx-file")
+    reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=onnx_source,
+                                    metadata_root=tmp_path, exact=True)
+    rep = reports[0]
+    assert rep.basis == "static-screen"
+    assert not any("vela failed" in n.lower() or "traceback" in n.lower() for n in rep.notes)
 
 
 def test_exact_is_unavailable_for_drpai_and_deepx_but_never_crashes(tmp_path):

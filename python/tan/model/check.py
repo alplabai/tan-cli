@@ -147,6 +147,32 @@ def _license_gated_exact_note(report: BackendReport, backend: str) -> BackendRep
     return replace(report, notes=[*report.notes, note])
 
 
+#: A note is one line in the JSON envelope and the text render; a failed
+#: `vela` subprocess can raise `RuntimeError` wrapping its own raw stderr,
+#: which can be a multi-hundred-character, multi-newline Python traceback
+#: (measured: 750 characters, 9 newlines) that must never land verbatim in
+#: either (MAJOR 2 review).
+_VELA_ERR_NOTE_BUDGET = 200
+
+
+def _short_vela_error(err: Exception) -> str:
+    """The first line of @err's message, cut to `_VELA_ERR_NOTE_BUDGET`
+    characters on a word boundary with a trailing `…` when it doesn't
+    already fit -- mirrors `tan.core.doctor_render._truncate_fix`'s
+    word-boundary-plus-ellipsis convention. Never a mid-word cut, never a
+    bare truncation with no marker, and never more than the first line of a
+    multi-line traceback."""
+    text = str(err).strip()
+    first_line = text.splitlines()[0] if text else text
+    if len(first_line) <= _VELA_ERR_NOTE_BUDGET:
+        return first_line
+    cut = first_line[:_VELA_ERR_NOTE_BUDGET]
+    boundary = cut.rfind(" ")
+    if boundary > 0:
+        cut = cut[:boundary]
+    return f"{cut}…"
+
+
 def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
                           metadata_root: Path) -> BackendReport:
     """Runs the real `vela` compile when it is on PATH; degrades cleanly --
@@ -155,8 +181,21 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
     Never raises. The compile succeeding is handed to `_report_from_vela_
     compile`, which is what actually decides `npu_coverage` -- NOT this
     function, and NOT vela's exit code (0 on a full CPU fallback by
-    design)."""
-    if report.ops and report.ops[0].reason == "format-not-accepted":
+    design).
+
+    Gated on `VelaAdapter().accepts(...)` directly, NOT on
+    `report.ops[0].reason == "format-not-accepted"`: `extract_ops` (tensorio)
+    only ever extracts operators from a `.tflite` source, so `report.ops` is
+    `[]` for every OTHER format too -- meaning the reason-based check was
+    dead code for exactly the case it existed to guard (ethos_u only ingests
+    "tflite", so it only ever GETS "format-not-accepted" for a non-.tflite
+    source, which is precisely when `ops` is always empty). Left ungated,
+    `VelaAdapter().compile()` was invoked on e.g. a `.onnx` source under
+    `--exact` on an Ethos-U SKU, and a `vela` failure on unparseable input
+    can raise with its own raw, multi-line traceback as the message (MAJOR 2
+    review: measured a 750-character, 9-newline traceback landing in
+    `notes[1]` of the JSON envelope this way)."""
+    if not VelaAdapter().accepts(source.suffix.lstrip(".").lower()):
         return report
     if shutil.which("vela") is None:
         note = ("--exact was requested, but vela is not on PATH (pip install "
@@ -171,7 +210,8 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
         with tempfile.TemporaryDirectory() as tmp:
             blob = VelaAdapter().compile(source, accel_config=accel_config, out_dir=Path(tmp))
     except Exception as err:  # noqa: BLE001 -- a failed exact compile degrades, it never crashes
-        note = f"--exact compile with vela failed ({err}); reporting the static screen instead."
+        note = (f"--exact compile with vela failed ({_short_vela_error(err)}); "
+                 f"reporting the static screen instead.")
         return replace(report, notes=[*report.notes, note])
     return _report_from_vela_compile(report, blob, accel_config)
 
@@ -185,39 +225,45 @@ def _report_from_vela_compile(report: BackendReport, blob: Blob, accel_config: s
     proof of NPU placement -- that overclaim is exactly what this function
     replaces (the BLOCKER this fix addresses).
 
-    Reads `blob.cpu_op_count`/`npu_op_count` (vela's own placement verdict,
-    `ethos_u._parse_vela_placement`): 100% NPU (no CPU ops, at least one op
-    ran) is the only case that reports `"fits"`, the only `npu_coverage` this
-    module ever emits at `basis: "compiled"` -- `ops` stays `[]`, since
-    nothing fell back. Partial or 0% NPU reports the REAL split
-    (`"partial"`/`"cpu-only"`, a real not upper-bound `compute_on_npu_pct_
-    max`) and KEEPS @report's own per-op verdicts (`ops=report.ops`) rather
-    than discarding them -- a 0%-NPU compile must never read as a bare,
-    contextless success. An unparseable placement summary degrades to
-    `_vela_placement_unreadable`, same as every other `_maybe_exact_ethos_u`
-    failure path: this function cannot verify a placement it can't read."""
+    Reads `blob.cpu_op_count`/`npu_op_count` (vela's own placement verdict):
+    100% NPU (no CPU ops, at least one op ran) is the only case that reports
+    `"fits"`, the only `npu_coverage` this module ever emits at `basis:
+    "compiled"` -- `ops` stays `[]`. Partial or 0% NPU reports the REAL split
+    (`npu_placement_pct_real`) and KEEPS @report's own per-op verdicts
+    (`ops=report.ops`) rather than discarding them -- a 0%-NPU compile must
+    never read as a bare, contextless success. An unparseable placement
+    summary degrades to `_vela_placement_unreadable`, same as every other
+    `_maybe_exact_ethos_u` failure path.
+
+    `pct` -- vela's aggregate CPU/NPU op *count* split -- goes into
+    `npu_placement_pct_real`, NEVER into `compute_on_npu_pct_max` (left
+    `None` here): the latter's contract is a MAC-weighted figure
+    (`analyze.BackendReport`'s own field comment), and vela's placement
+    summary carries no per-op MAC data to weight `pct` by -- reusing that
+    field for an op-count ratio was the unit mismatch MAJOR 4 review flagged."""
     sizing = f"arena {blob.arena_bytes} bytes, SRAM {blob.req_sram_kib} KiB"
     total = (blob.npu_op_count or 0) + (blob.cpu_op_count or 0)
     if blob.npu_op_count is None or blob.cpu_op_count is None or total == 0:
         return _vela_placement_unreadable(report, blob, accel_config, sizing)
     pct = 100.0 * blob.npu_op_count / total
     if blob.cpu_op_count == 0:
-        coverage, ops = "fits", []
+        coverage, ops, uncosted = "fits", [], 0
     else:
         coverage = "cpu-only" if blob.npu_op_count == 0 else "partial"
-        ops = report.ops          # keep the static per-op verdicts; a real
-                                   # partial/0% compile must not erase them
+        # Keep @report's per-op verdicts AND its uncosted-cpu-op count --
+        # a real partial/0% compile must not erase either (MINOR review).
+        ops = report.ops
+        uncosted = report.uncosted_cpu_op_count
     # `blob.compiler_version` is ALREADY the full string to show -- "vela"
-    # (degraded: the `ethos-u-vela` distribution's metadata is absent,
-    # `_vela_version()` in `adapters/ethos_u.py`) or "vela X.Y.Z" (real).
-    # Wrapping it in a second "vela (...)" would read "vela (vela)" on the
-    # degraded path -- a typo, not a version string.
+    # (degraded) or "vela X.Y.Z" (real); wrapping it in a second "vela (...)"
+    # would read "vela (vela)" on the degraded path.
     note = (f"{blob.compiler_version} compiled for {accel_config}: "
             f"{blob.npu_op_count}/{total} operators placed on the NPU "
             f"({pct:.0f}%); {sizing}.")
     return BackendReport(
         backend="ethos_u", variant=report.variant, table=report.table,
-        npu_coverage=coverage, compute_on_npu_pct_max=pct, ops=ops,
+        npu_coverage=coverage, compute_on_npu_pct_max=None,
+        npu_placement_pct_real=pct, uncosted_cpu_op_count=uncosted, ops=ops,
         basis="compiled", confidence="certain", notes=[note],
     )
 

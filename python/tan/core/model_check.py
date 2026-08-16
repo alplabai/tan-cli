@@ -39,13 +39,18 @@ def backend_report_as_dict(report: BackendReport) -> dict:
     `confidence` and `uncostedCpuOpCount` (a structured caveat on
     `computeOnNpuPctMax`, not just prose -- see `analyze.BackendReport`'s own
     comment), so a consumer never needs the text rendering to recover a
-    number this dict already carries."""
+    number this dict already carries. `computeOnNpuPctMax` and
+    `npuPlacementPctReal` are DIFFERENT units answering different questions
+    (MAC-weighted upper bound vs. real op-count placement) and are never
+    both non-`None` on the same report -- see `analyze.BackendReport`'s
+    field comments."""
     return {
         "backend": report.backend,
         "variant": report.variant,
         "table": report.table,
         "npuCoverage": report.npu_coverage,
         "computeOnNpuPctMax": report.compute_on_npu_pct_max,
+        "npuPlacementPctReal": report.npu_placement_pct_real,
         "uncostedCpuOpCount": report.uncosted_cpu_op_count,
         "basis": report.basis,
         "confidence": report.confidence,
@@ -90,6 +95,21 @@ def _coverage_line(report: dict) -> str | None:
 
 
 def _cpu_fallback_line(report: dict) -> str | None:
+    """`None` for a real (`basis: "compiled"`) report -- the SAME gate
+    `_coverage_line` carries, for the same reason (MAJOR 3 review: this line
+    did NOT get that gate in the commit that added it to `_coverage_line`,
+    so a compiled report could still print an op-level "N ops are certain
+    CPU fallback" claim built from the kept STATIC verdicts
+    (`tan.model.check._report_from_vela_compile`'s `ops=report.ops`) --
+    self-contradicting the REAL placement `_coverage_line`/`notes` reports
+    alongside it: measured a static screen asserting "2 ops are certain CPU
+    fallback" next to a real compile's "1/3 operators placed on the NPU
+    (67%)" in the same rendered block, from the same STATIC vs COMPILED
+    disagreement `_coverage_line`'s own gate exists to prevent -- table
+    membership doesn't check dtype/shape, so the static and compiled
+    verdicts can legitimately differ)."""
+    if report["basis"] != "static-screen":
+        return None
     names = [o["op"] for o in report["ops"] if o["status"] == "cpu-certain"]
     if not names:
         return None

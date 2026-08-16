@@ -265,10 +265,11 @@ def test_the_full_envelope_shape_carries_every_backendreport_field(tmp_path, mon
     backend = doc["data"]["models"][0]["backends"][0]
     assert set(backend) == {
         "backend", "variant", "table", "npuCoverage", "computeOnNpuPctMax",
-        "uncostedCpuOpCount", "basis", "confidence", "notes", "ops",
+        "npuPlacementPctReal", "uncostedCpuOpCount", "basis", "confidence", "notes", "ops",
     }
     assert backend["npuCoverage"] == "partial"
     assert backend["computeOnNpuPctMax"] == 96.0
+    assert backend["npuPlacementPctReal"] is None       # only ever set at basis: "compiled"
     assert backend["uncostedCpuOpCount"] == 0
     assert backend["basis"] == "static-screen"
     assert backend["confidence"] == "screening"
@@ -416,6 +417,37 @@ def test_text_from_a_compiled_report_never_mixes_the_real_pct_with_a_static_op_c
     # never a second, contradicting "1/1 ops are NPU-eligible" figure built
     # from the kept static verdict
     assert "1/1" not in text
+
+
+def test_text_from_a_compiled_report_never_prints_a_stale_cpu_fallback_line(tmp_path, monkeypatch):
+    # MAJOR 3 review: _cpu_fallback_line lacked the SAME `basis !=
+    # "static-screen"` gate `_coverage_line` already carries above, so a
+    # compiled report that keeps the STATIC per-op verdicts
+    # (tan.model.check._report_from_vela_compile's `ops=report.ops` on a
+    # partial/cpu-only real compile) still printed an op-level "N ops are
+    # certain CPU fallback" line built from those STALE static verdicts --
+    # self-contradicting the REAL vela placement reported in the very same
+    # block (measured: "2 ops are certain CPU fallback: SOFTMAX, TOPK_V2"
+    # printed alongside "2/3 operators placed on the NPU (67%)", the exact
+    # static-vs-compiled disagreement `_coverage_line`'s own gate exists to
+    # prevent one line up).
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "source.tflite", "x")
+    board_yaml(tmp_path, models="models:\n  - name: m\n    source: source.tflite\n")
+    report = _fake_report(
+        npu_coverage="partial", compute_on_npu_pct_max=66.67, basis="compiled",
+        confidence="certain",
+        notes=["vela 5.1.0 compiled for ethos-u85-256: 2/3 operators placed "
+               "on the NPU (67%); arena 74480 bytes, SRAM 73 KiB."])
+    monkeypatch.setattr(model_cmd, "resolve_check_backends", lambda sku, **kw: ["ethos_u"])
+    monkeypatch.setattr(model_cmd, "check_model_backends", lambda **kw: [report])
+    result = runner.invoke(
+        app, ["check", "--project", str(tmp_path), "--sdk-root", str(sdk)], catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    text = result.stderr
+    assert "2/3 operators placed on the NPU (67%)" in text      # the real split, from the note
+    assert "certain CPU fallback" not in text                    # no stale op-level claim alongside it
 
 
 # --------------------------------------------------------------------------

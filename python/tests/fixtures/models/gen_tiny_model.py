@@ -3,7 +3,9 @@
 
 Run to (re)create tiny_int8.tflite:
     py -3.14 tests/fixtures/models/gen_tiny_model.py
-Requires the `model-compile` extra (tflite + flatbuffers)."""
+Requires the `model-io` extra (tflite + flatbuffers) -- this script only
+builds a .tflite flatbuffer, it never shells vela, so `model-compile` (which
+adds `ethos-u-vela` on top) is more than this needs."""
 from __future__ import annotations
 from pathlib import Path
 

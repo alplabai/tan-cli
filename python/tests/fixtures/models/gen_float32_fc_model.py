@@ -26,7 +26,9 @@ this fixture is the only way to prove that fix; no amount of monkeypatching
 
 Run to (re)create float32_fc.tflite:
     py -3.14 tests/fixtures/models/gen_float32_fc_model.py
-Requires the `model-compile` extra (tflite + flatbuffers)."""
+Requires the `model-io` extra (tflite + flatbuffers) -- this script only
+builds a .tflite flatbuffer, it never shells vela, so `model-compile` (which
+adds `ethos-u-vela` on top) is more than this needs."""
 from __future__ import annotations
 import struct
 from pathlib import Path

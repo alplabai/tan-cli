@@ -100,7 +100,29 @@ class BackendReport:
                                # plus "fits", but ONLY when basis == "compiled" (tan.model.check's
                                # `--exact` path, tan-cli#782 Task 6). analyze_backend() itself
                                # never emits "fits" -- basis stays "static-screen" here always.
-    compute_on_npu_pct_max: float | None   # MAC-weighted UPPER bound, 0-100
+    # MAC-weighted UPPER bound, 0-100 -- ONLY at `basis: "static-screen"`
+    # (this module's own `_score_ops`/`eligible_macs / total_macs`). Always
+    # `None` at `basis: "compiled"` (tan.model.check's `--exact` path):
+    # vela's own placement summary is an aggregate CPU/NPU *op count*, not a
+    # per-op MAC breakdown, so there is no real MAC-weighted figure to put
+    # here for a compile -- `npu_placement_pct_real` below carries the real
+    # (but op-count, not MAC-weighted) placement instead (MAJOR 4 review: a
+    # `basis: "compiled"` report used to overload THIS field with that
+    # op-count ratio, under the exact MAC-weighted-upper-bound contract this
+    # comment documents -- measured a static report with one 1000-MAC
+    # eligible op and two 0-MAC CPU ops emitting `66.666...` here on the
+    # compiled path, precisely the op-count distortion MAC weighting exists
+    # to eliminate).
+    compute_on_npu_pct_max: float | None
+    # The REAL NPU-vs-CPU op-count placement ratio, 0-100 -- ONLY ever set at
+    # `basis: "compiled"` (`tan.model.check._report_from_vela_compile`, from
+    # vela's own "CPU/NPU operators = N (P%)" summary counts). `None` at
+    # `basis: "static-screen"`, where there is no real compile to report a
+    # placement for. Deliberately a SEPARATE field from `compute_on_npu_pct_
+    # max` above, not a reuse of it under a different meaning: an op-count
+    # ratio and a MAC-weighted ratio answer different questions and must
+    # never share one key a consumer could read as either.
+    npu_placement_pct_real: float | None = None
     # cpu-certain ops with an unpriced (macs=0) MAC estimate -- excluded from
     # compute_on_npu_pct_max's denominator, so a nonzero count here is a
     # machine-readable caveat on that percentage: it can read 100.0 while real,

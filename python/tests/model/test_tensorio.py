@@ -19,6 +19,18 @@ def test_extract_io_non_tflite_returns_empty(tmp_path):
     assert extract_io(src) == ([], [])
 
 
+def test_extract_io_missing_onnx_source_raises_not_swallowed(tmp_path):
+    # The .onnx twin of the .tflite read-before-import fix: a source that
+    # cannot be read at all is a real failure regardless of extension -- it
+    # must never collapse to the identical `[], []` a genuinely readable but
+    # non-.tflite source returns above (tan.model.check's MAJOR-1 review: this
+    # silently backed `model check` reporting a verdict-shaped "nothing to
+    # score" note for a nonexistent .onnx source on the ONNX-ingesting
+    # backends -- drpai/deepx_dxm1 -- with model.check-failed never firing).
+    with pytest.raises(OSError):
+        extract_io(tmp_path / "missing.onnx")
+
+
 def test_extract_io_malformed_tflite_returns_empty(tmp_path):
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-NOT-REALLY")
@@ -63,6 +75,13 @@ def test_extract_ops_non_tflite_returns_empty(tmp_path):
     # here, never raises, so the ONNX-ingesting backends report `undetermined`
     # rather than a guess (tan.model.analyze).
     assert extract_ops(src) == []
+
+
+def test_extract_ops_missing_onnx_source_raises_not_swallowed(tmp_path):
+    # Same .onnx twin as test_extract_io_missing_onnx_source_raises_not_swallowed,
+    # for the sibling extractor tan.model.check actually calls.
+    with pytest.raises(OSError):
+        extract_ops(tmp_path / "missing.onnx")
 
 
 def test_extract_ops_malformed_tflite_returns_empty(tmp_path):

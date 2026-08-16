@@ -98,5 +98,11 @@ def test_vela_compiles_real_model_for_e8(tmp_path, accel_config):
     blob = VelaAdapter().compile(src, accel_config=accel_config, out_dir=tmp_path)
     assert blob.format == "vela_tflite"
     assert blob.payload[4:8] == b"TFL3"
-    # A real (non-toy) model yields a real reported footprint.
-    assert blob.arena_bytes > 0 or blob.req_sram_kib > 0
+    # A real (non-toy) model yields a real, nonzero reported footprint on
+    # BOTH figures -- not just one or the other. A regression to the KiB/bytes
+    # unit bug (arena sourced from vela's `arena_cache_size` config knob, and
+    # `sram_memory_used` misread as bytes instead of KiB) silently zeroed
+    # req_sram_kib while leaving arena_bytes looking plausible (384), so this
+    # must assert req_sram_kib specifically, not just "either one is nonzero".
+    assert blob.req_sram_kib > 0
+    assert blob.arena_bytes > 0
