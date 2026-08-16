@@ -406,10 +406,8 @@ def test_unfiltered_empty_manifest_still_only_warns(tmp_path):
     no filter to have mistyped. Companion to `test_manifest_holds_non_utf8_
     bytes`, pinned directly against the `flash.nothing-matched` shape rather
     than a UTF-8 edge case."""
-    exit_code, out, _ = run_flash(
-        tmp_path, "--format", "json",
-        manifest="schema_version: 1\nhw_info: {sku: S}\nslices: []\nhelper_mcus: []\nboot_order: []\n",
-    )
+    manifest = "schema_version: 1\nhw_info: {sku: S}\nslices: []\nhelper_mcus: []\nboot_order: []\n"
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", manifest=manifest)
     payload = envelope(out)
     assert exit_code == 0
     assert payload["ok"] is True
@@ -4491,10 +4489,18 @@ def test_flow_d_preflight_an_unrecognised_banner_falls_back_to_the_wiring_messag
     **tan-cli#373**: no DP ID was reported here, so this must get the
     ORIGINAL probe-selection/`jlink_serial` sentence -- not #369's
     cloned-serial text, which only applies when a board DID answer with a
-    different ID (the wrong-DP-ID test below covers that one)."""
+    different ID (the wrong-DP-ID test below covers that one).
+
+    **tan-cli#795 review, minor**: this banner matches neither `_DP_ID_RE`
+    nor either `_CONNECT_FAILED_*_RE` -- distinct from the target-level-
+    refusal test below, which DOES match `_CONNECT_FAILED_TARGET_RE` -- so it
+    must carry the "could not recognise the connect banner" clause naming
+    that this is an unparsed banner, not a confirmed wiring diagnosis. The
+    remediation stays byte-for-byte the same either way."""
     _stub_flow_d_probe(monkeypatch, tmp_path, stdout="some unrecognised probe banner\n")
     message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
     assert message is not None
+    assert "could not recognise the connect banner" in message
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "re-enumerat" not in message
     assert "CLONED serial" not in message
@@ -4529,6 +4535,10 @@ def test_flow_d_preflight_a_target_level_cannot_connect_keeps_the_wiring_message
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "re-enumerat" not in message
     assert "CLONED serial" not in message
+    # tan-cli#795 review, minor: a genuine `_CONNECT_FAILED_TARGET_RE` match
+    # is NOT the "could not recognise the connect banner" case -- this IS a
+    # confirmed target-level refusal, so it must not carry that clause.
+    assert "could not recognise the connect banner" not in message
 
 
 def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypatch, tmp_path):
@@ -4627,18 +4637,19 @@ def test_dp_id_matches_rejects_arms_shared_jep106_designer_field():
 
 def test_expect_dpidr_width_refusal_rejects_a_truncated_id():
     """tan-cli#795(b): a manifest `expect_dpidr` that is not a full 32-bit / 8
-    hex-digit value must be refused at the comparison's call site --
-    `validate_address` (`flash_plan.py`) stays a generic charset check shared
-    with `base` and friends, so this is the ONE place the width rule can
-    live."""
-    refusal = flash_cmd._expect_dpidr_width_refusal("0x2477", "alif_mram_jlink")
-    assert refusal is not None
-    assert "expect_dpidr" in refusal
-    assert "32-bit" in refusal
+    hex-digit value must be refused at PLAN time, in `flash_plan.
+    validate_flow_d_preflight_args` beside its `validate_address` call --
+    `validate_address` itself stays a generic charset check shared with
+    `base` and friends, so the width rule lives in its own function instead,
+    called from the same plan-time site."""
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan._validate_expect_dpidr_width("0x2477", "alif_mram_jlink")
+    assert "expect_dpidr" in str(raised.value)
+    assert "32-bit" in str(raised.value)
 
 
 def test_expect_dpidr_width_refusal_accepts_a_full_width_id():
-    assert flash_cmd._expect_dpidr_width_refusal("0x0BE12477", "alif_mram_jlink") is None
+    flash_plan._validate_expect_dpidr_width("0x0BE12477", "alif_mram_jlink")
 
 
 def test_flow_d_preflight_refuses_a_truncated_expect_dpidr_before_probing(monkeypatch, tmp_path):
@@ -4733,6 +4744,38 @@ boot_order: []
     assert entry["status"] == "failed"
     assert "expect_dpidr" in entry["message"]
     assert "jlink_device" in entry["message"]
+    codes = {issue["code"] for issue in payload["issues"]}
+    assert "flash.entry-failed" in codes
+
+
+def test_flow_d_dry_run_surfaces_a_truncated_expect_dpidr_as_a_failure(tmp_path):
+    """tan-cli#795 review: the width rule must run at the SAME plan-time call
+    site as the half-armed-pair check above, not only inside `_flow_d_
+    preflight` at real-write-probe time -- otherwise a truncated
+    `expect_dpidr` (here `0x477`, ARM's own JEP106 designer field, shared by
+    every ARM SW-DP) is invisible to a preview: `tan flash --dry-run` used to
+    report `ok: true` / exit 0 / no issues for exactly this manifest, silently
+    disarming the wrong-board guard `flash_plan.py`'s own docstring promises
+    runs at plan time."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_address: "0x8057F5B0",
+                expect_dpidr: "0x477", jlink_device: Cortex-M55}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["ok"] is False
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "expect_dpidr" in entry["message"]
+    assert "32-bit" in entry["message"]
     codes = {issue["code"] for issue in payload["issues"]}
     assert "flash.entry-failed" in codes
 

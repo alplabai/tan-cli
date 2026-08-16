@@ -572,11 +572,10 @@
     {
       "code": "flash.nothing-matched",
       "status": "reserved",
-      "severity": "warning",
+      "severity": "error or warning",
       "consumer": "none",
-      "emittedBy": "crates/tan-cli/src/commands/flash/mod.rs",
-      "literal": "code: \"flash.nothing-matched\"",
-      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Originally registered by tan-cli#219 against crates/tan-cli/src/commands/flash/mod.rs; tan-cli#807 moved the emit site to python/tan/commands/flash_cmd.py (the Python port) and split the severity: `error` (exit 1) when a `--core`/`--helper` filter was supplied and matched nothing -- a mistyped filter used to warn/exit 0 even though it never touched a device; `warning` (exit 0, unchanged) when no filter was supplied at all, i.e. an empty/unfiltered manifest with no filter to have mistyped (`python/tests/commands/test_flash_command.py::test_unfiltered_empty_manifest_still_only_warns`). No `literal` field (tan-cli#372): nothing reads it for a python/ entry. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "flash.slice-not-built",

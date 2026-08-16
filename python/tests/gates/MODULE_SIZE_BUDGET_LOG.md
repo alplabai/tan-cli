@@ -155,3 +155,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/doctor_cmd.py: 4114 -> 4131
     - tan/core/bootstrap.py: 2275 -> 2400
     - function_count_budget: 259 -> 260
+- 2026-08-16 -- tan-cli#795: relocate the expect_dpidr width guard (_validate_expect_dpidr_width) from flash_cmd.py's real-write-time preflight into flash_plan.py's plan-time validate_flow_d_preflight_args, beside its validate_address(expect_dpidr) calls, so a truncated expect_dpidr surfaces under --dry-run too; the pure banner-matching helpers it does not need (FlashPlanError) moved out to a new tan/core/dp_id.py instead, but this one function must stay beside the exception type it raises
+    - tan/core/flash_plan.py: 3164 -> 3201

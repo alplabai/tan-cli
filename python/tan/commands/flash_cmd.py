@@ -98,6 +98,13 @@ import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.sdk_cmd import sdk_resolution_issues
+from tan.core.dp_id import (
+    _CONNECT_FAILED_TARGET_RE,
+    _connect_failed_outright,
+    _dp_id_matches,
+    _dp_id_reported,
+    _dp_id_value,
+)
 from tan.core.flash_plan import (
     DPIDR_GUARD_COVERAGE,
     FAIL,
@@ -3150,16 +3157,12 @@ def _flow_d_preflight(
         return None
     script, expected = prepared
     # tan-cli#795: `expect_dpidr` must be a full 32-bit SW-DP ID (8 hex
-    # digits) before it is trusted to disarm the write below. `validate_
-    # address` (`flash_plan.py`) stays a generic charset check shared with
-    # `base` and friends -- the width rule is specific to this one
-    # wrong-board guard, so it lives here, at the comparison's call site,
-    # instead. Without it a truncated value like `0x2477`, or `0x477` (ARM's
-    # own JEP106 designer field, shared by every ARM SW-DP), would match any
-    # ARM board's banner and silently disarm the guard.
-    width_refusal = _expect_dpidr_width_refusal(expected, method)
-    if width_refusal is not None:
-        return width_refusal
+    # digits) before it is trusted to disarm the write below. That width rule
+    # is enforced by `validate_flow_d_preflight_args` itself (`flash_plan.py`,
+    # beside its `validate_address` call), which `flow_d_preflight_script`
+    # already called just above to build `prepared` -- so a truncated
+    # `expected` never reaches this point at all; it raised `FlashPlanError`,
+    # caught above, before `prepared` was ever assigned.
     # tan-cli#520 REVIEW, minor 3: Flow D's refusal text named its write
     # target explicitly ("write MRAM") before this function served a second
     # backend; a bare generalisation to backend-neutral "write" would have
@@ -3276,7 +3279,30 @@ def _flow_d_preflight(
     # An unrecognised banner, or a genuine TARGET-level connect refusal (no DP
     # ID was even read to compare against the cloned-serial case above) --
     # `jlink_serial` pinning a probe IS the actual fix here when it is unset
-    # on a multi-probe host (tan-cli#353), so the original sentence survives.
+    # on a multi-probe host (tan-cli#353), so the original sentence survives
+    # for BOTH -- conservative by design (tan-cli#312 review): a banner
+    # neither `_DP_ID_RE` nor `_CONNECT_FAILED_TARGET_RE`/`_CONNECT_FAILED_RE`
+    # recognises is not confidently "wiring is fine" either, so this must not
+    # guess a softer diagnosis than the genuine target-refusal case gets.
+    #
+    # tan-cli#795 review, minor: the two ARE distinguishable, though -- a real
+    # `Cannot connect to target.`/`Cannot connect to J-Link.` (this preflight
+    # DID read a SEGGER refusal, just not a DP-ID-shaped one) is a confirmed
+    # target-level problem, while a banner matching neither RE at all is one
+    # this preflight could not parse in the first place. Naming that
+    # difference (remediation UNCHANGED either way -- still refuse, still
+    # point at jlink_serial/wiring) avoids reading "Check the probe
+    # selection" as a diagnosis when it is really "this preflight doesn't
+    # know what it read."
+    if _CONNECT_FAILED_TARGET_RE.search(banner) is None:
+        return (
+            f"{method}: expected SW-DP IDR {expected} was not reported on connect, "
+            "and this preflight could not recognise the connect banner at all "
+            f"-- refusing to {verb} to an unidentified board. Check the probe "
+            "selection (flash_args.jlink_serial) and the wiring. If jlink_serial is "
+            "unset the script selects NO probe, which on a host carrying more than "
+            "one J-Link cannot connect at all (tan-cli#353)."
+        )
     return (
         f"{method}: expected SW-DP IDR {expected} was not reported on connect "
         f"-- refusing to {verb} to an unidentified board. Check the probe "
@@ -3284,99 +3310,6 @@ def _flow_d_preflight(
         "unset the script selects NO probe, which on a host carrying more than "
         "one J-Link cannot connect at all (tan-cli#353)."
     )
-
-
-def _expect_dpidr_width_refusal(expected: str, method: str) -> str | None:
-    """Refuse an `expect_dpidr` that is not a full 32-bit / 8-hex-digit SW-DP
-    ID (tan-cli#795), or `None` if the width is fine. `validate_address`
-    (`flash_plan.py`) stays a generic charset check of any length -- `base`
-    and friends share it -- so this width rule lives here instead, narrowly
-    scoped to the one field this preflight arms off of."""
-    digits = expected[2:] if expected[:2] in ("0x", "0X") else expected
-    if len(digits) == 8:
-        return None
-    return (
-        f"{method}: flash_args.expect_dpidr = {expected!r} is not a full "
-        "32-bit SW-DP ID (8 hex digits) -- refusing to arm the wrong-board "
-        "guard with a value short enough to match more than one board (ARM's "
-        "own JEP106 designer field, 0x477, is shared by every ARM SW-DP)."
-    )
-
-
-def _dp_id_matches(expected: str, banner: str) -> bool:
-    """Whether the banner's reported SW-DP ID equals `expected`, compared as
-    PARSED 32-bit values (tan-cli#795) rather than the prior unanchored
-    substring match (`_hex_in`, since removed): that match accepted any
-    truncation of `expected` that happened to appear in the banner --
-    `0x2477` matched `Found SW-DP with ID 0x0BE12477`, and `0x477` (ARM's own
-    JEP106 designer field, shared by every ARM SW-DP) matched every ARM
-    board's banner. The caller already refuses a short `expected` via
-    `_expect_dpidr_width_refusal` before this runs; `_dp_id_value` extracts
-    the banner's own reported ID the same way the mismatch-reporting branch
-    below already does."""
-    actual = _dp_id_value(banner)
-    if actual is None:
-        return False
-    return int(actual, 16) == int(expected, 16)
-
-
-#: SEGGER's own wording for a successful SWD connect that read AN id, whatever
-#: it turned out to be -- "Found SW-DP with ID 0x........" / "DPIDR: 0x........".
-#: Matched loosely on purpose: what this distinguishes is "a real board
-#: answered with a different identity" from "nothing answered", not the exact
-#: firmware/DLL version's phrasing. The hex value is its own capture group
-#: (tan-cli#512) so `_dp_id_value` can report what was ACTUALLY read, not only
-#: whether something was -- `_dp_id_reported` still just asks whether this
-#: matches at all.
-_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*(0x[0-9A-Fa-f]+)", re.IGNORECASE)
-
-#: SEGGER's own wording for the PROBE itself refusing the connection outright
-#: -- measured verbatim on the rc3 bench run: "Connecting to J-Link ...FAILED:
-#: Cannot connect to the probe/programmer." (tan-cli#312). Deliberately NOT a
-#: bare `FAILED`/`Cannot connect` match (that was the tan-cli#312 review
-#: finding): JLinkExe prints "FAILED" in many contexts, and "Cannot connect"
-#: alone also fires on a TARGET-level refusal -- see `_CONNECT_FAILED_TARGET_RE`
-#: below -- which is a real wiring/probe-selection problem, not a re-enumerating
-#: probe.
-_CONNECT_FAILED_RE = re.compile(r"Cannot connect to the probe/programmer", re.IGNORECASE)
-
-#: SEGGER's own wording for a TARGET-level connect refusal -- "Cannot connect
-#: to target." (unplugged SWD ribbon, unpowered board) or "Cannot connect to
-#: J-Link." (a probe that IS reachable via USB but refuses the requested
-#: `jlink_serial`). Both are genuine wiring/probe-selection problems, so their
-#: presence forces `_connect_failed_outright` to False even alongside the
-#: probe-level phrase above -- asserting "wiring is fine" here would be the
-#: false negative tan-cli#312's review flagged (measured against a real
-#: unplugged-ribbon and a real unpowered-target banner).
-_CONNECT_FAILED_TARGET_RE = re.compile(r"Cannot connect to (?:target|J-Link)\b", re.IGNORECASE)
-
-
-def _dp_id_reported(banner: str) -> bool:
-    """Whether the banner names ANY SW-DP ID -- not whether it matches
-    `expected` (the caller already ruled that out via `_dp_id_matches`), only
-    whether a connect got far enough to read one at all."""
-    return _DP_ID_RE.search(banner) is not None
-
-
-def _dp_id_value(banner: str) -> str | None:
-    """The actual SW-DP ID text the banner reported, verbatim (whatever hex
-    casing/`0x` spelling SEGGER printed), or `None` if `_DP_ID_RE` does not
-    match at all. tan-cli#512: a caller that already knows `_dp_id_reported(
-    banner)` is `True` gets a non-`None` value here by construction -- both
-    read the same regex against the same banner."""
-    match = _DP_ID_RE.search(banner)
-    return match.group(1) if match else None
-
-
-def _connect_failed_outright(banner: str) -> bool:
-    """Whether the banner carries SEGGER's own wording for the PROBE itself
-    refusing the connection (still re-enumerating, no board reachable at all),
-    as opposed to a TARGET-level refusal -- a real wiring/probe-selection
-    problem that must keep the original remediation, not the re-enumeration
-    one."""
-    if _CONNECT_FAILED_TARGET_RE.search(banner) is not None:
-        return False
-    return _CONNECT_FAILED_RE.search(banner) is not None
 
 
 def _is_file(path: str) -> bool:
