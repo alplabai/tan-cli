@@ -94,6 +94,45 @@ def test_run_reports_build_failed_when_no_sdk_found(tmp_path, monkeypatch):
     assert payload["issues"][0]["code"] == "build.plan-unavailable"
 
 
+def test_run_parser_actually_accepts_confirm():
+    """tan-cli#799 review: `test_run_help_lists_its_own_flags_not_builds_or_
+    flashs` asserted `"--confirm" in result.output`, but `--flash`'s own help
+    text (`run_cmd.py`'s `flash` option) happens to CONTAIN the literal
+    substring "--confirm" -- so that assertion stayed green even with the
+    `confirm` option removed entirely from `run`'s signature (measured: see
+    the module docstring below). Assert on the PARSER instead: the Click
+    command's registered `params` must contain an option whose `opts` include
+    `--confirm`, which is only true when the option is actually declared.
+    """
+    from typer.main import get_command
+
+    click_command = get_command(_app())
+    run_click_command = click_command.get_command(None, "run")
+    # Not `isinstance(param, click.Option)`: this Typer version vendors its
+    # own internal Click fork (`typer._click`), so `TyperOption` does NOT
+    # subclass the real, separately-installed `click` package's `Option` --
+    # `param.opts` (a plain list every Click/Typer parameter exposes) is the
+    # portable check.
+    confirm_params = [
+        param for param in run_click_command.params if "--confirm" in getattr(param, "opts", ())
+    ]
+    assert confirm_params, (
+        f"no --confirm option registered on `run`; opts were "
+        f"{[getattr(p, 'opts', None) for p in run_click_command.params]}"
+    )
+
+
+def test_run_confirm_flag_is_accepted_by_the_real_parser(tmp_path, monkeypatch):
+    """Same proof, end to end: invoking `run --flash --confirm` must never
+    hit Click's own "No such option" refusal. Combined with the forwarding
+    tests below (which call `run_cmd._run(confirm=True)` directly), this
+    closes the gap between "the flag parses" and "the flag is wired
+    through"."""
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(_app(), ["run", "--flash", "--confirm", "--format", "json"])
+    assert "No such option" not in result.output, result.output
+
+
 def test_run_help_text_mode_reaches_a_command_error_free(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(_app(), ["run"])

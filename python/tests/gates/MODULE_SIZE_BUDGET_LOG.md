@@ -169,3 +169,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/validate_cmd.py: 1571 -> 1587
 - 2026-08-16 -- tan-cli#799 review: scope validate_cmd's Envelope construction to TEXT/JSON only (nit fix)
     - tan/commands/validate_cmd.py: 1587 -> 1591
+- 2026-08-16 -- tan-cli#799: validate's sdk.* seam-issue text now carries a severity prefix, matching clean/size/image/run
+    - tan/commands/validate_cmd.py: 1591 -> 1613
