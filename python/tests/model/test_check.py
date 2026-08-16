@@ -26,11 +26,19 @@ from tan.model.check import (
     check_model_backends,
     resolve_check_backends,
 )
+from tan.model.tensorio import OpDesc
 from tests.conftest import sdk_root
 
 SDK = sdk_root()
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "models" / "tiny_int8.tflite"
+
+# Named so a reader who hits the skip knows what to install and why -- not
+# just "tflite not installed" (importorskip's own bare default message), but
+# which extra actually puts it on PATH. `pip install -e ./python` alone (the
+# bare shape `ci.yml`'s `gates` job installs, no extras) never gets this;
+# only the real read-a-real-.tflite tests need it.
+_MODEL_IO_SKIP_REASON = "tflite reader missing -- pip install alp-tan[model-io] for real .tflite parsing"
 
 
 def _write_som(meta: Path, sku: str, silicon: str, *, ethos_u_variant: str | None = None) -> None:
@@ -83,6 +91,12 @@ def test_resolve_check_backends_raises_for_an_unresolvable_sku(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_check_model_backends_screens_the_real_tflite_fixture(tmp_path):
+    # Needs the REAL reader: the assertion depends on _FIXTURE's actual
+    # operator content (a single FULLY_CONNECTED op) being extracted by the
+    # real `tflite` parser, not a stand-in -- this is the one tier-1 case
+    # (tests/model/test_analyze.py's docstring split) that cannot be reworked
+    # around the `model-io` extra without testing something else entirely.
+    pytest.importorskip("tflite", reason=_MODEL_IO_SKIP_REASON)
     _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
     _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
     _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55",
@@ -95,7 +109,18 @@ def test_check_model_backends_screens_the_real_tflite_fixture(tmp_path):
     assert reports[0].basis == "static-screen"
 
 
-def test_check_model_backends_reports_format_not_accepted_never_cpu_only(tmp_path):
+def test_check_model_backends_reports_format_not_accepted_never_cpu_only(tmp_path, monkeypatch):
+    # The format gate (analyze.analyze_backend's own documented order: format
+    # gate, THEN table resolution, THEN the per-op walk) fires before any op
+    # extraction is even consulted for scoring -- so this needs a non-empty
+    # *extracted* op list to prove the per-op verdicts it produces, not a real
+    # `tflite` parse of a real file. Monkeypatching `extract_ops` (rather than
+    # requiring the `model-io` extra) keeps this test meaningful on exactly
+    # the bare-install shape `ci.yml`'s `gates` job runs, which is where the
+    # format gate matters most (it is the ONLY thing standing between a
+    # .tflite source and a wrongly-scored onnx-only backend).
+    fake_op = OpDesc(op="FULLY_CONNECTED", op_namespace="tflite")
+    monkeypatch.setattr(check_mod, "extract_ops", lambda source, **kw: [fake_op])
     _write_som(tmp_path, "E1M-FAKE", "fake:soc:multi")
     _write_soc(tmp_path, "fake:soc:multi", [{"type": "drp-ai3", "subtype": "drp", "mac_per_cycle": 1}])
     reports = check_model_backends(backends=["drpai"], sku="E1M-FAKE", source=_FIXTURE,
@@ -110,6 +135,10 @@ def test_check_model_backends_propagates_an_unreadable_source(tmp_path):
     # check_model_backends itself does not swallow this -- `model_cmd._check_
     # one_model`'s try/except is the seam that turns it into a coded
     # `model.check-failed` issue; the engine layer stays honest about failure.
+    # Needs no `tflite` reader at all: `extract_ops` now reads (or fails to
+    # read) @source BEFORE it ever checks whether `tflite` is importable
+    # (tan.model.tensorio), so a missing source raises OSError on a bare
+    # install exactly as it does with the `model-io` extra present.
     _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
     _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
     with pytest.raises(OSError):
@@ -150,7 +179,7 @@ def test_a_genuinely_empty_model_keeps_the_generic_note_when_the_reader_is_prese
     # operators (unparseable/empty bytes) -- this must keep _empty_ops_report's
     # ordinary "nothing was extracted" note, not the reader-specific one, since
     # nothing here is actually the reader's fault.
-    pytest.importorskip("tflite")
+    pytest.importorskip("tflite", reason=_MODEL_IO_SKIP_REASON)
     _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
     _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
     _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55",
@@ -232,7 +261,7 @@ def test_exact_never_reports_fits_when_vela_places_zero_ops_on_the_npu(tmp_path,
     # Asserts on report.ops content, which needs a REAL op walk of _FIXTURE
     # (the `tflite` reader, the `model-io` extra) -- the compile itself is
     # monkeypatched, but the KEPT static verdicts underneath it are not.
-    pytest.importorskip("tflite")
+    pytest.importorskip("tflite", reason=_MODEL_IO_SKIP_REASON)
     _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
     _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
     _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55",
@@ -262,7 +291,7 @@ def test_exact_never_reports_fits_when_vela_places_zero_ops_on_the_npu(tmp_path,
 
 
 def test_exact_reports_partial_and_keeps_the_static_per_op_verdicts(tmp_path, monkeypatch):
-    pytest.importorskip("tflite")          # same reason as the test above
+    pytest.importorskip("tflite", reason=_MODEL_IO_SKIP_REASON)
     _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
     _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
     _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55",

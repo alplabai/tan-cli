@@ -17,6 +17,7 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
 import typer
 from typer.testing import CliRunner
 
@@ -30,6 +31,12 @@ app.command("model")(model)
 runner = CliRunner()
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "models" / "tiny_int8.tflite"
+
+# Named so a reader who hits the skip knows what to install and why -- not
+# just "tflite not installed" (importorskip's own bare default message), but
+# which extra actually puts it on PATH. `pip install -e ./python` alone (the
+# bare shape `ci.yml`'s `gates` job installs, no extras) never gets this.
+_MODEL_IO_SKIP_REASON = "tflite reader missing -- pip install alp-tan[model-io] for real .tflite parsing"
 
 
 def envelope(result):
@@ -180,6 +187,12 @@ def test_an_unresolvable_sku_is_a_coded_refusal_not_a_crash(tmp_path):
 
 
 def test_end_to_end_against_a_synthetic_ethos_u_som(tmp_path):
+    # The `npuCoverage == "full-eligible"` assertion below depends on the REAL
+    # `tflite` parser actually finding _FIXTURE's one FULLY_CONNECTED op --
+    # this test is exactly the hermetic-but-real wiring check the module
+    # docstring describes, so it must skip (not fake the extraction) when the
+    # `model-io` extra isn't installed.
+    pytest.importorskip("tflite", reason=_MODEL_IO_SKIP_REASON)
     sdk = make_sdk(tmp_path / "sdk")
     write_metadata(sdk / "metadata", "E1M-FAKE", "fake:soc:u55",
                     [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}],

@@ -56,15 +56,20 @@ def _dtype_name(dtype_names: dict[int, str], code: int) -> str:
 def extract_io(source: Path, *, raw: bytes | None = None) -> tuple[list[Tensor], list[Tensor]]:
     if source.suffix.lower() != ".tflite":
         return [], []                       # ONNX I/O extraction is a later follow-up
+    # Reuse the caller's already-read bytes when provided (build_model reads the
+    # source once for the manifest sha); an OSError on our own read is a real
+    # failure, not a parse problem -- read (or take the caller's bytes) BEFORE
+    # the `tflite` import check below, so "the source is unreadable" is never
+    # masked by "the reader isn't installed". Both would otherwise collapse to
+    # the identical `[], []`, which silently hides a real missing/unreadable
+    # source on exactly the bare-install (no `model-io` extra) host this
+    # degrade path exists for.
+    if raw is None:
+        raw = source.read_bytes()
     try:
         import tflite
     except ImportError:
         return [], []                       # parser not installed -> skip
-    # Reuse the caller's already-read bytes when provided (build_model reads the
-    # source once for the manifest sha); an OSError on our own read is a real
-    # failure, not a parse problem.
-    if raw is None:
-        raw = source.read_bytes()
     try:
         model = tflite.Model.GetRootAs(raw, 0)
         if model.SubgraphsLength() == 0:
@@ -128,12 +133,16 @@ def extract_ops(source: Path, *, raw: bytes | None = None) -> list[OpDesc]:
     for the ONNX-ingesting backends rather than guessing."""
     if source.suffix.lower() != ".tflite":
         return []
+    # Same ordering fix as extract_io above, for the same reason: read (or
+    # take the caller's bytes) BEFORE checking whether `tflite` is importable,
+    # so an unreadable/missing source still raises rather than being masked
+    # by "the reader isn't installed" on a bare-install host.
+    if raw is None:
+        raw = source.read_bytes()
     try:
         import tflite
     except ImportError:
         return []
-    if raw is None:
-        raw = source.read_bytes()
     try:
         model = tflite.Model.GetRootAs(raw, 0)
         if model.SubgraphsLength() == 0:
