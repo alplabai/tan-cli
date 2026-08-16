@@ -98,6 +98,7 @@ from pathlib import Path
 from tan.commands.build.configure_inputs import (
     discover_configure_inputs,
     read_configure_inputs_stamp,
+    resolve_zephyr_discovery_dir,
     write_configure_inputs_stamp,
 )
 from tan.commands.build.manifest import (
@@ -117,6 +118,7 @@ from tan.core.plan_exec import (
     SdkStampAction,
     assemble_slice_env,
     cross_drive_source_refusal,
+    missing_tool_message,
     resolve_action,
     sdk_stamp_action,
     sdk_stamp_key,
@@ -638,6 +640,7 @@ def _maybe_reset_stale_configure_cache(
     cwd: Path,
     app_dir: str | None,
     backend: str,
+    build_root: Path,
     on_output: Callable[[str], None],
 ) -> tuple[list[str], list[Issue]]:
     """tan-cli#655: a newly-added (or removed) devicetree overlay or Kconfig
@@ -698,10 +701,26 @@ def _maybe_reset_stale_configure_cache(
     (`cmake_cache_configured` -- nothing is cached yet on a first build, so
     there is nothing to reset; this call only lays down the baseline stamp).
     Comparison uses [`tan.commands.build.configure_inputs`]'s existence-only
-    fingerprint of `app_dir`'s auto-discovery locations, stamped inside
-    west's own nested build dir (mirrors the SDK-identity stamp above) --
-    NOT the plan's `command.args`, which name every EXTRA_/-D flag tan
-    itself controls but say nothing about a file the CUSTOMER added by hand.
+    fingerprint of the discovery dir's auto-discovery locations, stamped
+    inside west's own nested build dir (mirrors the SDK-identity stamp
+    above) -- NOT the plan's `command.args`, which name every EXTRA_/-D flag
+    tan itself controls but say nothing about a file the CUSTOMER added by
+    hand.
+
+    tan-cli#798: `app_dir` is the plan's `appDir` -- the CONFIGURED path,
+    NOT the directory `west build` is actually pointed at (see
+    `tan.commands.build_cmd`'s "Note `appDir` is NOT the substituted value"
+    docstring). For the scaffolded `app: ./src` layout (96 of 105 alp-sdk
+    example core entries, and every `tan init` template but `minimal-app`),
+    Zephyr auto-discovers overlays/fragments at the PARENT of `app_dir`, so
+    globbing `app_dir` itself found nothing on every build and this guard
+    never fired. [`resolve_zephyr_discovery_dir`] anchors `app_dir` on
+    `build_root` (a relative `appDir` must not resolve against the `tan`
+    process's own CWD -- the same reasoning `_missing_app_dirs` and
+    `_substituted_app_dirs` already carry) and applies the identical
+    CMakeLists.txt-parent fallback `_zephyr_app_dir`
+    (`tan.planner.orchestrator`) uses for the real `west build` positional,
+    so this guard's glob lands on the same directory.
 
     Returns `(extra_cmake_args, issues)`, mirroring
     [`_maybe_pristine_stale_sdk_build_dir`]'s own return shape: append
@@ -715,7 +734,7 @@ def _maybe_reset_stale_configure_cache(
     actually verify."""
     if backend != "zephyr" or not app_dir:
         return [], []
-    app_dir_path = Path(app_dir)
+    app_dir_path = resolve_zephyr_discovery_dir(app_dir, build_root)
     if not cmake_cache_configured(cwd):
         # Nothing cached yet to poison -- lay down this configure's own
         # baseline so the NEXT build has something to compare against.
@@ -852,7 +871,7 @@ def _missing_post_tool(
     step is refused at parse time, `tan.core.build_plan._post_commands`) and
     `unknownBackend` is a per-slice fact decided before any step runs."""
     action = resolve_action(policy, "missing_tool", PolicyAction.SKIP)
-    short = f"{where} cannot run: tool `{tool}` not found"
+    short = f"{where} cannot run: {missing_tool_message(tool)}"
     return _PostOutcome(
         "skipped" if action is PolicyAction.SKIP else "failed",
         None,
@@ -1251,13 +1270,13 @@ def execute_slices(
                 _skip_or_fail(
                     sl.core_id,
                     resolve_action(policy, "missing_tool", PolicyAction.SKIP),
-                    f"tool `{tool}` not found -- searched {resolution.searched}",
+                    f"{missing_tool_message(tool)} -- searched {resolution.searched}",
                     # tan-cli#510 review round 3, MAJOR: the full searched-PATH
                     # text stays in `message` (this run's stdout + envelope
                     # `reason`) but must NOT reach the persisted
                     # `system-manifest.yaml` -- see [`SliceOutcome.
                     # manifest_message`]'s own docstring.
-                    manifest_message=f"tool `{tool}` not found",
+                    manifest_message=missing_tool_message(tool),
                 )
             )
             continue
@@ -1287,7 +1306,7 @@ def execute_slices(
         # anything on disk.
         configure_cache_reset_args, new_configure_cache_issues = (
             _maybe_reset_stale_configure_cache(
-                sl.core_id, cwd, sl.app_dir, sl.backend, on_output
+                sl.core_id, cwd, sl.app_dir, sl.backend, build_root, on_output
             )
         )
         configure_cache_issues.extend(new_configure_cache_issues)
