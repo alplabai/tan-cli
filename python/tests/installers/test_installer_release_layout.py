@@ -730,8 +730,12 @@ def test_ps1_backup_rename_failure_mid_block_rolls_back(release_server, tmp_path
     (lib_dir / "marker.txt").write_text("PREVIOUS-LIB-MARKER")
 
     exe = dest / "tan.exe"
+    # The well-known SID (*S-1-1-0), not the "Everyone" name: icacls accepts
+    # a *-prefixed SID directly (translating it locally) and this stays
+    # correct on a non-English Windows host, where "Everyone" is not a valid
+    # principal name at all.
     deny = subprocess.run(
-        ["icacls", str(exe), "/deny", "Everyone:(D)"],
+        ["icacls", str(exe), "/deny", "*S-1-1-0:(D)"],
         capture_output=True, text=True, timeout=30,
     )
     assert deny.returncode == 0, f"could not set up the deny-delete ACE: {deny.stdout}\n{deny.stderr}"
