@@ -5,9 +5,21 @@ Wraps the `vela` CLI from `ethos-u-vela` (the `model-compile` optional
 dependency). is_available() is True when `vela` is on PATH; compile() shells out
 for the given accelerator-config and reads back `<stem>_vela.tflite`. The
 arena/peak-SRAM footprint is parsed best-effort from vela's summary CSV (column
-names drift across vela versions, so matching is tolerant; 0 when unavailable)."""
+names drift across vela versions, so matching is tolerant; 0 when unavailable).
+
+compile() NEVER raises on a clean vela exit, including a full CPU fallback --
+vela's own exit code is 0 whether it placed every operator on the NPU or none
+of them (measured: `vela float_fc.tflite --accelerator-config ethos-u85-256`
+on a float32 FULLY_CONNECTED model prints "NPU operators = 0 (0.0%)" and still
+exits 0). `_parse_vela_placement` reads vela's own per-run placement summary
+(always printed to stdout, `ethosu.vela.stats_writer.print_performance_metrics_
+common`'s "CPU/NPU operators = N (P%)" lines) so a caller never has to infer
+placement from the mere absence of an exception -- see `tan.model.check`'s
+`_report_from_vela_compile`, the actual consumer of `Blob.npu_op_count`/
+`cpu_op_count`."""
 from __future__ import annotations
 import csv
+import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -16,6 +28,14 @@ from pathlib import Path
 from . import CompilerAdapter, Blob
 
 _VELA_TIMEOUT_S = 600        # vela compiles are minutes at most; never unbounded in CI
+
+# ethosu.vela.stats_writer.print_performance_metrics_common (always printed to
+# stdout, f=sys.stdout is its own default) emits exactly one "CPU operators ="
+# and one "NPU operators =" line per run, e.g. "NPU operators = 0 (0.0%)". The
+# regex intentionally ignores the printed percentage -- _parse_vela_placement
+# recomputes it from the two integer counts so it never inherits vela's own
+# text-formatting rounding.
+_PLACEMENT_RE = re.compile(r"^(CPU|NPU) operators = (\d+)", re.MULTILINE)
 
 
 def _vela_version() -> str:
@@ -51,6 +71,19 @@ def _parse_vela_summary(out_dir: Path, stem: str) -> tuple[int, int]:
     return int(arena), int(sram_bytes // 1024)
 
 
+def _parse_vela_placement(stdout: str) -> tuple[int, int] | None:
+    """(cpu_op_count, npu_op_count) from vela's own "CPU/NPU operators = N
+    (P%)" summary lines -- vela's REAL per-run placement verdict, not
+    inferred from its exit code (0 either way). None when either line is
+    absent (an unexpected vela output shape, e.g. a future version that
+    changes this text): a caller must not fabricate a placement it can't
+    actually read."""
+    counts = {k: int(v) for k, v in _PLACEMENT_RE.findall(stdout)}
+    if "CPU" not in counts or "NPU" not in counts:
+        return None
+    return counts["CPU"], counts["NPU"]
+
+
 class VelaAdapter(CompilerAdapter):
     backend = "ethos_u"
 
@@ -74,6 +107,8 @@ class VelaAdapter(CompilerAdapter):
         if not produced.is_file():
             raise RuntimeError(f"vela produced no output at {produced}")
         arena, sram_kib = _parse_vela_summary(out_dir, source.stem)
+        placement = _parse_vela_placement(proc.stdout)
+        cpu_ops, npu_ops = placement if placement is not None else (None, None)
         return Blob(format="vela_tflite", payload=produced.read_bytes(),
                     arena_bytes=arena, compiler_version=_vela_version(),
-                    req_sram_kib=sram_kib)
+                    req_sram_kib=sram_kib, cpu_op_count=cpu_ops, npu_op_count=npu_ops)

@@ -314,6 +314,98 @@ def test_text_mode_carries_the_silent_cpu_fallback_sentence_and_the_upgrade_hint
 
 
 # --------------------------------------------------------------------------
+# MAJOR 3 review: the renderer must not manufacture a "0/N ops are
+# NPU-eligible" negative on either `undetermined` protected path -- the JSON
+# was already correct (`status: "unknown"`, `reason: "format-not-accepted"` /
+# "no-table-for-backend"), but `_coverage_line` used to count those
+# placeholder "unknown" verdicts against `len(ops)` and print exactly the
+# `cpu-only` misreading non-negotiables 1 and 2 forbid. Checked through the
+# RENDERED TEXT, not just the JSON `npuCoverage` field.
+# --------------------------------------------------------------------------
+
+
+def test_text_never_manufactures_a_negative_for_a_format_not_accepted_backend(tmp_path, monkeypatch):
+    # DRP-AI screened against a .tflite source: analyze.py's own format gate
+    # fires before any table load, so every extracted op gets a placeholder
+    # "unknown" verdict -- `ops` is non-empty, but nothing was ever scored.
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "source.tflite", "x")
+    board_yaml(tmp_path, models="models:\n  - name: m\n    source: source.tflite\n")
+    report = _fake_report(
+        backend="drpai", variant=None, table=None, npu_coverage="undetermined",
+        compute_on_npu_pct_max=None, uncosted_cpu_op_count=0,
+        ops=[OpVerdict(op="Conv", status="unknown", reason="format-not-accepted")],
+        notes=["drpai does not ingest 'tflite' source models; no score "
+               "computed. This is not a verdict on the model, only on "
+               "the format/backend pairing."])
+    monkeypatch.setattr(model_cmd, "resolve_check_backends", lambda sku, **kw: ["drpai"])
+    monkeypatch.setattr(model_cmd, "check_model_backends", lambda **kw: [report])
+    result = runner.invoke(
+        app, ["check", "--project", str(tmp_path), "--sdk-root", str(sdk)], catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    text = result.stderr
+    assert "undetermined" in text
+    # the exact MAJOR 3 misreading: "0/1 ops are NPU-eligible by name"
+    assert "NPU-eligible" not in text
+    assert "0/1" not in text
+
+
+def test_text_never_manufactures_a_negative_when_no_table_covers_the_variant(tmp_path, monkeypatch):
+    # Ethos-U with its ops table directory missing/removed: format accepted,
+    # but no table resolves -- again a placeholder "unknown" verdict per op.
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "source.tflite", "x")
+    board_yaml(tmp_path, models="models:\n  - name: m\n    source: source.tflite\n")
+    report = _fake_report(
+        table=None, npu_coverage="undetermined", compute_on_npu_pct_max=None,
+        uncosted_cpu_op_count=0,
+        ops=[OpVerdict(op="CONV_2D", status="unknown", reason="no-table-for-backend")],
+        notes=["no NPU-ops support table for this backend/variant -- absence "
+               "of data, not evidence of no support."])
+    monkeypatch.setattr(model_cmd, "resolve_check_backends", lambda sku, **kw: ["ethos_u"])
+    monkeypatch.setattr(model_cmd, "check_model_backends", lambda **kw: [report])
+    result = runner.invoke(
+        app, ["check", "--project", str(tmp_path), "--sdk-root", str(sdk)], catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    text = result.stderr
+    assert "undetermined" in text
+    assert "NPU-eligible" not in text
+    assert "0/1" not in text
+
+
+def test_text_from_a_compiled_report_never_mixes_the_real_pct_with_a_static_op_count(tmp_path, monkeypatch):
+    # A real --exact vela compile that keeps the STATIC per-op verdicts
+    # alongside a REAL, disagreeing placement pct (tan.model.check._report_
+    # from_vela_compile) must not let _coverage_line recompute an "X/Y ops
+    # are NPU-eligible" figure from those stale static verdicts -- that would
+    # read alongside the real 0% placement as self-contradictory.
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "source.tflite", "x")
+    board_yaml(tmp_path, models="models:\n  - name: m\n    source: source.tflite\n")
+    report = _fake_report(
+        npu_coverage="cpu-only", compute_on_npu_pct_max=0.0, basis="compiled",
+        confidence="certain",
+        ops=[OpVerdict(op="FULLY_CONNECTED", status="npu-eligible",
+                       reason="constraint-unchecked", macs=8)],
+        notes=["vela 5.1.0 compiled for ethos-u85-256: 0/1 operators placed "
+               "on the NPU (0%); arena 384 bytes, SRAM 0 KiB."])
+    monkeypatch.setattr(model_cmd, "resolve_check_backends", lambda sku, **kw: ["ethos_u"])
+    monkeypatch.setattr(model_cmd, "check_model_backends", lambda **kw: [report])
+    result = runner.invoke(
+        app, ["check", "--project", str(tmp_path), "--sdk-root", str(sdk)], catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    text = result.stderr
+    assert "cpu-only" in text
+    assert "0/1 operators placed on the NPU (0%)" in text     # the real split, from the note
+    # never a second, contradicting "1/1 ops are NPU-eligible" figure built
+    # from the kept static verdict
+    assert "1/1" not in text
+
+
+# --------------------------------------------------------------------------
 # --exact: degrades cleanly (and says so) when vela is absent
 # --------------------------------------------------------------------------
 

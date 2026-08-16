@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tan.model.tensorio import extract_io, extract_ops
+from tan.model.tensorio import extract_io, extract_ops, tflite_reader_available
 from tan.model.manifest import Tensor
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -79,6 +79,13 @@ def test_extract_ops_missing_tflite_reader_returns_empty(tmp_path, monkeypatch):
     # malformed-bytes case above.
     monkeypatch.setitem(sys.modules, "tflite", None)
     assert extract_ops(_FIXTURE) == []
+
+
+def test_tflite_reader_available_follows_the_real_import(monkeypatch):
+    pytest.importorskip("tflite")
+    assert tflite_reader_available() is True
+    monkeypatch.setitem(sys.modules, "tflite", None)
+    assert tflite_reader_available() is False
 
 
 def test_extract_ops_parses_tiny_fixture_with_macs():

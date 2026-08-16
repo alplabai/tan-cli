@@ -55,16 +55,38 @@ def backend_report_as_dict(report: BackendReport) -> dict:
 
 
 def _coverage_line(report: dict) -> str | None:
-    ops = report["ops"]
-    eligible = sum(1 for o in ops if o["status"] == "npu-eligible")
-    total = len(ops)
+    """`None` on BOTH of `npu_coverage`'s "we don't actually know" spellings
+    -- `"undetermined"` itself, and the more subtle case where every `op`
+    entry carries `status: "unknown"` (`format-not-accepted`/`no-table-for-
+    backend`: `analyze.py` still emits one placeholder verdict per input op
+    so a consumer can see WHICH ops were skipped, but none of them was
+    actually screened). Counting `status == "unknown"` entries against
+    `len(ops)` reads as "0/N ops are NPU-eligible" -- the exact `cpu-only`
+    misreading non-negotiables 1 and 2 forbid, reintroduced by the renderer
+    (MAJOR 3 review) even though the JSON underneath was already correct.
+    Only ever counts verdicts a real screen actually determined
+    (`npu-eligible`/`cpu-certain`). Also `None` for a real (`basis:
+    "compiled"`) report: `tan.model.check._report_from_vela_compile` keeps
+    the STATIC per-op verdicts alongside a real vela placement result
+    (`ops=report.ops`, so the caller can still see which ops the table
+    thought were eligible), and those can legitimately disagree with what
+    vela actually placed (table membership doesn't check dtype/shape) --
+    recomputing an "E/T ops are NPU-eligible" figure from them here would
+    read alongside the REAL placement percentage as self-contradictory. The
+    real split is already `notes`' whole point for that report
+    (`"N/Total operators placed on the NPU (P%)"`)."""
+    if report["npuCoverage"] == "undetermined" or report["basis"] != "static-screen":
+        return None
+    determined = [o for o in report["ops"] if o["status"] in ("npu-eligible", "cpu-certain")]
+    if not determined:
+        return None
+    eligible = sum(1 for o in determined if o["status"] == "npu-eligible")
+    total = len(determined)
     pct = report["computeOnNpuPctMax"]
     if pct is not None:
         return (f"  {pct:.0f}% of compute ({eligible}/{total} ops) is NPU-eligible"
                 f"   [upper bound, static screen]")
-    if total:
-        return f"  {eligible}/{total} ops are NPU-eligible by name (no MAC-weighted figure)"
-    return None
+    return f"  {eligible}/{total} ops are NPU-eligible by name (no MAC-weighted figure)"
 
 
 def _cpu_fallback_line(report: dict) -> str | None:

@@ -28,6 +28,22 @@ _DTYPE_WANTED = {"FLOAT32": "f32", "FLOAT16": "f16", "INT32": "int32",
                   "UINT8": "uint8", "INT16": "int16", "INT8": "int8"}
 
 
+def tflite_reader_available() -> bool:
+    """True when the `tflite` reader (the `model-io` extra) is importable on
+    this host. `extract_io`/`extract_ops` deliberately swallow a missing
+    reader into an empty best-effort result -- the right contract for
+    `build_model`'s "compile what's available" stance -- but a caller that
+    needs to tell "the reader isn't installed" apart from "this model
+    genuinely has no operators" (both look like `[]` from `extract_ops`,
+    `tan.model.check`'s MAJOR 2 review) reads this directly instead of
+    re-deriving it from an empty list, which the second case returns too."""
+    try:
+        import tflite  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _dtype_names(tflite) -> dict[int, str]:
     tt = tflite.TensorType
     return {getattr(tt, k): v for k, v in _DTYPE_WANTED.items()}

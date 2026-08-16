@@ -15,6 +15,17 @@ class Blob:
     arena_bytes: int = 0
     compiler_version: str = ""
     req_sram_kib: int = 0
+    # Real per-operator NPU-vs-CPU placement, as the compiler itself reports
+    # it -- today only `VelaAdapter` populates these (parsed from vela's own
+    # "CPU/NPU operators = N (P%)" summary line, `ethos_u._parse_vela_
+    # placement`). None for every other adapter, and None when the compiler
+    # ran but didn't print a placement summary this could parse: a compiler
+    # exiting 0 is NOT proof every op landed on the NPU (vela exits 0 on a
+    # full CPU fallback by design), so a caller that wants "did this compile
+    # actually place anything on the accelerator" must read these, never
+    # infer it from the mere absence of an exception.
+    npu_op_count: int | None = None
+    cpu_op_count: int | None = None
 
 
 class CompilerAdapter(ABC):
