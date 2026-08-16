@@ -20,7 +20,7 @@ from tan.model.adapters import CompilerAdapter, Blob
 from tan.model.adapters.cpu import CpuAdapter
 from tan.model.adapters.ethos_u import VelaAdapter, VelaFootprintRefused
 from tan.model.adapters.executorch import ExecutorchAdapter
-from tan.model.package import read_package
+from tan.model.package import read_manifest_file, read_package
 from tan.planner_root import bind_sdk_root
 from tests.conftest import sdk_root
 
@@ -452,3 +452,85 @@ def test_an_unknown_accelerator_placement_is_not_treated_as_zero(tmp_path):
                       metadata_root=_META, adapters=[CpuAdapter(), _Silent()])
     mft, _ = read_package(out.read_bytes())
     assert [t.backend for t in mft.targets if t.backend == "drpai"] == ["drpai"]
+
+
+# --------------------------------------------------------------------------
+# The compiler's own caveats travel WITH the blob into the package.
+# --------------------------------------------------------------------------
+
+@_needs_vela
+def test_a_shipped_blobs_compiler_caveat_is_carried_into_the_package(tmp_path):
+    """THE (f) GUARD, through a REAL vela process, read back out of the file.
+
+    `tan model check --exact` already surfaced `Blob.caveats` into its report
+    and JSON envelope -- but `check` ships nothing. `build` is the path that
+    puts bytes on a board, and it dropped them: a package could ship a blob
+    compiled for a memory model the module does not have with NOTHING in the
+    package saying so, while the `arena`/`requires.sram_kib` pair sitting
+    beside that blob -- figures describing vela's DEFAULT memory model, not
+    the module's -- are exactly what alp-sdk's on-device selector consumes
+    (`return e->arena_sram_kib == 0u || t->req_sram_kib <= e->arena_sram_kib;`,
+    `src/backends/inference/alp_model_select.c`).
+
+    Measured, `ethos-u-vela` 5.1.0 over the committed `tiny_int8.tflite` for
+    `E1M-AEN801`: both surviving `ethos_u` targets (`ethos-u55-256`,
+    `ethos-u55-128`; the `ethos-u85-256` sibling is refused, see above) are
+    compiled with NO `--system-config` and NO `--memory-mode`, so vela falls
+    back to `Ethos_U55_High_End_Embedded` / `Shared_Sram` and prints its own
+    "Compilation may be invalid or non-optimal" warning for each. Those are
+    the names that must reach the manifest -- not a hardcoded profile, and not
+    the U85 DRAM profile the refused sibling resolved.
+
+    Read back with `read_manifest_file`, i.e. out of the WRITTEN ARTIFACT: a
+    caveat that never reached the file must not be assertable here.
+    Monkeypatching cannot prove any of this -- the claim is about what the
+    real compiler reported for a real, successful, NPU-placing compile."""
+    src = tmp_path / _TINY_INT8.name
+    shutil.copy(_TINY_INT8, src)
+    out = build_model(sku="E1M-AEN801", name="tiny", source=src, out_dir=tmp_path,
+                      metadata_root=_META)          # default registry: real vela + cpu
+    mft = read_manifest_file(out)
+
+    ethos_u = {t.accel_config: t for t in mft.targets if t.backend == "ethos_u"}
+    assert set(ethos_u) == {"ethos-u55-256", "ethos-u55-128"}
+    for accel_config, target in ethos_u.items():
+        assert len(target.caveats) == 1, f"{accel_config}: {target.caveats}"
+        caveat = target.caveats[0]
+        assert "BUILT-IN default profile" in caveat
+        # The profile THIS run resolved, named -- never a hardcoded one.
+        assert "system-config Ethos_U55_High_End_Embedded" in caveat
+        assert "memory-mode Shared_Sram" in caveat
+        assert "Compilation may be invalid or non-optimal" in caveat   # vela's own words
+        # Never the host path out of vela's third ("No configuration file
+        # specified") warning -- that one interpolates site-packages.
+        assert "site-packages" not in caveat
+        # The caveat sits beside the very figures it qualifies.
+        assert target.arena > 0 and target.requires["sram_kib"] > 0
+
+    # A passthrough CPU blob has no compiler with anything to say about it,
+    # and none is invented.
+    cpu = [t for t in mft.targets if t.backend == "cpu"]
+    assert len(cpu) == 1 and cpu[0].caveats == []
+
+
+@_needs_vela
+def test_a_package_with_nothing_to_caveat_carries_no_caveat_key_at_all(tmp_path):
+    """The negative control for the wire-level compatibility property: the
+    `cpu` passthrough target ships no `caveats` key, so a package built out of
+    uncaveated blobs is byte-for-byte what this writer produced before the
+    field existed. Asserted on the RAW CBOR, not the dataclass, because the
+    dataclass defaults an absent key to `[]` and would hide the difference."""
+    import struct
+
+    import cbor2
+
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-DUMMY")
+    out = build_model(sku="E1M-AEN801", name="demo", source=src, out_dir=tmp_path,
+                      metadata_root=_META, adapters=[CpuAdapter()])
+    raw = out.read_bytes()
+    _, _, _, mft_off, mft_len, _, _ = struct.Struct("<4sHHIIII").unpack_from(raw, 0)
+    wire = cbor2.loads(raw[mft_off:mft_off + mft_len])
+    assert wire["targets"], "expected the cpu target"
+    for target in wire["targets"]:
+        assert "caveats" not in target, target

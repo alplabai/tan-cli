@@ -111,6 +111,7 @@ from tan.model.adapters.drpai import _tvm_home as _drpai_tvm_home
 from tan.model.adapters.ethos_u import _vela_version
 from tan.model.build import _ADAPTERS, build_model
 from tan.model.check import check_model_backends, resolve_check_backends
+from tan.model.package import read_manifest_file
 from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for `build`'s payload.
@@ -298,6 +299,43 @@ def _resolve_metadata_dir(metadata_root: str | None, resolved_sdk: Path, workspa
     return metadata_dir
 
 
+def _shipped_caveat_issues(name: str, out_path: Path) -> list[Issue]:
+    """One `model.target-caveat` WARNING per caveated target in the package
+    just written -- read back OUT OF THE FILE, not out of the in-memory build.
+
+    `tan model check --exact` already surfaced the compiler's own caveats, but
+    `check` ships nothing; `build` is the path that puts bytes on a board, and
+    it dropped them. A vela blob compiled against vela's BUILT-IN default
+    profile carries an `arena`/`sram_kib` pair describing THAT memory model,
+    and those are the very figures alp-sdk's on-device selector gates on
+    (`src/backends/inference/alp_model_select.c`), so the operator who runs
+    `tan model build` has to be told -- once per target, verbatim, at the
+    moment the package is produced.
+
+    Reported from `package.read_manifest_file` so the line describes the
+    ARTIFACT: a caveat that never reached the file cannot be narrated here.
+    A readback that fails is itself a warning (`model.caveat-readback-
+    failed`), never an error -- the package IS written, and downgrading a
+    successful build to a failure over a diagnostic read would be the wrong
+    trade. It is not swallowed either: silence would be indistinguishable
+    from "no caveats"."""
+    try:
+        mft = read_manifest_file(out_path)
+    except Exception as err:  # noqa: BLE001 -- a diagnostic readback, not the build
+        return [Issue("model.caveat-readback-failed", "warning",
+                      f"model '{name}': wrote {out_path} but could not read its manifest "
+                      f"back to report compiler caveats: {type(err).__name__}: {err}")]
+    out: list[Issue] = []
+    for target in mft.targets:
+        label = f"{target.backend} {target.accel_config}".strip()
+        for caveat in target.caveats:
+            out.append(Issue(
+                "model.target-caveat", "warning",
+                f"model '{name}': the {label} target in {out_path.name} ships with a "
+                f"compiler caveat -- {caveat}"))
+    return out
+
+
 def _run_build(
     *,
     context: ProjectContext,
@@ -380,8 +418,15 @@ def _run_build(
             )
         else:
             built.append(str(out_path))
+            issues.extend(_shipped_caveat_issues(name, out_path))
     data["built"] = built
-    exit_code = ExitCode.SUCCESS if not issues else ExitCode.WRITE_FAILURE
+    # ERRORS decide the exit code, not `issues` being non-empty. `_shipped_
+    # caveat_issues` puts WARNINGS in this list, and a warning about a package
+    # that was written must not report it as a write failure -- the same
+    # separation `finish()`'s renderer already makes between `warnings` and
+    # `errors`, and the same one the caller's `sdk_issues` rely on.
+    exit_code = (ExitCode.SUCCESS if not any(i.severity == "error" for i in issues)
+                 else ExitCode.WRITE_FAILURE)
     return reported_project, sdk_info, data, issues, exit_code
 
 

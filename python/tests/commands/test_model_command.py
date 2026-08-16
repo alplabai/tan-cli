@@ -25,11 +25,22 @@ from typer.testing import CliRunner
 
 from tan.commands import model_cmd
 from tan.commands.model_cmd import model
+from tan.model._gen_fixture import build_fixture_bytes
 
 app = typer.Typer(add_completion=False)
 app.command("model")(model)
 
 runner = CliRunner()
+
+#: What every `_fake_build_model` below writes. A REAL, well-formed
+#: `.alpmodel` container (the committed `minimal` fixture) rather than the
+#: `b"x"` / `b"stub-package"` placeholders these fakes used to drop on disk:
+#: `_run_build` now reads each written package's manifest back to report the
+#: compiler caveats it ships with (`model_cmd._shipped_caveat_issues`), so a
+#: fake standing in for `build_model` has to produce something `build_model`
+#: could actually have produced. It carries NO caveats, which is what keeps
+#: these tests' `issues` lists about the thing each one is testing.
+_REAL_PACKAGE_BYTES = build_fixture_bytes()
 
 
 def envelope(result):
@@ -188,7 +199,7 @@ def test_build_calls_the_in_process_engine_not_a_subprocess(tmp_path, monkeypatc
         calls.append(kw)
         out = tmp_path / "build" / "models" / "mymodel.alpmodel"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"x")
+        out.write_bytes(_REAL_PACKAGE_BYTES)
         return out
 
     monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
@@ -262,7 +273,7 @@ def test_a_built_model_reports_its_output_path(tmp_path, monkeypatch):
     def _fake_build_model(*, out_dir, name, **kw):
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / f"{name}.alpmodel"
-        out.write_bytes(b"stub-package")
+        out.write_bytes(_REAL_PACKAGE_BYTES)
         return out
 
     monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
@@ -304,7 +315,7 @@ def test_a_failed_model_is_an_issue_not_a_traceback_and_the_batch_continues(
             raise ValueError(f"no blob compiled for model '{name}'")
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / f"{name}.alpmodel"
-        out.write_bytes(b"stub-package")
+        out.write_bytes(_REAL_PACKAGE_BYTES)
         return out
 
     monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
@@ -422,7 +433,7 @@ def test_compile_opts_paths_are_resolved_absolute_relative_to_board_dir(
         calls.append(kw)
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / f"{name}.alpmodel"
-        out.write_bytes(b"x")
+        out.write_bytes(_REAL_PACKAGE_BYTES)
         return out
 
     monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
@@ -744,3 +755,126 @@ def test_the_no_flag_refusal_still_offers_the_flag(tmp_path):
         "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
         "alp-sdk checkout, or "
     )
+
+
+# --------------------------------------------------------------------------
+# tan-cli#789 (f) -- a shipped blob's compiler caveat reaches the operator who
+# ran `tan model build`, not just `tan model check --exact`.
+# --------------------------------------------------------------------------
+
+_CAVEAT = ('vela used its BUILT-IN default profile (system-config '
+           'Ethos_U55_High_End_Embedded, memory-mode Shared_Sram), not one authored '
+           'for this module -- vela\'s own warning for that is "Compilation may be '
+           'invalid or non-optimal". The arena/SRAM figures and the compiled command '
+           "stream describe that default memory model, not this module's.")
+
+
+def _caveated_package_bytes() -> bytes:
+    """A real container whose ethos_u target ships with the verbatim vela
+    default-profile caveat. (The COMPILE that produces this caveat is pinned
+    against real vela 5.1.0 by `tests/model/test_build.py`; this file is about
+    what the command does with one that already exists.)"""
+    from tan.model.manifest import Manifest, Target
+    from tan.model.package import write_package
+
+    return write_package(
+        Manifest(
+            name="mymodel", src_sha=bytes(32),
+            targets=[
+                Target("ethos_u", "alif:ensemble:e8", "vela_tflite", "ethos-u55-128",
+                       32, {"sram_kib": 1, "op_features": []}, 0,
+                       compiler_version="vela 5.1.0", caveats=[_CAVEAT]),
+                Target("cpu", "*", "tflite", "", 0,
+                       {"sram_kib": 0, "op_features": []}, 1,
+                       compiler_version="passthrough"),
+            ],
+        ),
+        [b"VELA-BLOB", b"TFLITE-BLOB"],
+    )
+
+
+def _build_one_model(tmp_path, monkeypatch, package_bytes, *, args=("--format", "json")):
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "source.tflite", "x")
+    board_yaml(tmp_path, "models:\n  - name: mymodel\n    source: source.tflite\n")
+
+    def _fake_build_model(*, out_dir, name, **kw):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{name}.alpmodel"
+        out.write_bytes(package_bytes)
+        return out
+
+    monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
+    return runner.invoke(
+        app,
+        ["build", "--project", str(tmp_path), "--sdk-root", str(sdk), *args],
+    )
+
+
+def test_a_shipped_caveat_is_reported_as_a_warning_not_swallowed(tmp_path, monkeypatch):
+    """`build` writes the bytes that reach a board. A blob compiled against
+    vela's BUILT-IN default memory model carries an `arena`/`sram_kib` pair
+    describing THAT model, and those are the figures alp-sdk's on-device
+    selector gates on (`src/backends/inference/alp_model_select.c`) -- so the
+    operator has to be told, verbatim, at the moment the package is produced.
+
+    Fails against the previous behaviour: `issues` was `[]`."""
+    result = _build_one_model(tmp_path, monkeypatch, _caveated_package_bytes())
+    assert result.exit_code == 0, result.stdout
+    doc = envelope(result)
+    assert doc["ok"] is True
+    assert [i["code"] for i in doc["issues"]] == ["model.target-caveat"]
+    issue = doc["issues"][0]
+    assert issue["severity"] == "warning"
+    assert issue["message"].startswith(
+        "model 'mymodel': the ethos_u ethos-u55-128 target in mymodel.alpmodel "
+        "ships with a compiler caveat -- "
+    )
+    assert issue["message"].endswith(_CAVEAT)      # verbatim, not summarised
+    # ...and the package is still reported as built. A caveat is a caveat.
+    assert len(doc["data"]["built"]) == 1
+
+
+def test_a_shipped_caveat_does_not_turn_a_successful_build_into_a_failure(
+    tmp_path, monkeypatch
+):
+    """`_run_build`'s exit code keys on ERROR issues, not on `issues` being
+    non-empty. Without that, adding a warning here would have reported every
+    caveated build as `WriteFailure` (exit 3) with the package sitting on disk
+    perfectly intact."""
+    result = _build_one_model(tmp_path, monkeypatch, _caveated_package_bytes())
+    assert result.exit_code == 0, result.stdout
+    assert envelope(result)["data"]["built"], "the package WAS written"
+
+
+def test_a_shipped_caveat_reaches_text_mode_too(tmp_path, monkeypatch):
+    """The default (non-JSON) mode. Warnings LEAD, so the caveat is readable
+    above the `built ...` line rather than buried under it."""
+    result = _build_one_model(tmp_path, monkeypatch, _caveated_package_bytes(), args=())
+    assert result.exit_code == 0, result.stderr
+    lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    assert lines[0].startswith("warning: model 'mymodel': the ethos_u ethos-u55-128 target")
+    assert "Compilation may be invalid or non-optimal" in lines[0]
+    assert any(ln.startswith("built ") for ln in lines[1:])
+
+
+def test_a_package_with_no_caveats_reports_none(tmp_path, monkeypatch):
+    """The negative control: an uncaveated package must leave `issues` empty,
+    or a caveat line would mean nothing."""
+    result = _build_one_model(tmp_path, monkeypatch, _REAL_PACKAGE_BYTES)
+    assert result.exit_code == 0, result.stdout
+    assert envelope(result)["issues"] == []
+
+
+def test_an_unreadable_package_is_a_warning_not_a_silent_pass(tmp_path, monkeypatch):
+    """`build_model` returned a path this reader cannot decode. The package is
+    written, so this is not a build failure -- but staying silent would be
+    indistinguishable from "this package has no caveats", which is the exact
+    confusion the field exists to end."""
+    result = _build_one_model(tmp_path, monkeypatch, b"not-an-alpmodel-container")
+    assert result.exit_code == 0, result.stdout
+    doc = envelope(result)
+    assert [i["code"] for i in doc["issues"]] == ["model.caveat-readback-failed"]
+    assert doc["issues"][0]["severity"] == "warning"
+    assert "could not read its manifest back" in doc["issues"][0]["message"]
+    assert len(doc["data"]["built"]) == 1

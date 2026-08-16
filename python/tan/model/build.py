@@ -180,7 +180,17 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
             blob_format=blob.format, accel_config=spec.accel_config,
             arena=blob.arena_bytes,
             requires={"sram_kib": blob.req_sram_kib, "op_features": []},
-            blob=len(blobs), compiler_version=blob.compiler_version))
+            blob=len(blobs), compiler_version=blob.compiler_version,
+            # The compiler's unresolved caveats travel WITH the blob into the
+            # package. Dropping them here was the gap: `tan model check
+            # --exact` reported them and shipped nothing, `tan model build`
+            # shipped bytes and reported nothing, so a blob compiled against
+            # vela's BUILT-IN default memory model could reach a board with
+            # the package silent about it -- while `arena`/`sram_kib` right
+            # beside it, figures that describe THAT default memory model, are
+            # what alp-sdk's on-device selector consumes
+            # (src/backends/inference/alp_model_select.c).
+            caveats=list(blob.caveats)))
         blobs.append(blob.payload)
 
     if not blobs:

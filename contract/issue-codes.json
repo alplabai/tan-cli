@@ -1876,6 +1876,22 @@
       "note": "tan-cli#782: `model check`'s per-model failure -- an unreadable/unparseable declared model source, most commonly -- caught around `check_model_backends()` and reported as a coded issue rather than a traceback, mirroring `model.build-failed`'s exact shape so one bad model in a multi-model board.yaml does not abort the batch. A plain `Issue(\"model.check-failed\", ...)` construction in `_check_one_model`, not a `ModelError` (the run continues to the next model). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.target-caveat",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#789 review (f): one per caveated target in a package `model build` just wrote -- the COMPILER's own unresolved caveat about the blob being shipped, carried verbatim from `tan.model.adapters.Blob.caveats` through the `.alpmodel` manifest's per-target `caveats` list and read back out of the written file by `_shipped_caveat_issues` (`package.read_manifest_file`). Today that is vela's \"Compilation may be invalid or non-optimal\" verdict when it fell back to its BUILT-IN default profile, whose memory model may not be the module's -- which matters because the `arena`/`requires.sram_kib` figures beside it in the same manifest entry are what alp-sdk's on-device selector gates fit on (`src/backends/inference/alp_model_select.c`). A WARNING, never an error: the package is written and valid, and `_run_build`'s exit code keys on error-severity issues only. A plain `Issue(\"model.target-caveat\", ...)` construction in `_shipped_caveat_issues`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.caveat-readback-failed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#789 review (f): `model build` wrote a package but could not decode its manifest to report the compiler caveats it ships with (`package.read_manifest_file` raised). Reported rather than swallowed because silence here is indistinguishable from `model.target-caveat`'s absence, i.e. from \"this package has no caveats\" -- the exact ambiguity the caveat field exists to end. A WARNING, not an error: the artifact IS on disk, and downgrading a successful build to a failure over a diagnostic read would be the wrong trade. A plain `Issue(\"model.caveat-readback-failed\", ...)` construction in `_shipped_caveat_issues`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",
