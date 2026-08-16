@@ -1066,11 +1066,14 @@ def test_west_check_probes_the_resolved_path_not_a_bare_name_reprobe(tmp_path, m
     resolved = "/opt/onpath/west"
     monkeypatch.setattr(doctor_cmd, "on_path", lambda name: resolved if name == "west" else None)
 
-    def _fake_probe(argv, timeout=doctor_cmd.PROBE_TIMEOUT_S):
+    def _fake_probe(argv, timeout=doctor_cmd.PROBE_TIMEOUT_S, executable=None):
         if argv == [resolved, "--version"]:
             return "West version: v1.5.0\n"
         if argv == ["west", "--version"]:
             return "West version: v9.99.0\n"  # the rogue binary's answer
+        # tan-cli#797: `_probe_host_python` also runs inside `_collect`, now
+        # via this same monkeypatched `probe` -- answer it too so this test
+        # keeps pinning ONLY the `west` call site's own resolution.
         return None
 
     monkeypatch.setattr(doctor_cmd, "probe", _fake_probe)
@@ -3375,8 +3378,9 @@ def test_sdk_provenance_check_does_not_attribute_an_enclosing_repos_commit(tmp_p
     assert check.detail == "alp-sdk 0.42.0", check.detail
     # `_is_own_git_checkout` unit-level, directly: proves the guard itself,
     # not just its downstream effect on the assembled detail string.
-    assert doctor_cmd._is_own_git_checkout(str(vendored_sdk)) is False
-    assert doctor_cmd._is_own_git_checkout(str(tmp_path)) is True
+    git_exe = doctor_cmd._resolve_git_executable()
+    assert doctor_cmd._is_own_git_checkout(str(vendored_sdk), git_exe) is False
+    assert doctor_cmd._is_own_git_checkout(str(tmp_path), git_exe) is True
 
 
 def test_sdk_provenance_check_reads_the_sdk_version_file_when_present(tmp_path):

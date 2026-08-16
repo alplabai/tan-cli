@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from tan.commands import flash_cmd, size_cmd
+from tan.commands import doctor_cmd, flash_cmd, size_cmd
 from tan.commands.build import execute as execute_module
 from tan.core.bootstrap import venv_layout
 from tan.core.flash_plan import FlashInputs, FlashPlan
@@ -90,7 +90,10 @@ def hostile(tmp_path, monkeypatch):
     realbin = tmp_path / "realbin"
     project = tmp_path / "hostile-project"
     project.mkdir()
-    for name in ("dd", "gunzip", "size", "taskkill", "JLinkExe"):
+    # "git"/"py"/"python"/"python3" added for tan-cli#797: `doctor_cmd`'s SDK-
+    # provenance + host-Python probes join the scenario the rest of this file
+    # already set up for `dd`/`gunzip`/`size`/`taskkill`/`JLinkExe`.
+    for name in ("dd", "gunzip", "size", "taskkill", "JLinkExe", "git", "py", "python", "python3"):
         _executable(realbin, name)
         _executable(project, name)
     monkeypatch.setenv("PATH", str(realbin))
@@ -633,3 +636,124 @@ def test_taskkill_program_never_resolves_the_current_directory(hostile):
     assert resolved is not None
     assert Path(resolved).parent == realbin
     assert not str(resolved).startswith(str(project))
+
+
+# ── tan doctor: SDK-provenance git + host-Python probes (tan-cli#797) ───────
+
+
+def test_doctor_resolve_git_executable_answers_the_path_copy(hostile):
+    """`_resolve_git_executable` is the ONE lookup all four doctor git call
+    sites below now share -- it must answer the PATH copy, never the
+    project's own decoy `git`."""
+    _project, realbin = hostile
+    resolved = doctor_cmd._resolve_git_executable()
+    assert resolved is not None
+    assert Path(resolved).parent == realbin
+
+
+def test_doctor_is_own_git_checkout_spawns_the_resolved_git(hostile, spy):
+    """Fails before the fix, where `argv[0]` is the bare `'git'` and no
+    `executable=` is pinned -- `CreateProcess` would then load the project's
+    own decoy to answer "is this SDK checkout its own git repo"."""
+    project, realbin = hostile
+    git_exe = doctor_cmd._resolve_git_executable()
+
+    doctor_cmd._is_own_git_checkout(str(project), git_exe)
+
+    assert spy.argvs, "_is_own_git_checkout never spawned git"
+    argv0, executable = spy.argvs[-1][0], spy.executables[-1]
+    assert executable is not None, "the spawn pinned no executable"
+    assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+    assert argv0 == "git", f"the child's own argv[0] became {argv0!r}"
+
+
+def test_doctor_git_short_commit_and_behind_upstream_spawn_the_resolved_git(hostile, spy):
+    """The two callers layered on top of `_is_own_git_checkout` -- each is its
+    own `probe()` call and must resolve independently rather than falling
+    back to a bare spawn once the guard above has passed."""
+    project, realbin = hostile
+    git_exe = doctor_cmd._resolve_git_executable()
+
+    doctor_cmd._git_short_commit(str(project), git_exe)
+    doctor_cmd._git_behind_upstream(str(project), git_exe)
+
+    assert len(spy.argvs) >= 2, spy.argvs
+    for argv, executable in zip(spy.argvs, spy.executables):
+        assert argv[0] == "git", argv
+        assert executable is not None, "a git spawn pinned no executable"
+        assert Path(executable).parent == realbin
+
+
+def test_doctor_git_core_longpaths_spawns_the_resolved_git(hostile, spy):
+    """`_git_core_longpaths` is the one site that was spawned raw via
+    `subprocess.run`, with no `probe()` and no `executable=` at all -- fails
+    before the fix on the same `executable is None` assertion as the rest."""
+    project, realbin = hostile
+    git_exe = doctor_cmd._resolve_git_executable()
+
+    doctor_cmd._git_core_longpaths(git_exe)
+
+    assert spy.argvs, "_git_core_longpaths never spawned git"
+    argv0, executable = spy.argvs[-1][0], spy.executables[-1]
+    assert executable is not None, "the spawn pinned no executable"
+    assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+    assert argv0 == "git", f"the child's own argv[0] became {argv0!r}"
+
+
+def test_doctor_git_functions_degrade_gracefully_when_git_is_absent(tmp_path, monkeypatch, spy):
+    """The not-found case: `git` on nobody's PATH must never crash `tan
+    doctor`, and must never fall back to spawning the bare identity -- the
+    exact hazard the resolution exists to close. A doctor that raises because
+    git is missing is worse than the bug this fixes."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    git_exe = doctor_cmd._resolve_git_executable()
+    assert git_exe is None
+
+    assert doctor_cmd._is_own_git_checkout(str(tmp_path), git_exe) is False
+    assert doctor_cmd._git_short_commit(str(tmp_path), git_exe) is None
+    assert doctor_cmd._git_behind_upstream(str(tmp_path), git_exe) is None
+    assert doctor_cmd._git_core_longpaths(git_exe) is None
+    assert spy.argvs == [], f"a bare git was spawned despite resolving to nothing: {spy.argvs}"
+
+    # And the whole envelope-facing check degrades to a plain "pass" with no
+    # commit/skew attributed, rather than raising out of `_collect`.
+    check = doctor_cmd.sdk_provenance_check(str(tmp_path))
+    assert check.status == "pass"
+    assert "@" not in check.detail, check.detail
+
+
+def test_doctor_probe_host_python_spawns_the_resolved_interpreter(hostile, spy):
+    """`_python_candidates()` used to hand `probe()` the bare `'py'`/`'python'`/
+    `'python3'` identity; fails before the fix on the same `executable is
+    None` assertion the rest of this file uses. Every candidate the fixture
+    made resolvable gets spawned (empty stdout never parses as a version, so
+    `_probe_host_python` tries them all) -- checked, not just the last."""
+    project, realbin = hostile
+
+    doctor_cmd._probe_host_python((0, 0))
+
+    assert spy.argvs, "_probe_host_python never spawned an interpreter"
+    for argv, executable in zip(spy.argvs, spy.executables):
+        assert argv[0] in ("py", "python", "python3"), (
+            f"the child's own argv[0] became {argv[0]!r}"
+        )
+        assert executable is not None, "an interpreter spawn pinned no executable"
+        assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+
+
+def test_doctor_probe_host_python_skips_a_candidate_that_does_not_resolve(tmp_path, monkeypatch, spy):
+    """No candidate on PATH at all: every one is skipped outright rather than
+    handed to `subprocess` unresolved, and the function answers `None` instead
+    of raising."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    assert doctor_cmd._probe_host_python((0, 0)) is None
+    assert spy.argvs == [], f"an unresolved interpreter candidate was spawned: {spy.argvs}"

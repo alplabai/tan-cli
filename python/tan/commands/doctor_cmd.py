@@ -377,8 +377,18 @@ class Check:
 # ---------------------------------------------------------------------------
 
 
-def probe_status(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> tuple[bool, str | None]:
+def probe_status(
+    argv: list[str], timeout: int = PROBE_TIMEOUT_S, executable: str | None = None
+) -> tuple[bool, str | None]:
     """Run `argv` and return `(ran, stdout)`.
+
+    `executable`, when given, is `lpApplicationName`/POSIX `execve`'s own
+    program path -- the PATH-RESOLVED absolute location `tool_lookup.resolve_tool`
+    found, threaded through by a caller that needs `argv[0]` to stay the bare
+    identity (so a tool's own diagnostics keep printing the short name) while
+    the OS loads the hardened path instead of re-searching for the bare one
+    itself (tan-cli#797, the same `executable=` shape tan-cli#567 established
+    for the flash/size spawns).
 
     `ran` is `True` exactly when the process was actually spawned AND exited
     zero -- the one predicate that answers "could a build slice run this
@@ -402,6 +412,7 @@ def probe_status(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> tuple[bool,
     try:
         out = subprocess.run(
             argv,
+            executable=executable,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -418,7 +429,9 @@ def probe_status(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> tuple[bool,
     return (out.returncode == 0), (out.stdout if out.returncode == 0 else None)
 
 
-def probe(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> str | None:
+def probe(
+    argv: list[str], timeout: int = PROBE_TIMEOUT_S, executable: str | None = None
+) -> str | None:
     """Run `argv` and return its stdout, or `None` for every way that can fail.
 
     `None` means "no answer", never "the answer is bad" -- callers must not read
@@ -437,7 +450,7 @@ def probe(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> str | None:
     wanted "the answer, or nothing" and has no use for the ran/did-not-run
     split.
     """
-    return probe_status(argv, timeout)[1]
+    return probe_status(argv, timeout, executable=executable)[1]
 
 
 def on_path(command: str) -> str | None:
@@ -2216,7 +2229,12 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     and performs no network fetch, so it only reflects the checkout's state
     as of the last `git fetch` -- never blocks a build over it.
     """
-    commit = _git_short_commit(sdk_root)
+    # tan-cli#797: resolved ONCE and threaded through both git calls below --
+    # each spawns `git` itself, and re-resolving per call would not be wrong,
+    # only wasteful; the point that matters is that neither one hands
+    # `subprocess` the bare `"git"` (see `_resolve_git_executable`).
+    git_exe = _resolve_git_executable()
+    commit = _git_short_commit(sdk_root, git_exe)
     version = _read_sdk_version(sdk_root)
     if version and commit:
         detail = f"alp-sdk {version} @ {commit}"
@@ -2227,7 +2245,7 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     else:
         detail = f"alp-sdk at {sdk_root} (no git checkout / metadata/sdk_version.yaml)"
 
-    behind = _git_behind_upstream(sdk_root)
+    behind = _git_behind_upstream(sdk_root, git_exe)
     if behind is not None and behind > 0:
         return Check(
             "sdkProvenance",
@@ -2239,7 +2257,19 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     return Check("sdkProvenance", "pass", detail, scope="project")
 
 
-def _is_own_git_checkout(root: str) -> bool:
+def _resolve_git_executable() -> str | None:
+    """The absolute path to `git`, resolved through the shared
+    `tool_lookup.resolve_tool` walk -- never `shutil.which`, which on Windows
+    inserts the current directory ahead of `%PATH%` (see `tool_lookup`'s own
+    docstring). `None` when `git` is not on PATH at all, which every caller
+    below must treat as "no git provenance to report", not a crash
+    (tan-cli#797): a doctor that raises because git is absent is worse than
+    the bare-argv0 spawn it replaces.
+    """
+    return resolve_tool("git", os.environ).resolved
+
+
+def _is_own_git_checkout(root: str, git_exe: str | None) -> bool:
     """Whether `root` is itself the TOP of a git checkout, not merely nested
     somewhere inside an unrelated ENCLOSING one (tan-cli#488 defect 4).
 
@@ -2255,8 +2285,15 @@ def _is_own_git_checkout(root: str) -> bool:
     Compares the RESOLVED `--show-toplevel` against the RESOLVED `root`:
     lexical string comparison alone would false-negative on a symlinked or
     differently-cased path to the same directory.
+
+    `git_exe` -- the PATH-RESOLVED absolute `git`, from `_resolve_git_executable`
+    (tan-cli#797). `None` when `git` is not on PATH at all: refuses outright
+    rather than falling back to a bare `probe(["git", ...])`, which would
+    re-open the exact cwd-shadowing hazard this resolution exists to close.
     """
-    top = probe(["git", "-C", root, "rev-parse", "--show-toplevel"])
+    if git_exe is None:
+        return False
+    top = probe(["git", "-C", root, "rev-parse", "--show-toplevel"], executable=git_exe)
     if top is None:
         return False
     try:
@@ -2265,27 +2302,30 @@ def _is_own_git_checkout(root: str) -> bool:
         return False
 
 
-def _git_short_commit(root: str) -> str | None:
+def _git_short_commit(root: str, git_exe: str | None) -> str | None:
     """`git -C <root> rev-parse --short HEAD`, or `None` when `root` is not a
     git checkout of its own (e.g. an extracted SDK release archive -- including
     one vendored inside a customer's own git repository, see
-    `_is_own_git_checkout`)."""
-    if not _is_own_git_checkout(root):
+    `_is_own_git_checkout`) or `git_exe` is `None` (git not on PATH)."""
+    if not _is_own_git_checkout(root, git_exe):
         return None
-    out = probe(["git", "-C", root, "rev-parse", "--short", "HEAD"])
+    out = probe(["git", "-C", root, "rev-parse", "--short", "HEAD"], executable=git_exe)
     if out is None:
         return None
     commit = out.strip()
     return commit or None
 
 
-def _git_behind_upstream(root: str) -> int | None:
+def _git_behind_upstream(root: str, git_exe: str | None) -> int | None:
     """Commit count `HEAD` is behind its upstream tracking ref, without
-    fetching. `None` when there is no upstream, or `root` is not a git
-    checkout of its own (see `_is_own_git_checkout`)."""
-    if not _is_own_git_checkout(root):
+    fetching. `None` when there is no upstream, `root` is not a git checkout
+    of its own (see `_is_own_git_checkout`), or `git_exe` is `None` (git not
+    on PATH)."""
+    if not _is_own_git_checkout(root, git_exe):
         return None
-    out = probe(["git", "-C", root, "rev-list", "--count", "HEAD..@{upstream}"])
+    out = probe(
+        ["git", "-C", root, "rev-list", "--count", "HEAD..@{upstream}"], executable=git_exe
+    )
     if out is None:
         return None
     try:
@@ -2470,7 +2510,7 @@ def classify_git_core_longpaths(exit_code: int | None, stdout: str) -> bool | No
     return None
 
 
-def _git_core_longpaths() -> bool | None:
+def _git_core_longpaths(git_exe: str | None) -> bool | None:
     """Read git's own EFFECTIVE `core.longpaths` (system -> global -> local
     precedence, resolved by `git config --get` itself rather than tan
     re-implementing that precedence by hand) via a real `git` subprocess.
@@ -2486,10 +2526,19 @@ def _git_core_longpaths() -> bool | None:
     exited non-zero" (exit 1, meaning "unset") and "could not run at all"
     (meaning "unknown") to the same `None`, and `classify_git_core_longpaths`
     needs to tell those apart.
+
+    `git_exe` -- the PATH-RESOLVED absolute `git` from `_resolve_git_executable`
+    (tan-cli#797). `None` when git is not on PATH: answers "unknown" rather
+    than spawning the bare `"git"` this used to hand straight to
+    `subprocess.run`, which on Windows searches the CURRENT DIRECTORY (the
+    customer project's, since doctor never `chdir`s) ahead of `%PATH%`.
     """
+    if git_exe is None:
+        return None
     try:
         out = subprocess.run(
             ["git", "config", "--get", "core.longpaths"],
+            executable=git_exe,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -2653,10 +2702,24 @@ def _zephyr_sdk_detected() -> bool:
 def _probe_host_python(floor: tuple[int, int]) -> tuple[str, tuple[int, int]] | None:
     """First candidate that RUNS and clears `floor`; else the first that merely
     ran, so the too-old message can name a real version instead of "did not
-    run". Mirrors `crate::util::probe_host_python`."""
+    run". Mirrors `crate::util::probe_host_python`.
+
+    tan-cli#797: `candidate[0]` (`"py"`/`"python"`/`"python3"`) is resolved
+    through `tool_lookup.resolve_tool` and spawned as `executable=`, keeping
+    `candidate` itself -- and therefore `entry`'s display spelling -- bare. A
+    candidate that does not resolve is skipped outright, the same "no answer"
+    treatment `probe()` already gives every other way this can fail; it is
+    never handed to `subprocess` unresolved.
+    """
     first_that_ran: tuple[str, tuple[int, int]] | None = None
     for candidate in _python_candidates():
-        out = probe([*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"])
+        resolved = resolve_tool(candidate[0], os.environ).resolved
+        if resolved is None:
+            continue
+        out = probe(
+            [*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+            executable=resolved,
+        )
         if out is None:
             continue
         version = _parse_two(out)
@@ -3529,7 +3592,9 @@ def _collect(
     host_os, host_arch = _host_os_arch_tags()
     _add(zephyr_sdk_host_check(host_os, host_arch))
     if os.name == "nt":
-        _add(long_paths_check(_long_paths_enabled(), _git_core_longpaths()))
+        _add(
+            long_paths_check(_long_paths_enabled(), _git_core_longpaths(_resolve_git_executable()))
+        )
     _add(
         home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
     )
