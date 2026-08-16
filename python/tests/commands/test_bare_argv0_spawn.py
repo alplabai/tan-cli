@@ -90,10 +90,14 @@ def hostile(tmp_path, monkeypatch):
     realbin = tmp_path / "realbin"
     project = tmp_path / "hostile-project"
     project.mkdir()
-    # "git"/"py"/"python"/"python3" added for tan-cli#797: `doctor_cmd`'s SDK-
-    # provenance + host-Python probes join the scenario the rest of this file
-    # already set up for `dd`/`gunzip`/`size`/`taskkill`/`JLinkExe`.
-    for name in ("dd", "gunzip", "size", "taskkill", "JLinkExe", "git", "py", "python", "python3"):
+    # "git"/"py"/"python"/"python3"/"sysctl" added for tan-cli#797: `doctor_cmd`'s
+    # SDK-provenance + host-Python + macOS-Rosetta probes join the scenario the
+    # rest of this file already set up for `dd`/`gunzip`/`size`/`taskkill`/
+    # `JLinkExe`.
+    for name in (
+        "dd", "gunzip", "size", "taskkill", "JLinkExe",
+        "git", "py", "python", "python3", "sysctl",
+    ):
         _executable(realbin, name)
         _executable(project, name)
     monkeypatch.setenv("PATH", str(realbin))
@@ -687,8 +691,11 @@ def test_doctor_git_short_commit_and_behind_upstream_spawn_the_resolved_git(host
 
 def test_doctor_git_core_longpaths_spawns_the_resolved_git(hostile, spy):
     """`_git_core_longpaths` is the one site that was spawned raw via
-    `subprocess.run`, with no `probe()` and no `executable=` at all -- fails
-    before the fix on the same `executable is None` assertion as the rest."""
+    `subprocess.run`, with no `probe()` and no `executable=` at all. Pre-fix
+    this raised `AttributeError: module 'tan.commands.doctor_cmd' has no
+    attribute '_resolve_git_executable'` -- the whole helper is new -- never
+    reaching the `executable is None` assertion below; that assertion is
+    what pins the fix itself, not the pre-fix failure mode."""
     project, realbin = hostile
     git_exe = doctor_cmd._resolve_git_executable()
 
@@ -747,7 +754,9 @@ def test_doctor_probe_host_python_spawns_the_resolved_interpreter(hostile, spy):
     assert not spy.loaded(-1, str(project)).startswith(str(project))
 
 
-def test_doctor_probe_host_python_skips_a_candidate_that_does_not_resolve(tmp_path, monkeypatch, spy):
+def test_doctor_probe_host_python_skips_a_candidate_that_does_not_resolve(
+    tmp_path, monkeypatch, spy
+):
     """No candidate on PATH at all: every one is skipped outright rather than
     handed to `subprocess` unresolved, and the function answers `None` instead
     of raising."""
@@ -757,3 +766,106 @@ def test_doctor_probe_host_python_skips_a_candidate_that_does_not_resolve(tmp_pa
 
     assert doctor_cmd._probe_host_python((0, 0)) is None
     assert spy.argvs == [], f"an unresolved interpreter candidate was spawned: {spy.argvs}"
+
+
+def test_doctor_posix_venv_capable_spawns_the_resolved_interpreter(hostile, spy):
+    """tan-cli#797 major finding: `_posix_venv_capable`'s own `ensurepip`
+    probe used to hand `subprocess.run` the BARE argv `_probe_host_python`
+    had just resolved and then discarded (`python_found[0].split()` at the
+    `_collect` call site) -- a resolve-then-spawn-something-else divergence
+    on the one platform this guard runs on at all (`sys.platform.startswith
+    ("linux")`). Fails before the fix on the same `executable is None`
+    assertion the rest of this file uses.
+
+    `executable` is resolved directly here, the same way `_probe_host_python`
+    resolves `candidate[0]`, rather than round-tripping through
+    `_probe_host_python` itself: the `spy` stand-in's empty stdout never
+    parses as a version (see `test_doctor_probe_host_python_spawns_the_
+    resolved_interpreter`'s own docstring), so `_probe_host_python` always
+    answers `None` under this fixture -- this test pins `_posix_venv_capable`
+    in isolation instead."""
+    project, realbin = hostile
+    executable = doctor_cmd.resolve_tool("python3", os.environ).resolved
+    assert executable is not None, "fixture interpreter never resolved"
+
+    doctor_cmd._posix_venv_capable(["python3"], executable=executable)
+
+    assert spy.argvs, "_posix_venv_capable never spawned an interpreter"
+    argv0, spawned_executable = spy.argvs[-1][0], spy.executables[-1]
+    assert spawned_executable is not None, "the ensurepip probe pinned no executable"
+    assert Path(spawned_executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+    assert argv0 == "python3", f"the child's own argv[0] became {argv0!r}"
+
+
+def test_doctor_macos_rosetta_translated_spawns_the_resolved_sysctl(hostile, spy):
+    """`_macos_rosetta_translated`'s `sysctl` probe is resolved through
+    `tool_lookup.resolve_tool` the same as this module's git/Python probes
+    (tan-cli#797 minor finding) -- not a Windows-reachable hazard (POSIX
+    `execvp` never searches cwd the way `CreateProcess` does), but left bare
+    it was the one inconsistent spawn in an otherwise fully-resolved module."""
+    project, realbin = hostile
+
+    doctor_cmd._macos_rosetta_translated()
+
+    assert spy.argvs, "_macos_rosetta_translated never spawned sysctl"
+    argv0, executable = spy.argvs[-1][0], spy.executables[-1]
+    assert executable is not None, "the sysctl probe pinned no executable"
+    assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+    assert argv0 == "sysctl", f"the child's own argv[0] became {argv0!r}"
+
+
+def test_doctor_macos_rosetta_translated_degrades_when_sysctl_is_absent(
+    tmp_path, monkeypatch, spy
+):
+    """`sysctl` on nobody's PATH answers `False`, never a bare fallback
+    spawn or a crash."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    assert doctor_cmd._macos_rosetta_translated() is False
+    assert spy.argvs == [], f"a bare sysctl was spawned despite resolving to nothing: {spy.argvs}"
+
+
+# ── tan build: SDK-provenance git (tan-cli#797) ─────────────────────────────
+
+
+def test_build_token_substitution_git_short_head_spawns_the_resolved_git(hostile, spy):
+    """`token_substitution.git_short_head`/`_is_own_git_checkout` run on the
+    BUILD path with the process cwd set to the CUSTOMER project -- the
+    Windows-reachable strong form of the hazard this file otherwise pins only
+    for `tan doctor`/`tan flash`/`tan size`. Fails before the fix on the
+    same `executable is None` assertion as the rest of this module."""
+    from tan.commands.build import token_substitution
+
+    project, realbin = hostile
+
+    token_substitution.git_short_head(project)
+
+    assert spy.argvs, "git_short_head never spawned git"
+    for argv, executable in zip(spy.argvs, spy.executables):
+        assert argv[0] == "git", argv
+        assert executable is not None, "a git spawn pinned no executable"
+        assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+
+
+def test_build_token_substitution_git_functions_degrade_when_git_is_absent(
+    tmp_path, monkeypatch, spy
+):
+    """`git` on nobody's PATH must never crash a build or fall back to a bare
+    spawn -- the exact hazard the resolution exists to close."""
+    from tan.commands.build import token_substitution
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    git_exe = token_substitution._resolve_git_executable()
+    assert git_exe is None
+    assert token_substitution._is_own_git_checkout(tmp_path, git_exe) is False
+    assert token_substitution.git_short_head(tmp_path) == ""
+    assert spy.argvs == [], f"a bare git was spawned despite resolving to nothing: {spy.argvs}"
+

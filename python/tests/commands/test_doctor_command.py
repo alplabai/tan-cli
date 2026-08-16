@@ -137,6 +137,31 @@ def test_no_runnable_interpreter_is_its_own_frozen_code():
     assert check.code == "bootstrap.python-not-runnable"
 
 
+def test_probe_host_python_returns_the_resolved_path_alongside_the_display_spelling():
+    """tan-cli#797 major finding: `_probe_host_python` must carry the
+    PATH-RESOLVED interpreter path as a third element, not just the display
+    spelling + version `python_check` reads -- `_posix_venv_capable`'s
+    `ensurepip` probe needs that resolved path as `executable=` rather than
+    re-deriving (and bare-spawning) argv from the display spelling. Runs the
+    REAL host Python, no mocks: the one property under test is the shape of
+    the return value, not any particular version."""
+    found = doctor_cmd._probe_host_python((0, 0))
+    assert found is not None, "no host Python resolved at all -- cannot exercise this"
+    assert len(found) == 3, found
+    display, version, resolved = found
+    assert isinstance(display, str) and display
+    assert isinstance(version, tuple) and len(version) == 2
+    assert isinstance(resolved, str) and os.path.isabs(resolved), (
+        f"the resolved path is not absolute: {resolved!r}"
+    )
+    assert os.path.isfile(resolved), resolved
+    # python_check only ever reads the first two elements -- the call site
+    # slices `found[:2]` before handing it in, and that slice must still be
+    # exactly what python_check's own contract expects.
+    check = doctor_cmd.python_check(found[:2], floor=(0, 0), floor_source="test")
+    assert check.status == "pass", check.detail
+
+
 def test_zephyr_floor_is_read_from_the_real_cmake_when_the_workspace_resolves(tmp_path):
     modules = tmp_path / "cmake" / "modules"
     modules.mkdir(parents=True)
@@ -1071,9 +1096,11 @@ def test_west_check_probes_the_resolved_path_not_a_bare_name_reprobe(tmp_path, m
             return "West version: v1.5.0\n"
         if argv == ["west", "--version"]:
             return "West version: v9.99.0\n"  # the rogue binary's answer
-        # tan-cli#797: `_probe_host_python` also runs inside `_collect`, now
-        # via this same monkeypatched `probe` -- answer it too so this test
-        # keeps pinning ONLY the `west` call site's own resolution.
+        # tan-cli#797: `probe` now takes an `executable=` keyword (every
+        # caller inside `_collect`, including `_probe_host_python`, passes
+        # one) -- the fake's signature has to accept it or `_collect` raises
+        # a `TypeError` reaching this call site, unrelated to what this test
+        # actually pins (the `west` call site's own resolution).
         return None
 
     monkeypatch.setattr(doctor_cmd, "probe", _fake_probe)

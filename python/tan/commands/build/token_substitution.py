@@ -13,6 +13,7 @@ per-slice or on retry, the same "one resolution for the whole plan" contract
 WITH `toolchain_root` for that reason: it is the second half of one
 resolution (`toolchain.ToolchainResolution`), not an independent knob, and
 re-deriving it here would let the reason drift from the value it explains."""
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,7 @@ from tan.core.plan_tokens import (
     sdk_commit_mismatches,
     substitute_plan_tokens,
 )
+from tan.core.tool_lookup import resolve_tool
 
 
 class TokenSubstitutionError(Exception):
@@ -53,7 +55,20 @@ class SliceDemotion:
     reason: str
 
 
-def _is_own_git_checkout(sdk_root: Path) -> bool:
+def _resolve_git_executable() -> str | None:
+    """The absolute path to `git`, resolved through the shared
+    `tool_lookup.resolve_tool` walk -- never `shutil.which`, which on Windows
+    inserts the current directory ahead of `%PATH%`. `None` when `git` is not
+    on PATH at all, which both callers below treat as "no git provenance",
+    never a crash (tan-cli#797, mirroring `doctor_cmd._resolve_git_executable`
+    -- the same fix, duplicated here rather than imported for the same reason
+    `_is_own_git_checkout`'s own docstring gives: this is the second of the
+    two sites the issue names, not a shared library call).
+    """
+    return resolve_tool("git", os.environ).resolved
+
+
+def _is_own_git_checkout(sdk_root: Path, git_exe: str | None) -> bool:
     """Whether `sdk_root` is itself the TOP of a git checkout, not merely
     nested somewhere inside an unrelated ENCLOSING one (tan-cli#488 defect 4,
     mirroring `doctor_cmd._is_own_git_checkout` -- the SAME defect, the SAME
@@ -75,10 +90,18 @@ def _is_own_git_checkout(sdk_root: Path) -> bool:
     Compares the RESOLVED `--show-toplevel` against the RESOLVED `sdk_root`:
     lexical string comparison alone would false-negative on a symlinked or
     differently-cased path to the same directory.
+
+    `git_exe` -- the PATH-RESOLVED absolute `git` from `_resolve_git_executable`
+    (tan-cli#797): this runs on the BUILD path with cwd set to the CUSTOMER's
+    project, the Windows-reachable strong form of the cwd-shadowing hazard.
+    `None` refuses outright rather than falling back to a bare spawn.
     """
+    if git_exe is None:
+        return False
     try:
         out = subprocess.run(
             ["git", "-C", str(sdk_root), "rev-parse", "--show-toplevel"],
+            executable=git_exe,
             capture_output=True,
             text=True,
             timeout=10,
@@ -103,12 +126,20 @@ def git_short_head(sdk_root: Path) -> str:
     tan-cli#488 defect 4), or the command otherwise fails -- all NO SIGNAL,
     never a hard failure: an SDK checkout with no `.git` (a release tarball,
     including one vendored inside a customer's own git repository) is a
-    normal, supported setup."""
-    if not _is_own_git_checkout(sdk_root):
+    normal, supported setup.
+
+    `git` is resolved ONCE, through `_resolve_git_executable`, and threaded
+    into both the `_is_own_git_checkout` guard and the spawn below as
+    `executable=` (tan-cli#797) -- neither hands `subprocess` the bare
+    `"git"` identity.
+    """
+    git_exe = _resolve_git_executable()
+    if not _is_own_git_checkout(sdk_root, git_exe):
         return ""
     try:
         out = subprocess.run(
             ["git", "-C", str(sdk_root), "rev-parse", "--short", "HEAD"],
+            executable=git_exe,
             capture_output=True,
             text=True,
             timeout=10,
