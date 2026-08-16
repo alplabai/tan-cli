@@ -8,7 +8,7 @@ from tan.model.adapters import CompilerAdapter, Blob
 from tan.model.adapters.cpu import CpuAdapter
 from tan.model.adapters.drpai import DrpaiAdapter
 from tan.model.adapters.deepx import DeepxAdapter
-from tan.model.adapters.ethos_u import VelaAdapter, _parse_vela_summary
+from tan.model.adapters.ethos_u import VelaAdapter, _footprint, _parse_vela_summary
 from tan.model.adapters.executorch import ExecutorchAdapter
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -110,6 +110,26 @@ def test_vela_adapter_is_available_follows_path(monkeypatch):
     assert VelaAdapter().is_available() is True
 
 
+def _out_dir_of(cmd: list[str]) -> Path:
+    """Where the adapter told vela to write -- the real contract a fake
+    `subprocess.run` has to honour. Read from the command line rather than
+    assumed to be the caller's `out_dir`: each run gets its own
+    per-accel-config subdirectory (`ethos_u._run_dir`), so two configs a SoM
+    declares can never read each other's summary CSV."""
+    return Path(cmd[cmd.index("--output-dir") + 1])
+
+
+class _FakeProc:
+    """A `subprocess.run` result stand-in. `stdout` matters: the adapter reads
+    vela's resolved profile, its default-profile warnings AND its operator
+    placement out of it, never out of the exit code."""
+
+    def __init__(self, *, stdout: str = "", stderr: str = "", returncode: int = 0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
 def test_vela_adapter_compile_invokes_cli_and_reads_output(tmp_path, monkeypatch):
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
@@ -117,21 +137,19 @@ def test_vela_adapter_compile_invokes_cli_and_reads_output(tmp_path, monkeypatch
 
     def fake_run(cmd, capture_output, text, timeout):
         seen["cmd"] = cmd
-        (tmp_path / "m_vela.tflite").write_bytes(b"VELA-OUT")   # emulate vela's output
-
-        class _R:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-        return _R()
+        # emulate vela's output, into the directory the adapter asked for
+        (_out_dir_of(cmd) / "m_vela.tflite").write_bytes(b"VELA-OUT")
+        return _FakeProc()
 
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     blob = VelaAdapter().compile(src, accel_config="ethos-u55-128", out_dir=tmp_path)
     assert seen["cmd"][:2] == ["vela", str(src)]
     assert "--accelerator-config" in seen["cmd"] and "ethos-u55-128" in seen["cmd"]
+    assert _out_dir_of(seen["cmd"]) == tmp_path / "vela-ethos-u55-128"
     assert blob.format == "vela_tflite"
     assert blob.payload == b"VELA-OUT"
     assert blob.compiler_version.startswith("vela")
+    assert blob.caveats == ()               # no default-profile warning in this stdout
 
 
 def test_vela_adapter_compile_raises_on_vela_error(tmp_path, monkeypatch):
@@ -139,11 +157,7 @@ def test_vela_adapter_compile_raises_on_vela_error(tmp_path, monkeypatch):
     src.write_bytes(b"TFL3-INPUT")
 
     def fake_run(cmd, capture_output, text, timeout):
-        class _R:
-            returncode = 1
-            stdout = ""
-            stderr = "Invalid model"
-        return _R()
+        return _FakeProc(returncode=1, stderr="Invalid model")
 
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     with pytest.raises(RuntimeError, match="vela failed"):
@@ -155,11 +169,7 @@ def test_vela_adapter_compile_raises_when_output_file_missing(tmp_path, monkeypa
     src.write_bytes(b"TFL3-INPUT")
 
     def fake_run(cmd, capture_output, text, timeout):
-        class _R:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-        return _R()                        # vela "succeeds" but writes no _vela.tflite
+        return _FakeProc()                 # vela "succeeds" but writes no _vela.tflite
 
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     with pytest.raises(RuntimeError, match="produced no output"):
@@ -202,6 +212,12 @@ _REAL_VELA_SUMMARY_CSV = (
     "181758\n"
 )
 
+# vela names its summary `<stem>_summary_<system_config>.csv` -- the suffix is
+# the system-config it RESOLVED, which is why two accel configs in one family
+# (ethos-u55-256 and ethos-u55-128 both resolve to Ethos_U55_High_End_Embedded)
+# collide on one filename, and why each run now gets its own subdirectory.
+_REAL_VELA_SUMMARY_NAME = "person_detect_int8_summary_Ethos_U85_SYS_DRAM_Mid.csv"
+
 
 def test_parse_vela_summary_converts_kib_columns_not_bytes(tmp_path):
     """`sram_memory_used`=72.734375 in this real CSV is genuinely *KiB*
@@ -211,15 +227,150 @@ def test_parse_vela_summary_converts_kib_columns_not_bytes(tmp_path):
     gate as if it did), and must never source either figure from
     `arena_cache_size`=384.0 (a build-time cache-capacity knob, not this
     model's requirement)."""
-    (tmp_path / "person_detect_int8_summary_x.csv").write_text(
+    (tmp_path / _REAL_VELA_SUMMARY_NAME).write_text(
         _REAL_VELA_SUMMARY_CSV, encoding="utf-8")
-    arena, sram_kib = _parse_vela_summary(tmp_path, "person_detect_int8")
+    used = _parse_vela_summary(tmp_path, "person_detect_int8",
+                               system_config="Ethos_U85_SYS_DRAM_Mid")
+    assert used["sram"] == 72.734375        # KiB, verbatim -- not re-scaled here
+    assert "arena_cache_size" not in used   # a build-time knob, never a footprint
+    arena, sram_kib = _footprint(used)
     assert arena == 74480          # round(72.734375 * 1024), NOT 384
     assert sram_kib == 73          # ceil(72.734375), NOT 0 and NOT floored to 72
 
 
-def test_parse_vela_summary_absent_returns_zeros(tmp_path):
-    assert _parse_vela_summary(tmp_path, "missing") == (0, 0)
+def test_parse_vela_summary_reads_every_memory_area_not_just_sram(tmp_path):
+    """The areas a compile did NOT land in are load-bearing too: a compile
+    with 0 KiB SRAM and a non-zero DRAM figure is the exact shape
+    `_refuse_zero_sram_footprint` exists to catch, and it can only name where
+    the working set actually went if every `<mem_area>_memory_used` column is
+    read, not just `sram_memory_used`."""
+    (tmp_path / _REAL_VELA_SUMMARY_NAME).write_text(
+        _REAL_VELA_SUMMARY_CSV, encoding="utf-8")
+    used = _parse_vela_summary(tmp_path, "person_detect_int8",
+                               system_config="Ethos_U85_SYS_DRAM_Mid")
+    assert used == {"sram": 72.734375, "dram": 237.796875,
+                    "on_chip_flash": 0.0, "off_chip_flash": 0.0}
+
+
+def test_parse_vela_summary_picks_this_runs_csv_not_the_alphabetical_first(tmp_path):
+    """Two summary CSVs in one directory (what `build_model`'s reused
+    `out_dir` produced before each run got its own subdirectory) must resolve
+    by the run's OWN system-config, never by sort order -- `Ethos_U55_High_
+    End_Embedded` sorts before `Ethos_U85_SYS_DRAM_Mid`, so a u85 target read
+    a u55 compile's arena purely by accident of the alphabet."""
+    (tmp_path / _REAL_VELA_SUMMARY_NAME).write_text(
+        _REAL_VELA_SUMMARY_CSV, encoding="utf-8")
+    (tmp_path / "person_detect_int8_summary_Ethos_U55_High_End_Embedded.csv").write_text(
+        _REAL_VELA_SUMMARY_CSV.replace("72.734375", "1.5"), encoding="utf-8")
+    used = _parse_vela_summary(tmp_path, "person_detect_int8",
+                               system_config="Ethos_U85_SYS_DRAM_Mid")
+    assert used["sram"] == 72.734375
+    # Ambiguous (no system-config to disambiguate) is NOT a guess: no figure
+    # at all beats a figure belonging to a different compile.
+    assert _parse_vela_summary(tmp_path, "person_detect_int8") == {}
+
+
+def test_parse_vela_summary_absent_returns_no_areas(tmp_path):
+    assert _parse_vela_summary(tmp_path, "missing") == {}
+    assert _footprint({}) == (0, 0)
+
+
+def test_vela_refuses_a_zero_sram_footprint_on_a_real_npu_placement(tmp_path, monkeypatch):
+    """THE REGRESSION GUARD (tan-cli#789): a successful compile that placed
+    operators on the NPU must never report `arena 0 / req_sram_kib 0`.
+
+    Measured verbatim, real `ethos-u-vela` 5.1.0 on
+    `keyword_scrambled_8bit.tflite` at `ethos-u85-256`: 6 of 15 operators on
+    the NPU, exit 0, `sram_memory_used = 0.0`, `dram_memory_used = 5.359375`
+    -- because vela's built-in default profile is DRAM-backed. Reporting 0
+    there passes alp-sdk's on-device fit gate unconditionally
+    (`e->arena_sram_kib == 0u || t->req_sram_kib <= e->arena_sram_kib`,
+    src/backends/inference/alp_model_select.c) and hands the caller
+    `arena_bytes = 0`."""
+    src = tmp_path / "keyword_scrambled_8bit.tflite"
+    src.write_bytes(b"TFL3-INPUT")
+    stdout = ("System configuration             Ethos_U85_SYS_DRAM_Mid\n"
+              "Memory mode                      Dedicated_Sram_384KB\n"
+              "CPU operators = 9 (60.0%)\n"
+              "NPU operators = 6 (40.0%)\n")
+
+    def fake_run(cmd, capture_output, text, timeout):
+        out = _out_dir_of(cmd)
+        (out / "keyword_scrambled_8bit_vela.tflite").write_bytes(b"VELA-OUT")
+        (out / "keyword_scrambled_8bit_summary_Ethos_U85_SYS_DRAM_Mid.csv").write_text(
+            "sram_memory_used,dram_memory_used\n0.0,5.359375\n", encoding="utf-8")
+        return _FakeProc(stdout=stdout)
+
+    monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
+    with pytest.raises(RuntimeError) as exc:
+        VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path)
+    msg = str(exc.value)
+    assert "6/15 operators on the NPU" in msg      # the placement it DID achieve
+    assert "dram 5.36 KiB" in msg                   # where the working set went
+    assert "Ethos_U85_SYS_DRAM_Mid / Dedicated_Sram_384KB" in msg   # under which profile
+    assert "\n" not in msg                          # one line: it lands in a report note
+
+
+def test_vela_reports_a_real_zero_footprint_for_a_full_cpu_fallback(tmp_path, monkeypatch):
+    """0 NPU operators is a LEGITIMATE 0 KiB footprint -- measured:
+    `float32_fc.tflite` at `ethos-u85-256` reports 0.0 for every memory area
+    and prints "NPU operators = 0 (0.0%)". The refusal above must not fire
+    here, or `tan model check --exact`'s cpu-only verdict becomes an error."""
+    src = tmp_path / "float32_fc.tflite"
+    src.write_bytes(b"TFL3-INPUT")
+
+    def fake_run(cmd, capture_output, text, timeout):
+        out = _out_dir_of(cmd)
+        (out / "float32_fc_vela.tflite").write_bytes(b"VELA-OUT")
+        (out / "float32_fc_summary_Ethos_U85_SYS_DRAM_Mid.csv").write_text(
+            "sram_memory_used,dram_memory_used\n0.0,0.0\n", encoding="utf-8")
+        return _FakeProc(stdout=(
+            "System configuration             Ethos_U85_SYS_DRAM_Mid\n"
+            "Memory mode                      Dedicated_Sram_384KB\n"
+            "CPU operators = 1 (100.0%)\n"
+            "NPU operators = 0 (0.0%)\n"))
+
+    monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
+    blob = VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path)
+    assert (blob.arena_bytes, blob.req_sram_kib) == (0, 0)
+    assert (blob.npu_op_count, blob.cpu_op_count) == (0, 1)
+
+
+def test_vela_carries_its_own_default_profile_warning_as_a_caveat(tmp_path, monkeypatch):
+    """No `--system-config`/`--memory-mode` is passed (none can be: the
+    SoM-authoritative profile lives in a proprietary .ini alp-sdk does not
+    redistribute), so vela falls back to a DRAM-backed default on a module
+    that has no DRAM. Its own warning is carried out verbatim rather than
+    swallowed -- a default-profile compile must not read as an authoritative
+    one."""
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-INPUT")
+
+    def fake_run(cmd, capture_output, text, timeout):
+        out = _out_dir_of(cmd)
+        (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
+        (out / "m_summary_Ethos_U85_SYS_DRAM_Mid.csv").write_text(
+            "sram_memory_used\n8.0\n", encoding="utf-8")
+        # Warning text verbatim from a real `ethos-u-vela` 5.1.0 run.
+        return _FakeProc(stdout=(
+            "Warning: No system configuration specified. Using a default of "
+            "Ethos_U85_SYS_DRAM_Mid. Compilation may be invalid or non-optimal.\n"
+            "Warning: No memory mode specified. Using a default of "
+            "Dedicated_Sram_384KB. Compilation may be invalid or non-optimal.\n"
+            "System configuration             Ethos_U85_SYS_DRAM_Mid\n"
+            "Memory mode                      Dedicated_Sram_384KB\n"
+            "CPU operators = 0 (0.0%)\n"
+            "NPU operators = 4 (100.0%)\n"))
+
+    monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
+    blob = VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path)
+    assert len(blob.caveats) == 1
+    caveat = blob.caveats[0]
+    assert "BUILT-IN default profile" in caveat
+    assert "system-config Ethos_U85_SYS_DRAM_Mid" in caveat
+    assert "memory-mode Dedicated_Sram_384KB" in caveat
+    assert "Compilation may be invalid or non-optimal" in caveat     # vela's own words
+    assert "site-packages" not in caveat        # never the host path from vela's third warning
 
 
 @pytest.mark.skipif(shutil.which("vela") is None, reason="vela (ethos-u-vela) not installed")
@@ -233,15 +384,20 @@ def test_vela_real_compile_of_tiny_fixture(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("vela") is None, reason="vela (ethos-u-vela) not installed")
-@pytest.mark.parametrize("accel_config", ["ethos-u85-256", "ethos-u55-256", "ethos-u55-128"])
+@pytest.mark.parametrize("accel_config", ["ethos-u55-256", "ethos-u55-128"])
 def test_vela_real_compile_for_e8_accel_configs(tmp_path, accel_config):
-    """Compile the committed fixture for each E1M-AEN801 (E8) accel config.
+    """Compile the committed fixture for the E1M-AEN801 (E8) U55 accel configs.
 
-    Proves the shipped Vela accepts every metadata-derived config string for
-    the arriving part -- including the E8-only ``ethos-u85-256`` generative NPU
-    -- and emits a vela_tflite blob (i.e. op-support + arena sizing).  It does
-    NOT prove the blob runs correctly on the U85; that is silicon + Ethos-U HAL
-    gated (alp_ethosu_aen_register() returns NOSUPPORT today).
+    Proves the shipped Vela accepts the metadata-derived config strings and
+    emits a vela_tflite blob with a real footprint (i.e. op-support + arena
+    sizing).  It does NOT prove the blob runs correctly on the NPU; that is
+    silicon + Ethos-U HAL gated (alp_ethosu_aen_register() returns NOSUPPORT
+    today).
+
+    The E8-only ``ethos-u85-256`` is NOT parametrized here: vela accepts it
+    and compiles cleanly, but its default profile reports no SRAM footprint
+    for a fixture this small, which is a refusal, not a blob -- see the test
+    below, which is where that config's real behaviour is pinned.
     """
     src = tmp_path / "tiny.tflite"
     shutil.copy(_ROOT / "tests/fixtures/models/tiny_int8.tflite", src)
@@ -249,6 +405,38 @@ def test_vela_real_compile_for_e8_accel_configs(tmp_path, accel_config):
     assert blob.format == "vela_tflite"
     assert blob.payload[4:8] == b"TFL3"
     assert blob.compiler_version.startswith("vela")
+    # Ethos_U55_High_End_Embedded / Shared_Sram: the arena IS in SRAM here, so
+    # a real footprint comes back (measured, vela 5.1.0).
+    assert blob.req_sram_kib > 0 and blob.arena_bytes > 0
+
+
+@pytest.mark.skipif(shutil.which("vela") is None, reason="vela (ethos-u-vela) not installed")
+def test_vela_real_u85_compile_refuses_rather_than_reporting_a_zero_footprint(tmp_path):
+    """The E8-only ``ethos-u85-256`` config, through a REAL vela process.
+
+    Measured, `ethos-u-vela` 5.1.0: vela accepts the config string, compiles
+    the committed fixture cleanly, places 1/1 operators on the NPU and exits
+    0 -- yet reports `sram_memory_used = 0.0`, because its BUILT-IN default
+    profile for a U85 (`Ethos_U85_SYS_DRAM_Mid` / `Dedicated_Sram_384KB`) puts
+    both feature maps and weights in DRAM, which an Alif Ensemble module does
+    not have.  There is no SoM-authoritative profile to compile against
+    instead (Alif's `ensemble_vela.ini` is proprietary and not redistributed
+    -- see `tan.model.adapters.ethos_u`'s module docstring), so the honest
+    answer is a refusal naming exactly that, NOT `arena 0 / req_sram_kib 0`:
+    alp-sdk's on-device selector reads a zero as "fits any envelope".
+
+    Monkeypatching cannot prove this -- the whole point is what the REAL
+    compiler reports for a REAL, successful, NPU-placing compile.
+    """
+    src = tmp_path / "tiny.tflite"
+    shutil.copy(_ROOT / "tests/fixtures/models/tiny_int8.tflite", src)
+    with pytest.raises(RuntimeError) as exc:
+        VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path)
+    msg = str(exc.value)
+    assert "operators on the NPU for ethos-u85-256" in msg   # the compile DID succeed
+    assert "reported 0 KiB SRAM" in msg
+    assert "Ethos_U85_SYS_DRAM_Mid / Dedicated_Sram_384KB" in msg
+    assert "\n" not in msg                                    # one line: it lands in a note
 
 
 def test_cpu_and_vela_do_not_require_compile_opts():
@@ -270,9 +458,8 @@ def test_cpu_compile_accepts_opts_kwarg(tmp_path):
 def test_vela_compile_accepts_opts_kwarg(tmp_path, monkeypatch):
     src = tmp_path / "m.tflite"; src.write_bytes(b"TFL3-X")
     def fake_run(cmd, capture_output, text, timeout):
-        (tmp_path / "m_vela.tflite").write_bytes(b"VELA-OUT")
-        class _R: returncode = 0; stdout = ""; stderr = ""
-        return _R()
+        (_out_dir_of(cmd) / "m_vela.tflite").write_bytes(b"VELA-OUT")
+        return _FakeProc()
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     blob = VelaAdapter().compile(src, accel_config="ethos-u55-128",
                                  out_dir=tmp_path, opts={"ignored": True})

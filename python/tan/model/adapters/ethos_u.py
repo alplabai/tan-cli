@@ -4,28 +4,51 @@
 Wraps the `vela` CLI from `ethos-u-vela` (the `model-compile` optional
 dependency). is_available() is True when `vela` is on PATH; compile() shells out
 for the given accelerator-config and reads back `<stem>_vela.tflite`. The
-arena/peak-SRAM footprint is parsed best-effort from vela's summary CSV (column
-names drift across vela versions, so matching is tolerant; 0 when unavailable).
+arena/peak-SRAM footprint is parsed from vela's summary CSV for THAT run, and a
+successful compile that placed operators on the NPU but reports no SRAM working
+set is a hard error, never a silent zero (see `_refuse_zero_sram_footprint`).
 
-compile() NEVER raises on a clean vela exit, including a full CPU fallback --
-vela's own exit code is 0 whether it placed every operator on the NPU or none
-of them (measured: `vela float_fc.tflite --accelerator-config ethos-u85-256`
-on a float32 FULLY_CONNECTED model prints "NPU operators = 0 (0.0%)" and still
-exits 0). `_parse_vela_placement` reads vela's own per-run placement summary
-(always printed to stdout, `ethosu.vela.stats_writer.print_performance_metrics_
-common`'s "CPU/NPU operators = N (P%)" lines) so a caller never has to infer
-placement from the mere absence of an exception -- see `tan.model.check`'s
+compile() NEVER raises on a clean vela exit *for placement reasons*, including a
+full CPU fallback -- vela's own exit code is 0 whether it placed every operator
+on the NPU or none of them (measured: `vela float32_fc.tflite
+--accelerator-config ethos-u85-256` on a float32 FULLY_CONNECTED model prints
+"NPU operators = 0 (0.0%)" and still exits 0). `_parse_vela_placement` reads
+vela's own per-run placement summary (always printed to stdout,
+`ethosu.vela.stats_writer.print_performance_metrics_common`'s "CPU/NPU
+operators = N (P%)" lines) so a caller never has to infer placement from the
+mere absence of an exception -- see `tan.model.check`'s
 `_report_from_vela_compile`, the actual consumer of `Blob.npu_op_count`/
-`cpu_op_count`."""
+`cpu_op_count`.
+
+THE PROFILE CAVEAT (tan-cli#789): this adapter passes NO `--system-config` and
+NO `--memory-mode`, so vela falls back to its own built-in profile -- measured
+verbatim on `ethos-u-vela` 5.1.0: "Warning: No system configuration specified.
+Using a default of Ethos_U85_SYS_DRAM_Mid. Compilation may be invalid or
+non-optimal." plus the same for "No memory mode specified. Using a default of
+Dedicated_Sram_384KB." Both defaults are DRAM-backed
+(`weights_storage_area=DRAM`, `feature_map_storage_area=DRAM` in the summary
+CSV), and an Alif Ensemble E-series module is MRAM + SRAM with no DRAM at all.
+A SoM-authoritative profile is NOT derivable here: the one alp-sdk itself uses
+(`--system-config Ethos_U85_SRAM_Only --memory-mode Sram_Only`,
+`examples/aen/aen-npu-inference-alp/CMakeLists.txt`) names sections that live
+ONLY in Alif's PROPRIETARY `ensemble_vela.ini`, which alp-sdk does not
+redistribute (it is `.gitignore`d there and ships in alp-sdk-internal) --
+passing those names without that `.ini` makes vela error outright. So the
+absence is made LOUD instead of guessed at: `_default_profile_caveats` carries
+vela's own "may be invalid or non-optimal" verdict, naming the defaults it
+actually resolved, out through `Blob.caveats` into the report/envelope. Never
+invent a profile here; a wrong one compiles a command stream for hardware the
+module does not have."""
 from __future__ import annotations
 import csv
 import math
 import re
 import shutil
 import subprocess
-from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import NoReturn
+
 from . import CompilerAdapter, Blob
 
 _VELA_TIMEOUT_S = 600        # vela compiles are minutes at most; never unbounded in CI
@@ -38,6 +61,33 @@ _VELA_TIMEOUT_S = 600        # vela compiles are minutes at most; never unbounde
 # text-formatting rounding.
 _PLACEMENT_RE = re.compile(r"^(CPU|NPU) operators = (\d+)", re.MULTILINE)
 
+# The same network-summary block names the profile vela ACTUALLY resolved --
+# "System configuration             Ethos_U85_SYS_DRAM_Mid" / "Memory mode
+# Dedicated_Sram_384KB" -- whether it came from a supplied .ini or from vela's
+# built-in default. Read rather than assumed: it is both the summary CSV's own
+# filename suffix and the only honest way to say WHICH profile a figure
+# describes.
+_PROFILE_RE = re.compile(r"^(System configuration|Memory mode) +(\S+) *$", re.MULTILINE)
+
+# vela's verbatim warning when it falls back to its own built-in profile.
+# Deliberately NOT matched on the "No configuration file specified" sibling:
+# that one interpolates an absolute path into the host's site-packages, which
+# must never be echoed into a customer-facing envelope.
+_DEFAULTED_RE = re.compile(
+    r"^Warning: No (system configuration|memory mode) specified\.", re.MULTILINE)
+
+# `write_summary_metrics_csv_common` writes one `<mem_area>_memory_used` column
+# per memory area the accelerator config declares (stats_writer.py's
+# `area.identifier_name() + "_memory_used"`), so the area names are data, not a
+# fixed list -- matched by shape so a vela version that adds an area is read,
+# not silently dropped.
+_MEM_USED_RE = re.compile(r"^(.+)_memory_used$")
+
+# A directory component built from an accel_config that comes out of SoM
+# metadata; anything outside this set is folded to "_" so a malformed
+# accel_config can never walk out of @out_dir.
+_UNSAFE_DIR_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
 
 def _vela_version() -> str:
     try:
@@ -46,51 +96,146 @@ def _vela_version() -> str:
         return "vela"
 
 
-def _parse_vela_summary(out_dir: Path, stem: str) -> tuple[int, int]:
-    """Best-effort (arena_bytes, req_sram_kib) from vela's <stem>_summary_*.csv.
+def _run_dir(out_dir: Path, accel_config: str) -> Path:
+    """A per-accel-config subdirectory of @out_dir for one vela run.
 
-    Every `<mem_area>_memory_used` column in vela's summary CSV is already in
-    KiB, not bytes (`memory_used[...] / 1024.0`,
-    ethosu/vela/stats_writer.py:123 in write_summary_metrics_csv_common) --
-    despite the raw CSV values looking byte-scale at a glance (e.g.
-    `72.734375`). The model's actual arena requirement is its SRAM working
-    set, `sram_memory_used`: the scratch region alp-sdk's `alp_model_open()`
-    `arena`/`arena_bytes` sizes at runtime for the default Shared/Dedicated
-    SRAM memory modes. `arena_cache_size` (`arch.arena_cache_size / 1024`,
+    vela names its summary `<stem>_summary_<system_config>.csv`, and the
+    system-config is a property of the SILICON FAMILY, not of the accelerator
+    config: `ethos-u55-256` and `ethos-u55-128` both resolve to
+    `Ethos_U55_High_End_Embedded` and therefore write the SAME filename
+    (measured, vela 5.1.0). `build_model` reuses one `out_dir` across every
+    config a SoM declares, so a shared directory means one compile's summary
+    silently answers for another's -- a u85 target inheriting a u55 compile's
+    arena. One directory per run makes that impossible, and keeps vela's
+    intermediate output from landing beside the `.alpmodel` package."""
+    return out_dir / f"vela-{_UNSAFE_DIR_CHARS.sub('_', accel_config)}"
+
+
+def _parse_vela_profile(stdout: str) -> tuple[str | None, str | None]:
+    """(system_config, memory_mode) vela resolved for this run, from its own
+    network-summary block. Either is None when the line is absent (an
+    unexpected vela output shape) -- never guessed at."""
+    found = dict(_PROFILE_RE.findall(stdout))
+    return found.get("System configuration"), found.get("Memory mode")
+
+
+def _summary_csv(out_dir: Path, stem: str, system_config: str | None) -> Path | None:
+    """vela's summary CSV for THIS run: the exact `<stem>_summary_<system_
+    config>.csv` name when the run's own system-config was readable, else the
+    sole glob match. `None` for no match AND for an ambiguous one -- picking
+    `sorted(matches)[0]` out of several is only ever right by accident of sort
+    order, and a footprint attributed to the wrong compile is worse than no
+    footprint at all (which the caller refuses loudly)."""
+    if system_config:
+        exact = out_dir / f"{stem}_summary_{system_config}.csv"
+        if exact.is_file():
+            return exact
+    matches = sorted(out_dir.glob(f"{stem}_summary_*.csv"))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _parse_vela_summary(out_dir: Path, stem: str,
+                        *, system_config: str | None = None) -> dict[str, float]:
+    """Every `<mem_area>_memory_used` figure vela reported for this run, keyed
+    by lower-cased memory-area name ("sram", "dram", "on_chip_flash", ...), in
+    KiB.
+
+    The values are ALREADY KiB in the CSV, not bytes (`memory_used[...] /
+    1024.0`, ethosu/vela/stats_writer.py:123 in
+    write_summary_metrics_csv_common) -- despite looking byte-scale at a glance
+    (e.g. `72.734375`). `arena_cache_size` (`arch.arena_cache_size / 1024`,
     stats_writer.py:107) is a DIFFERENT column -- the accelerator config's
-    configured cache capacity, a build-time knob unrelated to any one
-    model's footprint -- and must never be read here.
+    configured cache capacity, a build-time knob unrelated to any one model's
+    footprint -- and is deliberately not among these.
 
-    req_sram_kib is rounded UP (ceil, never floor/truncate): the device-side
-    fit gate (`t->req_sram_kib <= e->arena_sram_kib`,
+    `{}` when the summary is missing or unparseable; a memory area vela did
+    not write is simply absent, and one it wrote as 0.0 is present as 0.0 (the
+    two are different facts, and `_refuse_zero_sram_footprint` says which)."""
+    path = _summary_csv(out_dir, stem, system_config)
+    if path is None:
+        return {}
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        return {}
+    used: dict[str, float] = {}
+    for key, val in rows[0].items():
+        m = _MEM_USED_RE.match(key.lower()) if key else None
+        if m is None:
+            continue
+        try:
+            used[m.group(1)] = float(val)
+        except (TypeError, ValueError):
+            continue
+    return used
+
+
+def _footprint(used: dict[str, float]) -> tuple[int, int]:
+    """(arena_bytes, req_sram_kib) from @used's SRAM working set.
+
+    The model's arena requirement is its SRAM working set, `sram_memory_used`:
+    the scratch region alp-sdk's `alp_model_open()` `arena`/`arena_bytes` sizes
+    at runtime. req_sram_kib is rounded UP (ceil, never floor/truncate): the
+    device-side fit gate (`t->req_sram_kib <= e->arena_sram_kib`,
     src/backends/inference/alp_model_select.c) must never under-report a
     model's requirement, or a model that doesn't actually fit could pass the
     gate as if it did.
 
-    Returns (0, 0) when the summary is missing, unparseable, or reports no
-    SRAM usage (e.g. a full CPU-fallback compile)."""
-    matches = sorted(out_dir.glob(f"{stem}_summary_*.csv"))
-    if not matches:
-        return 0, 0
-    with open(matches[0], newline="", encoding="utf-8") as fh:
-        rows = list(csv.DictReader(fh))
-    if not rows:
-        return 0, 0
-    row = rows[0]
-
-    def _num(pred: Callable[[str], bool]) -> float:
-        for key, val in row.items():
-            if key and pred(key.lower()):
-                try:
-                    return float(val)
-                except (TypeError, ValueError):
-                    continue
-        return 0.0
-
-    sram_kib = _num(lambda k: "sram" in k and "used" in k)
+    (0, 0) only when vela reported no SRAM at all -- correct for a full CPU
+    fallback (measured: `float32_fc.tflite` at `ethos-u85-256` reports 0.0 for
+    EVERY memory area), and refused by the caller for anything else."""
+    sram_kib = used.get("sram", 0.0)
     if sram_kib <= 0:
         return 0, 0
     return round(sram_kib * 1024), math.ceil(sram_kib)
+
+
+def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int | None,
+                                used: dict[str, float], system_config: str | None,
+                                memory_mode: str | None) -> NoReturn:
+    """A successful compile that placed operators on the NPU but reports no
+    SRAM working set is a HARD ERROR, not a zero.
+
+    `req_sram_kib == 0` does not read as "this model needs no arena" on the
+    device side: alp-sdk's selector reads it as *fits any envelope*
+    (`return e->arena_sram_kib == 0u || t->req_sram_kib <= e->arena_sram_kib;`,
+    src/backends/inference/alp_model_select.c) and then hands the caller
+    `arena_bytes = 0`. A board would trust that. Measured, real `ethos-u-vela`
+    5.1.0: `keyword_scrambled_8bit.tflite` at `ethos-u85-256` places 6 of 15
+    operators on the NPU, exits 0, and reports `sram_memory_used = 0.0`
+    alongside `dram_memory_used = 5.359375` -- because vela's own default
+    profile is DRAM-backed. The footprint is real; it is just not expressed in
+    a memory area this module has. Refusing loudly is the only honest answer
+    available without inventing a profile (see the module docstring)."""
+    total = npu_ops + (cpu_ops or 0)
+    elsewhere = ", ".join(f"{area} {kib:.2f} KiB"
+                          for area, kib in sorted(used.items()) if kib > 0)
+    where = (f"its working set went to {elsewhere}" if elsewhere
+             else "it reported no memory use in any area")
+    profile = " / ".join(p for p in (system_config, memory_mode) if p) or "an unreported profile"
+    raise RuntimeError(
+        f"vela placed {npu_ops}/{total} operators on the NPU for {accel_config} but "
+        f"reported 0 KiB SRAM; {where} under {profile}. Refusing to report a zero "
+        f"footprint: alp-sdk's on-device selector reads req_sram_kib == 0 as 'fits "
+        f"any envelope' (src/backends/inference/alp_model_select.c). Compile against "
+        f"a --system-config/--memory-mode matching this module's memory model instead.")
+
+
+def _default_profile_caveats(stdout: str, system_config: str | None,
+                             memory_mode: str | None) -> tuple[str, ...]:
+    """vela's own "may be invalid or non-optimal" verdict, surfaced as a report
+    caveat when it fell back to its built-in profile -- so a customer cannot
+    mistake a default-profile compile for one authored for this module. `()`
+    when a real profile was supplied. See the module docstring for why no
+    profile is invented here instead."""
+    if not _DEFAULTED_RE.search(stdout):
+        return ()
+    named = ", ".join(f"{label} {name}" for label, name in
+                      (("system-config", system_config), ("memory-mode", memory_mode)) if name)
+    return (f"vela used its BUILT-IN default profile ({named or 'unreported'}), not one "
+            f"authored for this module -- vela's own warning for that is \"Compilation "
+            f"may be invalid or non-optimal\". The arena/SRAM figures and the compiled "
+            f"command stream describe that default memory model, not this module's.",)
 
 
 def _parse_vela_placement(stdout: str) -> tuple[int, int] | None:
@@ -116,21 +261,33 @@ class VelaAdapter(CompilerAdapter):
         return src_format == "tflite"
 
     def compile(self, source: Path, *, accel_config: str, out_dir: Path, opts: dict | None = None) -> Blob:
-        out_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = _run_dir(out_dir, accel_config)
+        run_dir.mkdir(parents=True, exist_ok=True)
         cmd = ["vela", str(source), "--accelerator-config", accel_config,
-               "--output-dir", str(out_dir)]
+               "--output-dir", str(run_dir)]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_VELA_TIMEOUT_S)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"vela timed out after {exc.timeout}s for {accel_config}") from exc
         if proc.returncode != 0:
             raise RuntimeError(f"vela failed for {accel_config}: {proc.stderr.strip()}")
-        produced = out_dir / f"{source.stem}_vela.tflite"
+        produced = run_dir / f"{source.stem}_vela.tflite"
         if not produced.is_file():
             raise RuntimeError(f"vela produced no output at {produced}")
-        arena, sram_kib = _parse_vela_summary(out_dir, source.stem)
+        system_config, memory_mode = _parse_vela_profile(proc.stdout)
+        used = _parse_vela_summary(run_dir, source.stem, system_config=system_config)
+        arena, sram_kib = _footprint(used)
         placement = _parse_vela_placement(proc.stdout)
         cpu_ops, npu_ops = placement if placement is not None else (None, None)
+        # Only a CONFIRMED NPU placement refuses: 0 NPU operators is a real,
+        # legitimate 0 KiB footprint (full CPU fallback), and an unreadable
+        # placement summary already degrades through `tan.model.check`'s
+        # `_vela_placement_unreadable` rather than claiming anything.
+        if npu_ops and sram_kib <= 0:
+            _refuse_zero_sram_footprint(accel_config=accel_config, npu_ops=npu_ops,
+                                        cpu_ops=cpu_ops, used=used,
+                                        system_config=system_config, memory_mode=memory_mode)
         return Blob(format="vela_tflite", payload=produced.read_bytes(),
                     arena_bytes=arena, compiler_version=_vela_version(),
-                    req_sram_kib=sram_kib, cpu_op_count=cpu_ops, npu_op_count=npu_ops)
+                    req_sram_kib=sram_kib, cpu_op_count=cpu_ops, npu_op_count=npu_ops,
+                    caveats=_default_profile_caveats(proc.stdout, system_config, memory_mode))

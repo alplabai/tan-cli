@@ -268,6 +268,37 @@ def test_exact_runs_the_real_compiler_and_returns_basis_compiled(tmp_path, monke
     assert rep.npu_placement_pct_real == 100.0 # the real, op-count placement instead
     assert "vela 3.9.0" in rep.notes[0]
     assert "123" in rep.notes[0] and "4" in rep.notes[0]
+    assert len(rep.notes) == 1                 # no caveats on this Blob, none invented
+
+
+def test_exact_surfaces_the_compilers_own_caveats_into_the_report(tmp_path, monkeypatch):
+    """tan-cli#789: vela compiles against its own BUILT-IN default profile
+    (no `--system-config`/`--memory-mode` is passed, and none can be -- the
+    SoM-authoritative one lives in a proprietary .ini alp-sdk does not
+    redistribute), and that default is DRAM-backed on a module that has no
+    DRAM. The adapter's caveat must reach the report, or a customer reads a
+    default-profile compile as an authoritative one. `basis`/`npu_coverage`
+    are untouched by it: it is a caveat about the figures, not a verdict."""
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
+    _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
+    _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55",
+                 supported=["FULLY_CONNECTED"])
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    caveat = ("vela used its BUILT-IN default profile (system-config "
+              "Ethos_U85_SYS_DRAM_Mid, memory-mode Dedicated_Sram_384KB) ...")
+
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None):
+        return Blob(format="vela_tflite", payload=b"x", arena_bytes=123,
+                    compiler_version="vela 5.1.0", req_sram_kib=4,
+                    cpu_op_count=0, npu_op_count=1, caveats=(caveat,))
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _fake_compile)
+    reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                    metadata_root=tmp_path, exact=True)
+    rep = reports[0]
+    assert rep.basis == "compiled" and rep.npu_coverage == "fits"
+    assert rep.notes[-1] == caveat              # carried verbatim, never rewritten
+    assert "vela 5.1.0 compiled for" in rep.notes[0]    # the placement note still leads
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +459,11 @@ def test_exact_real_vela_compile_of_a_model_it_rejects_never_reports_fits(tmp_pa
     0 -- ``ethos-u-vela`` 5.1.0 measured: "NPU operators = 0 (0.0%)"."""
     if shutil.which("vela") is None:
         pytest.skip("vela (ethos-u-vela) is not installed on PATH")
+    # The `rep.ops` assertion below needs REAL extracted operators, and only the
+    # `tflite` reader (the `model-io` extra) produces those. `vela` on PATH says
+    # nothing about that: on the bare install shape `ci.yml` builds, `rep.ops` is
+    # `[]` and the assertion degrades to `assert ([])` instead of skipping.
+    pytest.importorskip("tflite", reason=_MODEL_IO_SKIP_REASON)
     _write_som(tmp_path, "E1M-FAKE", "fake:soc:u85", ethos_u_variant="u85")
     _write_soc(tmp_path, "fake:soc:u85", [{"type": "ethos-u85", "subtype": "x", "mac_per_cycle": 256}])
     _write_table(tmp_path, "ethos_u", "u85@vela-1.0.0.json", variant="u85",
@@ -461,10 +497,17 @@ def test_exact_degrades_on_a_vela_compile_failure(tmp_path, monkeypatch):
     assert any(n.startswith("--exact") and "vela failed" in n for n in reports[0].notes)
 
 
-def test_exact_truncates_a_multiline_vela_traceback_to_one_short_line(tmp_path, monkeypatch):
+def test_exact_truncates_a_multiline_vela_traceback_to_its_exception_line(tmp_path, monkeypatch):
     # MAJOR 2 review: a failed vela subprocess's RuntimeError can wrap its
     # own raw, multi-line stderr verbatim (measured: a 750-character,
     # 9-newline Python traceback) -- that must never land whole in a note.
+    # tan-cli#789 review: nor may it be cut down to the traceback BANNER,
+    # the one line of a traceback with no diagnostic content at all
+    # (measured real note: "--exact compile with vela failed (vela failed
+    # for ethos-u85-256: Traceback (most recent call last):); reporting the
+    # static screen instead." -- discarding "RuntimeError: Compilation
+    # failed: No networks defined via GraphAPI"). One line, and it must be
+    # the line that says what went wrong.
     _write_som(tmp_path, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55")
     _write_soc(tmp_path, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
     _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55",
@@ -481,9 +524,36 @@ def test_exact_truncates_a_multiline_vela_traceback_to_one_short_line(tmp_path, 
                                     metadata_root=tmp_path, exact=True)
     note = next(n for n in reports[0].notes if n.startswith("--exact"))
     assert "\n" not in note                             # never a raw multi-line traceback
-    assert "vela/x.py" not in note                       # first line only, not the frame body
-    assert "ValueError: bad tensor shape" not in note     # ... nor the trailing exception line
-    assert note.startswith("--exact compile with vela failed (Traceback")
+    assert "vela/x.py" not in note                       # ... nor any frame body
+    assert "Traceback (most recent call last)" not in note   # ... nor the contentless banner
+    assert note.startswith("--exact compile with vela failed (ValueError: bad tensor shape)")
+
+
+def test_exact_keeps_the_accel_config_in_front_of_a_wrapped_traceback(tmp_path, monkeypatch):
+    """`VelaAdapter.compile` prefixes its own "vela failed for <accel>:" onto
+    whatever vela raised, and that prefix is the only thing naming the target
+    -- so it survives alongside the exception line, not instead of it.
+    Message shape measured on a real failing run."""
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:u85", ethos_u_variant="u85")
+    _write_soc(tmp_path, "fake:soc:u85", [{"type": "ethos-u85", "subtype": "x", "mac_per_cycle": 256}])
+    _write_table(tmp_path, "ethos_u", "u85@vela-1.0.0.json", variant="u85",
+                 supported=["FULLY_CONNECTED"])
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+
+    def _boom(self, source, *, accel_config, out_dir, opts=None):
+        raise RuntimeError(
+            "vela failed for ethos-u85-256: Traceback (most recent call last):\n"
+            "  File \"ethosu/vela/vela.py\", line 1, in main\n"
+            "RuntimeError: Compilation failed: No networks defined via GraphAPI")
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _boom)
+    reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                    metadata_root=tmp_path, exact=True)
+    note = next(n for n in reports[0].notes if n.startswith("--exact"))
+    assert "vela failed for ethos-u85-256:" in note                       # which target
+    assert "No networks defined via GraphAPI" in note                     # what went wrong
+    assert "Traceback (most recent call last)" not in note
+    assert "\n" not in note
 
 
 def test_exact_never_spawns_vela_for_a_format_it_does_not_ingest(tmp_path, monkeypatch):
@@ -592,6 +662,12 @@ def test_a_tflite_model_against_a_real_v2n_v2m_sku_reports_onnx_backends_undeter
     `undetermined` + `format-not-accepted` -- never `cpu-only`, which would
     read as "this model won't run on this board" rather than "wrong format
     to screen it in"."""
+    # `rep.ops` carries the per-op `format-not-accepted` verdict only when the
+    # ops were extracted at all -- on the bare install shape (`ci.yml`'s
+    # `gates` job, no `model-io` extra) `rep.ops` is `[]` and the reason
+    # assertion below degrades to `assert ([])`. Same guard the sibling
+    # real-.tflite cases in this file already carry.
+    pytest.importorskip("tflite", reason=_MODEL_IO_SKIP_REASON)
     backends = resolve_check_backends(sku, metadata_root=_META)
     assert backends            # at least drpai; V2M also carries deepx_dxm1
     reports = check_model_backends(backends=backends, sku=sku, source=_FIXTURE,

@@ -26,6 +26,21 @@ class Blob:
     # infer it from the mere absence of an exception.
     npu_op_count: int | None = None
     cpu_op_count: int | None = None
+    # Adapter-authored caveats about THIS compile that a report must not drop
+    # -- each already a complete, customer-readable sentence. Today only
+    # `VelaAdapter` populates them, for the one caveat it cannot resolve:
+    # vela compiles against its own BUILT-IN default profile (no
+    # `--system-config`/`--memory-mode` is passed, and none can be -- the
+    # SoM-authoritative one names sections that live only in a proprietary
+    # .ini alp-sdk does not redistribute), and that default memory model is
+    # DRAM-backed on modules that have no DRAM. Surfaced rather than
+    # swallowed so a default-profile compile cannot be mistaken for a
+    # module-authoritative one; `tan.model.check`'s `_report_from_vela_
+    # compile` carries them into `BackendReport.notes` and so into the JSON
+    # envelope. Never a substitute for failing: a figure that cannot be
+    # derived is refused (`ethos_u._refuse_zero_sram_footprint`), not
+    # caveated.
+    caveats: tuple[str, ...] = ()
 
 
 class CompilerAdapter(ABC):
