@@ -164,12 +164,13 @@ _VELA_ERR_NOTE_BUDGET = 200
 #: the remediation, which is the whole reason the refusal was reworded
 #: (tan-cli#789 review BLOCKER 2 / MINOR 5). The two numbers below are RE-RUN
 #: against the live template every time it is reworded, never carried forward
-#: with a delta applied: a real `ethos-u85-256` refusal is 618 characters
+#: with a delta applied: a real `ethos-u85-256` refusal is 623 characters
 #: (measured by compiling `tests/fixtures/models/tiny_int8.tflite` at
-#: `ethos-u85-256` with real `ethos-u-vela` 5.1.0 and `silicon_ref
-#: alif:ensemble:e8`, then taking `len(str(exc))`), and a deliberately maximal
-#: one (three memory areas at five significant figures, the longest profile
-#: name vela emits, four-digit op counts) is 686 --
+#: `ethos-u85-256` with real `ethos-u-vela` 5.1.0, carrying e8.json's own
+#: `vendor_config_filename` and its no-DRAM answer, then taking
+#: `len(str(exc))`), and a deliberately maximal one (three memory areas at
+#: five significant figures, the longest profile name vela emits, four-digit
+#: op counts, both metadata clauses) is 691 --
 #: `test_the_refusal_note_budget_covers_a_maximal_refusal` builds exactly that
 #: and fails if a future message outgrows this. Both were 3 and 2 characters
 #: over-stated when last edited, because the reword's delta was estimated
@@ -286,15 +287,19 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
     accel_config = target.accel_config
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            # Vendor, accel-config AND memory profile all come off the SAME
-            # resolved target (`_headline_ethos_u_target`), so `--exact`
-            # reports what `tan model build` would actually compile for this
-            # SKU -- a screen run against a different memory model than the
-            # build uses would be a figure the customer cannot act on.
-            blob = VelaAdapter().compile(source, accel_config=accel_config, out_dir=Path(tmp),
-                                         silicon_ref=target.silicon_ref,
-                                         vela_memory_mode=target.vela_memory_mode,
-                                         vela_system_config=target.vela_system_config)
+            # Accel-config, memory profile AND the part's diagnostic facts all
+            # come off the SAME resolved target (`_headline_ethos_u_target`), so
+            # `--exact` reports what `tan model build` would actually compile
+            # for this SKU -- a screen run against a different memory model than
+            # the build uses would be a figure the customer cannot act on, and a
+            # refusal here has to read exactly as the build's would.
+            blob = VelaAdapter().compile(
+                source, accel_config=accel_config, out_dir=Path(tmp),
+                vela_memory_mode=target.vela_memory_mode,
+                vela_system_config=target.vela_system_config,
+                vela_vendor_system_config=target.vela_vendor_system_config,
+                vela_vendor_config_filename=target.vela_vendor_config_filename,
+                soc_declares_dram=target.soc_declares_dram)
     except VelaFootprintRefused as err:
         return _footprint_refused_note(report, err)
     except Exception as err:  # noqa: BLE001 -- a failed exact compile degrades, it never crashes
@@ -399,9 +404,10 @@ def _headline_ethos_u_target(sku: str, metadata_root: Path) -> TargetSpec | None
     (drpai/deepx_dxm1 SoMs) or no target matches it.
 
     Returns the whole `TargetSpec` rather than just its `accel_config` so the
-    caller can hand `silicon_ref` to the adapter alongside it (tan-cli#789
-    review (g)): both come off the SAME resolved target, so `--exact` can
-    never describe one target's accelerator with another's vendor."""
+    caller can hand the adapter this part's memory profile and its diagnostic
+    facts alongside it (tan-cli#789 review (g)): all of them come off the SAME
+    resolved target, so `--exact` can never describe one target's accelerator
+    with another's memory model or another part's vendor `.ini`."""
     variant = resolve_ethos_u_variant(sku, metadata_root=metadata_root)
     if variant is None:
         return None

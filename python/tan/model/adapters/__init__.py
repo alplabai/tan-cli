@@ -62,9 +62,12 @@ class CompilerAdapter(ABC):
 
     @abstractmethod
     def compile(self, source: Path, *, accel_config: str, out_dir: Path,
-                opts: dict | None = None, silicon_ref: str | None = None,
+                opts: dict | None = None,
                 vela_memory_mode: str | None = None,
-                vela_system_config: str | None = None) -> Blob:
+                vela_system_config: str | None = None,
+                vela_vendor_system_config: str | None = None,
+                vela_vendor_config_filename: str | None = None,
+                soc_declares_dram: bool | None = None) -> Blob:
         """Compile @source for @accel_config; return the Blob.
 
         @opts is the per-model compile config for this backend
@@ -72,27 +75,34 @@ class CompilerAdapter(ABC):
         resolved to absolute paths by the caller; None when the backend needs
         no per-model config (cpu, ethos_u).
 
-        @silicon_ref is the `<vendor>:<family>:<part>` ref of the silicon this
-        target runs on -- `TargetSpec.silicon_ref`, straight out of the SoM
-        preset's `silicon:` (`alif:ensemble:e8`, `nxp:imx9:imx93`, ...) -- for
-        an adapter whose DIAGNOSTICS are vendor-specific even though its
-        compile is not. Today only `VelaAdapter` reads it, to name Alif's
-        proprietary `ensemble_vela.ini` in a footprint refusal on an Alif
-        Ensemble part and NOT on the NXP i.MX 93 (tan-cli#789 review (g)).
-        `None` means the caller could not resolve one; an adapter must then
-        stay vendor-neutral, never guess a vendor from an accelerator config
-        or a compiler-reported profile name. It is NOT a compile input: no
-        adapter may change the artifact it emits based on this.
+        @vela_memory_mode / @vela_system_config / @vela_vendor_system_config
+        ARE compile inputs, and the only backend-specific ones on this
+        interface: `TargetSpec.vela_*`, the silicon's own vela invocation
+        profile out of the SoC spec's `npu_toolchain.vela` (alp-sdk #1470).
+        Only `VelaAdapter` acts on them -- every other adapter accepts and
+        ignores them, exactly as `cpu` and `ethos_u` accept and ignore `opts`
+        -- and they are named for vela on purpose, so a future DRP-AI or DEEPX
+        profile cannot be mistaken for being carried by them. `None` means the
+        caller resolved no profile, and an adapter must then invoke its
+        compiler exactly as it did before the profile existed rather than
+        substituting a default of its own: a guessed memory model compiles a
+        command stream for hardware the module does not have. The vendor
+        System_Config is a SEPARATE field from the built-in one because it is
+        legal only alongside a `--config` the customer supplies through
+        `ALP_VELA_CONFIG`; an adapter handed both in one field could put a
+        section name on a command line vela cannot resolve, which is rc=1.
 
-        @vela_memory_mode / @vela_system_config ARE compile inputs, and the
-        only backend-specific pair on this interface: `TargetSpec.vela_*`, the
-        silicon's own vela invocation profile out of the SoC spec's
-        `npu_toolchain.vela` (alp-sdk #1470). Only `VelaAdapter` acts on them
-        -- every other adapter accepts and ignores them, exactly as `cpu` and
-        `ethos_u` accept and ignore `opts` -- and they are named for vela on
-        purpose, so a future DRP-AI or DEEPX profile cannot be mistaken for
-        being carried by them. `None` means the caller resolved no profile,
-        and an adapter must then invoke its compiler exactly as it did before
-        the profile existed rather than substituting a default of its own: a
-        guessed memory model compiles a command stream for hardware the module
-        does not have."""
+        @vela_vendor_config_filename / @soc_declares_dram are the opposite:
+        DIAGNOSTIC facts about this part, out of the same SoC spec
+        (`npu_toolchain.vela.vendor_config_filename` and
+        `external_memory_interfaces[]`), for an adapter whose ERROR TEXT is
+        part-specific even though its compile is not. Today only `VelaAdapter`
+        reads them -- to name the vendor `.ini` a part actually declares, and
+        to say that a DRAM placement describes memory this part has no
+        interface to. They replaced a `silicon_ref` vendor-prefix match that
+        stood in for both questions (tan-cli#789 review (g)); metadata answers
+        them per part, so no adapter has to know who builds what. `None` means
+        the caller resolved no such fact, and an adapter must then say nothing
+        about it rather than infer one from an accelerator config or a
+        compiler-reported profile name. Neither is a compile input: no adapter
+        may change the artifact it emits based on these."""

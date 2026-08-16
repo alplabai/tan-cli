@@ -58,10 +58,10 @@ else:
     _META = None
 
 
-def _meta_without_a_vela_profile(tmp_path: Path, sku: str) -> Path:
-    """A copy of the BOUND metadata/ tree with `npu_toolchain` deleted from
-    every SoC spec -- i.e. the real presets and the real SoC JSON, minus the
-    one block under test.
+def _meta_without_a_vela_memory_mode(tmp_path: Path, sku: str) -> Path:
+    """A copy of the BOUND metadata/ tree with `npu_toolchain.vela.memory_mode`
+    deleted from every SoC spec -- i.e. the real presets and the real SoC JSON,
+    minus the one key under test.
 
     Why this exists. Until alp-sdk #1470 every `ethos_u` compile went out
     flagless, vela fell back to its DRAM-backed built-in profile, and the
@@ -74,15 +74,22 @@ def _meta_without_a_vela_profile(tmp_path: Path, sku: str) -> Path:
     `test_the_soms_memory_mode_makes_the_refused_target_ship_at_all`).
 
     That is the fix working, and it is NOT a licence to delete the guards:
-    `tan.model.targets._vela_profile` returns `(None, None)` for any SoC spec
-    that carries no block, which is exactly what a part whose profile is still
-    TBD gets (the plan's own rule -- an unsourced profile is never invented,
-    it is simply not passed). Stripping the block reproduces that condition
-    against the real presets, so these keep running the REAL vela process
-    through the REAL `build_model` and keep proving what they were written to
-    prove. Only the absence of `npu_toolchain` is synthetic; the SoM preset,
-    the `silicon:` ref, the NPU list and the accel configs are all the bound
-    tree's own.
+    `tan.model.targets._vela_profile` resolves no memory mode for any SoC spec
+    that declares none, which is exactly what a part whose profile is still TBD
+    gets (the plan's own rule -- an unsourced profile is never invented, it is
+    simply not passed). Deleting THAT ONE KEY reproduces that condition against
+    the real presets, so these keep running the REAL vela process through the
+    REAL `build_model` and keep proving what they were written to prove.
+
+    Only `memory_mode` is dropped, not the whole `npu_toolchain` block, and the
+    difference is load-bearing: the block also carries
+    `vendor_config_filename`, which is where the refusal's vendor clause now
+    comes from (alp-sdk #1470 Task 4), and `external_memory_interfaces` -- the
+    source of its no-DRAM evidence -- is untouched here entirely. Stripping the
+    block wholesale would silently delete both clauses from the very messages
+    these tests read. A part with a declared vendor file and a TBD memory mode
+    is also the realistic shape: which `.ini` a vendor ships is known long
+    before anyone measures the part's memory model.
 
     The whole `socs/` tree is copied, not just the host SoC: `resolve_targets`
     globs it for on-module discrete accelerators."""
@@ -93,7 +100,9 @@ def _meta_without_a_vela_profile(tmp_path: Path, sku: str) -> Path:
         dst = root / "socs" / src_json.relative_to(_META / "socs")
         dst.parent.mkdir(parents=True, exist_ok=True)
         soc = json.loads(src_json.read_text(encoding="utf-8"))
-        soc.pop("npu_toolchain", None)
+        vela = soc.get("npu_toolchain", {}).get("vela")
+        if isinstance(vela, dict):
+            vela.pop("memory_mode", None)
         dst.write_text(json.dumps(soc), encoding="utf-8")
     return root
 
@@ -234,8 +243,10 @@ def test_build_model_skips_backend_missing_compile_config(tmp_path):
         requires_compile_opts = True
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                    vela_memory_mode=None, vela_system_config=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None,
+                    vela_memory_mode=None, vela_system_config=None,
+                    vela_vendor_system_config=None,
+                    vela_vendor_config_filename=None, soc_declares_dram=None):
             raise AssertionError("must not compile without opts")
     src = tmp_path / "m.tflite"; src.write_bytes(b"TFL3-X")
     out = build_model(sku="E1M-V2M101", name="demo", source=src, out_dir=tmp_path,
@@ -253,8 +264,10 @@ def test_build_model_passes_compile_opts_to_adapter(tmp_path):
         requires_compile_opts = True
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                    vela_memory_mode=None, vela_system_config=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None,
+                    vela_memory_mode=None, vela_system_config=None,
+                    vela_vendor_system_config=None,
+                    vela_vendor_config_filename=None, soc_declares_dram=None):
             seen["opts"] = opts
             return Blob(format="drpai_dir", payload=b"RT", arena_bytes=0)
     src = tmp_path / "m.tflite"; src.write_bytes(b"TFL3-X")
@@ -322,7 +335,7 @@ def test_a_refused_target_does_not_take_the_rest_of_the_package_with_it(tmp_path
     must be legibly ABSENT with its reason -- never silently present carrying
     the zero footprint the refusal exists to stop.
 
-    Driven through `_meta_without_a_vela_profile` since alp-sdk #1470: the
+    Driven through `_meta_without_a_vela_memory_mode` since alp-sdk #1470: the
     real `E1M-AEN801` now resolves `--memory-mode Sram_Only` and its u85
     target ships (`sram_memory_used = 0.03125`), so a SoC spec with no
     `npu_toolchain.vela` is where a real vela process still produces the zero
@@ -332,7 +345,7 @@ def test_a_refused_target_does_not_take_the_rest_of_the_package_with_it(tmp_path
     shutil.copy(_TINY_INT8, src)
     out = build_model(sku="E1M-AEN801", name="tiny", source=src, out_dir=tmp_path,
                       # default registry: real vela + cpu
-                      metadata_root=_meta_without_a_vela_profile(tmp_path, "E1M-AEN801"))
+                      metadata_root=_meta_without_a_vela_memory_mode(tmp_path, "E1M-AEN801"))
     mft, blobs = read_package(out.read_bytes())
 
     # The siblings survived, with real footprints.
@@ -363,11 +376,45 @@ def test_a_refused_target_does_not_take_the_rest_of_the_package_with_it(tmp_path
     assert refused[0].status == "skipped"
     assert "reported 0 KiB SRAM" in refused[0].reason
     assert "Ethos_U85_SYS_DRAM_Mid" in refused[0].reason
-    # ... and what to do about it. E1M-AEN801's preset is `silicon:
-    # alif:ensemble:e8`, so this SKU is exactly where the proprietary-profile
-    # pointer belongs (tan-cli#789 review (g); the NXP counterpart is pinned
-    # by `test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file`).
-    assert "ensemble_vela.ini" in refused[0].reason
+    # ... and the EVIDENCE, end to end through a real vela process:
+    # `metadata/socs/alif/ensemble/e8.json`'s `external_memory_interfaces`
+    # lists only `HexSPI` and `SD/eMMC`, so the DRAM the run's working set
+    # landed in is memory this part has no interface to (alp-sdk #1470 Task 4).
+    # Nothing here is synthetic -- the interface list is the bound tree's own,
+    # and the placement is vela's. Deliberately NOT `@needs_sdk_vela_profile`:
+    # `external_memory_interfaces` long predates `npu_toolchain.vela` and is
+    # present at the pinned SDK commit too, so this assertion RUNS there.
+    assert "(no DRAM interface on this SoC)" in refused[0].reason
+    # The vendor-file pointer is the half that DOES need the newer metadata, so
+    # it is asserted next door under that capability mark rather than here.
+
+
+@_needs_vela
+@needs_sdk_vela_profile
+def test_a_real_refusal_names_the_vendor_file_the_bound_metadata_declares(tmp_path):
+    """The other half of the refusal above, split out because it is the one
+    assertion that needs `npu_toolchain.vela` in the bound tree.
+
+    `metadata/socs/alif/ensemble/e8.json` declares `vendor_config_filename:
+    ensemble_vela.ini`, and that -- not a vendor prefix on the SoM preset's
+    `silicon:` ref, and not a literal in tan -- is what puts the pointer in a
+    real `tan model build`'s coverage reason (tan-cli#789 review (g),
+    re-sourced). The counterpart for a part that declares none is pinned by
+    `test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file`.
+
+    Runs the same real vela build as the test above rather than sharing it: a
+    single test carrying both assertions would have to skip WHOLESALE at the
+    pinned SDK commit, taking the per-target survival guard with it."""
+    src = tmp_path / _TINY_INT8.name
+    shutil.copy(_TINY_INT8, src)
+    out = build_model(sku="E1M-AEN801", name="tiny", source=src, out_dir=tmp_path,
+                      metadata_root=_meta_without_a_vela_memory_mode(tmp_path, "E1M-AEN801"))
+    mft, _ = read_package(out.read_bytes())
+    refused = [c for c in mft.coverage
+               if c.backend == "ethos_u" and c.accel_config == "ethos-u85-256"]
+    assert len(refused) == 1
+    assert ("its System_Config lives in the proprietary ensemble_vela.ini "
+            "alp-sdk does not redistribute") in refused[0].reason
 
 
 @_needs_vela
@@ -387,7 +434,7 @@ def test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file(tmp_path):
     The `cpu` target still ships, which is the other half of the per-target
     contract: one refused accelerator target must never empty the package.
 
-    Driven through `_meta_without_a_vela_profile` since alp-sdk #1470 -- the
+    Driven through `_meta_without_a_vela_memory_mode` since alp-sdk #1470 -- the
     real `E1M-NX9101` now resolves `--memory-mode Shared_Sram` from
     `imx93.json` and its `ethos-u65-256` target ships. The SoM preset, the
     `silicon: nxp:imx9:imx93` ref the vendor clause is gated on, and the
@@ -397,7 +444,7 @@ def test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file(tmp_path):
     shutil.copy(_TINY_INT8, src)
     out = build_model(sku="E1M-NX9101", name="tiny", source=src, out_dir=tmp_path,
                       # default registry: real vela + cpu
-                      metadata_root=_meta_without_a_vela_profile(tmp_path, "E1M-NX9101"))
+                      metadata_root=_meta_without_a_vela_memory_mode(tmp_path, "E1M-NX9101"))
     mft, _ = read_package(out.read_bytes())
     assert [t.backend for t in mft.targets] == ["cpu"]
 
@@ -425,13 +472,13 @@ def test_every_target_refusing_is_an_error_not_an_empty_package(tmp_path):
     this fixture when no memory mode is resolvable) so restricting the registry
     to vela alone leaves nothing at all, and the refusal's own text must
     survive into the failure so the reader learns WHY rather than just "no blob
-    compiled". `_meta_without_a_vela_profile` for the same reason as its two
+    compiled". `_meta_without_a_vela_memory_mode` for the same reason as its two
     siblings above."""
     src = tmp_path / _TINY_INT8.name
     shutil.copy(_TINY_INT8, src)
     with pytest.raises(ValueError) as exc:
         build_model(sku="E1M-NX9101", name="tiny", source=src, out_dir=tmp_path,
-                    metadata_root=_meta_without_a_vela_profile(tmp_path, "E1M-NX9101"),
+                    metadata_root=_meta_without_a_vela_memory_mode(tmp_path, "E1M-NX9101"),
                     adapters=[VelaAdapter()])
     msg = str(exc.value)
     assert "no blob compiled" in msg
@@ -577,13 +624,17 @@ def test_only_the_footprint_refusal_is_absorbed_a_real_compile_failure_still_fai
         backend = "ethos_u"
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                    vela_memory_mode=None, vela_system_config=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None,
+                    vela_memory_mode=None, vela_system_config=None,
+                    vela_vendor_system_config=None,
+                    vela_vendor_config_filename=None, soc_declares_dram=None):
             raise VelaFootprintRefused(f"refused {accel_config}")
 
     class _Crashes(_Refuses):
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                    vela_memory_mode=None, vela_system_config=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None,
+                    vela_memory_mode=None, vela_system_config=None,
+                    vela_vendor_system_config=None,
+                    vela_vendor_config_filename=None, soc_declares_dram=None):
             raise RuntimeError(f"vela failed for {accel_config}: segmentation fault")
 
     src = tmp_path / "m.tflite"
@@ -610,8 +661,10 @@ def test_an_unknown_accelerator_placement_is_not_treated_as_zero(tmp_path):
         backend = "drpai"
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                    vela_memory_mode=None, vela_system_config=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None,
+                    vela_memory_mode=None, vela_system_config=None,
+                    vela_vendor_system_config=None,
+                    vela_vendor_config_filename=None, soc_declares_dram=None):
             return Blob(format="drpai_dir", payload=b"RT", arena_bytes=4096,
                         req_sram_kib=4)             # npu_op_count stays None
 

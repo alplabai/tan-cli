@@ -20,6 +20,12 @@ SoM/SoC file: `doctor` must be safe to run on a completely broken host, and
 "safe" here specifically means it cannot invoke a compiler as a side effect
 of asking whether one is installed.
 
+`data.optional[]` (`optional_row`) is the one row shape that is NOT a
+"can tan compile for this backend" verdict: an unavailable OPTIONAL
+prerequisite -- today the vendor vela `.ini` a licensed customer points
+`ALP_VELA_CONFIG` at -- is not a fault and must not read as one. It is kept out
+of `backends[]` for that reason; see `optional_row`.
+
 `registry_backends` still reads the *shape* of `tan.model.build._ADAPTERS`
 (which backends the registry actually declares, in what order) rather than
 hard-coding the four-entry list a snapshot of that registry happens to be
@@ -144,6 +150,37 @@ def backend_row(
         available=available,
         version=version if available else None,
         reason=None if available else fallback_reason,
+    )
+
+
+def optional_row(
+    backend: str, *, tool: str, available: bool, reason: str | None
+) -> BackendRow:
+    """One OPTIONAL prerequisite's row -- the same five keys as `backend_row`,
+    reported under `data.optional[]` rather than `data.backends[]`.
+
+    A SEPARATE LIST, not a fifth backend row, because the two answer different
+    questions and a consumer keyed on `backends[]` reads one row per backend.
+    `available: false` there means "tan cannot compile for this backend at
+    all"; here it means "this backend works, and a vendor-tuned enhancement is
+    not installed". Rendering the second as the first would tell an unlicensed
+    customer their toolchain is broken when it is complete and correct: without
+    a vendor `.ini` vela uses Arm's own built-in system config, which is what
+    the arena/SRAM figures tan reports already describe.
+
+    `version` is always None: this is a data file, not a toolchain, and there
+    is no version of it to probe without reading a customer's proprietary file.
+    `reason` is dropped when available, exactly as `backend_row` drops it --
+    and it is REQUIRED from the caller when it is not, because
+    `_UNAVAILABLE_REASONS[backend]` answers the other question (`ethos_u`'s
+    entry is about `vela` not being on PATH) and must never fall through to
+    this row."""
+    return BackendRow(
+        backend=backend,
+        tool=tool,
+        available=available,
+        version=None,
+        reason=None if available else reason,
     )
 
 

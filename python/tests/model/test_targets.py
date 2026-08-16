@@ -61,6 +61,12 @@ def test_an_alif_ethos_u_target_carries_the_builtin_memory_mode_but_not_the_vend
     # Ethos_U85_SRAM_Only lives only in the proprietary ensemble_vela.ini;
     # passing it without --config is vela rc=1 "Section ... not found".
     assert u85[0].vela_system_config is None
+    # ... and the file that WOULD define it is named, because e8.json declares
+    # it -- that is what a footprint refusal points a reader at.
+    assert u85[0].vela_vendor_config_filename == "ensemble_vela.ini"
+    # No Alif spec names a System_Config at all (an Alif one is per core
+    # subsystem, not per die), so there is nothing for `--config` to complete.
+    assert u85[0].vela_vendor_system_config is None
 
 
 @needs_sdk_vela_profile
@@ -69,6 +75,32 @@ def test_an_nxp_ethos_u_target_carries_its_own_memory_mode():
     u65 = [s for s in specs if s.accel_config == "ethos-u65-256"]
     assert u65, "E1M-NX9101 must resolve an ethos-u65-256 target"
     assert u65[0].vela_memory_mode == "Shared_Sram"
+    # imx93.json declares `system_config_requires_vendor_config: false` and no
+    # filename -- so a refusal on this part names no vendor file at all.
+    assert u65[0].vela_vendor_config_filename is None
+
+
+def test_the_real_soc_specs_answer_the_dram_question_per_part():
+    """The EVIDENCE behind the zero-SRAM refusal, read off the committed specs
+    rather than asserted in prose (alp-sdk #1470 Task 4).
+
+    `metadata/socs/alif/ensemble/e8.json`'s `external_memory_interfaces` lists
+    exactly `HexSPI` and `SD/eMMC`; `nxp/imx9/imx93.json` lists `LPDDR4/4X`,
+    `FlexSPI` and `SD/eMMC`; `renesas/rzv2n/n44.json` lists `LPDDR4/4X`. So
+    "vela put the working set in DRAM and this part has no DRAM interface" is
+    true for the Alif parts and FALSE for the other two -- which is exactly why
+    it is resolved per part instead of stated once in a comment.
+
+    Not `@needs_sdk_vela_profile`-gated: `external_memory_interfaces` long
+    predates `npu_toolchain.vela`, so any bound checkout can answer this."""
+    for sku in ("E1M-AEN801", "E1M-AEN701"):
+        for spec in resolve_targets(sku, metadata_root=_META):
+            if spec.silicon_ref != "*":
+                assert spec.soc_declares_dram is False, f"{sku}/{spec.silicon_ref}"
+    for sku in ("E1M-NX9101", "E1M-V2N101"):
+        for spec in resolve_targets(sku, metadata_root=_META):
+            if spec.silicon_ref != "*":
+                assert spec.soc_declares_dram is True, f"{sku}/{spec.silicon_ref}"
 
 
 def test_a_non_vela_target_never_carries_a_vela_profile():
@@ -76,13 +108,16 @@ def test_a_non_vela_target_never_carries_a_vela_profile():
     invocation ever sees. `E1M-V2M101` resolves a DRP-AI target and a discrete
     DEEPX one alongside `cpu`; a memory mode on any of those would be handed to
     an adapter that has no such flag, and would read as silicon fact about a
-    compiler that never ran."""
+    compiler that never ran. Same for the vendor half of the profile, whose
+    only legal use is a vela `--config`."""
     for sku in ("E1M-V2M101", "E1M-AEN801"):
         for spec in resolve_targets(sku, metadata_root=_META):
             if spec.backend == "ethos_u":
                 continue
             assert spec.vela_memory_mode is None, f"{sku}/{spec.backend}"
             assert spec.vela_system_config is None, f"{sku}/{spec.backend}"
+            assert spec.vela_vendor_system_config is None, f"{sku}/{spec.backend}"
+            assert spec.vela_vendor_config_filename is None, f"{sku}/{spec.backend}"
 
 
 def test_resolve_targets_for_v2n101_yields_drpai_plus_cpu():

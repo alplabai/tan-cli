@@ -74,6 +74,15 @@ than the `model.sdk-root-unresolved` ERROR `build` uses for the same
 situation -- the backend rows below it are unaffected by a missing SDK either
 way, since none of them reads `metadata/**`.
 
+`doctor` also reports OPTIONAL prerequisites, in `data.optional[]` and in the
+same five-key row shape -- today one: the vendor vela config `.ini` a licensed
+customer names in `ALP_VELA_CONFIG` (`_vela_vendor_config_status`). Kept out of
+`backends[]` deliberately: `available: false` there means tan cannot compile
+for that backend, while an absent vendor `.ini` means the backend works and an
+enhancement is not installed. Without it vela uses Arm's own built-in system
+config, which is what the arena/SRAM figures tan reports already describe, so
+neither the JSON nor the text line may read as a fault.
+
 **`check` is the static NPU-eligibility screen ADR-0028's amendment adds
 (tan-cli#782).** `tan.model.check`/`tan.model.analyze` do the actual work
 (resolving @sku's real NPU backends, walking a model's ops, scoring them);
@@ -102,13 +111,13 @@ from tan.commands.build_output import (
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.model_check import backend_report_as_dict, render_check_text
-from tan.core.model_doctor import backend_row, registry_backends
+from tan.core.model_doctor import backend_row, optional_row, registry_backends
 from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.model.adapters.drpai import _compiler_version as _drpai_compiler_version
 from tan.model.adapters.drpai import _tvm_home as _drpai_tvm_home
-from tan.model.adapters.ethos_u import _vela_version
+from tan.model.adapters.ethos_u import _VELA_CONFIG_ENV, _vela_version, _vendor_config_path
 from tan.model.build import _ADAPTERS, build_model
 from tan.model.check import check_model_backends, resolve_check_backends
 from tan.model.package import read_manifest_file
@@ -638,6 +647,40 @@ def _drpai_status() -> tuple[bool, str | None]:
     return True, None
 
 
+def _vela_vendor_config_status() -> tuple[bool, str | None]:
+    """The OPTIONAL vendor vela `.ini` row's verdict -- is `ALP_VELA_CONFIG`
+    pointing at a file `VelaAdapter.compile()` could pass to `vela --config`?
+
+    Read-only and non-spawning like every other probe here: `os.environ.get` +
+    `Path.is_file`, through the adapter's own `_vendor_config_path()` so doctor
+    and the compile answer the same question from one implementation. It reads
+    no metadata: WHICH vendor file a given part wants is a per-SoC fact
+    (`npu_toolchain.vela.vendor_config_filename`), and doctor reports
+    host-toolchain facts that hold whatever project it was run from.
+
+    Returns `(available, reason)`. The reason MUST make it plain that absence
+    is not a fault: without this file vela uses Arm's own built-in system
+    config, which is exactly what tan's reported arena/SRAM figures describe --
+    the vendor file buys a vendor-tuned bandwidth/latency model, not
+    correctness. A customer without a license is complete, not broken.
+    """
+    raw = os.environ.get(_VELA_CONFIG_ENV)
+    if not raw:
+        return False, (
+            f"OPTIONAL, not a fault: {_VELA_CONFIG_ENV} is not set, so vela uses Arm's "
+            "built-in system config -- the arena/SRAM figures tan reports describe that "
+            "model and are correct. A licensed customer may set it to their vendor vela "
+            "config .ini (e.g. Alif's ensemble_vela.ini) for the vendor-tuned profile"
+        )
+    if _vendor_config_path() is None:
+        return False, (
+            f"OPTIONAL, not a fault: {_VELA_CONFIG_ENV}={raw} does not name a readable "
+            "file, so it is ignored and vela uses Arm's built-in system config -- point "
+            "it at the vendor vela config .ini or unset it"
+        )
+    return True, None
+
+
 def _probe_backend(backend: str) -> tuple[bool, str | None]:
     """`(available, reason override)` for one backend row -- `deepx_dxm1` and
     `drpai` each get a NARROWER probe than the adapter's own `is_available()`
@@ -699,9 +742,22 @@ def _run_doctor(
         version = _backend_version(backend, available=available)
         rows.append(backend_row(backend, available=available, version=version, reason=reason))
 
+    # OPTIONAL prerequisites, reported separately from `backends[]` so an
+    # absent one cannot read as a broken backend (`model_doctor.optional_row`).
+    vendor_config_available, vendor_config_reason = _vela_vendor_config_status()
+    optional_rows = [
+        optional_row("ethos_u", tool=_VELA_CONFIG_ENV,
+                     available=vendor_config_available, reason=vendor_config_reason),
+    ]
+
     data: dict[str, Any] = {
         "schemaVersion": DOCTOR_DATA_SCHEMA_VERSION,
         "backends": [row.as_dict() for row in rows],
+        # Additive: `schemaVersion` stays "1". A consumer reading `backends[]`
+        # sees the same list it always did, and one that does not know this key
+        # ignores it -- which is the correct outcome for an enhancement nobody
+        # is required to have.
+        "optional": [row.as_dict() for row in optional_rows],
     }
     return reported_project, sdk_info, data, issues, ExitCode.SUCCESS
 
@@ -713,7 +769,7 @@ def _empty_data(subcommand: str | None) -> dict[str, Any]:
     `data.built`/`data.models` off a refusal envelope gets the same shape it
     would from a run that resolved nothing."""
     if subcommand == "doctor":
-        return {"schemaVersion": DOCTOR_DATA_SCHEMA_VERSION, "backends": []}
+        return {"schemaVersion": DOCTOR_DATA_SCHEMA_VERSION, "backends": [], "optional": []}
     if subcommand == "check":
         return {"schemaVersion": CHECK_DATA_SCHEMA_VERSION, "sku": None, "exact": False, "models": []}
     return {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []}
@@ -802,6 +858,23 @@ def model(
                         suffix = f" -- {row['reason']}" if row["reason"] else ""
                         print(
                             f"{row['backend']}: unavailable (tool={tool}){suffix}",
+                            file=sys.stderr,
+                        )
+                # OPTIONAL prerequisites, after the backend rows and never
+                # spelled `unavailable`: the word this branch leads with is
+                # what stops a licensed-only enhancement reading as a fault
+                # in a scrollback (`tan.core.model_doctor.optional_row`).
+                for row in data.get("optional", []):
+                    tool = row["tool"] or "-"
+                    if row["available"]:
+                        print(
+                            f"{row['backend']}: optional (tool={tool}) present",
+                            file=sys.stderr,
+                        )
+                    else:
+                        suffix = f" -- {row['reason']}" if row["reason"] else ""
+                        print(
+                            f"{row['backend']}: optional (tool={tool}) not in use{suffix}",
                             file=sys.stderr,
                         )
             elif "models" in data:

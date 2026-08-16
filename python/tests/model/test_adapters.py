@@ -9,7 +9,8 @@ from tan.model.adapters.cpu import CpuAdapter
 from tan.model.adapters.drpai import DrpaiAdapter
 from tan.model.adapters.deepx import DeepxAdapter
 from tan.model.adapters.ethos_u import (VelaAdapter, VelaFootprintRefused, _footprint,
-                                        _parse_vela_summary)
+                                        _parse_vela_summary,
+                                        _refuse_zero_sram_footprint)
 from tan.model.adapters.executorch import ExecutorchAdapter
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -322,10 +323,11 @@ def test_the_refusal_prescribes_nothing_tan_cannot_actually_do(tmp_path, monkeyp
     `deepx_dxm1`/`drpai`, so there is no `ethos_u` key to route a profile
     through. Every clause must now be true and point at something real.
 
-    `silicon_ref="alif:ensemble:e8"` is E1M-AEN801's own `silicon:` value
-    (metadata/e1m_modules/E1M-AEN801.yaml) -- the `ensemble_vela.ini` pointer
-    is asserted here BECAUSE this is an Alif Ensemble part, and the sibling
-    test below asserts its absence on the NXP one (tan-cli#789 review (g))."""
+    `vela_vendor_config_filename="ensemble_vela.ini"` is what E1M-AEN801's own
+    SoC spec declares (metadata/socs/alif/ensemble/e8.json's
+    `npu_toolchain.vela`) -- the pointer is asserted here BECAUSE this part's
+    metadata names that file, and the sibling test below asserts its absence
+    for a part whose metadata names none (tan-cli#789 review (g))."""
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
@@ -347,7 +349,7 @@ def test_the_refusal_prescribes_nothing_tan_cannot_actually_do(tmp_path, monkeyp
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     with pytest.raises(VelaFootprintRefused) as exc:
         VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path,
-                              silicon_ref="alif:ensemble:e8")
+                              vela_vendor_config_filename="ensemble_vela.ini")
     msg = str(exc.value)
     assert "--system-config" not in msg and "--memory-mode" not in msg
     # ... and instead, the three things that ARE true:
@@ -400,7 +402,7 @@ def test_the_refusal_names_the_profile_the_run_reported_not_a_hardcoded_alif_one
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     with pytest.raises(VelaFootprintRefused) as exc:
         VelaAdapter().compile(src, accel_config="ethos-u65-256", out_dir=tmp_path,
-                              silicon_ref="nxp:imx9:imx93")
+                              soc_declares_dram=True)
     msg = str(exc.value)
     assert "ethos-u65-256" in msg
     assert "Ethos_U65_Client_Server" in msg
@@ -415,8 +417,12 @@ def test_the_refusal_names_the_profile_the_run_reported_not_a_hardcoded_alif_one
     assert "\n" not in msg
 
 
-def _refuse_on(accel_config, profile, silicon_ref, tmp_path, monkeypatch):
-    """One defaulted-profile refusal for @accel_config/@profile on @silicon_ref.
+def _refuse_on(accel_config, profile, tmp_path, monkeypatch, *,
+               vendor_ini=None, declares_dram=None):
+    """One defaulted-profile refusal for @accel_config/@profile, carrying the
+    two DIAGNOSTIC facts a caller resolves from this part's SoC spec:
+    @vendor_ini is `npu_toolchain.vela.vendor_config_filename` and
+    @declares_dram is the `external_memory_interfaces[]` verdict.
 
     The stdout is the real vela 5.1.0 shape (both "No ... specified" warnings
     plus the network-summary block); the summary CSV puts the whole working
@@ -442,18 +448,17 @@ def _refuse_on(accel_config, profile, silicon_ref, tmp_path, monkeypatch):
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     with pytest.raises(VelaFootprintRefused) as exc:
         VelaAdapter().compile(src, accel_config=accel_config, out_dir=tmp_path,
-                              silicon_ref=silicon_ref)
+                              vela_vendor_config_filename=vendor_ini,
+                              soc_declares_dram=declares_dram)
     return str(exc.value)
 
 
-@pytest.mark.parametrize("silicon_ref", [
-    pytest.param("nxp:imx9:imx93", id="E1M-NX9101-nxp-imx93"),   # the part this is about
-    pytest.param(None, id="caller-could-not-resolve-a-silicon-ref"),
-])
-def test_a_non_alif_refusal_never_names_an_alif_file(tmp_path, monkeypatch, silicon_ref):
-    """tan-cli#789 review (g): the REMEDY was Alif-specific for every part.
+def test_a_refusal_never_names_a_vendor_file_for_a_part_that_declares_none(
+        tmp_path, monkeypatch):
+    """tan-cli#789 review (g), re-sourced: the REMEDY was Alif-specific for
+    every part, and then Alif-specific by a VENDOR-PREFIX MATCH.
 
-    `_profile_clause` was fixed per-run in the previous round (MAJOR 3), but
+    `_profile_clause` was fixed per-run in an earlier round (MAJOR 3), but
     `_refusal_remedy` still returned, unconditionally, "for Alif Ensemble
     parts it lives in the proprietary ensemble_vela.ini alp-sdk does not
     redistribute" -- so an `ethos-u65-256` refusal on `E1M-NX9101` correctly
@@ -462,18 +467,29 @@ def test_a_non_alif_refusal_never_names_an_alif_file(tmp_path, monkeypatch, sili
     invocation involves no proprietary `.ini` at all (`vendors/nxp-imx93/
     README.md`), so that pointer is not merely unhelpful there, it is wrong.
 
-    `None` is parametrized alongside it because "I could not resolve the
-    vendor" must behave like "not Alif", never like "probably Alif": the
-    fallback is silence about vendors, not a guess.
+    The first fix gated it on `silicon_ref.startswith("alif:ensemble:")`, which
+    was correct for the two parts anyone had looked at and a standing claim
+    about every part nobody had. The gate is now the part's OWN declaration
+    (`npu_toolchain.vela.vendor_config_filename`), so this one case covers what
+    used to need two: `E1M-NX9101`, whose spec declares no such file, and "the
+    caller resolved no spec at all" are the same input -- `None` -- and the
+    answer to both is silence about vendor files, never a guess.
+
+    `declares_dram=True` is the i.MX 93's own answer (its
+    `external_memory_interfaces` lists `LPDDR4/4X`), which is why the no-DRAM
+    marker must be absent here too: the placement vela chose is a bad fit for
+    the arena, not an impossible one on that part.
 
     What must SURVIVE for every part is the pair of clauses that are true for
     all of them -- no profile was resolved for this part, so vela chose the
     placement, and the rest of the SKU still builds."""
-    msg = _refuse_on("ethos-u65-256", "Ethos_U65_Client_Server", silicon_ref,
-                     tmp_path, monkeypatch)
+    msg = _refuse_on("ethos-u65-256", "Ethos_U65_Client_Server", tmp_path, monkeypatch,
+                     vendor_ini=None, declares_dram=True)
     assert "ensemble_vela.ini" not in msg                    # THE regression (g)
+    assert ".ini" not in msg                                 # ... nor any other vendor file
     assert "Alif" not in msg and "alif" not in msg
     assert "does not redistribute" not in msg
+    assert "no DRAM interface" not in msg                    # this part HAS DRAM
     # ... while the part-independent half of the remedy is untouched:
     assert "No module vela profile was resolved for this part, so vela chose its own." in msg
     assert "`tan model build` skips this target and still builds the SKU's others." in msg
@@ -481,52 +497,116 @@ def test_a_non_alif_refusal_never_names_an_alif_file(tmp_path, monkeypatch, sili
     assert "\n" not in msg
 
 
-def test_an_alif_ensemble_refusal_still_names_the_proprietary_profile_file(
-        tmp_path, monkeypatch):
+@pytest.mark.parametrize("vendor_ini", [
+    # What every Alif Ensemble SoC spec declares today (e3..e8).
+    pytest.param("ensemble_vela.ini", id="the-filename-alp-sdk-declares-today"),
+    # A filename no repo contains, precisely so this cannot pass by a literal
+    # surviving somewhere in the template: the clause has to be BUILT from what
+    # the part declared.
+    pytest.param("some_other_vendor_vela.ini", id="a-filename-that-exists-nowhere"),
+])
+def test_a_refusal_names_the_vendor_file_the_parts_metadata_declares(
+        tmp_path, monkeypatch, vendor_ini):
     """The other side of (g): gating the clause must not delete it.
 
-    Every Alif Ensemble SKU's preset carries `silicon: alif:ensemble:<part>`
-    (E1M-AEN401 `e4`, E1M-AEN601 `e6`, E1M-AEN801 `e8`), and for those the
-    pointer is the only thing that explains WHY tan cannot fix the footprint
-    itself. The match is on that ref prefix -- authored SoM metadata -- not on
-    the accel config or on vela's profile name, both of which describe an Arm
-    IP block and say nothing about who built the part.
+    Where a part's SoC spec declares a `vendor_config_filename`, that pointer is
+    the only thing explaining WHY tan cannot fix the footprint itself, and the
+    refusal must name the file THAT PART declared -- not a literal this module
+    happens to carry, which is what the second parametrisation proves.
 
     It names the `System_Config` SPECIFICALLY (tan-cli#789 review MINOR 4).
     The clause read "it lives in the proprietary ensemble_vela.ini", whose
     antecedent is the previous sentence's "module vela profile" -- and since
     alp-sdk #1470 that is false for the half of the profile that matters: the
     memory mode is an Arm built-in tan passes for every Alif part with no
-    `.ini` anywhere. Only the tuned `System_Config` names live in Alif's file,
-    so only the `System_Config` may be pointed at it. `System_Config` and not
-    `--system-config`: that is vela's own INI section name, so it identifies
+    `.ini` anywhere. Only the tuned `System_Config` names live in the vendor
+    file, so only the `System_Config` may be pointed at it. `System_Config` and
+    not `--system-config`: that is vela's own INI section name, so it identifies
     the right half without putting a CLI flag into a message that must
     prescribe nothing (`test_the_refusal_prescribes_nothing_tan_cannot_
     actually_do`, which asserts exactly that, is left untouched)."""
-    for part in ("e4", "e6", "e8"):
-        msg = _refuse_on("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid",
-                         f"alif:ensemble:{part}", tmp_path, monkeypatch)
-        assert "on this Alif Ensemble part its System_Config lives in the proprietary " \
-               "ensemble_vela.ini alp-sdk does not redistribute" in msg
-        assert "--system-config" not in msg and "--memory-mode" not in msg
-        # ... and NOT the bare pronoun, which claimed the memory mode too.
-        assert "part it lives in the proprietary" not in msg
-        assert "`tan model build` skips this target and still builds the SKU's others." in msg
-        assert "\n" not in msg
+    msg = _refuse_on("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid", tmp_path, monkeypatch,
+                     vendor_ini=vendor_ini)
+    assert (f"its System_Config lives in the proprietary {vendor_ini} "
+            "alp-sdk does not redistribute") in msg
+    assert "--system-config" not in msg and "--memory-mode" not in msg
+    # ... and NOT the bare pronoun, which claimed the memory mode too.
+    assert "part it lives in the proprietary" not in msg
+    assert "`tan model build` skips this target and still builds the SKU's others." in msg
+    assert "\n" not in msg
 
 
 def test_the_vendor_clause_is_not_derived_from_the_vela_profile_name(tmp_path, monkeypatch):
-    """The signal is the SoM's silicon ref, never the compiler's profile name.
+    """The signal is the part's own declaration, never the compiler's profile
+    name.
 
     `Ethos_U85_SYS_DRAM_Mid` is an Arm/vela built-in that any vendor's U85
-    part resolves to, so keying the Alif clause off it (or off `ethos-u85-*`)
+    part resolves to, so keying a vendor clause off it (or off `ethos-u85-*`)
     would be semantically wrong AND would re-break the NXP case the moment a
-    non-Alif U85 module ships. Same profile, same accel config, different
-    vendor -> no vendor clause."""
-    msg = _refuse_on("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid", "nxp:imx9:imx93",
-                     tmp_path, monkeypatch)
+    non-Alif U85 module ships. Same profile, same accel config, no declared
+    file -> no vendor clause."""
+    msg = _refuse_on("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid", tmp_path, monkeypatch,
+                     vendor_ini=None)
     assert "Ethos_U85_SYS_DRAM_Mid" in msg          # the profile IS the U85 default
     assert "ensemble_vela.ini" not in msg           # ... and it still proves nothing
+
+
+def test_a_refusal_on_a_part_with_no_dram_interface_says_so(tmp_path, monkeypatch):
+    """THE EVIDENCE, from metadata (alp-sdk #1470 Task 4).
+
+    The refusal always said WHERE the working set went; what made that damning
+    rather than merely interesting lived in a comment: an Alif Ensemble module
+    has no DRAM at all, so a DRAM-resident working set is not a placement the
+    part can honour. `metadata/socs/alif/ensemble/e8.json`'s
+    `external_memory_interfaces` lists exactly `HexSPI` and `SD/eMMC`, so that
+    is machine-checkable per part -- resolved by
+    `tan.model.targets._soc_declares_dram` and threaded in, never re-derived
+    from a vendor name or an accel config.
+
+    The marker sits on the DRAM figure itself, so it says which of several
+    reported areas it is about."""
+    msg = _refuse_on("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid", tmp_path, monkeypatch,
+                     vendor_ini="ensemble_vela.ini", declares_dram=False)
+    assert "its working set went to dram 0.11 KiB (no DRAM interface on this SoC)" in msg
+    assert "\n" not in msg
+
+
+@pytest.mark.parametrize("declares_dram,expect_marker", [
+    pytest.param(False, True, id="declares-no-DRAM-interface"),
+    pytest.param(True, False, id="declares-DRAM"),
+    # The one that must NOT be treated as a "no": a spec carrying no
+    # `external_memory_interfaces` at all has said nothing, and an unknown
+    # rendered as evidence is a hardware claim nobody made.
+    pytest.param(None, False, id="the-spec-says-nothing"),
+])
+def test_the_no_dram_marker_needs_an_explicit_no(declares_dram, expect_marker):
+    """Rendered from the LIVE template (`_refuse_zero_sram_footprint`), not a
+    copy of it: a copied literal would stay byte-identical to whatever it was
+    copied from and enforce nothing."""
+    with pytest.raises(VelaFootprintRefused) as exc:
+        _refuse_zero_sram_footprint(
+            accel_config="ethos-u85-256", npu_ops=1, cpu_ops=0,
+            used={"dram": 0.27}, system_config="Ethos_U85_SYS_DRAM_Mid",
+            memory_mode="Dedicated_Sram_384KB",
+            defaulted=frozenset({"system configuration", "memory mode"}),
+            soc_declares_dram=declares_dram)
+    assert ("no DRAM interface on this SoC" in str(exc.value)) is expect_marker
+
+
+def test_the_no_dram_marker_only_marks_the_dram_figure(tmp_path):
+    """A part that declares no DRAM says nothing about its OTHER areas -- the
+    marker is evidence about the area vela actually used, not a label for the
+    whole line. Rendered live, same reason as above."""
+    with pytest.raises(VelaFootprintRefused) as exc:
+        _refuse_zero_sram_footprint(
+            accel_config="ethos-u85-256", npu_ops=1, cpu_ops=0,
+            used={"dram": 0.27, "on_chip_flash": 0.23},
+            system_config="Ethos_U85_SYS_DRAM_Mid", memory_mode="Dedicated_Sram_384KB",
+            defaulted=frozenset({"system configuration", "memory mode"}),
+            soc_declares_dram=False)
+    msg = str(exc.value)
+    assert "dram 0.27 KiB (no DRAM interface on this SoC), on_chip_flash 0.23 KiB" in msg
+    assert msg.count("no DRAM interface") == 1
 
 
 def test_two_runs_sharing_one_out_dir_never_read_each_others_summary(tmp_path, monkeypatch):
@@ -687,20 +767,20 @@ def test_vela_real_compile_for_e8_accel_configs(tmp_path, accel_config):
 
 
 @pytest.mark.skipif(shutil.which("vela") is None, reason="vela (ethos-u-vela) not installed")
-@pytest.mark.parametrize("accel_config,profile,silicon_ref,alif", [
-    # E1M-AEN401 (E4) / E1M-AEN601 (E6) / E1M-AEN801 (E8) -- Alif Ensemble.
+@pytest.mark.parametrize("accel_config,profile,vendor_ini", [
+    # E1M-AEN401 (E4) / E1M-AEN601 (E6) / E1M-AEN801 (E8) -- Alif Ensemble,
+    # whose SoC specs declare `vendor_config_filename: ensemble_vela.ini`.
     ("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid / Dedicated_Sram_384KB",
-     "alif:ensemble:e8", True),
-    # E1M-NX9101 -- NXP i.MX 93. NOT an Alif part, and a DIFFERENT default
-    # profile: hardcoding the U85 one would blame an Alif memory model for an
-    # NXP refusal (tan-cli#789 review MAJOR 3), and naming Alif's proprietary
-    # profile file in the remedy does the same thing one sentence later
-    # (review (g)).
-    ("ethos-u65-256", "Ethos_U65_Client_Server / Dedicated_Sram_384KB",
-     "nxp:imx9:imx93", False),
+     "ensemble_vela.ini"),
+    # E1M-NX9101 -- NXP i.MX 93, whose spec declares NO vendor config file, and
+    # a DIFFERENT default profile: hardcoding the U85 one would blame an Alif
+    # memory model for an NXP refusal (tan-cli#789 review MAJOR 3), and naming
+    # Alif's proprietary profile file in the remedy does the same thing one
+    # sentence later (review (g)).
+    ("ethos-u65-256", "Ethos_U65_Client_Server / Dedicated_Sram_384KB", None),
 ])
 def test_vela_real_dram_default_profile_compile_refuses_a_zero_footprint(
-        tmp_path, accel_config, profile, silicon_ref, alif):
+        tmp_path, accel_config, profile, vendor_ini):
     """The two accel configs whose BUILT-IN default profile is DRAM-backed,
     through a REAL vela process.
 
@@ -712,8 +792,9 @@ def test_vela_real_dram_default_profile_compile_refuses_a_zero_footprint(
     `Ethos_U65_Client_Server`, `dram 0.11 KiB`), and neither an Alif Ensemble
     module nor an i.MX 93 SoM exposes that memory to the NPU arena. There is
     no SoM-authoritative profile to compile against instead (Alif's
-    `ensemble_vela.ini` is proprietary and not redistributed, and nothing
-    plumbs one through `tan model build` anyway -- see
+    `ensemble_vela.ini` is proprietary and not redistributed; a licensed
+    customer can supply it through `ALP_VELA_CONFIG`, but no SoC spec names a
+    vendor `System_Config` for it to complete -- see
     `tan.model.adapters.ethos_u`'s module docstring), so the honest answer is
     a refusal naming exactly that, NOT `arena 0 / req_sram_kib 0`: alp-sdk's
     on-device selector reads a zero as "fits any envelope".
@@ -725,12 +806,13 @@ def test_vela_real_dram_default_profile_compile_refuses_a_zero_footprint(
     shutil.copy(_ROOT / "tests/fixtures/models/tiny_int8.tflite", src)
     with pytest.raises(VelaFootprintRefused) as exc:
         VelaAdapter().compile(src, accel_config=accel_config, out_dir=tmp_path,
-                              silicon_ref=silicon_ref)
+                              vela_vendor_config_filename=vendor_ini)
     msg = str(exc.value)
     assert f"vela compiled cleanly for {accel_config}" in msg   # the compile DID succeed
     assert "operators on the NPU" in msg
     assert "reported 0 KiB SRAM" in msg
-    assert ("ensemble_vela.ini" in msg) is alif    # the vendor clause, through REAL vela
+    # the vendor clause, through REAL vela -- named iff metadata declares a file
+    assert ("ensemble_vela.ini" in msg) is (vendor_ini is not None)
     assert profile in msg                          # the profile THIS run resolved
     assert "\n" not in msg                         # one line: it lands in a note
 
@@ -796,6 +878,111 @@ def test_no_resolved_profile_leaves_the_command_line_exactly_as_it_was(tmp_path,
     for byte -- the adapter never guesses a memory model."""
     cmd = _capture_vela_cmd(monkeypatch, tmp_path)
     assert "--memory-mode" not in cmd and "--system-config" not in cmd
+
+
+# --------------------------------------------------------------------------
+# The OPTIONAL vendor `.ini` (`ALP_VELA_CONFIG`) -- environment, not hardware,
+# and never `board.yaml`. `--config` + a vendor `--system-config` + the memory
+# mode are legal ONLY as a complete set; every rc below was measured against
+# real `ethos-u-vela` 5.1.0 with a hand-written `.ini`, not reasoned from
+# vela's source.
+# --------------------------------------------------------------------------
+
+def _vendor_ini(tmp_path):
+    """A file at a real path. Contents are irrelevant here -- nothing in this
+    module parses it; the adapter only decides whether to name it."""
+    path = tmp_path / "ensemble_vela.ini"
+    path.write_text("[System_Config.Ethos_U85_SRAM_Only]\ncore_clock=400e6\n", encoding="utf-8")
+    return path
+
+
+def test_no_vendor_config_env_means_no_config_flag(tmp_path, monkeypatch):
+    """State 1 of 3: `ALP_VELA_CONFIG` unset. The unlicensed customer's case,
+    and the default -- vela uses Arm's built-in system config, which is exactly
+    what the arena/SRAM figures then describe."""
+    monkeypatch.delenv("ALP_VELA_CONFIG", raising=False)
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path, vela_memory_mode="Sram_Only",
+                            vela_vendor_system_config="Ethos_U85_SRAM_Only")
+    assert "--config" not in cmd
+    assert "--system-config" not in cmd          # rc=1 without its .ini
+
+
+def test_a_vendor_config_with_no_vendor_system_config_passes_neither(tmp_path, monkeypatch):
+    """State 2 of 3, AND THE TRAP: `ALP_VELA_CONFIG` set, but this part
+    declares no vendor `System_Config` -- the state EVERY part is in today,
+    because an Alif `System_Config` is per core subsystem and no SoC spec can
+    carry a per-SoC scalar for it.
+
+    Doing nothing is the only correct behaviour. Measured, real
+    `ethos-u-vela` 5.1.0: `--config <ini>` with no `--system-config` is rc=1,
+    verbatim `Error: Incorrect argument to CLI option
+    --config=['fake_vendor.ini']: Specifying a configuration file is not
+    allowed when using a default system configuration`. Substituting a profile
+    name to make the flag legal would be inventing a hardware fact."""
+    monkeypatch.setenv("ALP_VELA_CONFIG", str(_vendor_ini(tmp_path)))
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path, vela_memory_mode="Sram_Only",
+                            vela_vendor_system_config=None)
+    assert "--config" not in cmd
+    assert "--system-config" not in cmd
+
+
+def test_a_vendor_config_and_a_vendor_system_config_are_passed_together(tmp_path, monkeypatch):
+    """State 3 of 3, simulated: the day a part declares a vendor
+    `System_Config`, the licensed customer gets the vendor-tuned profile.
+
+    ALL THREE FLAGS, not two. Measured, real `ethos-u-vela` 5.1.0: supplying
+    `--config` REPLACES vela's built-in `vela.ini` rather than merging with it
+    (`architecture_features.py`: `self.vela_config_files = vela_config_files`),
+    and it then refuses any default left beside it -- `--config <ini>
+    --system-config Ethos_U85_SRAM_Only` with no `--memory-mode` is rc=1,
+    verbatim `... Specifying a configuration file is not allowed when using a
+    default memory mode`, while the full triple against an `.ini` defining both
+    sections is rc=0 and reports `System configuration Ethos_U85_SRAM_Only` /
+    `Memory mode Sram_Only`. That is also exactly what alp-sdk's own Alif
+    recipe passes (`examples/aen/aen-npu-inference-alp/CMakeLists.txt`)."""
+    ini = _vendor_ini(tmp_path)
+    monkeypatch.setenv("ALP_VELA_CONFIG", str(ini))
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path, vela_memory_mode="Sram_Only",
+                            vela_vendor_system_config="Ethos_U85_SRAM_Only")
+    assert cmd[cmd.index("--config") + 1] == str(ini)
+    assert cmd[cmd.index("--system-config") + 1] == "Ethos_U85_SRAM_Only"
+    assert cmd[cmd.index("--memory-mode") + 1] == "Sram_Only"
+
+
+def test_a_vendor_system_config_without_a_memory_mode_is_never_passed(tmp_path, monkeypatch):
+    """The third leg of the same rc=1: a part that declares a vendor
+    `System_Config` but no memory mode cannot complete the set either, so
+    nothing goes on the command line."""
+    monkeypatch.setenv("ALP_VELA_CONFIG", str(_vendor_ini(tmp_path)))
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path, vela_memory_mode=None,
+                            vela_vendor_system_config="Ethos_U85_SRAM_Only")
+    assert "--config" not in cmd and "--system-config" not in cmd
+
+
+def test_a_vendor_config_env_pointing_at_nothing_is_ignored(tmp_path, monkeypatch):
+    """A stale `ALP_VELA_CONFIG` degrades to Arm's built-in profile; it never
+    hands vela a path it cannot open. Same reading for an empty value."""
+    monkeypatch.setenv("ALP_VELA_CONFIG", str(tmp_path / "not-here.ini"))
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path, vela_memory_mode="Sram_Only",
+                            vela_vendor_system_config="Ethos_U85_SRAM_Only")
+    assert "--config" not in cmd and "--system-config" not in cmd
+    monkeypatch.setenv("ALP_VELA_CONFIG", "")
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path, vela_memory_mode="Sram_Only",
+                            vela_vendor_system_config="Ethos_U85_SRAM_Only")
+    assert "--config" not in cmd and "--system-config" not in cmd
+
+
+def test_an_arm_builtin_system_config_never_drags_the_vendor_config_in(tmp_path, monkeypatch):
+    """A built-in `System_Config` is resolvable in Arm's own `vela.ini`, and
+    passing `--config` alongside it would REPLACE that file -- the built-in
+    section would then be missing from the only config vela reads, which is the
+    same rc=1 by another route (`Section System_Config.<name> not found in Vela
+    config file`). So the vendor file rides only with a vendor name."""
+    monkeypatch.setenv("ALP_VELA_CONFIG", str(_vendor_ini(tmp_path)))
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path, vela_memory_mode="Sram_Only",
+                            vela_system_config="Ethos_U85_SYS_Flash_High")
+    assert "--config" not in cmd
+    assert cmd[cmd.index("--system-config") + 1] == "Ethos_U85_SYS_Flash_High"
 
 
 def test_a_supplied_memory_mode_is_not_reported_as_velas_own_default(tmp_path, monkeypatch):

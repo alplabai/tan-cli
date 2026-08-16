@@ -52,11 +52,17 @@ def _write_som(meta: Path, sku: str, silicon: str, *, ethos_u_variant: str | Non
     (d / f"{sku}.yaml").write_text(body)
 
 
-def _write_soc(meta: Path, silicon: str, npus: list[dict]) -> None:
+def _write_soc(meta: Path, silicon: str, npus: list[dict], *, extra: dict | None = None) -> None:
+    """@extra merges top-level SoC-spec keys in -- `npu_toolchain`,
+    `external_memory_interfaces` -- for the tests that need `resolve_targets`
+    to resolve a real vela profile or DRAM answer out of this tree rather than
+    the all-None a bare spec yields."""
     vendor, family, part = silicon.split(":")
     d = meta / "socs" / vendor / family
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{part}.json").write_text(json.dumps({"ref": silicon, "npus": npus}))
+    spec: dict = {"ref": silicon, "npus": npus}
+    spec.update(extra or {})
+    (d / f"{part}.json").write_text(json.dumps(spec))
 
 
 def _write_table(meta: Path, backend: str, filename: str, *, variant: str, supported: list[str]) -> None:
@@ -251,8 +257,10 @@ def test_exact_runs_the_real_compiler_and_returns_basis_compiled(tmp_path, monke
                  supported=["FULLY_CONNECTED"])
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
 
-    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                      vela_memory_mode=None, vela_system_config=None):
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
         assert accel_config == "ethos-u55-256"
         return Blob(format="vela_tflite", payload=b"x", arena_bytes=123,
                     compiler_version="vela 3.9.0", req_sram_kib=4,
@@ -289,8 +297,10 @@ def test_exact_surfaces_the_compilers_own_caveats_into_the_report(tmp_path, monk
     caveat = ("vela used its BUILT-IN default profile (system-config "
               "Ethos_U85_SYS_DRAM_Mid, memory-mode Dedicated_Sram_384KB) ...")
 
-    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                      vela_memory_mode=None, vela_system_config=None):
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
         return Blob(format="vela_tflite", payload=b"x", arena_bytes=123,
                     compiler_version="vela 5.1.0", req_sram_kib=4,
                     cpu_op_count=0, npu_op_count=1, caveats=(caveat,))
@@ -320,8 +330,10 @@ def test_exact_never_reports_fits_when_vela_places_zero_ops_on_the_npu(tmp_path,
                  supported=["FULLY_CONNECTED"])
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
 
-    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                      vela_memory_mode=None, vela_system_config=None):
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
         # A clean, zero-exit-code compile that placed NOTHING on the NPU --
         # exactly what vela does for a model it rejects outright (measured:
         # RC=0, "NPU operators = 0 (0.0%)").
@@ -352,8 +364,10 @@ def test_exact_reports_partial_and_keeps_the_static_per_op_verdicts(tmp_path, mo
                  supported=["FULLY_CONNECTED"])
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
 
-    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                      vela_memory_mode=None, vela_system_config=None):
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
         return Blob(format="vela_tflite", payload=b"x", arena_bytes=100,
                     compiler_version="vela 5.1.0", req_sram_kib=1,
                     cpu_op_count=1, npu_op_count=1)
@@ -392,8 +406,10 @@ def test_exact_carries_uncosted_cpu_op_count_through_a_kept_partial_report(tmp_p
     )
     monkeypatch.setattr(check_mod, "analyze_backend", lambda **kw: static_report)
 
-    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                      vela_memory_mode=None, vela_system_config=None):
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
         return Blob(format="vela_tflite", payload=b"x", arena_bytes=100,
                     compiler_version="vela 5.1.0", req_sram_kib=1,
                     cpu_op_count=1, npu_op_count=2)
@@ -417,8 +433,10 @@ def test_exact_fits_report_has_no_uncosted_cpu_op_count_since_ops_is_empty(tmp_p
                  supported=["FULLY_CONNECTED"])
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
 
-    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                      vela_memory_mode=None, vela_system_config=None):
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
         return Blob(format="vela_tflite", payload=b"x", arena_bytes=123,
                     compiler_version="vela 3.9.0", req_sram_kib=4,
                     cpu_op_count=0, npu_op_count=1)
@@ -442,8 +460,10 @@ def test_exact_degrades_to_the_static_screen_when_placement_cannot_be_parsed(tmp
                  supported=["FULLY_CONNECTED"])
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
 
-    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                      vela_memory_mode=None, vela_system_config=None):
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
         return Blob(format="vela_tflite", payload=b"x", arena_bytes=100,
                     compiler_version="vela 5.1.0", req_sram_kib=1)   # no cpu/npu_op_count
 
@@ -495,8 +515,10 @@ def test_exact_degrades_on_a_vela_compile_failure(tmp_path, monkeypatch):
                  supported=["FULLY_CONNECTED"])
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
 
-    def _boom(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-              vela_memory_mode=None, vela_system_config=None):
+    def _boom(self, source, *, accel_config, out_dir, opts=None,
+              vela_memory_mode=None, vela_system_config=None,
+              vela_vendor_system_config=None,
+              vela_vendor_config_filename=None, soc_declares_dram=None):
         raise RuntimeError("vela failed for ethos-u55-256: bad shape")
 
     monkeypatch.setattr(check_mod.VelaAdapter, "compile", _boom)
@@ -525,8 +547,10 @@ def test_exact_truncates_a_multiline_vela_traceback_to_its_exception_line(tmp_pa
     traceback_text = "Traceback (most recent call last):\n" + "\n".join(
         f"  File \"vela/x.py\", line {i}, in fn" for i in range(9)) + "\nValueError: bad tensor shape"
 
-    def _boom(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-              vela_memory_mode=None, vela_system_config=None):
+    def _boom(self, source, *, accel_config, out_dir, opts=None,
+              vela_memory_mode=None, vela_system_config=None,
+              vela_vendor_system_config=None,
+              vela_vendor_config_filename=None, soc_declares_dram=None):
         raise RuntimeError(traceback_text)
 
     monkeypatch.setattr(check_mod.VelaAdapter, "compile", _boom)
@@ -572,25 +596,32 @@ def test_a_refused_footprint_is_not_reported_as_a_failed_compile(tmp_path, monke
     # below an enforcement rather than a claim.
     #
     # The values are those of a real refusal on an ALIF ENSEMBLE part
-    # (ethos-u-vela 5.1.0, tiny_int8.tflite at ethos-u85-256, silicon_ref
-    # `alif:ensemble:e8`, a SoC spec with no `npu_toolchain.vela` -- since
-    # alp-sdk #1470 that is what it takes to reach this branch), captured by
-    # running that compile for real: it renders 618 characters, one line.
-    # Deliberately the LONGER of the two shapes -- the same arguments with a
-    # non-Alif `silicon_ref` render 499 characters because they carry no vendor
-    # clause at all (tan-cli#789 review (g)) -- since truncation is what this
-    # test is about. `defaulted` carries vela's OWN names for the two flags,
-    # the strings `_defaulted_flags` finds in its stdout.
+    # (ethos-u-vela 5.1.0, tiny_int8.tflite at ethos-u85-256, a SoC spec with
+    # no `npu_toolchain.vela.memory_mode` -- since alp-sdk #1470 that is what
+    # it takes to reach this branch), captured by running that compile for
+    # real. The two diagnostic facts are e8.json's own: it declares
+    # `vendor_config_filename: ensemble_vela.ini`, and its
+    # `external_memory_interfaces` lists exactly `HexSPI` and `SD/eMMC`, i.e.
+    # no DRAM. Rendered live, that is 623 characters on one line.
+    # Deliberately the LONGEST shape -- the same arguments with neither fact
+    # (a part that declares no vendor file and whose DRAM answer is unknown)
+    # render 499 characters, carrying neither the vendor clause nor the
+    # no-DRAM marker -- since truncation is what this test is about.
+    # `defaulted` carries vela's OWN names for the two flags, the strings
+    # `_defaulted_flags` finds in its stdout.
     real_refusal_args = dict(
         accel_config="ethos-u85-256", npu_ops=1, cpu_ops=0,
         used={"dram": 0.27},
         system_config="Ethos_U85_SYS_DRAM_Mid",
         memory_mode="Dedicated_Sram_384KB",
         defaulted=frozenset({"system configuration", "memory mode"}),
-        silicon_ref="alif:ensemble:e8")
+        vendor_config_filename="ensemble_vela.ini",
+        soc_declares_dram=False)
 
-    def _refuse(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                vela_memory_mode=None, vela_system_config=None):
+    def _refuse(self, source, *, accel_config, out_dir, opts=None,
+                vela_memory_mode=None, vela_system_config=None,
+                vela_vendor_system_config=None,
+                vela_vendor_config_filename=None, soc_declares_dram=None):
         _refuse_zero_sram_footprint(**real_refusal_args)
 
     monkeypatch.setattr(check_mod.VelaAdapter, "compile", _refuse)
@@ -615,26 +646,51 @@ def test_a_refused_footprint_is_not_reported_as_a_failed_compile(tmp_path, monke
     assert "fits" not in note.lower()
 
 
-@pytest.mark.parametrize("silicon", ["alif:ensemble:e8", "nxp:imx9:imx93"])
-def test_exact_hands_the_adapter_the_soms_own_silicon_ref(tmp_path, monkeypatch, silicon):
-    """`--exact` resolves the vendor from the SAME target it resolves the
-    accel config from, and passes it down (tan-cli#789 review (g)).
+@pytest.mark.parametrize("extra,expect_filename,expect_dram", [
+    pytest.param(
+        {"npu_toolchain": {"vela": {"memory_mode": "Sram_Only",
+                                    "system_config_requires_vendor_config": True,
+                                    "vendor_config_filename": "ensemble_vela.ini"}},
+         "external_memory_interfaces": [{"kind": "HexSPI"}, {"kind": "SD/eMMC"}]},
+        "ensemble_vela.ini", False, id="declares-a-vendor-ini-and-no-DRAM"),
+    pytest.param(
+        {"npu_toolchain": {"vela": {"memory_mode": "Shared_Sram",
+                                    "system_config_requires_vendor_config": False}},
+         "external_memory_interfaces": [{"kind": "LPDDR4/4X"}, {"kind": "FlexSPI"}]},
+        None, True, id="declares-DRAM-and-no-vendor-ini"),
+])
+def test_exact_hands_the_adapter_the_parts_own_diagnostic_facts(
+        tmp_path, monkeypatch, extra, expect_filename, expect_dram):
+    """`--exact` resolves the refusal's EVIDENCE from the SAME target it
+    resolves the accel config from, and passes it down (tan-cli#789 review (g),
+    re-sourced from metadata).
 
-    Without this the adapter sees `silicon_ref=None` on the `--exact` path and
-    the refusal goes vendor-neutral everywhere -- correct for NXP, but it
-    would silently drop the `ensemble_vela.ini` pointer on the Alif parts that
-    are the reason it exists. Pinned on BOTH vendors so neither direction can
-    rot: what arrives must be the SoM preset's `silicon:` value verbatim."""
+    This used to pin `silicon_ref` -- the SoM preset's `silicon:` ref -- because
+    a vendor-prefix match on it was what decided whether the refusal named
+    `ensemble_vela.ini`. It no longer decides anything: the file a part needs is
+    that part's own `npu_toolchain.vela.vendor_config_filename`, and whether a
+    DRAM placement is impossible for it is its own
+    `external_memory_interfaces[]`. Both must reach the adapter, or `--exact`'s
+    refusal silently loses the two clauses that make it actionable while
+    `tan model build`'s keeps them -- the two must read identically for the same
+    part. Pinned on BOTH shapes so neither direction can rot: the part that
+    declares a vendor `.ini` and no DRAM, and the part that declares DRAM and
+    no `.ini`."""
+    silicon = "fake:soc:u85"
     _write_som(tmp_path, "E1M-FAKE", silicon, ethos_u_variant="u85")
-    _write_soc(tmp_path, silicon, [{"type": "ethos-u85", "subtype": "x", "mac_per_cycle": 256}])
+    _write_soc(tmp_path, silicon, [{"type": "ethos-u85", "subtype": "x", "mac_per_cycle": 256}],
+               extra=extra)
     _write_table(tmp_path, "ethos_u", "u85@vela-1.0.0.json", variant="u85",
                  supported=["FULLY_CONNECTED"])
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
     seen = {}
 
-    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-                      vela_memory_mode=None, vela_system_config=None):
-        seen["silicon_ref"] = silicon_ref
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
+        seen["filename"] = vela_vendor_config_filename
+        seen["dram"] = soc_declares_dram
         return Blob(format="vela_tflite", payload=b"x", arena_bytes=123,
                     compiler_version="vela 5.1.0", req_sram_kib=4,
                     cpu_op_count=0, npu_op_count=1)
@@ -642,7 +698,8 @@ def test_exact_hands_the_adapter_the_soms_own_silicon_ref(tmp_path, monkeypatch,
     monkeypatch.setattr(check_mod.VelaAdapter, "compile", _fake_compile)
     check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
                          metadata_root=tmp_path, exact=True)
-    assert seen["silicon_ref"] == silicon
+    assert seen["filename"] == expect_filename
+    assert seen["dram"] is expect_dram
 
 
 def test_the_refusal_note_budget_covers_a_maximal_refusal():
@@ -653,11 +710,19 @@ def test_the_refusal_note_budget_covers_a_maximal_refusal():
     stderr. That only holds while the template stays inside it, so this builds
     a deliberately maximal refusal -- three populated memory areas at five
     significant figures, the longest profile name vela emits, four-digit
-    operator counts, AND an Alif Ensemble `silicon_ref` (the only vendor that
-    adds a clause, so the only one that can be maximal) -- straight out of the
-    real `_refuse_zero_sram_footprint`, and fails if it no longer fits. A
-    truncated refusal loses its remediation tail, which is the whole reason
-    the budget was raised (MINOR 5)."""
+    operator counts, AND both metadata-sourced clauses (a declared
+    `vendor_config_filename`, and `soc_declares_dram=False`, which adds the
+    no-DRAM marker to the `dram` figure) -- straight out of the real
+    `_refuse_zero_sram_footprint`, and fails if it no longer fits. A truncated
+    refusal loses its remediation tail, which is the whole reason the budget
+    was raised (MINOR 5).
+
+    Measured 691 of 700 with a 17-character `ensemble_vela.ini`. That filename
+    is the ONE variable-length input in the whole template -- everything else
+    is fixed prose or a bounded figure -- so those 9 characters are the
+    headroom a longer future `vendor_config_filename` has to fit inside; a
+    part declaring a longer one needs this budget re-measured, which is what
+    this test is here to force."""
     with pytest.raises(VelaFootprintRefused) as exc:
         _refuse_zero_sram_footprint(
             accel_config="ethos-u85-256", npu_ops=999, cpu_ops=999,
@@ -671,9 +736,11 @@ def test_the_refusal_note_budget_covers_a_maximal_refusal():
             # produces now that it passes a metadata-sourced --memory-mode) is
             # strictly shorter.
             defaulted=frozenset({"system configuration", "memory mode"}),
-            silicon_ref="alif:ensemble:e8")
+            vendor_config_filename="ensemble_vela.ini",
+            soc_declares_dram=False)
     maximal = str(exc.value)
     assert "\n" not in maximal
+    assert len(maximal) == 691                               # re-measure if this moves
     assert len(maximal) <= check_mod._VELA_REFUSAL_NOTE_BUDGET
     # ... and the FOREIGN-stderr budget is not what got widened: a 750-char,
     # 9-newline vela traceback must still be cut at 200.
@@ -693,8 +760,10 @@ def test_exact_keeps_the_accel_config_in_front_of_a_wrapped_traceback(tmp_path, 
                  supported=["FULLY_CONNECTED"])
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
 
-    def _boom(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
-              vela_memory_mode=None, vela_system_config=None):
+    def _boom(self, source, *, accel_config, out_dir, opts=None,
+              vela_memory_mode=None, vela_system_config=None,
+              vela_vendor_system_config=None,
+              vela_vendor_config_filename=None, soc_declares_dram=None):
         raise RuntimeError(
             "vela failed for ethos-u85-256: Traceback (most recent call last):\n"
             "  File \"ethosu/vela/vela.py\", line 1, in main\n"
@@ -777,9 +846,10 @@ def test_headline_accel_config_picks_the_highest_mac_per_cycle_at_the_primary_va
     target = _headline_ethos_u_target("E1M-FAKE", tmp_path)
     assert target.accel_config == "ethos-u55-256"
     # The whole TargetSpec comes back so `--exact` can hand the adapter the
-    # SAME target's silicon_ref alongside its accel config (tan-cli#789 review
-    # (g)) -- a vendor read off a different target would be exactly the class
-    # of mismatch this fix exists to stop.
+    # SAME target's memory profile and diagnostic facts alongside its accel
+    # config (tan-cli#789 review (g)) -- a profile or a vendor `.ini` read off a
+    # different target would be exactly the class of mismatch this fix exists
+    # to stop.
     assert target.silicon_ref == "fake:soc:dual"
 
 

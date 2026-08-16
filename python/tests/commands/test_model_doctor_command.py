@@ -37,17 +37,22 @@ def envelope(result):
 
 
 def _force_all_unavailable(monkeypatch) -> None:
-    """No `vela`/`dxcom` on PATH, no DRP-AI/DeepX env var set -- the
-    deterministic "fresh host" state every host-independent assertion below
+    """No `vela`/`dxcom` on PATH, no DRP-AI/DeepX/vendor-vela env var set --
+    the deterministic "fresh host" state every host-independent assertion below
     needs, regardless of what happens to be installed on the machine actually
     running the suite."""
     monkeypatch.setattr(shutil, "which", lambda name: None)
     monkeypatch.delenv("ALP_DRPAI_TVM_HOME", raising=False)
     monkeypatch.delenv("ALP_DEEPX_SDK_HOME", raising=False)
+    monkeypatch.delenv("ALP_VELA_CONFIG", raising=False)
 
 
 def _rows(doc) -> dict[str, dict]:
     return {row["backend"]: row for row in doc["data"]["backends"]}
+
+
+def _optional(doc) -> list[dict]:
+    return doc["data"]["optional"]
 
 
 # --------------------------------------------------------------------------
@@ -447,7 +452,103 @@ def test_the_internal_failure_catch_all_still_covers_doctor(tmp_path, monkeypatc
     doc = envelope(result)
     assert doc["issues"][-1]["code"] == "model.internal-failure"
     assert "model doctor failed unexpectedly" in doc["issues"][-1]["message"]
-    assert doc["data"] == {"schemaVersion": model_cmd.DOCTOR_DATA_SCHEMA_VERSION, "backends": []}
+    assert doc["data"] == {"schemaVersion": model_cmd.DOCTOR_DATA_SCHEMA_VERSION,
+                           "backends": [], "optional": []}
+
+
+# --------------------------------------------------------------------------
+# the OPTIONAL vendor vela `.ini` (`ALP_VELA_CONFIG`) -- reported, never as a
+# fault (alp-sdk #1470 Task 5)
+# --------------------------------------------------------------------------
+
+
+def test_the_vendor_vela_config_is_an_optional_row_not_a_backend_row(tmp_path, monkeypatch):
+    """It rides in `data.optional[]`, in the SAME five-key shape the backend
+    rows use, and NOT in `data.backends[]`.
+
+    Kept apart because `available: false` means two different things in the two
+    lists: in `backends[]` it means tan cannot compile for that backend at all,
+    here it means the backend works and a licensed-only enhancement is not
+    installed. A consumer counting `backends[]` (or keying it by backend name)
+    must not suddenly see a second `ethos_u`."""
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    doc = envelope(result)
+    assert [row["backend"] for row in doc["data"]["backends"]] == [
+        "cpu", "ethos_u", "drpai", "deepx_dxm1",
+    ]
+    optional = _optional(doc)
+    assert len(optional) == 1
+    assert set(optional[0]) == {"backend", "tool", "available", "version", "reason"}
+    assert optional[0]["backend"] == "ethos_u"
+    assert optional[0]["tool"] == "ALP_VELA_CONFIG"
+    assert optional[0]["version"] is None
+
+
+def test_an_absent_vendor_vela_config_reads_as_optional_never_as_a_fault(tmp_path, monkeypatch):
+    """The unlicensed customer's case, which is the COMMON one: they are not
+    broken. Without the `.ini` vela uses Arm's own built-in system config,
+    which is exactly what the arena/SRAM figures tan reports describe -- so the
+    reason has to say the absence is not a fault AND say what setting it would
+    buy, or `doctor` turns a licensing boundary into a bug report."""
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _optional(envelope(result))[0]
+    assert row["available"] is False
+    assert row["reason"].startswith("OPTIONAL, not a fault: ALP_VELA_CONFIG is not set")
+    assert "Arm's built-in system config" in row["reason"]
+    assert "are correct" in row["reason"]
+    # ... and it must NOT fall through to the ethos_u BACKEND reason, which is
+    # about `vela` not being on PATH and would be actionable nonsense here.
+    assert "pip install" not in row["reason"]
+    # An optional prerequisite never changes the run's verdict.
+    assert envelope(result)["ok"] is True
+    assert result.exit_code == 0
+
+
+def test_a_present_vendor_vela_config_reports_available_with_no_reason(tmp_path, monkeypatch):
+    _force_all_unavailable(monkeypatch)
+    ini = tmp_path / "ensemble_vela.ini"
+    ini.write_text("[System_Config.Ethos_U85_SRAM_Only]\n", encoding="utf-8")
+    monkeypatch.setenv("ALP_VELA_CONFIG", str(ini))
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _optional(envelope(result))[0]
+    assert row["available"] is True
+    assert row["reason"] is None
+
+
+def test_a_vendor_vela_config_pointing_at_nothing_says_which_path(tmp_path, monkeypatch):
+    """Set-but-wrong is its own actionable state, not the generic "not set"
+    one: the value is ignored (vela is never handed a path it cannot open), and
+    the reason echoes the path so a customer can see the typo."""
+    _force_all_unavailable(monkeypatch)
+    missing = tmp_path / "not-here.ini"
+    monkeypatch.setenv("ALP_VELA_CONFIG", str(missing))
+    result = runner.invoke(app, ["doctor", "--format", "json"], catch_exceptions=False)
+    row = _optional(envelope(result))[0]
+    assert row["available"] is False
+    assert row["reason"].startswith("OPTIONAL, not a fault:")
+    assert str(missing) in row["reason"]
+    assert "does not name a readable file" in row["reason"]
+
+
+def test_text_mode_never_calls_the_optional_row_unavailable(tmp_path, monkeypatch):
+    """The word a scrollback leads with decides how this reads. `unavailable`
+    is what an actually-broken backend gets one line above; this row must not
+    borrow it."""
+    _force_all_unavailable(monkeypatch)
+    result = runner.invoke(
+        app, ["doctor", "--project", str(tmp_path)], catch_exceptions=False
+    )
+    lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    optional_lines = [ln for ln in lines if "optional" in ln]
+    assert optional_lines == [
+        "ethos_u: optional (tool=ALP_VELA_CONFIG) not in use -- OPTIONAL, not a fault: "
+        "ALP_VELA_CONFIG is not set, so vela uses Arm's built-in system config -- the "
+        "arena/SRAM figures tan reports describe that model and are correct. A licensed "
+        "customer may set it to their vendor vela config .ini (e.g. Alif's "
+        "ensemble_vela.ini) for the vendor-tuned profile"
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -514,7 +615,13 @@ def test_text_mode_drops_the_reason_clause_entirely_when_reason_is_none(tmp_path
     )
     assert result.exit_code == 0
     lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
-    ethos_u_lines = [ln for ln in lines if ln.startswith("ethos_u:")]
+    # BACKEND rows only: `ethos_u` also owns an OPTIONAL row (the vendor vela
+    # `.ini`, `data.optional[]`), whose line is prefixed with the same backend
+    # name and is not what this test is about. `backend_row` is what was
+    # monkeypatched above; `optional_row` is a different builder and keeps its
+    # own reason.
+    ethos_u_lines = [ln for ln in lines
+                     if ln.startswith("ethos_u:") and "optional" not in ln]
     assert ethos_u_lines == ["ethos_u: unavailable (tool=vela)"]
     assert "None" not in ethos_u_lines[0]
 

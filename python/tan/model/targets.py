@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
@@ -29,13 +30,84 @@ class TargetSpec:
     # behaviour rather than a guess.
     vela_memory_mode: str | None = None      # Arm built-in, e.g. "Sram_Only"
     vela_system_config: str | None = None    # ONLY when it needs no vendor config
+    # The other half of that block: the vendor-gated System_Config and the file
+    # that defines it. Carried SEPARATELY from `vela_system_config` -- which
+    # stays "safe to put on a command line alone" by construction -- because
+    # these two are legal only TOGETHER and only alongside a `--config` the
+    # customer supplies through `ALP_VELA_CONFIG`
+    # (`tan.model.adapters.ethos_u`). None for every part shipped today: no SoC
+    # spec names a `system_config` at all.
+    vela_vendor_system_config: str | None = None
+    # The vendor `.ini`'s FILENAME as metadata declares it
+    # (`vendor_config_filename`, e.g. `ensemble_vela.ini`) -- a DIAGNOSTIC
+    # fact, never a path: `tan.model.adapters.ethos_u`'s footprint refusal
+    # names it to explain why tan cannot resolve a complete profile for this
+    # part. A part whose metadata declares none gets no file named, so no
+    # customer is ever sent after another vendor's download.
+    vela_vendor_config_filename: str | None = None
+    # Does this SoC declare ANY external DRAM interface
+    # (`external_memory_interfaces[].kind`)? `False` is the machine-checkable
+    # evidence behind the zero-SRAM refusal: vela's default profiles are
+    # DRAM-backed, and a working set placed in DRAM on a part that declares no
+    # DRAM interface describes memory the module does not have. `None` means
+    # the spec says nothing, and an unknown must never be reported as a "no"
+    # -- see `_soc_declares_dram`.
+    soc_declares_dram: bool | None = None
 
 
-def _vela_profile(soc: dict) -> tuple[str | None, str | None]:
-    """(memory_mode, system_config) to invoke vela with for THIS SoC, read from
-    its `npu_toolchain.vela` block. `(None, None)` for a spec that carries no
-    block -- never a guessed profile; a wrong one compiles a command stream for
-    memory the module does not have.
+class _VelaProfile(NamedTuple):
+    """What one SoC spec's `npu_toolchain.vela` block resolves to, split by
+    what is SAFE TO PASS: `system_config` is an Arm built-in that vela accepts
+    on its own, `vendor_system_config` is a name that exists only inside
+    `vendor_config_filename` and is rc=1 without it."""
+    memory_mode: str | None
+    system_config: str | None
+    vendor_system_config: str | None
+    vendor_config_filename: str | None
+
+
+#: Substrings that make an `external_memory_interfaces[].kind` a DRAM
+#: interface, matched case-insensitively against the declared kind. Covers
+#: every DRAM spelling in metadata today -- `LPDDR4/4X` (nxp:imx9:imx93,
+#: renesas:rzv2n:n44), `LPDDR4X / LPDDR5` (deepx:dx:m1) -- and nothing else:
+#: `HexSPI`, `OctalSPI`, `FlexSPI`, `xSPI` and `SD/eMMC` (the ONLY kinds the
+#: six Alif Ensemble parts declare) are not DRAM.
+#:
+#: Matched on `kind` alone and NOT on the interface's `supports` list, which
+#: is where the Alif parts carry `HyperBus`. A HyperBus port can host HyperRAM,
+#: but that is a populated-device question this spec does not answer, and vela's
+#: `Dram` memory area is not it -- reading `supports` here would turn an
+#: attachable-bus fact into a "this part has DRAM" claim nothing sourced.
+_DRAM_INTERFACE_TOKENS = ("DDR", "DRAM")
+
+
+def _soc_declares_dram(soc: dict) -> bool | None:
+    """Does this SoC spec declare an external DRAM interface? `None` when it
+    declares no `external_memory_interfaces` at all.
+
+    THE `None` IS THE POINT, and it fails closed. The consumer
+    (`tan.model.adapters.ethos_u._refuse_zero_sram_footprint`) states "this SoC
+    declares no DRAM interface" as EVIDENCE in a refusal a customer sizes
+    hardware from, so it may only ever say that on an explicit `False`. A spec
+    that carries no interface list has not declared the absence of DRAM; it has
+    said nothing, and saying nothing back is the only honest answer. Same
+    reading for an EMPTY list, which is a stub far more often than a positive
+    statement that a part has no external memory at all."""
+    interfaces = soc.get("external_memory_interfaces")
+    if not isinstance(interfaces, list) or not interfaces:
+        return None
+    for iface in interfaces:
+        kind = str(iface.get("kind", "")) if isinstance(iface, dict) else ""
+        if any(token in kind.upper() for token in _DRAM_INTERFACE_TOKENS):
+            return True
+    return False
+
+
+def _vela_profile(soc: dict) -> _VelaProfile:
+    """How to invoke vela for THIS SoC, read from its `npu_toolchain.vela`
+    block. All-None for a spec that carries no block -- never a guessed
+    profile; a wrong one compiles a command stream for memory the module does
+    not have.
 
     THE SYSTEM_CONFIG GUARD IS LOAD-BEARING. `--memory-mode` values are Arm
     built-ins (the SoC schema constrains `memory_mode` to the `[Memory_Mode.*]`
@@ -66,15 +138,34 @@ def _vela_profile(soc: dict) -> tuple[str | None, str | None]:
     config needed": no Alif or NXP spec names one today (an Alif System_Config
     describes one CORE SUBSYSTEM, not a die), so this branch yields None for
     every part currently shipped -- correct, and the mechanism is here for the
-    spec that eventually does carry a built-in one."""
+    spec that eventually does carry a built-in one.
+
+    A vendor-gated name is WITHHELD FROM `system_config` AND CARRIED ON
+    `vendor_system_config`, rather than dropped. The two fields are exactly
+    "safe alone" versus "legal only with its `.ini`": the adapter may put the
+    first on a command line unconditionally, and the second only alongside a
+    `--config` pointing at a file the customer supplied through
+    `ALP_VELA_CONFIG`. Splitting them here rather than passing one name plus a
+    boolean keeps the fail-closed guard above the only place that decides which
+    is which: an adapter cannot accidentally pass a vendor name by reading a
+    flag the wrong way round, because it is never handed one in the field it
+    passes freely."""
     block = soc.get("npu_toolchain")
     vela = block.get("vela") if isinstance(block, dict) else None
     if not isinstance(vela, dict):
-        return None, None
+        return _VelaProfile(None, None, None, None)
     memory_mode = vela.get("memory_mode") or None
+    system_config = vela.get("system_config") or None
     if vela.get("system_config_requires_vendor_config") is not False:
-        return memory_mode, None
-    return memory_mode, vela.get("system_config") or None
+        # The filename rides ONLY on this branch. A spec that declares it needs
+        # no vendor config has no vendor file to name, and a contradictory spec
+        # (`false` plus a filename) must not have that filename quoted at a
+        # customer as something they need -- the refusal clause it feeds calls
+        # the file proprietary and undistributed, which would then be advice
+        # about a download nobody has to make.
+        return _VelaProfile(memory_mode, None, system_config,
+                            vela.get("vendor_config_filename") or None)
+    return _VelaProfile(memory_mode, system_config, None, None)
 
 
 def _npu_backend(npu_type: str, subtype: str) -> str | None:
@@ -90,7 +181,8 @@ def _npu_backend(npu_type: str, subtype: str) -> str | None:
 def _soc_targets(soc: dict, silicon_ref: str) -> list[TargetSpec]:
     """One TargetSpec per mappable NPU in a SoC's npus[] (deduped by the caller)."""
     out: list[TargetSpec] = []
-    memory_mode, system_config = _vela_profile(soc)
+    profile = _vela_profile(soc)
+    declares_dram = _soc_declares_dram(soc)
     for npu in soc.get("npus", []):
         npu_type = npu.get("type", "")
         backend = _npu_backend(npu_type, npu.get("subtype", ""))
@@ -100,10 +192,18 @@ def _soc_targets(soc: dict, silicon_ref: str) -> list[TargetSpec]:
         accel = f"{npu_type}-{npu['mac_per_cycle']}" if ethos_u else ""
         # The profile is a vela flag, so it rides only on the targets vela
         # compiles: a DRP-AI or DEEPX target on the same die must not carry
-        # (and its adapter must never be handed) an Ethos-U memory mode.
+        # (and its adapter must never be handed) an Ethos-U memory mode. The
+        # DRAM fact is NOT a vela flag -- it is a property of the silicon this
+        # target runs on, like `silicon_ref` -- so it rides on every target the
+        # spec produces, whether or not any adapter reads it today.
         out.append(TargetSpec(backend=backend, silicon_ref=silicon_ref, accel_config=accel,
-                              vela_memory_mode=memory_mode if ethos_u else None,
-                              vela_system_config=system_config if ethos_u else None))
+                              vela_memory_mode=profile.memory_mode if ethos_u else None,
+                              vela_system_config=profile.system_config if ethos_u else None,
+                              vela_vendor_system_config=(
+                                  profile.vendor_system_config if ethos_u else None),
+                              vela_vendor_config_filename=(
+                                  profile.vendor_config_filename if ethos_u else None),
+                              soc_declares_dram=declares_dram))
     return out
 
 

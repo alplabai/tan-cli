@@ -74,19 +74,29 @@ under `Sram_Only` the memory mode decides placement outright and the system
 config is bandwidth/latency only; under an `Axi1` const mode the system config
 decides placement too.
 
-`--system-config` is therefore still not passed, and that is deliberate rather
-than pending. The names alp-sdk's own examples use
+`--system-config` is therefore still not passed by default, and that is
+deliberate rather than pending. The names alp-sdk's own examples use
 (`Ethos_U85_SRAM_Only`, `RTSS_HE_SRAM_Only`;
 `examples/aen/aen-npu-inference-alp/CMakeLists.txt:42-43` and its `-u55`
 sibling) live ONLY in Alif's PROPRIETARY `ensemble_vela.ini`, which alp-sdk does
 not redistribute, and handing vela a section it cannot resolve is a hard rc=1,
 verbatim: `Section System_Config.Ethos_U85_SRAM_Only not found in Vela config
 file`. So the SoC spec flags those as vendor-gated and `resolve_targets`
-withholds them (`tan.model.targets._vela_profile`); vela's own default system
-config is used and SAID SO through `_default_profile_caveats`, which now
-distinguishes the two flags rather than blaming the whole profile on vela.
-Never invent a profile here; a wrong one compiles a command stream for hardware
-the module does not have.
+withholds them from the field this adapter passes freely
+(`tan.model.targets._vela_profile`); vela's own default system config is used
+and SAID SO through `_default_profile_caveats`, which now distinguishes the two
+flags rather than blaming the whole profile on vela. Never invent a profile
+here; a wrong one compiles a command stream for hardware the module does not
+have.
+
+A LICENSED CUSTOMER CAN SUPPLY THAT FILE, through `ALP_VELA_CONFIG` and never
+through `board.yaml` (the path is environment, not hardware). It buys the
+vendor-tuned profile only as a complete set: `--config` + the part's vendor
+`System_Config` + its memory mode, all three or none -- see `compile()`, where
+each half of that rule is pinned to a measured `ethos-u-vela` 5.1.0 rc. No SoC
+spec names a vendor `System_Config` today, so the mechanism is wired and does
+nothing, which is the only correct thing it can do: passing `--config` alone is
+rc=1 and naming a profile nobody published would be an invention.
 
 WHO THE OLD DEFAULT HIT (tan-cli#789 review), i.e. what the memory mode fixes:
 the DRAM-backed built-in default was NOT a U85/Alif-only fact. Measured, real
@@ -115,18 +125,28 @@ verbatim from `vendors/nxp-imx93/README.md`: `vela --accelerator-config
 ethos-u65-256 --output-dir build/vela-imx93 --memory-mode Shared_Sram
 mobilenet_v2_quantised.tflite`. So on an NXP part that clause sent the reader
 after another vendor's file, which is not what their silicon needs and not
-where their profile comes from. The clause is now gated on
-@silicon_ref -- the SoM preset's own `silicon:` ref reaching `compile()`
-(`alif:ensemble:e8` vs `nxp:imx9:imx93`, via `TargetSpec.silicon_ref`), a real
-signal -- and NOT on the vela profile name, which is a property of the
-accelerator config rather than of the vendor. That i.MX 93 line is no longer
-restated as advice for a different reason than it was: `--memory-mode
-Shared_Sram` is now what tan actually PASSES for that part, straight from
-`imx93.json`'s own `npu_toolchain.vela` block, so there is nothing left to
-advise a reader to do by hand."""
+where their profile comes from. That i.MX 93 line is no longer restated as
+advice for a different reason than it was: `--memory-mode Shared_Sram` is now
+what tan actually PASSES for that part, straight from `imx93.json`'s own
+`npu_toolchain.vela` block, so there is nothing left to advise a reader to do
+by hand.
+
+BOTH HALVES OF THE REFUSAL'S EVIDENCE NOW COME FROM METADATA, not from prose in
+this file: WHICH vendor file (if any) to name is the SoC spec's own
+`npu_toolchain.vela.vendor_config_filename` (`@vela_vendor_config_filename`),
+and WHY a DRAM placement is wrong here is `@soc_declares_dram`, resolved from
+its `external_memory_interfaces[]` -- `alif:ensemble:e8` lists exactly `HexSPI`
+and `SD/eMMC`, `nxp:imx9:imx93` lists `LPDDR4/4X`. Each is then right for every
+part automatically, including one nobody has looked at yet.
+
+Neither is read from `metadata/` HERE: `resolve_targets` already has the SoC
+spec open, an adapter that reads the SDK's fact tree would be a second
+unversioned reader of it, and a fact resolved once and threaded cannot disagree
+with itself between the target and the artifact it produced."""
 from __future__ import annotations
 import csv
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -203,14 +223,54 @@ _MEM_USED_RE = re.compile(r"^(.+)_memory_used$")
 # accel_config can never walk out of @out_dir.
 _UNSAFE_DIR_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
-# The one vendor whose vela profile tan can point at by name. `silicon_ref` is
-# `<vendor>:<family>:<part>` straight from the SoM preset's `silicon:` key
-# (metadata/e1m_modules/E1M-AEN801.yaml -> `alif:ensemble:e8`), so this is a
-# family match on authored metadata, not a guess from an accel_config or from
-# vela's own profile name -- `ethos-u55-*`/`Ethos_U55_High_End_Embedded` say
-# nothing about who built the part. Anything else (`nxp:imx9:imx93`, a future
-# vendor, or an unresolved None) gets no vendor clause at all.
-_ALIF_ENSEMBLE_REF_PREFIX = "alif:ensemble:"
+# vela's own memory-area name for external DRAM, as it appears in its summary
+# CSV columns (`dram_memory_used`) and therefore as `_parse_vela_summary` keys
+# it -- the area a working set must NOT land in on a part whose SoC spec
+# declares no DRAM interface.
+_DRAM_AREA = "dram"
+
+# What the refusal appends to that area's figure when the caller resolved
+# `soc_declares_dram=False` -- i.e. the SoC spec's `external_memory_interfaces`
+# names no DDR/DRAM kind at all (`tan.model.targets._soc_declares_dram`; on
+# `alif:ensemble:e8` it lists exactly `HexSPI` and `SD/eMMC`). Machine-checked
+# per part rather than asserted in prose, so it is silent for a part that
+# declares DRAM (`nxp:imx9:imx93` -- LPDDR4/4X) or declares nothing.
+#
+# Kept SHORT deliberately: it lands inside a one-line note bounded by
+# `tan.model.check._VELA_REFUSAL_NOTE_BUDGET` (700), against which the maximal
+# refusal measures 691 with this marker and a 17-character
+# `vendor_config_filename` in it (`tests/model/test_check.py::
+# test_the_refusal_note_budget_covers_a_maximal_refusal`, which renders the
+# real template rather than a copy). That filename is the one variable-length
+# input in the whole template, so those 9 characters are the headroom a longer
+# future one has to fit inside.
+_NO_DRAM_MARKER = " (no DRAM interface on this SoC)"
+
+
+#: Where a licensed customer names their vendor vela config `.ini` -- an
+#: ENVIRONMENT fact, never a hardware one, so it is read here and never from
+#: `board.yaml`. alp-sdk's own schema says why: `models[].compile` is for a
+#: per-model config "the SDK cannot derive", and a vela profile IS derivable
+#: from the SKU; a local absolute path in a committed board file would also
+#: travel to every other machine that opens it. Same shape as the other two
+#: toolchain env vars tan already reads in adapters (`ALP_DRPAI_TVM_HOME`,
+#: `ALP_DEEPX_SDK_HOME`).
+_VELA_CONFIG_ENV = "ALP_VELA_CONFIG"
+
+
+def _vendor_config_path() -> Path | None:
+    """The vendor vela `.ini` this host has, or `None`.
+
+    `None` for unset, empty, and for a value that does not name a readable
+    FILE -- vela would fail on a path it cannot open, and an env var pointing
+    at a stale location must degrade to "no vendor config" (Arm's built-in
+    profile, which is what makes the arena figures correct in the first place)
+    rather than break a build that worked yesterday."""
+    raw = os.environ.get(_VELA_CONFIG_ENV)
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_file() else None
 
 
 class VelaFootprintRefused(RuntimeError):
@@ -435,9 +495,19 @@ def _profile_clause(system_config: str | None, memory_mode: str | None,
 # the vendor clause survives only to explain why tan cannot name a complete
 # profile there, never as the remedy. (Stating the metadata fix in the shipped
 # string does not fit: `_VELA_REFUSAL_NOTE_BUDGET` is 700 and the maximal
-# refusal already measures 686 with this clause in it --
+# refusal already measures 691 with this clause in it --
 # `tests/model/test_check.py::test_the_refusal_note_budget_covers_a_maximal_
 # refusal` is what holds that line.)
+#
+# WHICH FILE IT NAMES IS NOW METADATA'S ANSWER, NOT A VENDOR PREFIX MATCH. The
+# gate used to be `silicon_ref.startswith("alif:ensemble:")` with the filename
+# `ensemble_vela.ini` hardcoded beside it -- a standing claim about one vendor
+# that no data could correct. It is now emitted iff this part's own SoC spec
+# declares `npu_toolchain.vela.vendor_config_filename`, and names exactly that.
+# So "a non-Alif refusal never names an Alif file" holds for the stronger
+# reason that no part is ever handed another part's file at all
+# (`nxp:imx9:imx93` declares none). `silicon_ref` was the gate's only reader
+# and is therefore gone from this adapter's interface.
 #
 # `System_Config` and NOT `--system-config`: that is vela's own INI section name
 # (`Section System_Config.<name> not found in Vela config file`), so it
@@ -452,9 +522,8 @@ def _profile_clause(system_config: str | None, memory_mode: str | None,
 # Reaching the branch now means THIS part's spec publishes none -- a part still
 # marked TBD, which the sourcing rule leaves unset rather than guessing -- so the
 # true statement is that none was resolved for it and vela therefore chose the
-# placement itself. Re-sourcing the rest of the evidence (the "this SoC declares
-# no DRAM interface" half) from metadata is a separate slice.
-def _refusal_remedy(defaulted: frozenset[str], silicon_ref: str | None) -> str:
+# placement itself.
+def _refusal_remedy(defaulted: frozenset[str], vendor_config_filename: str | None) -> str:
     """What the reader can actually DO -- which today is: nothing to this
     target, and the rest of the SKU still builds.
 
@@ -468,15 +537,15 @@ def _refusal_remedy(defaulted: frozenset[str], silicon_ref: str | None) -> str:
     change (ADR-0028 leaves `metadata/schemas/` with alp-sdk), so this states
     the real position instead of promising a flag that does not exist.
 
-    The `ensemble_vela.ini` pointer is likewise stated only where it is TRUE
+    The vendor-file pointer is likewise stated only where it is TRUE
     (tan-cli#789 review (g)). It was unconditional, so the `ethos-u65-256`
     refusal on `E1M-NX9101` -- an NXP i.MX 93, whose alp-sdk-documented vela
     invocation involves no proprietary `.ini` whatsoever -- sent that reader
-    hunting an Alif file. Gated on @silicon_ref, the SoM preset's own
-    `silicon:` ref, so `None` (caller could not resolve one) and every
-    non-Alif vendor get the two clauses that hold for ALL parts and no vendor
-    file at all. The first sentence stays vendor-neutral by construction: it
-    says no profile was resolved for THIS part, which is a fact about that
+    hunting an Alif file. Gated now on @vendor_config_filename, this part's own
+    SoC-spec declaration, so `None` (the part declares none, or the caller
+    resolved no spec) gets the two clauses that hold for ALL parts and no
+    vendor file at all. The first sentence stays part-neutral by construction:
+    it says no profile was resolved for THIS part, which is a fact about that
     part's metadata, not about anyone's silicon.
 
     Gated on the MEMORY MODE specifically, not on "vela defaulted something":
@@ -490,18 +559,33 @@ def _refusal_remedy(defaulted: frozenset[str], silicon_ref: str | None) -> str:
     if _MEMORY_MODE_FLAG not in defaulted:
         return "`tan model build` skips this target and still builds the SKU's others."
     where = ""
-    if silicon_ref and silicon_ref.startswith(_ALIF_ENSEMBLE_REF_PREFIX):
-        where = ("; on this Alif Ensemble part its System_Config lives in the proprietary "
-                 "ensemble_vela.ini alp-sdk does not redistribute")
+    if vendor_config_filename:
+        where = (f"; its System_Config lives in the proprietary {vendor_config_filename} "
+                 f"alp-sdk does not redistribute")
     return (f"No module vela profile was resolved for this part, so vela chose its "
             f"own{where}. `tan model build` skips this target and still builds the "
             f"SKU's others.")
 
 
+def _no_dram_marker(area: str, soc_declares_dram: bool | None) -> str:
+    """`_NO_DRAM_MARKER` for the DRAM area on a part whose SoC spec declares no
+    DRAM interface; `""` for every other area and for every other answer.
+
+    `is False` and never a truthiness test: `None` means the spec declared no
+    `external_memory_interfaces` at all (`tan.model.targets._soc_declares_dram`),
+    and an unknown must not be rendered as evidence that a part has no DRAM.
+    The refusal is a string a customer sizes hardware from; the safe direction
+    is silence."""
+    if area == _DRAM_AREA and soc_declares_dram is False:
+        return _NO_DRAM_MARKER
+    return ""
+
+
 def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int | None,
                                 used: dict[str, float], system_config: str | None,
                                 memory_mode: str | None, defaulted: frozenset[str],
-                                silicon_ref: str | None) -> NoReturn:
+                                vendor_config_filename: str | None = None,
+                                soc_declares_dram: bool | None = None) -> NoReturn:
     """A successful compile that placed operators on the NPU but reports no
     SRAM working set is a refusal, not a zero.
 
@@ -518,9 +602,20 @@ def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int
     available without inventing a profile (see the module docstring).
 
     Raises `VelaFootprintRefused`, not a bare `RuntimeError`: this refusal
-    costs the caller ONE target, never the whole package (see that type)."""
+    costs the caller ONE target, never the whole package (see that type).
+
+    THE EVIDENCE FOR "a memory area this module does not have" IS SOURCED, NOT
+    ASSERTED. @soc_declares_dram is this part's own SoC spec answering whether
+    it declares any external DRAM interface at all, resolved by
+    `tan.model.targets._soc_declares_dram` from `external_memory_interfaces[]`
+    and threaded here on `TargetSpec` -- so the clause is right for every part
+    automatically, including one nobody has looked at yet, and absent for a part
+    that does have DRAM. It is deliberately NOT resolved by reading a SoC JSON
+    from inside this adapter: a compiler adapter that opens `metadata/` would be
+    a second, unversioned reader of the SDK's fact tree, and the caller already
+    has the spec open."""
     total = npu_ops + (cpu_ops or 0)
-    elsewhere = ", ".join(f"{area} {kib:.2f} KiB"
+    elsewhere = ", ".join(f"{area} {kib:.2f} KiB{_no_dram_marker(area, soc_declares_dram)}"
                           for area, kib in sorted(used.items()) if kib > 0)
     where = (f"its working set went to {elsewhere}" if elsewhere
              else "it reported no memory use in any area")
@@ -556,7 +651,7 @@ def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int
         f"{_profile_clause(system_config, memory_mode, defaulted)}. Refused because alp-sdk's "
         f"on-device selector accepts req_sram_kib == 0 against ANY arena size "
         f"(src/backends/inference/alp_model_select.c). "
-        f"{_refusal_remedy(defaulted, silicon_ref)}")
+        f"{_refusal_remedy(defaulted, vendor_config_filename)}")
 
 
 # `_default_profile_caveats` EMITS THREE SHAPES, because the two profile flags
@@ -666,18 +761,22 @@ class VelaAdapter(CompilerAdapter):
         return src_format == "tflite"
 
     def compile(self, source: Path, *, accel_config: str, out_dir: Path,
-                opts: dict | None = None, silicon_ref: str | None = None,
+                opts: dict | None = None,
                 vela_memory_mode: str | None = None,
-                vela_system_config: str | None = None) -> Blob:
-        # @silicon_ref reaches ONLY the refusal wording (`_refusal_remedy`) --
-        # the vela command line below is byte-identical with and without it,
-        # so no vendor can ever get a different artifact out of this adapter.
-        # @vela_memory_mode / @vela_system_config are the opposite: they are
-        # the SILICON's own profile (`TargetSpec.vela_*`, out of the SoC spec's
-        # `npu_toolchain.vela`) and they DO change the artifact -- that is the
-        # point. Both stay optional and default to None, so a caller that
-        # resolved no profile gets byte-for-byte the flagless invocation this
-        # adapter has always issued.
+                vela_system_config: str | None = None,
+                vela_vendor_system_config: str | None = None,
+                vela_vendor_config_filename: str | None = None,
+                soc_declares_dram: bool | None = None) -> Blob:
+        # @vela_vendor_config_filename / @soc_declares_dram reach ONLY the
+        # refusal wording (`_refusal_remedy`, `_no_dram_marker`) -- the vela
+        # command line below is byte-identical with and without them, so no
+        # part can get a different artifact out of a diagnostic fact.
+        # @vela_memory_mode / @vela_system_config / @vela_vendor_system_config
+        # are the opposite: they are the SILICON's own profile
+        # (`TargetSpec.vela_*`, out of the SoC spec's `npu_toolchain.vela`) and
+        # they DO change the artifact -- that is the point. All stay optional
+        # and default to None, so a caller that resolved no profile gets
+        # byte-for-byte the flagless invocation this adapter has always issued.
         run_dir = _run_dir(out_dir, accel_config)
         run_dir.mkdir(parents=True, exist_ok=True)
         cmd = ["vela", str(source), "--accelerator-config", accel_config,
@@ -706,12 +805,56 @@ class VelaAdapter(CompilerAdapter):
         # `arena_cache_size`), so this changes no shipped figure today.
         if vela_memory_mode:
             cmd += ["--memory-mode", vela_memory_mode]
-        # NEVER emitted alone by this adapter's own default: `resolve_targets`
-        # withholds a vendor-gated name (`_vela_profile`), because a section
-        # vela cannot resolve is rc=1, not a degradation. Passing `--config`
-        # so a vendor-tuned name becomes legal is a separate slice.
+        # An ARM BUILT-IN system config is safe on its own -- `resolve_targets`
+        # only ever puts one here (`targets._vela_profile` withholds a
+        # vendor-gated name from this field), because a section vela cannot
+        # resolve is rc=1, not a degradation.
         if vela_system_config:
             cmd += ["--system-config", vela_system_config]
+        # THE VENDOR PROFILE: ALL THREE FLAGS OR NONE OF THEM. A licensed
+        # customer names their `.ini` in `ALP_VELA_CONFIG`, and only then does
+        # this part's vendor-gated `System_Config` become legal to pass.
+        #
+        # It is a TRIPLE, not the pair the design first assumed, and that is
+        # measured against real `ethos-u-vela` 5.1.0 rather than reasoned
+        # (`architecture_features.py:588-608`): supplying `--config` REPLACES
+        # vela's built-in `vela.ini` outright -- `self.vela_config_files =
+        # vela_config_files`, no merge -- and vela then refuses any default
+        # left beside it. Each of these was run:
+        #
+        #   * `--config <ini>` alone -> rc=1, verbatim `Error: Incorrect
+        #     argument to CLI option --config=['fake_vendor.ini']: Specifying a
+        #     configuration file is not allowed when using a default system
+        #     configuration`
+        #   * `--config <ini> --system-config <name>` -> rc=1, `... Specifying a
+        #     configuration file is not allowed when using a default memory
+        #     mode`
+        #   * the full triple, against an .ini defining BOTH sections -> rc=0,
+        #     `System configuration Ethos_U85_SRAM_Only` / `Memory mode
+        #     Sram_Only` in vela's own summary block
+        #
+        # so the vendor `.ini` must also define the `[Memory_Mode.<mode>]` this
+        # part declares -- Arm's built-in one is no longer being read. alp-sdk's
+        # own Alif recipe passes exactly this triple, and only
+        # `if(AEN_NPU_VELA_CONFIG)`
+        # (`examples/aen/aen-npu-inference-alp/CMakeLists.txt`).
+        #
+        # TODAY THIS BRANCH NEVER FIRES, and doing nothing is the correct
+        # behaviour rather than a gap: no SoC spec carries a `system_config` at
+        # all, because an Alif `System_Config` is per CORE SUBSYSTEM, not per
+        # SoC (one Ensemble die sources both `Ethos_U85_SRAM_Only` and
+        # `RTSS_HE_SRAM_Only`), so a per-SoC scalar would be right for one of
+        # its two or three Ethos-U accelerators and wrong for the rest. With
+        # `ALP_VELA_CONFIG` set and no vendor name resolved, passing `--config`
+        # anyway would be rc=1 and inventing a profile name would compile a
+        # command stream for hardware nobody described. The mechanism goes live
+        # the day metadata can name one per accelerator; until then it is wired
+        # and silent.
+        elif vela_memory_mode and vela_vendor_system_config:
+            vendor_config = _vendor_config_path()
+            if vendor_config is not None:
+                cmd += ["--config", str(vendor_config),
+                        "--system-config", vela_vendor_system_config]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_VELA_TIMEOUT_S)
         except subprocess.TimeoutExpired as exc:
@@ -732,10 +875,11 @@ class VelaAdapter(CompilerAdapter):
         # placement summary already degrades through `tan.model.check`'s
         # `_vela_placement_unreadable` rather than claiming anything.
         if npu_ops and sram_kib <= 0:
-            _refuse_zero_sram_footprint(accel_config=accel_config, npu_ops=npu_ops,
-                                        cpu_ops=cpu_ops, used=used,
-                                        system_config=system_config, memory_mode=memory_mode,
-                                        defaulted=defaulted, silicon_ref=silicon_ref)
+            _refuse_zero_sram_footprint(
+                accel_config=accel_config, npu_ops=npu_ops, cpu_ops=cpu_ops, used=used,
+                system_config=system_config, memory_mode=memory_mode, defaulted=defaulted,
+                vendor_config_filename=vela_vendor_config_filename,
+                soc_declares_dram=soc_declares_dram)
         return Blob(format="vela_tflite", payload=produced.read_bytes(),
                     arena_bytes=arena, compiler_version=_vela_version(),
                     req_sram_kib=sram_kib, cpu_op_count=cpu_ops, npu_op_count=npu_ops,

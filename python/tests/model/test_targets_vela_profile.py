@@ -24,9 +24,12 @@ _SKU = "E1M-FAKE001"
 _SILICON = "fakevendor:fakefamily:fakepart"
 
 
-def _metadata_root(tmp_path, vela_block: dict | None) -> object:
+def _metadata_root(tmp_path, vela_block: dict | None, memory_interfaces=None) -> object:
     """A metadata/ tree with exactly what `resolve_targets` reads: one SoM
-    preset naming one SoC, and that SoC's spec with a single Ethos-U NPU."""
+    preset naming one SoC, and that SoC's spec with a single Ethos-U NPU.
+
+    @memory_interfaces is the spec's `external_memory_interfaces` when given --
+    absent by default, which is the "this spec says nothing" case."""
     root = tmp_path / "metadata"
     (root / "e1m_modules").mkdir(parents=True)
     (root / "e1m_modules" / f"{_SKU}.yaml").write_text(
@@ -37,12 +40,15 @@ def _metadata_root(tmp_path, vela_block: dict | None) -> object:
     soc: dict = {"ref": _SILICON, "npus": [{"type": "ethos-u85", "mac_per_cycle": 256}]}
     if vela_block is not None:
         soc["npu_toolchain"] = {"vela": vela_block}
+    if memory_interfaces is not None:
+        soc["external_memory_interfaces"] = memory_interfaces
     (soc_dir / f"{part}.json").write_text(json.dumps(soc), encoding="utf-8")
     return root
 
 
-def _ethos_u(tmp_path, vela_block):
-    specs = resolve_targets(_SKU, metadata_root=_metadata_root(tmp_path, vela_block))
+def _ethos_u(tmp_path, vela_block, memory_interfaces=None):
+    specs = resolve_targets(
+        _SKU, metadata_root=_metadata_root(tmp_path, vela_block, memory_interfaces))
     ethos = [s for s in specs if s.backend == "ethos_u"]
     assert len(ethos) == 1, "fixture declares exactly one Ethos-U NPU"
     return ethos[0]
@@ -123,3 +129,109 @@ def test_a_soc_spec_with_no_vela_profile_resolves_to_no_flags(tmp_path, block):
     spec = _ethos_u(tmp_path, block)
     assert spec.vela_memory_mode is None
     assert spec.vela_system_config is None
+    assert spec.vela_vendor_system_config is None
+    assert spec.vela_vendor_config_filename is None
+
+
+# --------------------------------------------------------------------------
+# The VENDOR half of the block: the gated `System_Config` and the file that
+# defines it (alp-sdk #1470 Tasks 4-5). Both are withheld from the fields the
+# adapter passes freely and carried on their own, because they are legal only
+# alongside a `--config` the customer supplies via `ALP_VELA_CONFIG`.
+# --------------------------------------------------------------------------
+
+def test_a_vendor_gated_system_config_is_carried_on_its_own_field(tmp_path):
+    """Withheld from `vela_system_config`, NOT discarded. Dropping it entirely
+    would leave a licensed customer with an `ensemble_vela.ini` unable to reach
+    the vendor-tuned profile at all, and there would be nothing for the
+    `--config` mechanism to complete."""
+    spec = _ethos_u(tmp_path, {
+        "memory_mode": "Sram_Only",
+        "system_config": "Ethos_U85_SRAM_Only",
+        "system_config_requires_vendor_config": True,
+        "vendor_config_filename": "ensemble_vela.ini",
+        "source": "examples/aen/aen-npu-inference-alp/CMakeLists.txt:42-43",
+    })
+    assert spec.vela_system_config is None                        # never alone: rc=1
+    assert spec.vela_vendor_system_config == "Ethos_U85_SRAM_Only"
+    assert spec.vela_vendor_config_filename == "ensemble_vela.ini"
+
+
+def test_the_vendor_filename_is_carried_even_with_no_system_config(tmp_path):
+    """The shape EVERY Alif Ensemble spec is in today: it declares the file but
+    names no `System_Config` (an Alif one is per core subsystem, so no per-SoC
+    scalar is right). The filename still has a consumer -- the footprint
+    refusal names it -- so it must survive a block that completes nothing."""
+    spec = _ethos_u(tmp_path, {
+        "memory_mode": "Sram_Only",
+        "system_config_requires_vendor_config": True,
+        "vendor_config_filename": "ensemble_vela.ini",
+        "source": "examples/aen/aen-npu-inference-alp/CMakeLists.txt:43",
+    })
+    assert spec.vela_vendor_config_filename == "ensemble_vela.ini"
+    assert spec.vela_vendor_system_config is None                 # nothing to complete
+    assert spec.vela_system_config is None
+
+
+def test_a_part_needing_no_vendor_config_names_no_vendor_file(tmp_path):
+    """A spec that says it needs no vendor config has no vendor file to point a
+    customer at, even if it contradicts itself by naming one -- the refusal
+    clause that consumes this calls the file proprietary and undistributed, and
+    that must never be said about a download nobody has to make. The i.MX 93's
+    real shape (`false`, no filename) lands here too."""
+    spec = _ethos_u(tmp_path, {
+        "memory_mode": "Shared_Sram",
+        "system_config_requires_vendor_config": False,
+        "vendor_config_filename": "should_not_be_quoted.ini",
+        "source": "vendors/nxp-imx93/README.md:106",
+    })
+    assert spec.vela_vendor_config_filename is None
+    assert spec.vela_vendor_system_config is None
+
+
+# --------------------------------------------------------------------------
+# `external_memory_interfaces[]` -> `TargetSpec.soc_declares_dram` (Task 4).
+# The refusal states this as EVIDENCE, so an unknown must never resolve to a
+# "no".
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("interfaces,expected", [
+    # metadata/socs/alif/ensemble/e8.json, verbatim kinds.
+    pytest.param([{"kind": "HexSPI"}, {"kind": "SD/eMMC"}], False, id="e8-HexSPI-SD-eMMC"),
+    # e3/e4/e5/e6/e7.
+    pytest.param([{"kind": "OctalSPI"}, {"kind": "SD/eMMC"}], False, id="e3-e7-OctalSPI"),
+    # metadata/socs/nxp/imx9/imx93.json.
+    pytest.param([{"kind": "LPDDR4/4X"}, {"kind": "FlexSPI"}, {"kind": "SD/eMMC"}], True,
+                 id="imx93-LPDDR4-4X"),
+    # metadata/socs/deepx/dx/m1.json.
+    pytest.param([{"kind": "LPDDR4X / LPDDR5"}], True, id="dx-m1-LPDDR4X-LPDDR5"),
+    # metadata/socs/renesas/rzv2n/n44.json.
+    pytest.param([{"kind": "LPDDR4/4X"}, {"kind": "xSPI"}, {"kind": "SD/eMMC"}], True,
+                 id="n44-LPDDR4-4X-xSPI"),
+    # A spelling none of the five uses, to prove the match is on the token and
+    # not on a list of the kinds that happen to be in metadata today.
+    pytest.param([{"kind": "DDR3L"}], True, id="a-DDR-spelling-metadata-does-not-use-yet"),
+    # The unknowns: no key at all, and an empty list. Neither is a declaration
+    # that a part has no DRAM.
+    pytest.param(None, None, id="no-external_memory_interfaces-key"),
+    pytest.param([], None, id="an-empty-interface-list"),
+])
+def test_the_dram_answer_comes_from_the_declared_interface_kinds(tmp_path, interfaces, expected):
+    spec = _ethos_u(tmp_path, {"memory_mode": "Sram_Only",
+                               "system_config_requires_vendor_config": True},
+                    memory_interfaces=interfaces)
+    assert spec.soc_declares_dram is expected
+
+
+def test_a_hyperbus_capable_spi_port_is_not_a_declared_dram_interface(tmp_path):
+    """The Alif parts carry `HyperBus` in the SPI interface's `supports` list.
+    A HyperBus port can host HyperRAM, but which device is populated is not
+    what this spec answers, and vela's `Dram` area is not it -- reading
+    `supports` would turn an attachable-bus fact into a "this part has DRAM"
+    claim nothing sourced. Matched on `kind` alone."""
+    spec = _ethos_u(tmp_path, {"memory_mode": "Sram_Only",
+                               "system_config_requires_vendor_config": True},
+                    memory_interfaces=[
+                        {"kind": "HexSPI", "supports": ["XIP", "AES inline", "HyperBus"]},
+                        {"kind": "SD/eMMC"}])
+    assert spec.soc_declares_dram is False
