@@ -162,12 +162,19 @@ _VELA_ERR_NOTE_BUDGET = 200
 #: report a zero…" -- measured inner length 197 -- so the customer-facing note
 #: in the text report AND the JSON envelope carried the diagnosis with none of
 #: the remediation, which is the whole reason the refusal was reworded
-#: (tan-cli#789 review BLOCKER 2 / MINOR 5). The number is measured, not
-#: guessed: a real `ethos-u85-256` refusal is 621 characters, and a
-#: deliberately maximal one (three memory areas at five significant figures,
-#: the longest profile name vela emits, four-digit op counts) is 688 --
+#: (tan-cli#789 review BLOCKER 2 / MINOR 5). The two numbers below are RE-RUN
+#: against the live template every time it is reworded, never carried forward
+#: with a delta applied: a real `ethos-u85-256` refusal is 618 characters
+#: (measured by compiling `tests/fixtures/models/tiny_int8.tflite` at
+#: `ethos-u85-256` with real `ethos-u-vela` 5.1.0 and `silicon_ref
+#: alif:ensemble:e8`, then taking `len(str(exc))`), and a deliberately maximal
+#: one (three memory areas at five significant figures, the longest profile
+#: name vela emits, four-digit op counts) is 686 --
 #: `test_the_refusal_note_budget_covers_a_maximal_refusal` builds exactly that
-#: and fails if a future message outgrows this. Still bounded and still
+#: and fails if a future message outgrows this. Both were 3 and 2 characters
+#: over-stated when last edited, because the reword's delta was estimated
+#: rather than the message re-measured (tan-cli#789 review MINOR 1); no gate
+#: reads either figure, so an assumed one rots silently. Still bounded and still
 #: word-boundary-truncated with a trailing marker, so the one-line guarantee
 #: is unchanged; the 750-character, 9-newline traceback stays governed by
 #: `_VELA_ERR_NOTE_BUDGET` above, not by this.

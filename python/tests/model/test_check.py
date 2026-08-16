@@ -558,33 +558,40 @@ def test_a_refused_footprint_is_not_reported_as_a_failed_compile(tmp_path, monke
     _write_table(tmp_path, "ethos_u", "u85@vela-1.0.0.json", variant="u85",
                  supported=["FULLY_CONNECTED"])
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
-    # The real message, verbatim from a real refusal on an ALIF ENSEMBLE part
+    # THE ARGUMENTS OF A REAL REFUSAL, NOT A COPY OF ITS MESSAGE. `_refuse`
+    # below raises whatever the LIVE `_refuse_zero_sram_footprint` renders from
+    # them, so every assertion at the bottom of this test reads the production
+    # template.
+    #
+    # It used to raise a hand-copied literal of that template instead, and that
+    # enforced NOTHING (tan-cli#789 review BLOCKER): the copy stayed
+    # byte-identical to the template it came from, so rewording the selector
+    # clause to "reads req_sram_kib == 0 as fits any envelope" left the whole
+    # suite green while that phrase reached this very note and the JSON
+    # envelope. Rendering live is what makes the `"fits" not in note` assertion
+    # below an enforcement rather than a claim.
+    #
+    # The values are those of a real refusal on an ALIF ENSEMBLE part
     # (ethos-u-vela 5.1.0, tiny_int8.tflite at ethos-u85-256, silicon_ref
     # `alif:ensemble:e8`, a SoC spec with no `npu_toolchain.vela` -- since
-    # alp-sdk #1470 that is what it takes to reach this branch): 618
-    # characters, one line. Deliberately the LONGER of the two shapes -- the
-    # same message with a non-Alif `silicon_ref` is 499 characters because it
-    # carries no vendor clause at all (tan-cli#789 review (g)) -- since
-    # truncation is what this test is about. Both figures re-measured off the
-    # live template
-    # when the vendor clause was reworded to name the `System_Config` rather
-    # than the whole profile (tan-cli#789 review MINOR 4); a literal that has
-    # drifted from what `_refuse_zero_sram_footprint` actually emits stops
-    # being evidence about truncation.
-    refusal = VelaFootprintRefused(
-        "vela compiled cleanly for ethos-u85-256 (1/1 operators on the NPU) but "
-        "reported 0 KiB SRAM: its working set went to dram 0.27 KiB under "
-        "Ethos_U85_SYS_DRAM_Mid / Dedicated_Sram_384KB, vela's BUILT-IN default "
-        "profile. Refused because alp-sdk's on-device selector accepts req_sram_kib "
-        "== 0 against ANY arena size (src/backends/inference/alp_model_select.c). "
-        "No module vela profile was resolved for this part, so vela chose its own; "
-        "on this Alif Ensemble part its System_Config lives in the proprietary "
-        "ensemble_vela.ini alp-sdk does not redistribute. `tan model build` skips "
-        "this target and still builds the SKU's others.")
+    # alp-sdk #1470 that is what it takes to reach this branch), captured by
+    # running that compile for real: it renders 618 characters, one line.
+    # Deliberately the LONGER of the two shapes -- the same arguments with a
+    # non-Alif `silicon_ref` render 499 characters because they carry no vendor
+    # clause at all (tan-cli#789 review (g)) -- since truncation is what this
+    # test is about. `defaulted` carries vela's OWN names for the two flags,
+    # the strings `_defaulted_flags` finds in its stdout.
+    real_refusal_args = dict(
+        accel_config="ethos-u85-256", npu_ops=1, cpu_ops=0,
+        used={"dram": 0.27},
+        system_config="Ethos_U85_SYS_DRAM_Mid",
+        memory_mode="Dedicated_Sram_384KB",
+        defaulted=frozenset({"system configuration", "memory mode"}),
+        silicon_ref="alif:ensemble:e8")
 
     def _refuse(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
                 vela_memory_mode=None, vela_system_config=None):
-        raise refusal
+        _refuse_zero_sram_footprint(**real_refusal_args)
 
     monkeypatch.setattr(check_mod.VelaAdapter, "compile", _refuse)
     reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,

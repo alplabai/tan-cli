@@ -528,11 +528,28 @@ def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int
     # arena size", NEVER the retired "fits" vocabulary. This string reaches a
     # `basis: "static-screen"` report note through `tan.model.check`'s
     # `_footprint_refused_note`, and a static screen must never emit "fits" in
-    # any form (`test_the_word_fits_never_appears_in_a_static_screen_report`,
-    # `test_the_retired_word_never_leaks_into_the_clis_rendered_static_screen_
-    # output`). Until this round the clause was there but the 200-character
+    # any form. Until this round the clause was there but the 200-character
     # note budget happened to cut it off; widening that budget would have
     # walked it straight into the envelope.
+    #
+    # THE ONE TEST THAT ENFORCES THAT is
+    # `test_a_refused_footprint_is_not_reported_as_a_failed_compile`
+    # (`tests/model/test_check.py`), and only because it renders its note by
+    # CALLING this function. It used to raise a hand-copied literal of this
+    # template, which enforced nothing: the copy was byte-identical to the
+    # template it came from, so rewording this clause to "reads req_sram_kib
+    # == 0 as fits any envelope" left the whole suite green while that phrase
+    # reached the customer note and the JSON envelope (tan-cli#789 review
+    # BLOCKER). The two static-screen guards this comment used to name --
+    # `test_the_word_fits_never_appears_in_a_static_screen_report`
+    # (`tests/model/test_analyze.py`) and `test_the_retired_word_never_leaks_
+    # into_the_clis_rendered_static_screen_output`
+    # (`tests/commands/test_model_check_command.py`) -- do NOT reach this
+    # template and never did: the first runs live reports that never provoke a
+    # refusal, and the second monkeypatches `check_model_backends` with
+    # fabricated reports whose notes are hand-written literals. Naming them
+    # here claimed an enforcement that did not exist, which is exactly what
+    # stops the next reader from adding a real one.
     raise VelaFootprintRefused(
         f"vela compiled cleanly for {accel_config} ({npu_ops}/{total} operators on the NPU) "
         f"but reported 0 KiB SRAM: {where} under "
