@@ -87,14 +87,31 @@ NEW = "0" * 39 + "1"
 def test_rewrite_pin_keeps_the_line_shape_parity_yml_greps_for():
     """`parity.yml` fails when `^HAND_PORT_PINNED_SDK_COMMIT = "<40hex>"` does
     not match exactly once -- so the rewrite must preserve the anchored form
-    AND the trailing comment, not just the value."""
+    AND the trailing comment, not just the value.
+
+    The trailing comment is read out of the file rather than hardcoded
+    (tan-cli#756 review). It used to be spelled `# alp-sdk origin/dev`
+    inline here, which asserted preservation by memorising the comment that
+    happened to be there -- and so quietly asserted a second thing, that the
+    pin is always on `dev`. It is not always on `dev`: `88318e75` is
+    reachable from `origin/main` only, deliberately (see that pin's own
+    comment for why the tree stops one commit short of the `v0.16.0-rc1`
+    back-merge). Capturing the comment makes this test say what it means --
+    whatever trailing text a pin carries survives a rewrite -- and stops a
+    legitimate pin move from failing a gate that has no opinion about which
+    branch a pin sits on."""
     import re
 
     text = GATE.read_text(encoding="utf-8")
+    before = re.search(
+        r'^HAND_PORT_PINNED_SDK_COMMIT = "[0-9a-f]{40}"(?P<tail>.*)$', text, re.M)
+    assert before is not None, "the pin line this test rewrites is not in the gate file"
     out = pr.rewrite_pin(text, "HAND_PORT_PINNED_SDK_COMMIT", NEW)
     grep = re.compile(r'^HAND_PORT_PINNED_SDK_COMMIT = "[0-9a-f]{40}"', re.M)
     assert len(grep.findall(out)) == 1
-    assert f'HAND_PORT_PINNED_SDK_COMMIT = "{NEW}"  # alp-sdk origin/dev' in out
+    assert f'HAND_PORT_PINNED_SDK_COMMIT = "{NEW}"{before.group("tail")}' in out, (
+        "the rewrite dropped or altered the pin line's trailing comment"
+    )
     # and the OTHER two pins are untouched
     gate_after = pr.parse_gate(out)
     gate_before = pr.parse_gate(text)

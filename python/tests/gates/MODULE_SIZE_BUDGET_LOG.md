@@ -144,6 +144,12 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-15 -- tan-cli#760 review round 3: mutation-provable --fix wiring test (Check.fix_missing fallback in __post_init__, corrected fix_installer_not_found_check/run_fix docstrings, hardened shell-metacharacter denylist)
     - tan/commands/doctor_cmd.py: 4087 -> 4114
     - tan/core/bootstrap.py: 2269 -> 2275
+- 2026-08-15 -- tan-cli#756: hand-port alp-sdk#1446's _aen_require_disjoint_slot0 into tan/planner/zephyr_board.py -- a dual-M55 AEN SoM with no per-role <role>_slot0 region is now refused at emit time instead of silently sharing one MRAM slot0 address
+    - tan/planner/loader.py: 1301 -> 1313
+    - tan/planner/zephyr_board.py: 1433 -> 1486
+    - function_count_budget: raised on this branch from 257 to 258; the final count after merging tan-cli#760 is recorded by the merge-resync entry below
+- 2026-08-15 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 258 -> 259
 - 2026-08-15 -- ADR-0028 Task 2: relocate the alp-sdk model engine (13 modules, 1029 lines) into tan.model verbatim; two of its already-existing over-50-line functions move with it
     - function_count_budget: 258 -> 260
 - 2026-08-15 -- tan-cli#782: model_cmd.py grows past 800 wiring `tan model check` (a third subcommand's board.yaml/SDK resolution, per-model dispatch and envelope shaping, matching build/doctor's own shape); function_count_budget's 260->261 is a PRE-EXISTING drift from the model-doctor merge (25443c4), not from this change -- measured before any edit in this session, fixed here since it blocks a green gate.
@@ -155,3 +161,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 261 -> 264
 - 2026-08-16 -- tan-cli#789 review BLOCKER: _refuse_zero_sram_footprint 42 -> 59 for the comment recording which test actually enforces its selector-clause wording -- the two tests it used to name enforce nothing on this template, and the one that does only started doing so now that it renders its note by CALLING this function instead of raising a hand-copied literal of it. The 17 lines are kept INSIDE the function deliberately, because A FLAT RATCHET DOES NOT IMPLY A FLAT FILE (tan-cli#789 review MINOR 2): core.long_functions measures end_lineno - lineno per def, so prose that moves from a docstring into a comment block ABOVE the def leaves every number here unchanged while the module grows. Measured across 88ef2f1 -> 08314b0: tan/model/adapters/ethos_u.py went 591 -> 725 lines while _refusal_remedy's span SHRANK 50 -> 42 and this file's over-50 count held at 2; only compile moved (59 -> 75). Moving that prose out of the docstrings was the right call and is NOT being undone -- but do not read a flat function_count as a flat module. As of this entry ethos_u.py measures 742 lines against MODULE_CAP 800, i.e. 58 lines of headroom before it joins the tracked modules map and starts failing outright, and nothing in this ratchet will warn on the way there.
     - function_count_budget: 264 -> 265
+- 2026-08-16 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/model_cmd.py: new entry at 938
+    - function_count_budget: 259 -> 266
