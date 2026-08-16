@@ -31,6 +31,16 @@ from tan.commands.build import execute as execute_module
 from tan.core.bootstrap import venv_layout
 from tan.core.flash_plan import FlashInputs, FlashPlan
 from tan.core.tool_lookup import ToolResolution, windows_candidate_names
+from tan.planner_root import bind_sdk_root
+from tests.conftest import sdk_root
+
+#: `tan.planner.buildplan` needs SOME bound alp-sdk root at import time
+#: (`tan/planner_root.py`) even though `_sdk_commit`'s own spawn-hazard
+#: assertions below read only this checkout's `.git`, never the bound
+#: tree's `metadata/**` -- same `ALP_SDK_ROOT`-gated skip every other
+#: `tan.planner` import in this suite carries (e.g.
+#: `tests/planner/test_zephyr_board_disjoint_slot0.py`).
+_PLANNER_SDK = sdk_root()
 
 
 def createprocess_would_load(argv0: str, executable: str | None, cwd: str, path: str) -> str:
@@ -798,6 +808,48 @@ def test_doctor_posix_venv_capable_spawns_the_resolved_interpreter(hostile, spy)
     assert argv0 == "python3", f"the child's own argv[0] became {argv0!r}"
 
 
+def test_collect_threads_probe_host_pythons_resolved_path_into_posix_venv_capable(
+    monkeypatch,
+):
+    """tan-cli#797 review MINOR: the test above pins `_posix_venv_capable` in
+    isolation, with the resolved `executable` handed in BY THE TEST -- it
+    proves the parameter works, not that the CALL SITE inside `_collect`
+    (`doctor_cmd.py`, the `venv_refusal` block) actually threads
+    `_probe_host_python`'s resolved third element through. Before the fix
+    that call site was
+    `_posix_venv_capable(python_found[0].split())` -- the bare display
+    spelling `_probe_host_python` had just resolved and then discarded,
+    reintroducing the exact regression #797 exists to close, invisibly to a
+    suite that only ever calls `_posix_venv_capable` directly. Revert
+    `doctor_cmd.py`'s call site to that bare form and this test fails; the
+    isolated test above does not."""
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    # Every prerequisite tool "found" so the `venv_refusal` branch is reached
+    # (it is gated on `not missing_tools`) regardless of this host's real PATH.
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(
+        doctor_cmd,
+        "_probe_host_python",
+        lambda floor: ("python3", (3, 12), "/resolved/bin/python3"),
+    )
+    captured: dict[str, object] = {}
+
+    def _spy_posix_venv_capable(argv, executable=None):
+        captured["argv"] = argv
+        captured["executable"] = executable
+        return True
+
+    monkeypatch.setattr(doctor_cmd, "_posix_venv_capable", _spy_posix_venv_capable)
+
+    doctor_cmd._collect(None)
+
+    assert captured, "_collect never reached the venv_refusal call site"
+    assert captured["executable"] == "/resolved/bin/python3", (
+        "_collect handed _posix_venv_capable something other than "
+        f"_probe_host_python's resolved path: {captured}"
+    )
+
+
 def test_doctor_macos_rosetta_translated_spawns_the_resolved_sysctl(hostile, spy):
     """`_macos_rosetta_translated`'s `sysctl` probe is resolved through
     `tool_lookup.resolve_tool` the same as this module's git/Python probes
@@ -867,5 +919,55 @@ def test_build_token_substitution_git_functions_degrade_when_git_is_absent(
     assert git_exe is None
     assert token_substitution._is_own_git_checkout(tmp_path, git_exe) is False
     assert token_substitution.git_short_head(tmp_path) == ""
+    assert spy.argvs == [], f"a bare git was spawned despite resolving to nothing: {spy.argvs}"
+
+
+@pytest.mark.skipif(
+    _PLANNER_SDK is None,
+    reason="ALP_SDK_ROOT is not set (or does not point at a real alp-sdk "
+           "checkout) -- importing tan.planner.buildplan requires SOME "
+           "bound root (tan/planner_root.py), even though _sdk_commit's own "
+           "spawn-hazard assertions below read only this checkout's .git.",
+)
+def test_planner_buildplan_sdk_commit_spawns_the_resolved_git(hostile, spy):
+    """`buildplan._sdk_commit` feeds the emitted plan's `sdkCommit` and, like
+    `token_substitution.git_short_head` above, runs with the process cwd set
+    to the CUSTOMER's project (`tan build` is invoked from there, not from
+    the SDK checkout) -- the same Windows-reachable strong form of the
+    cwd-shadowing hazard, not just the doctor-side weak form. Fails before
+    the fix on the same `executable is None` assertion as the rest of this
+    module."""
+    bind_sdk_root(_PLANNER_SDK)
+    from tan.planner import buildplan
+
+    project, realbin = hostile
+
+    buildplan._sdk_commit()
+
+    assert spy.argvs, "_sdk_commit never spawned git"
+    for argv, executable in zip(spy.argvs, spy.executables):
+        assert argv[0] == "git", argv
+        assert executable is not None, "a git spawn pinned no executable"
+        assert Path(executable).parent == realbin
+    assert not spy.loaded(-1, str(project)).startswith(str(project))
+
+
+@pytest.mark.skipif(
+    _PLANNER_SDK is None,
+    reason="ALP_SDK_ROOT is not set (or does not point at a real alp-sdk "
+           "checkout) -- see test_planner_buildplan_sdk_commit_spawns_the_"
+           "resolved_git above.",
+)
+def test_planner_buildplan_sdk_commit_degrades_when_git_is_absent(tmp_path, monkeypatch, spy):
+    """`git` on nobody's PATH must never crash a `tan build` emit or fall back
+    to a bare spawn -- the exact hazard the resolution exists to close."""
+    bind_sdk_root(_PLANNER_SDK)
+    from tan.planner import buildplan
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    assert buildplan._sdk_commit() is None
     assert spy.argvs == [], f"a bare git was spawned despite resolving to nothing: {spy.argvs}"
 

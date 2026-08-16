@@ -37,6 +37,7 @@ from typer.testing import CliRunner
 from tan.cli import app
 from tan.commands import doctor_cmd
 from tan.core.bootstrap import venv_layout, workspace_sdk_record_json
+from tan.core.tool_lookup import ToolResolution
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``.
@@ -2412,6 +2413,18 @@ def test_zephyr_sdk_host_check_names_wsl2_for_windows_on_arm_and_a_different_rem
 
 
 def test_macos_rosetta_translated_reads_the_sysctl_probe(monkeypatch):
+    """`_macos_rosetta_translated` now resolves `sysctl` through
+    `resolve_tool` before probing it (tan-cli#797) -- pin THAT resolution too,
+    not just `probe`, so this test asserts the probe's verdict rather than
+    whatever `sysctl` inventory the CI host running it happens to have. A
+    `windows-latest` runner has no `sysctl` on PATH at all: without this pin,
+    `resolve_tool` returns `resolved=None` there and the function short-
+    circuits to `False` regardless of what `probe` says, which is exactly the
+    host-dependent failure mode this pin exists to close off."""
+    monkeypatch.setattr(
+        doctor_cmd, "resolve_tool", lambda *a, **k: ToolResolution("sysctl", "stub")
+    )
+
     monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "1\n")
     assert doctor_cmd._macos_rosetta_translated() is True
 
@@ -2427,9 +2440,16 @@ def test_host_os_arch_tags_corrects_x86_64_to_aarch64_under_rosetta(monkeypatch)
     reports `macos-x86_64` from `platform.machine()` alone -- a FALSE hard
     refusal (`zephyrSdkAvailableForHost` fail, exit 4, "build on a Linux
     host") on a host the pinned SDK fully serves as `macos-aarch64`.
-    Rosetta's own sysctl corrects it."""
+    Rosetta's own sysctl corrects it.
+
+    `resolve_tool` is pinned resolved too (tan-cli#797) so this exercises the
+    probe's verdict, not the running host's `sysctl` inventory -- see
+    `test_macos_rosetta_translated_reads_the_sysctl_probe`."""
     monkeypatch.setattr(doctor_cmd.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(doctor_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        doctor_cmd, "resolve_tool", lambda *a, **k: ToolResolution("sysctl", "stub")
+    )
     monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "1\n")
     assert doctor_cmd._host_os_arch_tags() == ("macos", "aarch64")
 
@@ -2437,9 +2457,15 @@ def test_host_os_arch_tags_corrects_x86_64_to_aarch64_under_rosetta(monkeypatch)
 def test_host_os_arch_tags_leaves_a_native_intel_mac_alone(monkeypatch):
     """The other state of the same probe: a REAL Intel Mac (not translated)
     must still report `macos-x86_64` -- the unserved host this check is
-    supposed to fail."""
+    supposed to fail.
+
+    `resolve_tool` is pinned resolved too (tan-cli#797) -- see
+    `test_macos_rosetta_translated_reads_the_sysctl_probe`."""
     monkeypatch.setattr(doctor_cmd.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(doctor_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        doctor_cmd, "resolve_tool", lambda *a, **k: ToolResolution("sysctl", "stub")
+    )
     monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "0\n")
     assert doctor_cmd._host_os_arch_tags() == ("macos", "x86_64")
 

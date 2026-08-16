@@ -16,10 +16,13 @@ lazy-imported from the package (they stay inline until orchestrator.py).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
+
+from tan.core.tool_lookup import resolve_tool
 
 from .headers import emit_dts_partitions, emit_dts_reservations, emit_ipc_contract_h
 from .kconfig import (
@@ -342,10 +345,26 @@ def _sdk_commit() -> Optional[str]:
     sys.path workaround noted on `_sdk_version` above, and receipt's variant
     also resolves the FULL rev plus a dirty-tree flag this envelope doesn't
     need.
+
+    `git` is resolved through `tool_lookup.resolve_tool` and spawned with
+    `executable=` pinned, the same treatment `token_substitution.py`'s
+    build-side git-provenance pair got (tan-cli#797): `emit_build_plan` runs
+    with the process cwd sitting in the CUSTOMER's project directory (`tan
+    build` is invoked from there, not from `REPO`), so a bare `"git"` argv[0]
+    here is the same Windows `CreateProcess`-searches-cwd-first hazard as
+    those two -- a checked-in or unpacked `git.exe` at the project root would
+    have run in `git`'s place and silently corrupted the emitted plan's
+    `sdkCommit`. `resolve_tool` returning `None` (git not on PATH at all)
+    degrades to "no commit", the same no-signal answer a `CalledProcessError`
+    already gave -- never a crash of the emit.
     """
+    git_exe = resolve_tool("git", os.environ).resolved
+    if git_exe is None:
+        return None
     try:
         result = subprocess.run(
             ["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
+            executable=git_exe,
             capture_output=True, text=True, check=True)
     except (subprocess.CalledProcessError, OSError):
         return None
