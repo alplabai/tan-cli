@@ -50,7 +50,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .adapters import Blob
-from .adapters.ethos_u import VelaAdapter
+from .adapters.ethos_u import VelaAdapter, VelaFootprintRefused
 from .analyze import BackendReport, OpVerdict, analyze_backend, resolve_ethos_u_variant
 from .targets import resolve_targets
 from .tensorio import extract_ops, tflite_reader_available
@@ -151,8 +151,27 @@ def _license_gated_exact_note(report: BackendReport, backend: str) -> BackendRep
 #: `vela` subprocess can raise `RuntimeError` wrapping its own raw stderr,
 #: which can be a multi-hundred-character, multi-newline Python traceback
 #: (measured: 750 characters, 9 newlines) that must never land verbatim in
-#: either (MAJOR 2 review).
+#: either (MAJOR 2 review). This budget governs FOREIGN text -- whatever
+#: arbitrary thing vela's stderr happened to contain.
 _VELA_ERR_NOTE_BUDGET = 200
+
+#: `VelaFootprintRefused` gets a wider one, because it is a different kind of
+#: string: tan AUTHORS it, one line by contract, from a fixed template over a
+#: handful of bounded fields (accel config, two op counts, vela's own memory
+#: areas + resolved profile names). At 200 it was cut at "... Refusing to
+#: report a zero…" -- measured inner length 197 -- so the customer-facing note
+#: in the text report AND the JSON envelope carried the diagnosis with none of
+#: the remediation, which is the whole reason the refusal was reworded
+#: (tan-cli#789 review BLOCKER 2 / MINOR 5). The number is measured, not
+#: guessed: a real `ethos-u85-256` refusal is 591 characters, and a
+#: deliberately maximal one (three memory areas at five significant figures,
+#: the longest profile name vela emits, four-digit op counts) is 659 --
+#: `test_the_refusal_note_budget_covers_a_maximal_refusal` builds exactly that
+#: and fails if a future message outgrows this. Still bounded and still
+#: word-boundary-truncated with a trailing marker, so the one-line guarantee
+#: is unchanged; the 750-character, 9-newline traceback stays governed by
+#: `_VELA_ERR_NOTE_BUDGET` above, not by this.
+_VELA_REFUSAL_NOTE_BUDGET = 700
 
 
 #: Python's own traceback banner. When @err's message wraps a raw traceback (a
@@ -165,19 +184,25 @@ _VELA_ERR_NOTE_BUDGET = 200
 _TRACEBACK_BANNER = "Traceback (most recent call last):"
 
 
-def _short_vela_error(err: Exception) -> str:
-    """ONE line of @err's message, cut to `_VELA_ERR_NOTE_BUDGET` characters
-    on a word boundary with a trailing `…` when it doesn't already fit --
-    mirrors `tan.core.doctor_render._truncate_fix`'s
-    word-boundary-plus-ellipsis convention. Never a mid-word cut, never a bare
-    truncation with no marker, and never a multi-line traceback.
+def _short_vela_error(err: Exception, *, budget: int = _VELA_ERR_NOTE_BUDGET) -> str:
+    """ONE line of @err's message, cut to @budget characters on a word
+    boundary with a trailing `…` when it doesn't already fit -- mirrors
+    `tan.core.doctor_render._truncate_fix`'s word-boundary-plus-ellipsis
+    convention. Never a mid-word cut, never a bare truncation with no marker,
+    and never a multi-line traceback.
 
     WHICH line: for a wrapped traceback, the LAST non-empty one -- the
     exception line, the only one that says what actually went wrong -- kept
     behind whatever @err's own first line said BEFORE the banner (the accel
     config, in `VelaAdapter.compile`'s "vela failed for ethos-u85-256:"), so
     the note names both the target and the cause. Otherwise the first line,
-    unchanged."""
+    unchanged.
+
+    @budget is a parameter rather than the bare constant because the two
+    callers pass genuinely different kinds of string: arbitrary foreign vela
+    stderr (`_VELA_ERR_NOTE_BUDGET`) versus tan's own single-line
+    `VelaFootprintRefused` template (`_VELA_REFUSAL_NOTE_BUDGET`). Both are
+    bounded; only the number differs."""
     text = str(err).strip()
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
@@ -187,24 +212,46 @@ def _short_vela_error(err: Exception) -> str:
         line = f"{prefix} {lines[-1]}".strip() if prefix else lines[-1]
     else:
         line = lines[0]
-    if len(line) <= _VELA_ERR_NOTE_BUDGET:
+    if len(line) <= budget:
         return line
-    cut = line[:_VELA_ERR_NOTE_BUDGET]
+    cut = line[:budget]
     boundary = cut.rfind(" ")
     if boundary > 0:
         cut = cut[:boundary]
     return f"{cut}…"
 
 
+def _footprint_refused_note(report: BackendReport, err: Exception) -> BackendReport:
+    """`--exact` degrades to the static screen when tan refuses the footprint
+    of an otherwise CLEAN vela run -- and says exactly that.
+
+    NOT "compile with vela failed" (tan-cli#789 review NIT 8): vela exited 0,
+    wrote its output and printed a real placement summary. What failed was
+    tan's acceptance of the footprint it reported. Wording the two the same
+    would send a customer hunting a vela bug that isn't there.
+
+    The refusal text passes through at `_VELA_REFUSAL_NOTE_BUDGET`, so the
+    remediation clause at its tail survives into the text report and the JSON
+    envelope instead of being cut off mid-diagnosis."""
+    detail = _short_vela_error(err, budget=_VELA_REFUSAL_NOTE_BUDGET)
+    return replace(report, notes=[*report.notes,
+                                  f"--exact: {detail} Reporting the static screen instead."])
+
+
 def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
                           metadata_root: Path) -> BackendReport:
     """Runs the real `vela` compile when it is on PATH; degrades cleanly --
     and SAYS SO, in a note -- back to @report (the static screen) for every
-    other case: no vela, no resolvable accelerator config, or a vela failure.
-    Never raises. The compile succeeding is handed to `_report_from_vela_
-    compile`, which is what actually decides `npu_coverage` -- NOT this
-    function, and NOT vela's exit code (0 on a full CPU fallback by
-    design).
+    other case: no vela, no resolvable accelerator config, a vela failure, or
+    a footprint tan refused. Never raises. The compile succeeding is handed to
+    `_report_from_vela_compile`, which is what actually decides `npu_coverage`
+    -- NOT this function, and NOT vela's exit code (0 on a full CPU fallback
+    by design).
+
+    The refusal gets its OWN except-branch ahead of the general one
+    (`_footprint_refused_note`): "compile with vela failed" is the wrong
+    sentence for a run that exited 0 and printed a real placement summary, and
+    the refusal's remediation tail needs the wider note budget to survive.
 
     Gated on `VelaAdapter().accepts(...)` directly, NOT on
     `report.ops[0].reason == "format-not-accepted"`: `extract_ops` (tensorio)
@@ -232,6 +279,8 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
     try:
         with tempfile.TemporaryDirectory() as tmp:
             blob = VelaAdapter().compile(source, accel_config=accel_config, out_dir=Path(tmp))
+    except VelaFootprintRefused as err:
+        return _footprint_refused_note(report, err)
     except Exception as err:  # noqa: BLE001 -- a failed exact compile degrades, it never crashes
         note = (f"--exact compile with vela failed ({_short_vela_error(err)}); "
                  f"reporting the static screen instead.")

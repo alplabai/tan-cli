@@ -32,13 +32,34 @@ A SoM-authoritative profile is NOT derivable here: the one alp-sdk itself uses
 (`--system-config Ethos_U85_SRAM_Only --memory-mode Sram_Only`,
 `examples/aen/aen-npu-inference-alp/CMakeLists.txt`) names sections that live
 ONLY in Alif's PROPRIETARY `ensemble_vela.ini`, which alp-sdk does not
-redistribute (it is `.gitignore`d there and ships in alp-sdk-internal) --
-passing those names without that `.ini` makes vela error outright. So the
-absence is made LOUD instead of guessed at: `_default_profile_caveats` carries
-vela's own "may be invalid or non-optimal" verdict, naming the defaults it
-actually resolved, out through `Blob.caveats` into the report/envelope. Never
-invent a profile here; a wrong one compiles a command stream for hardware the
-module does not have."""
+redistribute (it is `.gitignore`d there -- ".../ensemble_vela.ini ... ships in
+alp-sdk-internal, NOT here") -- passing those names without that `.ini` makes
+vela error outright. And there is no plumbing to pass one anyway: `compile()`
+receives `opts` but has no profile keys to read, `board.schema.json`'s
+`models[].compile` is `additionalProperties: false` over `deepx_dxm1`/`drpai`
+only, and adding an `ethos_u` block there is an alp-sdk schema change (ADR-0028
+leaves `metadata/schemas/` with alp-sdk). So the absence is made LOUD instead of
+guessed at: `_default_profile_caveats` carries vela's own "may be invalid or
+non-optimal" verdict, naming the defaults it actually resolved, out through
+`Blob.caveats` into the report/envelope. Never invent a profile here; a wrong
+one compiles a command stream for hardware the module does not have.
+
+WHO THIS HITS (tan-cli#789 review): the DRAM-backed built-in default is NOT a
+U85/Alif-only fact. Measured, real `ethos-u-vela` 5.1.0 over the committed
+`tests/fixtures/models/tiny_int8.tflite`, both of these refuse:
+
+  * `ethos-u85-256` -> `Ethos_U85_SYS_DRAM_Mid` / `Dedicated_Sram_384KB`
+    (E1M-AEN401 / E1M-AEN601 / E1M-AEN801, Alif Ensemble E4/E6/E8)
+  * `ethos-u65-256` -> `Ethos_U65_Client_Server` / `Dedicated_Sram_384KB`
+    (E1M-NX9101, NXP i.MX 93 -- NOT an Alif part)
+
+while every `ethos-u55-*` config (E1M-AEN301/501/701 and the U55 targets of the
+three AEN SKUs above) resolves to the SRAM-backed `Ethos_U55_High_End_Embedded`
+and reports a real footprint. Nor is it confined to tiny fixtures:
+`keyword_scrambled_8bit.tflite` (29 KB, 6/15 partial placement) refuses on
+`E1M-AEN801` too. `_refuse_zero_sram_footprint` therefore names the profile the
+run ITSELF reported (`_parse_vela_profile`), never a hardcoded Alif one -- an
+NXP user must not read an error blaming `Ethos_U85_SYS_DRAM_Mid`."""
 from __future__ import annotations
 import csv
 import math
@@ -87,6 +108,29 @@ _MEM_USED_RE = re.compile(r"^(.+)_memory_used$")
 # metadata; anything outside this set is folded to "_" so a malformed
 # accel_config can never walk out of @out_dir.
 _UNSAFE_DIR_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+class VelaFootprintRefused(RuntimeError):
+    """vela ran CLEANLY and tan refused the footprint it reported.
+
+    A distinct type because the two callers must tell it apart from a real
+    vela failure, and neither can do that by inspecting a message:
+
+      * `tan.model.build.build_model` skips THIS target and keeps building the
+        SKU's others (tan-cli#789 review BLOCKER 1: one refused
+        `ethos-u85-256` used to abort the whole `.alpmodel`, taking the
+        `ethos-u55-256` / `ethos-u55-128` / `cpu` targets that compiled fine
+        down with it). A genuine `adapter.compile()` failure still fails the
+        build loudly -- that is deliberate and unchanged.
+      * `tan.model.check`'s `--exact` opens its note "vela compiled cleanly
+        for <accel-config> ...", NOT "--exact compile with vela failed (...)"
+        (tan-cli#789 review NIT 8) -- vela exited 0; it was the footprint that
+        was refused. It also passes the message through at a wider note budget
+        because -- unlike a vela subprocess re-raising its own raw stderr --
+        this text is authored here, one line, and bounded.
+
+    The message is a single line by contract (both callers put it in a
+    one-line surface): a report note and an `.alpmodel` coverage reason."""
 
 
 def _vela_version() -> str:
@@ -190,11 +234,47 @@ def _footprint(used: dict[str, float]) -> tuple[int, int]:
     return round(sram_kib * 1024), math.ceil(sram_kib)
 
 
+def _profile_clause(system_config: str | None, memory_mode: str | None,
+                    defaulted: bool) -> str:
+    """The profile THIS run resolved, named as the run itself reported it
+    (`_parse_vela_profile`) -- never a hardcoded `Ethos_U85_*`, which would
+    blame an Alif memory model for an `ethos-u65-256` refusal on the NXP
+    E1M-NX9101 (tan-cli#789 review MAJOR 3).
+
+    @defaulted is vela's OWN verdict (`_DEFAULTED_RE` over its stdout), not an
+    assumption: the "built-in default" clause is only appended when vela
+    actually said it fell back, so the sentence stays true if a profile is
+    ever supplied."""
+    named = " / ".join(p for p in (system_config, memory_mode) if p) or "an unreported profile"
+    return f"{named}, vela's BUILT-IN default profile" if defaulted else named
+
+
+def _refusal_remedy(defaulted: bool) -> str:
+    """What the reader can actually DO -- which today is: nothing to this
+    target, and the rest of the SKU still builds.
+
+    The message this replaced ended "Compile against a --system-config/
+    --memory-mode matching this module's memory model instead", which
+    prescribed an action tan cannot perform (tan-cli#789 review BLOCKER 2):
+    `compile()` never reads `opts`, nothing under `tan/` passes either flag,
+    and alp-sdk's `board.schema.json` declares `models[].compile` as
+    `additionalProperties: false` over `deepx_dxm1`/`drpai` -- there is no
+    `ethos_u` key to route a profile through. Adding one is an alp-sdk schema
+    change (ADR-0028 leaves `metadata/schemas/` with alp-sdk), so this states
+    the real position instead of promising a flag that does not exist."""
+    if not defaulted:
+        return "`tan model build` skips this target and still builds the SKU's others."
+    return ("No module vela profile was supplied and tan cannot pass one yet; for Alif "
+            "Ensemble parts it lives in the proprietary ensemble_vela.ini alp-sdk does "
+            "not redistribute. `tan model build` skips this target and still builds the "
+            "SKU's others.")
+
+
 def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int | None,
                                 used: dict[str, float], system_config: str | None,
-                                memory_mode: str | None) -> NoReturn:
+                                memory_mode: str | None, defaulted: bool) -> NoReturn:
     """A successful compile that placed operators on the NPU but reports no
-    SRAM working set is a HARD ERROR, not a zero.
+    SRAM working set is a refusal, not a zero.
 
     `req_sram_kib == 0` does not read as "this model needs no arena" on the
     device side: alp-sdk's selector reads it as *fits any envelope*
@@ -206,29 +286,45 @@ def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int
     alongside `dram_memory_used = 5.359375` -- because vela's own default
     profile is DRAM-backed. The footprint is real; it is just not expressed in
     a memory area this module has. Refusing loudly is the only honest answer
-    available without inventing a profile (see the module docstring)."""
+    available without inventing a profile (see the module docstring).
+
+    Raises `VelaFootprintRefused`, not a bare `RuntimeError`: this refusal
+    costs the caller ONE target, never the whole package (see that type)."""
     total = npu_ops + (cpu_ops or 0)
     elsewhere = ", ".join(f"{area} {kib:.2f} KiB"
                           for area, kib in sorted(used.items()) if kib > 0)
     where = (f"its working set went to {elsewhere}" if elsewhere
              else "it reported no memory use in any area")
-    profile = " / ".join(p for p in (system_config, memory_mode) if p) or "an unreported profile"
-    raise RuntimeError(
-        f"vela placed {npu_ops}/{total} operators on the NPU for {accel_config} but "
-        f"reported 0 KiB SRAM; {where} under {profile}. Refusing to report a zero "
-        f"footprint: alp-sdk's on-device selector reads req_sram_kib == 0 as 'fits "
-        f"any envelope' (src/backends/inference/alp_model_select.c). Compile against "
-        f"a --system-config/--memory-mode matching this module's memory model instead.")
+    # NOTE the wording of the selector clause: it says "accepts ... against ANY
+    # arena size", NEVER the retired "fits" vocabulary. This string reaches a
+    # `basis: "static-screen"` report note through `tan.model.check`'s
+    # `_footprint_refused_note`, and a static screen must never emit "fits" in
+    # any form (`test_the_word_fits_never_appears_in_a_static_screen_report`,
+    # `test_the_retired_word_never_leaks_into_the_clis_rendered_static_screen_
+    # output`). Until this round the clause was there but the 200-character
+    # note budget happened to cut it off; widening that budget would have
+    # walked it straight into the envelope.
+    raise VelaFootprintRefused(
+        f"vela compiled cleanly for {accel_config} ({npu_ops}/{total} operators on the NPU) "
+        f"but reported 0 KiB SRAM: {where} under "
+        f"{_profile_clause(system_config, memory_mode, defaulted)}. Refused because alp-sdk's "
+        f"on-device selector accepts req_sram_kib == 0 against ANY arena size "
+        f"(src/backends/inference/alp_model_select.c). {_refusal_remedy(defaulted)}")
 
 
-def _default_profile_caveats(stdout: str, system_config: str | None,
+def _default_profile_caveats(defaulted: bool, system_config: str | None,
                              memory_mode: str | None) -> tuple[str, ...]:
     """vela's own "may be invalid or non-optimal" verdict, surfaced as a report
     caveat when it fell back to its built-in profile -- so a customer cannot
     mistake a default-profile compile for one authored for this module. `()`
     when a real profile was supplied. See the module docstring for why no
-    profile is invented here instead."""
-    if not _DEFAULTED_RE.search(stdout):
+    profile is invented here instead.
+
+    Takes @defaulted rather than re-searching stdout: `compile()` resolves it
+    once (`_DEFAULTED_RE`) and hands the SAME fact to this and to
+    `_refuse_zero_sram_footprint`, so the caveat and the refusal can never
+    disagree about whether vela defaulted."""
+    if not defaulted:
         return ()
     named = ", ".join(f"{label} {name}" for label, name in
                       (("system-config", system_config), ("memory-mode", memory_mode)) if name)
@@ -275,6 +371,7 @@ class VelaAdapter(CompilerAdapter):
         if not produced.is_file():
             raise RuntimeError(f"vela produced no output at {produced}")
         system_config, memory_mode = _parse_vela_profile(proc.stdout)
+        defaulted = _DEFAULTED_RE.search(proc.stdout) is not None
         used = _parse_vela_summary(run_dir, source.stem, system_config=system_config)
         arena, sram_kib = _footprint(used)
         placement = _parse_vela_placement(proc.stdout)
@@ -286,8 +383,9 @@ class VelaAdapter(CompilerAdapter):
         if npu_ops and sram_kib <= 0:
             _refuse_zero_sram_footprint(accel_config=accel_config, npu_ops=npu_ops,
                                         cpu_ops=cpu_ops, used=used,
-                                        system_config=system_config, memory_mode=memory_mode)
+                                        system_config=system_config, memory_mode=memory_mode,
+                                        defaulted=defaulted)
         return Blob(format="vela_tflite", payload=produced.read_bytes(),
                     arena_bytes=arena, compiler_version=_vela_version(),
                     req_sram_kib=sram_kib, cpu_op_count=cpu_ops, npu_op_count=npu_ops,
-                    caveats=_default_profile_caveats(proc.stdout, system_config, memory_mode))
+                    caveats=_default_profile_caveats(defaulted, system_config, memory_mode))

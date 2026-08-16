@@ -21,6 +21,7 @@ import pytest
 
 from tan.model import check as check_mod
 from tan.model.adapters import Blob
+from tan.model.adapters.ethos_u import VelaFootprintRefused, _refuse_zero_sram_footprint
 from tan.model.analyze import BackendReport, OpVerdict
 from tan.model.check import (
     _headline_ethos_u_accel_config,
@@ -527,6 +528,90 @@ def test_exact_truncates_a_multiline_vela_traceback_to_its_exception_line(tmp_pa
     assert "vela/x.py" not in note                       # ... nor any frame body
     assert "Traceback (most recent call last)" not in note   # ... nor the contentless banner
     assert note.startswith("--exact compile with vela failed (ValueError: bad tensor shape)")
+
+
+def test_a_refused_footprint_is_not_reported_as_a_failed_compile(tmp_path, monkeypatch):
+    """tan-cli#789 review NIT 8 + MINOR 5, together -- both about the SAME
+    note.
+
+    NIT 8: vela exited 0, wrote its output and printed a real placement
+    summary. What was refused was tan's acceptance of the FOOTPRINT it
+    reported. "--exact compile with vela failed (...)" sends a customer
+    hunting a vela bug that isn't there.
+
+    MINOR 5: at `_VELA_ERR_NOTE_BUDGET` (200) the refusal was cut at
+    "... Refusing to report a zero…" -- measured inner length 197 -- so the
+    note in the text report AND the JSON envelope carried the diagnosis with
+    none of the remediation. The whole point of rewording the refusal was the
+    remediation, so it must survive to the reader."""
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:u85", ethos_u_variant="u85")
+    _write_soc(tmp_path, "fake:soc:u85", [{"type": "ethos-u85", "subtype": "x", "mac_per_cycle": 256}])
+    _write_table(tmp_path, "ethos_u", "u85@vela-1.0.0.json", variant="u85",
+                 supported=["FULLY_CONNECTED"])
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    # The real message, verbatim from a real refusal (ethos-u-vela 5.1.0,
+    # tiny_int8.tflite at ethos-u85-256): 591 characters, one line.
+    refusal = VelaFootprintRefused(
+        "vela compiled cleanly for ethos-u85-256 (1/1 operators on the NPU) but "
+        "reported 0 KiB SRAM: its working set went to dram 0.27 KiB under "
+        "Ethos_U85_SYS_DRAM_Mid / Dedicated_Sram_384KB, vela's BUILT-IN default "
+        "profile. Refused because alp-sdk's on-device selector accepts req_sram_kib "
+        "== 0 against ANY arena size (src/backends/inference/alp_model_select.c). "
+        "No module vela profile was supplied and tan cannot pass one yet; for Alif "
+        "Ensemble parts it lives in the proprietary ensemble_vela.ini alp-sdk does "
+        "not redistribute. `tan model build` skips this target and still builds the "
+        "SKU's others.")
+
+    def _refuse(self, source, *, accel_config, out_dir, opts=None):
+        raise refusal
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _refuse)
+    reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                    metadata_root=tmp_path, exact=True)
+    note = next(n for n in reports[0].notes if n.startswith("--exact"))
+    assert reports[0].basis == "static-screen"          # degraded, not crashed
+    # NIT 8: it compiled. It was the footprint that was refused.
+    assert "compile with vela failed" not in note
+    assert "vela compiled cleanly" in note
+    # MINOR 5: the remediation, which sits at the TAIL, survives.
+    assert "ensemble_vela.ini" in note
+    assert "`tan model build` skips this target and still builds the SKU's others." in note
+    assert "…" not in note                               # nothing was truncated at all
+    assert "\n" not in note                              # ... and it is still one line
+    # Non-negotiable 1, on the surface this note newly reaches: the report is
+    # still `basis: "static-screen"`, and a static screen must never emit the
+    # retired "fits" vocabulary in ANY form. The refusal explains alp-sdk's
+    # selector predicate as "accepts ... against ANY arena size" precisely so
+    # that widening the note budget could not walk "fits any envelope" into
+    # the text report and the JSON envelope.
+    assert "fits" not in note.lower()
+
+
+def test_the_refusal_note_budget_covers_a_maximal_refusal():
+    """The budget above the real message is measured, not guessed.
+
+    `_VELA_REFUSAL_NOTE_BUDGET` is wider than `_VELA_ERR_NOTE_BUDGET` because
+    it governs a string tan AUTHORS from a fixed template, not arbitrary vela
+    stderr. That only holds while the template stays inside it, so this builds
+    a deliberately maximal refusal -- three populated memory areas at five
+    significant figures, the longest profile name vela emits, four-digit
+    operator counts -- straight out of the real `_refuse_zero_sram_footprint`,
+    and fails if it no longer fits. A truncated refusal loses its remediation
+    tail, which is the whole reason the budget was raised (MINOR 5)."""
+    with pytest.raises(VelaFootprintRefused) as exc:
+        _refuse_zero_sram_footprint(
+            accel_config="ethos-u85-256", npu_ops=999, cpu_ops=999,
+            used={"sram": 0.0, "dram": 9999.99,
+                  "on_chip_flash": 9999.99, "off_chip_flash": 9999.99},
+            system_config="Ethos_U55_High_End_Embedded",
+            memory_mode="Dedicated_Sram_384KB", defaulted=True)
+    maximal = str(exc.value)
+    assert "\n" not in maximal
+    assert len(maximal) <= check_mod._VELA_REFUSAL_NOTE_BUDGET
+    # ... and the FOREIGN-stderr budget is not what got widened: a 750-char,
+    # 9-newline vela traceback must still be cut at 200.
+    assert check_mod._VELA_ERR_NOTE_BUDGET == 200
+    assert len(check_mod._short_vela_error(exc.value)) <= 201    # 200 + the "…" marker
 
 
 def test_exact_keeps_the_accel_config_in_front_of_a_wrapped_traceback(tmp_path, monkeypatch):

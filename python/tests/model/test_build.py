@@ -11,16 +11,33 @@ resolve real, committed SoM presets (`E1M-AEN801.yaml`, `E1M-V2M101.yaml`,
 ...) and SoC JSON under `metadata/socs/` -- a throwaway fixture tree has none
 of that content. Bind + resolve happen together, at module scope, guarded by
 the same `SDK is None` check `pytestmark` skips on."""
+import shutil
+from pathlib import Path
+
 import pytest
 
 from tan.model.adapters import CompilerAdapter, Blob
 from tan.model.adapters.cpu import CpuAdapter
+from tan.model.adapters.ethos_u import VelaAdapter, VelaFootprintRefused
 from tan.model.adapters.executorch import ExecutorchAdapter
 from tan.model.package import read_package
 from tan.planner_root import bind_sdk_root
 from tests.conftest import sdk_root
 
 SDK = sdk_root()
+
+#: `tan-cli`'s OWN committed fixtures, not the bound SDK's -- these are the
+#: two whose REAL vela behaviour the tests below assert, and they must not
+#: change under a test when `ALP_SDK_ROOT` is repointed.
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "models"
+_TINY_INT8 = _FIXTURES / "tiny_int8.tflite"     # 1 op, 1/1 on the NPU at every config
+_FLOAT32_FC = _FIXTURES / "float32_fc.tflite"   # float32: 0/1 on the NPU at every config
+
+#: The tests below spawn the REAL compiler -- monkeypatching cannot prove what
+#: vela actually reports for a real NPU-placing compile, which is the whole
+#: claim. A host without `ethos-u-vela` skips rather than pretending.
+_needs_vela = pytest.mark.skipif(shutil.which("vela") is None,
+                                 reason="vela (ethos-u-vela) not installed")
 
 pytestmark = pytest.mark.skipif(
     SDK is None,
@@ -236,3 +253,164 @@ def test_build_model_valid_name_still_writes_in_out_dir(tmp_path):
                       out_dir=out_dir, metadata_root=_META, adapters=[CpuAdapter()])
     assert out == out_dir / "demo-model_1.alpmodel"
     assert out.is_file()
+
+
+# --------------------------------------------------------------------------
+# tan-cli#789 review: a refused target costs its SIBLINGS nothing.
+# --------------------------------------------------------------------------
+
+@_needs_vela
+def test_a_refused_target_does_not_take_the_rest_of_the_package_with_it(tmp_path):
+    """THE BLOCKER-1 GUARD, through a REAL vela process.
+
+    Measured, `ethos-u-vela` 5.1.0 over the committed `tiny_int8.tflite`:
+    `E1M-AEN801` (Alif Ensemble E8) resolves to `ethos-u85-256`,
+    `ethos-u55-256`, `ethos-u55-128` and `cpu`. The u85 compile places 1/1
+    operators on the NPU but reports its working set in DRAM under vela's
+    built-in `Ethos_U85_SYS_DRAM_Mid`, which tan refuses -- and with no guard
+    in `build_model`, that ONE refusal propagated out of the loop and aborted
+    the whole build: `BUILD FAILED RuntimeError`, **no package written at
+    all**, with the other three targets compiling perfectly (`arena 32, SRAM
+    1 KiB` on both u55 configs). The same held for `E1M-AEN401`,
+    `E1M-AEN601`, and for `E1M-NX9101` at `ethos-u65-256`.
+
+    Both halves matter: the survivors must be PRESENT, and the refused target
+    must be legibly ABSENT with its reason -- never silently present carrying
+    the zero footprint the refusal exists to stop."""
+    src = tmp_path / _TINY_INT8.name
+    shutil.copy(_TINY_INT8, src)
+    out = build_model(sku="E1M-AEN801", name="tiny", source=src, out_dir=tmp_path,
+                      metadata_root=_META)          # default registry: real vela + cpu
+    mft, blobs = read_package(out.read_bytes())
+
+    # The siblings survived, with real footprints.
+    survivors = {t.accel_config: t for t in mft.targets if t.backend == "ethos_u"}
+    assert set(survivors) == {"ethos-u55-256", "ethos-u55-128"}
+    for target in survivors.values():
+        assert target.arena > 0 and target.requires["sram_kib"] > 0
+        assert blobs[target.blob][4:8] == b"TFL3"
+    assert any(t.backend == "cpu" for t in mft.targets)
+
+    # The u85 target is absent from targets[] and RECORDED, with its reason.
+    assert "ethos-u85-256" not in {t.accel_config for t in mft.targets}
+    refused = [c for c in mft.coverage
+               if c.backend == "ethos_u" and c.accel_config == "ethos-u85-256"]
+    assert len(refused) == 1
+    assert refused[0].status == "skipped"
+    assert "reported 0 KiB SRAM" in refused[0].reason
+    assert "Ethos_U85_SYS_DRAM_Mid" in refused[0].reason
+    assert "ensemble_vela.ini" in refused[0].reason         # ... and what to do about it
+
+
+@_needs_vela
+def test_every_target_refusing_is_an_error_not_an_empty_package(tmp_path):
+    """The deliberate decision for "what if they ALL refuse".
+
+    A `.alpmodel` with no runnable blob is worse than an error: nothing fails
+    until the device tries to load it. So the existing zero-blob guard stands
+    -- per-target skipping is about not losing the targets that WORKED, never
+    about shipping a package with none.
+
+    `E1M-NX9101` declares exactly one NPU (`ethos-u65-256`, which refuses on
+    this fixture) so restricting the registry to vela alone leaves nothing at
+    all, and the refusal's own text must survive into the failure so the
+    reader learns WHY rather than just "no blob compiled"."""
+    src = tmp_path / _TINY_INT8.name
+    shutil.copy(_TINY_INT8, src)
+    with pytest.raises(ValueError) as exc:
+        build_model(sku="E1M-NX9101", name="tiny", source=src, out_dir=tmp_path,
+                    metadata_root=_META, adapters=[VelaAdapter()])
+    msg = str(exc.value)
+    assert "no blob compiled" in msg
+    assert "ethos-u65-256" in msg and "Ethos_U65_Client_Server" in msg
+    assert not list(tmp_path.glob("*.alpmodel"))         # nothing half-written
+
+
+@_needs_vela
+def test_a_zero_npu_placement_target_is_skipped_not_shipped_as_a_zero(tmp_path):
+    """THE MINOR-7 GUARD, through a REAL vela process.
+
+    `float32_fc.tflite` is float32, so vela places 0/1 operators on the NPU at
+    every accel config and exits 0 with a genuine 0 KiB footprint -- correct,
+    and deliberately NOT a refusal (a full CPU fallback really does need no
+    arena; `tan model check --exact` reports it as `cpu-only`). But writing it
+    into the package as an `ethos_u` target is the same defect from the other
+    side: measured, `E1M-AEN801` shipped THREE targets at `arena=0
+    requires={'sram_kib': 0}`, the exact "fits any envelope" shape alp-sdk's
+    selector waves through (`e->arena_sram_kib == 0u || t->req_sram_kib <=
+    e->arena_sram_kib`, `src/backends/inference/alp_model_select.c`), so a
+    board could select an NPU blob that runs every operator on the CPU anyway.
+
+    An accelerator target with no accelerator placement is dropped to a
+    coverage skip; the `cpu` target -- which is what actually runs this model
+    -- stays."""
+    src = tmp_path / _FLOAT32_FC.name
+    shutil.copy(_FLOAT32_FC, src)
+    out = build_model(sku="E1M-AEN801", name="fc", source=src, out_dir=tmp_path,
+                      metadata_root=_META)          # default registry: real vela + cpu
+    mft, _ = read_package(out.read_bytes())
+
+    assert [t.backend for t in mft.targets] == ["cpu"]
+    assert not [t for t in mft.targets if t.requires["sram_kib"] == 0
+                and t.backend != "cpu"]
+    dropped = {c.accel_config: c for c in mft.coverage if c.backend == "ethos_u"}
+    assert set(dropped) == {"ethos-u85-256", "ethos-u55-256", "ethos-u55-128"}
+    for cov in dropped.values():
+        assert cov.status == "skipped"
+        assert "placed 0 of 1 operators" in cov.reason
+        assert "The cpu target runs this model." in cov.reason
+
+
+def test_only_the_footprint_refusal_is_absorbed_a_real_compile_failure_still_fails(tmp_path):
+    """The scope of the per-target guard, stated from the other side.
+
+    `build_model` catches `VelaFootprintRefused` and NOTHING else: a toolchain
+    that crashed, timed out or produced no artifact is a broken build, not a
+    coverage line. Widening the `except` to `Exception` would turn every one
+    of those into a silent skip, which is how a customer gets a package that
+    is quietly missing the target they bought the module for."""
+    class _Refuses(CompilerAdapter):
+        backend = "ethos_u"
+        def is_available(self): return True
+        def accepts(self, src_format): return src_format == "tflite"
+        def compile(self, source, *, accel_config, out_dir, opts=None):
+            raise VelaFootprintRefused(f"refused {accel_config}")
+
+    class _Crashes(_Refuses):
+        def compile(self, source, *, accel_config, out_dir, opts=None):
+            raise RuntimeError(f"vela failed for {accel_config}: segmentation fault")
+
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-DUMMY")
+    out = build_model(sku="E1M-AEN801", name="ok", source=src, out_dir=tmp_path,
+                      metadata_root=_META, adapters=[CpuAdapter(), _Refuses()])
+    mft, _ = read_package(out.read_bytes())
+    assert {c.reason for c in mft.coverage if c.backend == "ethos_u"} == {
+        "refused ethos-u85-256", "refused ethos-u55-256", "refused ethos-u55-128"}
+
+    with pytest.raises(RuntimeError, match="segmentation fault"):
+        build_model(sku="E1M-AEN801", name="boom", source=src, out_dir=tmp_path,
+                    metadata_root=_META, adapters=[CpuAdapter(), _Crashes()])
+
+
+def test_an_unknown_accelerator_placement_is_not_treated_as_zero(tmp_path):
+    """`npu_op_count is None` means "this compiler did not report a
+    placement", which is not the same fact as "it placed nothing" -- every
+    adapter but vela leaves it None today, and vela itself leaves it None when
+    its own summary could not be parsed (`_parse_vela_placement`). Dropping
+    those targets would silently empty the package for DRP-AI and DEEPX, whose
+    adapters have never reported a placement at all."""
+    class _Silent(CompilerAdapter):
+        backend = "drpai"
+        def is_available(self): return True
+        def accepts(self, src_format): return src_format == "tflite"
+        def compile(self, source, *, accel_config, out_dir, opts=None):
+            return Blob(format="drpai_dir", payload=b"RT", arena_bytes=4096,
+                        req_sram_kib=4)             # npu_op_count stays None
+
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-X")
+    out = build_model(sku="E1M-V2M101", name="demo", source=src, out_dir=tmp_path,
+                      metadata_root=_META, adapters=[CpuAdapter(), _Silent()])
+    mft, _ = read_package(out.read_bytes())
+    assert [t.backend for t in mft.targets if t.backend == "drpai"] == ["drpai"]
