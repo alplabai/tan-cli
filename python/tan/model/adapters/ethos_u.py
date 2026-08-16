@@ -20,33 +20,51 @@ mere absence of an exception -- see `tan.model.check`'s
 `_report_from_vela_compile`, the actual consumer of `Blob.npu_op_count`/
 `cpu_op_count`.
 
-THE PROFILE CAVEAT (tan-cli#789): this adapter passes NO `--system-config` and
-NO `--memory-mode`, so vela falls back to its own built-in profile -- measured
-verbatim on `ethos-u-vela` 5.1.0: "Warning: No system configuration specified.
-Using a default of Ethos_U85_SYS_DRAM_Mid. Compilation may be invalid or
-non-optimal." plus the same for "No memory mode specified. Using a default of
-Dedicated_Sram_384KB." Both defaults are DRAM-backed
-(`weights_storage_area=DRAM`, `feature_map_storage_area=DRAM` in the summary
-CSV), and an Alif Ensemble E-series module is MRAM + SRAM with no DRAM at all.
-A SoM-authoritative profile is NOT derivable here: the one alp-sdk itself uses
-(`--system-config Ethos_U85_SRAM_Only --memory-mode Sram_Only`,
-`examples/aen/aen-npu-inference-alp/CMakeLists.txt`) names sections that live
-ONLY in Alif's PROPRIETARY `ensemble_vela.ini`, which alp-sdk does not
-redistribute (it is `.gitignore`d there -- ".../ensemble_vela.ini ... ships in
-alp-sdk-internal, NOT here") -- passing those names without that `.ini` makes
-vela error outright. And there is no plumbing to pass one anyway: `compile()`
-receives `opts` but has no profile keys to read, `board.schema.json`'s
-`models[].compile` is `additionalProperties: false` over `deepx_dxm1`/`drpai`
-only, and adding an `ethos_u` block there is an alp-sdk schema change (ADR-0028
-leaves `metadata/schemas/` with alp-sdk). So the absence is made LOUD instead of
-guessed at: `_default_profile_caveats` carries vela's own "may be invalid or
-non-optimal" verdict, naming the defaults it actually resolved, out through
-`Blob.caveats` into the report/envelope. Never invent a profile here; a wrong
-one compiles a command stream for hardware the module does not have.
+THE MEMORY PROFILE (alp-sdk #1470): this adapter passes `--memory-mode` when
+its caller resolved one, and today every caller does -- it is a SILICON fact,
+published per part in the SoC spec's `npu_toolchain.vela.memory_mode`
+(`Sram_Only` on the Alif Ensemble parts, `Shared_Sram` on the NXP i.MX 93) and
+carried here as `TargetSpec.vela_memory_mode`. It is never guessed: a caller
+that resolved none gets the flagless invocation, byte for byte.
 
-WHO THIS HITS (tan-cli#789 review): the DRAM-backed built-in default is NOT a
-U85/Alif-only fact. Measured, real `ethos-u-vela` 5.1.0 over the committed
-`tests/fixtures/models/tiny_int8.tflite`, both of these refuse:
+That flag is the one that matters, and the reason is measured. On the committed
+`tests/fixtures/models/tiny_int8.tflite` at `ethos-u85-256`, `ethos-u-vela`
+5.1.0 reports:
+
+  * with no profile flags -- `sram_memory_used = 0.0`,
+    `dram_memory_used = 0.265625` (under `Ethos_U85_SYS_DRAM_Mid` /
+    `Dedicated_Sram_384KB`, both of which vela warns it defaulted)
+  * with `--memory-mode Sram_Only` -- `sram_memory_used = 0.03125`,
+    `dram_memory_used = 0.0`, `on_chip_flash_memory_used = 0.234375`
+
+Both exit 0. The first is the shape tan-cli#789 had to REFUSE: vela's built-in
+default profile is DRAM-backed (`Ethos_U85_SYS_DRAM_Mid` /
+`Dedicated_Sram_384KB`, `weights_storage_area=DRAM` in the summary CSV) and an
+Alif Ensemble E-series module is MRAM + SRAM with no DRAM at all, so the whole
+working set landed in memory the part does not have and the SRAM figure alp-sdk
+sizes an arena from came back zero. Adding `--system-config
+Ethos_U85_SYS_Flash_High` on top of the memory mode changes NO memory figure
+(also measured) -- placement is decided by `--memory-mode`, bandwidth by
+`--system-config`.
+
+`--system-config` is therefore still not passed, and that is deliberate rather
+than pending. The names alp-sdk's own examples use
+(`Ethos_U85_SRAM_Only`, `RTSS_HE_SRAM_Only`;
+`examples/aen/aen-npu-inference-alp/CMakeLists.txt:42-43` and its `-u55`
+sibling) live ONLY in Alif's PROPRIETARY `ensemble_vela.ini`, which alp-sdk does
+not redistribute, and handing vela a section it cannot resolve is a hard rc=1,
+verbatim: `Section System_Config.Ethos_U85_SRAM_Only not found in Vela config
+file`. So the SoC spec flags those as vendor-gated and `resolve_targets`
+withholds them (`tan.model.targets._vela_profile`); vela's own default system
+config is used and SAID SO through `_default_profile_caveats`, which now
+distinguishes the two flags rather than blaming the whole profile on vela.
+Never invent a profile here; a wrong one compiles a command stream for hardware
+the module does not have.
+
+WHO THE OLD DEFAULT HIT (tan-cli#789 review), i.e. what the memory mode fixes:
+the DRAM-backed built-in default was NOT a U85/Alif-only fact. Measured, real
+`ethos-u-vela` 5.1.0 over the committed fixture, both of these refused with no
+memory mode:
 
   * `ethos-u85-256` -> `Ethos_U85_SYS_DRAM_Mid` / `Dedicated_Sram_384KB`
     (E1M-AEN401 / E1M-AEN601 / E1M-AEN801, Alif Ensemble E4/E6/E8)
@@ -54,12 +72,13 @@ U85/Alif-only fact. Measured, real `ethos-u-vela` 5.1.0 over the committed
     (E1M-NX9101, NXP i.MX 93 -- NOT an Alif part)
 
 while every `ethos-u55-*` config (E1M-AEN301/501/701 and the U55 targets of the
-three AEN SKUs above) resolves to the SRAM-backed `Ethos_U55_High_End_Embedded`
-and reports a real footprint. Nor is it confined to tiny fixtures:
-`keyword_scrambled_8bit.tflite` (29 KB, 6/15 partial placement) refuses on
-`E1M-AEN801` too. `_refuse_zero_sram_footprint` therefore names the profile the
-run ITSELF reported (`_parse_vela_profile`), never a hardcoded Alif one -- an
-NXP user must not read an error blaming `Ethos_U85_SYS_DRAM_Mid`.
+three AEN SKUs above) resolved to the SRAM-backed
+`Ethos_U55_High_End_Embedded` and reported a real footprint. The refusal is
+kept, not deleted: a part whose spec carries no profile, or a compile that
+reports no SRAM even under its module's own memory mode, must still be refused
+rather than shipped as a zero. `_refuse_zero_sram_footprint` names the profile
+the run ITSELF reported (`_parse_vela_profile`), never a hardcoded Alif one --
+an NXP user must not read an error blaming `Ethos_U85_SYS_DRAM_Mid`.
 
 ...AND NEITHER IS THE REMEDY (tan-cli#789 review (g)). Naming the profile per
 run only half-closed that: the REMEDY sentence still told every reader the
@@ -73,10 +92,11 @@ where their profile comes from. The clause is now gated on
 @silicon_ref -- the SoM preset's own `silicon:` ref reaching `compile()`
 (`alif:ensemble:e8` vs `nxp:imx9:imx93`, via `TargetSpec.silicon_ref`), a real
 signal -- and NOT on the vela profile name, which is a property of the
-accelerator config rather than of the vendor. Note the Shared_Sram line above
-is NOT restated as advice: `compile()` still passes no `--memory-mode` and has
-no way to, and prescribing a flag tan cannot pass is the defect review BLOCKER
-2 removed (see `_refusal_remedy`)."""
+accelerator config rather than of the vendor. That i.MX 93 line is no longer
+restated as advice for a different reason than it was: `--memory-mode
+Shared_Sram` is now what tan actually PASSES for that part, straight from
+`imx93.json`'s own `npu_toolchain.vela` block, so there is nothing left to
+advise a reader to do by hand."""
 from __future__ import annotations
 import csv
 import math
@@ -113,6 +133,19 @@ _PROFILE_RE = re.compile(r"^(System configuration|Memory mode) +(\S+) *$", re.MU
 # must never be echoed into a customer-facing envelope.
 _DEFAULTED_RE = re.compile(
     r"^Warning: No (system configuration|memory mode) specified\.", re.MULTILINE)
+
+# vela's own names for the two profile flags, as they appear in that warning.
+# Read PER FLAG, not as one boolean: since alp-sdk #1470 tan supplies the
+# memory mode from SoC metadata and still supplies no system config, so a run
+# is routinely half-defaulted -- measured, `--memory-mode Sram_Only` at
+# `ethos-u85-256` still prints "Warning: No system configuration specified.
+# Using a default of Ethos_U85_SYS_DRAM_Mid." and nothing else. Calling that
+# whole run "vela's built-in default profile" would credit vela with the
+# memory mode tan just passed, and would tell a customer the SRAM figure
+# describes a memory model that is not theirs when it now describes exactly
+# theirs.
+_SYSTEM_CONFIG_FLAG = "system configuration"
+_MEMORY_MODE_FLAG = "memory mode"
 
 # `write_summary_metrics_csv_common` writes one `<mem_area>_memory_used` column
 # per memory area the accelerator config declares (stats_writer.py's
@@ -253,29 +286,87 @@ def _footprint(used: dict[str, float]) -> tuple[int, int]:
 
     (0, 0) only when vela reported no SRAM at all -- correct for a full CPU
     fallback (measured: `float32_fc.tflite` at `ethos-u85-256` reports 0.0 for
-    EVERY memory area), and refused by the caller for anything else."""
+    EVERY memory area), and refused by the caller for anything else.
+
+    KNOWN GAP, OPEN, AND NOT SILENTLY PATCHABLE HERE: under `--memory-mode
+    Sram_Only` this reads the ARENA ONLY. vela files the const/weights region
+    under `on_chip_flash_memory_used`, and on a `Sram_Only` part that is a pure
+    BOOKKEEPING RENAME rather than a placement -- verbatim from
+    `ethosu/vela/architecture_features.py`, when the const area's port maps to
+    SRAM and const/arena/cache are the same area: `"Info: Changing
+    const_mem_area from Sram to OnChipFlash. This will use the same
+    characteristics as Sram."`, after which `memory_clock_scales`,
+    `memory_burst_length`, `memory_ports_used` and `memory_latency` for
+    `OnChipFlash` are all assigned from `Sram`. It happens because
+    `[Memory_Mode.Sram_Only]` puts `const_mem_area`, `arena_mem_area` and
+    `cache_mem_area` all on `Axi0` (vela 5.1.0's own `vela.ini`) while vela's
+    validity check forbids naming SRAM as a const area.
+
+    On an Alif Ensemble module that region really IS SRAM-resident:
+    alp-sdk's `examples/aen/aen-npu-inference-alp/src/main.c` memcpy's the
+    model into `static uint8_t model_sram[NETWORK_MODEL_LEN]
+    __aligned(NPU_ALIGN) __attribute__((section("SRAM0")));` with the tensor
+    arena in SRAM0 beside it, and `src/backends/inference/ethos_u_aen.cpp`
+    pins every NPU access to the SRAM AXI port for exactly this reason --
+    verbatim, "everything a SRAM_Only model touches is SRAM0-resident". So on
+    the real 44-op `person_detect_int8.tflite` at `ethos-u85-256`, measured
+    with `ethos-u-vela` 5.1.0: `sram_memory_used = 72.0` and
+    `on_chip_flash_memory_used = 235.265625`, i.e. 72.0 + 235.265625 =
+    307.265625 KiB genuinely resident in SRAM0 against a reported
+    `req_sram_kib = 72` -- an under-report, which is the one direction this
+    function's own contract above says it must never go.
+
+    Summing the columns is NOT the fix and is deliberately not done: an
+    integration that XIPs weights out of flash would then be OVER-reported by
+    the same figure, and a target that does not fit would be refused a board it
+    fits. Getting it right needs a per-part statement of where the const region
+    physically lands, which no metadata in either repo carries today. That is a
+    maintainer decision, not something to guess at here -- so the gap is
+    recorded rather than papered over, and
+    `tests/model/test_build.py::test_the_soms_memory_mode_makes_the_refused_
+    target_ship_at_all` asserts only that the figure is nonzero, never that it
+    is right."""
     sram_kib = used.get("sram", 0.0)
     if sram_kib <= 0:
         return 0, 0
     return round(sram_kib * 1024), math.ceil(sram_kib)
 
 
+def _defaulted_flags(stdout: str) -> frozenset[str]:
+    """Which profile flags vela fell back to a built-in for, by vela's OWN
+    names for them (`_SYSTEM_CONFIG_FLAG` / `_MEMORY_MODE_FLAG`), read from its
+    own warnings. Empty when it defaulted neither."""
+    return frozenset(_DEFAULTED_RE.findall(stdout))
+
+
 def _profile_clause(system_config: str | None, memory_mode: str | None,
-                    defaulted: bool) -> str:
+                    defaulted: frozenset[str]) -> str:
     """The profile THIS run resolved, named as the run itself reported it
     (`_parse_vela_profile`) -- never a hardcoded `Ethos_U85_*`, which would
     blame an Alif memory model for an `ethos-u65-256` refusal on the NXP
     E1M-NX9101 (tan-cli#789 review MAJOR 3).
 
-    @defaulted is vela's OWN verdict (`_DEFAULTED_RE` over its stdout), not an
-    assumption: the "built-in default" clause is only appended when vela
-    actually said it fell back, so the sentence stays true if a profile is
-    ever supplied."""
-    named = " / ".join(p for p in (system_config, memory_mode) if p) or "an unreported profile"
-    return f"{named}, vela's BUILT-IN default profile" if defaulted else named
+    @defaulted is vela's OWN verdict (`_defaulted_flags` over its stdout), not
+    an assumption, and it is per-flag: the blanket "vela's BUILT-IN default
+    profile" tail is used only when vela defaulted EVERY name in the clause.
+    When it defaulted some but not all -- the shape tan produces now that it
+    passes a metadata-sourced `--memory-mode` and no `--system-config` -- each
+    name says for itself which it was, so a supplied flag is never attributed
+    to vela and a defaulted one is never presented as the module's."""
+    parts = [(label, name) for label, name in
+             ((_SYSTEM_CONFIG_FLAG, system_config), (_MEMORY_MODE_FLAG, memory_mode)) if name]
+    if not parts:
+        return "an unreported profile"
+    named = " / ".join(name for _, name in parts)
+    if all(label in defaulted for label, _ in parts):
+        return f"{named}, vela's BUILT-IN default profile"
+    if not any(label in defaulted for label, _ in parts):
+        return named
+    return " / ".join(f"{name} (vela's built-in default)" if label in defaulted else name
+                      for label, name in parts)
 
 
-def _refusal_remedy(defaulted: bool, silicon_ref: str | None) -> str:
+def _refusal_remedy(defaulted: frozenset[str], silicon_ref: str | None) -> str:
     """What the reader can actually DO -- which today is: nothing to this
     target, and the rest of the SKU still builds.
 
@@ -297,21 +388,39 @@ def _refusal_remedy(defaulted: bool, silicon_ref: str | None) -> str:
     `silicon:` ref, so `None` (caller could not resolve one) and every
     non-Alif vendor get the two clauses that hold for ALL parts and no vendor
     file at all. The first sentence stays vendor-neutral by construction: it
-    says a profile was not supplied and cannot be passed, which is a fact
-    about tan, not about anyone's silicon."""
-    if not defaulted:
+    says no profile was resolved for THIS part, which is a fact about that
+    part's metadata, not about anyone's silicon.
+
+    Gated on the MEMORY MODE specifically, not on "vela defaulted something":
+    the memory mode is the flag that decides placement, and since alp-sdk
+    #1470 tan passes it from SoC metadata while still passing no
+    `--system-config`. A run that got its module's memory mode and STILL
+    reported no SRAM has not been failed by a missing profile, so telling its
+    reader "no module vela profile was resolved" would be false.
+
+    That gate is also why the sentence no longer says tan "cannot pass one
+    yet". It could not, when this text was written; since #1470 it does, for
+    every part whose SoC spec publishes a `npu_toolchain.vela.memory_mode`.
+    Reaching this branch now means THIS part's spec publishes none -- a part
+    still marked TBD, which the sourcing rule leaves unset rather than
+    guessing -- so the true statement is that none was resolved for it and
+    vela therefore chose the placement itself. Re-sourcing the rest of the
+    evidence (the "this SoC declares no DRAM interface" half) from metadata is
+    a separate slice."""
+    if _MEMORY_MODE_FLAG not in defaulted:
         return "`tan model build` skips this target and still builds the SKU's others."
     where = ""
     if silicon_ref and silicon_ref.startswith(_ALIF_ENSEMBLE_REF_PREFIX):
         where = ("; on this Alif Ensemble part it lives in the proprietary "
                  "ensemble_vela.ini alp-sdk does not redistribute")
-    return (f"No module vela profile was supplied and tan cannot pass one yet{where}. "
-            f"`tan model build` skips this target and still builds the SKU's others.")
+    return (f"No module vela profile was resolved for this part, so vela chose its "
+            f"own{where}. `tan model build` skips this target and still builds the "
+            f"SKU's others.")
 
 
 def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int | None,
                                 used: dict[str, float], system_config: str | None,
-                                memory_mode: str | None, defaulted: bool,
+                                memory_mode: str | None, defaulted: frozenset[str],
                                 silicon_ref: str | None) -> NoReturn:
     """A successful compile that placed operators on the NPU but reports no
     SRAM working set is a refusal, not a zero.
@@ -353,26 +462,50 @@ def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int
         f"{_refusal_remedy(defaulted, silicon_ref)}")
 
 
-def _default_profile_caveats(defaulted: bool, system_config: str | None,
+def _default_profile_caveats(defaulted: frozenset[str], system_config: str | None,
                              memory_mode: str | None) -> tuple[str, ...]:
     """vela's own "may be invalid or non-optimal" verdict, surfaced as a report
-    caveat when it fell back to its built-in profile -- so a customer cannot
-    mistake a default-profile compile for one authored for this module. `()`
-    when a real profile was supplied. See the module docstring for why no
-    profile is invented here instead.
+    caveat for whichever profile flags it had to default -- so a customer
+    cannot mistake a default-profile figure for one authored for this module.
+    `()` when vela defaulted neither.
+
+    TWO SHAPES, because the two flags carry different weight and since alp-sdk
+    #1470 they routinely differ:
+
+      * NO MEMORY MODE -- the hard caveat, unchanged. vela chose the placement,
+        its built-in default is DRAM-backed, and the arena/SRAM figures
+        therefore describe a memory model the module may not have at all.
+      * MEMORY MODE SUPPLIED, SYSTEM CONFIG DEFAULTED -- the ordinary shape of
+        every compile tan issues today. The memory figures are the module's:
+        measured on `tests/fixtures/models/tiny_int8.tflite` at
+        `ethos-u85-256`, `--memory-mode Sram_Only` alone and
+        `--system-config Ethos_U85_SYS_Flash_High --memory-mode Sram_Only`
+        report byte-identical `sram_memory_used`/`on_chip_flash_memory_used`.
+        What vela's default system config does decide is the bandwidth/latency
+        cost model its scheduler optimises against, so the caveat says exactly
+        that and does NOT repeat the "figures describe the wrong memory model"
+        sentence, which would now be false.
 
     Takes @defaulted rather than re-searching stdout: `compile()` resolves it
-    once (`_DEFAULTED_RE`) and hands the SAME fact to this and to
+    once (`_defaulted_flags`) and hands the SAME fact to this and to
     `_refuse_zero_sram_footprint`, so the caveat and the refusal can never
-    disagree about whether vela defaulted."""
+    disagree about which flags vela defaulted."""
     if not defaulted:
         return ()
-    named = ", ".join(f"{label} {name}" for label, name in
-                      (("system-config", system_config), ("memory-mode", memory_mode)) if name)
-    return (f"vela used its BUILT-IN default profile ({named or 'unreported'}), not one "
-            f"authored for this module -- vela's own warning for that is \"Compilation "
-            f"may be invalid or non-optimal\". The arena/SRAM figures and the compiled "
-            f"command stream describe that default memory model, not this module's.",)
+    named = ", ".join(f"{cli} {name}" for label, cli, name in
+                      ((_SYSTEM_CONFIG_FLAG, "system-config", system_config),
+                       (_MEMORY_MODE_FLAG, "memory-mode", memory_mode))
+                      if name and label in defaulted)
+    if _MEMORY_MODE_FLAG in defaulted:
+        return (f"vela used its BUILT-IN default profile ({named or 'unreported'}), not one "
+                f"authored for this module -- vela's own warning for that is \"Compilation "
+                f"may be invalid or non-optimal\". The arena/SRAM figures and the compiled "
+                f"command stream describe that default memory model, not this module's.",)
+    return (f"vela used its BUILT-IN default {named or 'system-config unreported'} for "
+            f"bandwidth/latency estimates -- no module-authored one is available -- so its "
+            f"scheduling is tuned for that system, not this module's. The arena/SRAM figures "
+            f"are unaffected: they follow --memory-mode {memory_mode}, which came from this "
+            f"module's SoC metadata.",)
 
 
 def _parse_vela_placement(stdout: str) -> tuple[int, int] | None:
@@ -398,14 +531,36 @@ class VelaAdapter(CompilerAdapter):
         return src_format == "tflite"
 
     def compile(self, source: Path, *, accel_config: str, out_dir: Path,
-                opts: dict | None = None, silicon_ref: str | None = None) -> Blob:
+                opts: dict | None = None, silicon_ref: str | None = None,
+                vela_memory_mode: str | None = None,
+                vela_system_config: str | None = None) -> Blob:
         # @silicon_ref reaches ONLY the refusal wording (`_refusal_remedy`) --
         # the vela command line below is byte-identical with and without it,
         # so no vendor can ever get a different artifact out of this adapter.
+        # @vela_memory_mode / @vela_system_config are the opposite: they are
+        # the SILICON's own profile (`TargetSpec.vela_*`, out of the SoC spec's
+        # `npu_toolchain.vela`) and they DO change the artifact -- that is the
+        # point. Both stay optional and default to None, so a caller that
+        # resolved no profile gets byte-for-byte the flagless invocation this
+        # adapter has always issued.
         run_dir = _run_dir(out_dir, accel_config)
         run_dir.mkdir(parents=True, exist_ok=True)
         cmd = ["vela", str(source), "--accelerator-config", accel_config,
                "--output-dir", str(run_dir)]
+        # Placement is decided by --memory-mode, bandwidth by --system-config;
+        # measured on `tests/fixtures/models/tiny_int8.tflite` at
+        # `ethos-u85-256`, adding `--system-config Ethos_U85_SYS_Flash_High`
+        # alongside `--memory-mode Sram_Only` changes no memory figure at all.
+        # So the memory mode is the load-bearing one, and every value that
+        # reaches it is an Arm built-in -- this works with no vendor .ini.
+        if vela_memory_mode:
+            cmd += ["--memory-mode", vela_memory_mode]
+        # NEVER emitted alone by this adapter's own default: `resolve_targets`
+        # withholds a vendor-gated name (`_vela_profile`), because a section
+        # vela cannot resolve is rc=1, not a degradation. Passing `--config`
+        # so a vendor-tuned name becomes legal is a separate slice.
+        if vela_system_config:
+            cmd += ["--system-config", vela_system_config]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_VELA_TIMEOUT_S)
         except subprocess.TimeoutExpired as exc:
@@ -416,7 +571,7 @@ class VelaAdapter(CompilerAdapter):
         if not produced.is_file():
             raise RuntimeError(f"vela produced no output at {produced}")
         system_config, memory_mode = _parse_vela_profile(proc.stdout)
-        defaulted = _DEFAULTED_RE.search(proc.stdout) is not None
+        defaulted = _defaulted_flags(proc.stdout)
         used = _parse_vela_summary(run_dir, source.stem, system_config=system_config)
         arena, sram_kib = _footprint(used)
         placement = _parse_vela_placement(proc.stdout)

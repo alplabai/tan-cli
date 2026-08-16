@@ -279,8 +279,15 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
     accel_config = target.accel_config
     try:
         with tempfile.TemporaryDirectory() as tmp:
+            # Vendor, accel-config AND memory profile all come off the SAME
+            # resolved target (`_headline_ethos_u_target`), so `--exact`
+            # reports what `tan model build` would actually compile for this
+            # SKU -- a screen run against a different memory model than the
+            # build uses would be a figure the customer cannot act on.
             blob = VelaAdapter().compile(source, accel_config=accel_config, out_dir=Path(tmp),
-                                         silicon_ref=target.silicon_ref)
+                                         silicon_ref=target.silicon_ref,
+                                         vela_memory_mode=target.vela_memory_mode,
+                                         vela_system_config=target.vela_system_config)
     except VelaFootprintRefused as err:
         return _footprint_refused_note(report, err)
     except Exception as err:  # noqa: BLE001 -- a failed exact compile degrades, it never crashes

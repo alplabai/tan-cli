@@ -59,7 +59,9 @@ class DeepxAdapter(CompilerAdapter):
         return src_format == "onnx"          # dxcom is an ONNX frontend
 
     def compile(self, source: Path, *, accel_config: str, out_dir: Path,
-                opts: dict | None = None, silicon_ref: str | None = None) -> Blob:
+                opts: dict | None = None, silicon_ref: str | None = None,
+                vela_memory_mode: str | None = None,
+                vela_system_config: str | None = None) -> Blob:
         config = (opts or {}).get("config")
         if not config:
             raise RuntimeError(

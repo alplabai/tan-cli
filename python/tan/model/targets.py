@@ -21,6 +21,50 @@ class TargetSpec:
     backend: str            # cpu | ethos_u | drpai | deepx_dxm1
     silicon_ref: str        # SoC ref e.g. "alif:ensemble:e7" | "deepx:dx:m1" | "*"
     accel_config: str       # vela accel-config e.g. "ethos-u55-256"; "" when N/A
+    # The SILICON's vela invocation profile, from the SoC spec's
+    # `npu_toolchain.vela` block (alp-sdk #1470) -- ethos_u targets only, None
+    # everywhere else. Optional with None defaults so no existing TargetSpec
+    # construction site has to change, and so a SoC spec that predates the
+    # block resolves to "pass no profile flag", which is exactly today's
+    # behaviour rather than a guess.
+    vela_memory_mode: str | None = None      # Arm built-in, e.g. "Sram_Only"
+    vela_system_config: str | None = None    # ONLY when it needs no vendor config
+
+
+def _vela_profile(soc: dict) -> tuple[str | None, str | None]:
+    """(memory_mode, system_config) to invoke vela with for THIS SoC, read from
+    its `npu_toolchain.vela` block. `(None, None)` for a spec that carries no
+    block -- never a guessed profile; a wrong one compiles a command stream for
+    memory the module does not have.
+
+    THE SYSTEM_CONFIG GUARD IS LOAD-BEARING. `--memory-mode` values are Arm
+    built-ins (the SoC schema constrains `memory_mode` to the `[Memory_Mode.*]`
+    sections `ethos-u-vela` 5.1.0 ships), so passing one always works. A
+    `System_Config` name usually is NOT: the Alif Ensemble parts' own
+    `Ethos_U85_SRAM_Only` / `RTSS_HE_SRAM_Only` live only in the proprietary
+    `ensemble_vela.ini`, and handing vela a section it cannot resolve is a hard
+    rc=1, measured verbatim:
+
+        ethosu.vela.errors.CliOptionError: 'Error: Incorrect argument to CLI
+        option --system-config=Ethos_U85_SRAM_Only: Section
+        System_Config.Ethos_U85_SRAM_Only not found in Vela config file'
+
+    So a `system_config` is carried ONLY when the block does not set
+    `system_config_requires_vendor_config` -- a key the SoC schema makes
+    REQUIRED, so falsy here means an author said "no vendor file needed", not
+    that they forgot. An ABSENT `system_config` is likewise "nothing to pass",
+    never "no vendor config needed": no Alif or NXP spec names one today (an
+    Alif System_Config describes one CORE SUBSYSTEM, not a die), so this branch
+    yields None for every part currently shipped -- correct, and the mechanism
+    is here for the spec that eventually does carry a built-in one."""
+    block = soc.get("npu_toolchain")
+    vela = block.get("vela") if isinstance(block, dict) else None
+    if not isinstance(vela, dict):
+        return None, None
+    memory_mode = vela.get("memory_mode") or None
+    if vela.get("system_config_requires_vendor_config"):
+        return memory_mode, None
+    return memory_mode, vela.get("system_config") or None
 
 
 def _npu_backend(npu_type: str, subtype: str) -> str | None:
@@ -36,13 +80,20 @@ def _npu_backend(npu_type: str, subtype: str) -> str | None:
 def _soc_targets(soc: dict, silicon_ref: str) -> list[TargetSpec]:
     """One TargetSpec per mappable NPU in a SoC's npus[] (deduped by the caller)."""
     out: list[TargetSpec] = []
+    memory_mode, system_config = _vela_profile(soc)
     for npu in soc.get("npus", []):
         npu_type = npu.get("type", "")
         backend = _npu_backend(npu_type, npu.get("subtype", ""))
         if backend is None:
             continue
-        accel = f"{npu_type}-{npu['mac_per_cycle']}" if backend == "ethos_u" else ""
-        out.append(TargetSpec(backend=backend, silicon_ref=silicon_ref, accel_config=accel))
+        ethos_u = backend == "ethos_u"
+        accel = f"{npu_type}-{npu['mac_per_cycle']}" if ethos_u else ""
+        # The profile is a vela flag, so it rides only on the targets vela
+        # compiles: a DRP-AI or DEEPX target on the same die must not carry
+        # (and its adapter must never be handed) an Ethos-U memory mode.
+        out.append(TargetSpec(backend=backend, silicon_ref=silicon_ref, accel_config=accel,
+                              vela_memory_mode=memory_mode if ethos_u else None,
+                              vela_system_config=system_config if ethos_u else None))
     return out
 
 

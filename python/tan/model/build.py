@@ -164,9 +164,24 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
             # vela footprint refusal name Alif's proprietary profile file on
             # an Alif Ensemble target and stay silent about it on the NXP
             # i.MX 93 (tan-cli#789 review (g)).
+            #
+            # `spec.vela_*` is the opposite: the silicon's own vela memory
+            # profile (SoC spec `npu_toolchain.vela`, alp-sdk #1470), and it
+            # DOES change the artifact -- that is the point. It is what makes
+            # an `ethos-u85-256` target ship at all: measured, real
+            # `ethos-u-vela` 5.1.0 over `tests/fixtures/models/
+            # tiny_int8.tflite` reported `sram_memory_used = 0.0` for
+            # E1M-AEN801 without it (refused, a coverage row) and 0.03125 KiB
+            # with `--memory-mode Sram_Only` (a real target). Passed on the
+            # same call as everything else so a target can never be compiled
+            # with one target's accel-config and another's memory model; it is
+            # None for every non-ethos_u backend by construction
+            # (`targets._soc_targets`).
             blob = adapter.compile(source, accel_config=spec.accel_config,
                                    out_dir=out_dir, opts=backend_opts,
-                                   silicon_ref=spec.silicon_ref)
+                                   silicon_ref=spec.silicon_ref,
+                                   vela_memory_mode=spec.vela_memory_mode,
+                                   vela_system_config=spec.vela_system_config)
         except VelaFootprintRefused as err:
             # ONE target's refusal, not the package's. See the module docstring.
             coverage.append(Coverage(spec.backend, spec.accel_config, "skipped", str(err)))

@@ -142,7 +142,9 @@ class DrpaiAdapter(CompilerAdapter):
         return src_format == "onnx"          # DRP-AI TVM ingests ONNX
 
     def compile(self, source: Path, *, accel_config: str, out_dir: Path,
-                opts: dict | None = None, silicon_ref: str | None = None) -> Blob:
+                opts: dict | None = None, silicon_ref: str | None = None,
+                vela_memory_mode: str | None = None,
+                vela_system_config: str | None = None) -> Blob:
         tvm_home = _tvm_home()
         if tvm_home is None:
             raise RuntimeError(

@@ -15,7 +15,9 @@ class CpuAdapter(CompilerAdapter):
         return src_format == "tflite"
 
     def compile(self, source: Path, *, accel_config: str, out_dir: Path,
-                opts: dict | None = None, silicon_ref: str | None = None) -> Blob:
+                opts: dict | None = None, silicon_ref: str | None = None,
+                vela_memory_mode: str | None = None,
+                vela_system_config: str | None = None) -> Blob:
         payload = source.read_bytes()
         return Blob(format="tflite", payload=payload, arena_bytes=0,
                     compiler_version="passthrough")

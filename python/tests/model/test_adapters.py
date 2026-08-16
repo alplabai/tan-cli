@@ -352,7 +352,11 @@ def test_the_refusal_prescribes_nothing_tan_cannot_actually_do(tmp_path, monkeyp
     assert "--system-config" not in msg and "--memory-mode" not in msg
     # ... and instead, the three things that ARE true:
     assert "vela's BUILT-IN default profile" in msg          # why the figure is wrong
-    assert "tan cannot pass one yet" in msg                   # why you cannot fix it here
+    # ... why: this part's SoC spec published no memory mode, so vela picked
+    # the placement. NOT "tan cannot pass one yet", which alp-sdk #1470 made
+    # false -- tan passes one for every part whose spec declares it.
+    assert "No module vela profile was resolved for this part" in msg
+    assert "cannot pass one yet" not in msg
     assert "ensemble_vela.ini" in msg                         # where the real profile lives
     assert "alp-sdk does not redistribute" in msg
     assert "`tan model build` skips this target" in msg       # what happens next
@@ -445,15 +449,15 @@ def test_a_non_alif_refusal_never_names_an_alif_file(tmp_path, monkeypatch, sili
     fallback is silence about vendors, not a guess.
 
     What must SURVIVE for every part is the pair of clauses that are true for
-    all of them -- no profile was supplied, tan cannot pass one, and the rest
-    of the SKU still builds."""
+    all of them -- no profile was resolved for this part, so vela chose the
+    placement, and the rest of the SKU still builds."""
     msg = _refuse_on("ethos-u65-256", "Ethos_U65_Client_Server", silicon_ref,
                      tmp_path, monkeypatch)
     assert "ensemble_vela.ini" not in msg                    # THE regression (g)
     assert "Alif" not in msg and "alif" not in msg
     assert "does not redistribute" not in msg
     # ... while the part-independent half of the remedy is untouched:
-    assert "No module vela profile was supplied and tan cannot pass one yet." in msg
+    assert "No module vela profile was resolved for this part, so vela chose its own." in msg
     assert "`tan model build` skips this target and still builds the SKU's others." in msg
     assert "Ethos_U65_Client_Server" in msg                  # still the run's own profile
     assert "\n" not in msg
@@ -696,6 +700,138 @@ def test_vela_real_dram_default_profile_compile_refuses_a_zero_footprint(
     assert ("ensemble_vela.ini" in msg) is alif    # the vendor clause, through REAL vela
     assert profile in msg                          # the profile THIS run resolved
     assert "\n" not in msg                         # one line: it lands in a note
+
+
+# --------------------------------------------------------------------------
+# The SILICON's vela memory profile on the command line (alp-sdk #1470).
+# `--memory-mode` decides placement, `--system-config` decides bandwidth, and
+# only the first is safe to pass unconditionally -- see
+# `tan.model.targets._vela_profile`.
+# --------------------------------------------------------------------------
+
+def _capture_vela_cmd(monkeypatch, tmp_path, **profile):
+    """Run `VelaAdapter().compile` against a fake vela and return the argv it
+    built. The fake writes the output file the adapter requires and nothing
+    else, so nothing but the command line is under test here."""
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-INPUT")
+    seen = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        seen["cmd"] = cmd
+        (_out_dir_of(cmd) / "m_vela.tflite").write_bytes(b"VELA-OUT")
+        return _FakeProc()
+
+    monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
+    VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path, **profile)
+    return seen["cmd"]
+
+
+def test_compile_passes_the_targets_memory_mode_to_vela(tmp_path, monkeypatch):
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path, vela_memory_mode="Sram_Only")
+    assert "--memory-mode" in cmd
+    assert cmd[cmd.index("--memory-mode") + 1] == "Sram_Only"
+
+
+def test_a_vendor_system_config_is_never_put_on_the_command_line_alone(tmp_path, monkeypatch):
+    # Ethos_U85_SRAM_Only without --config is a hard vela rc=1:
+    # "Section System_Config.Ethos_U85_SRAM_Only not found in Vela config file"
+    # -- so `resolve_targets` withholds it, and this adapter must not
+    # substitute one of its own when only the memory mode arrives.
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path,
+                            vela_memory_mode="Sram_Only", vela_system_config=None)
+    assert "--system-config" not in cmd
+
+
+def test_a_system_config_that_needs_no_vendor_config_reaches_the_command_line(
+        tmp_path, monkeypatch):
+    """The other side of the same guard: a name that IS resolvable (an Arm
+    built-in, or a vendor one alongside a `--config` a later slice supplies)
+    must actually be passed, or the guard is just a way of dropping it."""
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path, vela_memory_mode="Sram_Only",
+                            vela_system_config="Ethos_U85_SYS_Flash_High")
+    assert cmd[cmd.index("--system-config") + 1] == "Ethos_U85_SYS_Flash_High"
+
+
+def test_no_resolved_profile_leaves_the_command_line_exactly_as_it_was(tmp_path, monkeypatch):
+    """A caller that resolved no profile gets the flagless invocation, byte
+    for byte -- the adapter never guesses a memory model."""
+    cmd = _capture_vela_cmd(monkeypatch, tmp_path)
+    assert "--memory-mode" not in cmd and "--system-config" not in cmd
+
+
+def test_a_supplied_memory_mode_is_not_reported_as_velas_own_default(tmp_path, monkeypatch):
+    """vela still warns "No system configuration specified" when only the
+    memory mode is passed (measured, 5.1.0), so the whole-profile caveat would
+    now credit vela with a memory mode tan supplied -- and tell the customer
+    the SRAM figure describes the wrong memory model when it describes exactly
+    theirs. The caveat names only what vela actually defaulted."""
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-INPUT")
+
+    def fake_run(cmd, capture_output, text, timeout):
+        out = _out_dir_of(cmd)
+        (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
+        (out / "m_summary_Ethos_U85_SYS_DRAM_Mid.csv").write_text(
+            "sram_memory_used,on_chip_flash_memory_used\n0.03125,0.234375\n", encoding="utf-8")
+        return _FakeProc(stdout=(
+            "Warning: No system configuration specified. Using a default of "
+            "Ethos_U85_SYS_DRAM_Mid. Compilation may be invalid or non-optimal.\n"
+            "System configuration             Ethos_U85_SYS_DRAM_Mid\n"
+            "Memory mode                                 Sram_Only\n"
+            "CPU operators = 0 (0.0%)\n"
+            "NPU operators = 1 (100.0%)\n"))
+
+    monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
+    blob = VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path,
+                                 vela_memory_mode="Sram_Only")
+    assert blob.req_sram_kib == 1 and blob.arena_bytes == 32      # ceil(0.03125), 0.03125 KiB
+    assert len(blob.caveats) == 1
+    caveat = blob.caveats[0]
+    # Only the system config is attributed to vela ...
+    assert caveat.startswith("vela used its BUILT-IN default system-config Ethos_U85_SYS_DRAM_Mid")
+    assert "--memory-mode Sram_Only" in caveat        # ... the memory mode is named as the module's
+    # ... and the hard caveat's verdict on the FIGURES is gone, because the
+    # arena/SRAM numbers now describe this module's memory model, not vela's.
+    assert "describe that default memory model" not in caveat
+    assert "The arena/SRAM figures are unaffected" in caveat
+
+
+@pytest.mark.skipif(shutil.which("vela") is None, reason="vela (ethos-u-vela) not installed")
+def test_real_vela_with_the_soms_memory_mode_reports_a_nonzero_sram_footprint(tmp_path):
+    """The whole point of the profile: 0 KiB SRAM is what defeated the
+    on-device fit gate (`t->req_sram_kib <= e->arena_sram_kib` reads a zero as
+    fitting ANY arena, src/backends/inference/alp_model_select.c), and what
+    `ethos-u85-256` reported under vela's DRAM-backed default for every Alif
+    Ensemble SKU.
+
+    Measured, real `ethos-u-vela` 5.1.0 over the committed
+    `tiny_int8.tflite`: no profile flags -> `sram_memory_used = 0.0` /
+    `dram_memory_used = 0.265625` (the refusal above); `--memory-mode
+    Sram_Only` -> `sram_memory_used = 0.03125` / `dram_memory_used = 0.0` /
+    `on_chip_flash_memory_used = 0.234375`. Only a real vela can prove that --
+    it is a fact about the compiler's placement, not about tan's argv."""
+    src = tmp_path / "tiny.tflite"
+    shutil.copy(_ROOT / "tests/fixtures/models/tiny_int8.tflite", src)
+    blob = VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path,
+                                 vela_memory_mode="Sram_Only")
+    # NONZERO is the property, never this particular number -- and the number
+    # is KNOWN INCOMPLETE. `_footprint` reads `sram_memory_used` alone, so
+    # under `Sram_Only` this is the arena and NOT the const/weights region
+    # vela renames into `on_chip_flash_memory_used` as a bookkeeping move
+    # (`architecture_features.py`: "Changing const_mem_area from Sram to
+    # OnChipFlash. This will use the same characteristics as Sram."), which on
+    # an Alif Ensemble part is SRAM0-resident all the same. On the real 44-op
+    # `person_detect_int8.tflite` at `ethos-u85-256` that is 72.0 reported
+    # against 72.0 + 235.265625 = 307.265625 KiB actually resident. See
+    # `_footprint`'s own docstring: the fix needs a per-part statement of where
+    # the const region lands and is a maintainer decision, so this asserts the
+    # property the fit gate needs and deliberately pins no figure that would
+    # bless the under-report as correct.
+    assert blob.req_sram_kib > 0
+    assert blob.arena_bytes > 0
+    assert blob.npu_op_count == 1 and blob.cpu_op_count == 0      # a real NPU placement
+    assert blob.format == "vela_tflite" and blob.payload[4:8] == b"TFL3"
 
 
 def test_cpu_and_vela_do_not_require_compile_opts():

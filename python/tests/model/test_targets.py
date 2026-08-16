@@ -52,6 +52,37 @@ def test_resolve_targets_dedupes_identical_accel_configs():
     assert len(ethos) == 2                                     # one per distinct accel_config
 
 
+def test_an_alif_ethos_u_target_carries_the_builtin_memory_mode_but_not_the_vendor_system_config():
+    specs = resolve_targets("E1M-AEN801", metadata_root=_META)
+    u85 = [s for s in specs if s.accel_config == "ethos-u85-256"]
+    assert u85, "E1M-AEN801 must resolve an ethos-u85-256 target"
+    assert u85[0].vela_memory_mode == "Sram_Only"
+    # Ethos_U85_SRAM_Only lives only in the proprietary ensemble_vela.ini;
+    # passing it without --config is vela rc=1 "Section ... not found".
+    assert u85[0].vela_system_config is None
+
+
+def test_an_nxp_ethos_u_target_carries_its_own_memory_mode():
+    specs = resolve_targets("E1M-NX9101", metadata_root=_META)
+    u65 = [s for s in specs if s.accel_config == "ethos-u65-256"]
+    assert u65, "E1M-NX9101 must resolve an ethos-u65-256 target"
+    assert u65[0].vela_memory_mode == "Shared_Sram"
+
+
+def test_a_non_vela_target_never_carries_a_vela_profile():
+    """The profile is a vela flag, so it must not ride on a target no vela
+    invocation ever sees. `E1M-V2M101` resolves a DRP-AI target and a discrete
+    DEEPX one alongside `cpu`; a memory mode on any of those would be handed to
+    an adapter that has no such flag, and would read as silicon fact about a
+    compiler that never ran."""
+    for sku in ("E1M-V2M101", "E1M-AEN801"):
+        for spec in resolve_targets(sku, metadata_root=_META):
+            if spec.backend == "ethos_u":
+                continue
+            assert spec.vela_memory_mode is None, f"{sku}/{spec.backend}"
+            assert spec.vela_system_config is None, f"{sku}/{spec.backend}"
+
+
 def test_resolve_targets_for_v2n101_yields_drpai_plus_cpu():
     # E1M-V2N101 -> renesas:rzv2n:n44 -> DRP-AI NPU + cpu
     specs = resolve_targets("E1M-V2N101", metadata_root=_META)

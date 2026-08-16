@@ -28,13 +28,13 @@ class Blob:
     cpu_op_count: int | None = None
     # Adapter-authored caveats about THIS compile that a report must not drop
     # -- each already a complete, customer-readable sentence. Today only
-    # `VelaAdapter` populates them, for the one caveat it cannot resolve:
-    # vela compiles against its own BUILT-IN default profile (no
-    # `--system-config`/`--memory-mode` is passed, and none can be -- the
-    # SoM-authoritative one names sections that live only in a proprietary
-    # .ini alp-sdk does not redistribute), and that default memory model is
-    # DRAM-backed on modules that have no DRAM. Surfaced rather than
-    # swallowed so a default-profile compile cannot be mistaken for a
+    # `VelaAdapter` populates them, for the profile flags vela had to default:
+    # `--memory-mode` now comes from the SoC spec (alp-sdk #1470), but
+    # `--system-config` still does not, because the SoM-authoritative names
+    # live only in a proprietary .ini alp-sdk does not redistribute. Surfaced
+    # rather than swallowed so a compile tuned to vela's own bandwidth model
+    # -- or, when no memory mode was resolvable at all, to vela's DRAM-backed
+    # default on a module that has no DRAM -- cannot be mistaken for a
     # module-authoritative one; `tan.model.check`'s `_report_from_vela_
     # compile` carries them into `BackendReport.notes` and so into the JSON
     # envelope. Never a substitute for failing: a figure that cannot be
@@ -60,7 +60,9 @@ class CompilerAdapter(ABC):
 
     @abstractmethod
     def compile(self, source: Path, *, accel_config: str, out_dir: Path,
-                opts: dict | None = None, silicon_ref: str | None = None) -> Blob:
+                opts: dict | None = None, silicon_ref: str | None = None,
+                vela_memory_mode: str | None = None,
+                vela_system_config: str | None = None) -> Blob:
         """Compile @source for @accel_config; return the Blob.
 
         @opts is the per-model compile config for this backend
@@ -78,4 +80,17 @@ class CompilerAdapter(ABC):
         `None` means the caller could not resolve one; an adapter must then
         stay vendor-neutral, never guess a vendor from an accelerator config
         or a compiler-reported profile name. It is NOT a compile input: no
-        adapter may change the artifact it emits based on this."""
+        adapter may change the artifact it emits based on this.
+
+        @vela_memory_mode / @vela_system_config ARE compile inputs, and the
+        only backend-specific pair on this interface: `TargetSpec.vela_*`, the
+        silicon's own vela invocation profile out of the SoC spec's
+        `npu_toolchain.vela` (alp-sdk #1470). Only `VelaAdapter` acts on them
+        -- every other adapter accepts and ignores them, exactly as `cpu` and
+        `ethos_u` accept and ignore `opts` -- and they are named for vela on
+        purpose, so a future DRP-AI or DEEPX profile cannot be mistaken for
+        being carried by them. `None` means the caller resolved no profile,
+        and an adapter must then invoke its compiler exactly as it did before
+        the profile existed rather than substituting a default of its own: a
+        guessed memory model compiles a command stream for hardware the module
+        does not have."""

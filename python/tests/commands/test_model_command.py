@@ -771,9 +771,13 @@ _CAVEAT = ('vela used its BUILT-IN default profile (system-config '
 
 def _caveated_package_bytes() -> bytes:
     """A real container whose ethos_u target ships with the verbatim vela
-    default-profile caveat. (The COMPILE that produces this caveat is pinned
-    against real vela 5.1.0 by `tests/model/test_build.py`; this file is about
-    what the command does with one that already exists.)"""
+    default-profile caveat. (The COMPILE that produces this exact string is
+    pinned against real vela 5.1.0 by `tests/model/test_build.py`'s
+    `test_a_refused_target_does_not_take_the_rest_of_the_package_with_it` --
+    the both-flags-defaulted shape, which since alp-sdk #1470 means a SoC spec
+    carrying no `npu_toolchain.vela`. This file is about what the command does
+    with a caveat that already exists, so which shape it is does not matter
+    here.)"""
     from tan.model.manifest import Manifest, Target
     from tan.model.package import write_package
 

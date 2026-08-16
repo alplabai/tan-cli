@@ -11,6 +11,7 @@ resolve real, committed SoM presets (`E1M-AEN801.yaml`, `E1M-V2M101.yaml`,
 ...) and SoC JSON under `metadata/socs/` -- a throwaway fixture tree has none
 of that content. Bind + resolve happen together, at module scope, guarded by
 the same `SDK is None` check `pytestmark` skips on."""
+import json
 import shutil
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from tan.model.adapters.cpu import CpuAdapter
 from tan.model.adapters.ethos_u import VelaAdapter, VelaFootprintRefused
 from tan.model.adapters.executorch import ExecutorchAdapter
 from tan.model.package import read_manifest_file, read_package
+from tan.model.targets import resolve_targets
 from tan.planner_root import bind_sdk_root
 from tests.conftest import sdk_root
 
@@ -54,6 +56,46 @@ if SDK is not None:
 else:
     build_model = None  # unreachable: every test in this module is skipped
     _META = None
+
+
+def _meta_without_a_vela_profile(tmp_path: Path, sku: str) -> Path:
+    """A copy of the BOUND metadata/ tree with `npu_toolchain` deleted from
+    every SoC spec -- i.e. the real presets and the real SoC JSON, minus the
+    one block under test.
+
+    Why this exists. Until alp-sdk #1470 every `ethos_u` compile went out
+    flagless, vela fell back to its DRAM-backed built-in profile, and the
+    three refusal guards below fired against the REAL shipped SKUs. They no
+    longer do: `E1M-AEN401`/`E1M-AEN601`/`E1M-AEN801` now resolve
+    `--memory-mode Sram_Only` and `E1M-NX9101` `--memory-mode Shared_Sram`
+    straight out of `metadata/socs/**`'s `npu_toolchain.vela`, so nothing in
+    the shipped catalogue reports 0 KiB SRAM on a real NPU placement any more
+    (measured, `ethos-u-vela` 5.1.0 over both committed fixtures -- see
+    `test_the_soms_memory_mode_makes_the_refused_target_ship_at_all`).
+
+    That is the fix working, and it is NOT a licence to delete the guards:
+    `tan.model.targets._vela_profile` returns `(None, None)` for any SoC spec
+    that carries no block, which is exactly what a part whose profile is still
+    TBD gets (the plan's own rule -- an unsourced profile is never invented,
+    it is simply not passed). Stripping the block reproduces that condition
+    against the real presets, so these keep running the REAL vela process
+    through the REAL `build_model` and keep proving what they were written to
+    prove. Only the absence of `npu_toolchain` is synthetic; the SoM preset,
+    the `silicon:` ref, the NPU list and the accel configs are all the bound
+    tree's own.
+
+    The whole `socs/` tree is copied, not just the host SoC: `resolve_targets`
+    globs it for on-module discrete accelerators."""
+    root = tmp_path / "metadata-no-vela-profile"
+    (root / "e1m_modules").mkdir(parents=True, exist_ok=True)
+    shutil.copy(_META / "e1m_modules" / f"{sku}.yaml", root / "e1m_modules" / f"{sku}.yaml")
+    for src_json in sorted((_META / "socs").glob("**/*.json")):
+        dst = root / "socs" / src_json.relative_to(_META / "socs")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        soc = json.loads(src_json.read_text(encoding="utf-8"))
+        soc.pop("npu_toolchain", None)
+        dst.write_text(json.dumps(soc), encoding="utf-8")
+    return root
 
 
 def test_build_model_writes_alpmodel_with_cpu_blob_and_coverage(tmp_path):
@@ -192,7 +234,8 @@ def test_build_model_skips_backend_missing_compile_config(tmp_path):
         requires_compile_opts = True
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
+                    vela_memory_mode=None, vela_system_config=None):
             raise AssertionError("must not compile without opts")
     src = tmp_path / "m.tflite"; src.write_bytes(b"TFL3-X")
     out = build_model(sku="E1M-V2M101", name="demo", source=src, out_dir=tmp_path,
@@ -210,7 +253,8 @@ def test_build_model_passes_compile_opts_to_adapter(tmp_path):
         requires_compile_opts = True
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
+                    vela_memory_mode=None, vela_system_config=None):
             seen["opts"] = opts
             return Blob(format="drpai_dir", payload=b"RT", arena_bytes=0)
     src = tmp_path / "m.tflite"; src.write_bytes(b"TFL3-X")
@@ -276,11 +320,19 @@ def test_a_refused_target_does_not_take_the_rest_of_the_package_with_it(tmp_path
 
     Both halves matter: the survivors must be PRESENT, and the refused target
     must be legibly ABSENT with its reason -- never silently present carrying
-    the zero footprint the refusal exists to stop."""
+    the zero footprint the refusal exists to stop.
+
+    Driven through `_meta_without_a_vela_profile` since alp-sdk #1470: the
+    real `E1M-AEN801` now resolves `--memory-mode Sram_Only` and its u85
+    target ships (`sram_memory_used = 0.03125`), so a SoC spec with no
+    `npu_toolchain.vela` is where a real vela process still produces the zero
+    this guard is about. See that helper for why the guard is kept rather than
+    deleted."""
     src = tmp_path / _TINY_INT8.name
     shutil.copy(_TINY_INT8, src)
     out = build_model(sku="E1M-AEN801", name="tiny", source=src, out_dir=tmp_path,
-                      metadata_root=_META)          # default registry: real vela + cpu
+                      # default registry: real vela + cpu
+                      metadata_root=_meta_without_a_vela_profile(tmp_path, "E1M-AEN801"))
     mft, blobs = read_package(out.read_bytes())
 
     # The siblings survived, with real footprints.
@@ -289,6 +341,18 @@ def test_a_refused_target_does_not_take_the_rest_of_the_package_with_it(tmp_path
     for target in survivors.values():
         assert target.arena > 0 and target.requires["sram_kib"] > 0
         assert blobs[target.blob][4:8] == b"TFL3"
+        # And, since no profile was resolvable at all here, the FULL-profile
+        # caveat -- both flags defaulted, which is the shape
+        # `tests/commands/test_model_command.py`'s `_CAVEAT` is copied from.
+        # The half-defaulted shape tan now produces for a part WITH a
+        # `npu_toolchain.vela` block is pinned by
+        # `test_a_shipped_blobs_compiler_caveat_is_carried_into_the_package`.
+        assert target.caveats == [
+            "vela used its BUILT-IN default profile (system-config "
+            "Ethos_U55_High_End_Embedded, memory-mode Shared_Sram), not one authored "
+            "for this module -- vela's own warning for that is \"Compilation may be "
+            "invalid or non-optimal\". The arena/SRAM figures and the compiled command "
+            "stream describe that default memory model, not this module's."]
     assert any(t.backend == "cpu" for t in mft.targets)
 
     # The u85 target is absent from targets[] and RECORDED, with its reason.
@@ -321,11 +385,19 @@ def test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file(tmp_path):
     profile per run (MAJOR 3) fixed only the first half of the sentence.
 
     The `cpu` target still ships, which is the other half of the per-target
-    contract: one refused accelerator target must never empty the package."""
+    contract: one refused accelerator target must never empty the package.
+
+    Driven through `_meta_without_a_vela_profile` since alp-sdk #1470 -- the
+    real `E1M-NX9101` now resolves `--memory-mode Shared_Sram` from
+    `imx93.json` and its `ethos-u65-256` target ships. The SoM preset, the
+    `silicon: nxp:imx9:imx93` ref the vendor clause is gated on, and the
+    accel config are all still the bound tree's real ones, so the claim this
+    makes about NXP customers is unchanged."""
     src = tmp_path / _TINY_INT8.name
     shutil.copy(_TINY_INT8, src)
     out = build_model(sku="E1M-NX9101", name="tiny", source=src, out_dir=tmp_path,
-                      metadata_root=_META)          # default registry: real vela + cpu
+                      # default registry: real vela + cpu
+                      metadata_root=_meta_without_a_vela_profile(tmp_path, "E1M-NX9101"))
     mft, _ = read_package(out.read_bytes())
     assert [t.backend for t in mft.targets] == ["cpu"]
 
@@ -336,7 +408,7 @@ def test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file(tmp_path):
     assert "ensemble_vela.ini" not in reason               # ... and no Alif file after it
     assert "Alif" not in reason and "alif" not in reason
     # The part-independent remedy is intact for this SKU too.
-    assert "No module vela profile was supplied and tan cannot pass one yet." in reason
+    assert "No module vela profile was resolved for this part, so vela chose its own." in reason
     assert "`tan model build` skips this target and still builds the SKU's others." in reason
 
 
@@ -350,18 +422,111 @@ def test_every_target_refusing_is_an_error_not_an_empty_package(tmp_path):
     about shipping a package with none.
 
     `E1M-NX9101` declares exactly one NPU (`ethos-u65-256`, which refuses on
-    this fixture) so restricting the registry to vela alone leaves nothing at
-    all, and the refusal's own text must survive into the failure so the
-    reader learns WHY rather than just "no blob compiled"."""
+    this fixture when no memory mode is resolvable) so restricting the registry
+    to vela alone leaves nothing at all, and the refusal's own text must
+    survive into the failure so the reader learns WHY rather than just "no blob
+    compiled". `_meta_without_a_vela_profile` for the same reason as its two
+    siblings above."""
     src = tmp_path / _TINY_INT8.name
     shutil.copy(_TINY_INT8, src)
     with pytest.raises(ValueError) as exc:
         build_model(sku="E1M-NX9101", name="tiny", source=src, out_dir=tmp_path,
-                    metadata_root=_META, adapters=[VelaAdapter()])
+                    metadata_root=_meta_without_a_vela_profile(tmp_path, "E1M-NX9101"),
+                    adapters=[VelaAdapter()])
     msg = str(exc.value)
     assert "no blob compiled" in msg
     assert "ethos-u65-256" in msg and "Ethos_U65_Client_Server" in msg
     assert not list(tmp_path.glob("*.alpmodel"))         # nothing half-written
+
+
+# --------------------------------------------------------------------------
+# alp-sdk #1470: the SoM's own vela memory profile, end to end.
+# --------------------------------------------------------------------------
+
+@_needs_vela
+@pytest.mark.parametrize("sku,accel_config,memory_mode", [
+    ("E1M-AEN401", "ethos-u85-256", "Sram_Only"),
+    ("E1M-AEN601", "ethos-u85-256", "Sram_Only"),
+    ("E1M-AEN801", "ethos-u85-256", "Sram_Only"),
+    ("E1M-NX9101", "ethos-u65-256", "Shared_Sram"),
+])
+def test_the_soms_memory_mode_makes_the_refused_target_ship_at_all(
+        tmp_path, sku, accel_config, memory_mode):
+    """THE ACCEPTANCE for the whole slice, through a REAL vela process.
+
+    These are precisely the four SKUs tan-cli#789 had to refuse, and the
+    reason was never the model: vela was compiling them against its own
+    DRAM-backed built-in profile on parts that have no DRAM, so the SRAM
+    figure alp-sdk sizes an arena from came back zero and the target became a
+    `skipped` coverage row. With `--memory-mode` sourced from
+    `metadata/socs/**`'s `npu_toolchain.vela` the placement lands in memory
+    the module actually has and the target ships.
+
+    Measured, `ethos-u-vela` 5.1.0 over the committed `tiny_int8.tflite`, this
+    exact code path, before -> after:
+
+      | SKU / accel config           | before      | after                     |
+      |---|---|---|
+      | AEN401/601/801 ethos-u85-256 | skipped     | arena 32, req_sram_kib 1  |
+      | NX9101         ethos-u65-256 | skipped     | arena 32, req_sram_kib 1  |
+
+    with vela's own columns moving `sram 0.0 / dram 0.265625` ->
+    `sram 0.03125 / dram 0.0 / on_chip_flash 0.234375` on the Alif u85, and
+    `sram 0.0 / dram 0.109375` -> `sram 0.03125 / dram 0.078125` on the NXP
+    u65. Parametrized over all four rather than spot-checked on one: three
+    resolve `Sram_Only` from an Alif Ensemble spec and one resolves
+    `Shared_Sram` from `imx93.json`, and a regression that hardcoded either
+    would pass a single-SKU test."""
+    src = tmp_path / _TINY_INT8.name
+    shutil.copy(_TINY_INT8, src)
+    # The profile really did come from metadata, and the vendor-gated system
+    # config really was withheld -- assert it here so a silently-empty profile
+    # cannot pass this test by way of some other change making the compile work.
+    spec = [s for s in resolve_targets(sku, metadata_root=_META)
+            if s.accel_config == accel_config]
+    assert len(spec) == 1
+    assert spec[0].vela_memory_mode == memory_mode
+    assert spec[0].vela_system_config is None
+
+    out = build_model(sku=sku, name="tiny", source=src, out_dir=tmp_path,
+                      metadata_root=_META)          # default registry: real vela + cpu
+    mft, _ = read_package(out.read_bytes())
+
+    shipped = {t.accel_config: t for t in mft.targets if t.backend == "ethos_u"}
+    assert accel_config in shipped, (
+        f"{accel_config} must ship as a target now, not a coverage row; "
+        f"coverage: {[(c.accel_config, c.status, c.reason) for c in mft.coverage]}")
+    target = shipped[accel_config]
+    # NOT a pinned figure. `req_sram_kib` is measured above and named in the
+    # docstring for the record, but what this asserts is the property the
+    # device-side fit gate needs -- a nonzero requirement
+    # (`t->req_sram_kib <= e->arena_sram_kib` reads 0 as fitting ANY arena,
+    # src/backends/inference/alp_model_select.c).
+    #
+    # KNOWN GAP, deliberately not pinned as correct here: under `Sram_Only`
+    # this figure is the ARENA ONLY. vela files the const/weights region under
+    # `on_chip_flash`, and for the Alif parts that is a pure bookkeeping
+    # rename, not a real placement -- `ethosu/vela/architecture_features.py`
+    # overrides `const_mem_area` from `Sram` to `OnChipFlash` with every
+    # characteristic copied ("This will use the same characteristics as
+    # Sram."), because vela's own validity check forbids naming `Sram` as a
+    # const area while `Sram_Only` puts all three areas on the same port. On
+    # an AEN module that region really is SRAM-resident (alp-sdk's
+    # `examples/aen/aen-npu-inference-alp/src/main.c` memcpy's the model into
+    # `model_sram[] __attribute__((section("SRAM0")))` with the arena in SRAM0
+    # too). Measured on the real 44-op `person_detect_int8.tflite` at
+    # `ethos-u85-256`: `sram_memory_used = 72.0` and
+    # `on_chip_flash_memory_used = 235.265625`, so real SRAM0 residency is
+    # 307.265625 KiB against a reported `req_sram_kib = 72`. Summing the
+    # columns is NOT the fix -- an integration that XIPs weights from flash
+    # would then be over-reported -- and choosing correctly needs a per-part
+    # statement of where the const region physically lands, which no metadata
+    # in either repo carries yet. That is a maintainer decision; this test
+    # records the gap rather than blessing the number.
+    assert target.requires["sram_kib"] > 0
+    assert target.arena > 0
+    assert any(t.backend == "cpu" for t in mft.targets)     # siblings untouched
+    assert accel_config not in {c.accel_config for c in mft.coverage}
 
 
 @_needs_vela
@@ -411,11 +576,13 @@ def test_only_the_footprint_refusal_is_absorbed_a_real_compile_failure_still_fai
         backend = "ethos_u"
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
+                    vela_memory_mode=None, vela_system_config=None):
             raise VelaFootprintRefused(f"refused {accel_config}")
 
     class _Crashes(_Refuses):
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
+                    vela_memory_mode=None, vela_system_config=None):
             raise RuntimeError(f"vela failed for {accel_config}: segmentation fault")
 
     src = tmp_path / "m.tflite"
@@ -442,7 +609,8 @@ def test_an_unknown_accelerator_placement_is_not_treated_as_zero(tmp_path):
         backend = "drpai"
         def is_available(self): return True
         def accepts(self, src_format): return src_format == "tflite"
-        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None):
+        def compile(self, source, *, accel_config, out_dir, opts=None, silicon_ref=None,
+                    vela_memory_mode=None, vela_system_config=None):
             return Blob(format="drpai_dir", payload=b"RT", arena_bytes=4096,
                         req_sram_kib=4)             # npu_op_count stays None
 
@@ -473,13 +641,19 @@ def test_a_shipped_blobs_compiler_caveat_is_carried_into_the_package(tmp_path):
     `src/backends/inference/alp_model_select.c`).
 
     Measured, `ethos-u-vela` 5.1.0 over the committed `tiny_int8.tflite` for
-    `E1M-AEN801`: both surviving `ethos_u` targets (`ethos-u55-256`,
-    `ethos-u55-128`; the `ethos-u85-256` sibling is refused, see above) are
-    compiled with NO `--system-config` and NO `--memory-mode`, so vela falls
-    back to `Ethos_U55_High_End_Embedded` / `Shared_Sram` and prints its own
-    "Compilation may be invalid or non-optimal" warning for each. Those are
-    the names that must reach the manifest -- not a hardcoded profile, and not
-    the U85 DRAM profile the refused sibling resolved.
+    `E1M-AEN801`, ALL THREE `ethos_u` targets (`ethos-u85-256`,
+    `ethos-u55-256`, `ethos-u55-128` -- the u85 one no longer refused, since
+    alp-sdk #1470 supplies its memory mode): each is compiled with
+    `--memory-mode Sram_Only` out of `e8.json`'s `npu_toolchain.vela` and with
+    NO `--system-config`, because the Alif names live only in the proprietary
+    `ensemble_vela.ini`. vela therefore defaults exactly one of the two flags
+    and says so once per run -- verbatim, "Warning: No system configuration
+    specified. Using a default of Ethos_U85_SYS_DRAM_Mid." (and
+    `Ethos_U55_High_End_Embedded` on the two u55 configs). The caveat that
+    reaches the manifest must name THAT, per run, and must not attribute the
+    memory mode tan supplied to vela: the hard "figures describe that default
+    memory model" verdict is false now that the placement is the module's, and
+    a customer reading it would discount a figure that is correct.
 
     Read back with `read_manifest_file`, i.e. out of the WRITTEN ARTIFACT: a
     caveat that never reached the file must not be assertable here.
@@ -492,15 +666,20 @@ def test_a_shipped_blobs_compiler_caveat_is_carried_into_the_package(tmp_path):
     mft = read_manifest_file(out)
 
     ethos_u = {t.accel_config: t for t in mft.targets if t.backend == "ethos_u"}
-    assert set(ethos_u) == {"ethos-u55-256", "ethos-u55-128"}
+    assert set(ethos_u) == {"ethos-u85-256", "ethos-u55-256", "ethos-u55-128"}
+    defaulted_system_config = {"ethos-u85-256": "Ethos_U85_SYS_DRAM_Mid",
+                               "ethos-u55-256": "Ethos_U55_High_End_Embedded",
+                               "ethos-u55-128": "Ethos_U55_High_End_Embedded"}
     for accel_config, target in ethos_u.items():
         assert len(target.caveats) == 1, f"{accel_config}: {target.caveats}"
         caveat = target.caveats[0]
-        assert "BUILT-IN default profile" in caveat
-        # The profile THIS run resolved, named -- never a hardcoded one.
-        assert "system-config Ethos_U55_High_End_Embedded" in caveat
-        assert "memory-mode Shared_Sram" in caveat
-        assert "Compilation may be invalid or non-optimal" in caveat   # vela's own words
+        # The system config THIS run resolved, named -- never a hardcoded one,
+        # and never the U85 name on a u55 config.
+        assert f"BUILT-IN default system-config {defaulted_system_config[accel_config]}" in caveat
+        # ... while the memory mode is credited to the module, not to vela.
+        assert "--memory-mode Sram_Only" in caveat
+        assert "came from this module's SoC metadata" in caveat
+        assert "describe that default memory model" not in caveat
         # Never the host path out of vela's third ("No configuration file
         # specified") warning -- that one interpolates site-packages.
         assert "site-packages" not in caveat
