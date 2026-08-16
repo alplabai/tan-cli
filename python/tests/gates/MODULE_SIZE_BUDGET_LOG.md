@@ -160,3 +160,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-16 -- tan-cli#798/#801: build_root anchoring for the split-layout configure-cache guard, plus coupling the missing-tool message to a shared plan_exec constant, need a few lines of call-site docstring in execute.py and build_cmd.py that don't belong split elsewhere
     - tan/commands/build/execute.py: 1643 -> 1662
     - tan/commands/build_cmd.py: 2161 -> 2172
+- 2026-08-16 -- tan-cli#804: consume _teardown_sim's grace-loop poll (which already waits up to _QUIT_GRACE_S) as the sim-exited-early source at --timeout 0, discriminated via a surfaced quit() write-failure or a nonzero exit code so a healthy quit-driven shutdown is never misreported
+    - tan/commands/renode_cmd.py: 1533 -> 1587
+    - function_count_budget: 260 -> 261

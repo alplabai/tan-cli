@@ -606,16 +606,25 @@ class RenodeMonitor:
                 last = str(err)
         raise RuntimeError(last)
 
-    def quit(self) -> None:
+    def quit(self) -> bool:
         """Best-effort `quit` on teardown. This only ASKS; whether Renode
         gets time to shut its emulation down depends on the caller polling
-        for the exit afterwards (`_teardown_sim` does, briefly)."""
+        for the exit afterwards (`_teardown_sim` does, briefly).
+
+        Returns whether the request was actually DELIVERED to the child's
+        stdin. A write/flush to a dead child's pipe fails with `OSError` (a
+        broken pipe -- the read end closes the instant the process exits)
+        or `ValueError` (a closed file object); `False` here is therefore
+        proof the child was already gone before we ever asked it to quit.
+        `_teardown_sim` uses that proof (tan-cli#804) instead of silently
+        swallowing it the way this method used to."""
         with self._lock:
             try:
                 self._stdin.write(b"quit\n")
                 self._stdin.flush()
+                return True
             except (OSError, ValueError):
-                pass
+                return False
 
 
 def _bind_sim_listeners() -> tuple[socket.socket, socket.socket, int, int]:
@@ -741,16 +750,50 @@ def _spawn_renode_sim(argv: list[str], log_path: str) -> subprocess.Popen:
         )
 
 
-def _teardown_sim(monitor: RenodeMonitor, proc: subprocess.Popen) -> None:
+def _teardown_sim(monitor: RenodeMonitor, proc: subprocess.Popen) -> int | None:
     """Ask Renode to `quit`, give it `_QUIT_GRACE_S` to actually do it, then
     make sure it is gone. `quit` on its own is only a REQUEST: killing the
     child microseconds after the flush would leave the emulation no time to
-    close its sockets or flush its log."""
-    monitor.quit()
+    close its sockets or flush its log.
+
+    Returns the child's exit code only when it can be PROVEN abnormal --
+    never a healthy session's own `quit`-driven shutdown, which would
+    otherwise get misreported as `renode.sim-exited-early` and break the
+    positive control (tan-cli#804). Two proofs, either is sufficient, from
+    what this grace loop already observes:
+
+    - `monitor.quit()`'s write to the child's stdin FAILED: the child was
+      already gone before we even asked it to quit (a dead pipe's read end
+      raises on write, never on a live one). This is the original race --
+      a child that crashes essentially at spawn is gone before either
+      `_run_sim`'s up-front poll or this loop's own first poll can land on
+      it, but the write attempt itself still proves it.
+    - the exit code this loop observes is NONZERO: a session that shuts
+      down because `quit` asked it to always exits 0 -- that is the whole
+      contract of a clean shutdown here (every fake in the test suite
+      encodes it that way, and it is the ordinary meaning of a monitor
+      `quit`). A nonzero code proves the process died on its own for an
+      unrelated reason, even when the death happens to land after a
+      successfully-delivered `quit` write -- e.g. a child that was already
+      fatally wedged and was going to exit that way regardless of whether
+      `quit` ever reached it. This is what makes the reviewer's
+      50ms-delayed-exit regression deterministic: `quit`'s write succeeds
+      because the child is still alive to accept it, but the eventual exit
+      is unrelated to that write, and this loop's own (pre-existing,
+      1-second) wait is what actually observes it -- nothing here adds a
+      new sleep or a retry.
+
+    A code of exactly 0, or no exit observed at all before the grace period
+    expires and the child is force-killed, is never treated as early: both
+    are indistinguishable from -- and, in the force-kill case, literally
+    ARE -- a normal teardown.
+    """
+    delivered = monitor.quit()
     deadline = time.monotonic() + _QUIT_GRACE_S
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            return  # quit worked; poll() already reaped it
+        code = proc.poll()
+        if code is not None:
+            return code if (not delivered or code != 0) else None
         time.sleep(0.025)
     try:
         proc.kill()
@@ -760,6 +803,7 @@ def _teardown_sim(monitor: RenodeMonitor, proc: subprocess.Popen) -> None:
         proc.wait()
     except OSError:
         pass
+    return None
 
 
 def _announce_ready(json_mode: bool, timeout: int) -> None:
@@ -1374,7 +1418,17 @@ def _run_sim(
         time.sleep(0.25)
         early_exit = proc.poll()
 
-    _teardown_sim(monitor, proc)
+    # `early_exit` above only ever catches a death DURING the hold window;
+    # at `--timeout 0` that window is zero-length, so a child that is still
+    # alive at the up-front poll but dies moments later -- during teardown's
+    # own `_QUIT_GRACE_S` wait -- would otherwise go unreported (tan-cli#804,
+    # the CI-red this whole fix exists for). `_teardown_sim` already waits
+    # up to a full second for the child either way; consume what it proves
+    # instead of discarding it, but only when `early_exit` didn't already
+    # find something -- a death already caught above is reported as-is.
+    teardown_exit = _teardown_sim(monitor, proc)
+    if early_exit is None:
+        early_exit = teardown_exit
     _close_quietly(ctrl_sock, uart_sock)
 
     if early_exit is not None:

@@ -123,6 +123,7 @@ def _write_fake_sim_renode(
     exit_after_s: float | None = None,
     exit_code: int = 0,
     exit_after_first_echo_code: int | None = None,
+    exit_after_first_echo_delay_s: float | None = None,
 ) -> None:
     """A fake `renode` on PATH for `--sim-mode` tests: an interactive stub
     that answers just enough of the monitor line protocol for
@@ -157,12 +158,28 @@ def _write_fake_sim_renode(
     sleep against it; used for the `--timeout 0` regression (tan-cli#804),
     where the hold loop polls only once and a timer-based exit can't be
     trusted to land before that single poll.
+
+    `exit_after_first_echo_delay_s`, combined with `exit_after_first_echo_code`,
+    inserts a SYNCHRONOUS `time.sleep` between the echo reply and the
+    `os._exit` -- the child is still provably alive (and its stdin pipe
+    still open) at the moment `_run_sim`'s up-front poll AND
+    `_teardown_sim`'s `quit()` write both happen, and only dies partway
+    through `_teardown_sim`'s own `_QUIT_GRACE_S` wait. This is the
+    reviewer's deterministic reproduction of the tan-cli#804 CI red: it
+    does not depend on `os._exit` racing a poll at spawn time, it forces
+    the death to land inside the one window (the grace loop) that is
+    actually guaranteed to observe it.
     """
     if exit_after_s is not None and exit_after_first_echo_code is not None:
         raise ValueError(
             "exit_after_s and exit_after_first_echo_code are mutually exclusive: the "
             "echo-branch os._exit()s before the timer thread ever fires, making the "
             "timer dead weight"
+        )
+    if exit_after_first_echo_delay_s is not None and exit_after_first_echo_code is None:
+        raise ValueError(
+            "exit_after_first_echo_delay_s only makes sense alongside "
+            "exit_after_first_echo_code -- there is no os._exit to delay otherwise"
         )
     bin_dir.mkdir(parents=True, exist_ok=True)
     impl = bin_dir / "_fake_sim_renode_impl.py"
@@ -173,8 +190,13 @@ def _write_fake_sim_renode(
         if exit_after_s is not None
         else ""
     )
+    echo_delay_src = (
+        f"time.sleep({exit_after_first_echo_delay_s}); "
+        if exit_after_first_echo_delay_s is not None
+        else ""
+    )
     echo_action_src = (
-        f"print(s[6:-1]); sys.stdout.flush(); os._exit({exit_after_first_echo_code})"
+        f"print(s[6:-1]); sys.stdout.flush(); {echo_delay_src}os._exit({exit_after_first_echo_code})"
         if exit_after_first_echo_code is not None
         else "print(s[6:-1]); sys.stdout.flush(); continue"
     )
@@ -1200,6 +1222,51 @@ def test_sim_mode_timeout_zero_still_reports_exited_early(tmp_path: Path):
     _scaffold_sim_bundle(tmp_path)
     fake_bin = tmp_path / "fakebin"
     _write_fake_sim_renode(fake_bin, exit_after_first_echo_code=9)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "0",
+        "--format",
+        "json",
+        path_override=str(fake_bin),
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.sim-exited-early"
+    assert "exit code 9" in envelope["issues"][0]["message"]
+
+
+def test_sim_mode_timeout_zero_reports_a_death_that_lands_after_the_upfront_poll(
+    tmp_path: Path,
+):
+    """tan-cli#804, the actual CI-red shape: an up-front `proc.poll()` alone
+    (the first fix attempt) only catches a child that has ALREADY died by
+    the microsecond it's called -- at `--timeout 0` that's a race, and the
+    CI matrix lost it on all three OSes. A second fix attempt tried
+    latching `_teardown_sim`'s OWN pre-quit poll, but an instrumented build
+    proved that poll lands a mere ~48 microseconds after the up-front one
+    -- any runner slow enough to lose the first race loses the second one
+    too, so that attempt was inert against this exact regression.
+
+    This fake dies 50ms AFTER answering `drain_boot`'s echo -- well past
+    both of those near-simultaneous up-front polls, deterministically
+    (`time.sleep` is synchronous in the child, not a racy background timer)
+    -- so the ONLY thing that can observe it is `_teardown_sim`'s own
+    `_QUIT_GRACE_S` (1s) wait loop, which already runs for pre-existing
+    shutdown-grace reasons. `monitor.quit()`'s write still succeeds here
+    (the child is alive, just sleeping, when the request lands) -- the fix
+    must not need the write to fail to catch this; it has to notice the
+    nonzero exit code the grace loop itself observes."""
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(
+        fake_bin, exit_after_first_echo_code=9, exit_after_first_echo_delay_s=0.05
+    )
     exit_code, stdout, _stderr = run_renode_cmd(
         tmp_path,
         "--sim-mode",
