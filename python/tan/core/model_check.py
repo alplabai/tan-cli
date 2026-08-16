@@ -43,7 +43,12 @@ def backend_report_as_dict(report: BackendReport) -> dict:
     `npuPlacementPctReal` are DIFFERENT units answering different questions
     (MAC-weighted upper bound vs. real op-count placement) and are never
     both non-`None` on the same report -- see `analyze.BackendReport`'s
-    field comments."""
+    field comments.
+
+    The six measured fields (`arenaBytes` ... `perfRef`) are `null` at
+    `basis: "static-screen"` and stay structured rather than prose-only, so a
+    consumer sizing a module reads a NUMBER instead of parsing tan's own
+    sentence: `null` there means "not measured", never zero."""
     return {
         "backend": report.backend,
         "variant": report.variant,
@@ -54,6 +59,12 @@ def backend_report_as_dict(report: BackendReport) -> dict:
         "uncostedCpuOpCount": report.uncosted_cpu_op_count,
         "basis": report.basis,
         "confidence": report.confidence,
+        "arenaBytes": report.arena_bytes,
+        "reqSramKib": report.req_sram_kib,
+        "latencyMsMean": report.latency_ms_mean,
+        "latencyMsP95": report.latency_ms_p95,
+        "latencyRuns": report.latency_runs,
+        "perfRef": report.perf_ref,
         "notes": list(report.notes),
         "ops": [op_verdict_as_dict(o) for o in report.ops],
     }

@@ -207,6 +207,40 @@ def sdk_predates_the_model_engine_relocation(sdk: Path) -> bool:
     return (sdk / "scripts" / "alp_model").is_dir()
 
 
+def sdk_publishes_model_perf_points(sdk: Path) -> bool:
+    """True when ``<sdk>/metadata/model_perf/`` holds at least one published
+    bench-measured perf point -- the tier-2 facts `tan.model.perf` reads.
+
+    This one is a step further out than its three siblings above: the others
+    gate on metadata that EXISTS on `alplabai/alp-sdk#1470` and is merely
+    absent from the pin, whereas `metadata/model_perf/` exists in NO alp-sdk
+    at all yet. The contract landed (alp-sdk `fe56ff1d`: the schema, the
+    validator semantics, the capture recipe and ONE synthetic fixture point
+    under `tests/fixtures/`), but the directory this reads stays empty until
+    the bench campaign that is Task 5 of the tier-2 plan runs on real silicon.
+    So a test carrying this mark skips EVERYWHERE today, including against a
+    bound `origin/dev`, and that is the honest state rather than a defect --
+    the alternative is a test that asserts against data nobody has measured.
+    Presence of a real point, not "would this assertion pass", so it cannot
+    fire once the campaign publishes one.
+    """
+    return any((sdk / "metadata" / "model_perf").rglob("*.json"))
+
+
+def sdk_ships_the_model_perf_fixture(sdk: Path) -> bool:
+    """True when ``<sdk>/tests/fixtures/model_perf/`` holds at least one
+    synthetic perf point -- alp-sdk's own `_fixture`-bannered document.
+
+    A SEPARATE artefact from the published tree above and therefore a separate
+    predicate, not a broader one: a test that proves tan REFUSES a fixture
+    point needs a real fixture document to refuse, and that exists today
+    (alp-sdk `fe56ff1d`) while a published point does not. Folding the two
+    into one switch would skip the refusal proof for the next several months
+    on the strength of an unrelated absence.
+    """
+    return any((sdk / "tests" / "fixtures" / "model_perf").rglob("*.json"))
+
+
 #: Resolved once, here, at conftest import -- i.e. at the same moment a test
 #: module's own `SDK = sdk_root()` resolves, and before
 #: `_scrub_sdk_discovery_env` deletes `ALP_SDK_ROOT` for the first test.
@@ -261,6 +295,37 @@ needs_sdk_after_the_model_engine_relocation = pytest.mark.skipif(
         "sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at 88318e75; "
         "once that pin moves this test RUNS, and a failure here then is a "
         "regression, not this skip."
+    ),
+)
+
+#: `metadata/model_perf/**`, the published bench-measured perf points.
+needs_sdk_model_perf_points = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_publishes_model_perf_points(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk publishes no metadata/model_perf/ perf points: the "
+        "tier-2 CONTRACT landed (alp-sdk fe56ff1d -- schema, validator "
+        "semantics, capture recipe, one synthetic fixture) but the published "
+        "tree stays empty until the bench campaign that is Task 5 of "
+        "docs/superpowers/plans/2026-08-16-model-perf-tier2.md runs on real "
+        "silicon. EXPECTED everywhere today, including against a bound "
+        "origin/dev -- there is no measured data to assert against yet, and "
+        "authoring one to make this run would be exactly the fabricated "
+        "bench number the whole tier forbids. Once a real point is published "
+        "this test RUNS, and a failure here then is a regression, not this "
+        "skip."
+    ),
+)
+
+#: `tests/fixtures/model_perf/**`, alp-sdk's own `_fixture`-bannered synthetic.
+needs_sdk_model_perf_fixture = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_ships_the_model_perf_fixture(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk ships no tests/fixtures/model_perf/ synthetic perf "
+        f"point: it predates alp-sdk fe56ff1d ({_SDK_PR}, still open), so "
+        "there is no real fixture document for this test to prove tan REFUSES. "
+        "EXPECTED while ci.yml's sdk_parity `ref:` and parity.yml's "
+        "PINNED_SDK_TAG sit at 88318e75; once that pin moves this test RUNS, "
+        "and a failure here then is a regression, not this skip."
     ),
 )
 

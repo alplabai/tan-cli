@@ -265,14 +265,23 @@ def test_the_full_envelope_shape_carries_every_backendreport_field(tmp_path, mon
     backend = doc["data"]["models"][0]["backends"][0]
     assert set(backend) == {
         "backend", "variant", "table", "npuCoverage", "computeOnNpuPctMax",
-        "npuPlacementPctReal", "uncostedCpuOpCount", "basis", "confidence", "notes", "ops",
+        "npuPlacementPctReal", "uncostedCpuOpCount", "basis", "confidence",
+        "arenaBytes", "reqSramKib", "latencyMsMean", "latencyMsP95",
+        "latencyRuns", "perfRef", "notes", "ops",
     }
     assert backend["npuCoverage"] == "partial"
     assert backend["computeOnNpuPctMax"] == 96.0
-    assert backend["npuPlacementPctReal"] is None       # only ever set at basis: "compiled"
+    assert backend["npuPlacementPctReal"] is None       # set only at a MEASURED basis
     assert backend["uncostedCpuOpCount"] == 0
     assert backend["basis"] == "static-screen"
     assert backend["confidence"] == "screening"
+    # The six measured fields are all `null` at `basis: "static-screen"` --
+    # "not measured", never zero. A screen that walks operator NAMES against a
+    # table has no footprint and no wall-clock to report, and inventing either
+    # from it is the estimate this vocabulary exists to keep out.
+    for key in ("arenaBytes", "reqSramKib", "latencyMsMean", "latencyMsP95",
+                "latencyRuns", "perfRef"):
+        assert backend[key] is None, key
     op = backend["ops"][0]
     assert set(op) == {"op", "status", "reason", "macs"}
 

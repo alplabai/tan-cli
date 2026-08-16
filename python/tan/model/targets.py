@@ -53,6 +53,15 @@ class TargetSpec:
     # the spec says nothing, and an unknown must never be reported as a "no"
     # -- see `_soc_declares_dram`.
     soc_declares_dram: bool | None = None
+    # Which CPU core drives this accelerator, from the SoC spec's own
+    # `npus[].paired_core` -- `m55_hp` for the E8's high-perf Ethos-U55,
+    # `m55_he` for its high-efficiency one. `None` where the spec declares no
+    # pairing (the E8's Ethos-U85 today), and that `None` is a real answer, not
+    # a gap to fill in: the metadata does not know which core drives it, so
+    # nothing downstream may infer one. A bench-measured perf point's identity
+    # includes the core (alp-sdk `f724d3e4`), and this is the only sourced
+    # answer tan has for it.
+    paired_core: str | None = None
 
 
 class _VelaProfile(NamedTuple):
@@ -203,7 +212,8 @@ def _soc_targets(soc: dict, silicon_ref: str) -> list[TargetSpec]:
                                   profile.vendor_system_config if ethos_u else None),
                               vela_vendor_config_filename=(
                                   profile.vendor_config_filename if ethos_u else None),
-                              soc_declares_dram=declares_dram))
+                              soc_declares_dram=declares_dram,
+                              paired_core=npu.get("paired_core") or None))
     return out
 
 

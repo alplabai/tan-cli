@@ -97,9 +97,15 @@ class BackendReport:
     variant: str | None       # u85 | u55 | u65 | None
     table: str | None         # the table file that answered, or None
     npu_coverage: str          # "full-eligible" | "partial" | "cpu-only" | "undetermined" --
-                               # plus "fits", but ONLY when basis == "compiled" (tan.model.check's
-                               # `--exact` path, tan-cli#782 Task 6). analyze_backend() itself
-                               # never emits "fits" -- basis stays "static-screen" here always.
+                               # plus "fits", but ONLY at basis == "compiled" (tan.model.check's
+                               # `--exact` path, tan-cli#782 Task 6) or basis == "bench" (a
+                               # matched `metadata/model_perf/` point, the tier-2 path in the
+                               # same module). Those are the only two surfaces ever permitted
+                               # to say it, and both derive it from ONE function
+                               # (`tan.model.perf.coverage_from_placement`) so the guard on the
+                               # word binds to a live rule rather than to a copy.
+                               # analyze_backend() itself never emits "fits" -- basis stays
+                               # "static-screen" here always.
     # MAC-weighted UPPER bound, 0-100 -- ONLY at `basis: "static-screen"`
     # (this module's own `_score_ops`/`eligible_macs / total_macs`). Always
     # `None` at `basis: "compiled"` (tan.model.check's `--exact` path):
@@ -114,14 +120,17 @@ class BackendReport:
     # compiled path, precisely the op-count distortion MAC weighting exists
     # to eliminate).
     compute_on_npu_pct_max: float | None
-    # The REAL NPU-vs-CPU op-count placement ratio, 0-100 -- ONLY ever set at
-    # `basis: "compiled"` (`tan.model.check._report_from_vela_compile`, from
-    # vela's own "CPU/NPU operators = N (P%)" summary counts). `None` at
-    # `basis: "static-screen"`, where there is no real compile to report a
-    # placement for. Deliberately a SEPARATE field from `compute_on_npu_pct_
-    # max` above, not a reuse of it under a different meaning: an op-count
-    # ratio and a MAC-weighted ratio answer different questions and must
-    # never share one key a consumer could read as either.
+    # The REAL NPU-vs-CPU op-count placement ratio, 0-100 -- set only where a
+    # real placement was MEASURED: `basis: "compiled"` (`tan.model.check.
+    # _report_from_vela_compile`, from vela's own "CPU/NPU operators = N (P%)"
+    # summary counts) and `basis: "bench"` (a `metadata/model_perf/` point's
+    # `measured.npu_ops`/`cpu_ops`, i.e. what the compiler that produced the
+    # measured artefact placed). `None` at `basis: "static-screen"`, where
+    # there is no real compile to report a placement for. Deliberately a
+    # SEPARATE field from `compute_on_npu_pct_max` above, not a reuse of it
+    # under a different meaning: an op-count ratio and a MAC-weighted ratio
+    # answer different questions and must never share one key a consumer could
+    # read as either.
     npu_placement_pct_real: float | None = None
     # cpu-certain ops with an unpriced (macs=0) MAC estimate -- excluded from
     # compute_on_npu_pct_max's denominator, so a nonzero count here is a
@@ -135,6 +144,33 @@ class BackendReport:
     ops: list[OpVerdict] = field(default_factory=list)
     basis: str = "static-screen"          # the only basis this module ever emits
     confidence: str = "screening"          # "certain" | "screening"
+    # THE FOOTPRINT AND LATENCY FIELDS, and what each `None` means.
+    #
+    # `None` is "not measured", never zero: a zero here is a measured zero, the
+    # same reading `metadata/model_perf/`'s own schema gives an omitted key.
+    # All six stay `None` at `basis: "static-screen"` -- a screen that walks
+    # operator NAMES against a table has no footprint to report and inventing
+    # one from it would be the estimate this whole vocabulary exists to keep
+    # separate from a measurement.
+    #
+    # `arena_bytes` / `req_sram_kib` are set at `basis: "compiled"` (from the
+    # `Blob` a real vela compile returned) and at `basis: "bench"` (from a
+    # matched perf point). Carrying them as FIELDS rather than only inside the
+    # prose note is what lets `tan.model.check` compare a customer's own
+    # compile against a bench point figure-by-figure instead of by parsing its
+    # own sentence back.
+    #
+    # The three latency fields and `perf_ref` are `basis: "bench"` only: a
+    # compile reports no wall-clock, and only a bench point cites a raw capture
+    # (`capture.reference`, e.g. `alp-sdk-internal:bench/captures/...`). A
+    # latency without `latency_runs` is a single shot rather than a
+    # measurement, which is why the count travels with the figures.
+    arena_bytes: int | None = None
+    req_sram_kib: int | None = None
+    latency_ms_mean: float | None = None
+    latency_ms_p95: float | None = None
+    latency_runs: int | None = None
+    perf_ref: str | None = None
     notes: list[str] = field(default_factory=list)
 
 

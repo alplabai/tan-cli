@@ -439,8 +439,24 @@ def _run_build(
     return reported_project, sdk_info, data, issues, exit_code
 
 
+def _declared_hw_rev(board_doc: dict) -> str | None:
+    """`board.yaml`'s `som.hw_rev`, or `None` when it declares none.
+
+    OPTIONAL by `board.schema.json`, which also states the fallback: "the SDK
+    falls back to the SKU preset's `default_hw_rev` when omitted". That
+    fallback is applied downstream (`tan.model.check._resolve_hw_rev`), where
+    the metadata root is in hand; this only reports what the customer wrote.
+    Unlike `som.sku` a missing value is not a refusal -- `check` worked without
+    it before a bench measurement existed to pin to a revision, and must keep
+    working."""
+    som = board_doc.get("som")
+    hw_rev = som.get("hw_rev") if isinstance(som, dict) else None
+    return hw_rev if isinstance(hw_rev, str) and hw_rev else None
+
+
 def _check_one_model(name: str, source: Path, backends: list[str], sku: str,
-                      metadata_dir: Path, exact: bool) -> dict | Issue:
+                      metadata_dir: Path, exact: bool,
+                      hw_rev: str | None = None) -> dict | Issue:
     """One declared model's `check` result: the serialised `{name, source,
     backends}` block on success, or a coded `model.check-failed` Issue on any
     failure (an unreadable/unparseable source, most commonly) -- never a
@@ -448,7 +464,8 @@ def _check_one_model(name: str, source: Path, backends: list[str], sku: str,
     one bad model in a multi-model board.yaml does not abort the batch."""
     try:
         reports = check_model_backends(backends=backends, sku=sku, source=source,
-                                        metadata_root=metadata_dir, exact=exact)
+                                        metadata_root=metadata_dir, exact=exact,
+                                        hw_rev=hw_rev)
     except Exception as err:  # noqa: BLE001 -- a per-model failure is a coded issue, not a traceback
         return Issue("model.check-failed", "error", f"model '{name}': {type(err).__name__}: {err}")
     return {"name": name, "source": str(source),
@@ -508,7 +525,8 @@ def _run_check(
     for m in models:
         _require_model_entry(m, board_path)
         source = (base / m["source"]).resolve()
-        result = _check_one_model(m["name"], source, backends, sku, metadata_dir, exact)
+        result = _check_one_model(m["name"], source, backends, sku, metadata_dir, exact,
+                                   _declared_hw_rev(board_doc))
         (issues if isinstance(result, Issue) else model_reports).append(result)
     data["models"] = model_reports
     exit_code = ExitCode.SUCCESS if not issues else ExitCode.RUNTIME_FAILURE

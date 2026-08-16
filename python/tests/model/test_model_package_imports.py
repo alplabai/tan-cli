@@ -29,7 +29,7 @@ _SELF_CONTAINED_MODULES = [
     "tan.model.adapters", "tan.model.adapters.cpu", "tan.model.adapters.deepx",
     "tan.model.adapters.drpai", "tan.model.adapters.ethos_u",
     "tan.model.adapters.executorch", "tan.model.targets", "tan.model.build",
-    "tan.model.analyze", "tan.model.check",
+    "tan.model.analyze", "tan.model.check", "tan.model.perf",
 ]
 
 

@@ -177,3 +177,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/model_cmd.py: new entry at 1011
     - tan/model/adapters/ethos_u.py: new entry at 886
     - function_count_budget: 260 -> 269
+- 2026-08-16 -- tan/commands/model_cmd.py 1011 -> 1029: `_declared_hw_rev` + plumbing board.yaml's `som.hw_rev` into `check_model_backends`. A bench-measured perf point's identity includes the module revision it ran on (alp-sdk f724d3e4), so tier-2 resolution cannot serve an r2 measurement to a customer holding an r1 module; the value has to reach the engine from the only place that states it.
+    - tan/commands/model_cmd.py: 1011 -> 1029
