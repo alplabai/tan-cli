@@ -3149,6 +3149,17 @@ def _flow_d_preflight(
     if prepared is None:
         return None
     script, expected = prepared
+    # tan-cli#795: `expect_dpidr` must be a full 32-bit SW-DP ID (8 hex
+    # digits) before it is trusted to disarm the write below. `validate_
+    # address` (`flash_plan.py`) stays a generic charset check shared with
+    # `base` and friends -- the width rule is specific to this one
+    # wrong-board guard, so it lives here, at the comparison's call site,
+    # instead. Without it a truncated value like `0x2477`, or `0x477` (ARM's
+    # own JEP106 designer field, shared by every ARM SW-DP), would match any
+    # ARM board's banner and silently disarm the guard.
+    width_refusal = _expect_dpidr_width_refusal(expected, method)
+    if width_refusal is not None:
+        return width_refusal
     # tan-cli#520 REVIEW, minor 3: Flow D's refusal text named its write
     # target explicitly ("write MRAM") before this function served a second
     # backend; a bare generalisation to backend-neutral "write" would have
@@ -3191,7 +3202,7 @@ def _flow_d_preflight(
     outcome = _spawn_jlink([spawned[0], "-NoGui", "1", "-CommanderScript"], script, True,
                            _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0])
     banner = f"{outcome.stdout}\n{outcome.stderr}"
-    if _hex_in(expected, banner):
+    if _dp_id_matches(expected, banner):
         return None
     if not banner.strip():
         return (
@@ -3275,15 +3286,38 @@ def _flow_d_preflight(
     )
 
 
-def _hex_in(expected: str, haystack: str) -> bool:
-    """Whether `expected` appears in `haystack` as a hex value, ignoring case and
-    an optional `0x` on EITHER side -- probes print the ID both ways."""
-    needle = expected.lower()
-    for prefix in ("0x", "0X"):
-        if expected.startswith(prefix):
-            needle = expected[len(prefix) :].lower()
-            break
-    return needle in haystack.lower().replace("0x", "")
+def _expect_dpidr_width_refusal(expected: str, method: str) -> str | None:
+    """Refuse an `expect_dpidr` that is not a full 32-bit / 8-hex-digit SW-DP
+    ID (tan-cli#795), or `None` if the width is fine. `validate_address`
+    (`flash_plan.py`) stays a generic charset check of any length -- `base`
+    and friends share it -- so this width rule lives here instead, narrowly
+    scoped to the one field this preflight arms off of."""
+    digits = expected[2:] if expected[:2] in ("0x", "0X") else expected
+    if len(digits) == 8:
+        return None
+    return (
+        f"{method}: flash_args.expect_dpidr = {expected!r} is not a full "
+        "32-bit SW-DP ID (8 hex digits) -- refusing to arm the wrong-board "
+        "guard with a value short enough to match more than one board (ARM's "
+        "own JEP106 designer field, 0x477, is shared by every ARM SW-DP)."
+    )
+
+
+def _dp_id_matches(expected: str, banner: str) -> bool:
+    """Whether the banner's reported SW-DP ID equals `expected`, compared as
+    PARSED 32-bit values (tan-cli#795) rather than the prior unanchored
+    substring match (`_hex_in`, since removed): that match accepted any
+    truncation of `expected` that happened to appear in the banner --
+    `0x2477` matched `Found SW-DP with ID 0x0BE12477`, and `0x477` (ARM's own
+    JEP106 designer field, shared by every ARM SW-DP) matched every ARM
+    board's banner. The caller already refuses a short `expected` via
+    `_expect_dpidr_width_refusal` before this runs; `_dp_id_value` extracts
+    the banner's own reported ID the same way the mismatch-reporting branch
+    below already does."""
+    actual = _dp_id_value(banner)
+    if actual is None:
+        return False
+    return int(actual, 16) == int(expected, 16)
 
 
 #: SEGGER's own wording for a successful SWD connect that read AN id, whatever
@@ -3319,8 +3353,8 @@ _CONNECT_FAILED_TARGET_RE = re.compile(r"Cannot connect to (?:target|J-Link)\b",
 
 def _dp_id_reported(banner: str) -> bool:
     """Whether the banner names ANY SW-DP ID -- not whether it matches
-    `expected` (the caller already ruled that out via `_hex_in`), only whether
-    a connect got far enough to read one at all."""
+    `expected` (the caller already ruled that out via `_dp_id_matches`), only
+    whether a connect got far enough to read one at all."""
     return _DP_ID_RE.search(banner) is not None
 
 
@@ -3726,7 +3760,19 @@ def _run(
         # A `--core`/`--helper` filter matching nothing used to warn only in text
         # mode, so `--format json` reported `ok:true` with empty
         # `entries`/`issues` for a flash that never touched a device.
-        issues.append(Issue("flash.nothing-matched", "warning", message))
+        #
+        # tan-cli#807: that was still true with NO filter at all -- an empty
+        # manifest -- and that case must stay `warning`/exit 0 (`test_
+        # manifest_holds_non_utf8_bytes` pins it). But when `--core`/`--helper`
+        # WAS supplied and matched nothing, this is the same silent-success
+        # shape `refused_skipped` fixes just below: a mistyped filter name
+        # reports a completed flash over an untouched board, with `$?`/`ok`
+        # giving no signal at all. Scoped to the filtered case only.
+        if core is not None or helper is not None:
+            failed += 1
+            issues.append(Issue("flash.nothing-matched", "error", message))
+        else:
+            issues.append(Issue("flash.nothing-matched", "warning", message))
     elif not flashed_anything and not plan.refused and plan.refused_skipped:
         # `refused_skipped` alone is fine ALONGSIDE at least one real flash (see
         # `TargetPlan.refused_skipped`): the skip was already a decision made
@@ -3865,9 +3911,19 @@ def flash(
     confirm: bool = typer.Option(
         False,
         "--confirm",
-        help="Arm the confirm gate and actually write the device. Without it (and "
-        "without ALP_FLASH_FORCE=1 or flash_args.confirm: true) every slice is "
-        "previewed, nothing is written, and the run exits non-zero (tan-cli#719).",
+        # tan-cli#796: this gate covers only yocto_wic, xspi_flashwriter, and
+        # Flow D MRAM (alif_mram_jlink) -- zephyr_west_flash,
+        # baremetal_cmake_flash, and swd_probe write the attached device
+        # UNCONDITIONALLY, with or without --confirm. An earlier, unqualified
+        # "every slice is previewed" claim here read as covering all six
+        # backends; --dry-run is the flag that actually previews all of them.
+        help="Arm the confirm gate on the backends that have one -- yocto_wic, "
+        "xspi_flashwriter, and Flow D MRAM (alif_mram_jlink). Without it (and "
+        "without ALP_FLASH_FORCE=1 or flash_args.confirm: true) those three preview "
+        "only and the run exits non-zero (tan-cli#719). zephyr_west_flash, "
+        "baremetal_cmake_flash, and swd_probe have no confirm gate and write the "
+        "attached device regardless of this flag. Use --dry-run for a preview that "
+        "works on every backend.",
     ),
     skip_missing_tools: bool = typer.Option(
         False,

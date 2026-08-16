@@ -2749,7 +2749,11 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     # that ID appears -- writing MRAM on the wrong attached board is the one
     # unrecoverable mistake this path can make. A hardware value, so it comes
     # from data: tan neither knows nor invents an IDR.
-    expect_dpidr = fa_str_checked(fa, "expect_dpidr", False)
+    # tan-cli#795: `as_hex_address=True` -- an unquoted YAML `expect_dpidr:
+    # 0x0BE12477` must round-trip back to `0x0BE12477`, the way `base` /
+    # `atoc_address` / `slot0_load_address` already do, not decay to the
+    # decimal string `199304311` and refuse the CORRECT board.
+    expect_dpidr = fa_str_checked(fa, "expect_dpidr", True)
     if expect_dpidr is not None:
         validate_address(expect_dpidr, "expect_dpidr")
 
@@ -2893,7 +2897,11 @@ def validate_flow_d_preflight_args(
     write -- with no diagnostic at all.
     """
     fa = flash_args
-    expected = fa_str_checked(fa, "expect_dpidr", False)
+    # tan-cli#795: `as_hex_address=True` -- same round-trip fix as
+    # `plan_alif_mram_jlink` above; a bare YAML integer must not decay to a
+    # decimal string that then fails to match the probe's hex-formatted banner
+    # on the CORRECT board.
+    expected = fa_str_checked(fa, "expect_dpidr", True)
     if expected is None and _fa_has_key(fa, "expect_dpidr"):
         raise FlashPlanError(
             f"{method}: flash_args.expect_dpidr is present but null/empty -- "
