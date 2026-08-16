@@ -4,6 +4,7 @@ envAppendPath and executionPolicy into concrete env values and skip/fail
 dispositions. No IO, no spawning -- the executor calls these and owns the IO."""
 import ntpath
 import os
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -212,6 +213,25 @@ def _build_dir_overridden(args: Sequence[str]) -> bool:
 #: with a coded reason naming both mounts, before spawning a process
 #: already known to crash.
 CROSS_DRIVE_MSG = "west build cannot span two Windows drives"
+
+
+#: tan-cli#801: the structural shape both of `tan.commands.build.execute`'s
+#: missing-tool refusals emit -- the slice's own `command` precheck
+#: (`` tool `{tool}` not found -- searched ... ``, at the START of the
+#: message) and `_missing_post_tool`'s post-build-step refusal (`` slice
+#: `{core_id}` post-build step N of M (`{label}`) cannot run: tool `{tool}`
+#: not found -- ... ``, where the phrase sits mid-string, AFTER "cannot
+#: run: "). `build_cmd._missing_tool_issues` used to key on
+#: `message.startswith("tool `")`, which only ever matched the first shape
+#: -- the #550 post-build-step skip's reason never promoted into
+#: `issues[]`, silently, because the phrase is not at position 0 there.
+#: Matched with `.search`, never `.match`/`startswith`, for exactly that
+#: reason: the marker's POSITION in the message is not part of the
+#: contract, only its shape is. Anchored on the backtick-delimited tool
+#: name (not two independent "tool `" / "` not found" substring checks
+#: with no adjacency requirement between them) so an unrelated message that
+#: happens to contain both fragments separately cannot false-positive.
+MISSING_TOOL_RE = re.compile(r"tool `[^`]*` not found")
 
 
 @dataclass(frozen=True)
