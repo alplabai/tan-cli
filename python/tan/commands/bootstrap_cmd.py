@@ -99,6 +99,7 @@ from tan.core.bootstrap import (
     confirmed_install_commands,
     decide_workspace_reuse,
     detect_host_os,
+    detect_linux_pm,
     die,
     fallback_facts,
     get_manifest_path,
@@ -497,9 +498,17 @@ def check_prerequisites(
     preserve a separate diagnosis for (unlike `tan doctor`; see
     `doctor_cmd.prerequisites_check`'s `fix_missing` split), so there is no
     RAW variant to keep here.
+
+    On Linux, `install_for_host` needs the package manager confirmed FIRST
+    (tan-cli#760's second half / alp-sdk#1464, see `detect_linux_pm`) -- a
+    real Fedora/Rocky host then gets `sudo dnf install -y cmake` instead of a
+    `null` it had a working remedy for.
     """
     is_windows = host == WINDOWS
-    install = confirmed_install_commands(facts.install_for_host(host), _on_path_available)
+    linux_pm = detect_linux_pm(_on_path_available) if host == LINUX else None
+    install = confirmed_install_commands(
+        facts.install_for_host(host, linux_pm=linux_pm), _on_path_available
+    )
     missing = [
         tool for tool in facts.prerequisites(host) if not _prereq_present(tool, is_windows)
     ]

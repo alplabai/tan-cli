@@ -51,6 +51,8 @@ from tan.core import atomic_write as atomic_write_mod
 from tan.core.bootstrap import (
     INCOMPATIBLE,
     LINUX,
+    LINUX_PM_APT,
+    LINUX_PM_DNF,
     MACOS,
     MANIFEST_MISMATCH,
     OTHER,
@@ -65,12 +67,14 @@ from tan.core.bootstrap import (
     completion_verdict,
     decide_workspace_reuse,
     detect_host_os,
+    detect_linux_pm,
     die,
     fallback_facts,
     get_manifest_path,
     hint_line,
     in_play_runtimes,
     next_steps_block,
+    normalize_linux_install,
     optional_libs_block,
     parent_needs_workspace_guard,
     parse_bootstrap_manifest,
@@ -86,6 +90,7 @@ from tan.core.bootstrap import (
     reported_missing,
     resolve_workspace_target,
     resolve_zephyr_pin,
+    select_linux_install,
     set_manifest_path,
     windows_python_not_runnable,
     windows_refusal,
@@ -295,7 +300,7 @@ def test_the_effective_floor_refuses_a_host_the_manifest_would_accept():
     facts = parse_bootstrap_manifest(REAL_MANIFEST)
     floor = PythonFloor(effective=(3, 12), source="zephyr python.cmake", manifest=(3, 10))
     refusal = python_too_old(
-        (3, 10), floor.effective, facts.install_for_host(LINUX),
+        (3, 10), floor.effective, facts.install_for_host(LINUX, linux_pm=LINUX_PM_APT),
         floor_source=floor.source, manifest_floor=floor.manifest,
     )
     assert refusal.code == "python-too-old"
@@ -334,7 +339,7 @@ def test_e2e_full_sh_floor_wording_survives_in_the_refusal_message():
     facts = parse_bootstrap_manifest(REAL_MANIFEST)
     floor = PythonFloor(effective=(3, 12), source="zephyr python.cmake", manifest=(3, 10))
     refusal = python_too_old(
-        (3, 10), floor.effective, facts.install_for_host(LINUX),
+        (3, 10), floor.effective, facts.install_for_host(LINUX, linux_pm=LINUX_PM_APT),
         floor_source=floor.source, manifest_floor=floor.manifest,
     )
     line = refusal.lines[0]
@@ -360,7 +365,7 @@ def test_the_skew_case_suppresses_the_manifests_own_install_command():
     exact version being refused. Printing the manifest's command in the skew case
     would send the customer round a loop, so it is dropped and the prose carries
     the real remedy."""
-    install = parse_bootstrap_manifest(REAL_MANIFEST).install_for_host(LINUX)
+    install = parse_bootstrap_manifest(REAL_MANIFEST).install_for_host(LINUX, linux_pm=LINUX_PM_APT)
     assert install["python3"] == "sudo apt-get install -y python3"
 
     skewed = python_too_old(
@@ -2072,13 +2077,37 @@ def test_the_fallback_constants_match_the_real_manifest_field_for_field():
     its source, so the exemption is gone and EVERY field is compared --
     `from_manifest` excepted, which is the parse-vs-fallback flag itself and
     differs by construction.
+
+    `install` gets a SECOND, narrower exemption now (tan-cli#760's second
+    half): `REAL_MANIFEST` tracks `parity.yml`'s `PINNED_SDK_TAG`, a pin onto
+    alp-sdk `main` -- which, as of this writing, has not yet merged
+    alp-sdk#1471 (landed on `dev` @ `7a419865`) and so still declares
+    `install.linux` in the pre-alp-sdk#1464 FLAT shape (normalised here to
+    `{"apt": {...}}`, no `dnf` key -- see `normalize_linux_install`). The
+    fallback (`_fallback_install_commands`) is deliberately re-pinned AHEAD
+    of that gap, to `dev` @ `7a419865`, so a customer with no manifest at all
+    (or a manifest whose `install.linux` is itself malformed) still gets a
+    working `dnf` remedy on a Fedora/Rocky host rather than being stuck with
+    `command: null` for want of an update-averse hardcoded table. `apt` and
+    every other field still compare byte-for-byte; only the ADDITIONAL `dnf`
+    key is exempted, and the second assertion below fails loudly -- naming
+    exactly what to narrow -- the day `PINNED_SDK_TAG` catches up.
     """
     manifest = parse_bootstrap_manifest(REAL_MANIFEST)
     fallback = fallback_facts(manifest.python_min_version)
     for field in vars(manifest):
-        if field == "from_manifest":
+        if field in ("from_manifest", "install"):
             continue
         assert getattr(fallback, field) == getattr(manifest, field), field
+
+    assert fallback.install[MACOS] == manifest.install[MACOS]
+    assert fallback.install[WINDOWS] == manifest.install[WINDOWS]
+    assert fallback.install[LINUX][LINUX_PM_APT] == manifest.install[LINUX][LINUX_PM_APT]
+    assert LINUX_PM_DNF in fallback.install[LINUX], "the dev-pinned re-vendor regressed"
+    assert LINUX_PM_DNF not in manifest.install[LINUX], (
+        "REAL_MANIFEST now carries alp-sdk#1471's dnf data -- narrow this "
+        "exemption back to a blanket field-for-field comparison"
+    )
 
 
 def test_no_instruction_in_the_vendored_manifest_names_a_refused_subcommand():
@@ -2320,12 +2349,23 @@ def test_every_host_gets_its_own_package_managers_command_for_one_tool():
     """Handing a macOS user Linux's `apt-get` line is the bug a `posix`-keyed
     lookup would cause."""
     facts = parse_bootstrap_manifest(REAL_MANIFEST)
-    assert facts.install_for_host(LINUX)["cmake"] == "sudo apt-get install -y cmake"
+    assert facts.install_for_host(LINUX, linux_pm=LINUX_PM_APT)["cmake"] == (
+        "sudo apt-get install -y cmake"
+    )
     assert facts.install_for_host(MACOS)["cmake"] == "brew install cmake"
     assert facts.install_for_host(WINDOWS)["cmake"] == "winget install -e --id Kitware.CMake"
     # A POSIX host that is neither: no manifest entry, so `null` -- never a
     # wrong-OS command.
     assert facts.install_for_host(OTHER) == {}
+    # No confirmed package manager at all -- `null` for every tool, not a
+    # guess (tan-cli#760's second half).
+    assert facts.install_for_host(LINUX) == {}
+    assert facts.install_for_host(LINUX, linux_pm=None) == {}
+    # `REAL_MANIFEST` still declares `install.linux` in the pre-alp-sdk#1471
+    # FLAT shape (Debian's, unconditionally) -- normalised here as `apt`'s
+    # sub-map (see `normalize_linux_install`), so querying it under `dnf`
+    # must come back empty, never Debian's commands read out as dnf's.
+    assert facts.install_for_host(LINUX, linux_pm=LINUX_PM_DNF) == {}
 
 
 def test_macos_reads_its_own_tool_list_and_falls_back_to_posix_without_one():
@@ -2361,7 +2401,7 @@ def test_the_posix_refusal_keeps_the_oracle_line_and_adds_the_doctor_fix_remedy(
     package names with no route to them while that command sat one subcommand
     away. Withholding a remedy tan HAS, to match an oracle that never had one,
     is parity serving nobody."""
-    install = parse_bootstrap_manifest(REAL_MANIFEST).install_for_host(LINUX)
+    install = parse_bootstrap_manifest(REAL_MANIFEST).install_for_host(LINUX, linux_pm=LINUX_PM_APT)
     refusal = posix_refusal(["cmake", "ninja"], install)
     assert len(refusal.lines) == 2, refusal.lines
     assert refusal.lines[0] == "Missing required tools: cmake ninja.  Install them and re-run."
@@ -2454,6 +2494,222 @@ def test_check_prerequisites_nulls_the_venv_unusable_command_when_apt_get_is_abs
     assert python is None
     assert refusal is not None and refusal.code == "venv-unusable"
     assert refusal.missing == (MissingPrerequisite("python3-venv", None),)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#760's second half (alp-sdk#1464 / #1471): `install.linux` is now
+# PACKAGE-MANAGER-keyed (`{"apt": {...}, "dnf": {...}}`), not tool-keyed, on
+# an alp-sdk `dev` manifest. `REAL_MANIFEST` above still declares the
+# pre-#1471 FLAT shape (it tracks `parity.yml`'s `PINNED_SDK_TAG`, a pin onto
+# alp-sdk `main`, which has not merged that change yet) -- exercised as the
+# OLD-MANIFEST case below. `FEDORA_AWARE_MANIFEST` carries alp-sdk `dev` @
+# `7a419865`'s real `install.linux.{apt,dnf}` content, apt's six commands
+# given one harmless, DISTINGUISHING marker each (`--no-install-recommends`)
+# so a test cannot pass merely because tan's hardcoded apt fallback happens
+# to be byte-identical to the real manifest data -- every assertion below
+# that compares a resolved command against one of these marked strings is
+# proof the REAL per-tool value reached the caller, not tan's own fallback
+# table standing in for it unnoticed (exactly the tan-cli#760 defect: "the
+# map comes back empty, and tan falls back to its byte-pinned apt table").
+# ---------------------------------------------------------------------------
+
+FEDORA_AWARE_INSTALL_LINUX = {
+    LINUX_PM_APT: {
+        "git": "sudo apt-get install -y --no-install-recommends git",
+        "cmake": "sudo apt-get install -y --no-install-recommends cmake",
+        "python3": "sudo apt-get install -y --no-install-recommends python3",
+        "ninja": "sudo apt-get install -y --no-install-recommends ninja-build",
+        "xz": "sudo apt-get install -y --no-install-recommends xz-utils",
+        "wget": "sudo apt-get install -y --no-install-recommends wget",
+    },
+    LINUX_PM_DNF: {
+        "git": "sudo dnf install -y git",
+        "cmake": "sudo dnf install -y cmake",
+        "python3": "sudo dnf install -y python3",
+        # No `ninja` -- alp-sdk#1464's deliberate gap: Rocky/RHEL's default
+        # repos carry no `ninja`/`ninja-build` under any name without EPEL.
+        "xz": "sudo dnf install -y xz",
+        "wget": "sudo dnf install -y wget",
+    },
+}
+
+
+def _manifest_with_linux_install(pm_map: dict) -> str:
+    """`REAL_MANIFEST`, with `prerequisites.install.linux` replaced -- every
+    other field (schemaVersion, zephyr, venv, west, pip, ...) stays real, so
+    only the one thing each test below is about actually varies."""
+    doc = json.loads(REAL_MANIFEST)
+    doc["prerequisites"]["install"]["linux"] = pm_map
+    return json.dumps(doc)
+
+
+FEDORA_AWARE_MANIFEST = _manifest_with_linux_install(FEDORA_AWARE_INSTALL_LINUX)
+
+
+def _apt_get_only(name: str) -> bool:
+    return name == "apt-get"
+
+
+def _dnf_and_sudo_only(name: str) -> bool:
+    return name in {"dnf", "sudo"}
+
+
+def _nothing_on_path(_name: str) -> bool:
+    return False
+
+
+def test_check_prerequisites_resolves_a_dnf_command_on_a_fedora_shaped_host(monkeypatch):
+    """**The core of tan-cli#760's second half.** `dnf` (and `sudo`) confirmed,
+    `apt-get` absent -- the `fedora:42`/`rockylinux:9` shape from the linked
+    issues. `cmake`'s command must be the manifest's REAL `dnf` line, not
+    `None` (tan's pre-fix behaviour: the nested `install.linux` filtered to
+    nothing, fell back to the apt table, which then got dropped by tan-cli
+    #760's PATH guard since `apt-get` is absent here) and not a guessed
+    `apt-get` line either.
+
+    Verified to FAIL against pre-fix code: pre-fix, `install_for_host` has no
+    `linux_pm` parameter at all and `_resolve_install_commands` cannot read
+    the nested shape, so `install_for_host(LINUX)` always returns the
+    fallback apt table regardless of host -- unconfirmed here (`apt-get`
+    absent), every command nulls, and the assertion below fails with
+    `None != "sudo dnf install -y cmake"`.
+    """
+    facts = parse_bootstrap_manifest(FEDORA_AWARE_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    monkeypatch.setattr(
+        bootstrap_cmd, "on_path", lambda name: f"/usr/bin/{name}" if name in {"dnf", "sudo"} else None
+    )
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None
+    by_tool = {m.tool: m.command for m in refusal.missing}
+    assert by_tool["cmake"] == "sudo dnf install -y cmake"
+    assert by_tool["git"] == "sudo dnf install -y git"
+    # And never the apt line, marked or not -- proves this is a real `dnf`
+    # resolution, not the apt sub-map leaking across package managers.
+    assert "apt-get" not in by_tool["cmake"]
+
+
+def test_check_prerequisites_leaves_ninjas_dnf_gap_null_never_a_guessed_package(monkeypatch):
+    """The other deliberate half of the same manifest: `install.linux.dnf` has
+    no `ninja` entry at all (alp-sdk#1464's Rocky/RHEL gap). `ninja` must stay
+    `None` -- never `ninja-build` (apt's package name) and never a GUESSED
+    `dnf`-shaped `ninja` command tan invented to fill the gap -- while `cmake`,
+    on the SAME host, resolves normally. Proving both in one call is what
+    makes this a `dnf`-resolution test and not just a repeat of the
+    already-covered "nothing resolves" case.
+
+    Verified to FAIL against pre-fix code for the same reason as the sibling
+    test above: `cmake`'s command comes back `None`, not the real `dnf` line,
+    because `apt-get` (the only PM tan's pre-fix fallback ever offers) is
+    absent on this host.
+    """
+    facts = parse_bootstrap_manifest(FEDORA_AWARE_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    monkeypatch.setattr(
+        bootstrap_cmd, "on_path", lambda name: f"/usr/bin/{name}" if name in {"dnf", "sudo"} else None
+    )
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None
+    by_tool = {m.tool: m.command for m in refusal.missing}
+    assert by_tool["cmake"] == "sudo dnf install -y cmake"
+    assert by_tool["ninja"] is None
+    assert "ninja-build" not in " ".join(refusal.lines)
+    assert "ninja" not in (by_tool.get("ninja") or "")
+
+
+def test_check_prerequisites_still_prefers_apt_when_a_manifest_carries_both(monkeypatch):
+    """`detect_linux_pm` checks `apt-get` BEFORE `dnf` -- the same order
+    alp-sdk's own two detectors use (`scripts/bootstrap.sh`'s `LINUX_PM`
+    block, `scripts/alp_cli/doctor.py`'s `_prereq_linux_pm()`). A real Debian
+    host with `apt-get` on PATH must get `apt`'s command even though this
+    manifest ALSO carries `dnf` data -- the marker text
+    (`--no-install-recommends`) is what proves the REAL apt sub-map was read,
+    not tan's own byte-identical hardcoded fallback standing in for it.
+
+    Verified to FAIL against pre-fix code: pre-fix, `install_for_host(LINUX)`
+    returns tan's own hardcoded fallback (the nested manifest filters to
+    nothing), which carries the PLAIN `sudo apt-get install -y cmake` --
+    never the marked `--no-install-recommends` variant this manifest actually
+    declares -- so the equality assertion below fails.
+    """
+    facts = parse_bootstrap_manifest(FEDORA_AWARE_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    monkeypatch.setattr(
+        bootstrap_cmd,
+        "on_path",
+        lambda name: f"/usr/bin/{name}" if name in {"apt-get", "sudo"} else None,
+    )
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None
+    by_tool = {m.tool: m.command for m in refusal.missing}
+    assert by_tool["cmake"] == "sudo apt-get install -y --no-install-recommends cmake"
+    assert "dnf" not in by_tool["cmake"]
+
+
+def test_check_prerequisites_degrades_host_neutral_with_neither_package_manager(monkeypatch):
+    """Neither `apt-get` nor `dnf` resolves (Alpine/musl; a `pacman` host,
+    which this manifest never even carries a sub-map for) -- every Linux tool
+    must null, and no package-manager-specific text may appear anywhere in the
+    refusal's prose, on a manifest that in fact carries usable `dnf` data for
+    a DIFFERENT host. `detect_linux_pm`/`install_for_host(..., linux_pm=None)`
+    are new tan-cli#760 API surface pre-fix code does not have at all --
+    calling this scenario through `check_prerequisites` (which internally
+    calls both) is what makes the assertions below meaningful rather than
+    coincidentally true on both sides of the fix.
+    """
+    facts = parse_bootstrap_manifest(FEDORA_AWARE_MANIFEST)
+    floor = PythonFloor(effective=(3, 10), source="x", manifest=(3, 10))
+    monkeypatch.setattr(bootstrap_cmd, "on_path", lambda _name: None)
+
+    python, refusal = check_prerequisites(facts, LINUX, floor)
+
+    assert python is None
+    assert refusal is not None
+    assert all(m.command is None for m in refusal.missing)
+    prose = " ".join(refusal.lines)
+    assert "apt-get" not in prose
+    assert "dnf" not in prose
+
+
+def test_normalize_and_select_round_trip_the_new_and_legacy_linux_shapes():
+    """The pure decision functions, isolated from PATH probing entirely --
+    `select_linux_install`/`normalize_linux_install`/`detect_linux_pm` do not
+    exist at all pre-fix, so any of these calls is an `ImportError` there,
+    not merely a wrong value.
+
+    Covers design decision (4): a manifest whose `install.linux` is still the
+    pre-alp-sdk#1471 FLAT shape (`REAL_MANIFEST`) is read AS `apt`'s sub-map
+    -- correct on a real apt host, and never leaked to a `dnf` one."""
+    new_shape = normalize_linux_install(FEDORA_AWARE_INSTALL_LINUX)
+    assert new_shape[LINUX_PM_APT]["cmake"] == (
+        "sudo apt-get install -y --no-install-recommends cmake"
+    )
+    assert new_shape[LINUX_PM_DNF]["cmake"] == "sudo dnf install -y cmake"
+    assert "ninja" not in new_shape[LINUX_PM_DNF]
+
+    legacy_raw = json.loads(REAL_MANIFEST)["prerequisites"]["install"]["linux"]
+    assert all(isinstance(v, str) for v in legacy_raw.values()), (
+        "REAL_MANIFEST caught up to the PM-keyed shape -- this fixture is "
+        "no longer exercising the legacy branch this test is about"
+    )
+    legacy_shape = normalize_linux_install(legacy_raw)
+    assert legacy_shape == {LINUX_PM_APT: legacy_raw}
+    assert select_linux_install(legacy_shape, LINUX_PM_APT) == legacy_raw
+    assert select_linux_install(legacy_shape, LINUX_PM_DNF) == {}
+    assert select_linux_install(legacy_shape, None) == {}
+
+    assert detect_linux_pm(_apt_get_only) == LINUX_PM_APT
+    assert detect_linux_pm(_dnf_and_sudo_only) == LINUX_PM_DNF
+    assert detect_linux_pm(_nothing_on_path) is None
 
 
 def test_the_tool_less_refusals_carry_their_own_codes_and_report_null():

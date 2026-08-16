@@ -51,6 +51,11 @@ from tan.core.timestamp import generated_at_iso
 #: separate enum would only need translating back.
 LINUX = "linux"
 MACOS = "macos"
+#: `install.linux`'s package-manager keys (alp-sdk#1464 / tan-cli#760) -- see
+#: `detect_linux_pm` for the detection order and why `pacman` has no constant
+#: here at all.
+LINUX_PM_APT = "apt"
+LINUX_PM_DNF = "dnf"
 WINDOWS = "windows"
 OTHER = "other"
 
@@ -377,10 +382,13 @@ class BootstrapFacts:
     #: existed. Not `_require`d: unlike `prerequisites.pythonMinVersion`, an
     #: absent key here is a normal, expected shape, not a malformed manifest.
     zephyr_python_min_version: tuple[int, int] | None
-    #: `prerequisites.install`, keyed `linux`/`macos`/`windows` -> tool ->
-    #: command. NOT the `posix`/`windows` split the tool LISTS use: an
-    #: apt-shaped command and a brew-shaped one cannot share one `posix` key.
-    install: dict[str, dict[str, str]]
+    #: `prerequisites.install`, keyed `linux`/`macos`/`windows`. `macos`/
+    #: `windows` map tool -> command directly. `linux` is one level deeper
+    #: (alp-sdk#1464 / tan-cli#760): PACKAGE MANAGER -> tool -> command --
+    #: `{"apt": {...}, "dnf": {...}}`, `dnf` a SUBSET of `apt`'s tools (see
+    #: `normalize_linux_install`/`_fallback_install_commands`). Use
+    #: `install_for_host`, never this field directly.
+    install: dict[str, dict[str, str] | dict[str, dict[str, str]]]
     west_pip_spec: str
     west_init_args: tuple[str, ...]
     west_update_args: tuple[str, ...]
@@ -432,7 +440,7 @@ class BootstrapFacts:
             return self.prerequisites_macos
         return self.prerequisites_posix
 
-    def install_for_host(self, host: str) -> dict[str, str]:
+    def install_for_host(self, host: str, linux_pm: str | None = None) -> dict[str, str]:
         """THE one place the manifest's `linux`/`macos`/`windows` install keying
         is reconciled with `prerequisites`' `posix`/`windows` tool-list keying.
         Callers resolve once, by host, and hand the resolved map down -- so no
@@ -443,7 +451,20 @@ class BootstrapFacts:
         entry and is not going to grow one: every tool there reports
         `command: null`. The alternatives are both worse than the `null` -- a
         throw, or handing a BSD user a `brew install` line.
+
+        `linux_pm` (alp-sdk#1464 / tan-cli#760) is the extra hop `host ==
+        LINUX` needs: `self.install[LINUX]` is package-manager -> tool ->
+        command, so a caller must say WHICH sub-map it wants. `None` (the
+        default) is an EMPTY map, never a guess -- a caller with no confirmed
+        package manager (`detect_linux_pm`) gets `command: null` for every
+        tool, not one PM's data served for another's.
         """
+        if host == LINUX:
+            if linux_pm is None:
+                return {}
+            sub = self.install.get(LINUX, {})
+            node = sub.get(linux_pm) if isinstance(sub, dict) else None
+            return dict(node) if isinstance(node, dict) else {}
         return self.install.get(host, {})
 
     def native_lib_hint(self, host: str) -> NativeLibHint | None:
@@ -668,25 +689,42 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
     )
 
 
-def _fallback_install_commands() -> dict[str, dict[str, str]]:
+def _fallback_install_commands() -> dict[str, dict[str, str] | dict[str, dict[str, str]]]:
     """The install one-liners as `metadata/bootstrap.json` carries them.
 
     Two callers: the whole-manifest fallback, and `_resolve_install_commands`'s
     gap-fill for a manifest predating alp-sdk#959 (which carried no `install`
     key at all). Note `ninja`'s PACKAGE name differs from the binary name --
     which is the whole argument for carrying these as data rather than guessing.
+
+    `LINUX` is re-pinned to alp-sdk `dev` @ `7a419865` (tan-cli#760's second
+    half / alp-sdk#1464+#1471): package-manager-keyed now, matching
+    `BootstrapFacts.install`'s own nested shape, not the flat tool -> command
+    map this table carried before. `dnf` has no `ninja` entry and there is no
+    `pacman` key at all -- both deliberate DATA (see `detect_linux_pm`), not
+    gaps to fill in later.
     """
     return {
         LINUX: {
-            "git": "sudo apt-get install -y git",
-            "cmake": "sudo apt-get install -y cmake",
-            "python3": "sudo apt-get install -y python3",
-            "ninja": "sudo apt-get install -y ninja-build",
-            # `xz`/`wget` joined `prerequisites.posix` at alp-sdk v0.14.0. Same
-            # package-name-differs-from-binary-name point as `ninja`: the binary
-            # is `xz`, the package is `xz-utils`.
-            "xz": "sudo apt-get install -y xz-utils",
-            "wget": "sudo apt-get install -y wget",
+            LINUX_PM_APT: {
+                "git": "sudo apt-get install -y git",
+                "cmake": "sudo apt-get install -y cmake",
+                "python3": "sudo apt-get install -y python3",
+                "ninja": "sudo apt-get install -y ninja-build",
+                # `xz`/`wget` joined `prerequisites.posix` at alp-sdk v0.14.0.
+                # Same package-name-differs-from-binary-name point as `ninja`:
+                # the binary is `xz`, the package is `xz-utils`.
+                "xz": "sudo apt-get install -y xz-utils",
+                "wget": "sudo apt-get install -y wget",
+            },
+            LINUX_PM_DNF: {
+                "git": "sudo dnf install -y git",
+                "cmake": "sudo dnf install -y cmake",
+                "python3": "sudo dnf install -y python3",
+                # No `ninja` -- see this function's own docstring.
+                "xz": "sudo dnf install -y xz",
+                "wget": "sudo dnf install -y wget",
+            },
         },
         MACOS: {
             "git": "brew install git",
@@ -717,7 +755,88 @@ def _fallback_install_commands() -> dict[str, dict[str, str]]:
     }
 
 
-def _resolve_install_commands(declared: Any) -> dict[str, dict[str, str]]:
+def normalize_linux_install(raw: Any) -> dict[str, dict[str, str]]:
+    """`prerequisites.install.linux`, canonicalised to PACKAGE MANAGER -> tool
+    -> command, whichever of the two shapes alp-sdk declared it in.
+
+    **New shape** (alp-sdk#1464, `dev` @ `7a419865` on): `{"apt": {tool:
+    command}, "dnf": {tool: command}}` -- detected structurally, by every
+    top-level value being a dict, not by key name, so a package manager this
+    parser has never heard of is still readable rather than silently dropped.
+
+    **Legacy shape** (every manifest before alp-sdk#1471): a FLAT tool ->
+    command map, unconditionally Debian's -- that key had no other content
+    until #1464 gave it a package-manager dimension at all. Read here AS
+    `apt`'s sub-map (design decision (4)): a NEW tan against an OLD
+    `--sdk-root` still works on a real apt host exactly as it always did, and
+    `select_linux_install` never hands the same data out to a dnf/pacman/other
+    caller -- read what was always there, under the key it was implicitly
+    for, and let `detect_linux_pm` decide who may see it.
+
+    Empty/absent/malformed input returns `{}` -- callers fall back to
+    `_fallback_install_commands()[LINUX]`, matching every other per-OS gap in
+    `_resolve_install_commands`.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    if all(isinstance(v, dict) for v in raw.values()):
+        out: dict[str, dict[str, str]] = {}
+        for pm, tools in raw.items():
+            if not isinstance(pm, str) or not isinstance(tools, dict):
+                continue
+            clean = {k: v for k, v in tools.items() if isinstance(k, str) and isinstance(v, str)}
+            if clean:
+                out[pm] = clean
+        return out
+    # Legacy flat shape -- read as `apt`'s sub-map (see the docstring above).
+    clean = {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+    return {LINUX_PM_APT: clean} if clean else {}
+
+
+def select_linux_install(normalized: dict[str, dict[str, str]], pm: str | None) -> dict[str, str]:
+    """The tool -> command map for ONE package manager, out of
+    `normalize_linux_install`'s output. `pm=None` -- no package manager
+    confirmed on this host (`detect_linux_pm` found neither `apt-get` nor
+    `dnf`, or found a third one this manifest ships no sub-map for, e.g.
+    Arch's `pacman`) -- is `{}`, never a different PM's data: the whole point
+    of keying `install.linux` by package manager is that one PM's shape must
+    never stand in for another's."""
+    if pm is None:
+        return {}
+    sub = normalized.get(pm)
+    return dict(sub) if isinstance(sub, dict) else {}
+
+
+def detect_linux_pm(available: Callable[[str], bool]) -> str | None:
+    """Which package-manager sub-map to read under `install.linux`
+    (alp-sdk#1464 / tan-cli#760) -- `apt` checked before `dnf`, `pacman`
+    never probed.
+
+    **Order and fallthrough MUST agree with alp-sdk's own two detectors** --
+    `scripts/bootstrap.sh`'s `LINUX_PM` block and `scripts/alp_cli/doctor.py`'s
+    `_prereq_linux_pm()` -- both probe `apt-get` before `dnf`, neither probes
+    `pacman`, both fall through to a host-neutral degrade when neither
+    resolves. A third detector that disagrees with those two is a future
+    drift bug: keep this order in lockstep with those two by hand; there is
+    no shared gate across the two repos that would.
+
+    `pacman` is deliberately never probed: `install.linux` ships no `pacman`
+    sub-map at all (an unattended `pacman -Sy` risks a partial upgrade) --
+    detecting it would only ever resolve to the same `None` below.
+
+    Pure: `available` is injected (`on_path(binary) is not None`), matching
+    every other PATH check in this module -- see `_confirmed`.
+    """
+    if available("apt-get"):
+        return LINUX_PM_APT
+    if available("dnf"):
+        return LINUX_PM_DNF
+    return None
+
+
+def _resolve_install_commands(
+    declared: Any,
+) -> dict[str, dict[str, str] | dict[str, dict[str, str]]]:
     """`prerequisites.install` as parsed, with each EMPTY per-OS map replaced by
     the fallback's.
 
@@ -731,12 +850,17 @@ def _resolve_install_commands(declared: Any) -> dict[str, dict[str, str]]:
     Degrade, do not refuse: every shape handled here is out of contract today,
     and a `ValidationFailure` on a manifest field reaches `tan build` and
     `tan run` through auto-bootstrap.
+
+    `LINUX` is handled separately (tan-cli#760's second half):
+    `normalize_linux_install` reconciles both shapes `install.linux` has ever
+    had into one PM-keyed map, so `BootstrapFacts.install[LINUX]` is ALWAYS
+    `{pm: {tool: command}}`.
     """
     fallback = _fallback_install_commands()
     if not isinstance(declared, dict):
         return fallback
-    out: dict[str, dict[str, str]] = {}
-    for host in (LINUX, MACOS, WINDOWS):
+    out: dict[str, dict[str, str] | dict[str, dict[str, str]]] = {}
+    for host in (MACOS, WINDOWS):
         node = declared.get(host)
         clean = (
             {k: v for k, v in node.items() if isinstance(k, str) and isinstance(v, str)}
@@ -744,6 +868,7 @@ def _resolve_install_commands(declared: Any) -> dict[str, dict[str, str]]:
             else {}
         )
         out[host] = clean or fallback[host]
+    out[LINUX] = normalize_linux_install(declared.get(LINUX)) or fallback[LINUX]
     return out
 
 

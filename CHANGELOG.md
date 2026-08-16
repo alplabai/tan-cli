@@ -9,6 +9,28 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **A Fedora/Rocky/Arch host still got `sudo apt-get install -y cmake` in
+  `data.missingPrerequisites[].command`, even after alp-sdk keyed
+  `prerequisites.install.linux` by package manager (alp-sdk#1464/#1471).**
+  `_resolve_install_commands` filtered `install.linux` with
+  `isinstance(v, str)`; every value is now a per-package-manager dict, so the
+  filter dropped everything and silently substituted tan's own byte-pinned
+  apt table regardless of host. `tan.core.bootstrap` gains
+  `detect_linux_pm` (probes `apt-get` then `dnf`, matching
+  `scripts/bootstrap.sh`'s `LINUX_PM` block and
+  `scripts/alp_cli/doctor.py`'s `_prereq_linux_pm()` exactly — same order,
+  same fallthrough, `pacman` never probed) plus
+  `normalize_linux_install`/`select_linux_install`, wired into both
+  `tan bootstrap`'s `check_prerequisites` and `tan doctor`'s own SEPARATE raw-
+  manifest reader (`_collect`), which had the identical defect independently
+  and, unguarded, broke on EVERY Linux host once a nested manifest was read,
+  Debian included. `install.linux.dnf`'s deliberate gaps (no `ninja`, no
+  `pacman` key at all) degrade to `command: null` plus a host-neutral hint —
+  never a guessed package name. A manifest predating alp-sdk#1471 (still a
+  flat `install.linux`) is read as `apt`'s sub-map, so a real Debian/Ubuntu
+  host reading an OLD `--sdk-root` checkout is unaffected. tan-cli#760;
+  refs alp-sdk#1464.
+
 - **`version-identity`'s `not-a-released-version` check went red on every PR
   opened against `dev` the moment `v0.6.0-rc1` was tagged.** `dev`'s tip kept
   `TAN_VERSION = "0.6.0-rc1"`, the exact string the published tag already
