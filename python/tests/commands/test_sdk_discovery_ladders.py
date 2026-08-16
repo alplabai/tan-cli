@@ -535,3 +535,74 @@ def test_both_sides_of_the_split_warn_now_that_the_wide_callers_are_wired(tmp_pa
     for label, env in (("build", build_env), ("examples", examples_env)):
         codes = [i["code"] for i in env["issues"]]
         assert DIVERGENCE_CODE in codes, f"`tan {label}` stayed silent; codes were {codes}"
+
+
+# ───────── the five narrow TEXT-channel callers, fixed (tan-cli#799) ─────────
+
+#: The shortest argv that reaches each command's post-envelope point in the
+#: bare `_divergent_layout` fixture (no board.yaml, no `metadata/`, no
+#: `system-manifest.yaml`) WITHOUT the run taking the internal-failure guard
+#: -- that guard reports `sdk=None` on `clean`/`run`, and a `None` sdk can
+#: never carry the divergence warning (`Envelope._with_sdk_divergence`'s own
+#: gate). Each of these five resolves the SDK, then refuses on something else
+#: entirely (a missing system-manifest.yaml, a missing board.yaml) -- exactly
+#: the shape #799 measured: the refusal reaches text, the warning didn't.
+NARROW_TEXT_COMMANDS: dict[str, tuple[str, ...]] = {
+    "size": ("size",),
+    "image": ("image",),
+    "clean": ("clean", "--dry-run"),
+    "run": ("run",),
+    "validate": ("validate",),
+}
+
+
+@pytest.mark.parametrize("command", sorted(NARROW_TEXT_COMMANDS))
+def test_narrow_text_channel_carries_the_divergence_warning(tmp_path, command):
+    """tan-cli#799: `size`/`image`/`clean`/`run`/`validate` each constructed
+    their `Envelope` only inside `if json_mode:` and rendered text from a
+    local `issues`/`text` list built strictly BEFORE that -- so
+    `sdk.discovery-divergent`, appended at the `Envelope.__init__` seam,
+    reached `--format json` and was silent on the default text channel.
+    `pinmux_cmd.py` was already correct (builds the envelope once,
+    unconditionally, and renders text from `envelope.issues`); this pins the
+    same fix on the other five, measured end to end rather than at the
+    seam/helper level the rest of this module already covers.
+    """
+    workspace, child, lateral = _divergent_layout(tmp_path)
+    argv = NARROW_TEXT_COMMANDS[command]
+
+    json_env = _envelope(_run_tan(*argv, "--format", "json", cwd=workspace))
+    divergence = next((i for i in json_env["issues"] if i["code"] == DIVERGENCE_CODE), None)
+    assert divergence is not None, (
+        f"the premise: `tan {' '.join(argv)} --format json` in the divergent "
+        f"layout must itself carry {DIVERGENCE_CODE}, or this test proves "
+        f"nothing about the text channel; issues were "
+        f"{[i['code'] for i in json_env['issues']]}"
+    )
+
+    text_proc = _run_tan(*argv, cwd=workspace)
+    assert "Traceback" not in text_proc.stderr, (
+        f"an exception escaped the contract:\n{text_proc.stderr}"
+    )
+    assert child.as_posix() in text_proc.stderr and lateral.as_posix() in text_proc.stderr, (
+        f"`tan {' '.join(argv)}` (default/text) carried {DIVERGENCE_CODE} in "
+        f"its `--format json` envelope but not on the default text channel; "
+        f"stderr was:\n{text_proc.stderr!r}"
+    )
+
+
+def test_a_narrow_text_run_over_one_checkout_gets_no_divergence_warning(tmp_path):
+    """The regression the fix must not become: every ordinary single-SDK
+    workspace keeps a plain refusal on the text channel, with no collision
+    warning invented for it -- the same control
+    `test_a_workspace_with_one_checkout_gets_no_divergence_warning_from_tan_build`
+    already pins for `--format json`."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(tmp_path / "alp-sdk")
+
+    proc = _run_tan("size", cwd=workspace)
+
+    assert "Traceback" not in proc.stderr
+    assert "discovery-divergent" not in proc.stderr
+    assert "two alp-sdk checkouts resolve" not in proc.stderr

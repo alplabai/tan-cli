@@ -163,3 +163,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-16 -- tan-cli#804: consume _teardown_sim's grace-loop poll (which already waits up to _QUIT_GRACE_S) as the sim-exited-early source at --timeout 0, discriminated via a surfaced quit() write-failure or a nonzero exit code so a healthy quit-driven shutdown is never misreported
     - tan/commands/renode_cmd.py: 1533 -> 1587
     - function_count_budget: 260 -> 261
+- 2026-08-16 -- tan-cli#799: build the Envelope once, unconditionally, in size_cmd/clean_cmd/validate_cmd (and image_cmd/run_cmd, both still under the cap) so the sdk.discovery-divergent seam warning reaches text mode too, not only --format json
+    - tan/commands/clean_cmd.py: 1110 -> 1119
+    - tan/commands/size_cmd.py: 831 -> 842
+    - tan/commands/validate_cmd.py: 1571 -> 1587

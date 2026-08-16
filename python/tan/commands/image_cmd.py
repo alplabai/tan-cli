@@ -674,19 +674,29 @@ def image(
             disclosure.sdk,
         )
 
+    # Built ONCE, for both formats: `Envelope.__init__` appends the tan-cli#407
+    # `sdk.discovery-divergent` warning at the shared seam (`_with_sdk_
+    # divergence`), and `outcome.text` was assembled strictly before any
+    # `Envelope` existed -- so a seam-appended issue reached `--format json`
+    # and was silent on the default text channel (tan-cli#799). Diffed
+    # against `outcome.issues` (by value: `Issue` is a frozen dataclass) so
+    # only what the seam ADDED is rendered, never a duplicate of a warning
+    # `outcome.text` already carries via `_sdk_warning_lines` above.
+    envelope = Envelope(
+        "image",
+        outcome.project,
+        outcome.data,
+        outcome.issues,
+        outcome.exit_code,
+        sdk=outcome.sdk,
+    )
     if json_mode:
-        emit(
-            Envelope(
-                "image",
-                outcome.project,
-                outcome.data,
-                outcome.issues,
-                outcome.exit_code,
-                sdk=outcome.sdk,
-            )
-        )
+        emit(envelope)
     else:
+        seam_extra = [issue for issue in envelope.issues if issue not in outcome.issues]
         stream = typer.get_text_stream("stderr")
+        for issue in seam_extra:
+            stream.write(f"{issue.severity}: {issue.message}\n")
         for line in outcome.text:
             stream.write(f"{line}\n")
     raise typer.Exit(int(outcome.exit_code))
