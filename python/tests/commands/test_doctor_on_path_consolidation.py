@@ -57,6 +57,30 @@ def _executable(directory: Path, name: str) -> Path:
     return path
 
 
+def _resolves_to(answer: str | None, expected: Path) -> bool:
+    """Whether `answer` names the SAME FILE as `expected` -- not the same
+    string.
+
+    Second Windows lesson from this module (tan-cli#532). `resolve_tool`
+    builds its candidate from `%PATHEXT%`, whose default is UPPERCASE
+    (`.COM;.EXE;.BAT;.CMD`), and returns `str(Path(directory) / name)`. So
+    the answer carries `alp-probe-tool.EXE` while the fixture on disk is
+    `alp-probe-tool.exe`: `Path.is_file()` matches, because the filesystem is
+    case-insensitive, and a `==` on the two strings does not. That is not a
+    defect in the lookup -- the path it returns opens the intended file, which
+    is the whole contract -- so the assertion is the thing that has to state
+    identity the way the platform means it.
+
+    `os.path.samefile` rather than a `.lower()` comparison: it answers the
+    question actually being asked ("did the probe find MY fixture"), and it
+    keeps working if a future `%PATHEXT%` change alters the casing again or a
+    caller starts returning a resolved/short-form path.
+    """
+    if answer is None:
+        return False
+    return os.path.samefile(answer, expected)
+
+
 def test_on_path_delegates_to_the_one_lookup(monkeypatch):
     """The anti-second-copy assertion: `on_path` must CALL `resolve_tool`,
     not merely happen to agree with it.
@@ -104,7 +128,7 @@ def test_on_path_reads_the_live_environment_not_a_snapshot(monkeypatch, tmp_path
     assert doctor_cmd.on_path("alp-probe-tool") is None
 
     monkeypatch.setenv("PATH", os.pathsep.join([str(first), str(second)]))
-    assert doctor_cmd.on_path("alp-probe-tool") == str(tool)
+    assert _resolves_to(doctor_cmd.on_path("alp-probe-tool"), tool)
 
 
 def test_on_path_and_resolve_tool_cannot_answer_differently(monkeypatch, tmp_path):
@@ -160,4 +184,4 @@ def test_an_unreadable_path_entry_does_not_fail_the_probe(monkeypatch, tmp_path)
 
     monkeypatch.setenv(
         "PATH", os.pathsep.join([str(missing), str(long_name), "", str(good)]))
-    assert doctor_cmd.on_path("alp-probe-tool") == str(tool)
+    assert _resolves_to(doctor_cmd.on_path("alp-probe-tool"), tool)
