@@ -1,0 +1,395 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The pin-move-verify SENDER (tan-cli#820, ADR-0029 clause 5's contract): on
+# any PR that touches a cross-repo alp-sdk-ref pin site, propose the
+# (tan_ref, sdk_ref, soms) tuple that PR is asking for and dispatch it to
+# `alplabai/alp-e2e`'s receiver (`.github/workflows/pin-move-verify.yml` +
+# `alpe2e/pinverify.py`, alp-e2e PR #1). The receiver builds the tuple on a
+# clean machine and posts a Check Run back HERE, on the commit that proposed
+# it. This job polls for that Check Run and turns it into this job's own
+# pass/fail, so "does this pin move actually build" can be a required status
+# check instead of a spelling agreement (ADR-0029's whole point: observation
+# 4 -- `SUPPORTED_CLI_VERSION = "0.5.1"` named a published tan release that
+# could not build ANY Renesas or Alif SoM, and its gate was green throughout).
+#
+# WHICH FILES ARE "A PIN SITE" HERE, AND WHICH ARE NOT
+#
+# See `python/scripts/pin_move_verify.py`'s own module docstring for the full
+# sweep and the reasoning -- `PIN_SITES` there is the single source this
+# workflow reads (`detect`, below), so the file list is not duplicated here.
+#
+# THE MOST IMPORTANT THING ABOUT THIS WORKFLOW, READ BEFORE TRUSTING A GREEN
+# RUN
+#
+# As of this PR, NEITHER side of the contract has its secrets provisioned:
+# `alplabai/tan-cli` (this repo) has no `ALP_CI_APP_ID` / `ALP_CI_APP_PRIVATE_KEY`
+# (checked: `gh secret list` shows only `CARGO_REGISTRY_TOKEN`/`NPM_TOKEN`),
+# so this job cannot even MINT a token to call alp-e2e's dispatches endpoint;
+# and `alplabai/alp-e2e` does not have them either (its own receiver's header
+# says so), so even a successful dispatch could not get a Check Run posted
+# back here. Until a human provisions both, ANY PR that touches a pin site
+# will fail this job at the "is the App provisioned?" step -- by design (see
+# the "fail closed" step below), not a bug. Do NOT add this job as a required
+# status check until that provisioning has happened and at least one real
+# dispatch has been observed to post a Check Run here.
+#
+# THE TUPLE THIS SENDER PROPOSES, STATED HONESTLY
+#
+# `tan_ref` is always the latest PUBLISHED tan-cli release (the receiver's
+# own journey installs it through `install.sh`, which cannot fetch an
+# unreleased PR branch) -- it does NOT test the code this PR itself changed.
+# `sdk_ref` is read live from `.github/workflows/parity.yml`'s
+# `PINNED_SDK_TAG` at the PR's own head, i.e. the PROPOSED value, which is
+# the one this sender actually needs to prove. See
+# `python/scripts/pin_move_verify.py`'s module docstring, "WHAT tan_ref MEANS
+# FOR THESE PINS", for the full reasoning and its honest limits.
+#
+# COST -- read the receiver's own header before changing the trigger scope.
+# One dispatch costs the receiver roughly 10 runner-minutes (two SoMs, ~5 min
+# each) and up to a 60-minute worst case; this job's own poll loop adds
+# little compute but can occupy an ubuntu-latest runner for up to
+# DEADLINE_MINUTES below. That is why this fires only on a PR that actually
+# touches a pin site, never on every push -- see the receiver's own comment:
+# "NOT on every push, where it would be resented and then disabled."
+#
+# STATIC NAME, ON PURPOSE (the trap this avoids is real -- see
+# `pr-bootstrap-distro-install.yml` in alp-sdk, `summary` job, and the
+# alp-sdk#1474 incident its own comment documents: a required context whose
+# name contains `${{ matrix.* }}` reports under its literal, UNRESOLVED
+# string the moment the job that would resolve it skips, permanently
+# blocking every PR that doesn't touch a watched path). This workflow has
+# exactly ONE job, with no matrix, precisely so its `name:` never needs
+# runtime interpolation to be legible -- the string below,
+# `pin-move-verify · sender`, is what a `gh api .../branches/<b>/protection`
+# call should require, once it is safe to.
+name: pin-move-verify
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      tan_ref:
+        description: "tan-cli ref to dispatch (default: the latest published release)"
+        required: false
+        default: ""
+      sdk_ref:
+        description: "alp-sdk ref to dispatch (default: parity.yml's live PINNED_SDK_TAG)"
+        required: false
+        default: ""
+      soms:
+        description: "comma-separated SoM SKUs (default: E1M-V2N101,E1M-AEN801)"
+        required: false
+        default: ""
+
+# Keyed on the commit under test: a fast-follow push to the same PR should
+# supersede its predecessor's in-flight (up to 90-minute) poll, not race it.
+# `merge_group` and `workflow_dispatch` get their own group members so they
+# never cancel a PR's own run or each other.
+concurrency:
+  group: pin-move-verify-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  # Read-only, and only to poll THIS repo's own check runs on the commit
+  # under test (the "poll for the receiver's Check Run" step). Writing a
+  # Check Run on alp-e2e's behalf never happens from here -- that is the
+  # receiver's own job, using its own App-minted token scoped to THIS repo.
+  checks: read
+
+jobs:
+  verify:
+    name: pin-move-verify · sender
+    runs-on: ubuntu-latest
+    # Roughly the receiver's own worst case (plan 10m + verify up to 60m +
+    # report 15m) plus headroom for this job's own setup and poll overhead.
+    # Not a target -- a healthy dispatch resolves in well under 15 minutes.
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # One place decides base/head/source facts per event, so every later
+      # step reads a plain step output instead of re-deriving the same
+      # event-shape switch. Every event value is read through `env:`, never
+      # interpolated directly into the shell -- `client_payload`-adjacent
+      # data from `pull_request`/`merge_group` is attacker-shaped in
+      # general, even though the three fields used here (a SHA, an integer,
+      # a ref name) are GitHub-validated formats, not free text.
+      - name: resolve event facts
+        id: facts
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              echo "base=$PR_BASE_SHA" >> "$GITHUB_OUTPUT"
+              echo "head=$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+              echo "source_sha=$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+              echo "source_pr=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+              ;;
+            merge_group)
+              echo "base=$MG_BASE_SHA" >> "$GITHUB_OUTPUT"
+              echo "head=$MG_HEAD_SHA" >> "$GITHUB_OUTPUT"
+              echo "source_sha=$MG_HEAD_SHA" >> "$GITHUB_OUTPUT"
+              echo "source_pr=" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch)
+              # No diff to detect against -- a manual dispatch always means
+              # "verify this deliberately", so `detect` (below) is skipped
+              # entirely for this event, not fed a synthetic base/head.
+              echo "base=" >> "$GITHUB_OUTPUT"
+              echo "head=" >> "$GITHUB_OUTPUT"
+              echo "source_sha=$RUN_SHA" >> "$GITHUB_OUTPUT"
+              echo "source_pr=" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::unhandled event_name=$EVENT_NAME"
+              exit 1
+              ;;
+          esac
+
+      # Cheap: one `git diff --name-only`, no receiver contacted yet. Skipped
+      # outright on workflow_dispatch (see the `facts` step above); the
+      # `relevant` step below treats a manual dispatch as always relevant.
+      - name: detect whether this run touches a pin site
+        id: detect
+        if: github.event_name != 'workflow_dispatch'
+        working-directory: python
+        env:
+          BASE: ${{ steps.facts.outputs.base }}
+          HEAD: ${{ steps.facts.outputs.head }}
+        run: |
+          set -euo pipefail
+          python scripts/pin_move_verify.py detect --base "$BASE" --head "$HEAD" --repo-root ..
+
+      # Folds `detect`'s result and the workflow_dispatch override into one
+      # flag every later step gates on. `detect` legitimately does not run on
+      # workflow_dispatch (see above) -- reading its output as `!= 'true'` in
+      # that case would read a MISSING output as "not relevant" and silently
+      # skip a dispatch a human explicitly asked for, which is the same
+      # fail-OPEN shape this workflow's other gates are built to avoid.
+      - name: is this run relevant?
+        id: relevant
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DETECT_TOUCHED: ${{ steps.detect.outputs.touched }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            value=true
+          else
+            value="$DETECT_TOUCHED"
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - name: nothing to verify -- no pin site touched
+        if: steps.relevant.outputs.value != 'true'
+        run: |
+          echo "no tracked pin site changed in this diff -- see python/scripts/pin_move_verify.py's PIN_SITES for the tracked list. Nothing to dispatch."
+
+      # --- everything from here on only runs when `relevant` -----------------
+
+      - name: resolve tan_ref (latest published tan-cli release, or the manual override)
+        id: tanref
+        if: steps.relevant.outputs.value == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.tan_ref || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "$OVERRIDE" ]; then
+            ref="$OVERRIDE"
+          else
+            ref="$(gh api repos/alplabai/tan-cli/releases/latest --jq .tag_name)"
+          fi
+          if [ -z "$ref" ]; then
+            echo "::error::could not resolve a tan_ref -- no published release found, and no workflow_dispatch override given"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "::notice::tan_ref = $ref"
+
+      - name: resolve sdk_ref (parity.yml's live PINNED_SDK_TAG, or the manual override)
+        id: sdkref
+        if: steps.relevant.outputs.value == 'true'
+        working-directory: python
+        env:
+          OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.sdk_ref || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "$OVERRIDE" ]; then
+            ref="$OVERRIDE"
+          else
+            ref="$(python scripts/pin_move_verify.py sdk-ref --parity-yml ../.github/workflows/parity.yml)"
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "::notice::sdk_ref = $ref"
+
+      # Validates + shapes the exact POST body in tested code (mirrors
+      # alpe2e.pinverify.check_body's own rationale: "the one artefact the
+      # sender actually SEES is produced by code with tests behind it").
+      # A malformed tuple fails HERE, before any network call.
+      - name: build + validate the dispatch payload
+        id: payload
+        if: steps.relevant.outputs.value == 'true'
+        working-directory: python
+        env:
+          TAN_REF: ${{ steps.tanref.outputs.ref }}
+          SDK_REF: ${{ steps.sdkref.outputs.ref }}
+          SOURCE_SHA: ${{ steps.facts.outputs.source_sha }}
+          SOURCE_PR: ${{ steps.facts.outputs.source_pr }}
+          SOMS_CSV: ${{ github.event_name == 'workflow_dispatch' && inputs.soms || '' }}
+        run: |
+          set -euo pipefail
+          args=(dispatch-body --tan-ref "$TAN_REF" --sdk-ref "$SDK_REF" --source-sha "$SOURCE_SHA")
+          if [ -n "$SOURCE_PR" ]; then
+            args+=(--source-pr "$SOURCE_PR")
+          fi
+          if [ -n "$SOMS_CSV" ]; then
+            IFS=',' read -ra soms <<< "$SOMS_CSV"
+            for s in "${soms[@]}"; do
+              args+=(--som "$s")
+            done
+          fi
+          python scripts/pin_move_verify.py "${args[@]}" > ../dispatch-body.json
+          cat ../dispatch-body.json
+
+      # `secrets` is not usable in an `if:` expression, only in `env:` --
+      # same reason the receiver's own "is the App provisioned?" step reads
+      # this way. Presence is decided here, not baked into any later `if:`.
+      - name: is the App provisioned?
+        id: secrets
+        if: steps.relevant.outputs.value == 'true'
+        env:
+          APP_ID: ${{ secrets.ALP_CI_APP_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APP_ID:-}" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `permission-contents: write` narrows the minted token to the ONE
+      # grant `repository_dispatch` actually needs (alp-sdk's own
+      # dispatch-tan-parity.yml header: "repository_dispatch needs
+      # Contents:write on the TARGET. That is the whole grant."), instead of
+      # the token inheriting the App's full installation permissions on
+      # alp-e2e -- zizmor's `github-app` audit (High) flags the unscoped
+      # form by design.
+      - name: mint a short-lived App token, scoped to alp-e2e
+        id: apptoken
+        if: steps.relevant.outputs.value == 'true' && steps.secrets.outputs.have == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.ALP_CI_APP_ID }}
+          private-key: ${{ secrets.ALP_CI_APP_PRIVATE_KEY }}
+          owner: alplabai
+          repositories: alp-e2e
+          permission-contents: write
+
+      # THE hard-constraint step. A missing secret, a network failure, or a
+      # dispatch the API rejects must FAIL this job, never wave a pin move
+      # through on the strength of "we tried". This is the branch that WILL
+      # fire on every pin-touching PR until a human provisions
+      # ALP_CI_APP_ID / ALP_CI_APP_PRIVATE_KEY here -- see this file's own
+      # header. That is the correct, honest state: an unverified pin move
+      # must not pass (ADR-0029 clause 2), and "the receiver is unreachable"
+      # is explicitly one of the shapes that must fail, not skip.
+      - name: refuse to proceed without the App (fail closed)
+        if: steps.relevant.outputs.value == 'true' && steps.secrets.outputs.have != 'true'
+        env:
+          SITES: ${{ steps.detect.outputs.sites }}
+        run: |
+          echo "::error title=pin-move-verify: cannot dispatch::ALP_CI_APP_ID / ALP_CI_APP_PRIVATE_KEY are not provisioned on alplabai/tan-cli, so no token can be minted to call alp-e2e's repository_dispatch endpoint. This run touches a pin site (${SITES:-a manually dispatched tuple}), so the proposed tuple's buildability is UNVERIFIED. Per ADR-0029 clause 2, an unverified pin move must not pass -- this is a hard failure, not a skip. Provision the two secrets on this repo (and on alplabai/alp-e2e, and merge alp-e2e#1) to unblock."
+          exit 1
+
+      - name: dispatch pin-move-verify to alp-e2e
+        id: dispatch
+        if: steps.relevant.outputs.value == 'true' && steps.secrets.outputs.have == 'true'
+        env:
+          GH_TOKEN: ${{ steps.apptoken.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/alplabai/alp-e2e/dispatches \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            --input dispatch-body.json
+          echo "::notice::dispatched pin-move-verify to alp-e2e for check '${{ steps.payload.outputs.check_name }}'"
+
+      # The dispatch API answers 204 whether or not anything is listening, so
+      # "the call succeeded" is not evidence a Check Run will ever appear --
+      # poll for it, bounded, and fail closed on the deadline rather than
+      # trusting the 204.
+      - name: poll for the receiver's Check Run
+        id: poll
+        if: steps.relevant.outputs.value == 'true' && steps.secrets.outputs.have == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.facts.outputs.source_sha }}
+          CHECK_NAME: ${{ steps.payload.outputs.check_name }}
+          DEADLINE_MINUTES: "90"
+          POLL_SECONDS: "30"
+        run: |
+          set -uo pipefail
+          deadline=$(( $(date +%s) + DEADLINE_MINUTES * 60 ))
+          found=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            resp="$(gh api "repos/alplabai/tan-cli/commits/${SHA}/check-runs" --paginate 2>/dev/null)"
+            run="$(printf '%s' "$resp" | jq -c --arg n "$CHECK_NAME" '
+                [ (.check_runs // [])[] | select(.name == $n) ]
+                | sort_by(.started_at // "")
+                | last // empty
+              ' 2>/dev/null)"
+            if [ -n "$run" ] && [ "$run" != "null" ]; then
+              status="$(printf '%s' "$run" | jq -r '.status')"
+              if [ "$status" = "completed" ]; then
+                found="$run"
+                break
+              fi
+            fi
+            sleep "$POLL_SECONDS"
+          done
+          if [ -n "$found" ]; then
+            printf '%s' "$found" > check-run.json
+            echo "timed_out=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::found a completed Check Run named '$CHECK_NAME'"
+          else
+            printf '{}' > check-run.json
+            echo "timed_out=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::no completed Check Run named '$CHECK_NAME' appeared on $SHA within ${DEADLINE_MINUTES} minutes"
+          fi
+
+      # The ONLY step that decides pass/fail for a dispatched run. Fail
+      # closed on every shape but a literal `success` conclusion -- see
+      # `judge_polled_check_run`'s own docstring for why this is deliberately
+      # stricter than GitHub's own required-check semantics (a `neutral`
+      # conclusion satisfies a required check by GitHub's own rules; it must
+      # not satisfy this one).
+      - name: judge the receiver's verdict (fail closed)
+        if: steps.relevant.outputs.value == 'true' && steps.secrets.outputs.have == 'true'
+        working-directory: python
+        env:
+          TIMED_OUT: ${{ steps.poll.outputs.timed_out }}
+        run: |
+          set -euo pipefail
+          args=(judge --check-run ../check-run.json)
+          if [ "$TIMED_OUT" = "true" ]; then
+            args+=(--timed-out)
+          fi
+          python scripts/pin_move_verify.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
