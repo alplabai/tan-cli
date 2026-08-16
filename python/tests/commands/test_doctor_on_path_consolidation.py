@@ -27,17 +27,33 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
+
 from tan.commands import doctor_cmd
 from tan.core.tool_lookup import resolve_tool
 
 
 def _executable(directory: Path, name: str) -> Path:
-    """A real file on disk with the executable bit set -- `resolve_tool`
-    checks `os.access(..., os.X_OK)`, so a plain `touch` is not a hit and a
-    test built on one would pass for the wrong reason."""
-    path = directory / name
+    """A file `resolve_tool` will actually find, on either platform.
+
+    `.exe` on Windows, mirroring `test_bare_argv0_spawn.py::_executable` --
+    and for the reason THIS module is about. `resolve_tool` never tries the
+    bare, extension-less name on Windows
+    (`tool_lookup.windows_candidate_names`), so a fixture written as
+    `alp-probe-tool` is exactly the file the consolidation refuses to
+    resolve: correct behaviour, and it made the first revision of this
+    module fail on `windows-latest` while passing everywhere else. The
+    lookup is still asked for the BARE name -- supplying the suffix is its
+    job, not the caller's.
+
+    On POSIX the executable bit is what makes it a hit (`os.access(...,
+    os.X_OK)`); `chmod` is a no-op for that purpose on Windows, where
+    `os.access` reports any existing file as executable.
+    """
+    path = directory / (f"{name}.exe" if os.name == "nt" else name)
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    if os.name != "nt":
+        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path
 
 
@@ -80,13 +96,15 @@ def test_on_path_reads_the_live_environment_not_a_snapshot(monkeypatch, tmp_path
     second = tmp_path / "second"
     first.mkdir()
     second.mkdir()
-    _executable(second, "alp-probe-tool")
+    # The helper's RETURN value, not a re-spelled path: on Windows the file on
+    # disk is `alp-probe-tool.exe` and that is what resolves.
+    tool = _executable(second, "alp-probe-tool")
 
     monkeypatch.setenv("PATH", str(first))
     assert doctor_cmd.on_path("alp-probe-tool") is None
 
     monkeypatch.setenv("PATH", os.pathsep.join([str(first), str(second)]))
-    assert doctor_cmd.on_path("alp-probe-tool") == str(second / "alp-probe-tool")
+    assert doctor_cmd.on_path("alp-probe-tool") == str(tool)
 
 
 def test_on_path_and_resolve_tool_cannot_answer_differently(monkeypatch, tmp_path):
@@ -106,6 +124,16 @@ def test_on_path_and_resolve_tool_cannot_answer_differently(monkeypatch, tmp_pat
     assert resolve_tool("alp-absent-tool", os.environ).resolved is None
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX-only by nature, not by convenience: Windows has no execute "
+           "bit, and `os.access(path, os.X_OK)` reports every existing file as "
+           "executable there, so the property under test does not exist on "
+           "that platform. Run unskipped it would pass for an unrelated reason "
+           "-- `resolve_tool` never tries the bare extension-less name on "
+           "Windows -- which is worse than a skip: a green case that measures "
+           "nothing.",
+)
 def test_a_non_executable_file_on_path_is_not_a_hit(monkeypatch, tmp_path):
     """The property the old copy enforced with `os.access(..., os.X_OK)`, kept
     across the consolidation. Without it a `README` beside the tools would
@@ -126,10 +154,10 @@ def test_an_unreadable_path_entry_does_not_fail_the_probe(monkeypatch, tmp_path)
     """
     good = tmp_path / "good"
     good.mkdir()
-    _executable(good, "alp-probe-tool")
+    tool = _executable(good, "alp-probe-tool")
     missing = tmp_path / "does-not-exist"
     long_name = tmp_path / ("x" * 300)
 
     monkeypatch.setenv(
         "PATH", os.pathsep.join([str(missing), str(long_name), "", str(good)]))
-    assert doctor_cmd.on_path("alp-probe-tool") == str(good / "alp-probe-tool")
+    assert doctor_cmd.on_path("alp-probe-tool") == str(tool)
