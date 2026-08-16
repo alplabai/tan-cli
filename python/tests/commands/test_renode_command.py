@@ -152,12 +152,18 @@ def _write_fake_sim_renode(
     `exit_after_first_echo_code` exits SYNCHRONOUSLY, in the same thread,
     right after answering the very first `echo "<sentinel>"` -- i.e. right
     after `drain_boot`'s own round trip succeeds -- instead of on a timer.
-    That makes the child ALREADY exited by the time `_run_sim_mode` reaches
+    That makes the child ALREADY exited by the time `_run_sim` reaches
     its post-boot `proc.poll()`, deterministically, rather than racing a
     sleep against it; used for the `--timeout 0` regression (tan-cli#804),
     where the hold loop polls only once and a timer-based exit can't be
     trusted to land before that single poll.
     """
+    if exit_after_s is not None and exit_after_first_echo_code is not None:
+        raise ValueError(
+            "exit_after_s and exit_after_first_echo_code are mutually exclusive: the "
+            "echo-branch os._exit()s before the timer thread ever fires, making the "
+            "timer dead weight"
+        )
     bin_dir.mkdir(parents=True, exist_ok=True)
     impl = bin_dir / "_fake_sim_renode_impl.py"
     preamble_src = "\n".join(f"print({line!r}); sys.stdout.flush()" for line in (preamble or []))
@@ -1189,7 +1195,7 @@ def test_sim_mode_timeout_zero_still_reports_exited_early(tmp_path: Path):
     place `proc.poll()` was called) never ran even once, `early_exit` stayed
     `None`, and `renode.sim-exited-early` was structurally unreachable no
     matter how the child actually exited. The fix polls once up front so a
-    child that is ALREADY dead by the time `_run_sim_mode` reaches the hold
+    child that is ALREADY dead by the time `_run_sim` reaches the hold
     is still caught even at a zero-length hold."""
     _scaffold_sim_bundle(tmp_path)
     fake_bin = tmp_path / "fakebin"
@@ -1211,6 +1217,35 @@ def test_sim_mode_timeout_zero_still_reports_exited_early(tmp_path: Path):
     assert exit_code == 1
     assert envelope["issues"][0]["code"] == "renode.sim-exited-early"
     assert "exit code 9" in envelope["issues"][0]["message"]
+
+
+def test_sim_mode_timeout_zero_still_succeeds_for_a_healthy_child(tmp_path: Path):
+    """The positive control for tan-cli#804's fix: a `--timeout 0` run
+    against a Renode that is still alive (never exits) must keep succeeding
+    -- the up-front `proc.poll()` added for the regression above must only
+    ever OBSERVE the child, never affect a healthy zero-length hold. Pins
+    the deliberately-kept `ok:true` / `exitCode:0` behaviour so a later move
+    of the poll past `_teardown_sim` can't silently flip it."""
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(fake_bin)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "0",
+        "--format",
+        "json",
+        path_override=str(fake_bin),
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 0
+    assert envelope["ok"] is True
+    assert envelope["issues"][0]["code"] == "renode.sim-profile-deferred"
 
 
 def test_sim_mode_expect_is_ignored_with_an_info_issue(tmp_path: Path):
