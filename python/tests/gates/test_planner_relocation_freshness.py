@@ -352,7 +352,41 @@ from tests.conftest import sdk_root
 #: comment for the breakdown. `STRICT_LOADERS_PINNED_SDK_COMMIT` does NOT
 #: move, same reasoning as above: `scripts/strict_loaders.py` does not
 #: appear in the `a3173305..d00dbdc1` diff at all.
-PINNED_SDK_COMMIT = "bd8be484680cf5aa1c1ac0e8b38d84128b5a279d"  # alp-sdk origin/dev
+#:
+#: WHY THIS PIN IS NOT ON `dev`, AND WHY IT STILL STOPS HERE (tan-cli#756
+#: review). `88318e75` is the merge commit of alp-sdk#1454 and is reachable
+#: from `origin/main` only -- `git merge-base --is-ancestor 88318e75
+#: origin/dev` exits 1, because dev's merge queue SQUASHED the release
+#: back-merge (`e9aea71b` has the single parent `b5fe22aa`), so main's
+#: history never became an ancestor of dev. The comment on this line said
+#: `origin/dev` and was simply wrong.
+#:
+#: The obvious repair is to pin `e9aea71b`, alp-sdk dev's tip, which is
+#: byte-identical to `88318e75` across every `scripts/alp_orchestrate/`
+#: file, all ten `HAND_PORT_HASHES` sources and `scripts/strict_loaders.py`.
+#: It is NOT taken, and the reason is not the planner: `e9aea71b` is the
+#: back-merge of the `v0.16.0-rc1` version bump, and the scaffold emit
+#: interpolates the SDK's own version into the documentation links it
+#: renders. Pinning it fails `seam1`'s scaffold byte-parity on SEVEN
+#: vendored `README.md` files (measured: 7 FAIL / 2 PASS), and the only way
+#: to make that gate green is to re-vendor them -- shipping customers
+#: `https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/...` links while
+#: alp-sdk's tag list holds `v0.15.0`, `v0.15.0-rc1` and `v0.16.0-rc1` and
+#: no `v0.16.0` at all. Every one of those links 404s until that release is
+#: cut.
+#:
+#: KNOWN COST, ACCEPTED DELIBERATELY: `parity.yml`'s `pin freshness (warn
+#: only)` counts one contract-surface commit between here and live dev
+#: (`e9aea71b` itself), so this lands emitting that warning. A warn-only
+#: step that is right is still better than a green gate that ships dead
+#: links, but it IS the "warning nobody reads" shape, so it carries a
+#: retirement condition rather than an apology: when alp-sdk cuts `v0.16.0`,
+#: move all four sites (`PINNED_SDK_COMMIT`, `HAND_PORT_PINNED_SDK_COMMIT`,
+#: `parity.yml`'s `PINNED_SDK_TAG`, `ci.yml`'s `gates` SDK `ref:`) onto a
+#: dev commit at or past the bump and RE-VENDOR the seven scaffold READMEs
+#: in that same change. The three hash tables below need no re-audit when
+#: that happens -- they already match `e9aea71b`.
+PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk origin/main -- NOT dev, see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -369,11 +403,11 @@ PINNED_HASHES: dict[str, str] = {
     "kconfig.py": "4c4a5abea3b1316d66e01f8bcd2e32411c28863179c9983746c06be52e415d30",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "bf4fd845248067f7713ce270ced265ba2a2c981f91f34911fe446849e9f57a5d",
-    "loader.py": "1c131af28d744531bdee708abf16708976ee18164416a268fa3833a117c60011",
+    "loader.py": "1dc9fb7a75c454e601584e6b50d77a7edaae38859ae4587997c6dc7888948552",
     "manifest.py": "f38de96a9626672bc08f181e09b3a545d8dc846c0423cc6e9dd08c3b96a87d1d",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
     "models.py": "e84bb25c5121ea96d9971df8ce69218b3eb025f9dad8f3d6286fba1b232241d1",
-    "orchestrator.py": "e0c41ce6f0d5db14961ce1d83a9e9eb09e1f2414a6ff05945fc9b2f814ebb21e",
+    "orchestrator.py": "cb6a38e1a2f4200b16da93c1b11512c6e59b963e8e08279d801b8d38e57c3002",
     "partition.py": "7f37224ff1aa05dd6d943424a664bc4d115dc05853762072854d43ea3628591c",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
@@ -555,7 +589,7 @@ PINNED_HASHES: dict[str, str] = {
 #: from a real drift; it never even ran the comparison. `faultdecode.py` now
 #: joins this table (11th entry) so the next SDK-side change to it is
 #: audited the same way as everything else here.
-HAND_PORT_PINNED_SDK_COMMIT = "bd8be484680cf5aa1c1ac0e8b38d84128b5a279d"  # alp-sdk origin/dev
+HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk origin/main -- NOT dev, see PINNED_SDK_COMMIT
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -627,7 +661,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "bd8be484680cf5aa1c1ac0e8b38d84128b5a279d"  # alp-
 #: source path, not by the consuming `tan` file, so a second key for the same
 #: path would be a no-op duplicate, not a new audit.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "083018a76a774d6ea37da87d3d8dda6eda4515c5cd924ebf0b5a141c9ba2cf9b",
+    "scripts/gen_zephyr_board.py": "30ab1b52835d77f226bf4ed07185cd5a91f2c374ea8b8576edb00699627ea8a7",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/alp_project_loader.py": "d5f142173a13cfac9e130ef8fde90d35d6bb92d21d152925a275b3e8bdaa49db",
     "scripts/alp_template.py": "9321c7e31759ef4f9c03c2c750b1d7d7f4019b9a50dd2679668deaa2b0054708",
