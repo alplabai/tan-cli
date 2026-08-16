@@ -21,7 +21,7 @@ import pytest
 
 from tan.model.analyze import BackendReport, OpVerdict, analyze_backend, resolve_ethos_u_variant
 from tan.model.tensorio import OpDesc
-from tests.conftest import sdk_root
+from tests.conftest import needs_sdk_npu_op_tables, sdk_root
 
 SDK = sdk_root()
 
@@ -241,6 +241,7 @@ def test_drpai_som_has_no_ethos_u_variant():
 
 
 @pytestmark_real_sdk
+@needs_sdk_npu_op_tables
 def test_u85_and_u55_resolve_different_real_tables_and_the_17_op_delta_is_visible():
     variant_u85 = resolve_ethos_u_variant("E1M-AEN801", metadata_root=_META)
     variant_u55 = resolve_ethos_u_variant("E1M-AEN301", metadata_root=_META)
@@ -270,6 +271,7 @@ def test_real_deepx_dxm1_has_no_table_and_is_undetermined():
 
 
 @pytestmark_real_sdk
+@needs_sdk_npu_op_tables
 def test_real_drpai_table_surfaces_uncosted_cpu_op_count_alongside_the_headline_pct():
     # Live on real data, not synthetic (the real drpai table lists "Conv" but
     # not "NonMaxSuppression"): a headline compute_on_npu_pct_max of 100.0

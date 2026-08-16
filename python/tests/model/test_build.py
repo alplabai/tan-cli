@@ -24,7 +24,7 @@ from tan.model.adapters.executorch import ExecutorchAdapter
 from tan.model.package import read_manifest_file, read_package
 from tan.model.targets import resolve_targets
 from tan.planner_root import bind_sdk_root
-from tests.conftest import sdk_root
+from tests.conftest import needs_sdk_vela_profile, sdk_root
 
 SDK = sdk_root()
 
@@ -444,6 +444,7 @@ def test_every_target_refusing_is_an_error_not_an_empty_package(tmp_path):
 # --------------------------------------------------------------------------
 
 @_needs_vela
+@needs_sdk_vela_profile
 @pytest.mark.parametrize("sku,accel_config,memory_mode", [
     ("E1M-AEN401", "ethos-u85-256", "Sram_Only"),
     ("E1M-AEN601", "ethos-u85-256", "Sram_Only"),
@@ -627,6 +628,7 @@ def test_an_unknown_accelerator_placement_is_not_treated_as_zero(tmp_path):
 # --------------------------------------------------------------------------
 
 @_needs_vela
+@needs_sdk_vela_profile
 def test_a_shipped_blobs_compiler_caveat_is_carried_into_the_package(tmp_path):
     """THE (f) GUARD, through a REAL vela process, read back out of the file.
 

@@ -14,7 +14,7 @@ check `pytestmark` skips on."""
 import pytest
 
 from tan.planner_root import bind_sdk_root
-from tests.conftest import sdk_root
+from tests.conftest import needs_sdk_vela_profile, sdk_root
 
 SDK = sdk_root()
 
@@ -52,6 +52,7 @@ def test_resolve_targets_dedupes_identical_accel_configs():
     assert len(ethos) == 2                                     # one per distinct accel_config
 
 
+@needs_sdk_vela_profile
 def test_an_alif_ethos_u_target_carries_the_builtin_memory_mode_but_not_the_vendor_system_config():
     specs = resolve_targets("E1M-AEN801", metadata_root=_META)
     u85 = [s for s in specs if s.accel_config == "ethos-u85-256"]
@@ -62,6 +63,7 @@ def test_an_alif_ethos_u_target_carries_the_builtin_memory_mode_but_not_the_vend
     assert u85[0].vela_system_config is None
 
 
+@needs_sdk_vela_profile
 def test_an_nxp_ethos_u_target_carries_its_own_memory_mode():
     specs = resolve_targets("E1M-NX9101", metadata_root=_META)
     u65 = [s for s in specs if s.accel_config == "ethos-u65-256"]

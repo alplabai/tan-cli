@@ -311,6 +311,24 @@ jobs:
       # `PINNED_SDK_COMMIT` comment for the full per-commit breakdown of
       # what was ported into `tan/planner/loader.py` / `manifest.py` /
       # `models.py` / `orchestrator.py`.
+      #
+      # OWED MOVE, NOT YET MAKEABLE (tan-cli#791). This pin also predates every
+      # artefact ADR-0028 publishes on the alp-sdk side -- `npu_toolchain.vela`
+      # in `metadata/socs/**` (alp-sdk `fff41087`), the `metadata/npu_ops/**`
+      # op-support tables, the deletion of `scripts/alp_model/` with the
+      # regenerated C fixtures that names (`ab6968e2`), and the public
+      # `tests/fixtures/models/person_detect_int8.tflite` real-model fixture
+      # (`4fd5fab5`). All four land together in alplabai/alp-sdk#1470, which is
+      # still OPEN, so there is no post-merge SHA to move this `ref:` to yet.
+      # Until there is, twelve tests under `python/tests/model/` SKIP against
+      # this checkout instead of failing against it, each naming the one
+      # artefact it is missing (`python/tests/conftest.py`'s capability
+      # predicates). Move this `ref:` -- in the same change as `parity.yml`'s
+      # `PINNED_SDK_TAG` and both freshness pins, as always -- onto an alp-sdk
+      # commit carrying `npu_toolchain.vela`, in the SAME merge window as
+      # alp-sdk#1470. A pin left behind after #1470 merges leaves the whole
+      # relocated model engine unmeasured while this job still reports green,
+      # which is the one outcome this job exists to prevent.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:

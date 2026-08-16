@@ -23,12 +23,14 @@ AEN801 (E8) accelerator configs, not just the tiny hermetic fixture in
 test_adapters.py.
 
 Moved here from alp-sdk's tests/scripts/test_vela_yolo_internal.py (ADR-0028
-Task 6) -- see test_deepx_yolo_internal.py's docstring for why. NOTE: whether
-`cutting-a-tan-release`'s checklist asserts this test (and its DeepX sibling)
-report PASSED, not skipped, before a release is cut is a release-checklist
-change still OWED to that skill (it lives in the alp-lab plugin, outside this
-repo) -- not yet made, so no release gate currently enforces that either test
-ran. Today this test running is a maintainer choice, not a guarantee.
+Task 6) -- see test_deepx_yolo_internal.py's docstring for why. The
+release-checklist change this docstring used to record as OWED has since been
+made: `cutting-a-tan-release` ("The model proofs must have RUN -- a SKIP is not
+a PASS") names both of this test's node IDs and its DeepX sibling's, and has
+the releaser run them with `-rA` and require `grep -c '^PASSED'` == 3 and
+`grep -c '^SKIPPED'` == 0. So a skip here is READ at a cut, and every skip
+condition in this file has to be worth reading -- which is why the public
+fixture is named rather than globbed below.
 
 Run (with an alp-sdk checkout beside this one, vela on PATH):
     ALP_SDK_ROOT=../alp-sdk \\
@@ -64,17 +66,43 @@ def _internal_root() -> Path:
     return Path(env) if env else _ROOT.parent / "alp-sdk-internal"
 
 
-_PUBLIC_MODELS_DIR = (_SDK / "tests/fixtures/models") if _SDK is not None else None
+#: The public fixture, NAMED, not globbed (tan-cli#791). It used to be reached
+#: with `glob("*_int8.tflite")` over the same directory, and alp-sdk's own
+#: 712-byte, 1-operator `tiny_int8.tflite` -- the toy this proof exists to be
+#: MORE than -- matches that pattern. Bound to an alp-sdk from before
+#: `person_detect_int8.tflite` landed (alp-sdk `4fd5fab5`, alplabai/alp-sdk#1470,
+#: still open), the glob therefore did not skip: it silently substituted the
+#: toy and compiled THAT, which is the worse failure of the two this file can
+#: have. Measured, flagless `VelaAdapter().compile()` on `ethos-u-vela` 5.1.0:
+#:
+#:   tiny_int8.tflite          ethos-u85-256  REFUSED (0 KiB SRAM)
+#:                             ethos-u55-256  req_sram_kib=1  arena_bytes=32     <- "PASSED"
+#:   person_detect_int8.tflite ethos-u85-256  req_sram_kib=73 arena_bytes=74480
+#:                             ethos-u55-256  req_sram_kib=73 arena_bytes=74480
+#:
+#: i.e. one half of the pair went red for the right reason while the OTHER
+#: half reported PASSED on a 712-byte toy -- and `cutting-a-tan-release`'s
+#: release checklist reads exactly that word (`grep -c '^PASSED'` MUST be 3,
+#: `grep -c '^SKIPPED'` MUST be 0) as the evidence that the real-model proofs
+#: ran. Naming the file makes the absent case a SKIP the checklist counts,
+#: instead of a pass it cannot distinguish from the real thing.
+_PUBLIC_REAL_MODEL = (
+    (_SDK / "tests/fixtures/models/person_detect_int8.tflite") if _SDK is not None else None
+)
 _INTERNAL_MODELS_DIR = _internal_root() / "vendors/alif-ethos-u/sample-models"
 
 
 def _real_int8_models() -> list[Path]:
     """Every real (non-toy) int8 .tflite reachable right now: the public
     alp-sdk fixture first (so it's model[0], the one the test below actually
-    compiles), then any private alp-sdk-internal sample models."""
+    compiles), then any private alp-sdk-internal sample models.
+
+    The private directory keeps its glob -- it is a directory OF licensed
+    sample models with no toy in it, and its contents are not this repo's to
+    enumerate. The public side is a single named file for the reason above."""
     found: list[Path] = []
-    if _PUBLIC_MODELS_DIR is not None and _PUBLIC_MODELS_DIR.is_dir():
-        found += sorted(_PUBLIC_MODELS_DIR.glob("*_int8.tflite"))
+    if _PUBLIC_REAL_MODEL is not None and _PUBLIC_REAL_MODEL.is_file():
+        found.append(_PUBLIC_REAL_MODEL)
     if _INTERNAL_MODELS_DIR.is_dir():
         found += sorted(_INTERNAL_MODELS_DIR.glob("*_int8.tflite"))
     return found
@@ -82,9 +110,14 @@ def _real_int8_models() -> list[Path]:
 
 @pytest.mark.skipif(shutil.which("vela") is None, reason="vela (ethos-u-vela) not installed")
 @pytest.mark.skipif(not _real_int8_models(),
-                    reason="no real int8 model reachable: set ALP_SDK_ROOT (public "
-                           "tests/fixtures/models/person_detect_int8.tflite) or "
-                           "ALP_SDK_INTERNAL (private sample-models dir)")
+                    reason="no real int8 model reachable: set ALP_SDK_ROOT to an "
+                           "alp-sdk carrying tests/fixtures/models/"
+                           "person_detect_int8.tflite (alp-sdk 4fd5fab5, "
+                           "alplabai/alp-sdk#1470, still open -- an SDK pinned "
+                           "before it ships only the 1-op tiny_int8.tflite toy, "
+                           "which is deliberately NOT accepted here), or set "
+                           "ALP_SDK_INTERNAL to an alp-sdk-internal checkout "
+                           "with private sample-models")
 @pytest.mark.parametrize("accel_config", ["ethos-u85-256", "ethos-u55-256"])
 def test_vela_compiles_real_model_for_e8(tmp_path, accel_config):
     """A real int8 .tflite -> a vela_tflite blob for the E8 accel configs.

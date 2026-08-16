@@ -441,6 +441,25 @@ env:
   #
   # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
   # predates every commit this bump exists to pick up.
+  #
+  # OWED MOVE, NOT YET MAKEABLE (tan-cli#791). `python-tests-shard` below binds
+  # `ALP_SDK_ROOT` to THIS tag, so this is the pin the relocated model engine
+  # is measured against -- and it predates every artefact ADR-0028 publishes on
+  # the alp-sdk side: `npu_toolchain.vela` in `metadata/socs/**` (alp-sdk
+  # `fff41087`), the `metadata/npu_ops/**` op-support tables, the deletion of
+  # `scripts/alp_model/` with the C fixtures regenerated to name the relocated
+  # generator (`ab6968e2`), and the public
+  # `tests/fixtures/models/person_detect_int8.tflite` real-model fixture
+  # (`4fd5fab5`). All four land together in alplabai/alp-sdk#1470, which is
+  # still OPEN, so there is no post-merge SHA to move this to yet. Until there
+  # is, twelve tests under `python/tests/model/` SKIP here rather than fail,
+  # each naming the one artefact it is missing
+  # (`python/tests/conftest.py`'s capability predicates). Move this -- in the
+  # same change as `ci.yml`'s `sdk_parity` `ref:` and both freshness pins, as
+  # always -- onto an alp-sdk commit carrying `npu_toolchain.vela`, in the SAME
+  # merge window as alp-sdk#1470. A pin left behind after #1470 merges leaves
+  # the whole relocated model engine unmeasured while these shards still report
+  # green.
   PINNED_SDK_TAG: 88318e759958529fbbd8fe9d481373681c0fa78d
 
 permissions:

@@ -16,7 +16,7 @@ from tan.model._gen_fixture import (
     build_onnx_cpu_fixture_bytes,
     to_c_header,
 )
-from tests.conftest import sdk_root
+from tests.conftest import needs_sdk_after_the_model_engine_relocation, sdk_root
 
 #: A real, verbatim `Blob.caveats` entry -- vela 5.1.0's own default-profile
 #: verdict, as `tan.model.adapters.ethos_u._default_profile_caveats` words it.
@@ -166,15 +166,35 @@ _needs_bound_sdk = pytest.mark.skipif(
 
 @_needs_bound_sdk
 def test_committed_fixture_matches_generator():
+    """The CONTAINER BYTES, which are what the on-device reader parses.
+
+    Split from the C-header half below (tan-cli#791) rather than gated with
+    it: these bytes are produced by the encoder itself and are identical
+    either side of alp-sdk's ADR-0028 Task 6 relocation, so there is no reason
+    for the strongest half of this cross-repo guard to go quiet while the pin
+    catches up.
+    """
     raw = build_fixture_bytes()
     on_disk = (_SDK / "tests/fixtures/alpmodel/minimal.alpmodel").read_bytes()
     assert raw == on_disk, "regenerate: python -m tan.model._gen_fixture --root <alp-sdk-checkout>"
+
+
+@_needs_bound_sdk
+@needs_sdk_after_the_model_engine_relocation
+def test_committed_fixture_c_header_matches_generator():
+    """The C HEADER wrapped around those bytes -- text, and it carries the
+    banner naming the generator that produced it. `ab6968e2` moved that banner
+    from `python -m alp_model._gen_fixture` to `python -m tan.model._gen_fixture`
+    when it deleted alp-sdk's host-side engine, so an alp-sdk bound from before
+    that commit carries a header this generator cannot emit and must not."""
+    raw = build_fixture_bytes()
     header = (_SDK / "tests/unit/alpmodel_reader/src/fixture.h").read_text()
     assert to_c_header(raw) == header, \
         "regenerate: python -m tan.model._gen_fixture --root <alp-sdk-checkout>"
 
 
 @_needs_bound_sdk
+@needs_sdk_after_the_model_engine_relocation
 def test_committed_onnx_cpu_fixture_matches_generator():
     # Issue #1254: tests/yocto/alpmodel_onnx_cpu.c's committed byte array
     # (tests/yocto/onnx_cpu_fixture.h) must stay GENERATED, not hand-typed
