@@ -4309,6 +4309,118 @@ def _flow_d_preflight_inputs():
     return FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
 
 
+# --------------------------------------------------------------------------
+# tan-cli#795: the wrong-board guard read its value as decimal and compared it
+# by unanchored substring. Both are pinned here, and every case below FAILS
+# against the pre-fix source -- (a) rendered `199304311`, (b) returned `None`
+# (accept) for a banner reporting a different board.
+# --------------------------------------------------------------------------
+
+
+def test_an_unquoted_expect_dpidr_survives_as_hex_not_decimal():
+    """`expect_dpidr: 0x0BE12477` written WITHOUT quotes is an int by the time
+    it reaches `flash_args`, and the read used `as_hex_address=False`, which
+    renders an int with `str()`. The preflight then looked for `199304311` in
+    a banner that says `0x0BE12477` and refused -- on the CORRECT board,
+    sending an operator after wiring and probe serials that are fine.
+
+    Every sibling address field (`base`, `atoc_address`,
+    `slot0_load_address`) already passes `True`; this is the one that did not.
+    Unquoted is the natural spelling of an operator-set field that
+    `docs/setools.md` documents as hex, so it is a trap the schema invites.
+    """
+    args = {**FLOW_D_ARGS, "expect_dpidr": 0x0BE12477, "jlink_device": "Generic-Attach"}
+    prepared = flash_plan.flow_d_preflight_script(
+        FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
+    )
+    assert prepared is not None
+    _script, expected = prepared
+    assert expected == "0x0BE12477", (
+        f"an unquoted hex expect_dpidr resolved to {expected!r} -- the decimal "
+        "rendering matches nothing any probe prints, so the guard refuses the "
+        "right board (tan-cli#795)"
+    )
+
+
+@pytest.mark.parametrize(
+    "truncated", ["0x477", "0x2477", "0xBE12477"],
+    ids=["arm-designer-field", "four-hex", "seven-hex"],
+)
+def test_a_narrower_than_32_bit_expect_dpidr_is_refused_before_any_probe_runs(
+    truncated, monkeypatch, tmp_path
+):
+    """A SW-DP IDR is 32 bits. A shorter value cannot identify a board, and
+    under the old substring compare it silently accepted whatever ARM board
+    was attached -- `0x477` is ARM's JEP106 designer field, reported by every
+    ARM SW-DP.
+
+    The refusal is at the CALL SITE, not in `validate_address`: `base`,
+    `atoc_address` and `slot0_load_address` share that helper and are
+    legitimately other widths, so a width rule there would be wrong.
+
+    It also fires before anything is spawned. The stub below answers
+    `0x0BE12477`, which the old code ACCEPTED for every one of these
+    parametrised values, so a test that let the probe run could not tell a
+    width refusal from a lucky mismatch.
+    """
+    _stub_flow_d_probe(
+        monkeypatch, tmp_path,
+        stdout="Connecting to target via SWD\nFound SW-DP with ID 0x0BE12477\n",
+    )
+    args = {**FLOW_D_ARGS, "expect_dpidr": truncated, "jlink_device": "Generic-Attach"}
+    message = flash_cmd._flow_d_preflight(
+        FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
+    )
+    assert message is not None, (
+        f"expect_dpidr={truncated!r} was accepted; a value this narrow matches "
+        "every ARM SW-DP (tan-cli#795)"
+    )
+    assert "8 hex digits" in message, message
+    assert truncated in message, message
+
+
+def test_the_expected_id_appearing_elsewhere_in_the_banner_is_not_a_match(
+    monkeypatch, tmp_path
+):
+    """The substring test ran against the WHOLE banner, not the DP-ID line, so
+    the expected value appearing anywhere -- a selected-device echo, a path, a
+    firmware string -- accepted the board whatever the DP actually reported.
+
+    This banner is that shape: it names `0x4C013477` (the AEN801, and what
+    this fixture expects) in a device line, while the SW-DP that answered is
+    `0x0BE12477` (the GD32 bridge -- the real pair measured on a bench where
+    both answer the cloned probe serial `603000869`). The old code accepted,
+    and the next step is an MRAM write. The comparison is now between the two
+    parsed 32-bit values.
+    """
+    _stub_flow_d_probe(
+        monkeypatch, tmp_path,
+        stdout=(
+            'Device "0x4C013477" selected.\n'
+            "Connecting to target via SWD\n"
+            "Found SW-DP with ID 0x0BE12477\n"
+        ),
+    )
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None, (
+        "the guard accepted a board whose SW-DP reported 0x0BE12477 because the "
+        "expected 0x4C013477 appeared elsewhere in the banner (tan-cli#795)"
+    )
+    assert "0x0BE12477" in message, message
+
+
+def test_a_matching_id_in_any_casing_still_accepts(monkeypatch, tmp_path):
+    """The negative control for the three above: the comparison is by VALUE, so
+    the probe's own casing and `0x` spelling stay its business. Without this,
+    the fix could have been "compare the strings exactly", which passes every
+    test above and refuses every real board."""
+    _stub_flow_d_probe(
+        monkeypatch, tmp_path,
+        stdout="Connecting to target via SWD\nFound SW-DP with ID 0x4c013477\n",
+    )
+    assert flash_cmd._flow_d_preflight(_flow_d_preflight_inputs()) is None
+
+
 def _stub_flow_d_probe(monkeypatch, tmp_path, stdout: str, stderr: str = "", success: bool = True):
     """Make `_flow_d_preflight` reach a fake connect banner without touching a
     real probe: a resolvable but INERT `JLinkExe` as the only thing on PATH,

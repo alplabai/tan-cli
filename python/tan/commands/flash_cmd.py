@@ -3157,6 +3157,30 @@ def _flow_d_preflight(
     # original wording is byte-for-byte unchanged and `swd_probe` gets its
     # own correct noun (it writes the GD32 bridge's own flash, not MRAM).
     verb = "write MRAM" if method == FLOW_D_METHOD else "write"
+    # WIDTH, checked before anything is spawned (tan-cli#795). A SW-DP IDR is
+    # 32 bits, so the only well-formed spelling is `0x` + 8 hex digits. Until
+    # this existed the accept decision was a SUBSTRING test, and a truncated
+    # value degraded it silently: `0x477` is ARM's JEP106 designer field,
+    # shared by every ARM SW-DP, so it matched `0x4C013477`, `0x0BE12477` and
+    # `0x6BA02477` alike -- the guard reported a clean pass on whatever ARM
+    # board happened to be attached. It passed on the CORRECT board too, so a
+    # bad manifest entry produced no signal anywhere to notice it by.
+    #
+    # `validate_address` (flash_plan) deliberately stays a generic hex-charset
+    # check -- `base`, `atoc_address` and `slot0_load_address` share it and are
+    # legitimately other widths -- so the width rule belongs here, at the one
+    # call site where the value's meaning is fixed. `docs/setools.md:95-112`
+    # documents the field without stating a width; this is the guardrail that
+    # was missing.
+    if not _DPIDR_RE.fullmatch(expected):
+        return (
+            f"{method}: flash_args.expect_dpidr is `{expected}`, which is not a "
+            "32-bit SW-DP IDR (expected `0x` followed by exactly 8 hex digits, "
+            "e.g. `0x4C013477`). A shorter value cannot identify a board -- "
+            "`0x477` alone is ARM's JEP106 designer field and every ARM SW-DP "
+            f"reports it -- so refusing to {verb} rather than accept a check "
+            "that would pass on the wrong board."
+        )
     binary = next((n for n in ("JLinkExe", "JLink") if _tool_available(n, venv_bin)), None)
     if binary is None:
         # Unreachable via `_flash_entry`: the tool gate already required
@@ -3191,7 +3215,16 @@ def _flow_d_preflight(
     outcome = _spawn_jlink([spawned[0], "-NoGui", "1", "-CommanderScript"], script, True,
                            _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0])
     banner = f"{outcome.stdout}\n{outcome.stderr}"
-    if _hex_in(expected, banner):
+    # PARSE, then compare by VALUE (tan-cli#795). This was
+    # `_hex_in(expected, banner)`: a case-insensitive substring test against
+    # the whole banner -- not even confined to the DP-ID line -- so any hex
+    # run containing the expected digits accepted the board. `_dp_id_value`
+    # already extracts the reported ID (it is what the refusal message below
+    # prints), so the comparison can be what it always should have been: the
+    # two 32-bit numbers, equal or not. `int(..., 16)` rather than a string
+    # compare because the probe's casing and `0x` spelling are its own.
+    actual = _dp_id_value(banner)
+    if actual is not None and int(actual, 16) == int(expected, 16):
         return None
     if not banner.strip():
         return (
@@ -3275,15 +3308,24 @@ def _flow_d_preflight(
     )
 
 
-def _hex_in(expected: str, haystack: str) -> bool:
-    """Whether `expected` appears in `haystack` as a hex value, ignoring case and
-    an optional `0x` on EITHER side -- probes print the ID both ways."""
-    needle = expected.lower()
-    for prefix in ("0x", "0X"):
-        if expected.startswith(prefix):
-            needle = expected[len(prefix) :].lower()
-            break
-    return needle in haystack.lower().replace("0x", "")
+#: A well-formed `flash_args.expect_dpidr`: `0x` and EXACTLY 8 hex digits, the
+#: width of a 32-bit SW-DP IDR (tan-cli#795). Anchored with `fullmatch` at the
+#: one call site whose meaning is fixed, rather than pushed into
+#: `flash_plan.validate_address` -- that stays a generic hex-charset check
+#: because `base`, `atoc_address` and `slot0_load_address` share it and are
+#: legitimately other widths.
+#:
+#: This replaces `_hex_in`, a case-insensitive SUBSTRING test against the whole
+#: probe banner. Measured on `v0.6.0-rc1` (`ad6470c7`):
+#:
+#:     _hex_in('0x2477',     'Found SW-DP with ID 0x0BE12477') -> True
+#:     _hex_in('0x477',      'Found SW-DP with ID 0x0BE12477') -> True
+#:     _hex_in('0x4C013477', 'Found SW-DP with ID 0x0BE12477') -> False
+#:
+#: The first two are the hole: `0x477` is ARM's JEP106 designer field, so a
+#: truncated expectation accepted any ARM board and reported a clean pass --
+#: including on the correct board, which is why nothing ever surfaced it.
+_DPIDR_RE = re.compile(r"0[xX][0-9A-Fa-f]{8}")
 
 
 #: SEGGER's own wording for a successful SWD connect that read AN id, whatever
@@ -3319,8 +3361,9 @@ _CONNECT_FAILED_TARGET_RE = re.compile(r"Cannot connect to (?:target|J-Link)\b",
 
 def _dp_id_reported(banner: str) -> bool:
     """Whether the banner names ANY SW-DP ID -- not whether it matches
-    `expected` (the caller already ruled that out via `_hex_in`), only whether
-    a connect got far enough to read one at all."""
+    `expected` (the caller already ruled that out by comparing
+    `_dp_id_value(banner)` to it as a number, tan-cli#795), only whether a
+    connect got far enough to read one at all."""
     return _DP_ID_RE.search(banner) is not None
 
 

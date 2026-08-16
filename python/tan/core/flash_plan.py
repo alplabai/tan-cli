@@ -2749,7 +2749,15 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     # that ID appears -- writing MRAM on the wrong attached board is the one
     # unrecoverable mistake this path can make. A hardware value, so it comes
     # from data: tan neither knows nor invents an IDR.
-    expect_dpidr = fa_str_checked(fa, "expect_dpidr", False)
+    # `True`, like every sibling address field (tan-cli#795): a manifest that
+    # spells the documented value unquoted -- `expect_dpidr: 0x0BE12477` --
+    # arrives here as the INT 199304311, and `as_hex_address=False` renders it
+    # back as the decimal string `199304311`, which matches nothing the probe
+    # prints. That fails CLOSED, but on the CORRECT board, and sends a bench
+    # operator after wiring and cloned probe serials that are fine. No-op for
+    # an already-quoted manifest: `fa_str_checked` returns a `str` unchanged
+    # whatever the flag says.
+    expect_dpidr = fa_str_checked(fa, "expect_dpidr", True)
     if expect_dpidr is not None:
         validate_address(expect_dpidr, "expect_dpidr")
 
@@ -2893,7 +2901,9 @@ def validate_flow_d_preflight_args(
     write -- with no diagnostic at all.
     """
     fa = flash_args
-    expected = fa_str_checked(fa, "expect_dpidr", False)
+    # `True` -- see `plan_alif_mram_jlink`'s read of the same key for the
+    # unquoted-YAML trap this closes (tan-cli#795).
+    expected = fa_str_checked(fa, "expect_dpidr", True)
     if expected is None and _fa_has_key(fa, "expect_dpidr"):
         raise FlashPlanError(
             f"{method}: flash_args.expect_dpidr is present but null/empty -- "

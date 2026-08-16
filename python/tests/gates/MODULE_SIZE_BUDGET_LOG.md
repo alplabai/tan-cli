@@ -155,3 +155,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/doctor_cmd.py: 4114 -> 4131
     - tan/core/bootstrap.py: 2275 -> 2400
     - function_count_budget: 259 -> 260
+- 2026-08-16 -- tan-cli#795: flash_cmd.py gains the 32-bit expect_dpidr width guard (with the JEP106 reasoning) and the parsed-value accept replacing _hex_in; flash_plan.py gains the as_hex_address=True rationale on both expect_dpidr reads
+    - tan/commands/flash_cmd.py: 3971 -> 4014
+    - tan/core/flash_plan.py: 3164 -> 3174
