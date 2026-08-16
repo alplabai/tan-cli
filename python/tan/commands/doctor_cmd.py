@@ -161,10 +161,19 @@ from tan.core.bootstrap import (
     select_linux_install,
 )
 from tan.core.consent import can_prompt
+from tan.core.doctor_git import (
+    _git_behind_upstream,
+    _git_core_longpaths,
+    _git_short_commit,
+    _is_own_git_checkout,
+    _resolve_git_executable,
+    classify_git_core_longpaths,
+)
 from tan.core.doctor_libraries import LibraryReport, inspect_selection
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
+from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
 from tan.core.tool_lookup import resolve_tool
@@ -200,12 +209,6 @@ ZEPHYR_PYTHON_FLOOR = (3, 12)
 #: it via `max()` either way, so a resolvable SDK checkout with the key present
 #: never depends on this value being current.
 FALLBACK_PYTHON_FLOOR = (3, 10)
-
-#: Seconds any single probe may take before it is killed. Generous enough for a
-#: cold `west --version` (it imports the whole west package), short enough that
-#: a J-Link binary waiting on a probe that is not plugged in cannot wedge the
-#: command.
-PROBE_TIMEOUT_S = 15
 
 #: The SETOOLS executables `alif_flash.py` looks for inside `$SETOOLS_DIR`
 #: (its `--app-gen-toc` / `--app-write-mram` defaults).
@@ -372,72 +375,16 @@ class Check:
 
 
 # ---------------------------------------------------------------------------
-# Probing. Every subprocess and every filesystem read in this module goes
-# through one of these two, and neither can raise.
+# Probing. `probe_status`/`probe` (tan.core.probe) are every subprocess this
+# module's checks read a tool's own answer through; `on_path` below is the
+# PATH-only presence walk. Every filesystem read goes through one of these
+# three, and none of them can raise. `probe_status`/`probe`/`PROBE_TIMEOUT_S`
+# moved to `tan.core.probe` (tan-cli#797 module-size budget) so
+# `tan.core.doctor_git` could depend on them without an import cycle back
+# into this file; re-imported here so every existing `probe(...)` call site
+# below, and every test referencing `doctor_cmd.probe`/`doctor_cmd.
+# PROBE_TIMEOUT_S`, keeps resolving unchanged.
 # ---------------------------------------------------------------------------
-
-
-def probe_status(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> tuple[bool, str | None]:
-    """Run `argv` and return `(ran, stdout)`.
-
-    `ran` is `True` exactly when the process was actually spawned AND exited
-    zero -- the one predicate that answers "could a build slice run this
-    binary at all". `stdout` is the captured text only when `ran` is `True`,
-    else always `None`. `probe()` below collapses both into a single `None`,
-    which is right for most callers (an unparseable version banner and a
-    binary that could not be spawned are both just "no answer") but wrong for
-    a caller that needs to tell "spawned fine, printed garbage" apart from
-    "never ran at all" -- `west_resolved_check` is exactly that caller
-    (tan-cli#488 defect 1): a `west` launcher whose file survives but whose
-    interpreter does not (a relocated workspace, a deleted `.venv/bin/python`)
-    is `is_file()`-true and therefore reaches this probe, but every real
-    invocation of it fails with `OSError`/a non-zero exit -- `probe()` alone
-    cannot distinguish that from a `west` that ran and printed something this
-    command's regex could not parse, and reporting the former as `pass` is
-    the false green this function exists to close.
-
-    See `probe()` for why each failure mode below is swallowed rather than
-    raised.
-    """
-    try:
-        out = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        # SubprocessError covers TimeoutExpired (the child is already killed by
-        # `run`); ValueError catches an empty/garbage argv rather than letting
-        # it escape as a traceback.
-        return False, None
-    return (out.returncode == 0), (out.stdout if out.returncode == 0 else None)
-
-
-def probe(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> str | None:
-    """Run `argv` and return its stdout, or `None` for every way that can fail.
-
-    `None` means "no answer", never "the answer is bad" -- callers must not read
-    it as a verdict. The failure modes this swallows are all real on a fresh
-    host: the binary is absent (`FileNotFoundError`), it is a directory or not
-    executable (`OSError`/`PermissionError`), it waits forever on a probe that is
-    not plugged in (`TimeoutExpired`), or it exits non-zero.
-
-    `stdin` is closed, not inherited: a tool that decides to prompt then reads
-    EOF and dies instead of blocking until the timeout. `errors="replace"` is
-    the same reason `tests/conformance` uses it -- a tool answering in the
-    platform code page must not turn into a `UnicodeDecodeError` crash that
-    masquerades as a host problem.
-
-    A thin wrapper over `probe_status` (above) for every caller that only ever
-    wanted "the answer, or nothing" and has no use for the ran/did-not-run
-    split.
-    """
-    return probe_status(argv, timeout)[1]
 
 
 def on_path(command: str) -> str | None:
@@ -912,7 +859,7 @@ def prerequisites_check(
     )
 
 
-def _posix_venv_capable(argv: list[str]) -> bool:
+def _posix_venv_capable(argv: list[str], executable: str | None = None) -> bool:
     """Whether `argv`'s Python can create a USABLE virtual environment
     (tan-cli#161). `python -m venv --help` cannot tell -- argparse answers
     before `ensurepip` is ever touched -- so this probes the real
@@ -931,10 +878,20 @@ def _posix_venv_capable(argv: list[str]) -> bool:
     NOT built on this file's own `probe()`: `probe()` collapses "ran and
     exited non-zero" and "could not run at all" to the same `None`, and
     those two outcomes need OPPOSITE verdicts here.
+
+    `executable` -- the PATH-RESOLVED interpreter path (tan-cli#797), e.g.
+    `_probe_host_python`'s own third return element. `argv` stays the bare
+    display spelling for the child's own `argv[0]`; only the OS-level lookup
+    is pinned, the same split every other resolved spawn in this module uses.
+    `None` is accepted (rather than required) so a caller that has not
+    resolved the interpreter still gets the pre-existing bare-spawn behaviour
+    -- there is no bare-git-style "refuse outright" case here, since `argv`
+    always comes from a candidate `_probe_host_python` already ran once.
     """
     try:
         result = subprocess.run(
             [*argv, "-c", "import ensurepip"],
+            executable=executable,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -2216,7 +2173,12 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     and performs no network fetch, so it only reflects the checkout's state
     as of the last `git fetch` -- never blocks a build over it.
     """
-    commit = _git_short_commit(sdk_root)
+    # tan-cli#797: resolved ONCE and threaded through both git calls below --
+    # each spawns `git` itself, and re-resolving per call would not be wrong,
+    # only wasteful; the point that matters is that neither one hands
+    # `subprocess` the bare `"git"` (see `_resolve_git_executable`).
+    git_exe = _resolve_git_executable()
+    commit = _git_short_commit(sdk_root, git_exe)
     version = _read_sdk_version(sdk_root)
     if version and commit:
         detail = f"alp-sdk {version} @ {commit}"
@@ -2227,7 +2189,7 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     else:
         detail = f"alp-sdk at {sdk_root} (no git checkout / metadata/sdk_version.yaml)"
 
-    behind = _git_behind_upstream(sdk_root)
+    behind = _git_behind_upstream(sdk_root, git_exe)
     if behind is not None and behind > 0:
         return Check(
             "sdkProvenance",
@@ -2239,60 +2201,9 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     return Check("sdkProvenance", "pass", detail, scope="project")
 
 
-def _is_own_git_checkout(root: str) -> bool:
-    """Whether `root` is itself the TOP of a git checkout, not merely nested
-    somewhere inside an unrelated ENCLOSING one (tan-cli#488 defect 4).
-
-    `git -C <root> ...` discovery walks UPWARD looking for a `.git`, so an SDK
-    with no `.git` of its own -- an extracted release archive, vendored under
-    a customer's own application repository, which this port explicitly
-    supports (`sdk_cmd.check_sdk_readiness`'s own docstring names exactly this
-    shape) -- answers every git query with the ENCLOSING repo's state instead
-    of "not a checkout". `_git_short_commit`/`_git_behind_upstream` below both
-    call this FIRST and refuse (`None`) rather than misattribute a foreign
-    repository's commit or upstream-skew as the SDK's own.
-
-    Compares the RESOLVED `--show-toplevel` against the RESOLVED `root`:
-    lexical string comparison alone would false-negative on a symlinked or
-    differently-cased path to the same directory.
-    """
-    top = probe(["git", "-C", root, "rev-parse", "--show-toplevel"])
-    if top is None:
-        return False
-    try:
-        return Path(top.strip()).resolve() == Path(root).resolve()
-    except OSError:
-        return False
-
-
-def _git_short_commit(root: str) -> str | None:
-    """`git -C <root> rev-parse --short HEAD`, or `None` when `root` is not a
-    git checkout of its own (e.g. an extracted SDK release archive -- including
-    one vendored inside a customer's own git repository, see
-    `_is_own_git_checkout`)."""
-    if not _is_own_git_checkout(root):
-        return None
-    out = probe(["git", "-C", root, "rev-parse", "--short", "HEAD"])
-    if out is None:
-        return None
-    commit = out.strip()
-    return commit or None
-
-
-def _git_behind_upstream(root: str) -> int | None:
-    """Commit count `HEAD` is behind its upstream tracking ref, without
-    fetching. `None` when there is no upstream, or `root` is not a git
-    checkout of its own (see `_is_own_git_checkout`)."""
-    if not _is_own_git_checkout(root):
-        return None
-    out = probe(["git", "-C", root, "rev-list", "--count", "HEAD..@{upstream}"])
-    if out is None:
-        return None
-    try:
-        return int(out.strip())
-    except ValueError:
-        return None
-
+# _resolve_git_executable / _is_own_git_checkout / _git_short_commit /
+# _git_behind_upstream moved to tan.core.doctor_git (tan-cli#797 module-size
+# budget); imported above.
 
 def _read_sdk_version(root: str) -> str | None:
     """Read a version from `<root>/metadata/sdk_version.yaml`. Shares
@@ -2414,8 +2325,22 @@ def _macos_rosetta_translated() -> bool:
     macOS command-line surface. `probe()` (and so this) returns `False` on a
     pre-Big-Sur host where the sysctl does not exist -- the compiled arch is
     already correct there, matching Rust's `rc == 0 && translated == 1`.
+
+    `sysctl` itself is resolved through `tool_lookup.resolve_tool` before the
+    spawn (tan-cli#797), the same treatment as this module's other probes --
+    POSIX `execvp` never searches the current directory the way Windows'
+    `CreateProcess` does, so a bare `argv[0]` here was never the strong form
+    of the hazard, but leaving one spawn unresolved while the rest of the
+    module resolves would be a needless inconsistency for the next reader to
+    puzzle over. `False` when `sysctl` is not on PATH at all -- the same
+    "nothing to report" verdict as every other way this probe can fail.
     """
-    return (probe(["sysctl", "-n", "sysctl.proc_translated"]) or "").strip() == "1"
+    resolved = resolve_tool("sysctl", os.environ).resolved
+    if resolved is None:
+        return False
+    return (
+        probe(["sysctl", "-n", "sysctl.proc_translated"], executable=resolved) or ""
+    ).strip() == "1"
 
 
 def _host_os_arch_tags() -> tuple[str, str]:
@@ -2447,60 +2372,8 @@ def _host_os_arch_tags() -> tuple[str, str]:
     return host_os, arch
 
 
-def classify_git_core_longpaths(exit_code: int | None, stdout: str) -> bool | None:
-    """The three-way verdict for a `git config --get core.longpaths`
-    invocation -- the git-side counterpart to `_long_paths_enabled`'s
-    registry read, split out as its own pure function (mirroring
-    `tan_core::host_env::classify_git_core_longpaths`) so the exact mapping
-    tan-cli#306 argues hardest about is unit-tested without needing a real
-    `git` invocation for every case.
-
-    * exit 0 -> the stdout value, parsed with git's own boolean grammar.
-    * exit 1 -> `False`. `git config --get` documents this code as "the key
-      is not set in any scope (system/global/local)" -- git's own default,
-      and the state a fresh `HOME` is in (tan-cli#306's exact repro).
-    * anything else (`git` not on PATH, a malformed config file, a
-      permissions error) -> `None`: uncertain, not guessed.
-    """
-    if exit_code == 0:
-        value = stdout.strip().lower()
-        return value not in ("false", "no", "off", "0")
-    if exit_code == 1:
-        return False
-    return None
-
-
-def _git_core_longpaths() -> bool | None:
-    """Read git's own EFFECTIVE `core.longpaths` (system -> global -> local
-    precedence, resolved by `git config --get` itself rather than tan
-    re-implementing that precedence by hand) via a real `git` subprocess.
-
-    A SEPARATE axis from `_long_paths_enabled` on purpose (tan-cli#306): the
-    registry governs manifested Win32 API calls; it does nothing for git,
-    which `west update` uses for every project clone/checkout and which
-    refuses a long path unless ITS OWN setting says so -- the registry read
-    alone reported `pass` on a fresh `HOME` while `west update` died on
-    `hal_nxp`'s `tf-psa-crypto` tree.
-
-    Not built on this file's own `probe()`: `probe()` collapses "ran and
-    exited non-zero" (exit 1, meaning "unset") and "could not run at all"
-    (meaning "unknown") to the same `None`, and `classify_git_core_longpaths`
-    needs to tell those apart.
-    """
-    try:
-        out = subprocess.run(
-            ["git", "config", "--get", "core.longpaths"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT_S,
-            check=False,
-        )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    return classify_git_core_longpaths(out.returncode, out.stdout)
+# classify_git_core_longpaths / _git_core_longpaths moved to
+# tan.core.doctor_git (tan-cli#797 module-size budget); imported above.
 
 
 def _long_paths_enabled() -> bool | None:
@@ -2650,19 +2523,44 @@ def _zephyr_sdk_detected() -> bool:
     return False
 
 
-def _probe_host_python(floor: tuple[int, int]) -> tuple[str, tuple[int, int]] | None:
+def _probe_host_python(
+    floor: tuple[int, int],
+) -> tuple[str, tuple[int, int], str] | None:
     """First candidate that RUNS and clears `floor`; else the first that merely
     ran, so the too-old message can name a real version instead of "did not
-    run". Mirrors `crate::util::probe_host_python`."""
-    first_that_ran: tuple[str, tuple[int, int]] | None = None
+    run". Mirrors `crate::util::probe_host_python`.
+
+    tan-cli#797: `candidate[0]` (`"py"`/`"python"`/`"python3"`) is resolved
+    through `tool_lookup.resolve_tool` and spawned as `executable=`, keeping
+    `candidate` itself -- and therefore `entry`'s display spelling -- bare. A
+    candidate that does not resolve is skipped outright, the same "no answer"
+    treatment `probe()` already gives every other way this can fail; it is
+    never handed to `subprocess` unresolved.
+
+    The returned 3-tuple carries the RESOLVED path as its third element
+    alongside the display spelling and version, so a caller that needs to
+    spawn this same interpreter again (`_posix_venv_capable`'s `ensurepip`
+    probe) threads the already-resolved path through as `executable=` instead
+    of re-deriving argv from the display spelling and handing THAT bare to
+    `subprocess` -- the resolve-then-spawn-something-else divergence
+    tan-cli#797 exists to close. `python_check` only reads the first two
+    elements; a caller wanting just those may slice `found[:2]`.
+    """
+    first_that_ran: tuple[str, tuple[int, int], str] | None = None
     for candidate in _python_candidates():
-        out = probe([*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"])
+        resolved = resolve_tool(candidate[0], os.environ).resolved
+        if resolved is None:
+            continue
+        out = probe(
+            [*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+            executable=resolved,
+        )
         if out is None:
             continue
         version = _parse_two(out)
         if version is None:
             continue
-        entry = (" ".join(candidate), version)
+        entry = (" ".join(candidate), version, resolved)
         if version >= floor:
             return entry
         if first_that_ran is None:
@@ -3529,7 +3427,9 @@ def _collect(
     host_os, host_arch = _host_os_arch_tags()
     _add(zephyr_sdk_host_check(host_os, host_arch))
     if os.name == "nt":
-        _add(long_paths_check(_long_paths_enabled(), _git_core_longpaths()))
+        _add(
+            long_paths_check(_long_paths_enabled(), _git_core_longpaths(_resolve_git_executable()))
+        )
     _add(
         home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
     )
@@ -3582,7 +3482,11 @@ def _collect(
     )
 
     python_found = _probe_host_python(effective_floor)
-    _add(python_check(python_found, effective_floor, effective_source))
+    _add(
+        python_check(
+            python_found[:2] if python_found else None, effective_floor, effective_source
+        )
+    )
     skew = python_floor_skew_check(
         manifest_floor,
         effective_floor,
@@ -3646,7 +3550,7 @@ def _collect(
         sys.platform.startswith("linux")
         and not missing_tools
         and python_found is not None
-        and not _posix_venv_capable(python_found[0].split())
+        and not _posix_venv_capable(python_found[0].split(), executable=python_found[2])
     ):
         venv_refusal = posix_venv_unusable()
     _add(
