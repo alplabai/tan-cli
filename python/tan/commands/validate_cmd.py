@@ -1098,47 +1098,51 @@ def _emit(
         findings = tuple(_Finding(issue.severity, issue.message) for issue in reportable)
     reported = list(zip(reportable, findings))
 
-    # Built ONCE, for every format (tan-cli#799): `Envelope.__init__` appends
-    # the tan-cli#407 `sdk.discovery-divergent` warning at the shared seam
+    # Built for TEXT/JSON only (tan-cli#799): `Envelope.__init__` appends the
+    # tan-cli#407 `sdk.discovery-divergent` warning at the shared seam
     # (`_with_sdk_divergence`). The three TEXT verdicts below loop `issues`
     # directly, and used to loop the PRE-envelope list -- built only inside
-    # this JSON branch before -- so a seam-appended divergence issue reached
-    # `--format json` and stayed silent on the default channel. `data` is
-    # built unconditionally too (cheap, and only the JSON branch reads it):
-    # doing it here rather than after the rebind below would need `issues`
-    # computed twice for no reason.
-    data = {
-        "schemaVersion": DATA_SCHEMA_VERSION,
-        "outcome": outcome,
-        "issueCount": len(reported),
-        # The validator command line that actually ran, or `""` -- which
-        # every guard and the whole offline path keep, and which the two
-        # committed conformance fixtures pin.
-        "commandLine": command_line,
-        # `data.boardYamlPath` is UNTOUCHED by tan-cli#236 -- it names where
-        # tan looked even on the missing-board refusal below; only
-        # `project.boardYaml` (Rust's starkest instance of the bug: the
-        # refusal one line below says the file does not exist, in the same
-        # envelope that used to still name it) is existence-filtered.
-        "boardYamlPath": board_path,
-    }
-    envelope = Envelope(
-        "validate",
-        Project.resolved(root, board_path),
-        data,
-        issues,
-        exit_code,
-        # Absent, not null, when nothing resolved -- `Envelope` omits
-        # the key on `None`. See the module docstring's `sdk` block
-        # paragraph for the measured presence/absence matrix.
-        sdk=sdk,
-    )
-    # Rebind: every branch below now sees whatever the seam appended. Safe
-    # against `reportable`/`reported`/`data["issueCount"]` above, all
-    # computed from the PRE-seam list -- a seam-appended issue's code always
-    # starts with "sdk.", so it was already excluded from `reportable` either
-    # way and none of those three needs recomputing.
-    issues = envelope.issues
+    # the JSON branch before -- so a seam-appended divergence issue reached
+    # `--format json` and stayed silent on the default channel. DIAGNOSTIC_V1
+    # and SARIF are ported documents that read neither `data` nor `envelope`
+    # (see the two branches below), so building either for them would only
+    # pay for `_with_sdk_divergence`'s filesystem ladder walk and discard the
+    # result -- skip both there.
+    if output_format in (ValidateOutputFormat.JSON, ValidateOutputFormat.TEXT):
+        data = {
+            "schemaVersion": DATA_SCHEMA_VERSION,
+            "outcome": outcome,
+            "issueCount": len(reported),
+            # The validator command line that actually ran, or `""` -- which
+            # every guard and the whole offline path keep, and which the two
+            # committed conformance fixtures pin.
+            "commandLine": command_line,
+            # `data.boardYamlPath` is UNTOUCHED by tan-cli#236 -- it names
+            # where tan looked even on the missing-board refusal below; only
+            # `project.boardYaml` (Rust's starkest instance of the bug: the
+            # refusal one line below says the file does not exist, in the
+            # same envelope that used to still name it) is
+            # existence-filtered.
+            "boardYamlPath": board_path,
+        }
+        envelope = Envelope(
+            "validate",
+            Project.resolved(root, board_path),
+            data,
+            issues,
+            exit_code,
+            # Absent, not null, when nothing resolved -- `Envelope` omits
+            # the key on `None`. See the module docstring's `sdk` block
+            # paragraph for the measured presence/absence matrix.
+            sdk=sdk,
+        )
+        # Rebind: every branch below now sees whatever the seam appended.
+        # Safe against `reportable`/`reported`/`data["issueCount"]` above,
+        # all computed from the PRE-seam list -- a seam-appended issue's
+        # code always starts with "sdk.", so it was already excluded from
+        # `reportable` either way and none of those three needs
+        # recomputing.
+        issues = envelope.issues
 
     if output_format == ValidateOutputFormat.JSON:
         emit(envelope)

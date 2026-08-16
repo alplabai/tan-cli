@@ -340,7 +340,10 @@ def run(
         "--flash",
         help="Program the board after building (hardware targets only). Required "
         "opt-in: without it, `run` on a hardware project builds and reports but "
-        "never flashes. Ignored for a native_sim/host target, which always runs "
+        "never flashes. Arming the write also needs --confirm (or "
+        "ALP_FLASH_FORCE=1, or flash_args.confirm: true in the manifest); "
+        "without it every slice comes back `planned` and the run exits "
+        "non-zero. Ignored for a native_sim/host target, which always runs "
         "the produced binary and never flashes.",
     ),
     core: str = typer.Option(

@@ -50,6 +50,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 DIVERGENCE_CODE = "sdk.discovery-divergent"
 
+#: A stable substring of `sdk_ladder_divergence_issue`'s own message
+#: (`build_cmd.py`'s `sdk_ladder_divergence_issue`), pinned the same way
+#: `E2E_DIVERGENCE_PHRASE` below pins doctor's -- so a reword that keeps both
+#: checkout paths in the text but drops the sentence naming what they mean
+#: (or drops the "warning:" severity the text renderer prepends) still fails
+#: this file instead of silently passing.
+DIVERGENCE_TEXT_PHRASE = 'both report sourceTier "discovery"'
+
 
 def _make_sdk(root: Path) -> Path:
     """The one marker every discovery tier keys on (`SDK_MARKER`). No
@@ -584,7 +592,17 @@ def test_narrow_text_channel_carries_the_divergence_warning(tmp_path, command):
     assert "Traceback" not in text_proc.stderr, (
         f"an exception escaped the contract:\n{text_proc.stderr}"
     )
-    assert child.as_posix() in text_proc.stderr and lateral.as_posix() in text_proc.stderr, (
+    # Both checkout paths AND the stable phrase/severity prefix that make
+    # them mean something -- a reword that dropped the "warning:" severity
+    # or the sentence explaining what the two paths are (while still, by
+    # coincidence, printing both paths somewhere in stderr) must fail this,
+    # not silently pass it. Same reasoning as `E2E_DIVERGENCE_PHRASE` above.
+    assert (
+        child.as_posix() in text_proc.stderr
+        and lateral.as_posix() in text_proc.stderr
+        and "warning:" in text_proc.stderr
+        and DIVERGENCE_TEXT_PHRASE in text_proc.stderr
+    ), (
         f"`tan {' '.join(argv)}` (default/text) carried {DIVERGENCE_CODE} in "
         f"its `--format json` envelope but not on the default text channel; "
         f"stderr was:\n{text_proc.stderr!r}"

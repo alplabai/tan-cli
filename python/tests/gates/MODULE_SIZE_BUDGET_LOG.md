@@ -167,3 +167,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/clean_cmd.py: 1110 -> 1119
     - tan/commands/size_cmd.py: 831 -> 842
     - tan/commands/validate_cmd.py: 1571 -> 1587
+- 2026-08-16 -- tan-cli#799 review: scope validate_cmd's Envelope construction to TEXT/JSON only (nit fix)
+    - tan/commands/validate_cmd.py: 1587 -> 1591
