@@ -254,6 +254,12 @@ def _run(
     flash: bool,
     core: str | None,
     json_mode: bool,
+    # Defaulted, not required: several existing unit tests call `_run`
+    # directly with the pre-tan-cli#809 kwarg set, exercising paths this flag
+    # never reaches (`BUILD_ONLY`/`MANIFEST_STALE`/`EXECUTE_NATIVE`) or
+    # stubbing `flash_cmd._run` themselves. `False` preserves the exact
+    # pre-#809 behaviour for every one of them.
+    confirm: bool = False,
 ) -> tuple[ExitCode, dict[str, Any] | None, list[Issue], list[str]]:
     """Everything between the resolved paths and the envelope. Returns
     `(exit_code, data, issues, text_lines)`."""
@@ -317,6 +323,13 @@ def _run(
         skip_missing_tools=False,
         capture=json_mode,
         cwd=build_root,
+        # tan-cli#809: `run` had no way to arm the flash confirm gate, so a
+        # hardware target (e.g. E1M-AEN801's Flow D) always landed every
+        # slice as `planned` and exited 1 with `flash.nothing-flashed` --
+        # whose own remedy names `--confirm`, a flag `run` rejected. The gate
+        # itself stays deliberate (see flash_plan.py); this only gives `run`
+        # the same opt-in `tan flash --confirm` already has.
+        confirm_flag=confirm,
     )
     return flash_exit, flash_data, flash_issues, flash_text
 
@@ -327,7 +340,10 @@ def run(
         "--flash",
         help="Program the board after building (hardware targets only). Required "
         "opt-in: without it, `run` on a hardware project builds and reports but "
-        "never flashes. Ignored for a native_sim/host target, which always runs "
+        "never flashes. Arming the write also needs --confirm (or "
+        "ALP_FLASH_FORCE=1, or flash_args.confirm: true in the manifest); "
+        "without it every slice comes back `planned` and the run exits "
+        "non-zero. Ignored for a native_sim/host target, which always runs "
         "the produced binary and never flashes.",
     ),
     core: str = typer.Option(
@@ -336,6 +352,15 @@ def run(
         metavar="CORE_ID",
         help="With --flash, flash only the slice with this core_id (forwarded "
         "verbatim to the native flash path's --core).",
+    ),
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="With --flash, arm the confirm gate and actually write the device. "
+        "Without it (and without ALP_FLASH_FORCE=1 or flash_args.confirm: true "
+        "in the manifest) a hardware target is only previewed -- every slice "
+        "comes back `planned`, nothing reaches the device, and the run exits "
+        "non-zero (tan-cli#809). Ignored without --flash.",
     ),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
@@ -418,6 +443,7 @@ def run(
             board_yaml=board_yaml,
             flash=flash,
             core=core,
+            confirm=confirm,
             json_mode=json_mode,
         )
     except Exception as err:  # noqa: BLE001 -- see build_cmd.build's identical guard
@@ -452,8 +478,25 @@ def run(
             f"{issue.severity}: {issue.message}" for issue in issues[:warning_count]
         ] + text_lines
 
+    # Built ONCE, for both formats: `Envelope.__init__` appends the
+    # tan-cli#407 `sdk.discovery-divergent` warning at the shared seam
+    # (`_with_sdk_divergence`), beyond the pin/foreign pair this function
+    # already prepends by hand above (tan-cli#464). Text mode used to render
+    # `text_lines`, built before any `Envelope` existed, so a seam-appended
+    # divergence issue reached `--format json` and was silent on the default
+    # channel (tan-cli#799) -- diffed against the pre-envelope `issues` list
+    # (by value: `Issue` is a frozen dataclass) so only what the seam ADDED
+    # is rendered, never a duplicate of the pin/foreign pair already in
+    # `text_lines`.
+    envelope = Envelope("run", project_obj, data, issues, exit_code, sdk=sdk)
+    seam_extra = [issue for issue in envelope.issues if issue not in issues]
+    if seam_extra:
+        text_lines = [
+            f"{issue.severity}: {issue.message}" for issue in seam_extra
+        ] + text_lines
+
     if json_mode:
-        emit(Envelope("run", project_obj, data, issues, exit_code, sdk=sdk))
+        emit(envelope)
     else:
         for line in text_lines:
             print(line, file=sys.stderr)

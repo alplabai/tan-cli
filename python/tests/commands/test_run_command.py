@@ -66,7 +66,9 @@ def test_run_is_not_an_alias_for_build_or_flash():
 def test_run_help_lists_its_own_flags_not_builds_or_flashs():
     result = CliRunner().invoke(_app(), ["run", "--help"])
     assert result.exit_code == 0, result.output
-    for flag in ("--flash", "--core", "--project", "--board-yaml", "--sdk-root", "--format"):
+    for flag in (
+        "--flash", "--core", "--confirm", "--project", "--board-yaml", "--sdk-root", "--format",
+    ):
         assert flag in result.output, result.output
     # `build`-only flags (crates/tan-cli/src/cli.rs BuildArgs) must not leak in.
     for flag in ("--plan", "--materialise", "--native", "--manifest", "--pristine",
@@ -90,6 +92,45 @@ def test_run_reports_build_failed_when_no_sdk_found(tmp_path, monkeypatch):
     # Same code `tan build` itself would report -- `run` retags the delegated
     # build's envelope's `command`, never its issue codes.
     assert payload["issues"][0]["code"] == "build.plan-unavailable"
+
+
+def test_run_parser_actually_accepts_confirm():
+    """tan-cli#799 review: `test_run_help_lists_its_own_flags_not_builds_or_
+    flashs` asserted `"--confirm" in result.output`, but `--flash`'s own help
+    text (`run_cmd.py`'s `flash` option) happens to CONTAIN the literal
+    substring "--confirm" -- so that assertion stayed green even with the
+    `confirm` option removed entirely from `run`'s signature (measured: see
+    the module docstring below). Assert on the PARSER instead: the Click
+    command's registered `params` must contain an option whose `opts` include
+    `--confirm`, which is only true when the option is actually declared.
+    """
+    from typer.main import get_command
+
+    click_command = get_command(_app())
+    run_click_command = click_command.get_command(None, "run")
+    # Not `isinstance(param, click.Option)`: this Typer version vendors its
+    # own internal Click fork (`typer._click`), so `TyperOption` does NOT
+    # subclass the real, separately-installed `click` package's `Option` --
+    # `param.opts` (a plain list every Click/Typer parameter exposes) is the
+    # portable check.
+    confirm_params = [
+        param for param in run_click_command.params if "--confirm" in getattr(param, "opts", ())
+    ]
+    assert confirm_params, (
+        f"no --confirm option registered on `run`; opts were "
+        f"{[getattr(p, 'opts', None) for p in run_click_command.params]}"
+    )
+
+
+def test_run_confirm_flag_is_accepted_by_the_real_parser(tmp_path, monkeypatch):
+    """Same proof, end to end: invoking `run --flash --confirm` must never
+    hit Click's own "No such option" refusal. Combined with the forwarding
+    tests below (which call `run_cmd._run(confirm=True)` directly), this
+    closes the gap between "the flag parses" and "the flag is wired
+    through"."""
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(_app(), ["run", "--flash", "--confirm", "--format", "json"])
+    assert "No such option" not in result.output, result.output
 
 
 def test_run_help_text_mode_reaches_a_command_error_free(tmp_path, monkeypatch):
@@ -191,6 +232,60 @@ def test_internal_run_flash_delegates_to_the_flash_engine_at_the_built_root(tmp_
     assert calls["core"] == "m55_hp"
     assert calls["sdk_root_arg"] == "/sdk"
     assert text == ["flash: 0 failure(s)."]
+
+
+def test_internal_run_flash_forwards_confirm_true_to_the_flash_engine(tmp_path, monkeypatch):
+    """tan-cli#809: `run --flash --confirm` must arm `flash_cmd._run`'s own
+    confirm gate (`confirm_flag=True`), the same opt-in `tan flash --confirm`
+    already has -- otherwise every slice comes back `planned` and `run`
+    exits non-zero with `flash.nothing-flashed` even though the caller asked
+    to write the device."""
+    monkeypatch.setattr(run_cmd, "_build", _stub_build)
+    monkeypatch.setattr(run_cmd, "decide_run_action", lambda *a, **k: RunAction.FLASH)
+    calls = {}
+
+    def fake_flash_run(**kwargs):
+        calls.update(kwargs)
+        return (
+            ExitCode.SUCCESS,
+            {"schemaVersion": "1", "buildRoot": kwargs["app_path"], "entries": []},
+            [],
+            ["flash: 0 failure(s)."],
+            None,
+        )
+
+    monkeypatch.setattr(flash_cmd, "_run", fake_flash_run)
+    run_cmd._run(
+        build_root=str(tmp_path), sdk_root=None, sdk_root_for_stamp=None, board_yaml=None,
+        flash=True, core=None, json_mode=False, confirm=True,
+    )
+    assert calls["confirm_flag"] is True
+
+
+def test_internal_run_flash_defaults_confirm_false_when_omitted(tmp_path, monkeypatch):
+    """The companion of the above: an ordinary `run --flash` (no `--confirm`)
+    must NOT silently arm the write -- `confirm_flag` reaches `flash_cmd._run`
+    as `False`, preserving the preview-only default `tan flash` itself has."""
+    monkeypatch.setattr(run_cmd, "_build", _stub_build)
+    monkeypatch.setattr(run_cmd, "decide_run_action", lambda *a, **k: RunAction.FLASH)
+    calls = {}
+
+    def fake_flash_run(**kwargs):
+        calls.update(kwargs)
+        return (
+            ExitCode.SUCCESS,
+            {"schemaVersion": "1", "buildRoot": kwargs["app_path"], "entries": []},
+            [],
+            ["flash: 0 failure(s)."],
+            None,
+        )
+
+    monkeypatch.setattr(flash_cmd, "_run", fake_flash_run)
+    run_cmd._run(
+        build_root=str(tmp_path), sdk_root=None, sdk_root_for_stamp=None, board_yaml=None,
+        flash=True, core=None, json_mode=False,
+    )
+    assert calls["confirm_flag"] is False
 
 
 def test_internal_run_reaches_flash_via_the_real_recorded_signal_not_a_stub(tmp_path, monkeypatch):
