@@ -181,3 +181,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 260 -> 269
 - 2026-08-16 -- tan/commands/model_cmd.py 1011 -> 1029: `_declared_hw_rev` + plumbing board.yaml's `som.hw_rev` into `check_model_backends`. A bench-measured perf point's identity includes the module revision it ran on (alp-sdk f724d3e4), so tier-2 resolution cannot serve an r2 measurement to a customer holding an r1 module; the value has to reach the engine from the only place that states it.
     - tan/commands/model_cmd.py: 1011 -> 1029
+- 2026-08-17 -- tan-cli#791 review MINOR 5: _declared_hw_rev now fails CLOSED (ModelError) on a present-but-unusable som.hw_rev (e.g. an unquoted YAML int) instead of silently falling through to the SKU preset's default_hw_rev; function_count_budget's 269->270 (pre-drift) is a pre-existing gap measured before any edit this session (git stash showed 270 over 50 lines against a committed 269 budget), fixed here alongside the real growth
+    - tan/commands/model_cmd.py: 1029 -> 1059
+    - function_count_budget: 269 -> 272

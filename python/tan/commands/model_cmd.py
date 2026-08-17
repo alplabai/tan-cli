@@ -439,19 +439,44 @@ def _run_build(
     return reported_project, sdk_info, data, issues, exit_code
 
 
-def _declared_hw_rev(board_doc: dict) -> str | None:
+def _declared_hw_rev(board_doc: dict, board_path: Path) -> str | None:
     """`board.yaml`'s `som.hw_rev`, or `None` when it declares none.
 
     OPTIONAL by `board.schema.json`, which also states the fallback: "the SDK
     falls back to the SKU preset's `default_hw_rev` when omitted". That
-    fallback is applied downstream (`tan.model.check._resolve_hw_rev`), where
-    the metadata root is in hand; this only reports what the customer wrote.
-    Unlike `som.sku` a missing value is not a refusal -- `check` worked without
-    it before a bench measurement existed to pin to a revision, and must keep
-    working."""
+    fallback is applied downstream (`tan.model.perf_apply._resolve_hw_rev`),
+    where the metadata root is in hand; this only reports what the customer
+    wrote. Unlike `som.sku` a missing value is not a refusal -- `check` worked
+    without it before a bench measurement existed to pin to a revision, and
+    must keep working.
+
+    A PRESENT-BUT-UNUSABLE value fails CLOSED instead, rather than silently
+    falling through to the same `None` a genuinely absent key returns
+    (tan-cli#791 review MINOR 5). `board.yaml` is YAML: an unquoted
+    `hw_rev: 2` parses to the int `2`, not the string `"r2"` no perf point is
+    ever published under. Measured: `{"som": {"hw_rev": 2}} -> None` here
+    used to silently defer to the SKU preset's own `default_hw_rev` --
+    serving a customer who wrote a real hw_rev a DIFFERENT module revision's
+    bench measurement, exactly the "describes a different machine" failure
+    `hw_rev` exists to refuse in the first place (alp-sdk `f724d3e4`).
+    `_run_check` does not otherwise schema-validate `board.yaml`, so this is
+    the one place this particular shape of bad input is ever caught -- raised
+    as a `ModelError` (a board-level fact, refusing the WHOLE run, same
+    scoping `_require_sku`/`_require_check_backends` already use) rather than
+    returned, since a caller that got `None` back has no way to tell "the
+    customer said nothing" apart from "the customer said something tan could
+    not use"."""
     som = board_doc.get("som")
-    hw_rev = som.get("hw_rev") if isinstance(som, dict) else None
-    return hw_rev if isinstance(hw_rev, str) and hw_rev else None
+    if not isinstance(som, dict) or "hw_rev" not in som:
+        return None
+    hw_rev = som["hw_rev"]
+    if isinstance(hw_rev, str) and hw_rev:
+        return hw_rev
+    raise ModelError(
+        "model.board-yaml-invalid",
+        f"{board_path}: som.hw_rev must be a non-empty string (e.g. \"r2\"); got {hw_rev!r}.",
+        ExitCode.VALIDATION_FAILURE,
+    )
 
 
 def _check_one_model(name: str, source: Path, backends: list[str], sku: str,
@@ -519,6 +544,11 @@ def _run_check(
     base = board_path.parent
     metadata_dir = _resolve_metadata_dir(metadata_root, resolved_sdk, workspace_root)
     backends = _require_check_backends(sku, metadata_dir, board_path)
+    # Board-level, like `sku`/`backends` above: resolved ONCE, ahead of the
+    # per-model loop, so an unusable `som.hw_rev` (`ModelError`, see
+    # `_declared_hw_rev`) refuses the whole run instead of repeating the same
+    # parse -- and the same failure -- once per declared model.
+    declared_hw_rev = _declared_hw_rev(board_doc, board_path)
 
     issues: list[Issue] = []
     model_reports: list[dict] = []
@@ -526,7 +556,7 @@ def _run_check(
         _require_model_entry(m, board_path)
         source = (base / m["source"]).resolve()
         result = _check_one_model(m["name"], source, backends, sku, metadata_dir, exact,
-                                   _declared_hw_rev(board_doc))
+                                   declared_hw_rev)
         (issues if isinstance(result, Issue) else model_reports).append(result)
     data["models"] = model_reports
     exit_code = ExitCode.SUCCESS if not issues else ExitCode.RUNTIME_FAILURE

@@ -351,6 +351,19 @@ def test_a_measured_zero_survives_as_a_zero(tmp_path):
     assert point.npu_ops == 0
 
 
+def test_a_measured_zero_latency_survives_as_a_zero_too(tmp_path):
+    # tan-cli#791 review NIT (a): `_millis` used to map a measured `0` to
+    # `None`, contradicting `PerfPoint`'s own docstring ("a zero here is a
+    # MEASURED zero") -- the same rule `_count` (the sibling used for
+    # `npu_ops`/`arena_bytes` above) already honoured.
+    _write_point(tmp_path, _only_measured(npu_ops=1, cpu_ops=0,
+                                          latency_ms_mean=0.0, latency_ms_p95=0.0, runs=1))
+    point = _find(tmp_path)
+    assert point is not None
+    assert point.latency_ms_mean == 0.0      # measured, not missing
+    assert point.latency_ms_p95 == 0.0
+
+
 def test_a_boolean_is_not_a_count(tmp_path):
     # `bool` is an `int` subclass in Python; `True` is not 1 operator.
     _write_point(tmp_path, _only_measured(npu_ops=True, cpu_ops=0))

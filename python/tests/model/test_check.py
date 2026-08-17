@@ -1155,6 +1155,103 @@ def test_a_part_that_pairs_no_core_narrows_on_none_and_infers_nothing(tmp_path):
     assert _check(tmp_path).basis == "static-screen"
 
 
+def _e8_shaped_tree(meta: Path, *, memory_mode: str | None = "Sram_Only") -> None:
+    """The E1M-AEN801 shape (tan-cli#791 review MAJOR 2): the E8's own
+    `ethos-u85` names no `paired_core` (`_headline_ethos_u_target` resolves
+    IT for this SKU, since it is the higher `mac_per_cycle` config), but the
+    SAME die's two `ethos-u55` rows pair to `m55_hp`/`m55_he` -- so nothing on
+    this die ever pairs an Ethos-U NPU of ANY variant to an application-class
+    core."""
+    _write_som(meta, "E1M-FAKE", "fake:soc:multi", ethos_u_variant="u85",
+               default_hw_rev="r2")
+    npus = [
+        {"type": "ethos-u85", "subtype": "generative", "mac_per_cycle": 256},
+        {"type": "ethos-u55", "subtype": "high-perf", "mac_per_cycle": 256,
+         "paired_core": "m55_hp"},
+        {"type": "ethos-u55", "subtype": "high-efficiency", "mac_per_cycle": 128,
+         "paired_core": "m55_he"},
+    ]
+    extra = ({"npu_toolchain": {"vela": {"memory_mode": memory_mode,
+                                          "system_config_requires_vendor_config": True}}}
+             if memory_mode else None)
+    _write_soc(meta, "fake:soc:multi", npus, extra=extra)
+    _write_table(meta, "ethos_u", "u85@vela-1.0.0.json", variant="u85",
+                 supported=["FULLY_CONNECTED"])
+
+
+def test_an_unpaired_variant_still_refuses_a_core_no_npu_on_the_die_pairs_to(tmp_path):
+    """MAJOR 2: `_headline_ethos_u_target` resolves the E8's Ethos-U85, which
+    pairs to no core of its own -- but a point measured on `a32_cluster` (the
+    Cortex-A32 application cluster, which drives no Ethos-U NPU on this die)
+    must still be refused, because the die's OTHER Ethos-U NPUs (its two
+    Ethos-U55s) prove a32_cluster is not a core anything here ever pairs to."""
+    _e8_shaped_tree(tmp_path)
+    baseline = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE",
+                                    source=_FIXTURE, metadata_root=tmp_path,
+                                    exact=False, hw_rev="r2")[0]
+    assert baseline.basis == "static-screen"
+    _write_perf_point(tmp_path, sku="E1M-FAKE", accel_config="ethos-u85-256",
+                      core="a32_cluster")
+    rep = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE",
+                               source=_FIXTURE, metadata_root=tmp_path,
+                               exact=False, hw_rev="r2")[0]
+    assert rep.basis == "static-screen"          # refused, not consumed
+
+
+def test_an_unpaired_variant_accepts_a_core_a_sibling_npu_does_pair_to(tmp_path):
+    # The narrowing is a REFUSAL of cores nothing pairs to, not an invented
+    # requirement that the point match the SPECIFIC target's own pairing --
+    # the U85 itself still pairs to nothing, so a point measured on m55_hp
+    # (a real pairing on THIS die, just for a different NPU) is not rejected
+    # by this guard.
+    _e8_shaped_tree(tmp_path)
+    _write_perf_point(tmp_path, sku="E1M-FAKE", accel_config="ethos-u85-256",
+                      core="m55_hp")
+    rep = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE",
+                               source=_FIXTURE, metadata_root=tmp_path,
+                               exact=False, hw_rev="r2")[0]
+    assert rep.basis == "bench"
+
+
+# ---------------------------------------------------------------------------
+# THE BLOCKER FIX (tan-cli#791 review item 1): the profile tiebreak used to
+# apply ONLY once two or more points survived every other filter, so a SINGLE
+# point captured under a memory profile the part does not declare was handed
+# back unfiltered at `confidence: "certain"` -- the realistic first-campaign
+# shape (exactly one point per part) hit this every time, not just on a
+# collision. Narrowing now happens BEFORE the single-point shortcut whenever
+# the part states a profile at all.
+# ---------------------------------------------------------------------------
+
+def test_a_lone_point_under_the_wrong_profile_is_refused_not_consumed(tmp_path):
+    """The measured case: a DRAM-backed default capture against a part that
+    declares `Sram_Only` (no DRAM at all) used to be consumed as `basis:
+    "bench", confidence: "certain"` -- overstating resident SRAM by 5.3x in
+    the review's own real-metadata measurement."""
+    _u55_tree(tmp_path, memory_mode="Sram_Only")
+    baseline = _check(tmp_path)
+    _write_perf_point(tmp_path, memory_mode="Dedicated_Sram_384KB")  # the wrong machine
+    assert _check(tmp_path) == baseline                              # refused, not consumed
+
+
+def test_a_lone_point_under_the_right_profile_still_answers(tmp_path):
+    # The ordinary case must not regress: a single point captured under the
+    # SAME profile the part declares still answers.
+    _u55_tree(tmp_path, memory_mode="Sram_Only")
+    _write_perf_point(tmp_path, memory_mode="Sram_Only")
+    assert _check(tmp_path).basis == "bench"
+
+
+def test_a_lone_point_when_the_part_declares_no_profile_still_answers(tmp_path):
+    # Nothing to narrow ON: the SoC spec carries no `npu_toolchain.vela` block
+    # at all, so the profile tiebreak must not reject the only point standing
+    # -- narrowing on a silent part would be the opposite failure this fix
+    # could introduce.
+    _u55_tree(tmp_path, memory_mode=None)
+    _write_perf_point(tmp_path, memory_mode="Sram_Only")
+    assert _check(tmp_path).basis == "bench"
+
+
 # ---------------------------------------------------------------------------
 # THE MULTI-MATCH RULE: the toolchain PROFILE is a point's identity but not the
 # match key, so a lookup can legitimately leave two points standing -- captured
@@ -1307,6 +1404,19 @@ def test_a_disagreeing_exact_compile_wins_over_the_bench_point(
     assert expected_diff in note
     assert "alp-sdk-internal:bench/captures/tiny.log" in note      # ours is still named
     assert "\n" not in note
+    # tan-cli#791 review MINOR 3: the point's own fields ride the report too,
+    # not just the note's prose -- a consumer reading `perfRef`/`latencyMs*`
+    # must not see `null` while the very same note quotes them in text.
+    assert rep.perf_ref == "alp-sdk-internal:bench/captures/tiny.log"
+    assert rep.latency_ms_mean == 0.4
+    assert rep.latency_ms_p95 == 0.5
+    assert rep.latency_runs == 100
+    # the LOCAL compile's own numbers are still what's reported for the
+    # figures that actually disagreed -- carrying the point's latency/perfRef
+    # alongside must never overwrite the winning compile's own coverage/
+    # arena/SRAM.
+    assert rep.arena_bytes == blob_kwargs["arena"]
+    assert rep.req_sram_kib == blob_kwargs["sram"]
 
 
 def test_a_figure_only_one_side_reported_is_never_a_disagreement(tmp_path, monkeypatch):
@@ -1332,6 +1442,12 @@ def test_a_degraded_exact_run_still_gets_the_bench_point(tmp_path, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
     rep = _check(tmp_path, exact=True)
     assert rep.basis == "bench"
+    # tan-cli#791 review MINOR 4: the customer's own `--exact` request is not
+    # silently un-answered just because a bench point also matched -- the
+    # host-environment diagnostic ("vela is not on PATH") is still true of
+    # THIS run and must survive the re-base onto the bench note, not just be
+    # present when no point exists.
+    assert any(n.startswith("--exact") and "vela is not on PATH" in n for n in rep.notes)
 
 
 # ---------------------------------------------------------------------------

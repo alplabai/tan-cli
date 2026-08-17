@@ -144,6 +144,56 @@ def test_missing_sku_refuses(tmp_path):
     assert envelope(result)["issues"][0]["code"] == "model.board-yaml-invalid"
 
 
+def test_a_non_string_hw_rev_fails_closed_rather_than_silently_falling_back(tmp_path):
+    """tan-cli#791 review MINOR 5. `som.hw_rev` is unquoted YAML in a real
+    board.yaml as easily as quoted -- `hw_rev: 2` parses to the int `2`, not
+    the string `"r2"` no perf point is ever published under. This must refuse
+    the whole run rather than silently defer to the SKU preset's own
+    `default_hw_rev`, which could serve a customer who wrote a real hw_rev a
+    DIFFERENT module revision's bench measurement."""
+    sdk = make_sdk(tmp_path / "sdk")
+    write_metadata(sdk / "metadata", "E1M-TEST", "fake:soc:u55",
+                    [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}],
+                    ethos_u_variant="u55")
+    write(tmp_path / "source.tflite", "x")
+    write(tmp_path / "board.yaml",
+          "som:\n  sku: E1M-TEST\n  hw_rev: 2\n"
+          "models:\n  - name: m\n    source: source.tflite\n")
+    result = runner.invoke(
+        app, ["check", "--project", str(tmp_path), "--sdk-root", str(sdk), "--format", "json"],
+    )
+    assert result.exit_code == 2
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "model.board-yaml-invalid"
+    assert "hw_rev" in doc["issues"][0]["message"]
+    assert doc["data"]["models"] == []
+
+
+def test_an_absent_hw_rev_still_works_exactly_as_before(tmp_path, monkeypatch):
+    # The ordinary case must not regress: no `som.hw_rev` at all is still a
+    # valid board.yaml, not a refusal.
+    result = _run_with_fake_backends(tmp_path, monkeypatch, [_fake_report()])
+    assert result.exit_code == 0
+
+
+def test_an_empty_string_hw_rev_fails_closed_too(tmp_path):
+    # An empty string is present-but-unusable exactly like a non-string --
+    # `""` is not a real `rN` revision either.
+    sdk = make_sdk(tmp_path / "sdk")
+    write_metadata(sdk / "metadata", "E1M-TEST", "fake:soc:u55",
+                    [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}],
+                    ethos_u_variant="u55")
+    write(tmp_path / "source.tflite", "x")
+    write(tmp_path / "board.yaml",
+          "som:\n  sku: E1M-TEST\n  hw_rev: \"\"\n"
+          "models:\n  - name: m\n    source: source.tflite\n")
+    result = runner.invoke(
+        app, ["check", "--project", str(tmp_path), "--sdk-root", str(sdk), "--format", "json"],
+    )
+    assert result.exit_code == 2
+    assert envelope(result)["issues"][0]["code"] == "model.board-yaml-invalid"
+
+
 def test_no_models_declared_is_a_success_no_op(tmp_path):
     sdk = make_sdk(tmp_path / "sdk")
     board_yaml(tmp_path)

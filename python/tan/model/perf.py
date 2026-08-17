@@ -211,7 +211,12 @@ def _millis(doc: dict, key: str) -> float | None:
     value = doc.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value) if value > 0 else None
+    # `>= 0`, not `> 0`: a `0` here is a MEASURED zero (`PerfPoint`'s own
+    # docstring), the same reading `_count` above already gives a `0` op
+    # count. `> 0` silently turned a real "0.0 ms" latency into "not
+    # measured" -- indistinguishable from an omitted key on the wire
+    # (tan-cli#791 review NIT (a)).
+    return float(value) if value >= 0 else None
 
 
 def _identity(doc: dict) -> dict | None:
@@ -305,9 +310,21 @@ def read_perf_point(path: Path) -> PerfPoint | None:
 # `core` and `toolchain_version` may be left unstated -- there is no local
 # toolchain to read a version off in the tier-2 premise, and nothing ties a
 # declared model to a core on a multi-core module -- and an unstated field is
-# simply not narrowed on. It is never guessed, and it never widens a match: it
-# only leaves MORE points standing, which the rule below then refuses to pick
-# between.
+# simply not narrowed on BY THIS FUNCTION: within `find_perf_points` alone, it
+# is never guessed, and it never widens a match, it only leaves MORE points
+# standing here.
+#
+# THAT IS NOT THE WHOLE PIPELINE'S GUARANTEE, though, and stating it as one
+# used to overclaim (tan-cli#791 review item 2 -- the eight-identity-fields
+# match was six fields exact plus two that narrowed only sometimes, not
+# eight). A CALLER holding a sourced silicon fact this function's own query
+# shape has no field for -- "which cores does this die pair to ANY npu of
+# this backend", not just to the one specific accelerator being screened --
+# may narrow FURTHER, by filtering what this function hands back
+# (`tan.model.perf_apply._paired_cores_for_backend`). `core` can therefore
+# still end up narrowed in practice even when the QUERY passed here left it
+# `None`; what never happens, in this function or the layer above it, is
+# WIDENING -- inferring a match a sourced fact does not support.
 #
 # THE TOOLCHAIN PROFILE IS IDENTITY BUT NOT KEY. `system_config`/`memory_mode`/
 # `pins` are digested into the filename's `+<profile12>` segment, but a customer
@@ -319,9 +336,13 @@ def read_perf_point(path: Path) -> PerfPoint | None:
 # and picks nothing; `find_perf_point` returns `None`. Picking arbitrarily is
 # what the collision test already demonstrated the cost of: its survivor was the
 # DRAM-backed profile, exactly measured and describing a part with no DRAM. A
-# caller holding a silicon fact may of course choose -- `tan.model.check`
+# caller holding a silicon fact may of course choose -- `tan.model.perf_apply`
 # narrows on the profile the SoC spec's own `npu_toolchain` block declares for
-# the part -- but that decision belongs where the silicon facts are, not here.
+# the part, and it does so BEFORE trusting even a single standing point, not
+# only as a tiebreak once two or more survive (tan-cli#791 review item 1 -- a
+# lone point captured under a profile the part does not declare used to be
+# handed back unfiltered at `confidence: "certain"`) -- but that decision
+# belongs where the silicon facts are, not here.
 #
 # THE PATH IS AN INDEX, THE BODY IS THE TRUTH. `<root>/<sku>/<target>/` narrows
 # the search cheaply, but every field is then re-checked against the document
@@ -361,8 +382,13 @@ def find_perf_points(*, sku: str, backend: str, accel_config: str,
     root = perf_points_root(metadata_root)
     if not root.is_dir():
         return []                       # the ordinary case, not an error
-    if hw_rev is None:
-        return []                       # an unknown module revision matches nothing
+    # No separate `hw_rev is None: return []` early return here (tan-cli#791
+    # review NIT (b)): `point.hw_rev == hw_rev` below already refuses on its
+    # own -- `PerfPoint.hw_rev` is a REQUIRED, always-non-empty field
+    # (`_identity`'s own `all(out.values())` gate), so it can never equal a
+    # `None` query value, and the dedicated early return was provably dead
+    # (measured: deleting it alone left `tests/model` fully green; only the
+    # comparison operator's own mutants went red).
     wanted = model_sha256.strip().lower()
     if len(wanted) != 64 or any(c not in "0123456789abcdef" for c in wanted):
         return []

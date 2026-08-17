@@ -160,11 +160,18 @@ class BackendReport:
     # compile against a bench point figure-by-figure instead of by parsing its
     # own sentence back.
     #
-    # The three latency fields and `perf_ref` are `basis: "bench"` only: a
-    # compile reports no wall-clock, and only a bench point cites a raw capture
-    # (`capture.reference`, e.g. `alp-sdk-internal:bench/captures/...`). A
-    # latency without `latency_runs` is a single shot rather than a
-    # measurement, which is why the count travels with the figures.
+    # The three latency fields and `perf_ref` are set at `basis: "bench"` --
+    # a compile reports no wall-clock, and only a bench point cites a raw
+    # capture (`capture.reference`, e.g. `alp-sdk-internal:bench/captures/
+    # ...`) -- OR, informationally, on a `basis: "compiled"` report that names
+    # a disagreeing bench point in its notes
+    # (`tan.model.perf_apply.apply_perf_point`'s Decision 1: the customer's
+    # own compile still wins on coverage/arena/SRAM, but Alp Lab's own
+    # measured latency and traceable capture have no compiled counterpart to
+    # disagree WITH, so they ride alongside rather than being discarded --
+    # tan-cli#791 review item 3). A latency without `latency_runs` is a single
+    # shot rather than a measurement, which is why the count travels with the
+    # figures.
     arena_bytes: int | None = None
     req_sram_kib: int | None = None
     latency_ms_mean: float | None = None
