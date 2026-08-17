@@ -1363,6 +1363,59 @@ def test_a_core_the_soms_topology_does_declare_still_answers_on_an_unpaired_die(
     assert _check_imx93(tmp_path).basis == "bench"
 
 
+def test_a_som_preset_missing_topology_entirely_refuses_every_point(tmp_path):
+    """LEVEL 1's fail-CLOSED behaviour for a SoM preset that drops `topology:`
+    entirely (tan-cli#791 round-2 review, item 1 gap): `_topology_core_ids`'s
+    own docstring says `set()` -- "REFUSES every point, never admits one"
+    (`perf_apply.py:229`) -- so an otherwise-perfect point (right SKU, right
+    hw_rev, right core, right backend, right sha256, right toolchain) must
+    still be refused when the preset carries no `topology:` block at all,
+    exactly as decisively as `test_a_core_absent_from_the_soms_topology_is_
+    refused_even_when_the_die_pairs_nothing` (above) refuses a bogus CORE.
+
+    Mutation-proof: gating the level-1 filter behind `if topology_cores:` --
+    the EXACT fail-open shape the old `if allowed_cores:` guard was fixed
+    for at level 2 -- turns this test RED, because an empty `topology_cores`
+    would then skip the filter instead of refusing everything through it."""
+    _imx93_shaped_tree(tmp_path, topology=None)
+    baseline = _check_imx93(tmp_path)
+    assert baseline.basis == "static-screen"
+    _write_perf_point(tmp_path, sku="E1M-FAKE", hw_rev="r1", core="a55_cluster",
+                      backend="ethos_u", accel_config="ethos-u65-256",
+                      filename="tiny-int8-aaaa@vela-5.1.0+r1+a55_cluster+aaaaaaaaaaaa.json")
+    result = _check_imx93(tmp_path)
+    assert result == baseline                     # refused, not consumed
+    assert not any("refused" in n for n in result.notes)  # silent, per the
+    # "absent means refuse" contract `_topology_core_ids`'s own docstring
+    # claims -- level 1's refusal note stays unset (only level 2's paired-
+    # core union ever sets `_resolve_perf_point`'s `note`), same as a wrong
+    # SKU/hw_rev/model/toolchain refusal elsewhere in this reader.
+
+
+def test_a_som_preset_with_an_empty_topology_block_refuses_every_point(tmp_path):
+    """The other half of the same fail-closed contract: `topology: {}` --
+    PRESENT but empty -- reaches `_topology_core_ids` as an empty dict, not a
+    missing key. `isinstance({}, dict)` is True, so `set({})` is still
+    `set()`, the same refuse-everything answer as a dropped key entirely
+    (`_topology_core_ids`'s own docstring: "a preset that dropped `topology:`
+    entirely OR left it malformed"). `_write_som`'s `topology=` truthiness
+    check (`if topology:`) cannot express this shape on its own -- an empty
+    tuple is exactly as falsy as `None` -- so this test appends the block by
+    hand onto the preset `_imx93_shaped_tree` already wrote with `topology=
+    None`."""
+    _imx93_shaped_tree(tmp_path, topology=None)
+    som_path = tmp_path / "e1m_modules" / "E1M-FAKE.yaml"
+    som_path.write_text(som_path.read_text() + "topology: {}\n", encoding="utf-8")
+    baseline = _check_imx93(tmp_path)
+    assert baseline.basis == "static-screen"
+    _write_perf_point(tmp_path, sku="E1M-FAKE", hw_rev="r1", core="a55_cluster",
+                      backend="ethos_u", accel_config="ethos-u65-256",
+                      filename="tiny-int8-aaaa@vela-5.1.0+r1+a55_cluster+aaaaaaaaaaaa.json")
+    result = _check_imx93(tmp_path)
+    assert result == baseline                     # refused, not consumed
+    assert not any("refused" in n for n in result.notes)
+
+
 # ---------------------------------------------------------------------------
 # THE BLOCKER FIX (tan-cli#791 review item 1): the profile tiebreak used to
 # apply ONLY once two or more points survived every other filter, so a SINGLE

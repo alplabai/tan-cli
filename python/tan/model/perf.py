@@ -317,14 +317,23 @@ def read_perf_point(path: Path) -> PerfPoint | None:
 # THAT IS NOT THE WHOLE PIPELINE'S GUARANTEE, though, and stating it as one
 # used to overclaim (tan-cli#791 review item 2 -- the eight-identity-fields
 # match was six fields exact plus two that narrowed only sometimes, not
-# eight). A CALLER holding a sourced silicon fact this function's own query
-# shape has no field for -- "which cores does this die pair to ANY npu of
-# this backend", not just to the one specific accelerator being screened --
-# may narrow FURTHER, by filtering what this function hands back
-# (`tan.model.perf_apply._paired_cores_for_backend`). `core` can therefore
-# still end up narrowed in practice even when the QUERY passed here left it
-# `None`; what never happens, in this function or the layer above it, is
-# WIDENING -- inferring a match a sourced fact does not support.
+# eight). TWO caller-side levels narrow `core` further than this function's
+# own query shape can (both in `tan.model.perf_apply._resolve_perf_point`,
+# tan-cli#791 round-2 review item 1). LEVEL 1 (`_topology_core_ids`) is
+# UNCONDITIONAL: a point's core must exist in @sku's OWN `topology:` map at
+# all, for EVERY backend on EVERY SKU, whether or not anything pairs an NPU
+# to a core -- and on E1M-NX9101/imx93 and on every drpai/deepx_dxm1 SoM
+# published today (no SoC spec of either kind ever names `paired_core`),
+# level 1 is the ONLY level that ever acts, because level 2 (below) is a
+# structural no-op for them. LEVEL 2 (`_paired_cores_for_backend`) narrows
+# FURTHER but only CONDITIONALLY, where a sourced silicon fact this
+# function's own query shape has no field for -- "which cores does this die
+# pair to ANY npu of this backend", not just to the one specific accelerator
+# being screened -- actually states an opinion; it refines what level 1
+# already let through, never substitutes for it. `core` can therefore still
+# end up narrowed in practice even when the QUERY passed here left it
+# `None`; what never happens, in this function or either caller-side level,
+# is WIDENING -- inferring a match a sourced fact does not support.
 #
 # THE TOOLCHAIN PROFILE IS IDENTITY BUT NOT KEY. `system_config`/`memory_mode`/
 # `pins` are digested into the filename's `+<profile12>` segment, but a customer

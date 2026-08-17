@@ -413,15 +413,19 @@ def _perf_disagreement_note(point: PerfPoint, diffs: list[str]) -> str:
 
 #: A note whose text starts with `"--exact"` is a diagnostic about THIS RUN's
 #: HOST/toolchain environment for the customer's `--exact` request (vela
-#: absent, license-gated, footprint refused, ...) -- see every note-authoring
-#: site in `tan.model.check`'s exact-compile path, which all share this
-#: prefix by construction. `_perf_point_report` (below) uses it to tell that
-#: kind of note apart from a BASIS-describing one (the static-screen prose, a
-#: real vela placement summary): the former survives a re-base onto a bench
-#: point because it is still true of this run; the latter does not, because it
-#: describes a basis the report no longer has (tan-cli#791 review item 4:
-#: measured the "--exact was requested, but vela is not on PATH" note present
-#: with no perf point and GONE the moment one matched).
+#: absent, license-gated, footprint refused, ...) -- every HOST-fact
+#: note-authoring site in `tan.model.check`'s exact-compile path shares this
+#: prefix by construction (`_license_gated_exact_note`, `_footprint_refused_
+#: note`, and every degrade branch in `_maybe_exact_ethos_u`/`_vela_placement_
+#: unreadable`). The BASIS-clause sites in that SAME path deliberately do
+#: NOT share it -- "This stays the static screen."/"Reporting the static
+#: screen instead." (`check.py:233`, `:341`, `:387`, `:429`, `:518`) -- and
+#: that is by design, not an oversight: `_perf_point_report` (below) uses the
+#: prefix to tell the two kinds of note apart. The former survives a re-base
+#: onto a bench point because it is still true of this run; the latter does
+#: not, because it describes a basis the report no longer has (tan-cli#791
+#: review item 4: measured the "--exact was requested, but vela is not on
+#: PATH" note present with no perf point and GONE the moment one matched).
 _EXACT_HOST_NOTE_PREFIX = "--exact"
 
 
