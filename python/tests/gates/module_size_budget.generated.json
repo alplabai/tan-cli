@@ -5,8 +5,8 @@
   "modules": {
     "tan/cli.py": 1008,
     "tan/commands/bootstrap_cmd.py": 3286,
-    "tan/commands/build/execute.py": 1643,
-    "tan/commands/build_cmd.py": 2161,
+    "tan/commands/build/execute.py": 1662,
+    "tan/commands/build_cmd.py": 2172,
     "tan/commands/clean_cmd.py": 1110,
     "tan/commands/debug_config_cmd.py": 1949,
     "tan/commands/diff_cmd.py": 882,
@@ -17,7 +17,7 @@
     "tan/commands/init_cmd.py": 1258,
     "tan/commands/model_cmd.py": 1059,
     "tan/commands/new_som_cmd.py": 1361,
-    "tan/commands/renode_cmd.py": 1533,
+    "tan/commands/renode_cmd.py": 1587,
     "tan/commands/sdk_cmd.py": 1415,
     "tan/commands/size_cmd.py": 831,
     "tan/commands/support_bundle_cmd.py": 1066,
@@ -32,6 +32,6 @@
     "tan/planner/template.py": 1436,
     "tan/planner/zephyr_board.py": 1486
   },
-  "function_count_budget": 272,
+  "function_count_budget": 273,
   "function_worst_budget": 747
 }

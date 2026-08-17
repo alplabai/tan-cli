@@ -184,3 +184,13 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-17 -- tan-cli#791 review MINOR 5: _declared_hw_rev now fails CLOSED (ModelError) on a present-but-unusable som.hw_rev (e.g. an unquoted YAML int) instead of silently falling through to the SKU preset's default_hw_rev; function_count_budget's 269->270 (pre-drift) is a pre-existing gap measured before any edit this session (git stash showed 270 over 50 lines against a committed 269 budget), fixed here alongside the real growth
     - tan/commands/model_cmd.py: 1029 -> 1059
     - function_count_budget: 269 -> 272
+- 2026-08-16 -- tan-cli#795 (as measured on the origin/dev side before this merge): relocate the expect_dpidr width guard, same change as above -- two branches' independent regens disagreed by 2 lines on flash_plan.py's total because of what else was in each tree at the time; kept as its own line rather than overwritten, per this log's own "two branches ... produce two lines" design
+    - tan/core/flash_plan.py: 3164 -> 3199
+- 2026-08-16 -- tan-cli#798/#801: build_root anchoring for the split-layout configure-cache guard, plus coupling the missing-tool message to a shared plan_exec constant, need a few lines of call-site docstring in execute.py and build_cmd.py that don't belong split elsewhere
+    - tan/commands/build/execute.py: 1643 -> 1662
+    - tan/commands/build_cmd.py: 2161 -> 2172
+- 2026-08-16 -- tan-cli#804: consume _teardown_sim's grace-loop poll (which already waits up to _QUIT_GRACE_S) as the sim-exited-early source at --timeout 0, discriminated via a surfaced quit() write-failure or a nonzero exit code so a healthy quit-driven shutdown is never misreported
+    - tan/commands/renode_cmd.py: 1533 -> 1587
+    - function_count_budget: 260 -> 261
+- 2026-08-17 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 272 -> 273

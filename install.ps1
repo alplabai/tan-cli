@@ -521,6 +521,14 @@ try {
 	# tan.cmd sitting beside it) -- whichever one is not being installed is
 	# backed up and only discarded once the new install is proven in place,
 	# never deleted up front.
+	#
+	# The three renames below and the payload swap that follows are ONE
+	# critical section, all inside the same try below (tan-cli#794): a
+	# Move-Item failing partway through the BACKUP renames is exactly as
+	# dangerous as one failing while placing the new payload -- either way the
+	# user can be left without a `tan` on PATH -- so both must land in the
+	# same $commitError/Restore-Previous rollback path rather than the backup
+	# renames running bare ahead of the only try/catch in this script.
 	# -------------------------------------------------------------------------
 	$destCmdBak = "$destCmd.bak"
 	$destExeBak = "$destExe.bak"
@@ -528,28 +536,33 @@ try {
 	$hadDestCmdBackup = $false
 	$hadDestExeBackup = $false
 	$hadLibBackup = $false
-	if (Test-Path -LiteralPath $destCmd) {
-		Remove-Item -LiteralPath $destCmdBak -Force -ErrorAction SilentlyContinue
-		Move-Item -LiteralPath $destCmd -Destination $destCmdBak -Force
-		$hadDestCmdBackup = $true
-	}
-	if (Test-Path -LiteralPath $destExe) {
-		Remove-Item -LiteralPath $destExeBak -Force -ErrorAction SilentlyContinue
-		Move-Item -LiteralPath $destExe -Destination $destExeBak -Force
-		$hadDestExeBackup = $true
-	}
-	if (Test-Path -LiteralPath $LibDir) {
-		Remove-Item -LiteralPath $libDirBak -Recurse -Force -ErrorAction SilentlyContinue
-		Move-Item -LiteralPath $LibDir -Destination $libDirBak -Force
-		$hadLibBackup = $true
-	}
+	$backupsDone = $false
 
 	function Restore-Previous {
-		# Restores every backup taken above; returns whether it fully succeeded.
+		# Restores every backup taken below; returns whether it fully succeeded.
+		# Needs $hadDestCmdBackup/$hadDestExeBackup/$hadLibBackup/$backupsDone,
+		# which is why it is defined after those are initialized -- PowerShell
+		# resolves a function's body at CALL time, not definition time, so
+		# where this sits relative to the backup renames below is otherwise
+		# inert. What actually makes this reachable from a throw during the
+		# very first backup rename is the try/catch boundary around both the
+		# backup renames AND the payload swap below (tan-cli#794).
+		#
+		# The three removes below are gated on $backupsDone (tan-cli#794
+		# review, finding 1): Restore-Previous is now reachable mid-way
+		# through the backup renames themselves, and at that point whatever
+		# still sits at $destCmd/$destExe/$LibDir is the UN-BACKED-UP previous
+		# install, not new payload -- deleting it unconditionally would
+		# destroy the very thing this function exists to save. Only once
+		# $backupsDone is set (all three backup renames completed) is
+		# anything at those paths guaranteed to be new payload, safe to clear
+		# before moving the backups back.
 		$ok = $true
-		Remove-Item -LiteralPath $destCmd -Force -ErrorAction SilentlyContinue
-		Remove-Item -LiteralPath $destExe -Force -ErrorAction SilentlyContinue
-		Remove-Item -LiteralPath $LibDir -Recurse -Force -ErrorAction SilentlyContinue
+		if ($backupsDone) {
+			Remove-Item -LiteralPath $destCmd -Force -ErrorAction SilentlyContinue
+			Remove-Item -LiteralPath $destExe -Force -ErrorAction SilentlyContinue
+			Remove-Item -LiteralPath $LibDir -Recurse -Force -ErrorAction SilentlyContinue
+		}
 		if ($hadDestCmdBackup) {
 			try { Move-Item -LiteralPath $destCmdBak -Destination $destCmd -Force } catch { $ok = $false }
 		}
@@ -606,8 +619,38 @@ try {
 		}
 	}
 
+	# Captured before the try below (tan-cli#794 review, finding 3): ground
+	# truth about whether a previous install existed at all, independent of
+	# how far the backup/commit phase below got. Selecting the "no previous
+	# installation existed" message off the $had*Backup flags instead (as
+	# before) was wrong the moment the very first backup rename itself threw
+	# -- $destCmd could Test-Path true one line above and still leave every
+	# $had*Backup flag $false, since the flag is only set AFTER its rename
+	# succeeds.
+	$hadAnyPrevious = (Test-Path -LiteralPath $destCmd) -or (Test-Path -LiteralPath $destExe) -or (Test-Path -LiteralPath $LibDir)
+
 	$commitError = $null
 	try {
+		if (Test-Path -LiteralPath $destCmd) {
+			Remove-Item -LiteralPath $destCmdBak -Force -ErrorAction SilentlyContinue
+			Move-Item -LiteralPath $destCmd -Destination $destCmdBak -Force
+			$hadDestCmdBackup = $true
+		}
+		if (Test-Path -LiteralPath $destExe) {
+			Remove-Item -LiteralPath $destExeBak -Force -ErrorAction SilentlyContinue
+			Move-Item -LiteralPath $destExe -Destination $destExeBak -Force
+			$hadDestExeBackup = $true
+		}
+		if (Test-Path -LiteralPath $LibDir) {
+			Remove-Item -LiteralPath $libDirBak -Recurse -Force -ErrorAction SilentlyContinue
+			Move-Item -LiteralPath $LibDir -Destination $libDirBak -Force
+			$hadLibBackup = $true
+		}
+		# All three backup renames completed -- anything still at $destCmd/
+		# $destExe/$LibDir from here on is new payload this run itself places,
+		# never the previous install (tan-cli#794 review, finding 1).
+		$backupsDone = $true
+
 		if ($layout -eq "archive") {
 			Move-Item -LiteralPath (Join-Path $stage "tan") -Destination $LibDir -Force
 
@@ -636,9 +679,13 @@ exit /b %ERRORLEVEL%
 	}
 
 	if ($commitError) {
-		Write-Host "install.ps1: failed to place the new install under $Dir -- rolling back: $commitError" -ForegroundColor Red
+		if ($backupsDone) {
+			Write-Host "install.ps1: failed to place the new install under $Dir -- rolling back: $commitError" -ForegroundColor Red
+		} else {
+			Write-Host "install.ps1: failed to back up the previous install under $Dir before placing the new one -- rolling back: $commitError" -ForegroundColor Red
+		}
 		$restored = Restore-Previous
-		if (-not ($hadDestCmdBackup -or $hadDestExeBackup -or $hadLibBackup)) {
+		if (-not $hadAnyPrevious) {
 			Write-Host "install.ps1: no previous installation existed; nothing to restore. Install failed." -ForegroundColor Red
 		} elseif ($restored) {
 			Write-Host "install.ps1: previous installation restored -- 'tan' still works as before. Install failed." -ForegroundColor Red

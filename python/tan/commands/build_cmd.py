@@ -106,7 +106,13 @@ from tan.commands.sdk_cmd import (
     resolve_sdk_tiered,
 )
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
-from tan.core.plan_exec import CROSS_DRIVE_MSG, PolicyAction, normalize_path, resolve_action
+from tan.core.plan_exec import (
+    CROSS_DRIVE_MSG,
+    MISSING_TOOL_RE,
+    PolicyAction,
+    normalize_path,
+    resolve_action,
+)
 from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT
 from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
@@ -1295,15 +1301,22 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     failed) slice could not find on this host.
 
     Matched on `outcome.message` rather than re-probing PATH a second time:
-    `execute_slices`' missing-tool branch (`build/execute.py`) is the ONLY
-    skip/fail reason that STARTS `` tool `{tool}` not found `` -- a
-    null-command skip reads `` has no command `` (and its reason already
+    every missing-tool refusal `execute_slices` (`build/execute.py`) can
+    produce carries [`MISSING_TOOL_RE`]'s shape somewhere in the message --
+    a null-command skip reads `` has no command `` (and its reason already
     lives in `plan.warnings`, I-11), and an unknown-backend one is caught
     structurally by `_backend_issues` above -- so this recovers exactly the
-    missing-tool cases and nothing else. `startswith` only, not also
-    `endswith` (tan-cli#510 dropped that half): the message now carries a
-    `-- searched ...` tail naming what `_resolve_tool` walked, so it no
-    longer ends on the literal `` not found ``.
+    missing-tool cases and nothing else.
+
+    tan-cli#801: this used to require the marker at the message's START
+    (`message.startswith("tool `")`), which matched only the slice's own
+    `command` precheck. The #550 post-build-step refusal
+    (`_missing_post_tool`) puts the SAME phrase after a `` slice `{core_id}`
+    post-build step N of M (`{label}`) cannot run: `` lead-in, so it never
+    started with the marker and this promoter silently dropped it -- the
+    exact silence tan-cli#283 was filed to close, just for a different
+    refusal site. `.search`, not `startswith`: the marker's position is not
+    part of the contract, only whether the message carries it at all.
 
     tan-cli#283: without this, `tan build` on a host missing `west`/`bitbake`
     reported each slice's specific reason only in `data.slices[].reason` --
@@ -1312,9 +1325,7 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     issues = []
     for sl, outcome in zip(plan.slices, outcomes, strict=True):
         message = outcome.message
-        if message is None or not message.startswith("tool `"):
-            continue
-        if "` not found" not in message:
+        if message is None or not MISSING_TOOL_RE.search(message):
             continue
         failed = outcome.status == "failed"
         issues.append(

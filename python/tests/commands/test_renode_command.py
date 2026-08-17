@@ -122,6 +122,8 @@ def _write_fake_sim_renode(
     preamble: list[str] | None = None,
     exit_after_s: float | None = None,
     exit_code: int = 0,
+    exit_after_first_echo_code: int | None = None,
+    exit_after_first_echo_delay_s: float | None = None,
 ) -> None:
     """A fake `renode` on PATH for `--sim-mode` tests: an interactive stub
     that answers just enough of the monitor line protocol for
@@ -147,7 +149,38 @@ def _write_fake_sim_renode(
     `renode.sim-exited-early` on a session whose `drain_boot` already
     succeeded, distinct from `renode.sim-monitor-failed` (which fires when
     the child is gone before `drain_boot` ever gets a reply).
+
+    `exit_after_first_echo_code` exits SYNCHRONOUSLY, in the same thread,
+    right after answering the very first `echo "<sentinel>"` -- i.e. right
+    after `drain_boot`'s own round trip succeeds -- instead of on a timer.
+    That makes the child ALREADY exited by the time `_run_sim` reaches
+    its post-boot `proc.poll()`, deterministically, rather than racing a
+    sleep against it; used for the `--timeout 0` regression (tan-cli#804),
+    where the hold loop polls only once and a timer-based exit can't be
+    trusted to land before that single poll.
+
+    `exit_after_first_echo_delay_s`, combined with `exit_after_first_echo_code`,
+    inserts a SYNCHRONOUS `time.sleep` between the echo reply and the
+    `os._exit` -- the child is still provably alive (and its stdin pipe
+    still open) at the moment `_run_sim`'s up-front poll AND
+    `_teardown_sim`'s `quit()` write both happen, and only dies partway
+    through `_teardown_sim`'s own `_QUIT_GRACE_S` wait. This is the
+    reviewer's deterministic reproduction of the tan-cli#804 CI red: it
+    does not depend on `os._exit` racing a poll at spawn time, it forces
+    the death to land inside the one window (the grace loop) that is
+    actually guaranteed to observe it.
     """
+    if exit_after_s is not None and exit_after_first_echo_code is not None:
+        raise ValueError(
+            "exit_after_s and exit_after_first_echo_code are mutually exclusive: the "
+            "echo-branch os._exit()s before the timer thread ever fires, making the "
+            "timer dead weight"
+        )
+    if exit_after_first_echo_delay_s is not None and exit_after_first_echo_code is None:
+        raise ValueError(
+            "exit_after_first_echo_delay_s only makes sense alongside "
+            "exit_after_first_echo_code -- there is no os._exit to delay otherwise"
+        )
     bin_dir.mkdir(parents=True, exist_ok=True)
     impl = bin_dir / "_fake_sim_renode_impl.py"
     preamble_src = "\n".join(f"print({line!r}); sys.stdout.flush()" for line in (preamble or []))
@@ -156,6 +189,16 @@ def _write_fake_sim_renode(
         "daemon=True).start()\n"
         if exit_after_s is not None
         else ""
+    )
+    echo_delay_src = (
+        f"time.sleep({exit_after_first_echo_delay_s}); "
+        if exit_after_first_echo_delay_s is not None
+        else ""
+    )
+    echo_action_src = (
+        f"print(s[6:-1]); sys.stdout.flush(); {echo_delay_src}os._exit({exit_after_first_echo_code})"
+        if exit_after_first_echo_code is not None
+        else "print(s[6:-1]); sys.stdout.flush(); continue"
     )
     body = f'''\
 import os, sys, time, threading
@@ -169,7 +212,7 @@ while True:
         break
     s = raw.rstrip("\\r\\n").strip()
     if s.startswith('echo "') and s.endswith('"'):
-        print(s[6:-1]); sys.stdout.flush(); continue
+        {echo_action_src}
     if s == "quit":
         sys.exit(0)
     parts = s.split()
@@ -1164,6 +1207,112 @@ def test_sim_mode_exited_early_after_drain_boot_succeeded(tmp_path: Path):
     assert exit_code == 1
     assert envelope["issues"][0]["code"] == "renode.sim-exited-early"
     assert "exit code 9" in envelope["issues"][0]["message"]
+
+
+def test_sim_mode_timeout_zero_still_reports_exited_early(tmp_path: Path):
+    """tan-cli#804: the hold loop used to compute
+    `deadline = time.monotonic() + timeout` and then guard on
+    `while time.monotonic() < deadline:` -- at `--timeout 0` the deadline is
+    already in the past the instant it's read, so the loop body (the only
+    place `proc.poll()` was called) never ran even once, `early_exit` stayed
+    `None`, and `renode.sim-exited-early` was structurally unreachable no
+    matter how the child actually exited. The fix polls once up front so a
+    child that is ALREADY dead by the time `_run_sim` reaches the hold
+    is still caught even at a zero-length hold."""
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(fake_bin, exit_after_first_echo_code=9)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "0",
+        "--format",
+        "json",
+        path_override=str(fake_bin),
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.sim-exited-early"
+    assert "exit code 9" in envelope["issues"][0]["message"]
+
+
+def test_sim_mode_timeout_zero_reports_a_death_that_lands_after_the_upfront_poll(
+    tmp_path: Path,
+):
+    """tan-cli#804, the actual CI-red shape: an up-front `proc.poll()` alone
+    (the first fix attempt) only catches a child that has ALREADY died by
+    the microsecond it's called -- at `--timeout 0` that's a race, and the
+    CI matrix lost it on all three OSes. A second fix attempt tried
+    latching `_teardown_sim`'s OWN pre-quit poll, but an instrumented build
+    proved that poll lands a mere ~48 microseconds after the up-front one
+    -- any runner slow enough to lose the first race loses the second one
+    too, so that attempt was inert against this exact regression.
+
+    This fake dies 50ms AFTER answering `drain_boot`'s echo -- well past
+    both of those near-simultaneous up-front polls, deterministically
+    (`time.sleep` is synchronous in the child, not a racy background timer)
+    -- so the ONLY thing that can observe it is `_teardown_sim`'s own
+    `_QUIT_GRACE_S` (1s) wait loop, which already runs for pre-existing
+    shutdown-grace reasons. `monitor.quit()`'s write still succeeds here
+    (the child is alive, just sleeping, when the request lands) -- the fix
+    must not need the write to fail to catch this; it has to notice the
+    nonzero exit code the grace loop itself observes."""
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(
+        fake_bin, exit_after_first_echo_code=9, exit_after_first_echo_delay_s=0.05
+    )
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "0",
+        "--format",
+        "json",
+        path_override=str(fake_bin),
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.sim-exited-early"
+    assert "exit code 9" in envelope["issues"][0]["message"]
+
+
+def test_sim_mode_timeout_zero_still_succeeds_for_a_healthy_child(tmp_path: Path):
+    """The positive control for tan-cli#804's fix: a `--timeout 0` run
+    against a Renode that is still alive (never exits) must keep succeeding
+    -- the up-front `proc.poll()` added for the regression above must only
+    ever OBSERVE the child, never affect a healthy zero-length hold. Pins
+    the deliberately-kept `ok:true` / `exitCode:0` behaviour so a later move
+    of the poll past `_teardown_sim` can't silently flip it."""
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(fake_bin)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "0",
+        "--format",
+        "json",
+        path_override=str(fake_bin),
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 0
+    assert envelope["ok"] is True
+    assert envelope["issues"][0]["code"] == "renode.sim-profile-deferred"
 
 
 def test_sim_mode_expect_is_ignored_with_an_info_issue(tmp_path: Path):
