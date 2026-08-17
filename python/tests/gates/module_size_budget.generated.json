@@ -32,6 +32,6 @@
     "tan/planner/template.py": 1436,
     "tan/planner/zephyr_board.py": 1486
   },
-  "function_count_budget": 274,
+  "function_count_budget": 273,
   "function_worst_budget": 747
 }

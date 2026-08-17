@@ -317,23 +317,31 @@ def read_perf_point(path: Path) -> PerfPoint | None:
 # THAT IS NOT THE WHOLE PIPELINE'S GUARANTEE, though, and stating it as one
 # used to overclaim (tan-cli#791 review item 2 -- the eight-identity-fields
 # match was six fields exact plus two that narrowed only sometimes, not
-# eight). TWO caller-side levels narrow `core` further than this function's
-# own query shape can (both in `tan.model.perf_apply._resolve_perf_point`,
-# tan-cli#791 round-2 review item 1). LEVEL 1 (`_topology_core_ids`) is
-# UNCONDITIONAL: a point's core must exist in @sku's OWN `topology:` map at
-# all, for EVERY backend on EVERY SKU, whether or not anything pairs an NPU
-# to a core -- and on E1M-NX9101/imx93 and on every drpai/deepx_dxm1 SoM
-# published today (no SoC spec of either kind ever names `paired_core`),
-# level 1 is the ONLY level that ever acts, because level 2 (below) is a
-# structural no-op for them. LEVEL 2 (`_paired_cores_for_backend`) narrows
-# FURTHER but only CONDITIONALLY, where a sourced silicon fact this
-# function's own query shape has no field for -- "which cores does this die
-# pair to ANY npu of this backend", not just to the one specific accelerator
-# being screened -- actually states an opinion; it refines what level 1
-# already let through, never substitutes for it. `core` can therefore still
-# end up narrowed in practice even when the QUERY passed here left it
-# `None`; what never happens, in this function or either caller-side level,
-# is WIDENING -- inferring a match a sourced fact does not support.
+# eight). ONE caller-side check narrows `core` further than this function's
+# own query shape can (`tan.model.perf_apply._topology_core_ids`, tan-cli#791
+# round-2 review item 1): a point's core must exist in @sku's OWN `topology:`
+# map at all, UNCONDITIONALLY, for EVERY backend on EVERY SKU, whether or not
+# the accelerator being screened pairs to a core -- this is what refuses
+# `m55_hp` on E1M-NX9101/imx93 (a real Ensemble core, not an imx93 one) or
+# `cortex_potato` anywhere, and on every drpai/deepx_dxm1 SoM published today
+# it is the ONLY thing that ever narrows `core` at all, because none of those
+# SoC specs ever names `paired_core`. A SECOND caller-side check used to also
+# narrow `core` here -- the UNION of `paired_core` across every NPU of a
+# backend on the die, applied even to an accelerator that named no pairing of
+# its own -- but that borrowed a fact from a SIBLING NPU rather than sourcing
+# one about the accelerator actually being screened, and newly-sourced
+# silicon evidence (the E8's Ethos-U85: a register alias byte-identical
+# across both M55 headers, no `Pname` on its vendor DFP element, clock-gated
+# system-side rather than from either core's own block) proved that
+# inference wrong for a genuinely shared NPU. It is gone (tan-cli#791
+# round-3): `core` now narrows to @target's own `paired_core` ONLY through
+# this function's QUERY parameter (above) -- a declared fact about the SAME
+# accelerator being screened -- and nothing wider. Where @target declares no
+# pairing of its own, `core` stays unnarrowed past the topology check, same
+# as every other unstated field in this match: a shared SoC-level NPU
+# legitimately declares no `paired_core` at all (alp-sdk's own
+# `soc-spec-v1.schema.json`), so a point naming any core the die's own
+# topology admits is not an unsourced guess to accept.
 #
 # THE TOOLCHAIN PROFILE IS IDENTITY BUT NOT KEY. `system_config`/`memory_mode`/
 # `pins` are digested into the filename's `+<profile12>` segment, but a customer

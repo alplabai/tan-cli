@@ -1193,24 +1193,21 @@ def test_a_point_measured_on_another_core_of_the_same_die_is_not_a_match(tmp_pat
 
 
 def test_a_part_that_pairs_no_core_narrows_on_none_and_infers_nothing(tmp_path):
-    """A die with a SINGLE Ethos-U NPU that pairs to no core at all -- the
-    E1M-NX9101/imx93 shape (its lone `ethos-u65` names no `paired_core`), NOT
-    the E8's (tan-cli#791 round-2 review item 6, NIT (b)): the E8 pairs each
-    of its two Ethos-U55s to an M55 and leaves only its Ethos-U85 unpaired,
-    so on the E8's die SOMETHING always pairs to SOME core -- the shape the
-    sibling test at `test_an_unpaired_variant_still_refuses_a_core_no_npu_on_
-    the_die_pairs_to` (below) actually covers, and where
-    `_paired_cores_for_backend`'s union is non-empty rather than `{}`. HERE,
-    where the whole backend's union really is `{}`, the metadata does not
-    know which core drove the inference, so tan does not guess: the core is
-    left unstated by level 2 (`_paired_cores_for_backend`), so a single
-    published point still answers -- and two points differing only in core
-    would leave two standing and fall through, which is the multi-match rule
-    doing its job rather than a core being invented. Level 1
-    (`_topology_core_ids`) still requires the core to be a REAL one this
-    fixture's own `topology:` declares (`m55_hp`/`m55_he`, part of
-    `_DEFAULT_TEST_TOPOLOGY`) -- the shape where even level 1 has nothing to
-    catch is covered separately, by the imx93-shaped tests below."""
+    """A die with a SINGLE Ethos-U NPU that itself declares no `paired_core`
+    -- the E1M-NX9101/imx93 shape (its lone `ethos-u65` names no
+    `paired_core`) as well as, since tan-cli#791 round-3's evidence-driven
+    narrowing, the E8's own Ethos-U85 (`test_an_unpaired_variant_accepts_
+    any_topology_core_the_die_admits`, below): whenever the SPECIFIC
+    accelerator being screened declares no pairing of its own, tan no longer
+    looks anywhere else on the die for one. The metadata does not know which
+    core drove the inference, so tan does not guess: a single published point
+    still answers -- and two points differing only in core would leave two
+    standing and fall through, which is the multi-match rule doing its job
+    rather than a core being invented. Level 1 (`_topology_core_ids`) still
+    requires the core to be a REAL one this fixture's own `topology:`
+    declares (`m55_hp`/`m55_he`, part of `_DEFAULT_TEST_TOPOLOGY`) -- the
+    shape where even level 1 has nothing to catch is covered separately, by
+    the imx93-shaped tests below."""
     _u55_tree(tmp_path, paired_core=None)
     _write_perf_point(tmp_path, core="m55_he")
     assert _check(tmp_path).basis == "bench"
@@ -1243,47 +1240,50 @@ def _e8_shaped_tree(meta: Path, *, memory_mode: str | None = "Sram_Only") -> Non
                  supported=["FULLY_CONNECTED"])
 
 
-def test_an_unpaired_variant_still_refuses_a_core_no_npu_on_the_die_pairs_to(tmp_path):
-    """MAJOR 2: `_headline_ethos_u_target` resolves the E8's Ethos-U85, which
-    pairs to no core of its own -- but a point measured on `a32_cluster` (the
-    Cortex-A32 application cluster, which drives no Ethos-U NPU on this die)
-    must still be refused, because the die's OTHER Ethos-U NPUs (its two
-    Ethos-U55s) prove a32_cluster is not a core anything here ever pairs to.
+def test_an_unpaired_variant_accepts_any_topology_core_the_die_admits(tmp_path):
+    """ROUND 3, evidence-driven correction of the prior round's MAJOR 2 fix:
+    `_headline_ethos_u_target` resolves the E8's Ethos-U85, which pairs to no
+    core of its own -- and a point measured on `a32_cluster` (the Cortex-A32
+    application cluster) is now ACCEPTED, not refused, because the die's
+    OTHER Ethos-U NPUs pairing to `m55_hp`/`m55_he` is not a sourced fact
+    about the U85 itself. Newly-sourced silicon evidence (a `NPU_HG_BASE`
+    register alias byte-identical across both M55 headers, no `Pname` on its
+    vendor DFP element, system-side clock gating) shows the U85 is genuinely
+    shared SoC-level silicon, and alp-sdk's own schema says a shared NPU
+    legitimately declares no `paired_core` at all -- so a point naming any
+    core this SKU's own `topology:` admits must not be refused on the
+    strength of a SIBLING NPU's pairing.
 
-    Also proves LEVEL 2 independently of LEVEL 1 (tan-cli#791 round-2 review
-    item 1's mutation-proof bar): `a32_cluster` IS a real core in this SKU's
-    own `topology:` (`_DEFAULT_TEST_TOPOLOGY`), so level 1
-    (`_topology_core_ids`) has nothing to say about it -- only level 2
-    (`_paired_cores_for_backend`) refuses it here, so this test still fails
-    if level 2 is neutered even though level 1 stays fully intact.
+    Proves this independently of LEVEL 1 (tan-cli#791 round-2 review item 1's
+    mutation-proof bar): `a32_cluster` IS a real core in this SKU's own
+    `topology:` (`_DEFAULT_TEST_TOPOLOGY`), so level 1 (`_topology_core_ids`)
+    would admit it regardless -- this test fails only if a union-style
+    inference over sibling NPUs is reintroduced and refuses it again.
 
-    tan-cli#791 round-2 review item 2: the refusal must not be SILENT any
-    more -- a note names the refused point, so a campaign that publishes an
-    unreadable point learns it from tan rather than from a static-screen
-    report with no explanation at all."""
+    MUTATION PROOF: re-adding the old union check (`{t.paired_core for t in
+    resolve_targets(...) if t.backend == backend and t.paired_core}`, applied
+    whenever non-empty) turns this test RED -- `a32_cluster` is not in that
+    union (only `m55_hp`/`m55_he` are), so the point would be refused again
+    and `rep.basis` would stay `"static-screen"`."""
     _e8_shaped_tree(tmp_path)
     baseline = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE",
                                     source=_FIXTURE, metadata_root=tmp_path,
                                     exact=False, hw_rev="r2")[0]
     assert baseline.basis == "static-screen"
-    assert not any("refused" in n for n in baseline.notes)
     _write_perf_point(tmp_path, sku="E1M-FAKE", accel_config="ethos-u85-256",
                       core="a32_cluster")
     rep = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE",
                                source=_FIXTURE, metadata_root=tmp_path,
                                exact=False, hw_rev="r2")[0]
-    assert rep.basis == "static-screen"          # refused, not consumed
-    note = next(n for n in rep.notes if "refused" in n)
-    assert "a32_cluster" in note
-    assert "m55_hp" in note or "m55_he" in note   # names what IS paired here
+    assert rep.basis == "bench"                   # accepted, not refused
+    assert not any("refused" in n for n in rep.notes)
 
 
 def test_an_unpaired_variant_accepts_a_core_a_sibling_npu_does_pair_to(tmp_path):
-    # The narrowing is a REFUSAL of cores nothing pairs to, not an invented
-    # requirement that the point match the SPECIFIC target's own pairing --
-    # the U85 itself still pairs to nothing, so a point measured on m55_hp
-    # (a real pairing on THIS die, just for a different NPU) is not rejected
-    # by this guard.
+    # An accelerator that itself pairs to no core does not reject a point
+    # measured on a core a DIFFERENT NPU on the same die happens to pair to,
+    # either -- `m55_hp` is a real pairing on THIS die, just for a different
+    # NPU, and nothing about the U85 contradicts it.
     _e8_shaped_tree(tmp_path)
     _write_perf_point(tmp_path, sku="E1M-FAKE", accel_config="ethos-u85-256",
                       core="m55_hp")
@@ -1311,12 +1311,12 @@ def _imx93_shaped_tree(meta: Path, *, topology: tuple[str, ...] = ("a55_cluster"
     `npus[].paired_core` and no `npu_toolchain` block either, matched here by
     leaving both out), on a SoM preset whose `topology:` is `a55_cluster` +
     `m33` -- the real E1M-NX9101.yaml's own two entries, not `m55_hp` or
-    anything Ensemble-shaped. `_paired_cores_for_backend` answers `{}` for
-    this die (nothing pairs), so this shape is the one where level 1 is the
-    ONLY thing that can ever refuse a bad core -- level 2 is structurally a
-    no-op here, which is what makes a test against this fixture a proof of
-    level 1 INDEPENDENTLY of level 2, not a proof that happens to pass either
-    way."""
+    anything Ensemble-shaped. The lone `ethos-u65` target's own `paired_core`
+    is `None`, so the exact-match query has nothing to narrow `core` on for
+    this die, which is what makes this shape the one where level 1
+    (`_topology_core_ids`) is the ONLY thing that can ever refuse a bad
+    core -- a test against this fixture is a proof of level 1 in isolation,
+    not a proof that happens to pass either way."""
     _write_som(meta, "E1M-FAKE", "fake:soc:u65", ethos_u_variant="u65",
                default_hw_rev="r1", topology=topology)
     _write_soc(meta, "fake:soc:u65", [{"type": "ethos-u65", "subtype": "x", "mac_per_cycle": 256}])
@@ -1351,11 +1351,11 @@ def test_a_core_absent_from_the_soms_topology_is_refused_even_when_the_die_pairs
 
 def test_a_core_the_soms_topology_does_declare_still_answers_on_an_unpaired_die(tmp_path):
     """The ordinary case must not regress: E1M-NX9101's own `a55_cluster` (a
-    REAL core in the SKU's `topology:`) still answers, even though nothing on
-    this die pairs an Ethos-U NPU to any core at all -- level 2 leaves core
-    unnarrowed here (as alp-sdk's own docs say it must: "do not invent the
-    pairing... record the core you actually ran on"), and level 1 has nothing
-    to refuse about a core that genuinely exists."""
+    REAL core in the SKU's `topology:`) still answers, even though the lone
+    `ethos-u65` on this die pairs to no core at all -- core stays unnarrowed
+    past the exact-match query here (as alp-sdk's own docs say it must: "do
+    not invent the pairing... record the core you actually ran on"), and
+    level 1 has nothing to refuse about a core that genuinely exists."""
     _imx93_shaped_tree(tmp_path)
     _write_perf_point(tmp_path, sku="E1M-FAKE", hw_rev="r1", core="a55_cluster",
                       backend="ethos_u", accel_config="ethos-u65-256",
@@ -1374,9 +1374,10 @@ def test_a_som_preset_missing_topology_entirely_refuses_every_point(tmp_path):
     refused_even_when_the_die_pairs_nothing` (above) refuses a bogus CORE.
 
     Mutation-proof: gating the level-1 filter behind `if topology_cores:` --
-    the EXACT fail-open shape the old `if allowed_cores:` guard was fixed
-    for at level 2 -- turns this test RED, because an empty `topology_cores`
-    would then skip the filter instead of refusing everything through it."""
+    the EXACT fail-open shape the old `if allowed_cores:` guard was fixed for
+    at what used to be level 2 -- turns this test RED, because an empty
+    `topology_cores` would then skip the filter instead of refusing
+    everything through it."""
     _imx93_shaped_tree(tmp_path, topology=None)
     baseline = _check_imx93(tmp_path)
     assert baseline.basis == "static-screen"
@@ -1387,9 +1388,8 @@ def test_a_som_preset_missing_topology_entirely_refuses_every_point(tmp_path):
     assert result == baseline                     # refused, not consumed
     assert not any("refused" in n for n in result.notes)  # silent, per the
     # "absent means refuse" contract `_topology_core_ids`'s own docstring
-    # claims -- level 1's refusal note stays unset (only level 2's paired-
-    # core union ever sets `_resolve_perf_point`'s `note`), same as a wrong
-    # SKU/hw_rev/model/toolchain refusal elsewhere in this reader.
+    # claims -- same as a wrong SKU/hw_rev/model/toolchain refusal elsewhere
+    # in this reader; `_resolve_perf_point` no longer produces a note at all.
 
 
 def test_a_som_preset_with_an_empty_topology_block_refuses_every_point(tmp_path):
@@ -1881,12 +1881,13 @@ def test_real_imx93_topology_is_a55_cluster_and_m33_only():
 @pytestmark_real_sdk
 def test_real_imx93_declares_no_paired_core_for_its_lone_ethos_u65():
     """The other half of the real-metadata proof: imx93.json's `ethos-u65`
-    entry really does state no `paired_core` -- confirming level 2
-    (`_paired_cores_for_backend`) is a genuine structural no-op on this SKU
-    (`{}`), which is what makes E1M-NX9101 the shape where level 1 is the
-    ONLY thing standing between a bogus core and a `basis: "bench"` report."""
-    assert perf_apply_mod._paired_cores_for_backend(
-        "E1M-NX9101", "ethos_u", metadata_root=_META) == set()
+    entry really does state no `paired_core` -- confirming the exact-match
+    query has nothing to narrow `core` on for this SKU, which is what makes
+    E1M-NX9101 the shape where LEVEL 1 (`_topology_core_ids`) is the ONLY
+    thing standing between a bogus core and a `basis: "bench"` report."""
+    target = _headline_ethos_u_target("E1M-NX9101", _META)
+    assert target is not None
+    assert target.paired_core is None
 
 
 @pytestmark_real_sdk
