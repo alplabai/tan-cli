@@ -417,6 +417,27 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 
+- **A `v*` tag no longer fails the whole release run with `startup_failure`
+  before any job starts.** `release.yml`'s `python-gates` called
+  `parity.yml` granting only `permissions: {contents: read}`, but
+  `parity.yml`'s `notify-planner-drift` job statically declares
+  `permissions: {issues: write}`. A called workflow may never exceed its
+  caller's grant, and GitHub evaluates that BEFORE any job runs -- regardless
+  of the `if:` that keeps `notify-planner-drift` to `repository_dispatch`, so
+  a tag build that never reaches the job still failed on it. The v0.6.0-rc1
+  tag reproduced it exactly: run `31830969596`, `startup_failure`, zero jobs,
+  no release object and no assets. `python-gates` now grants `issues: write`
+  alongside `contents: read`; a sweep of every local caller/callee pair
+  reports zero remaining conflicts.
+
+  *Recorded here late (tan-cli#813).* The fix is `3f39f34`, an ancestor of
+  the `v0.6.0-rc1` tag `ad6470c`, so it genuinely shipped in this release —
+  but it landed AFTER the assembler ran at `e2f5021 release: v0.6.0-rc1
+  (#750)`, so its fragment was never folded, and the published release body,
+  sliced from this very section, does not list it. That body is immutable;
+  this section is the accurate record. The general hole — any commit between
+  the release commit and the tag can reopen it — is closed by the
+  `--require-empty` gate wired into `release.yml` in the same change.
 
 - **`tan init` no longer reports `ok:true`/`issues:[]` while silently
   discarding what `--sdk-root` or `--cores` asked for.** Two sites, same
