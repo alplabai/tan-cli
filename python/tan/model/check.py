@@ -388,6 +388,14 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
         ])
     target = _headline_ethos_u_target(sku, metadata_root)
     if target is None:
+        # NOT split like the sites above (tan-cli#791 round-2 review item 4):
+        # `check_model_backends` resolves this SAME `_headline_ethos_u_target`
+        # call, with the SAME sku/metadata_root, for the tier-2 step -- a pure
+        # function of metadata, so if it is `None` HERE it is `None` there
+        # too, and `_resolve_perf_point` refuses outright on `backend ==
+        # "ethos_u" and target is None` before it ever looks at a point. This
+        # note can therefore never ride alongside a `basis: "bench"` report,
+        # so its basis clause is never false.
         note = ("--exact could not resolve an Ethos-U accelerator config for "
                  "this SKU; reporting the static screen instead.")
         return replace(report, notes=[*report.notes, note])
