@@ -124,6 +124,16 @@ jobs:
   # widening of this job.
   python:
     runs-on: ubuntu-latest
+    # 60, and the number is set by the RELEASE path, not the PR one. This job
+    # is 6-8 minutes on a `pull_request`/`merge_group` run but **23 minutes**
+    # on a release tag (run 31834718564, `v0.6.0-rc1`), because release.yml
+    # calls this workflow with `sdk_parity: true` (release.yml:235) and that
+    # switches on the planner byte-parity and planner-binding suites which
+    # SKIP without an alp-sdk checkout. A cap chosen from the PR measurement
+    # would pass every PR and then fail the tag -- the most expensive place in
+    # this repo to be wrong. 30 would leave that 23-minute run 30% headroom;
+    # 60 leaves it bounded without being a tripwire.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -364,6 +374,9 @@ jobs:
   # Node's own test runner, so there is nothing to install.
   shim:
     runs-on: ubuntu-latest
+    # Under a minute on every run sampled, PR and release tag alike. 10 is a
+    # hang catcher for the pip install, not a budget.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -392,6 +405,8 @@ jobs:
   # measures.
   wheel-floor:
     runs-on: ubuntu-latest
+    # Under a minute on every run sampled. Same reasoning as `shim` above.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -465,6 +480,12 @@ jobs:
   workflow-security:
     name: zizmor · workflow security
     runs-on: ubuntu-latest
+    # This job's `name:` IS the fifth required context, and it was the one
+    # tan-cli#812 left unbounded while closing the other four (all of which
+    # come from parity.yml). A wedged run here holds the PR for GitHub's
+    # 360-minute default. Measured under a minute: pip install plus a
+    # hermetic `--no-online-audits` pass over .github/workflows/.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
