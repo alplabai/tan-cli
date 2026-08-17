@@ -1279,6 +1279,44 @@ def test_an_unpaired_variant_accepts_any_topology_core_the_die_admits(tmp_path):
     assert not any("refused" in n for n in rep.notes)
 
 
+def test_two_points_differing_only_in_core_fall_through_rather_than_pick(tmp_path):
+    """tan-cli#791 review item 1: removing the union-of-siblings inference
+    makes a NEW outcome reachable for the E8's unpaired Ethos-U85 -- two
+    points for the SAME model/module/toolchain that differ ONLY in `core`,
+    both admitted by LEVEL 1 (`_topology_core_ids`) and by the query (neither
+    narrows further, since the U85 declares no `paired_core` of its own to
+    narrow the query on). Measured on real E1M-AEN801 metadata: a point on
+    `m55_hp` plus one on `a32_cluster` gave `basis: "bench"` plus a refusal
+    note at the union-inference commit (only `m55_hp` was ever in the union,
+    so `a32_cluster` alone was refused) -- and give `basis: "static-screen"`,
+    silently, at HEAD. That is the CORRECT behaviour: two equally-sourced
+    measurements of the SAME accelerator, and nothing sourced picks between
+    them, so falling through is the multi-match rule (`_resolve_perf_point`'s
+    own `points[0] if len(points) == 1 else None`) doing its job rather than
+    a core being invented -- but nothing pinned it there before this test,
+    and it is an outcome a reader of the changelog would want to know about.
+    Independent of `test_an_unpaired_variant_accepts_any_topology_core_the_
+    die_admits` and `test_an_unpaired_variant_accepts_a_core_a_sibling_npu_
+    does_pair_to` above, both of which prove a SINGLE such point is
+    accepted, not what happens once a SECOND one stands beside it.
+
+    MUTATION PROOF: replacing the multi-match rule with an arbitrary pick
+    (e.g. `return points[0] if points else None` in `_resolve_perf_point`)
+    turns this test RED -- one of the two points wins outright at
+    `basis: "bench"` instead of falling through."""
+    _e8_shaped_tree(tmp_path)
+    _write_perf_point(tmp_path, sku="E1M-FAKE", accel_config="ethos-u85-256",
+                      core="m55_hp",
+                      filename="tiny-int8-aaaa@vela-5.1.0+r2+m55_hp+aaaaaaaaaaaa.json")
+    _write_perf_point(tmp_path, sku="E1M-FAKE", accel_config="ethos-u85-256",
+                      core="a32_cluster",
+                      filename="tiny-int8-aaaa@vela-5.1.0+r2+a32_cluster+bbbbbbbbbbbb.json")
+    rep = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE",
+                               source=_FIXTURE, metadata_root=tmp_path,
+                               exact=False, hw_rev="r2")[0]
+    assert rep.basis == "static-screen"            # falls through, not picked
+
+
 def test_an_unpaired_variant_accepts_a_core_a_sibling_npu_does_pair_to(tmp_path):
     # An accelerator that itself pairs to no core does not reject a point
     # measured on a core a DIFFERENT NPU on the same die happens to pair to,
@@ -1336,10 +1374,11 @@ def test_a_core_absent_from_the_soms_topology_is_refused_even_when_the_die_pairs
     model check` on real E1M-NX9101 metadata: `m55_hp` is a real Ensemble core
     name, not an i.MX 93 one (the i.MX 93's topology is `a55_cluster`/`m33`
     only) -- and `cortex_potato` names no core anywhere, on any SoC. Both must
-    be refused, and BEFORE this fix neither was: `_paired_cores_for_backend`
-    answers `{}` for imx93's lone, unpaired `ethos-u65`, and the OLD
-    `if allowed_cores:` guard skipped the core check entirely the moment that
-    set was empty."""
+    be refused, and BEFORE this fix neither was: the exact-match query has
+    nothing to narrow `core` on for imx93's lone, unpaired `ethos-u65`
+    (`target.paired_core` is `None`), and the OLD `if allowed_cores:` guard
+    skipped the core check entirely the moment that narrowing came up
+    empty."""
     _imx93_shaped_tree(tmp_path)
     baseline = _check_imx93(tmp_path)
     assert baseline.basis == "static-screen"

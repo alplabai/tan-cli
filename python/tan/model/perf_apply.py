@@ -468,18 +468,18 @@ def _resolve_perf_point(*, backend: str, sku: str, model_sha256: str,
     own config block -- it is genuinely shared SoC-level silicon, not a
     core-private accelerator that merely forgot to declare its pairing. alp-
     sdk's own `soc-spec-v1.schema.json` says exactly that is legitimate:
-    `paired_core` is "optional on a SoC spec for a shared / non-core-paired
-    NPU". A point naming ANY core @sku's own topology admits (level 1) is
-    therefore accepted for such an accelerator, `a32_cluster` included --
-    accepting it is not a claim that the U85 CAN be driven from the A32
-    cluster, only that the customer's own report of what they ran is not
-    contradicted by any sourced fact. Nothing sourced says it cannot, either:
+    `paired_core`'s own field description says to "Omit for a shared /
+    non-core-paired NPU". A point naming ANY core @sku's own topology admits
+    (level 1) is therefore accepted for such an accelerator, `a32_cluster`
+    included -- accepting it is not a claim that the U85 CAN be driven from
+    the A32 cluster, only that the customer's own report of what they ran is
+    not contradicted by any sourced fact. Nothing sourced says it cannot, either:
     there is no A32 SVD view and no A32 board devicetree NPU node to check
     either way, so refusing the core would have been an equally unsourced
-    assertion in the OTHER direction. Only where NEITHER level applies at
-    all -- e.g. E1M-NX9101/imx93, whose lone `ethos-u65` declares no pairing,
-    or every drpai/deepx_dxm1 SoM today -- does level 1 alone decide, exactly
-    as it always did.
+    assertion in the OTHER direction. Only where @target declares no pairing
+    at all -- e.g. E1M-NX9101/imx93, whose lone `ethos-u65` declares no
+    pairing, or every drpai/deepx_dxm1 SoM today -- does level 1 alone
+    decide, exactly as it always did.
 
     THE PROFILE TIEBREAK NARROWS BEFORE THE SINGLE-POINT SHORTCUT, not after
     (tan-cli#791 review item 1, the BLOCKER). A part that declares a vela

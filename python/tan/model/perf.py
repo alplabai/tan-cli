@@ -340,8 +340,8 @@ def read_perf_point(path: Path) -> PerfPoint | None:
 # pairing of its own, `core` stays unnarrowed past the topology check, same
 # as every other unstated field in this match: a shared SoC-level NPU
 # legitimately declares no `paired_core` at all (alp-sdk's own
-# `soc-spec-v1.schema.json`), so a point naming any core the die's own
-# topology admits is not an unsourced guess to accept.
+# `soc-spec-v1.schema.json`), so accepting a point that names any core the
+# die's own topology admits is not an unsourced guess.
 #
 # THE TOOLCHAIN PROFILE IS IDENTITY BUT NOT KEY. `system_config`/`memory_mode`/
 # `pins` are digested into the filename's `+<profile12>` segment, but a customer
