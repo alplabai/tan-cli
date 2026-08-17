@@ -163,9 +163,10 @@ Flow D. It was `swd_probe`-only when tan-cli#589 shipped it, which left the AEN
 MRAM path — the genuine *customer* flash path of the two, the GD32 bridge being
 factory-programmed by Alp Lab — outside both halves of the guard. On Flow D the
 refusal fires ahead of the SETOOLS auto-sign, not merely ahead of the write:
-`app-gen-toc` rewrites `build/app-package-map.txt` rather than appending, and
-tan-cli#512 measured a wrong-board abort that correctly left slot0
-byte-identical and still left the SETOOLS install mutated.
+`app-gen-toc` appends a block to `build/app-package-map.txt` and rewrites
+`build/AppTocPackage.bin` whole, and tan-cli#512 measured a wrong-board abort
+that correctly left slot0 byte-identical and still left the SETOOLS install
+mutated.
 
 The policy belongs to the host, not to the manifest. Export it on a factory or
 bench machine, where a wrong-board write is expensive and nobody is watching;
