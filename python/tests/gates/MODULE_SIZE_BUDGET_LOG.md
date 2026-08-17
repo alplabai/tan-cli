@@ -194,3 +194,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 260 -> 261
 - 2026-08-17 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 272 -> 273
+- 2026-08-17 -- tan-cli#791 round-2 review: apply_perf_point's docstring grew to explain the item-2 refusal-note plumbing through every return path (_with_refusal_note); no logic was extracted, the growth is documentation
+    - function_count_budget: 273 -> 274

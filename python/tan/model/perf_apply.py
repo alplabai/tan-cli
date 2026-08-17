@@ -23,8 +23,13 @@ when the answer is no. That is not a courtesy, it is the contract: the same
 absence rule `npu-ops-v1` states for a missing op table applies here, so a
 customer whose model has never been benched (which is most of them) must get
 exactly the report they get today, note for note. `apply_perf_point`
-therefore returns @report ITSELF on every non-match path rather than a rebuilt
-copy, so "unchanged" is structural rather than a promise.
+therefore returns @report ITSELF on every ORDINARY non-match path rather than
+a rebuilt copy, so "unchanged" is structural rather than a promise. The one
+deliberate exception (tan-cli#791 round-2 review item 2) is a point refused by
+the paired-core union check alone: that is not an ordinary "wrong identity"
+absence -- alp-sdk's own docs explicitly permit publishing a point that way --
+so `apply_perf_point` appends ONE note naming the refusal rather than staying
+silent about a real, published measurement it chose not to use.
 """
 from __future__ import annotations
 
@@ -187,9 +192,71 @@ def _profile_matches_the_part(point: PerfPoint, target: TargetSpec) -> bool:
     return bool(stated) and all(declared == measured for declared, measured in stated)
 
 
+def _topology_core_ids(sku: str, metadata_root: Path) -> set[str]:
+    """Every core id @sku's OWN SoM preset `topology:` map declares -- the
+    physical cores this module actually has, keyed exactly as a perf point's
+    `measured_on.core` must be (`docs/bench/model-perf-capture.md`: "the core
+    that drove the inference, keyed as in the SKU preset's `topology:` map").
+
+    LEVEL 1 of the two-level core check (tan-cli#791 round-2 review item 1).
+    Applied UNCONDITIONALLY, for every backend, before either query-level
+    narrowing or `_paired_cores_for_backend` (level 2, below) ever runs: a
+    point naming a core the die does not physically have is wrong regardless
+    of whether anything ALSO pairs an NPU to a specific core. This is the
+    check the BLOCKER fix (the profile tiebreak, `_part_declares_a_profile`)
+    and the prior round's MAJOR fix (`_paired_cores_for_backend`) both left
+    undone: `_paired_cores_for_backend` answers `{}` -- "narrow on nothing"
+    -- whenever NO npu of a backend on the die declares `paired_core` at all,
+    which is exactly the E1M-NX9101/imx93 shape (its lone `ethos-u65` names
+    no pairing) as well as every drpai/deepx_dxm1 SoM today, and the caller's
+    `if allowed_cores:` guard then skips level 2 ENTIRELY for those SKUs --
+    fail-open, not "nothing to narrow on". Measured on E1M-NX9101 through
+    `tan model check` (the production path): a point claiming `core:
+    "m55_hp"` -- a core the i.MX 93 does not have; its topology is
+    `a55_cluster` and `m33` only -- was consumed at `basis: "bench",
+    confidence: "certain"` with no check ever having looked at `core` at
+    all. This function is what makes that check possible for EVERY backend
+    and EVERY SKU, not only the ones that happen to pair an NPU to a core:
+    a die's `topology:` is required and always populated (all eleven shipped
+    presets declare one), so `p.core in _topology_core_ids(...)` is always a
+    real, checkable fact -- unlike `paired_core`, which is genuinely absent
+    for some accelerators by design.
+
+    By the time this runs, @sku's preset is already known to exist and parse
+    (`resolve_check_backends` -> `resolve_targets` succeeded before a single
+    backend was screened, reading the SAME file), so this re-reads it rather
+    than threading a parsed doc all the way down here, matching
+    `_resolve_hw_rev`'s own stance next door. `set()` -- which REFUSES every
+    point, never admits one -- only for a preset that dropped `topology:`
+    entirely or left it malformed, which no shipped SoM does: a core this
+    function cannot vouch for is not proof the SKU has it, the same "absent
+    means refuse" reading `find_perf_points` already gives a `None` `hw_rev`
+    (`PerfPoint.hw_rev` is REQUIRED and non-empty, so it can never equal an
+    unresolvable query value either)."""
+    preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
+    try:
+        preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return set()
+    topology = preset.get("topology") if isinstance(preset, dict) else None
+    return set(topology) if isinstance(topology, dict) else set()
+
+
 def _paired_cores_for_backend(sku: str, backend: str, metadata_root: Path) -> set[str]:
     """Every core the SoC spec pairs to *some* NPU of @backend on this SKU's
     die -- not just the one specific accelerator `target` (below) names.
+
+    LEVEL 2 of the two-level core check -- @sku's `topology:` (level 1,
+    `_topology_core_ids` above) is what a core must EXIST in; this is what it
+    must additionally be, only where the die states an opinion at all. The
+    two are deliberately independent checks over independent evidence
+    (`topology:` on the SoM preset vs. `npus[].paired_core` on the SoC spec),
+    so neither can silently cover for a gap in the other: a core absent from
+    `topology:` entirely (`m55_hp` on E1M-NX9101) is refused by level 1 even
+    on a die where this function answers `{}`, and a core the die pairs to a
+    DIFFERENT npu (`a32_cluster` on the E8, which the E1M-AEN801 preset's own
+    `topology:` DOES declare) is refused by level 2 even though level 1 has
+    nothing to say about it.
 
     Exists for the shipping case a single target's own `paired_core` cannot
     answer (tan-cli#791 review item 2): the E8 pairs each Ethos-U55 to an M55
@@ -206,9 +273,16 @@ def _paired_cores_for_backend(sku: str, backend: str, metadata_root: Path) -> se
 
     `{}` when the spec pairs NO npu of this backend to any core at all --
     every drpai/deepx_dxm1 SoM published today (no SoC spec of either kind
-    names `paired_core` anywhere), and any Ethos-U SoC spec that predates the
-    field entirely -- and an empty set narrows on nothing, exactly like every
-    other unstated field in this match."""
+    names `paired_core` anywhere), and E1M-NX9101/imx93 today, whose lone
+    `ethos-u65` entry states no pairing (`paired_core` is optional on a SoC
+    spec for a shared / non-core-paired NPU -- `soc-spec-v1.schema.json`'s own
+    words -- not a sign the field predates that spec) -- and an empty set
+    narrows on nothing HERE, exactly like every other unstated field in this
+    match. That is no longer the whole story for E1M-NX9101 (tan-cli#791
+    round-2 review item 1 / item 3): `_topology_core_ids` still refuses any
+    core its own `topology:` does not declare, regardless of what this
+    function answers, so a die where this returns `{}` is narrowed by level 1
+    alone rather than left fully open."""
     return {t.paired_core for t in resolve_targets(sku, metadata_root=metadata_root)
             if t.backend == backend and t.paired_core}
 
@@ -254,18 +328,35 @@ def _perf_identity(point: PerfPoint) -> str:
 
     The CORE and the VERSION are the two the match rule may leave unnarrowed --
     where NOTHING on this die pairs any NPU of this backend to a core
-    (`_paired_cores_for_backend` empty: every drpai/deepx_dxm1 SoM, and an
-    Ethos-U SoC predating `paired_core`), and always for the version, since the
-    tier-2 customer has no local toolchain to state one -- so stating them here
-    is the only way the customer learns which one this point actually
-    describes. The PROFILE is there for the reason the schema makes it required
-    on an Ethos-U point at all: an arena captured under a DRAM-backed profile
-    is exactly measured and describes the wrong machine, and hiding it would
-    re-open on the reading side the ambiguity the schema closed on the writing
-    side."""
+    (`_paired_cores_for_backend` empty: every drpai/deepx_dxm1 SoM, and
+    E1M-NX9101/imx93 today, whose lone `ethos-u65` declares no pairing), and
+    always for the version, since the tier-2 customer has no local toolchain
+    to state one -- so stating them here is the only way the customer learns
+    which one this point actually describes. The PROFILE is there for the
+    reason the schema makes it required on an Ethos-U point at all: an arena
+    captured under a DRAM-backed profile is exactly measured and describes
+    the wrong machine, and hiding it would re-open on the reading side the
+    ambiguity the schema closed on the writing side.
+
+    THE PROFILE CLAUSE IS `ethos_u`-ONLY (tan-cli#791 round-2 review item 5).
+    `toolchain_system_config`/`toolchain_memory_mode` are only ever narrowed
+    or verified against silicon for `ethos_u` -- `_part_declares_a_profile`/
+    `_profile_matches_the_part` run only when `target is not None`, and
+    `target` is `None` for every OTHER backend by construction
+    (`tan.model.check.check_model_backends` only resolves one for
+    `backend == "ethos_u"`). Nothing sourced exists to check a drpai/
+    deepx_dxm1 point's profile fields against, which is a DEFENSIBLE gap --
+    there is no vela-shaped profile concept on those toolchains to check --
+    but printing whatever those two fields happen to hold as if it were this
+    point's verified memory profile is not: measured, a drpai point carrying
+    a stray Ethos-U85 `Ethos_U85_SYS_DRAM_Mid`/`Dedicated_Sram_384KB` pair
+    printed that nonsense verbatim into the customer-facing note. So this
+    clause is withheld outright for every backend but `ethos_u`, regardless
+    of what the point's own fields carry."""
     target = point.accel_config or point.backend
-    profile = ", ".join(_one_line(p) for p in
-                        (point.toolchain_system_config, point.toolchain_memory_mode) if p)
+    profile = ("" if point.backend != "ethos_u" else
+               ", ".join(_one_line(p) for p in
+                        (point.toolchain_system_config, point.toolchain_memory_mode) if p))
     return (f"{point.sku} {_one_line(point.hw_rev)} (core {_one_line(point.core)}) "
             f"at {_one_line(target)} with {_one_line(point.toolchain)} "
             f"{_one_line(point.toolchain_version)}"
@@ -366,10 +457,39 @@ def _perf_point_report(report: BackendReport, point: PerfPoint,
     )
 
 
+def _paired_core_refusal_note(refused: list[PerfPoint], allowed_cores: set[str]) -> str:
+    """One line naming a real, otherwise-fully-matching perf point that
+    `_paired_cores_for_backend`'s level-2 union check refused, so a campaign
+    that publishes one learns the refusal from tan instead of a silent
+    `static-screen` report (tan-cli#791 round-2 review item 2).
+
+    Every OTHER refusal in this reader stays silent, on purpose -- a wrong
+    SKU, `hw_rev`, model hash or toolchain describes an identity that plainly
+    is not this customer's, and `npu-ops-v1`'s own absence rule says that
+    kind of "we have not benched this" must never become a note. This one is
+    different: alp-sdk's own `docs/bench/model-perf-capture.md` EXPLICITLY
+    permits publishing a point exactly this way once the matched accelerator
+    itself declares no pairing ("do not invent the pairing in your point
+    either; record the core you actually ran on"), so a point this reader
+    then refuses is not bad data -- it is real data on a core the analysis
+    the CUSTOMER'S accelerator needs cannot use, and a silent refusal would
+    read as a bug in tan's matcher rather than what it actually is."""
+    cores = ", ".join(sorted({_one_line(p.core) for p in refused}))
+    allowed = ", ".join(sorted(_one_line(c) for c in allowed_cores))
+    sample = refused[0]
+    return (f"a bench perf point for this exact model on {sample.sku} "
+            f"{_one_line(sample.hw_rev)} at "
+            f"{_one_line(sample.accel_config or sample.backend)} was published, but "
+            f"its core ({cores}) is not one this die pairs to any {sample.backend} "
+            f"NPU (paired here: {allowed}) -- refused, not used.")
+
+
 def _resolve_perf_point(*, backend: str, sku: str, model_sha256: str,
                          hw_rev: str | None, metadata_root: Path,
-                         target: TargetSpec | None) -> PerfPoint | None:
-    """The ONE point that describes this customer's module, or `None`.
+                         target: TargetSpec | None) -> tuple[PerfPoint | None, str | None]:
+    """The ONE point that describes this customer's module, or `None` -- and a
+    diagnostic NOTE, or `None`, for the one refusal kind that must not stay
+    silent (see @return below).
 
     @target is the ALREADY-RESOLVED Ethos-U accelerator
     (`tan.model.check._headline_ethos_u_target`'s answer for @backend ==
@@ -383,15 +503,27 @@ def _resolve_perf_point(*, backend: str, sku: str, model_sha256: str,
     tier-2 premise, and a point measured at another version is still OUR
     measurement (decision 1).
 
-    CORE narrows in TWO STEPS, not one. The exact-match query below narrows to
-    @target's own `paired_core` when @target names one (the E8's Ethos-U55s).
-    When it does not (the E8's Ethos-U85 -- unpaired on this die, but sharing
-    it with two Ethos-U55s that ARE paired), `_paired_cores_for_backend`
-    additionally refuses any point whose core is not one this die pairs to
-    SOME npu of this backend, which still rules out a core -- an A-cluster --
-    that drives no Ethos-U NPU on this die at all (tan-cli#791 review item 2).
-    Only a backend/SoC that pairs NO npu at all to a core (every drpai/
-    deepx_dxm1 SoM today) leaves core fully unnarrowed, exactly as before.
+    CORE narrows in THREE STEPS now, not two (tan-cli#791 round-2 review item
+    1). The exact-match query below narrows to @target's own `paired_core`
+    when @target names one (the E8's Ethos-U55s). LEVEL 1, applied
+    UNCONDITIONALLY for every backend regardless of what @target names or
+    what the SoC spec pairs (`_topology_core_ids`): a point's core must exist
+    in @sku's OWN `topology:` map at all, full stop -- this is what catches a
+    point claiming `core: "m55_hp"` on E1M-NX9101 (imx93 has no such core; its
+    topology is `a55_cluster`/`m33`) or any other core nothing on the module
+    has ever had. LEVEL 2, `_paired_cores_for_backend`, is additional and
+    conditional: where the die pairs at least one npu of this backend to SOME
+    core (the E8's two Ethos-U55s, pairing `m55_hp`/`m55_he`, even though the
+    U85 being screened pairs to neither), a point naming a topology-real but
+    UNPAIRED core -- an A-cluster, which drives no Ethos-U NPU on this die at
+    all -- is refused too (tan-cli#791 review item 2). Only where NEITHER
+    level applies -- e.g. E1M-NX9101/imx93, whose lone `ethos-u65` pairs to
+    nothing, or every drpai/deepx_dxm1 SoM today -- does level 1 alone decide,
+    and level 1 ALWAYS decides: level 2's `{}` ("this die pairs nothing")
+    stopped being "core is fully unnarrowed" the moment level 1 existed to
+    cover it, which is the whole difference from the prior round's fail-open
+    (`allowed_cores` empty used to skip straight to the profile tiebreak with
+    no core check applied at all).
 
     THE PROFILE TIEBREAK NARROWS BEFORE THE SINGLE-POINT SHORTCUT, not after
     (tan-cli#791 review item 1, the BLOCKER). A part that declares a vela
@@ -413,22 +545,38 @@ def _resolve_perf_point(*, backend: str, sku: str, model_sha256: str,
     toolchain, captured under two different vela profiles the PART itself
     leaves unconstrained (`_part_declares_a_profile` false for it). Nothing
     further is picked: still several, or none once narrowed, falls through to
-    the next fidelity tier, silently, rather than guessing."""
+    the next fidelity tier, silently, rather than guessing.
+
+    @return is `(point, note)`. @note is `None` on every ordinary non-match
+    (a wrong SKU/hw_rev/model/toolchain/topology-nonexistent core is silence,
+    per this reader's own absence contract) and is set to a one-line
+    diagnostic ONLY when level 2 (the paired-core union, never level 1's
+    plain topology check) refused a point that had matched every sourced and
+    topology-existence field -- alp-sdk's own docs explicitly permit
+    publishing a point this way, so tan-cli#791 round-2 review item 2 asks
+    that this ONE refusal be visible rather than silent."""
     toolchain = _PERF_TOOLCHAIN.get(backend)
     if toolchain is None:
-        return None
+        return None, None
     if backend == "ethos_u" and target is None:
-        return None
+        return None, None
     points = find_perf_points(
         sku=sku, backend=backend, accel_config=target.accel_config if target else "",
         model_sha256=model_sha256, toolchain=toolchain, hw_rev=hw_rev,
         core=target.paired_core if target else None, metadata_root=metadata_root)
+    topology_cores = _topology_core_ids(sku, metadata_root)
+    points = [p for p in points if p.core in topology_cores]
     allowed_cores = _paired_cores_for_backend(sku, backend, metadata_root)
+    note = None
     if allowed_cores:
+        refused = [p for p in points if p.core not in allowed_cores]
+        if refused:
+            note = _paired_core_refusal_note(refused, allowed_cores)
         points = [p for p in points if p.core in allowed_cores]
     if target is not None and _part_declares_a_profile(target):
         points = [p for p in points if _profile_matches_the_part(p, target)]
-    return points[0] if len(points) == 1 else None
+    point = points[0] if len(points) == 1 else None
+    return point, note
 
 
 def apply_perf_point(report: BackendReport, *, backend: str, sku: str,
@@ -436,13 +584,15 @@ def apply_perf_point(report: BackendReport, *, backend: str, sku: str,
                       metadata_root: Path, target: TargetSpec | None) -> BackendReport:
     """Tier 2, or @report untouched.
 
-    Every early return hands back the SAME object, so an absent, ambiguous,
-    fixture-marked or placement-less point cannot degrade a report by even a
-    note. The last of those is the subtle one and is deliberate: a point that
-    measured latency but recorded no operator placement cannot answer what
-    `npu_coverage` asks, and re-basing on it would have to either invent a
-    coverage or downgrade a real static verdict to `undetermined` -- both worse
-    than the report the customer already had.
+    Every early return hands back the SAME object -- UNLESS `_resolve_perf_
+    point` also handed back a refusal note (below), the one deliberate
+    exception -- so an absent, ambiguous, fixture-marked or placement-less
+    point otherwise cannot degrade a report by even a note. The last of those
+    is the subtle one and is deliberate: a point that measured latency but
+    recorded no operator placement cannot answer what `npu_coverage` asks,
+    and re-basing on it would have to either invent a coverage or downgrade a
+    real static verdict to `undetermined` -- both worse than the report the
+    customer already had.
 
     DECISION 1 (tier-2 plan, Task 4): a `basis: "compiled"` report -- the
     customer really does hold the toolchain and really did compile -- WINS over
@@ -463,21 +613,36 @@ def apply_perf_point(report: BackendReport, *, backend: str, sku: str,
 
     When the two AGREE the point wins, because it adds measured wall-clock
     latency and a traceable capture that no compile can produce, and the local
-    compile corroborating it is said out loud."""
-    point = _resolve_perf_point(backend=backend, sku=sku, model_sha256=model_sha256,
-                                 hw_rev=hw_rev, metadata_root=metadata_root, target=target)
+    compile corroborating it is said out loud.
+
+    A REFUSAL NOTE RIDES ALONG ON EVERY RETURN PATH, not only the plain
+    absence one (tan-cli#791 round-2 review item 2): `_resolve_perf_point`
+    hands back a note whenever level 2's paired-core union refused a point
+    that otherwise matched, and that note must survive regardless of what
+    else happens to land on the SAME report -- a placement this reader still
+    can't read, a `--exact` disagreement, or a DIFFERENT point winning
+    outright. `_with_refusal_note` is the one place that decision is made, so
+    every `return` below goes through it rather than each repeating the same
+    `if refused_note` a fifth time."""
+    point, refused_note = _resolve_perf_point(backend=backend, sku=sku,
+                                               model_sha256=model_sha256, hw_rev=hw_rev,
+                                               metadata_root=metadata_root, target=target)
+
+    def _with_refusal_note(rep: BackendReport) -> BackendReport:
+        return replace(rep, notes=[*rep.notes, refused_note]) if refused_note else rep
+
     if point is None:
-        return report
+        return _with_refusal_note(report)
     outcome = _placement_outcome(report, point.npu_ops, point.cpu_ops)
     if outcome is None:
-        return report
+        return _with_refusal_note(report)
     if report.basis == "compiled":
         diffs = _perf_disagreements(point, outcome[0], report)
         if diffs:
-            return replace(report, notes=[*report.notes,
-                                           _perf_disagreement_note(point, diffs)],
-                           perf_ref=point.capture_reference,
-                           latency_ms_mean=point.latency_ms_mean,
-                           latency_ms_p95=point.latency_ms_p95,
-                           latency_runs=point.runs)
-    return _perf_point_report(report, point, outcome)
+            return _with_refusal_note(replace(
+                report, notes=[*report.notes, _perf_disagreement_note(point, diffs)],
+                perf_ref=point.capture_reference,
+                latency_ms_mean=point.latency_ms_mean,
+                latency_ms_p95=point.latency_ms_p95,
+                latency_runs=point.runs))
+    return _with_refusal_note(_perf_point_report(report, point, outcome))

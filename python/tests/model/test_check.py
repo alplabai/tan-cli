@@ -22,6 +22,7 @@ import pytest
 
 from tan.model import analyze as analyze_mod
 from tan.model import check as check_mod
+from tan.model import perf_apply as perf_apply_mod
 from tan.model.adapters import Blob
 from tan.model.adapters.ethos_u import VelaFootprintRefused, _refuse_zero_sram_footprint
 from tan.model.analyze import BackendReport, OpVerdict
@@ -46,8 +47,23 @@ _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "models" / "tiny_i
 _MODEL_IO_SKIP_REASON = "tflite reader missing -- pip install alp-tan[model-io] for real .tflite parsing"
 
 
+#: Every core name a perf-point test in this file writes onto a point's
+#: `core`, by default -- so `_write_som` (below) can declare a synthetic
+#: `topology:` block covering all of them without every one of the ~30
+#: pre-existing call sites having to say so. The topology-existence check
+#: (`tan.model.perf_apply._topology_core_ids`, tan-cli#791 round-2 review
+#: item 1) refuses a point whose core is not one @sku's OWN preset declares
+#: in `topology:` -- so a SoM preset test-fixture with no `topology:` at all
+#: would refuse EVERY perf point these tests write, incidentally breaking the
+#: paired-core/profile/hw_rev narrowing these tests actually exist to cover.
+#: Tests that exercise the topology check ITSELF (below) pass an explicit,
+#: narrower `topology=` instead of relying on this default.
+_DEFAULT_TEST_TOPOLOGY = ("m55_hp", "m55_he", "a32_cluster")
+
+
 def _write_som(meta: Path, sku: str, silicon: str, *, ethos_u_variant: str | None = None,
-               default_hw_rev: str | None = None) -> None:
+               default_hw_rev: str | None = None,
+               topology: tuple[str, ...] | None = _DEFAULT_TEST_TOPOLOGY) -> None:
     d = meta / "e1m_modules"
     d.mkdir(parents=True, exist_ok=True)
     body = f"silicon: {silicon}\n"
@@ -55,6 +71,8 @@ def _write_som(meta: Path, sku: str, silicon: str, *, ethos_u_variant: str | Non
         body += f"default_hw_rev: {default_hw_rev}\n"
     if ethos_u_variant:
         body += f"inference:\n  ethos_u_variant: {ethos_u_variant}\n"
+    if topology:
+        body += "topology:\n" + "".join(f"  {core}: {{}}\n" for core in topology)
     (d / f"{sku}.yaml").write_text(body)
 
 
@@ -1003,6 +1021,39 @@ def test_a_point_for_a_backend_with_no_memory_profile_says_nothing_about_one(tmp
     assert "()" not in rep.notes[0]
 
 
+def test_a_drpai_points_stray_ethos_u_profile_fields_are_never_printed(tmp_path):
+    """tan-cli#791 round-2 review item 5: `target` is `None` for every
+    backend but `ethos_u`, so nothing here ever narrows OR VERIFIES a
+    drpai/deepx_dxm1 point's `toolchain_system_config`/`toolchain_memory_
+    mode` against silicon -- printing whatever those two fields happen to
+    hold would print unverified, possibly nonsense data as if it were part
+    of this point's identity. Measured (the review's own repro): a drpai
+    point carrying a stray Ethos-U85 profile pair printed
+    "(Ethos_U85_SYS_DRAM_Mid, Dedicated_Sram_384KB)" verbatim into the
+    customer-facing note. `_write_perf_point` cannot express this shape
+    directly (its `toolchain` dict is hardcoded per-backend), so this
+    round-trips the file through JSON the same way
+    `test_a_foreign_multiline_capture_citation_cannot_break_the_one_line_
+    note` does below."""
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:multi", default_hw_rev="r2")
+    _write_soc(tmp_path, "fake:soc:multi", [{"type": "drp-ai3", "subtype": "drp",
+                                              "mac_per_cycle": 1}])
+    path = _write_perf_point(tmp_path, backend="drpai", accel_config="",
+                             toolchain="translator", version="1.12",
+                             filename="tiny-int8-aaaa@translator-1.12+r2+m55_hp+cccccccccccc.json")
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["toolchain"]["system_config"] = "Ethos_U85_SYS_DRAM_Mid"
+    doc["toolchain"]["memory_mode"] = "Dedicated_Sram_384KB"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    rep = check_model_backends(backends=["drpai"], sku="E1M-FAKE", source=_FIXTURE,
+                                metadata_root=tmp_path, exact=False)[0]
+    assert rep.basis == "bench"
+    assert "Ethos_U85_SYS_DRAM_Mid" not in rep.notes[0]
+    assert "Dedicated_Sram_384KB" not in rep.notes[0]
+    assert "with translator 1.12 --" in rep.notes[0]      # identity still ends cleanly
+    assert "()" not in rep.notes[0]
+
+
 def test_a_foreign_multiline_capture_citation_cannot_break_the_one_line_note(tmp_path):
     # `capture.reference` comes out of a document in ANOTHER repository that
     # this reader deliberately does not schema-validate -- a note is one line
@@ -1142,11 +1193,24 @@ def test_a_point_measured_on_another_core_of_the_same_die_is_not_a_match(tmp_pat
 
 
 def test_a_part_that_pairs_no_core_narrows_on_none_and_infers_nothing(tmp_path):
-    """The E8 pairs each Ethos-U55 to an M55 and pairs its Ethos-U85 to
-    NOTHING. Where the metadata does not know, tan does not guess: the core is
-    left unstated, so a single published point still answers -- and two points
-    differing only in core would leave two standing and fall through, which is
-    the multi-match rule doing its job rather than a core being invented."""
+    """A die with a SINGLE Ethos-U NPU that pairs to no core at all -- the
+    E1M-NX9101/imx93 shape (its lone `ethos-u65` names no `paired_core`), NOT
+    the E8's (tan-cli#791 round-2 review item 6, NIT (b)): the E8 pairs each
+    of its two Ethos-U55s to an M55 and leaves only its Ethos-U85 unpaired,
+    so on the E8's die SOMETHING always pairs to SOME core -- the shape the
+    sibling test at `test_an_unpaired_variant_still_refuses_a_core_no_npu_on_
+    the_die_pairs_to` (below) actually covers, and where
+    `_paired_cores_for_backend`'s union is non-empty rather than `{}`. HERE,
+    where the whole backend's union really is `{}`, the metadata does not
+    know which core drove the inference, so tan does not guess: the core is
+    left unstated by level 2 (`_paired_cores_for_backend`), so a single
+    published point still answers -- and two points differing only in core
+    would leave two standing and fall through, which is the multi-match rule
+    doing its job rather than a core being invented. Level 1
+    (`_topology_core_ids`) still requires the core to be a REAL one this
+    fixture's own `topology:` declares (`m55_hp`/`m55_he`, part of
+    `_DEFAULT_TEST_TOPOLOGY`) -- the shape where even level 1 has nothing to
+    catch is covered separately, by the imx93-shaped tests below."""
     _u55_tree(tmp_path, paired_core=None)
     _write_perf_point(tmp_path, core="m55_he")
     assert _check(tmp_path).basis == "bench"
@@ -1184,18 +1248,34 @@ def test_an_unpaired_variant_still_refuses_a_core_no_npu_on_the_die_pairs_to(tmp
     pairs to no core of its own -- but a point measured on `a32_cluster` (the
     Cortex-A32 application cluster, which drives no Ethos-U NPU on this die)
     must still be refused, because the die's OTHER Ethos-U NPUs (its two
-    Ethos-U55s) prove a32_cluster is not a core anything here ever pairs to."""
+    Ethos-U55s) prove a32_cluster is not a core anything here ever pairs to.
+
+    Also proves LEVEL 2 independently of LEVEL 1 (tan-cli#791 round-2 review
+    item 1's mutation-proof bar): `a32_cluster` IS a real core in this SKU's
+    own `topology:` (`_DEFAULT_TEST_TOPOLOGY`), so level 1
+    (`_topology_core_ids`) has nothing to say about it -- only level 2
+    (`_paired_cores_for_backend`) refuses it here, so this test still fails
+    if level 2 is neutered even though level 1 stays fully intact.
+
+    tan-cli#791 round-2 review item 2: the refusal must not be SILENT any
+    more -- a note names the refused point, so a campaign that publishes an
+    unreadable point learns it from tan rather than from a static-screen
+    report with no explanation at all."""
     _e8_shaped_tree(tmp_path)
     baseline = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE",
                                     source=_FIXTURE, metadata_root=tmp_path,
                                     exact=False, hw_rev="r2")[0]
     assert baseline.basis == "static-screen"
+    assert not any("refused" in n for n in baseline.notes)
     _write_perf_point(tmp_path, sku="E1M-FAKE", accel_config="ethos-u85-256",
                       core="a32_cluster")
     rep = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE",
                                source=_FIXTURE, metadata_root=tmp_path,
                                exact=False, hw_rev="r2")[0]
     assert rep.basis == "static-screen"          # refused, not consumed
+    note = next(n for n in rep.notes if "refused" in n)
+    assert "a32_cluster" in note
+    assert "m55_hp" in note or "m55_he" in note   # names what IS paired here
 
 
 def test_an_unpaired_variant_accepts_a_core_a_sibling_npu_does_pair_to(tmp_path):
@@ -1211,6 +1291,76 @@ def test_an_unpaired_variant_accepts_a_core_a_sibling_npu_does_pair_to(tmp_path)
                                source=_FIXTURE, metadata_root=tmp_path,
                                exact=False, hw_rev="r2")[0]
     assert rep.basis == "bench"
+
+
+# ---------------------------------------------------------------------------
+# THE MAJOR FIX, round 2 (tan-cli#791 round-2 review item 1): a die where NO
+# npu of a backend declares ANY `paired_core` -- the E1M-NX9101/imx93 shape --
+# used to leave `_paired_cores_for_backend` answering `{}`, and the old
+# `if allowed_cores:` guard then skipped the core check ENTIRELY: a point
+# claiming `core: "m55_hp"` (a core the i.MX 93 does not physically have) or
+# even `core: "cortex_potato"` (a core NOTHING has) was consumed outright at
+# `basis: "bench", confidence: "certain"`. LEVEL 1 (`_topology_core_ids`)
+# closes this: a point's core must exist in the SKU's own `topology:` map,
+# unconditionally, whether or not anything pairs an NPU to a core at all.
+# ---------------------------------------------------------------------------
+
+def _imx93_shaped_tree(meta: Path, *, topology: tuple[str, ...] = ("a55_cluster", "m33")) -> None:
+    """The REAL E1M-NX9101/imx93 shape, reproduced synthetically: ONE
+    `ethos-u65` NPU that names no `paired_core` at all (imx93.json carries no
+    `npus[].paired_core` and no `npu_toolchain` block either, matched here by
+    leaving both out), on a SoM preset whose `topology:` is `a55_cluster` +
+    `m33` -- the real E1M-NX9101.yaml's own two entries, not `m55_hp` or
+    anything Ensemble-shaped. `_paired_cores_for_backend` answers `{}` for
+    this die (nothing pairs), so this shape is the one where level 1 is the
+    ONLY thing that can ever refuse a bad core -- level 2 is structurally a
+    no-op here, which is what makes a test against this fixture a proof of
+    level 1 INDEPENDENTLY of level 2, not a proof that happens to pass either
+    way."""
+    _write_som(meta, "E1M-FAKE", "fake:soc:u65", ethos_u_variant="u65",
+               default_hw_rev="r1", topology=topology)
+    _write_soc(meta, "fake:soc:u65", [{"type": "ethos-u65", "subtype": "x", "mac_per_cycle": 256}])
+    _write_table(meta, "ethos_u", "u65@vela-1.0.0.json", variant="u65",
+                 supported=["FULLY_CONNECTED"])
+
+
+def _check_imx93(meta: Path) -> BackendReport:
+    return check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                 metadata_root=meta, exact=False, hw_rev="r1")[0]
+
+
+@pytest.mark.parametrize("bogus_core", ["m55_hp", "cortex_potato"])
+def test_a_core_absent_from_the_soms_topology_is_refused_even_when_the_die_pairs_nothing(
+        tmp_path, bogus_core):
+    """The exact production-path bug the round-2 review verified through `tan
+    model check` on real E1M-NX9101 metadata: `m55_hp` is a real Ensemble core
+    name, not an i.MX 93 one (the i.MX 93's topology is `a55_cluster`/`m33`
+    only) -- and `cortex_potato` names no core anywhere, on any SoC. Both must
+    be refused, and BEFORE this fix neither was: `_paired_cores_for_backend`
+    answers `{}` for imx93's lone, unpaired `ethos-u65`, and the OLD
+    `if allowed_cores:` guard skipped the core check entirely the moment that
+    set was empty."""
+    _imx93_shaped_tree(tmp_path)
+    baseline = _check_imx93(tmp_path)
+    assert baseline.basis == "static-screen"
+    _write_perf_point(tmp_path, sku="E1M-FAKE", hw_rev="r1", core=bogus_core,
+                      backend="ethos_u", accel_config="ethos-u65-256",
+                      filename=f"tiny-int8-aaaa@vela-5.1.0+r1+{bogus_core}+aaaaaaaaaaaa.json")
+    assert _check_imx93(tmp_path) == baseline           # refused, not consumed
+
+
+def test_a_core_the_soms_topology_does_declare_still_answers_on_an_unpaired_die(tmp_path):
+    """The ordinary case must not regress: E1M-NX9101's own `a55_cluster` (a
+    REAL core in the SKU's `topology:`) still answers, even though nothing on
+    this die pairs an Ethos-U NPU to any core at all -- level 2 leaves core
+    unnarrowed here (as alp-sdk's own docs say it must: "do not invent the
+    pairing... record the core you actually ran on"), and level 1 has nothing
+    to refuse about a core that genuinely exists."""
+    _imx93_shaped_tree(tmp_path)
+    _write_perf_point(tmp_path, sku="E1M-FAKE", hw_rev="r1", core="a55_cluster",
+                      backend="ethos_u", accel_config="ethos-u65-256",
+                      filename="tiny-int8-aaaa@vela-5.1.0+r1+a55_cluster+aaaaaaaaaaaa.json")
+    assert _check_imx93(tmp_path).basis == "bench"
 
 
 # ---------------------------------------------------------------------------
@@ -1323,9 +1473,12 @@ def test_two_toolchain_versions_fall_through_rather_than_pick(tmp_path):
 def test_a_backend_with_no_named_toolchain_is_never_asked_for_a_point(tmp_path):
     # `cpu` has no entry in `_PERF_TOOLCHAIN` on purpose -- inventing a name
     # for a backend nobody benches is exactly the kind of authored fact this
-    # tier forbids.
-    assert "cpu" not in check_mod._PERF_TOOLCHAIN
-    assert set(check_mod._PERF_TOOLCHAIN) == {"ethos_u", "drpai", "deepx_dxm1"}
+    # tier forbids. Read off `tan.model.perf_apply` directly (tan-cli#791
+    # round-2 review item 6, NIT (a)): `_PERF_TOOLCHAIN` lives there, and
+    # `check.py` no longer keeps a `# noqa: F401` re-export alive purely so
+    # this test could reach it through `check_mod`.
+    assert "cpu" not in perf_apply_mod._PERF_TOOLCHAIN
+    assert set(perf_apply_mod._PERF_TOOLCHAIN) == {"ethos_u", "drpai", "deepx_dxm1"}
 
 
 # ---------------------------------------------------------------------------
@@ -1448,6 +1601,109 @@ def test_a_degraded_exact_run_still_gets_the_bench_point(tmp_path, monkeypatch):
     # THIS run and must survive the re-base onto the bench note, not just be
     # present when no point exists.
     assert any(n.startswith("--exact") and "vela is not on PATH" in n for n in rep.notes)
+    # tan-cli#791 ROUND-2 review item 4: that survived note's own TAIL used to
+    # say "reporting the static screen instead" right alongside a `basis:
+    # "bench"` envelope -- a note whose own text contradicts the envelope it
+    # rides on. The basis clause must not survive the re-base even though the
+    # host fact in front of it does.
+    assert not any("reporting the static screen instead" in n.lower() for n in rep.notes)
+    assert not any("stays the static screen" in n.lower() for n in rep.notes)
+
+
+def test_a_license_gated_note_survives_a_bench_match_without_its_false_tail(tmp_path):
+    """tan-cli#791 round-2 review item 4, site 2 of 5
+    (`_license_gated_exact_note`, reproduced live on E1M-V2N101 drpai in the
+    review): the host fact ("dxcom is license-gated") survives a re-base
+    onto a matched bench point; "this stays the static screen" must not,
+    because the report is `basis: "bench"` by the time anyone reads it."""
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:multi", default_hw_rev="r2")
+    _write_soc(tmp_path, "fake:soc:multi", [{"type": "dx", "subtype": "npu", "mac_per_cycle": 1}])
+    onnx_source = tmp_path / "model.onnx"
+    onnx_source.write_bytes(b"not-a-real-onnx-file")
+    sha = hashlib.sha256(onnx_source.read_bytes()).hexdigest()
+    _write_perf_point(tmp_path, backend="deepx_dxm1", accel_config="",
+                      toolchain="dxcom", version="2.3.0", sha256=sha,
+                      filename="model-aaaa@dxcom-2.3.0+r2+m55_hp+eeeeeeeeeeee.json")
+    rep = check_model_backends(backends=["deepx_dxm1"], sku="E1M-FAKE", source=onnx_source,
+                               metadata_root=tmp_path, exact=True)[0]
+    assert rep.basis == "bench"
+    assert any(n.startswith("--exact") and "license-gated" in n for n in rep.notes)
+    assert not any("stays the static screen" in n.lower() for n in rep.notes)
+    assert not any("reporting the static screen instead" in n.lower() for n in rep.notes)
+
+
+def test_a_refused_footprint_note_survives_a_bench_match_without_its_false_tail(
+        tmp_path, monkeypatch):
+    """tan-cli#791 round-2 review item 4, site 3 of 5
+    (`_footprint_refused_note`): vela's own clean refusal text is a HOST fact
+    and survives; "Reporting the static screen instead." is a BASIS clause
+    and must not."""
+    _u55_tree(tmp_path)
+    _write_perf_point(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+
+    def _refuse(self, source, *, accel_config, out_dir, opts=None,
+                vela_memory_mode=None, vela_system_config=None,
+                vela_vendor_system_config=None,
+                vela_vendor_config_filename=None, soc_declares_dram=None):
+        _refuse_zero_sram_footprint(
+            accel_config=accel_config, npu_ops=1, cpu_ops=0,
+            used={"dram": 0.27}, system_config="Ethos_U55_High_End_Embedded",
+            memory_mode="Sram_Only", defaulted=frozenset(),
+            vendor_config_filename=None, soc_declares_dram=True)
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _refuse)
+    rep = _check(tmp_path, exact=True)
+    assert rep.basis == "bench"
+    assert any(n.startswith("--exact:") and "vela compiled cleanly" in n for n in rep.notes)
+    assert not any("reporting the static screen instead" in n.lower() for n in rep.notes)
+
+
+def test_a_vela_failure_note_survives_a_bench_match_without_its_false_tail(tmp_path, monkeypatch):
+    """tan-cli#791 round-2 review item 4, site 4 of 5 (`_maybe_exact_ethos_u`'s
+    generic-exception branch): the compile failure itself is a HOST fact and
+    survives; "reporting the static screen instead" is a BASIS clause and
+    must not."""
+    _u55_tree(tmp_path)
+    _write_perf_point(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+
+    def _boom(self, source, *, accel_config, out_dir, opts=None,
+              vela_memory_mode=None, vela_system_config=None,
+              vela_vendor_system_config=None,
+              vela_vendor_config_filename=None, soc_declares_dram=None):
+        raise RuntimeError("vela failed for ethos-u55-256: bad shape")
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _boom)
+    rep = _check(tmp_path, exact=True)
+    assert rep.basis == "bench"
+    assert any(n.startswith("--exact") and "vela failed" in n for n in rep.notes)
+    assert not any("reporting the static screen instead" in n.lower() for n in rep.notes)
+
+
+def test_a_placement_unreadable_note_survives_a_bench_match_without_its_false_tail(
+        tmp_path, monkeypatch):
+    """tan-cli#791 round-2 review item 4, site 5 of 5
+    (`_vela_placement_unreadable`): the "could not be read" fact is a HOST
+    fact and survives; "reporting the static screen instead" is a BASIS
+    clause and must not."""
+    _u55_tree(tmp_path)
+    _write_perf_point(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
+        return Blob(format="vela_tflite", payload=b"x", arena_bytes=100,
+                    compiler_version="vela 5.1.0", req_sram_kib=1)   # no cpu/npu_op_count
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _fake_compile)
+    rep = _check(tmp_path, exact=True)
+    assert rep.basis == "bench"
+    assert any(n.startswith("--exact") and "placement" in n and "could not be read" in n
+               for n in rep.notes)
+    assert not any("reporting the static screen instead" in n.lower() for n in rep.notes)
 
 
 # ---------------------------------------------------------------------------
@@ -1553,3 +1809,70 @@ def test_a_tflite_model_against_a_real_v2n_v2m_sku_reports_onnx_backends_undeter
         assert rep.npu_coverage == "undetermined"
         assert rep.ops and rep.ops[0].reason == "format-not-accepted"
         assert rep.npu_coverage != "cpu-only"
+
+
+@pytestmark_real_sdk
+def test_real_imx93_topology_is_a55_cluster_and_m33_only():
+    """tan-cli#791 round-2 review item 1 / item 6 NIT (b): item 1's own fix
+    grounded against the REAL E1M-NX9101/imx93 metadata, not only the
+    synthetic `_imx93_shaped_tree` fixture above. Binds to the LIVE parsed
+    set, never a hand-copied literal (the standing mutation-proof bar this
+    branch has already been bitten by twice) -- read straight off the real,
+    committed `metadata/e1m_modules/E1M-NX9101.yaml` `topology:` block."""
+    topology = perf_apply_mod._topology_core_ids("E1M-NX9101", metadata_root=_META)
+    assert topology == {"a55_cluster", "m33"}
+    assert "m55_hp" not in topology              # a real Ensemble core, not an imx93 one
+    assert "cortex_potato" not in topology        # names no core anywhere
+
+
+@pytestmark_real_sdk
+def test_real_imx93_declares_no_paired_core_for_its_lone_ethos_u65():
+    """The other half of the real-metadata proof: imx93.json's `ethos-u65`
+    entry really does state no `paired_core` -- confirming level 2
+    (`_paired_cores_for_backend`) is a genuine structural no-op on this SKU
+    (`{}`), which is what makes E1M-NX9101 the shape where level 1 is the
+    ONLY thing standing between a bogus core and a `basis: "bench"` report."""
+    assert perf_apply_mod._paired_cores_for_backend(
+        "E1M-NX9101", "ethos_u", metadata_root=_META) == set()
+
+
+@pytestmark_real_sdk
+def test_real_imx93_through_tan_model_check_refuses_a_core_it_does_not_have(tmp_path):
+    """The reviewer's OWN verification method (tan model check, the
+    production path, not a unit test), reproduced here against a tmp copy of
+    the REAL committed E1M-NX9101/imx93 metadata plus a synthetic perf point
+    -- alp-sdk publishes no `metadata/model_perf/` tree yet, so this is the
+    only way to run the full `check_model_backends` path against real
+    SoM/SoC content end to end. Before this fix, a point claiming `core:
+    "m55_hp"` -- verified in the review's own words, "a core the i.MX 93
+    does NOT physically have" -- was consumed outright at `basis: "bench",
+    confidence: "certain"` with `arenaBytes 999999`/`reqSramKib 777`; this
+    proves it no longer is, against the real files rather than a hand-typed
+    stand-in for their shape.
+
+    Deliberately does NOT copy a real `npu_ops/ethos_u/*.json` table -- that
+    filename is SDK-version-sensitive (it has moved since `PINNED_SDK_
+    COMMIT`) and this test's whole point is the tier-2 perf-point refusal,
+    not the tier-1 static-screen table lookup; `analyze_backend` degrades
+    to `_no_table_report` (still `basis: "static-screen"`) with no table at
+    all, which is exactly the baseline this test needs."""
+    (tmp_path / "e1m_modules").mkdir()
+    shutil.copy(_META / "e1m_modules" / "E1M-NX9101.yaml",
+                tmp_path / "e1m_modules" / "E1M-NX9101.yaml")
+    (tmp_path / "socs" / "nxp" / "imx9").mkdir(parents=True)
+    shutil.copy(_META / "socs" / "nxp" / "imx9" / "imx93.json",
+                tmp_path / "socs" / "nxp" / "imx9" / "imx93.json")
+    backends = resolve_check_backends("E1M-NX9101", metadata_root=tmp_path)
+    assert backends == ["ethos_u"]
+
+    def _screen():
+        return check_model_backends(backends=backends, sku="E1M-NX9101", source=_FIXTURE,
+                                    metadata_root=tmp_path, exact=False, hw_rev="r1")[0]
+
+    baseline = _screen()
+    _write_perf_point(tmp_path, sku="E1M-NX9101", hw_rev="r1", core="m55_hp",
+                      backend="ethos_u", accel_config="ethos-u65-256",
+                      measured={"npu_ops": 1, "cpu_ops": 0, "arena_bytes": 999999,
+                                "req_sram_kib": 777},
+                      filename="tiny-int8-aaaa@vela-5.1.0+r1+m55_hp+aaaaaaaaaaaa.json")
+    assert _screen() == baseline                  # refused, not the bogus 999999/777

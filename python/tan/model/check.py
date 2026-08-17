@@ -74,7 +74,6 @@ from .adapters.ethos_u import VelaAdapter, VelaFootprintRefused
 from .analyze import BackendReport, analyze_backend, resolve_ethos_u_variant
 from .perf import has_perf_points
 from .perf_apply import (
-    _PERF_TOOLCHAIN,  # noqa: F401  (re-export: tests/model/test_check.py's check_mod._PERF_TOOLCHAIN)
     _model_sha256,
     _placement_outcome,
     _resolve_hw_rev,
@@ -211,13 +210,27 @@ def _license_gated_exact_note(report: BackendReport, backend: str) -> BackendRep
     TVM checkout), so there is no un-gated path the way `vela` is for
     ethos_u. Reported as a note, never a crash -- mirrors `model doctor`'s
     own `_deepx_dxm1_status`/`_drpai_status` treatment of the same two
-    backends."""
+    backends.
+
+    TWO SEPARATE NOTES, not one (tan-cli#791 round-2 review item 4): the HOST
+    fact ("--exact is not available ...: {tool} is license-gated.") and the
+    BASIS clause ("This stays the static screen.") used to be one string, so
+    `tan.model.perf_apply._perf_point_report`'s "keep every note starting
+    with `--exact`" rule kept the WHOLE thing -- including the basis clause
+    -- when a bench point for this exact identity later matched, landing
+    "this stays the static screen" alongside an envelope whose `basis` was
+    already `"bench"`. Splitting them means the filter's own prefix check
+    does the rest: the host note still starts with `--exact` and survives (it
+    is still true that `--exact` cannot compile this backend); the basis
+    clause does not start with `--exact` and is dropped automatically,
+    exactly the way every other basis-describing note already is."""
     if report.ops and report.ops[0].reason == "format-not-accepted":
         return report          # wrong ingest format either way; nothing to caveat
     tool = "dxcom" if backend == "deepx_dxm1" else "the DRP-AI TVM toolchain"
-    note = (f"--exact is not available for {backend} in this release: "
-            f"{tool} is license-gated, so this stays the static screen.")
-    return replace(report, notes=[*report.notes, note])
+    host_note = (f"--exact is not available for {backend} in this release: "
+                 f"{tool} is license-gated.")
+    return replace(report, notes=[*report.notes, host_note,
+                                   "This stays the static screen."])
 
 
 #: A note is one line in the JSON envelope and the text render; a failed
@@ -313,10 +326,19 @@ def _footprint_refused_note(report: BackendReport, err: Exception) -> BackendRep
 
     The refusal text passes through at `_VELA_REFUSAL_NOTE_BUDGET`, so the
     remediation clause at its tail survives into the text report and the JSON
-    envelope instead of being cut off mid-diagnosis."""
+    envelope instead of being cut off mid-diagnosis.
+
+    TWO NOTES, not one (tan-cli#791 round-2 review item 4): `detail` is the
+    HOST/toolchain fact (vela's own refusal, still true of this run whatever
+    else happens); "Reporting the static screen instead." is a BASIS clause
+    that must not survive a re-base onto a matched bench point. Splitting
+    them lets `tan.model.perf_apply._perf_point_report`'s own "keep every
+    `--exact`-prefixed note" filter drop the second sentence for free -- it
+    does not start with `--exact` -- rather than keeping the whole string
+    verbatim next to a `basis: "bench"` envelope."""
     detail = _short_vela_error(err, budget=_VELA_REFUSAL_NOTE_BUDGET)
-    return replace(report, notes=[*report.notes,
-                                  f"--exact: {detail} Reporting the static screen instead."])
+    return replace(report, notes=[*report.notes, f"--exact: {detail}",
+                                  "Reporting the static screen instead."])
 
 
 def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
@@ -349,9 +371,21 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
     if not VelaAdapter().accepts(source.suffix.lstrip(".").lower()):
         return report
     if shutil.which("vela") is None:
-        note = ("--exact was requested, but vela is not on PATH (pip install "
-                 "alp-tan[model-compile]); reporting the static screen instead.")
-        return replace(report, notes=[*report.notes, note])
+        # TWO notes, not one (tan-cli#791 round-2 review item 4): "vela is
+        # not on PATH" is a HOST fact, still true of this run even when a
+        # bench point later matches for this exact identity; "reporting the
+        # static screen instead" is a BASIS clause that becomes false the
+        # moment it does. Kept as one string, the whole thing used to survive
+        # `tan.model.perf_apply._perf_point_report`'s "keep every
+        # `--exact`-prefixed note" filter and land next to a `basis: "bench"`
+        # envelope. Split, only the host sentence starts with `--exact`; the
+        # basis sentence is dropped by that same filter automatically.
+        return replace(report, notes=[
+            *report.notes,
+            "--exact was requested, but vela is not on PATH (pip install "
+            "alp-tan[model-compile]).",
+            "Reporting the static screen instead.",
+        ])
     target = _headline_ethos_u_target(sku, metadata_root)
     if target is None:
         note = ("--exact could not resolve an Ethos-U accelerator config for "
@@ -376,9 +410,16 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
     except VelaFootprintRefused as err:
         return _footprint_refused_note(report, err)
     except Exception as err:  # noqa: BLE001 -- a failed exact compile degrades, it never crashes
-        note = (f"--exact compile with vela failed ({_short_vela_error(err)}); "
-                 f"reporting the static screen instead.")
-        return replace(report, notes=[*report.notes, note])
+        # TWO notes, not one (tan-cli#791 round-2 review item 4) -- same split
+        # as the "vela is not on PATH" branch above, for the same reason: the
+        # HOST fact (vela really did fail, and why) must survive a re-base
+        # onto a matched bench point; the BASIS clause ("reporting the static
+        # screen instead") must not.
+        return replace(report, notes=[
+            *report.notes,
+            f"--exact compile with vela failed ({_short_vela_error(err)}).",
+            "Reporting the static screen instead.",
+        ])
     return _report_from_vela_compile(report, blob, accel_config)
 
 
@@ -455,12 +496,18 @@ def _vela_placement_unreadable(report: BackendReport, blob: Blob, accel_config: 
     future vela version that changes this text) -- degrade to @report (the
     static screen) exactly like every other `_maybe_exact_ethos_u` failure
     path. This function cannot verify a placement it can't read, so it does
-    not claim one -- never "0 CPU ops, so it must be all-NPU"."""
+    not claim one -- never "0 CPU ops, so it must be all-NPU".
+
+    TWO notes, not one (tan-cli#791 round-2 review item 4) -- the same split
+    as every other degrade note in this module: the HOST fact (vela compiled,
+    but its placement summary could not be read) survives a re-base onto a
+    matched bench point; the BASIS clause ("reporting the static screen
+    instead") does not, because it stops being true the moment one exists."""
     note = (f"--exact compiled with {blob.compiler_version} for {accel_config} "
             f"({sizing}), but its operator-placement summary could not be read, "
-            f"so NPU placement cannot be verified; reporting the static screen "
-            f"instead.")
-    return replace(report, notes=[*report.notes, note, *blob.caveats])
+            f"so NPU placement cannot be verified.")
+    return replace(report, notes=[*report.notes, note,
+                                  "Reporting the static screen instead.", *blob.caveats])
 
 
 def _headline_ethos_u_target(sku: str, metadata_root: Path) -> TargetSpec | None:
