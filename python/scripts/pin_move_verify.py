@@ -33,26 +33,114 @@ A cross-repo alp-sdk-ref pin is a literal value (a tag, branch, or 40-char
 commit SHA) that says "this is the alp-sdk this was built or audited
 against" -- exactly the kind of claim `(tan_ref, sdk_ref, soms)` can put
 through a build. Swept across this repo (2026-08, see the PR that added this
-module for the exact commands run):
+module for the exact commands run; re-swept 2026-08 during PR #823's
+review):
 
-  * `python/tests/gates/test_planner_relocation_freshness.py` --
-    `PINNED_SDK_COMMIT`, `HAND_PORT_PINNED_SDK_COMMIT`,
-    `STRICT_LOADERS_PINNED_SDK_COMMIT`. Fork-audit bookkeeping: the alp-sdk
-    commit `tan/planner/`'s hand-relocated/hand-ported code was last diffed
-    against. IN `PIN_SITES`.
   * `.github/workflows/parity.yml` -- `PINNED_SDK_TAG` (workflow-level
     `env:`). The alp-sdk ref `seam1`/`seam2` build tan's OWN checkout
     against on every PR -- getting-started.yml's own comment calls this "the
     single source for the alp-sdk pin". IN `PIN_SITES`.
+    CERTIFIABILITY: partial. It IS the literal `sdk_ref` value this sender
+    dispatches, but per "WHAT `tan_ref` MEANS FOR THESE PINS" below, the
+    dispatched tuple always tests the latest PUBLISHED tan release against
+    it, never this PR's own code -- a PR that bumps this pin AND ports
+    `tan/planner/` in the same change (the normal shape: see `ci.yml`'s own
+    multi-paragraph pin history below, where all three pins move together)
+    is graded on a tan that structurally lacks its own adaptation, clearable
+    only by cutting a release first. That is a deadlock, and it is why this
+    job is NOT on branch protection (see the workflow's own header and
+    `$GITHUB_STEP_SUMMARY` line).
   * `.github/workflows/ci.yml` -- the `sdk_parity` job's `alp-sdk` checkout
     `ref:`, a literal SHA that MUST move in lockstep with `PINNED_SDK_TAG`
-    (that file's own multi-paragraph comment documents two mid-review
-    divergences this exact fact caused, tan-cli#485 and tan-cli#639). IN
-    `PIN_SITES`.
+    (that file's own multi-paragraph comment documents two REAL mid-review
+    divergences this exact fact caused, tan-cli#485 and tan-cli#639 -- both
+    caught only by human review, neither by a gate). IN `PIN_SITES` for that
+    demonstrated drift risk. CERTIFIABILITY: same partial grade as
+    `PINNED_SDK_TAG` above -- this ref always mirrors it, so the dispatch
+    cannot certify this site any more independently than that one.
+  * `python/tests/gates/test_planner_relocation_freshness.py` --
+    `PINNED_SDK_COMMIT`, `HAND_PORT_PINNED_SDK_COMMIT`,
+    `STRICT_LOADERS_PINNED_SDK_COMMIT`. Fork-audit bookkeeping: the alp-sdk
+    commit `tan/planner/`'s hand-relocated/hand-ported code was last diffed
+    against. IN `PIN_SITES`: `ci.yml`'s own pin history names this exact
+    trio moving out of step with `PINNED_SDK_TAG` mid-review too (the
+    tan-cli#485 entry: "moving THIS ref and ... `PINNED_SDK_COMMIT` ...
+    together" while `PINNED_SDK_TAG` itself lagged behind) -- real,
+    demonstrated drift risk, the same bar `ci.yml`'s ref is held to.
+    CERTIFIABILITY: none. A build tuple proves the PUBLISHED tan builds
+    against `sdk_ref`; that says nothing about whether `tan/planner/`'s
+    hand-port was RE-AUDITED against that commit's shape -- the published
+    tan predates whatever this PR just ported by construction. That claim
+    is fully owned by this gate's own sha256 re-hash (`ALP_SDK_ROOT`-gated),
+    a strictly more direct check than any build tuple could be. Kept in
+    `PIN_SITES` anyway, not because the dispatch certifies the audit claim,
+    but because touching this file is exactly the kind of event that has
+    historically needed a cross-repo build check triggered alongside it.
 
-Found, but deliberately NOT in `PIN_SITES` because the tuple this sender can
-send cannot verify what they claim:
+Considered, and deliberately NOT in `PIN_SITES`, either because the tuple
+this sender can send cannot verify what the site claims, or because the
+site cannot change without ALSO touching one of the three sites above in
+the SAME commit -- so `touched_pin_sites` already fires by construction, and
+listing it again would be a second detector for the same event, not new
+coverage:
 
+  * `python/tan/templates/vendored/**`, INCLUDING `MANIFEST.md`'s own
+    `Ref:`/`Commit:` lines -- these DO carry a literal alp-sdk tag and
+    8-char SHA (verified: `MANIFEST.md` carries explicit "Ref: `v0.15.0`" /
+    "Commit: **`f30f4d4b`**" lines for one of its historical vendor-point
+    entries, not just prose). An earlier
+    version of this list excluded this whole tree on the claim that nothing
+    here "carries a literal tag/branch/SHA a payload's `sdk_ref` could be
+    extracted from" -- that claim was false for this specific file and is
+    corrected here (PR #823 review, finding 3). Excluded for the TRUE reason
+    instead: every historical re-vendor of this tree landed in the SAME
+    commit as a `PINNED_SDK_TAG` bump (`MANIFEST.md`'s own history,
+    verbatim: "This bump lands in the SAME commit as the `PINNED_SDK_TAG`
+    move ... because either half alone reds a seam"), and every one of
+    those re-vendors was independently re-verified against the live emit
+    before being committed ("Verified, not assumed: `scaffold_byte_parity.py
+    --sdk <ref>` is rc 0, 9/9 PASS", repeated at every touch point in that
+    file's own history) -- a self-checking, regenerate-and-diff mechanism
+    with ZERO documented drift incidents, unlike `ci.yml`'s hand-typed ref
+    and the freshness gate's hand-typed hashes above, which have each
+    drifted for real at least once. `PIN_SITES` already fires whenever this
+    tree legitimately changes, via the `.github/workflows/parity.yml` entry
+    above. And even where it fires, a build tuple proves "does it compile",
+    never "are these vendored bytes byte-identical to the live emit" --
+    `scaffold_byte_parity.py`'s own byte-diff is the right, and
+    already-present, tool for that claim.
+  * `tests/parity/scaffold_byte_parity.py`'s `_SDK_DOC_LINK_REF` /
+    `un_edit_doc_link_ref` -- the doc-link-ref transform ADR-0029 observation
+    7 names by example (alp-sdk#1474; tan-cli#756/#766: `PINNED_SDK_TAG` was
+    deliberately parked one commit short of alp-sdk `dev`'s tip because
+    re-vendoring past it would ship scaffold READMEs whose doc links 404
+    against a `v0.16.0` tag that does not exist yet -- see that changelog's
+    own "Move it the rest of the way when v0.16.0 ships" note). Named here
+    explicitly rather than silently missing from this sweep (PR #823 review,
+    finding 2). CURRENTLY DEAD: the regex is still frozen at the OLD
+    `v0.15.0-rc1` literal from tan-cli#384 and is exercised only by
+    `self_check()`'s own hardcoded self-test (fed a synthetic string, not a
+    file), not by any live `DELIBERATE_EDITS` entry -- alp-sdk has since cut
+    the real `v0.15.0` tag, which retired all seven README entries that used
+    to apply this transform (see that file's own comment immediately above
+    `DELIBERATE_EDITS`). It is kept only as a template for the NEXT
+    pre-release vendor point (`v0.16.0`), per that same comment. When it
+    next goes live, the same reasoning as `python/tan/templates/vendored/**`
+    above applies: the bump only happens as part of a `PINNED_SDK_TAG` move
+    (the tan-cli#756/#766 changelog's own words: "re-vendor the seven
+    READMEs in that same change"), and it asserts doc-link reachability, a
+    claim no build tuple can test either way. Excluded for that reason, not
+    because it was overlooked.
+  * `contract/fixtures/bootstrap/manifest.json`,
+    `contract/fixtures/toolchains/toolchains.json`,
+    `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` -- the other
+    three of the "FOUR parity gates" `MANIFEST.md`'s own history says move
+    together with the vendored tree above; same self-checking mechanism,
+    same reasoning. Unlike the vendored tree, none of these three carries a
+    literal alp-sdk tag/branch/SHA at all (checked: only Zephyr-SDK sha256
+    values and prose) -- so the original "not a literal ref" reasoning
+    stays TRUE for these three specifically. It was only ever false for
+    `python/tan/templates/vendored/**`'s own `MANIFEST.md`.
   * `ZEPHYR_SDK_INSTALL_VERSION` (`python/tan/commands/doctor_cmd.py`) --
     names a Zephyr SDK toolchain release, not an alp-sdk ref. There is no
     `toolchain_ref` field in the dispatch contract, and the receiver's
@@ -61,16 +149,6 @@ send cannot verify what they claim:
     instead by `tests/parity/toolchain_lock_parity.py`
     (byte-diff against `metadata/toolchains.json`) -- ADR-0029's "propagated
     constant" model, not "compatibility declaration".
-  * `contract/fixtures/bootstrap/manifest.json`,
-    `contract/fixtures/toolchains/toolchains.json`,
-    `tests/fixtures/kconfig-contract/emit-kconfig.golden.json`,
-    `python/tan/templates/vendored/**` -- vendored BYTE COPIES of alp-sdk
-    data, not a ref. None carries a literal tag/branch/SHA a payload's
-    `sdk_ref` could be extracted from; their staleness already tracks
-    `PINNED_SDK_TAG` (see `tests/parity/README.md`) through the three sites
-    above, and a build tuple proves "does it compile", not "are these bytes
-    identical to the vendor's" -- the existing `*_parity.py` byte-diffs are
-    the right tool for that claim, this contract is not.
   * `python/tan/version.py`'s `TAN_VERSION` -- this repo's OWN version, not
     a reference to another repo. Not a cross-repo pin at all.
 
@@ -89,7 +167,9 @@ build against it". That is a real, narrower question than the one the
 freshness gate's own hash check answers -- and it is exactly the class of
 question `install.sh`-based verification can ask, per the receiver's own
 design (see its header: "the customer's path, not a checkout"). Recorded
-here rather than glossed over.
+here rather than glossed over, and restated in `judge_polled_check_run`'s
+own PASS message so a reader of a green `$GITHUB_STEP_SUMMARY` sees it too,
+not just this docstring or the workflow's header comment.
 """
 
 from __future__ import annotations
@@ -114,19 +194,40 @@ class PayloadError(ValueError):
 # ---------------------------------------------------------------------------
 # The dispatch contract -- mirrored, not reinvented
 #
-# These four patterns are byte-for-byte `alpe2e.pinverify`'s own `_REF` /
-# `_SKU` / `_REPO` / `_SHA` (alp-e2e, private repo,
+# These four patterns, MAX_SOMS, and PinMoveTuple.check_name's format string
+# below are byte-for-byte `alpe2e.pinverify`'s own `_REF` / `_SKU` / `_REPO` /
+# `_SHA` / `MAX_SOMS` / `check_name` (alp-e2e, private repo,
 # `.github/workflows/pin-move-verify.yml`'s receiver). Duplicating them here
 # is NOT a second schema: the receiver re-validates independently and stays
 # authoritative (`parse_payload` there is what actually decides what runs).
 # The point of validating client-side too is cost -- a malformed payload
 # caught here fails in seconds, not after burning a dispatch and however
 # many of the receiver's own runner-minutes it takes to notice.
+#
+# An ungated second copy of a contract is tan-cli#358's exact defect shape,
+# so this one is pinned by hash (MIRRORED_CONTRACT_HASH, below the SoM cap)
+# with an issue-linked re-audit note (tan-cli#835) -- the same PINNED_HASHES
+# discipline `test_planner_relocation_freshness.py` applies to alp-sdk,
+# pointed at alp-e2e instead. `python/tests/scripts/
+# test_pin_move_verify_contract_mirror.py` re-extracts and re-hashes the
+# same block from a local alp-e2e checkout bound at `$ALP_E2E_ROOT`; without
+# it the gate SKIPS, loudly, never a silent pass.
 # ---------------------------------------------------------------------------
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]{0,99}$")
 _SKU = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+
+#: Mirrors `alpe2e.pinverify.MAX_SOMS`. The receiver's `plan` job refuses a
+#: payload over this cap outright, and its `report` job is
+#: `if: always() && needs.plan.result == 'success'` -- so a payload this
+#: sender lets through but the receiver refuses never gets a Check Run
+#: posted at all, and this job burns its full poll deadline (up to 90
+#: minutes) discovering that, contradicting the whole reason client-side
+#: validation exists (see the module docstring above: "a malformed payload
+#: caught here fails in seconds"). tan-cli#358's shape, avoided by mirroring
+#: the cap rather than omitting it.
+MAX_SOMS = 8
 
 #: This repo, as the receiver's contract spells it (`source_repo`).
 SOURCE_REPO = "alplabai/tan-cli"
@@ -200,6 +301,17 @@ def _soms(values: Sequence[str]) -> tuple[str, ...]:
         sku = _field(v, "soms[]", _SKU, "expected a SoM SKU such as E1M-V2N101")
         if sku not in seen:
             seen.append(sku)
+    if len(seen) > MAX_SOMS:
+        raise PayloadError(
+            f"{len(seen)} distinct SoMs requested, cap is {MAX_SOMS} -- mirrors "
+            "the receiver's own alpe2e.pinverify.MAX_SOMS (each SoM costs "
+            "roughly 5 runner-minutes there, so an uncapped request is an "
+            "uncapped bill). The receiver's `plan` job refuses a payload over "
+            "this cap before its `report` job (which posts the Check Run) ever "
+            "runs, so a tuple this sender let through would silently burn this "
+            "job's whole poll deadline waiting for a Check Run that will never "
+            "appear -- refusing here fails in seconds instead."
+        )
     return tuple(seen)
 
 
@@ -253,6 +365,40 @@ class PinMoveTuple:
         return {"event_type": "pin-move-verify", "client_payload": self.as_client_payload()}
 
 
+def _mirrored_contract_text() -> str:
+    """The exact block that must match `alpe2e.pinverify`'s own copy --
+    the four regex patterns, `MAX_SOMS`, and `check_name`'s format string,
+    all read from the live objects above rather than retyped, so this text
+    cannot itself drift from the code it describes.
+    """
+    example = PinMoveTuple(
+        tan_ref="TAN_REF", sdk_ref="SDK_REF", soms=("EXAMPLE",), source_sha="0" * 40
+    )
+    return (
+        f"_REF = {_REF.pattern!r}\n"
+        f"_SKU = {_SKU.pattern!r}\n"
+        f"_REPO = {_REPO.pattern!r}\n"
+        f"_SHA = {_SHA.pattern!r}\n"
+        f"MAX_SOMS = {MAX_SOMS!r}\n"
+        f"check_name = {example.check_name!r}\n"
+    )
+
+
+#: See "The dispatch contract -- mirrored, not reinvented" above.
+#: `python/tests/scripts/test_pin_move_verify_contract_mirror.py` re-hashes
+#: this SAME text after re-extracting the equivalent block from a local
+#: alp-e2e checkout bound at `$ALP_E2E_ROOT`; a mismatch means either side
+#: moved and this constant needs a hand re-audit (diff `alpe2e/pinverify.py`,
+#: port the delta, update this hash and the "last audited" note below).
+#: Without `$ALP_E2E_ROOT` that test SKIPS, loudly, never a silent pass.
+#:
+#: Last re-audited by hand against alp-e2e commit
+#: `fe8202890afb405e132482d9b7a23a76348bd710` (2026-08-16, alp-e2e PR #1).
+#: tan-cli#835 tracks the next re-audit.
+MIRRORED_CONTRACT_TEXT = _mirrored_contract_text()
+MIRRORED_CONTRACT_HASH = "62ebc38153106a76b095670645e594394104534d5e35bb10250f9013260b48be"
+
+
 def build_tuple(
     *,
     tan_ref: str,
@@ -291,13 +437,19 @@ class Verdict(str, Enum):
 
 
 def judge_polled_check_run(
-    check_run: Mapping[str, Any] | None, *, timed_out: bool
+    check_run: Mapping[str, Any] | None,
+    *,
+    timed_out: bool,
+    expected_check_name: str,
+    expected_source_sha: str,
+    tan_ref: str,
 ) -> tuple[Verdict, str]:
     """Fail-closed, on purpose: the ONLY shape that returns PASS is a
-    completed check run whose `conclusion` is the literal string
-    `"success"`. Every other shape -- not found, still in progress at the
-    deadline, `neutral`, `failure`, cancelled, an unrecognised conclusion --
-    returns FAIL.
+    completed check run whose `name`/`head_sha` match this dispatch and
+    whose `conclusion` is the literal string `"success"`. Every other shape
+    -- not found, a different check's name or commit, still in progress at
+    the deadline, `neutral`, `failure`, cancelled, an unrecognised
+    conclusion -- returns FAIL.
 
     This is deliberately STRICTER than GitHub's own required-status-check
     semantics. The receiver's own header states plainly: "GitHub treats a
@@ -308,6 +460,14 @@ def judge_polled_check_run(
     fail-closed discipline `pr-bootstrap-distro-install.yml`'s `summary` job
     applies to a `skipped` result: never trust a non-`success` shape at face
     value.
+
+    `expected_check_name`/`expected_source_sha` close a narrower gap:
+    `check_name` (`pin-verify · <tan_ref> × <sdk_ref>`) encodes only
+    `tan_ref`/`sdk_ref`, not `soms` -- a first-class member of ADR-0029's
+    tuple. The receiver's `workflow_dispatch` entrypoint means a hand-run
+    with the same two refs but a DIFFERENT SoM set lands under the same
+    name on the same commit; without this check that unrelated run's
+    conclusion would be graded as this dispatch's own verdict.
     """
     if not check_run:
         if timed_out:
@@ -325,6 +485,18 @@ def judge_polled_check_run(
             "an internal error in the poll loop, not a receiver verdict; "
             "failing closed rather than guessing which it was."
         )
+    name = check_run.get("name")
+    head_sha = check_run.get("head_sha")
+    if name != expected_check_name or head_sha != expected_source_sha:
+        return Verdict.FAIL, (
+            f"the polled check run's identity does not match this dispatch -- "
+            f"name={name!r} (expected {expected_check_name!r}), "
+            f"head_sha={head_sha!r} (expected {expected_source_sha!r}). `soms` "
+            "is not part of `check_name`, so an unrelated run (e.g. a hand-run "
+            "workflow_dispatch with the same two refs but a different SoM set) "
+            "could otherwise be graded as this dispatch's own verdict; failing "
+            "closed rather than trusting an unverified match."
+        )
     status = check_run.get("status")
     if status != "completed":
         return Verdict.FAIL, (
@@ -337,7 +509,17 @@ def judge_polled_check_run(
     if conclusion == "success":
         output = check_run.get("output")
         title = (output or {}).get("title") if isinstance(output, Mapping) else None
-        return Verdict.PASS, f"the tuple builds: {title}" if title else "the tuple builds"
+        # The qualifier a reader of a green check needs, not just this
+        # module's docstring or the workflow's header comment (PR #823
+        # review, finding 5): this dispatch always installs the latest
+        # PUBLISHED tan release, never this PR's own code -- see "WHAT
+        # tan_ref MEANS FOR THESE PINS" above for the full reasoning.
+        headline = (
+            f"the PUBLISHED tan {tan_ref} builds against the proposed sdk_ref "
+            "via the customer install path -- this is NOT proof that this "
+            "PR's own code builds against it"
+        )
+        return Verdict.PASS, f"{headline}: {title}" if title else headline
     return Verdict.FAIL, (
         f"the receiver's conclusion is {conclusion!r}, not 'success'. "
         "ADR-0029 clause 2: no pin entry moves without a green run on the "
@@ -410,6 +592,7 @@ def _cmd_dispatch_body(args: argparse.Namespace) -> int:
             source_sha=args.source_sha,
             source_pr=args.source_pr,
             soms=args.som or list(DEFAULT_SOMS),
+            source_repo=args.source_repo or SOURCE_REPO,
         )
     except PayloadError as exc:
         print(f"!! refusing this tuple: {exc}", file=sys.stderr)
@@ -429,7 +612,13 @@ def _cmd_judge(args: argparse.Namespace) -> int:
     doc: Any = json.loads(raw) if raw.strip() else None
     if isinstance(doc, Mapping) and not doc:
         doc = None
-    verdict, reason = judge_polled_check_run(doc, timed_out=args.timed_out)
+    verdict, reason = judge_polled_check_run(
+        doc,
+        timed_out=args.timed_out,
+        expected_check_name=args.expected_check_name,
+        expected_source_sha=args.expected_source_sha,
+        tan_ref=args.tan_ref,
+    )
     print(f"{verdict.value}: {reason}")
     _emit("verdict", verdict.value)
     _emit("reason", reason)
@@ -459,11 +648,36 @@ def cli(argv: Sequence[str]) -> int:
     p.add_argument("--source-sha", required=True)
     p.add_argument("--source-pr", default=None)
     p.add_argument("--som", action="append", default=None)
+    p.add_argument(
+        "--source-repo",
+        default=None,
+        help=f"owner/name this dispatch claims as its source (default: {SOURCE_REPO}); "
+        "pass ${{ github.repository }} from the workflow rather than relying on the "
+        "hardcoded default, so a fork of this repo does not silently claim to be it",
+    )
     p.set_defaults(fn=_cmd_dispatch_body)
 
     j = sub.add_parser("judge", help="turn a polled Check Run into a pass/fail")
     j.add_argument("--check-run", required=True, help="JSON file, or - for stdin")
     j.add_argument("--timed-out", action="store_true")
+    j.add_argument(
+        "--expected-check-name",
+        required=True,
+        help="the check_name this dispatch itself proposed -- a polled run whose "
+        "name doesn't match is not this dispatch's verdict",
+    )
+    j.add_argument(
+        "--expected-source-sha",
+        required=True,
+        help="the source_sha this dispatch itself proposed -- a polled run whose "
+        "head_sha doesn't match is not this dispatch's verdict",
+    )
+    j.add_argument(
+        "--tan-ref",
+        required=True,
+        help="the tan_ref this dispatch proposed, echoed into a PASS verdict's own "
+        "reason so a reader of a green check sees the published-vs-PR-code caveat",
+    )
     j.set_defaults(fn=_cmd_judge)
 
     args = ap.parse_args(list(argv))

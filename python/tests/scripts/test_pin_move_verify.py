@@ -68,12 +68,34 @@ def test_touched_pin_sites_normalises_windows_separators():
     assert sites == (".github/workflows/parity.yml",)
 
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
 def test_pin_sites_docstring_names_every_dict_entry():
-    # Cheap self-consistency: every PIN_SITES key should read as a real
-    # repo-relative path (this doesn't touch disk -- shape only).
+    # Every PIN_SITES key must (1) read as a real repo-relative path, no
+    # leading slash, no backslash, (2) actually EXIST on disk under
+    # REPO_ROOT, and (3) be named verbatim in pmv.__doc__ -- the module's
+    # own sweep narrative. (2) is load-bearing, not decorative: a rename of
+    # one of these files (`.github/workflows/parity.yml` -> anything else)
+    # makes `git diff --name-only` emit only the DESTINATION path, so
+    # `touched_pin_sites` stops matching that PIN_SITES entry permanently --
+    # exactly the tan-cli#275 / commit 8633d6b shape (a self-disabling gate
+    # that never goes red). The previous version of this test asserted only
+    # non-absoluteness and no-backslash, which is trivially true of any path
+    # literal and would not have caught a rename at all.
+    assert pmv.__doc__ is not None
     for path in pmv.PIN_SITES:
         assert not path.startswith("/"), path
         assert "\\" not in path, path
+        assert (REPO_ROOT / path).is_file(), (
+            f"{path} is a PIN_SITES key but does not exist on disk under "
+            f"{REPO_ROOT} -- renamed or deleted without updating PIN_SITES?"
+        )
+        assert path in pmv.__doc__, (
+            f"{path} is a PIN_SITES key but is not named verbatim in "
+            "pin_move_verify.py's own module docstring -- the sweep "
+            "narrative has drifted from the dict it describes."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -197,39 +219,117 @@ def test_build_tuple_refuses_bad_pr():
         pmv.build_tuple(tan_ref="v0.5.1", sdk_ref="x", source_sha=VALID_SHA, source_pr="not-a-number")
 
 
+def test_build_tuple_accepts_exactly_max_soms():
+    # The receiver's own cap (alpe2e.pinverify.MAX_SOMS) is 8 -- the boundary
+    # itself must still be accepted, not just anything under it.
+    soms = [f"E1M-X{i}" for i in range(pmv.MAX_SOMS)]
+    t = pmv.build_tuple(tan_ref="v0.5.1", sdk_ref="v0.16.0-rc1", source_sha=VALID_SHA, soms=soms)
+    assert len(t.soms) == pmv.MAX_SOMS
+
+
+def test_build_tuple_refuses_more_than_max_soms():
+    # Mirrors the receiver's alpe2e.pinverify.MAX_SOMS = 8: the receiver's
+    # `plan` job refuses a payload over the cap, and its `report` job
+    # (`if: always() && needs.plan.result == 'success'`) then never posts a
+    # Check Run -- so a payload this sender let through would silently burn
+    # the workflow's whole poll deadline. Refusing here, client-side, is the
+    # entire point of validating client-side at all (tan-cli#358's shape,
+    # avoided).
+    soms = [f"E1M-X{i}" for i in range(pmv.MAX_SOMS + 1)]
+    with pytest.raises(pmv.PayloadError, match=f"cap is {pmv.MAX_SOMS}"):
+        pmv.build_tuple(tan_ref="v0.5.1", sdk_ref="v0.16.0-rc1", source_sha=VALID_SHA, soms=soms)
+
+
+def test_build_tuple_soms_cap_is_after_dedupe():
+    # A caller that (accidentally or not) repeats the same SoM MAX_SOMS+1
+    # times is not actually asking for more than MAX_SOMS distinct builds --
+    # the cap is a cost statement about DISTINCT SoMs, matching how the
+    # receiver's own MAX_SOMS check reads `len(seen)` after its own dedupe.
+    soms = ["E1M-V2N101"] * (pmv.MAX_SOMS + 5)
+    t = pmv.build_tuple(tan_ref="v0.5.1", sdk_ref="v0.16.0-rc1", source_sha=VALID_SHA, soms=soms)
+    assert t.soms == ("E1M-V2N101",)
+
+
+def test_build_tuple_default_source_repo_is_this_repo():
+    t = pmv.build_tuple(tan_ref="v0.5.1", sdk_ref="v0.16.0-rc1", source_sha=VALID_SHA)
+    assert t.source_repo == "alplabai/tan-cli"
+
+
+def test_build_tuple_accepts_an_explicit_source_repo():
+    # `${{ github.repository }}` reaches this rather than the hardcoded
+    # default, so a fork of this repo does not silently claim to be
+    # alplabai/tan-cli in its own dispatch.
+    t = pmv.build_tuple(
+        tan_ref="v0.5.1",
+        sdk_ref="v0.16.0-rc1",
+        source_sha=VALID_SHA,
+        source_repo="someone/tan-cli-fork",
+    )
+    assert t.source_repo == "someone/tan-cli-fork"
+
+
 # ---------------------------------------------------------------------------
 # judge_polled_check_run -- the fail-closed core
 # ---------------------------------------------------------------------------
 
+EXPECTED_CHECK_NAME = "pin-verify · v0.5.1 × v0.16.0-rc1"
+EXPECTED_SOURCE_SHA = VALID_SHA
+EXPECTED_TAN_REF = "v0.5.1"
+
+
+def _judge(check_run, *, timed_out=False):
+    return pmv.judge_polled_check_run(
+        check_run,
+        timed_out=timed_out,
+        expected_check_name=EXPECTED_CHECK_NAME,
+        expected_source_sha=EXPECTED_SOURCE_SHA,
+        tan_ref=EXPECTED_TAN_REF,
+    )
+
+
+def _completed(conclusion, **extra):
+    return {
+        "name": EXPECTED_CHECK_NAME,
+        "head_sha": EXPECTED_SOURCE_SHA,
+        "status": "completed",
+        "conclusion": conclusion,
+        **extra,
+    }
+
 
 def test_judge_success_passes():
-    verdict, reason = pmv.judge_polled_check_run(
-        {"status": "completed", "conclusion": "success", "output": {"title": "ok"}},
-        timed_out=False,
-    )
+    verdict, reason = _judge(_completed("success", output={"title": "ok"}))
     assert verdict is pmv.Verdict.PASS
     assert "ok" in reason
 
 
+def test_judge_success_names_the_published_tan_ref_not_this_prs_code():
+    # PR #823 review, finding 5: a reader of a green $GITHUB_STEP_SUMMARY
+    # line must see that the tuple was verified against the PUBLISHED tan
+    # release, not this PR's own diff -- not just the workflow header or the
+    # module docstring, which a reader of the summary line never sees.
+    verdict, reason = _judge(_completed("success"))
+    assert verdict is pmv.Verdict.PASS
+    assert EXPECTED_TAN_REF in reason
+    assert "PUBLISHED" in reason
+    assert "NOT" in reason and "this PR's own code" in reason
+
+
 def test_judge_failure_fails():
-    verdict, _ = pmv.judge_polled_check_run(
-        {"status": "completed", "conclusion": "failure"}, timed_out=False
-    )
+    verdict, _ = _judge(_completed("failure"))
     assert verdict is pmv.Verdict.FAIL
 
 
 def test_judge_neutral_fails_even_though_github_would_pass_it():
     # The whole point: GitHub's own required-check semantics treat `neutral`
     # as satisfying a required check. This sender must not.
-    verdict, reason = pmv.judge_polled_check_run(
-        {"status": "completed", "conclusion": "neutral"}, timed_out=False
-    )
+    verdict, reason = _judge(_completed("neutral"))
     assert verdict is pmv.Verdict.FAIL
     assert "neutral" in reason.lower() or "not 'success'" in reason
 
 
 def test_judge_no_check_run_and_timed_out_fails_closed():
-    verdict, reason = pmv.judge_polled_check_run(None, timed_out=True)
+    verdict, reason = _judge(None, timed_out=True)
     assert verdict is pmv.Verdict.FAIL
     assert "timeout" in reason.lower()
 
@@ -238,18 +338,24 @@ def test_judge_no_check_run_and_no_timeout_fails_closed():
     # Should never happen in practice (the caller only stops polling on a
     # completed run or a timeout) -- but if it does, this must not read as a
     # pass by omission.
-    verdict, _ = pmv.judge_polled_check_run(None, timed_out=False)
+    verdict, _ = _judge(None, timed_out=False)
     assert verdict is pmv.Verdict.FAIL
 
 
 def test_judge_empty_mapping_treated_as_missing():
-    verdict, _ = pmv.judge_polled_check_run({}, timed_out=True)
+    verdict, _ = _judge({}, timed_out=True)
     assert verdict is pmv.Verdict.FAIL
 
 
 def test_judge_still_in_progress_fails_closed():
-    verdict, reason = pmv.judge_polled_check_run(
-        {"status": "in_progress", "conclusion": None}, timed_out=True
+    verdict, reason = _judge(
+        {
+            "name": EXPECTED_CHECK_NAME,
+            "head_sha": EXPECTED_SOURCE_SHA,
+            "status": "in_progress",
+            "conclusion": None,
+        },
+        timed_out=True,
     )
     assert verdict is pmv.Verdict.FAIL
     assert "in_progress" in reason
@@ -257,9 +363,48 @@ def test_judge_still_in_progress_fails_closed():
 
 @pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "action_required", "stale", None])
 def test_judge_every_non_success_conclusion_fails_closed(conclusion):
-    verdict, _ = pmv.judge_polled_check_run(
-        {"status": "completed", "conclusion": conclusion}, timed_out=False
-    )
+    verdict, _ = _judge(_completed(conclusion))
+    assert verdict is pmv.Verdict.FAIL
+
+
+# ---------------------------------------------------------------------------
+# judge_polled_check_run -- identity (PR #823 review, finding 7)
+#
+# `check_name` (`pin-verify · <tan_ref> × <sdk_ref>`) encodes only
+# tan_ref/sdk_ref, not `soms` -- a first-class member of ADR-0029's tuple.
+# The receiver's `workflow_dispatch` entrypoint means a hand-run with the
+# same two refs but a DIFFERENT SoM set lands under the same name on the
+# same commit, so `judge_polled_check_run` must not grade whatever it is
+# handed just because SOME check run with that name showed up.
+# ---------------------------------------------------------------------------
+
+
+def test_judge_refuses_a_check_run_with_the_wrong_name():
+    run = _completed("success")
+    run["name"] = "pin-verify · v0.5.1 × v9.9.9-someone-elses-dispatch"
+    verdict, reason = _judge(run)
+    assert verdict is pmv.Verdict.FAIL
+    assert "identity" in reason.lower()
+    assert EXPECTED_CHECK_NAME in reason
+
+
+def test_judge_refuses_a_check_run_with_the_wrong_head_sha():
+    run = _completed("success")
+    run["head_sha"] = "0" * 40
+    verdict, reason = _judge(run)
+    assert verdict is pmv.Verdict.FAIL
+    assert "identity" in reason.lower()
+    assert EXPECTED_SOURCE_SHA in reason
+
+
+def test_judge_identity_mismatch_is_checked_before_conclusion():
+    # A wrong-identity run with a `success` conclusion must still fail --
+    # the identity check has to run BEFORE the conclusion is trusted, not
+    # after, or a same-named check from an unrelated dispatch could pass
+    # this one by pure coincidence of timing.
+    run = _completed("success")
+    run["head_sha"] = "1" * 40
+    verdict, _ = _judge(run)
     assert verdict is pmv.Verdict.FAIL
 
 
@@ -303,24 +448,65 @@ def test_cli_dispatch_body_refuses_a_bad_tuple():
     assert "refusing this tuple" in proc.stderr
 
 
+def test_cli_dispatch_body_refuses_more_than_max_soms():
+    args = ["dispatch-body", "--tan-ref", "v0.5.1", "--sdk-ref", "v0.16.0-rc1",
+            "--source-sha", VALID_SHA]
+    for i in range(pmv.MAX_SOMS + 1):
+        args += ["--som", f"E1M-X{i}"]
+    proc = _run(*args)
+    assert proc.returncode == 2
+    assert f"cap is {pmv.MAX_SOMS}" in proc.stderr
+
+
+def test_cli_dispatch_body_honours_an_explicit_source_repo():
+    # `${{ github.repository }}` reaches here rather than the hardcoded
+    # SOURCE_REPO default (PR #823 review, finding 10).
+    proc = _run(
+        "dispatch-body",
+        "--tan-ref", "v0.5.1",
+        "--sdk-ref", "v0.16.0-rc1",
+        "--source-sha", VALID_SHA,
+        "--source-repo", "someone/tan-cli-fork",
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = json.loads(proc.stdout)
+    assert body["client_payload"]["source_repo"] == "someone/tan-cli-fork"
+
+
+_JUDGE_IDENTITY_ARGS = [
+    "--expected-check-name", EXPECTED_CHECK_NAME,
+    "--expected-source-sha", EXPECTED_SOURCE_SHA,
+    "--tan-ref", EXPECTED_TAN_REF,
+]
+
+
 def test_cli_judge_success_exits_zero():
-    doc = json.dumps({"status": "completed", "conclusion": "success"})
-    proc = _run("judge", "--check-run", "-", input_text=doc)
+    doc = json.dumps(_completed("success"))
+    proc = _run("judge", "--check-run", "-", *_JUDGE_IDENTITY_ARGS, input_text=doc)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.startswith("pass:")
+    assert EXPECTED_TAN_REF in proc.stdout
 
 
 def test_cli_judge_failure_exits_one():
-    doc = json.dumps({"status": "completed", "conclusion": "failure"})
-    proc = _run("judge", "--check-run", "-", input_text=doc)
+    doc = json.dumps(_completed("failure"))
+    proc = _run("judge", "--check-run", "-", *_JUDGE_IDENTITY_ARGS, input_text=doc)
     assert proc.returncode == 1
     assert proc.stdout.startswith("fail:")
 
 
 def test_cli_judge_timed_out_with_no_run_exits_one():
-    proc = _run("judge", "--check-run", "-", "--timed-out", input_text="")
+    proc = _run("judge", "--check-run", "-", "--timed-out", *_JUDGE_IDENTITY_ARGS, input_text="")
     assert proc.returncode == 1
     assert "timeout" in proc.stdout.lower()
+
+
+def test_cli_judge_wrong_identity_exits_one():
+    run = _completed("success")
+    run["head_sha"] = "0" * 40
+    proc = _run("judge", "--check-run", "-", *_JUDGE_IDENTITY_ARGS, input_text=json.dumps(run))
+    assert proc.returncode == 1
+    assert "identity" in proc.stdout.lower()
 
 
 def test_cli_sdk_ref_reads_the_real_parity_yml():
