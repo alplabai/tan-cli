@@ -1097,7 +1097,18 @@ def _emit(
     if findings is None:
         findings = tuple(_Finding(issue.severity, issue.message) for issue in reportable)
     reported = list(zip(reportable, findings))
-    if output_format == ValidateOutputFormat.JSON:
+
+    # Built for TEXT/JSON only (tan-cli#799): `Envelope.__init__` appends the
+    # tan-cli#407 `sdk.discovery-divergent` warning at the shared seam
+    # (`_with_sdk_divergence`). The three TEXT verdicts below loop `issues`
+    # directly, and used to loop the PRE-envelope list -- built only inside
+    # the JSON branch before -- so a seam-appended divergence issue reached
+    # `--format json` and stayed silent on the default channel. DIAGNOSTIC_V1
+    # and SARIF are ported documents that read neither `data` nor `envelope`
+    # (see the two branches below), so building either for them would only
+    # pay for `_with_sdk_divergence`'s filesystem ladder walk and discard the
+    # result -- skip both there.
+    if output_format in (ValidateOutputFormat.JSON, ValidateOutputFormat.TEXT):
         data = {
             "schemaVersion": DATA_SCHEMA_VERSION,
             "outcome": outcome,
@@ -1106,26 +1117,35 @@ def _emit(
             # every guard and the whole offline path keep, and which the two
             # committed conformance fixtures pin.
             "commandLine": command_line,
-            # `data.boardYamlPath` is UNTOUCHED by tan-cli#236 -- it names where
-            # tan looked even on the missing-board refusal below; only
+            # `data.boardYamlPath` is UNTOUCHED by tan-cli#236 -- it names
+            # where tan looked even on the missing-board refusal below; only
             # `project.boardYaml` (Rust's starkest instance of the bug: the
-            # refusal one line below says the file does not exist, in the same
-            # envelope that used to still name it) is existence-filtered.
+            # refusal one line below says the file does not exist, in the
+            # same envelope that used to still name it) is
+            # existence-filtered.
             "boardYamlPath": board_path,
         }
-        emit(
-            Envelope(
-                "validate",
-                Project.resolved(root, board_path),
-                data,
-                issues,
-                exit_code,
-                # Absent, not null, when nothing resolved -- `Envelope` omits
-                # the key on `None`. See the module docstring's `sdk` block
-                # paragraph for the measured presence/absence matrix.
-                sdk=sdk,
-            )
+        envelope = Envelope(
+            "validate",
+            Project.resolved(root, board_path),
+            data,
+            issues,
+            exit_code,
+            # Absent, not null, when nothing resolved -- `Envelope` omits
+            # the key on `None`. See the module docstring's `sdk` block
+            # paragraph for the measured presence/absence matrix.
+            sdk=sdk,
         )
+        # Rebind: every branch below now sees whatever the seam appended.
+        # Safe against `reportable`/`reported`/`data["issueCount"]` above,
+        # all computed from the PRE-seam list -- a seam-appended issue's
+        # code always starts with "sdk.", so it was already excluded from
+        # `reportable` either way and none of those three needs
+        # recomputing.
+        issues = envelope.issues
+
+    if output_format == ValidateOutputFormat.JSON:
+        emit(envelope)
     elif output_format == ValidateOutputFormat.DIAGNOSTIC_V1:
         # indent=2, matching scripts/alp_cli/validate.py:34's
         # `json.dumps(to_machine_json(collector), indent=2)` -- these two
@@ -1152,9 +1172,18 @@ def _emit(
             # OUT of `issueCount`/sarif/diagnostic-v1 still belong on the
             # customer's screen; the other two branches below already print
             # them because they loop over the unfiltered `issues`.
+            #
+            # tan-cli#799: severity-prefixed (`f"{issue.severity}: ..."`),
+            # matching how `clean`/`size`/`image`/`run` render the identical
+            # `sdk.*` seam issues -- a bare `issue.message` here was the one
+            # text-channel divergence `test_narrow_text_channel_carries_the_
+            # divergence_warning` measured (no "warning:" prefix on
+            # `sdk.discovery-divergent`). `reportable[0].message` just below
+            # stays bare on purpose: that line is validate's own verdict
+            # wording (#350/#498), never an `sdk.*` advisory.
             for issue in issues:
                 if issue.code.startswith("sdk."):
-                    stream.write(f"{issue.message}\n")
+                    stream.write(f"{issue.severity}: {issue.message}\n")
             stream.write(f"{reportable[0].message}\n")
         elif len(reportable) == 1 and reportable[0].code == "validate.board-yaml-unreadable":
             # tan-cli#498 defect 3, the text half, and the same reasoning as
@@ -1171,12 +1200,20 @@ def _emit(
             stream.write("validate: board.yaml could not be read\n")
             for issue in issues:
                 if issue.code.startswith("sdk."):
-                    stream.write(f"{issue.message}\n")
+                    stream.write(f"{issue.severity}: {issue.message}\n")
             stream.write(f"{reportable[0].message}\n")
         elif outcome != OUTCOME_CLEAN:
             stream.write("validate: validation failure\n")
+            # tan-cli#799: `sdk.*` seam issues (e.g. `sdk.discovery-divergent`)
+            # get the same `f"{severity}: {message}"` rendering the other
+            # four narrow-text commands use; validate's own `reportable`
+            # findings (already accounted for in `outcome`/`issueCount` above
+            # this render block) keep their bare wording unchanged.
             for issue in issues:
-                stream.write(f"{issue.message}\n")
+                if issue.code.startswith("sdk."):
+                    stream.write(f"{issue.severity}: {issue.message}\n")
+                else:
+                    stream.write(f"{issue.message}\n")
         else:
             # Keyed off the OUTCOME, not off `issues` being non-empty: a
             # SPAWNED validator that exits 0 having printed warnings
@@ -1188,8 +1225,13 @@ def _emit(
             # "validate: validation failure" over exit 0. The oracle's own
             # `spawn_text` keys off the outcome for exactly this reason.
             stream.write(f"validate: {board_path} is clean\n")
+            # Same tan-cli#799 severity-prefix rule as the `validation
+            # failure` branch above: only the `sdk.*` seam issues get it.
             for issue in issues:
-                stream.write(f"{issue.message}\n")
+                if issue.code.startswith("sdk."):
+                    stream.write(f"{issue.severity}: {issue.message}\n")
+                else:
+                    stream.write(f"{issue.message}\n")
     raise typer.Exit(int(exit_code))
 
 

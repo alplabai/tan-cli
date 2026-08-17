@@ -164,7 +164,7 @@ cd my-app
 tan validate
 tan build
 tan size
-tan run --flash
+tan run --flash --confirm
 ```
 
 What those commands do:
@@ -190,7 +190,15 @@ What those commands do:
 4. `validate` checks `board.yaml` and related metadata.
 5. `build` plans, materialises, and builds every core slice.
 6. `size` reports firmware use against the SoM memory budget.
-7. `run --flash` builds and then runs or programs the selected target.
+7. `run --flash` builds and then runs or programs the selected target. On a
+   hardware target (a native_sim/host target always just runs), `--flash`
+   alone only *previews* the write: every slice comes back `planned`, nothing
+   reaches the device, and the run exits non-zero naming the remedy. Add
+   `--confirm` (as above) to actually arm the write, or set
+   `ALP_FLASH_FORCE=1` in the environment, or `flash_args.confirm: true` in
+   the manifest -- the same three-way gate `tan flash --confirm` already has.
+   This is deliberate, not a bug: a fresh checkout must not silently
+   reprogram an attached module.
 
 Run `tan doctor` if setup or toolchain discovery fails; its `zephyrSdk`
 check names the exact `west sdk install` command above too, so it stays
@@ -224,8 +232,8 @@ move.
 | Create a project | `tan init --name my-app` |
 | Check a project | `tan validate` |
 | Build firmware | `tan build` |
-| Build and run or flash | `tan run --flash` |
-| Flash an existing build | `tan flash` |
+| Build and run or flash | `tan run --flash --confirm` (`--confirm` arms the write on a hardware target; see the quickstart) |
+| Flash an existing build | `tan flash --confirm` |
 | Inspect firmware size | `tan size` |
 | Create an image | `tan image` |
 | Remove build output | `tan clean` |
