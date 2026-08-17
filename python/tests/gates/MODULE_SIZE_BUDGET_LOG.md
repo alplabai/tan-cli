@@ -171,3 +171,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/validate_cmd.py: 1587 -> 1591
 - 2026-08-16 -- tan-cli#799: validate's sdk.* seam-issue text now carries a severity prefix, matching clean/size/image/run
     - tan/commands/validate_cmd.py: 1591 -> 1613
+- 2026-08-17 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/clean_cmd.py: 1110 -> 1119
+    - tan/commands/size_cmd.py: 831 -> 842
+    - tan/commands/validate_cmd.py: 1571 -> 1613
