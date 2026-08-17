@@ -4635,6 +4635,38 @@ def test_dp_id_matches_rejects_arms_shared_jep106_designer_field():
     assert flash_cmd._dp_id_matches("0x477", banner) is False
 
 
+def test_the_expected_id_appearing_elsewhere_in_the_banner_is_not_a_match():
+    """tan-cli#795, salvaged from tan-cli#822 (@hkngln): the prior unanchored
+    substring match ran against the WHOLE banner, not the DP-ID line, so the
+    `expected` value appearing anywhere -- a selected-device echo, a path, a
+    firmware string -- accepted the board whatever the DP actually reported.
+
+    This banner is that shape, and the real pair measured on a bench where
+    both answer the cloned probe serial `603000869`: it names `0x4C013477`
+    (the AEN801) in a device-selection line, while the SW-DP that actually
+    answered is `0x0BE12477` (the GD32 bridge). `_DP_ID_RE`'s
+    `(?:with\\s+ID|DPIDR)` anchor means `_dp_id_matches` extracts only the
+    DP-ID line's capture, so an expected value that merely appears elsewhere
+    in the banner must not match."""
+    banner = (
+        'Device "0x4C013477" selected.\n'
+        "Connecting to target via SWD\n"
+        "Found SW-DP with ID 0x0BE12477\n"
+    )
+    assert flash_cmd._dp_id_matches("0x4C013477", banner) is False
+
+
+def test_a_matching_id_in_any_casing_still_accepts():
+    """tan-cli#795, salvaged from tan-cli#822 (@hkngln): the negative control
+    for the anchoring case above -- the comparison is by parsed VALUE
+    (`int(actual, 16) == int(expected, 16)`), so the probe's own casing and
+    `0x` spelling stay its business. Without this, a "fix" that swapped in an
+    exact STRING compare would pass the anchoring test above and refuse every
+    real board whose banner casing differs from the manifest's."""
+    banner = "Connecting to target via SWD\nFound SW-DP with ID 0x4c013477\n"
+    assert flash_cmd._dp_id_matches("0x4C013477", banner) is True
+
+
 def test_expect_dpidr_width_refusal_rejects_a_truncated_id():
     """tan-cli#795(b): a manifest `expect_dpidr` that is not a full 32-bit / 8
     hex-digit value must be refused at PLAN time, in `flash_plan.
