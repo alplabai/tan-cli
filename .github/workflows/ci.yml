@@ -4,44 +4,53 @@
 # `python/tests`, `ALP_SDK_ROOT`-gated via `sdk_parity`), the npm-shim
 # platform-mapping check, and the sdist/wheel build-floor proof.
 #
-# BRANCH PROTECTION MUST BE REPOINTED (tan-cli#392, tan-cli#269)
-# ==============================================================
-# Measured 2026-08-02, `gh api
-# repos/alplabai/tan-cli/branches/<b>/protection` -- `main` and `dev` carried
-# the IDENTICAL six required contexts (strict: true, enforce_admins: true):
+# BRANCH PROTECTION (tan-cli#392, tan-cli#269 -- DONE; tan-cli#439)
+# =================================================================
+# The repoint this block used to demand has happened. Do not act on an older
+# copy of it: it named six contexts, five of which (`lint`, the three
+# `test (*)` legs, `msrv`) were cargo jobs on `crates/` that tan-cli#269
+# deleted, and it listed the replacements as work still to do.
 #
-#     lint | test (ubuntu-latest) | test (windows-latest)
-#     test (macos-latest) | msrv | seam1 -- plan-shape parity
+# Re-measured 2026-08-18, `gh api
+# repos/alplabai/tan-cli/branches/<b>/protection`. `main` and `dev` require the
+# IDENTICAL FIVE contexts, all of which run today:
 #
-# FIVE OF THOSE SIX NO LONGER EXIST. `lint`, the three `test (*)` legs and
-# `msrv` were cargo jobs on `crates/`, which tan-cli#269 deleted; they are
-# gone from this file. A required context that never reports does not fail --
-# it sits PENDING forever and blocks the merge, so protection has to be edited
-# before anything can land after this change. Branch protection is a repo
-# SETTING, not a file, and cannot be fixed from here.
+#     seam1 -- plan-shape parity
+#     python -- pytest across python/ (ubuntu-latest)
+#     python -- pytest across python/ (windows-latest)
+#     python -- pytest across python/ (macos-latest)
+#     zizmor · workflow security
 #
-# The exact context strings to require INSTEAD, all of which run today:
+# Four come from parity.yml; `zizmor · workflow security` is THIS file's
+# `workflow-security` job. `enforce_admins` is true on both.
 #
-#   `python`
-#       this file's own job below. One OS, whole suite INCLUDING tests/gates --
-#       but `sdk_parity` is false on a `pull_request`, so it runs with no
-#       alp-sdk bound and the SDK-gated modules are not even collected. Measure
-#       the gap rather than trusting a number written here: `python -m pytest
-#       --collect-only -q` from `python/`, with and without `ALP_SDK_ROOT`.
-#       Requiring this ALONE gates merges on the weaker half of the suite.
+# ONE INTENTIONAL DIFFERENCE, and it is not cosmetic: `strict` is **true on
+# `main`, false on `dev`**. On `main` a PR must be up to date with the base
+# before it can merge, so each merge sends the others back for a rebase and a
+# full re-run; on `dev` it does not, which is what makes several open PRs
+# workable there. Anyone quoting "strict: true" for this repo is quoting
+# `main`.
 #
-#   `python -- pytest across python/ (ubuntu-latest)`
-#   `python -- pytest across python/ (windows-latest)`
-#   `python -- pytest across python/ (macos-latest)`
-#       parity.yml's `python-tests` matrix. Binds `ALP_SDK_ROOT` on every run,
-#       on all three platforms tan ships assets for, and skips only
-#       `tests/gates` -- which `seam1 -- plan-shape parity`, already required,
-#       runs against the refs that make each gate's verdict mean something.
-#       This is the trio worth requiring.
+# `python` -- this file's own job below -- is deliberately NOT required. It is
+# one OS and, on a `pull_request`, `sdk_parity` is false, so it runs with no
+# alp-sdk bound and the SDK-gated modules are not even collected. Requiring it
+# would gate merges on the weaker half of the suite; the parity.yml trio binds
+# `ALP_SDK_ROOT` on all three platforms tan ships assets for. Measure the gap
+# rather than trusting a number written here: `python -m pytest --collect-only
+# -q` from `python/`, with and without `ALP_SDK_ROOT`.
 #
-# Those strings are each job's EVALUATED `name:`; `python` has none, so its
-# context is its job id. Renaming either job changes the required context and
-# blocks every merge until protection is edited to match -- treat both as API.
+# Re-measure rather than trusting this block; it is a snapshot and this is the
+# second time it went stale:
+#
+#     gh api repos/alplabai/tan-cli/branches/main/protection \
+#       --jq '.required_status_checks | {strict, contexts}'
+#     gh api repos/alplabai/tan-cli/branches/dev/protection \
+#       --jq '.required_status_checks | {strict, contexts}'
+#
+# Those strings are each job's EVALUATED `name:`; a job with no `name:` reports
+# under its job id. Renaming a required job changes the required context and
+# blocks every merge until protection is edited to match -- treat them as API.
+# Branch protection is a repo SETTING, not a file, and cannot be fixed here.
 name: ci
 on:
   push:
