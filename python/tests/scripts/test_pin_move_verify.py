@@ -135,6 +135,276 @@ def test_extract_pinned_sdk_tag_against_the_real_file():
 
 
 # ---------------------------------------------------------------------------
+# extract_ci_sdk_parity_ref / extract_freshness_pins
+# ---------------------------------------------------------------------------
+
+_CI_CHECKOUT = """      - uses: actions/checkout@abc # v7.0.1
+        with:
+          persist-credentials: false
+          repository: alplabai/alp-sdk
+          ref: 88318e759958529fbbd8fe9d481373681c0fa78d
+          path: alp-sdk
+"""
+
+
+def test_extract_ci_sdk_parity_ref_reads_the_ref_under_the_alp_sdk_repository():
+    assert (
+        pmv.extract_ci_sdk_parity_ref(_CI_CHECKOUT)
+        == "88318e759958529fbbd8fe9d481373681c0fa78d"
+    )
+
+
+def test_extract_ci_sdk_parity_ref_ignores_an_unrelated_checkout_ref():
+    # Anchoring on `repository: alplabai/alp-sdk` rather than "the only
+    # `ref:` in the file" is the whole point -- an unrelated checkout's ref
+    # must not be graded as the sdk_parity pin.
+    unrelated = """      - uses: actions/checkout@abc
+        with:
+          ref: v1.2.3
+"""
+    text = unrelated + _CI_CHECKOUT
+    assert (
+        pmv.extract_ci_sdk_parity_ref(text) == "88318e759958529fbbd8fe9d481373681c0fa78d"
+    )
+
+
+def test_extract_ci_sdk_parity_ref_refuses_zero_matches():
+    with pytest.raises(pmv.PayloadError, match="found 0"):
+        pmv.extract_ci_sdk_parity_ref("jobs:\n  x:\n    steps: []\n")
+
+
+def test_extract_ci_sdk_parity_ref_refuses_two_matches():
+    with pytest.raises(pmv.PayloadError, match="found 2"):
+        pmv.extract_ci_sdk_parity_ref(_CI_CHECKOUT + _CI_CHECKOUT)
+
+
+# A second alp-sdk checkout the two-line pattern CANNOT see is the dangerous
+# case, not the identical-block one above: it leaves exactly one match, so an
+# extractor that counted only matches would return the block it happens to
+# read and report a move of the OTHER ref as `moved: false`. Each shape below
+# was measured returning happily before `_ALP_SDK_CHECKOUT`'s independent
+# count landed.
+_SECOND_CHECKOUT_SHAPES = {
+    "reordered keys": """          ref: bbb
+          repository: alplabai/alp-sdk
+""",
+    "path line between the two keys": """          repository: alplabai/alp-sdk
+          path: two
+          ref: bbb
+""",
+    "inline flow map": """          with: {repository: alplabai/alp-sdk, ref: bbb}
+""",
+    "quoted repo name": """          repository: "alplabai/alp-sdk"
+          path: two
+          ref: bbb
+""",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_SECOND_CHECKOUT_SHAPES))
+def test_extract_ci_sdk_parity_ref_refuses_an_unparseable_second_checkout(shape):
+    with pytest.raises(pmv.PayloadError, match="2 alp-sdk checkout"):
+        pmv.extract_ci_sdk_parity_ref(_CI_CHECKOUT + _SECOND_CHECKOUT_SHAPES[shape])
+
+
+def test_extract_freshness_pins_refuses_an_unparseable_second_assignment():
+    # Same shape one file over: an INDENTED fourth assignment is invisible to
+    # the line-anchored pattern, so only the independent `_FRESHNESS_PIN_ANY`
+    # count catches it.
+    text = _FRESHNESS_PINS + '    PINNED_SDK_COMMIT = "' + "e" * 40 + '"' + chr(10)
+    with pytest.raises(pmv.PayloadError, match="refusing to guess"):
+        pmv.extract_freshness_pins(text)
+
+
+def test_extract_pinned_sdk_tag_refuses_an_unparseable_second_pin():
+    # A flow-mapped second pin: invisible to the line-anchored pattern, so
+    # only the independent `PINNED_SDK_TAG:` count refuses it.
+    text = """env:
+  PINNED_SDK_TAG: aaa
+jobs: {x: {env: {PINNED_SDK_TAG: bbb}}}
+"""
+    with pytest.raises(pmv.PayloadError, match="occurrence"):
+        pmv.extract_pinned_sdk_tag(text)
+
+
+def test_extract_ci_sdk_parity_ref_against_the_real_file():
+    real = Path(__file__).resolve().parents[3] / pmv.CI_YML
+    ref = pmv.extract_ci_sdk_parity_ref(real.read_text(encoding="utf-8"))
+    assert pmv._SHA.match(ref) or pmv._REF.match(ref)
+
+
+_FRESHNESS_PINS = (
+    'PINNED_SDK_COMMIT = "' + "a" * 40 + '"  # alp-sdk origin/main\n'
+    'HAND_PORT_PINNED_SDK_COMMIT = "' + "b" * 40 + '"  # see above\n'
+    'STRICT_LOADERS_PINNED_SDK_COMMIT = "' + "c" * 40 + '"  # frozen\n'
+)
+
+
+def test_extract_freshness_pins_reads_all_three_name_sorted():
+    assert pmv.extract_freshness_pins(_FRESHNESS_PINS) == ("b" * 40, "a" * 40, "c" * 40)
+
+
+def test_extract_freshness_pins_refuses_a_missing_pin():
+    text = _FRESHNESS_PINS.replace('STRICT_LOADERS_PINNED_SDK_COMMIT = "' + "c" * 40 + '"', "")
+    with pytest.raises(pmv.PayloadError, match="refusing to guess"):
+        pmv.extract_freshness_pins(text)
+
+
+def test_extract_freshness_pins_refuses_a_duplicated_pin():
+    with pytest.raises(pmv.PayloadError, match="refusing to guess"):
+        pmv.extract_freshness_pins(_FRESHNESS_PINS + _FRESHNESS_PINS)
+
+
+def test_extract_freshness_pins_against_the_real_file():
+    real = Path(__file__).resolve().parents[3] / pmv.FRESHNESS_GATE
+    pins = pmv.extract_freshness_pins(real.read_text(encoding="utf-8"))
+    assert len(pins) == len(pmv.PIN_SITES[pmv.FRESHNESS_GATE])
+    assert all(pmv._SHA.match(p) for p in pins)
+
+
+def test_every_pin_site_has_an_extractor_today():
+    # Not a structural requirement -- a site without one degrades to
+    # touch-based (always MOVED) behaviour, which is the SAFE direction. This
+    # asserts the state as of now: all three are value-gated, so a future
+    # deletion of an extractor is a deliberate act, not an accident.
+    assert set(pmv.PIN_VALUE_EXTRACTORS) == set(pmv.PIN_SITES)
+
+
+# ---------------------------------------------------------------------------
+# moved_pin_sites -- touched is not moved (ADR-0029 clause 2/3)
+# ---------------------------------------------------------------------------
+
+PARITY_AT_BASE = "env:\n  PINNED_SDK_TAG: " + "a" * 40 + "\n"
+PARITY_AT_HEAD_SAME_PIN = "# a comment the diff added\n" + PARITY_AT_BASE
+PARITY_AT_HEAD_MOVED = "env:\n  PINNED_SDK_TAG: " + "d" * 40 + "\n"
+
+
+def _reader(tree):
+    """`read_at(rev, path)` backed by a dict; a missing key is a file that
+    does not exist at that revision, exactly like `_git_show` returning None.
+    """
+    return lambda rev, path: tree.get((rev, path))
+
+
+def _moved(tree, sites=(pmv.PARITY_YML,)):
+    return pmv.moved_pin_sites(sites, _reader(tree), base="BASE", head="HEAD")
+
+
+def test_moved_pin_sites_touched_but_value_unchanged_is_not_moved():
+    # The tan-cli PR #848 shape: `parity.yml` edited (Renode steps removed),
+    # `PINNED_SDK_TAG` byte-identical. ADR-0029 clause 2/3 gate on the VALUE,
+    # so there is nothing to dispatch.
+    assert (
+        _moved(
+            {
+                ("BASE", pmv.PARITY_YML): PARITY_AT_BASE,
+                ("HEAD", pmv.PARITY_YML): PARITY_AT_HEAD_SAME_PIN,
+            }
+        )
+        == ()
+    )
+
+
+def test_moved_pin_sites_value_changed_is_moved():
+    assert _moved(
+        {
+            ("BASE", pmv.PARITY_YML): PARITY_AT_BASE,
+            ("HEAD", pmv.PARITY_YML): PARITY_AT_HEAD_MOVED,
+        }
+    ) == (pmv.PARITY_YML,)
+
+
+def test_moved_pin_sites_extraction_failure_is_moved():
+    # THE non-negotiable direction: a shape the extractor cannot read must
+    # never downgrade to "no dispatch needed" -- that would turn this
+    # narrowing into the hole the gate exists to close.
+    assert _moved(
+        {
+            ("BASE", pmv.PARITY_YML): PARITY_AT_BASE,
+            ("HEAD", pmv.PARITY_YML): "env:\n  # PINNED_SDK_TAG went away\n",
+        }
+    ) == (pmv.PARITY_YML,)
+
+
+def test_moved_pin_sites_extraction_failure_at_base_is_moved():
+    assert _moved(
+        {
+            ("BASE", pmv.PARITY_YML): "env: {}\n",
+            ("HEAD", pmv.PARITY_YML): PARITY_AT_BASE,
+        }
+    ) == (pmv.PARITY_YML,)
+
+
+@pytest.fixture
+def spy_extractor(monkeypatch):
+    """Records every text `parity.yml`'s extractor is handed, and never
+    raises. Both file-absent tests below need this: with the `before is None
+    or after is None` guard deleted, the real extractor blows up on `None`
+    and the catch-all returns True, so asserting only the RESULT leaves that
+    guard unpinned (measured: it does). Asserting the extractor was never
+    CALLED is what fails the moment the guard goes.
+    """
+    seen: list = []
+    monkeypatch.setitem(
+        pmv.PIN_VALUE_EXTRACTORS, pmv.PARITY_YML, lambda text: seen.append(text) or ("v",)
+    )
+    return seen
+
+
+def test_moved_pin_sites_file_added_is_moved(spy_extractor):
+    assert _moved({("HEAD", pmv.PARITY_YML): PARITY_AT_BASE}) == (pmv.PARITY_YML,)
+    assert spy_extractor == []
+
+
+def test_moved_pin_sites_file_deleted_is_moved(spy_extractor):
+    assert _moved({("BASE", pmv.PARITY_YML): PARITY_AT_BASE}) == (pmv.PARITY_YML,)
+    assert spy_extractor == []
+
+
+def test_moved_pin_sites_reader_raising_is_moved():
+    def boom(rev, path):
+        raise OSError("git is not on PATH")
+
+    assert pmv.moved_pin_sites([pmv.PARITY_YML], boom, base="BASE", head="HEAD") == (
+        pmv.PARITY_YML,
+    )
+
+
+def test_moved_pin_sites_site_without_an_extractor_is_moved():
+    # A `PIN_SITES` entry added without an extractor must be MOVED whenever
+    # it is touched -- adding the path alone is always the safe half-step.
+    #
+    # The result alone does NOT pin the `extract is None` guard: with it
+    # deleted, `extract(text)` raises TypeError and the catch-all returns True
+    # anyway, so the assertion below would still pass. Asserting that NOTHING
+    # WAS READ is what pins it -- with the guard gone, `read_at` runs first.
+    reads = []
+
+    def reader(rev, path):
+        reads.append((rev, path))
+        return "x"
+
+    assert pmv.moved_pin_sites(
+        ["docs/some-future-pin-site.md"], reader, base="BASE", head="HEAD"
+    ) == ("docs/some-future-pin-site.md",)
+    assert reads == []
+
+
+def test_moved_pin_sites_untouched_tree_is_neither():
+    assert pmv.moved_pin_sites([], _reader({}), base="BASE", head="HEAD") == ()
+
+
+def test_moved_pin_sites_reports_only_the_sites_that_moved():
+    tree = {
+        ("BASE", pmv.PARITY_YML): PARITY_AT_BASE,
+        ("HEAD", pmv.PARITY_YML): PARITY_AT_HEAD_SAME_PIN,
+        ("BASE", pmv.FRESHNESS_GATE): _FRESHNESS_PINS,
+        ("HEAD", pmv.FRESHNESS_GATE): _FRESHNESS_PINS.replace("a" * 40, "e" * 40),
+    }
+    assert _moved(tree, sites=(pmv.PARITY_YML, pmv.FRESHNESS_GATE)) == (pmv.FRESHNESS_GATE,)
+
+
+# ---------------------------------------------------------------------------
 # build_tuple / PinMoveTuple
 # ---------------------------------------------------------------------------
 
@@ -408,6 +678,22 @@ def test_judge_identity_mismatch_is_checked_before_conclusion():
     assert verdict is pmv.Verdict.FAIL
 
 
+def test_git_show_returns_none_when_git_fails_even_with_stdout(monkeypatch, tmp_path: Path):
+    # `if out.returncode == 0 else None` is otherwise unpinned: returning
+    # stdout unconditionally leaves every other test green. A git that exits
+    # non-zero having already written to stdout must still read as "absent",
+    # never as a pin value -- extracting one from a partial/failed read is
+    # exactly the silent-downgrade shape this module refuses.
+    monkeypatch.setattr(
+        pmv.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            ["git"], 128, "PINNED_SDK_TAG: leftover-from-a-failed-read", "fatal: bad object"
+        ),
+    )
+    assert pmv._git_show(tmp_path, "nope", pmv.PARITY_YML) is None
+
+
 # ---------------------------------------------------------------------------
 # CLI subcommands -- thin wrappers, exercised through subprocess so the
 # argparse wiring and exit codes are proven, not just the functions behind it
@@ -548,6 +834,10 @@ def test_cli_detect_against_a_real_git_repo(tmp_path: Path):
     doc = json.loads(proc.stdout)
     assert doc["touched"] is True
     assert doc["sites"] == [".github/workflows/parity.yml"]
+    # The file does not exist at base at all -- one of the conservative
+    # shapes, so MOVED even though there is no "before" value to compare.
+    assert doc["moved"] is True
+    assert doc["moved_sites"] == [".github/workflows/parity.yml"]
 
 
 def test_cli_detect_reports_untouched_when_no_pin_site_moves(tmp_path: Path):
@@ -575,3 +865,78 @@ def test_cli_detect_reports_untouched_when_no_pin_site_moves(tmp_path: Path):
     doc = json.loads(proc.stdout)
     assert doc["touched"] is False
     assert doc["sites"] == []
+    assert doc["moved"] is False
+    assert doc["moved_sites"] == []
+
+
+def _repo_with_parity_yml(tmp_path: Path, head_text: str | None) -> Path:
+    """A throwaway repo carrying `parity.yml` on `base-branch`, plus a
+    `feature` branch that rewrites it to `head_text` -- or, with `None`, an
+    empty `feature` branch for the caller to change however it likes.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    parity = repo / ".github" / "workflows" / "parity.yml"
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "test")
+    parity.write_text(PARITY_AT_BASE, encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    git("branch", "-q", "-m", "base-branch")
+
+    git("checkout", "-q", "-b", "feature")
+    if head_text is not None:
+        parity.write_text(head_text, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", "edit parity.yml")
+    return repo
+
+
+def test_cli_detect_touched_but_no_value_moved(tmp_path: Path):
+    # End-to-end over real git objects, the tan-cli PR #848 shape: the pin
+    # site is in the diff, `PINNED_SDK_TAG` is byte-identical. `touched`
+    # stays true (the summary still says which file), `moved` -- the flag
+    # the workflow gates on -- is false.
+    repo = _repo_with_parity_yml(tmp_path, PARITY_AT_HEAD_SAME_PIN)
+    proc = _run("detect", "--base", "base-branch", "--head", "feature", "--repo-root", str(repo))
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert doc["touched"] is True
+    assert doc["sites"] == [".github/workflows/parity.yml"]
+    assert doc["moved"] is False
+    assert doc["moved_sites"] == []
+
+
+def test_cli_detect_reports_a_moved_pin_value(tmp_path: Path):
+    repo = _repo_with_parity_yml(tmp_path, PARITY_AT_HEAD_MOVED)
+    proc = _run("detect", "--base", "base-branch", "--head", "feature", "--repo-root", str(repo))
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert doc["touched"] is True
+    assert doc["moved"] is True
+    assert doc["moved_sites"] == [".github/workflows/parity.yml"]
+
+
+def test_cli_detect_deleted_pin_site_is_moved(tmp_path: Path):
+    # End-to-end over real git objects. This one does NOT pin the file-absent
+    # guard on its own (deleting the guard leaves it green -- the extractor
+    # raises on `None` and the catch-all returns True); its unit-level twin
+    # `test_moved_pin_sites_file_deleted_is_moved` carries that. What this
+    # proves is the `_git_show`-to-`moved_sites` plumbing on a real deletion.
+    repo = _repo_with_parity_yml(tmp_path, None)
+    for args in (
+        ["rm", "-q", ".github/workflows/parity.yml"],
+        ["commit", "-q", "-m", "delete the pin site"],
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    proc = _run("detect", "--base", "base-branch", "--head", "feature", "--repo-root", str(repo))
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert doc["touched"] is True
+    assert doc["moved"] is True
+    assert doc["moved_sites"] == [".github/workflows/parity.yml"]
