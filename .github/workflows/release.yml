@@ -673,6 +673,34 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: assets/*
+      # RUNS BEFORE THE SLICE, and that order is the whole point (tan-cli#813).
+      #
+      # `assemble_changelog.py` folds `changelog.d/*.md` into `CHANGELOG.md` and
+      # is run BY HAND at the release commit. Anything merged between that
+      # commit and the tag push therefore ships its fix with its fragment still
+      # unfolded -- in no `CHANGELOG.md` section and in no release body -- and
+      # the slice below cannot notice, because its two guards only ask whether
+      # the `## [<version>]` section EXISTS and is NON-EMPTY. A section missing
+      # one entry passes both.
+      #
+      # Not hypothetical. v0.6.0-rc1 shipped exactly this way: `3f39f34`
+      # (tan-cli#752, the `issues: write` grant without which a `v*` tag failed
+      # the whole run with `startup_failure`) landed after the assembler ran at
+      # `e2f5021`, and its fragment was still sitting in `changelog.d/` at tag
+      # `ad6470c`. The fix was in the tree and in nobody's notes.
+      #
+      # `--require-empty` already existed (`assemble_changelog.py:173`) and was
+      # wired into zero workflows. `--check` is NOT a substitute -- the script's
+      # own help calls it "informational, NOT a gate" and it exits 0 always.
+      #
+      # A red X here means: run `python3 python/scripts/assemble_changelog.py`,
+      # commit the folded CHANGELOG, and re-tag. Loud at tag time is the point;
+      # the alternative is discovering it in a published release body that
+      # cannot be re-sliced.
+      - name: Refuse to publish with unfolded changelog fragments
+        shell: bash
+        run: python3 python/scripts/assemble_changelog.py --require-empty
+
       - name: Slice CHANGELOG section for the release notes
         shell: bash
         run: |
