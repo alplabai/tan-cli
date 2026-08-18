@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Two questions five command modules each answered with their own private
+"""Two questions four command modules each answered with their own private
 copy: "is this directory an alp-sdk checkout?" and "what shape is this YAML
 value?" (tan-cli#408).
 
-Neither is domain logic worth five implementations. `_is_sdk_root` had three
-(`build_cmd.py`, `flash_cmd.py`, `renode_cmd.py`) and `_yaml_kind` two
+Neither is domain logic worth four implementations. `_is_sdk_root` had two
+(`build_cmd.py`, `flash_cmd.py`) and `_yaml_kind` two
 (`diff_cmd.py`, `pinmux_cmd.py`), and the copies had already drifted in TYPE
--- two took `str`, one took `Path` -- which is exactly how a "same" helper
+-- one took `str`, one took `Path` -- which is exactly how a "same" helper
 stops being the same one.
 
 Lives under `tan.core` rather than beside any one caller because
@@ -31,13 +31,13 @@ def is_sdk_root(path: Path | str) -> bool:
     """Whether `path` is an alp-sdk checkout -- port of `util.rs::
     has_loader_script`, and INCAPABLE OF RAISING.
 
-    Accepts `Path` or `str` because the three copies this replaces disagreed:
-    `build_cmd`'s took a `Path`, `flash_cmd`'s and `renode_cmd`'s took a
-    `str`. Callers keep whichever they already hold rather than converting at
+    Accepts `Path` or `str` because the copies this replaces disagreed:
+    `build_cmd`'s took a `Path`, `flash_cmd`'s took a `str`. Callers keep
+    whichever they already hold rather than converting at
     every site.
 
     tan-cli#408 asks for a deliberate decision on the `except (OSError,
-    ValueError)` guard the two string-based copies carried, so: **it stays**,
+    ValueError)` guard the string-based copy carried, so: **it stays**,
     and the reason is that this is a PRE-FLIGHT guard. Every caller is asking
     "may I use this?" in a command whose whole job is to answer with an
     envelope; a path with an embedded NUL or an unreadable parent must read

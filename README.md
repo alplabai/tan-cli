@@ -241,7 +241,6 @@ move.
 | Check the host setup | `tan doctor` |
 | Start a serial monitor | `tan monitor` |
 | Generate debugger settings | `tan debug-config` |
-| Run with Renode | `tan renode` |
 | List examples and presets | `tan examples`, `tan presets` |
 | Explain resolved project settings | `tan inspect` |
 | Explain a template or generation target | `tan explain` |
@@ -313,7 +312,7 @@ VS Code UI          CLI      metadata, schemas, examples, west extensions
 - `alp-sdk`: hardware metadata, schemas, examples, and the remaining
   `west alp-*` extensions.
 - `tan`: SDK selection, planning, build execution, and the manifest that
-  `flash`/`size`/`image`/`renode` read.
+  `flash`/`size`/`image` read.
 - `alp-sdk-vscode`: an optional UI that invokes `tan`.
 
 A successful build writes `build/system-manifest.yaml`, which records the
@@ -347,7 +346,7 @@ backstop, not a substitute for using a venv in the first place.
 
 That run means the same thing on every machine, including a bench host with
 real debug tooling installed. The suite neutralises the debug/flash probe
-identities — `JLinkExe`, `openocd`, `pyocd`, `west`, `renode` and friends —
+identities — `JLinkExe`, `openocd`, `pyocd`, `west` and friends —
 for its own duration (`python/tests/conftest.py`, `PROBE_TOOLS`), so a
 which()-gated branch answers the way it answers on a CI runner rather than the
 way this host happens to be provisioned. Before that (tan-cli#603) seven

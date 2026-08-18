@@ -136,11 +136,11 @@ step() {
 # non-zero -- that is the signal to delete the entry, not to silence it.
 #
 # RC=124 (the timeout fired) is neither: "not the broken exit code" is NOT
-# evidence the defect is fixed, so a hang must never score XPASS. Measured: a
-# stub hanging past --timeout printed "XPASS ... #448 looks FIXED" and told
-# the operator to retire the ONE remaining ledger entry on a lie -- #448 is
-# "renode never reaches the app console", and hanging is its most likely
-# failure shape.
+# evidence the defect is fixed, so a hang must never score XPASS. Measured
+# against the ledger's then-only entry (#448): a stub hanging past --timeout
+# printed "XPASS ... #448 looks FIXED" and told the operator to retire it on
+# a lie. Hanging is the most likely failure shape for any long-running step,
+# so keep this guard whatever the next xstep turns out to be.
 xstep() {
   local issue=$1 label=$2 broken=$3 t=$STEP_TIMEOUT; shift 3
   [ "${1:-}" = "--timeout" ] && { t=$2; shift 2; }
@@ -239,7 +239,7 @@ step_out() {
 # short of flashing" -- the harness's only assertion that `run` does not
 # program a board. This closes that the way its `step`-then-`step_out` sibling
 # already does for pinmux (assert both), but in ONE invocation: several of
-# these sites are a real multi-minute `build`/`run`/`renode` against a
+# these sites are a real multi-minute `build`/`run` against a
 # bootstrapped workspace, and doubling the invocation only to check the exit
 # code separately would double a cost that is already the harness's biggest,
 # for no reason -- `_invoke` already has both `$RC` and the output in hand.
@@ -308,7 +308,7 @@ summary() {
     printf '    - %s\n' "${XPASSED_LABELS[@]}"
   fi
   # A SKIP means this run did NOT walk the whole surface (no bootstrapped
-  # workspace, no renode on PATH, init wrote no board.yaml, ...). Say so
+  # workspace, init wrote no board.yaml, ...). Say so
   # explicitly rather than letting "0 fail" read as "the whole surface is
   # green" -- those are different claims, and only --strict makes the second
   # one falsifiable.

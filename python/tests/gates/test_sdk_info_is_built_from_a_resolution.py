@@ -52,7 +52,6 @@ LEGACY_RAW_CONSTRUCTIONS: dict[str, int] = {
     "tan/commands/bootstrap_cmd.py": 4,
     "tan/commands/run_cmd.py": 1,
     "tan/commands/generate_cmd.py": 1,
-    "tan/commands/renode_cmd.py": 2,
     "tan/commands/build_cmd.py": 1,
 }
 

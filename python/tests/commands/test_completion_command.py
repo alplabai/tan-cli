@@ -111,7 +111,7 @@ def test_embedded_scripts_are_nonempty_and_shell_specific():
 def test_embedded_scripts_list_every_registered_subcommand():
     """Drift guard: every verb `tan.cli` registers must tab-complete on all
     three shells. Reads `tan.cli._SUBCOMMAND_NAMES` (a frozenset this file
-    only imports, never edits) rather than hand-duplicating the 32-name list a
+    only imports, never edits) rather than hand-duplicating the 31-name list a
     third time -- the same reasoning the oracle's own
     `embedded_scripts_list_every_cli_command` gives for reading clap's command
     graph instead of a hand-kept copy. Word-boundary, not substring: a bare
@@ -713,7 +713,7 @@ def test_fish_target_completion_lists_every_valid_generate_target():
 
 @pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
 def test_bash_completion_offers_subcommands_past_a_leading_global_flag():
-    """`tan --sdk-root /x <TAB>` used to offer not one of the 32 subcommand
+    """`tan --sdk-root /x <TAB>` used to offer not one of the 31 subcommand
     names: the gate that emits them was `[[ $cword -eq 1 ]]`, and `--sdk-root
     /x` puts the cursor at word 3."""
     reply = _bash_complete(["tan", "--sdk-root", "/x", ""])
@@ -758,7 +758,7 @@ def test_bash_completion_does_not_offer_subcommands_in_a_flag_value_slot():
     not a subcommand. The scan steps past the cursor word there, and that
     overshoot is what `at_value` detects: without it, the empty `$subcmd`
     would be read as "no subcommand typed yet" and the completion would start
-    offering 32 command names where a directory belongs."""
+    offering 31 command names where a directory belongs."""
     reply = _bash_complete(["tan", "--sdk-root", ""])
     assert "validate" not in reply
     assert "size" not in reply
@@ -997,7 +997,7 @@ def test_spliced_command_names_match_the_registered_command_surface():
     from tan.cli import _SUBCOMMAND_NAMES
 
     assert set(_COMMAND_NAMES.split()) == set(_SUBCOMMAND_NAMES)
-    assert len(_COMMAND_NAMES.split()) == 32
+    assert len(_COMMAND_NAMES.split()) == 31
 
 
 def test_subcommand_format_overrides_a_leading_root_format():

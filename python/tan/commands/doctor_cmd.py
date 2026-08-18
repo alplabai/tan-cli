@@ -1912,8 +1912,8 @@ def sdk_check(
             # `alp-sdk at {sdk_root}` above, which keeps this host's native
             # separators and is left byte-identical. The reason is the CODE:
             # this branch's detail becomes an `issues[].message` under
-            # `sdk.discovery-divergent`, which five other commands also emit
-            # -- and all five build it from `_abs_posix`. A consumer
+            # `sdk.discovery-divergent`, which four other commands also emit
+            # -- and all four build it from `_abs_posix`. A consumer
             # correlating two envelopes would otherwise match a code across a
             # message spelled `C:/...` on one side and `C:\...` on the other.
             # The envelope is the contract; normalise the filesystem side to
@@ -1925,8 +1925,8 @@ def sdk_check(
             return Check(
                 "sdk",
                 "warn",
-                f"{posix_root}; `tan init`, `tan generate`, `tan examples` "
-                f"and `tan renode` resolve a DIFFERENT checkout from this "
+                f"{posix_root}; `tan init`, `tan generate` and "
+                f"`tan examples` resolve a DIFFERENT checkout from this "
                 f"directory ({_abs_posix(divergent_candidate)}) and report "
                 f'the same sourceTier "discovery", so generated files and '
                 f"the build plan can come from different SDK versions.",
