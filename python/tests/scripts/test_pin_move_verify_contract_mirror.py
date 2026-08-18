@@ -272,10 +272,13 @@ def test_missing_pinverify_on_a_real_checkout_skips_not_fails(tmp_path):
 
 
 def test_missing_pinverify_still_skips_when_dotgit_is_a_worktree_pointer_file(tmp_path):
-    """tan-cli#835 review, minor: `.git` as a FILE (a git-worktree pointer,
-    the actual shape of the one checkout that can run this gate today --
-    `alp-e2e-pinverify`) must be recognised exactly like `.git` as a
-    directory. A later tighten of `_looks_like_alp_e2e_checkout` from
+    """tan-cli#835 review, minor: `.git` as a FILE (a git-worktree pointer)
+    must be recognised exactly like `.git` as a directory. That is not a
+    hypothetical shape here -- auditing against the unmerged
+    `feat/pin-move-verify-receiver` branch is most naturally done from a
+    `git worktree` of alp-e2e, whose `.git` is a pointer file, so it is the
+    likely shape of the only checkout that can run this gate today. A later
+    tighten of `_looks_like_alp_e2e_checkout` from
     `.exists()` to `.is_dir()` would silently push every worktree and
     submodule checkout into the FAIL arm instead of the SKIP arm; this
     pins the file shape so that regression cannot land silently.
