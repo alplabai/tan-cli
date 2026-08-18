@@ -373,7 +373,7 @@ half executed. The table's "In a tag?" column above is updated. The other half
 is NOT done: `zephyr_board.py`'s ATOC refusal still says *"upgrade alp-sdk to
 a release that includes alp-sdk#1289"* (an issue number, not a version —
 replace it with the actual floor, which now exists). It lives upstream in
-alp-sdk `scripts/gen_zephyr_board.py:637`, so the string fix is an alp-sdk
+alp-sdk `scripts/gen_zephyr_board.py:687`, so the string fix is an alp-sdk
 change re-synced in, never a patch to the mirror. Tracked as **alp-sdk#1354**
 (open), which
 also carries the reason the ATOC message is not the one a user actually sees
