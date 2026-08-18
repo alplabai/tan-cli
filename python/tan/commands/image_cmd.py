@@ -223,10 +223,15 @@ def _unresolved_sdk_clause(sdk_root_arg: str | None) -> str:
     bundle -- sending them to look for a missing flag instead of at the typo
     in the path they gave.
 
-    Entirely inside the `(tried ...)` clause `tests/parity/
-    test_image_size_oracle.py` already strips from BOTH modes as a declared
+    Entirely inside the `(tried ...)` clause that `tests/parity/
+    test_image_size_oracle.py` stripped from BOTH modes as a declared
     alp-sdk#330 divergence (the frozen oracle has no `sdk_root` fallback and
-    so no such clause at all), so the wording is free to be correct here.
+    so no such clause at all). That module went with the oracle axis in
+    tan-cli#269, so no parity CASE diffs it any more -- but BOTH branches of
+    the string below are asserted verbatim by
+    `tests/commands/test_image_command.py`'s
+    `test_a_rejected_sdk_root_flag_is_named_not_reported_as_absent` and
+    `test_an_absent_sdk_root_flag_still_says_so`, so a reword lands there too.
     """
     if sdk_root_arg is None:
         return "sdk root not resolved (no --sdk-root and no discoverable checkout)"

@@ -863,8 +863,17 @@ def main() -> None:
 
     Text mode (the default) lets Click run standalone: it already prints its
     own errors/help to stderr and exits with the right code, which is exactly
-    the contract there -- stderr carries no promises of its own (see
-    ``tests/parity/oracle.py``'s module docstring).
+    the contract there -- Click's exact RENDERING of a usage error carries no
+    promises of its own. That rule outlived its statement of record:
+    ``tests/parity/oracle.py`` declared it, scoped to the Rust-vs-Python diff,
+    and went with the oracle axis in tan-cli#269, so THIS docstring is where it
+    lives now. Read it narrowly. What is unpinned is Click/rich's wording and
+    box-drawing, because nothing diffs it against the retired binary's clap
+    renderer. tan's stderr as a CHANNEL is pinned hard -- ~500 assertions under
+    ``python/tests/`` take it as their subject, ``contract/envelopes``' goldens
+    require it EMPTY under ``--format json``, and
+    ``tests/test_stdout_bytes.py::test_stderr_also_has_no_cr`` forbids ``\r``
+    in it.
 
     ``--format json`` cannot be handled that way: Click's default dispatch
     prints straight to stdout/stderr and calls `sys.exit` itself for a usage

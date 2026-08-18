@@ -321,7 +321,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags --force --core" -- "$cur") )
       ;;
     explain)
-      COMPREPLY=( $(compgen -W "$global_flags --template" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --template --code" -- "$cur") )
       ;;
     init)
       COMPREPLY=( $(compgen -W "$global_flags --template --from-example --name --destination --som --cores --preview --force" -- "$cur") )
@@ -515,7 +515,7 @@ _tan() {
           _arguments '--force[Overwrite existing files]' '--core[Core id (zephyr-board target)]' "${global_args[@]}"
           ;;
         explain)
-          _arguments '--template[Template id]' "${global_args[@]}"
+          _arguments '--template[Template id]' '--code[Diagnostic or error code]' "${global_args[@]}"
           ;;
         examples)
           _arguments '--filter[Substring match on id/title]' "${global_args[@]}"
@@ -603,6 +603,7 @@ complete -c tan -n '__fish_seen_subcommand_from validate' -l offline -d 'Offline
 complete -c tan -n '__fish_seen_subcommand_from generate' -l force -d 'Overwrite existing files'
 complete -c tan -n '__fish_seen_subcommand_from generate' -l core -d 'Core id (zephyr-board target)'
 complete -c tan -n '__fish_seen_subcommand_from explain' -l template -d 'Template id'
+complete -c tan -n '__fish_seen_subcommand_from explain' -l code -d 'Diagnostic or error code'
 complete -c tan -n '__fish_seen_subcommand_from examples' -l filter -d 'Substring match on id/title'
 complete -c tan -n '__fish_seen_subcommand_from init scaffold' -l template -d 'Template id'
 complete -c tan -n '__fish_seen_subcommand_from init' -l from-example -d 'Example source dir'

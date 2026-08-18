@@ -30,8 +30,13 @@ changelog.d/612.changed.md
 
 - `<issue>` — the GitHub issue or PR number this entry belongs to. It only has
   to make the filename unique; it is not parsed for meaning.
-- `<category>` — one of `added`, `changed`, `fixed`, `removed`. It selects the
-  `###` heading the entry lands under.
+- `<category>` — one of `added`, `changed`, `deprecated`, `removed`, `fixed`,
+  `security`. It selects the `###` heading the entry lands under. All six are
+  live in `python/scripts/assemble_changelog.py`'s `CATEGORIES`, and a category
+  outside that set is a hard error rather than a dropped entry. `security` is
+  the one worth knowing about: file a security note as `<n>.fixed.md` and the
+  assembler takes it without complaint, landing it under `### Fixed` where it
+  loses the heading that made it findable.
 
 The file contains **the markdown bullet(s) exactly as they should appear** in
 `CHANGELOG.md` — same voice, same depth, same verbatim technical strings. The
@@ -57,7 +62,16 @@ order, then deletes the fragments:
 python3 python/scripts/assemble_changelog.py          # fold + delete fragments
 python3 python/scripts/assemble_changelog.py --check   # report only, change nothing
 python3 python/scripts/assemble_changelog.py --dry-run # print the result to stdout
+python3 python/scripts/assemble_changelog.py --require-empty  # exit 1 if any fragment is still unfolded
 ```
+
+`--check` never fails merely because fragments are pending — that is why it is
+not the gate. It is not unconditionally exit-0 either, whatever its `--help`
+says: like every mode it refuses an unusable fragment (a category outside the
+six, or an empty body) and exits 1, which makes it a usable filename lint.
+`--require-empty` is the gate, and since tan-cli#813 it is a live one:
+`.github/workflows/release.yml:704` runs it, so a tag cut with fragments still
+sitting here fails the release rather than shipping a CHANGELOG missing them.
 
 This runs **before** the version bump and tag, so `release.yml`'s existing
 `## [X.Y.Z]` slice sees a fully-populated section and nothing about the release
