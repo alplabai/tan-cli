@@ -589,6 +589,27 @@ PINNED_HASHES: dict[str, str] = {
 #: from a real drift; it never even ran the comparison. `faultdecode.py` now
 #: joins this table (11th entry) so the next SDK-side change to it is
 #: audited the same way as everything else here.
+#:
+#: tan-cli#846: `scripts/alp_template.py`'s `HAND_PORT_HASHES` entry below is
+#: DELIBERATELY left at its `88318e75` value (`9321c7e3...`) even though
+#: `tan/planner/template.py` itself is now ported PAST that pin --
+#: `_docs_ref()` carries alp-sdk#1535's `_tag_resolves()` guard, which
+#: landed at alp-sdk `94378a05` (`scripts/alp_template.py` sha256
+#: `5d453c5d...` there), a commit this pin does not reach. Moving the pin
+#: to `94378a05` to match would look like the more "correct" state but is
+#: NOT: `scripts/alp_cli/doctor.py` also changed inside `88318e75..94378a05`
+#: (`efeaf65c`, alp-sdk#1471 -- `f2faa07c...` at the pin vs `fe109d98...`
+#: at `94378a05`) and that delta is NOT ported into `tan/commands/
+#: doctor_cmd.py` / `tan/core/doctor_libraries.py`. Re-pinning HAND_PORT_
+#: PINNED_SDK_COMMIT to `94378a05` would re-freeze `doctor.py`'s hash at
+#: its unaudited-but-now-"current" value, silently declaring that drift
+#: reviewed when it never was -- the exact tan-cli#308/#275 failure mode
+#: this whole file exists to prevent, just aimed at a hash instead of a
+#: skip. So the pin stays at `88318e75`, `scripts/alp_template.py` sits
+#: ahead of it on its own, and `python/scripts/planner_resync.py` will
+#: keep re-proposing #1535 as "still unported" until this comment is
+#: read and the whole table -- not just the one file this fix touched --
+#: is re-audited and re-pinned together.
 HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk origin/main -- NOT dev, see PINNED_SDK_COMMIT
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
