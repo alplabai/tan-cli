@@ -210,8 +210,11 @@ class PayloadError(ValueError):
 # discipline `test_planner_relocation_freshness.py` applies to alp-sdk,
 # pointed at alp-e2e instead. `python/tests/scripts/
 # test_pin_move_verify_contract_mirror.py` re-extracts and re-hashes the
-# same block from a local alp-e2e checkout bound at `$ALP_E2E_ROOT`; without
-# it the gate SKIPS, loudly, never a silent pass.
+# same block from a local alp-e2e checkout bound at `$ALP_E2E_ROOT`. That
+# check SKIPS -- loudly, never a silent pass -- with `$ALP_E2E_ROOT` unset,
+# or bound at a real alp-e2e checkout that genuinely does not carry this
+# contract anywhere in its tree yet; every other shape (including the
+# contract having moved to a different file) is a FAIL, not a skip.
 # ---------------------------------------------------------------------------
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]{0,99}$")
 _SKU = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -390,7 +393,10 @@ def _mirrored_contract_text() -> str:
 #: alp-e2e checkout bound at `$ALP_E2E_ROOT`; a mismatch means either side
 #: moved and this constant needs a hand re-audit (diff `alpe2e/pinverify.py`,
 #: port the delta, update this hash and the "last audited" note below).
-#: Without `$ALP_E2E_ROOT` that test SKIPS, loudly, never a silent pass.
+#: That test SKIPS -- loudly, never a silent pass -- only with
+#: `$ALP_E2E_ROOT` unset or bound at a checkout that genuinely does not
+#: carry this contract anywhere yet; a moved/renamed contract module is a
+#: FAIL there, never a skip.
 #:
 #: Last re-audited by hand against alp-e2e commit
 #: `fe8202890afb405e132482d9b7a23a76348bd710` (re-audited 2026-08-18, no
