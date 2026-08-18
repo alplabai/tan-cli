@@ -393,8 +393,11 @@ def _mirrored_contract_text() -> str:
 #: Without `$ALP_E2E_ROOT` that test SKIPS, loudly, never a silent pass.
 #:
 #: Last re-audited by hand against alp-e2e commit
-#: `fe8202890afb405e132482d9b7a23a76348bd710` (2026-08-16, alp-e2e PR #1).
-#: tan-cli#835 tracks the next re-audit.
+#: `fe8202890afb405e132482d9b7a23a76348bd710` (re-audited 2026-08-18, no
+#: drift found; first audited 2026-08-16, alp-e2e PR #1). That commit is
+#: the tip of alp-e2e's UNMERGED branch `feat/pin-move-verify-receiver` --
+#: it is not on `main`, and `alpe2e/pinverify.py` does not exist on `main`
+#: at all yet. tan-cli#835 tracks the next re-audit.
 MIRRORED_CONTRACT_TEXT = _mirrored_contract_text()
 MIRRORED_CONTRACT_HASH = "62ebc38153106a76b095670645e594394104534d5e35bb10250f9013260b48be"
 

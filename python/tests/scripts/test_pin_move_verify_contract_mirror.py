@@ -68,11 +68,32 @@ def test_mirrored_contract_hash_matches_the_live_text():
 
 
 def _load_alp_e2e_pinverify(root: pathlib.Path) -> types.ModuleType:
-    path = root / "alpe2e" / "pinverify.py"
-    if not path.is_file():
+    package_dir = root / "alpe2e"
+    # Two genuinely different situations hide behind "the file isn't there",
+    # and conflating them misdiagnoses a correct checkout (tan-cli#835): a
+    # `root` that isn't an alp-e2e checkout at all is a setup mistake worth
+    # a hard FAIL, but a real alp-e2e checkout sitting on `main` -- where
+    # `alpe2e/pinverify.py` genuinely does not exist, because the
+    # pin-move-verify receiver has not merged there yet -- is not a mistake
+    # this test can do anything about. Telling that second case "this does
+    # not look like an alp-e2e checkout" is false and sends the reader off
+    # to debug the wrong thing.
+    if not package_dir.is_dir() or not (root / ".git").exists():
         pytest.fail(
-            f"ALP_E2E_ROOT={root} has no alpe2e/pinverify.py -- this does not "
-            "look like an alp-e2e checkout"
+            f"ALP_E2E_ROOT={root} has no alpe2e/ package (or no .git) -- "
+            "this does not look like an alp-e2e checkout at all"
+        )
+    path = package_dir / "pinverify.py"
+    if not path.is_file():
+        pytest.skip(
+            f"ALP_E2E_ROOT={root} IS an alp-e2e checkout, but it has no "
+            "alpe2e/pinverify.py -- the pin-move-verify receiver currently "
+            "lives only on alp-e2e's unmerged branch "
+            "'feat/pin-move-verify-receiver', not on 'main'. A checkout on "
+            "'main' genuinely cannot audit this mirrored contract, so this "
+            "is a SKIP, not a failure of tan-cli's own code: bind "
+            "ALP_E2E_ROOT at a checkout of 'feat/pin-move-verify-receiver' "
+            "to actually run this check."
         )
     spec = importlib.util.spec_from_file_location("_alp_e2e_pinverify_live", path)
     assert spec is not None and spec.loader is not None
@@ -90,6 +111,40 @@ def _load_alp_e2e_pinverify(root: pathlib.Path) -> types.ModuleType:
         del sys.modules[spec.name]
         raise
     return module
+
+
+def test_missing_pinverify_on_a_real_checkout_skips_not_fails(tmp_path):
+    """tan-cli#835 regression: a `root` that IS an alp-e2e checkout (has
+    `alpe2e/` and `.git`) but has no `alpe2e/pinverify.py` -- exactly the
+    shape of a checkout sitting on alp-e2e's `main`, where the
+    pin-move-verify receiver has not merged yet -- must SKIP with a message
+    that names the branch the receiver actually lives on
+    (`feat/pin-move-verify-receiver`), never the generic "this does not
+    look like an alp-e2e checkout" wording that misdiagnoses a correct
+    checkout as bogus.
+    """
+    (tmp_path / "alpe2e").mkdir()
+    (tmp_path / "alpe2e" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+
+    with pytest.raises(pytest.skip.Exception) as exc_info:
+        _load_alp_e2e_pinverify(tmp_path)
+
+    message = str(exc_info.value)
+    assert "feat/pin-move-verify-receiver" in message
+    assert "does not look like an alp-e2e checkout" not in message
+
+
+def test_a_non_checkout_root_still_fails_with_the_generic_message(tmp_path):
+    """The other half of the same fix: a `root` that is NOT an alp-e2e
+    checkout at all (no `alpe2e/` package, no `.git`) must still FAIL --
+    only the "checkout exists but the receiver hasn't merged" case became a
+    SKIP, not every empty-directory mistake.
+    """
+    with pytest.raises(pytest.fail.Exception) as exc_info:
+        _load_alp_e2e_pinverify(tmp_path)
+
+    assert "does not look like an alp-e2e checkout" in str(exc_info.value)
 
 
 def _resolve_alp_e2e_root() -> pathlib.Path | None:
