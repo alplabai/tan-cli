@@ -99,9 +99,7 @@ import sys
 from pathlib import Path
 
 import click
-import jsonschema
 import typer
-import yaml
 
 from tan.commands.build_cmd import _planner_python
 from tan.commands.doctor_cmd import probe
@@ -321,6 +319,12 @@ def _yaml_scalar(value: str) -> str:
     """
     if _has_control_char(value):
         raise ValueError("must not contain newlines or other control characters")
+    # tan-cli#810: deferred, because `cli.py` static-imports every command
+    # module -- a module-scope `import yaml` here was paid by `tan --version`.
+    # `sys.modules` caches it, so this file's other three call sites cost a
+    # dict lookup. `tests/gates/test_cli_import_is_lean.py` holds the rule.
+    import yaml  # noqa: PLC0415
+
     dumped = yaml.safe_dump(value, width=float("inf")).splitlines()
     return dumped[0] if dumped else "''"
 
@@ -346,6 +350,8 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
     boards_dir = sdk_root / "metadata" / "boards"
     if not boards_dir.is_dir():
         return None
+    import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)
+
     names: set[str] = set()
     for path in sorted(boards_dir.glob("*.yaml")):
         try:
@@ -400,6 +406,8 @@ def _family_hw_revisions(
     family_dir = _resolve_sku_family(sku, sdk_root)
     if family_dir is None:
         return None
+    import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)
+
     for root in (output_root, sdk_root):
         path = root / "metadata" / "e1m_modules" / family_dir / "hw-revisions.yaml"
         if path.is_file():
@@ -707,6 +715,16 @@ def _soc_skeleton(sku: str, soc_ref: str, vendor: str, cores: tuple[str, ...]) -
 
 def _schema_errors(doc, schema_path: Path) -> list[str]:
     """Validate ``doc`` against ``schema_path``; return error strings."""
+    # tan-cli#810: the only `jsonschema` call in the package, and it drags in
+    # `attr`, `referencing` and `jsonschema_specifications` behind it -- all of
+    # which every `tan` invocation used to load for this one line. Deferred
+    # here. (No per-module millisecond figure is quoted anywhere in this
+    # change: `-X importtime` cumulative charges a shared submodule to whoever
+    # imported it FIRST, so the per-module readings are order-dependent and do
+    # not sum to the measured total. The aggregate is in the PR and the budget
+    # log, where it was measured end to end.)
+    import jsonschema  # noqa: PLC0415
+
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     validator = jsonschema.Draft202012Validator(schema)
     return [
@@ -1178,6 +1196,8 @@ def new_som(
         # be named explicitly beside it.
         fail(f"could not read {som_schema_path} ({exc})")
         return
+    import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)
+
     try:
         preset_doc = yaml.safe_load(preset_text)
     except yaml.YAMLError as exc:

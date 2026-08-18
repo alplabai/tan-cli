@@ -175,3 +175,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/cli.py: 1008 -> 1006
     - tan/commands/renode_cmd.py: 1587 -> dropped (module deleted)
     - function_count_budget: 261 -> 252
+- 2026-08-19 -- tan-cli#810: four single-use imports moved into their call sites, so a bare `tan --version` stops loading click.testing, jsonschema, PyYAML and urllib.request (427 -> 279 modules, measured). The lines are the deferred imports plus the comment at each site saying why it is not at module scope -- without that, the next reader hoists them straight back. sdk_cmd also gains a TYPE_CHECKING block and the paragraph explaining why `_releases_opener`'s return annotation had to be respelled: an annotation binds in the MODULE namespace, so `-> urllib.request.OpenerDirector` named something the deferral removed, and `typing.get_type_hints` on that helper now raises -- which the next reader must know before wrapping it. `_yaml_scalar` was kept under the 50-line function cap by tightening its comment rather than raising the cap, so function_count_budget stays at 252.
+    - tan/cli.py: 1006 -> 1012
+    - tan/commands/new_som_cmd.py: 1361 -> 1381
+    - tan/commands/sdk_cmd.py: 1415 -> 1441

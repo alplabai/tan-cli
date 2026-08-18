@@ -256,6 +256,42 @@ def test_the_artifact_carries_its_scaffold_templates(tmp_path):
     assert list(tmp_path.iterdir()) == [], "--preview must not touch disk"
 
 
+def test_the_artifact_carries_click_testing(tmp_path):
+    """`tan --help --format json` must not be a dead path in a frozen build.
+
+    tan-cli#810 moved `from click.testing import CliRunner` out of `cli.py`'s
+    module scope and into `_emit_help_envelope`, which is the ONLY production
+    use of `click.testing` in the package. That took it off every path
+    `verify_binary.sh` exercises -- its `--version` check used to be what
+    proved the module was in the freeze, and after #810 it no longer touches
+    it. `build_binary.sh` passes no `--hidden-import` at all, so a freeze that
+    dropped `click.testing` would pass all five of those checks and fail first
+    at a customer, on the one flag combination the extension uses.
+
+    The repo has been here before: deferring `import serial` came with
+    `test_the_artifact_carries_pyserial` below for exactly this reason. This
+    is that test for the other deferral. `--help` under `--format json` is the
+    only argv that reaches `CliRunner`, so it is the only argv that proves it.
+    """
+    out = subprocess.run(
+        [str(BINARY), "--help", "--format", "json"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=str(tmp_path),
+        timeout=30,
+    )
+    assert "ModuleNotFoundError" not in out.stderr, (
+        "the frozen artifact is missing a module on the `--help --format json` "
+        f"path -- `click.testing` is the candidate this test exists for:\n{out.stderr}"
+    )
+    assert out.stdout.strip(), f"no envelope on stdout; stderr:\n{out.stderr}"
+    envelope = json.loads(out.stdout)
+    assert envelope["command"] == "cli"
+    assert envelope["ok"] is True, envelope.get("issues")
+    assert envelope["data"]["message"].startswith("Usage: tan"), envelope["data"]
+
+
 def test_the_artifact_carries_pyserial(tmp_path):
     """`tan monitor` must not be a dead command in a frozen build.
 
