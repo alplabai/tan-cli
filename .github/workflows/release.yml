@@ -221,13 +221,15 @@ jobs:
     # parity tests (`-k "manifest or system_manifest"`) pass in full, and
     # `python/tests/gates` (the five files armed by parity.yml's seam1 job,
     # jlink freshness deselected) passes clean against the exact alp-sdk
-    # commit tan/planner/ is audited against. One unrelated pre-existing
-    # failure was found while re-measuring
-    # (`test_bootstrap_command.py::test_the_fallback_constants_match_the_real_manifest_field_for_field`,
-    # a `prerequisites_posix` mismatch) -- it fails identically with or
-    # without `ALP_SDK_ROOT` bound, so it is not a `sdk_parity` regression and
-    # not this input's concern; it already reddens `ci.yml`'s `python` job
-    # today regardless of this flag and needs its own fix.
+    # commit tan/planner/ is audited against.
+    #
+    # An earlier revision of this comment carried a standing warning that
+    # `test_bootstrap_command.py::test_the_fallback_constants_match_the_real_manifest_field_for_field`
+    # was an unrelated pre-existing failure reddening `ci.yml`'s `python` job.
+    # It passes (re-run on 2026-08-18, `1 passed`), so the warning is gone --
+    # a comment that teaches a green gate is permanently red is worse than no
+    # comment, because it trains the next reader to ignore that job
+    # (tan-cli#439).
     #
     # A gate that cannot go green is not a gate, and one that is on-but-ignored
     # is worse -- flipped on now that the divergence it was off for is closed.

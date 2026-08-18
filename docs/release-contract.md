@@ -248,30 +248,40 @@ inherent to musl or to PyInstaller.
 
 ### Reference `releaseAssetForTarget` (vscode side)
 
-This is the extension's map **as it stands today**, kept here so the mismatch is
-visible: `linux:x64` still resolves to the `-musl` triple, which this release
-does not publish. Nothing breaks, because `SUPPORTED_CLI_VERSION` is still
-pinned to the last Rust release and the extension therefore never fetches a
-v0.5.0 asset at all. Repointing `linux:x64` to `x86_64-unknown-linux-gnu`
-travels with that pin move (#268), not before it.
+**Do not re-embed the extension's table here.** An in-repo snapshot of another
+repo's function is exactly what rotted: the block this replaces claimed
+`linux:x64` "still resolves to the `-musl` triple" and that
+`SUPPORTED_CLI_VERSION` was "still pinned to the last Rust release", and both
+had been false for 13 days when `v0.6.0-rc1` was cut (tan-cli#800). It also
+told the reader NOT to repoint `linux:x64` yet -- advice that, followed, would
+have reintroduced the `-musl` 404 that alp-sdk-vscode#444 removed.
 
-```ts
-function releaseAssetForTarget(platform: NodeJS.Platform, arch: string): string {
-  const triple = {
-    "win32:x64": "x86_64-pc-windows-msvc",
-    "win32:arm64": "aarch64-pc-windows-msvc",
-    // musl, NOT gnu — see the glibc floor below. Changing these two back
-    // reintroduces the -gnu asset's glibc floor (measured GLIBC_2.30 on
-    // v0.3.1), which breaks pre-Ubuntu-20.04 / pre-Debian-11 consumers.
-    "linux:x64": "x86_64-unknown-linux-musl",
-    "linux:arm64": "aarch64-unknown-linux-musl",
-    "darwin:x64": "x86_64-apple-darwin",
-    "darwin:arm64": "aarch64-apple-darwin",
-  }[`${platform}:${arch}`];
-  if (!triple) throw new Error(`unsupported platform ${platform}/${arch}`);
-  return platform === "win32" ? `tan-${triple}.exe` : `tan-${triple}`;
-}
-```
+The authority is the extension's own source:
+[`alp-sdk-vscode` `src/alpCli/service.ts`](https://github.com/alplabai/alp-sdk-vscode/blob/main/src/alpCli/service.ts).
+Read it there rather than here.
+
+Measured 2026-08-18 against that checkout, for orientation only -- if this
+paragraph and the file disagree, the file wins:
+
+* `SUPPORTED_CLI_VERSION` is `"0.5.1"` on `origin/main` and `"0.6.0-rc1"` on
+  `origin/dev`. Neither pins a Rust release; the extension has fetched the
+  Python `tan` since 2026-08-01.
+* `TARGETS` is keyed `platform/arch` (a slash, not a colon) and `linux/x64`
+  maps to `x86_64-unknown-linux-gnu`, carrying the comment
+  `// ── gnu, NOT musl. Do not "restore" -musl here (#444) ──`. It is a table
+  of triples from which two candidate asset names are built; the release's own
+  `checksums.txt` decides between them. It is not a function returning one raw
+  name.
+* The unpublished pair is `win32/arm64` and `linux/arm64` -- the extension
+  tracks them per version in `UNPUBLISHED_TARGETS`, e.g.
+  `"0.6.0-rc1": ["win32/arm64", "linux/arm64"]`.
+
+`release.yml`'s header calls this document the thing the extension "MUST match
+exactly". That claim is only checkable if something fails when the two drift,
+and nothing does today: `python/tests/gates/test_release_docs_match_the_workflow.py`
+parses `## Targets published`, asset counts, publish jobs and install commands,
+and never reads this section. Until such a gate exists, treat the list above as
+dated orientation, not as the contract's teeth.
 
 ## glibc floor (the Linux asset)
 

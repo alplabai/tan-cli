@@ -127,9 +127,11 @@ install` needs a 7-Zip-compatible archive tool on `PATH` instead -- west
 delegates `.7z` extraction to `patoolib`, which shells out to an external
 `7z`/`7za`/`7zr`/`7zz`/`7zzs`/`unar` binary and has no pure-Python fallback
 (`winget install -e --id 7zip.7zip`). `tan doctor` has a dedicated `sevenZip`
-check for this, on native Windows, once the Zephyr SDK is not yet detected: it
-warns when none of those binaries is on `PATH` and names the same `winget`
-command.
+check for this, on every native-Windows host: it warns when none of those
+binaries is on `PATH` and names the same `winget` command. It does not wait for
+the Zephyr SDK to be missing first — a host that already has the SDK and no
+7-Zip is exactly the host whose next `west sdk install` dies with
+`Zephyr SDK setup requires '7z'` (tan-cli#736).
 
 Do not assemble any of these lists by hand. `tan doctor` reads its checks from
 the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK
@@ -299,9 +301,28 @@ The stable top-level envelope is:
 {command, ok, exitCode, project, sdk, data, issues}
 ```
 
-Use `--ci` or `--non-interactive` in automation. Commands then refuse prompts
-and unattended host changes instead of waiting for input. Redirected or piped
-stdio is treated as non-interactive too.
+**You do not need a flag for this.** tan already treats a run as
+non-interactive when `stdin` or `stderr` is not a terminal — piped, redirected,
+or a CI runner — and `--format json` counts too. That rule is applied unasked
+(`tan/core/consent.py`'s `can_prompt`), and it is deliberately not keyed on
+`stdout`, so `tan ... --format json | jq` from a real terminal still behaves
+interactively. Where a command has a documented default it takes it; where it
+has none it fails rather than asking.
+
+`--ci` and `--non-interactive` exist as explicit "do not ask me" signals on top
+of that, but they are **per-command flags, not global ones**, and `tan build`
+refuses both outright:
+
+```console
+$ tan build --ci --format json
+{"command":"build","ok":false,"exitCode":1,...,"issues":[{"code":"cli.command-deferred",
+ "severity":"error","message":"`tan build --ci` is deferred and not available in this
+ build (see https://github.com/alplabai/tan-cli/issues/427)."}]}
+```
+
+So a script that adds `--ci` to every tan invocation breaks on `build` and gains
+nothing on the rest. Rely on the stdio rule; reach for the flags only where you
+have checked the command accepts them.
 
 ## How tan fits with the SDK
 

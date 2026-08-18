@@ -1162,11 +1162,11 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
     disbelieved a diagnostic that was actually correct.
 
     Paired with `seven_zip_check` on Windows (`_collect`, gated `os.name ==
-    "nt" and not detected` -- mirroring `crate::build_readiness`'s exact
-    `probe.is_windows && !probe.zephyr_sdk` gate, tan-cli#204): the `west sdk
-    install` this Fail's fix names cannot complete on native Windows without
-    7-Zip on PATH (`tan.core.bootstrap`'s `manual_install_windows` prose), so
-    this Fail's advice is only actionable together with that check.
+    "nt"` and nothing else -- tan-cli#736 dropped the `!probe.zephyr_sdk` term
+    the Rust sibling had, since the host WITH an SDK and no 7-Zip is precisely
+    what the pairing is for; tan-cli#204 covers that check's SEVERITY, not its
+    gate): the `west sdk install` this Fail's fix names cannot complete on
+    native Windows without 7-Zip on PATH (`manual_install_windows` prose).
     """
     if detected:
         return Check("zephyrSdk", "pass", "Zephyr SDK toolchain detected.", scope="host")
@@ -1212,8 +1212,8 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
 
 
 def seven_zip_check(found: bool) -> Check:
-    """`sevenZip` -- Windows-only, and only while `zephyrSdk` is failing (see
-    `_collect`'s gate). Ports the Rust oracle's sibling check (`crate::
+    """`sevenZip` -- Windows-only, unconditionally (tan-cli#736 dropped the
+    `zephyrSdk`-is-failing half). Ports the Rust oracle's sibling (`crate::
     build_readiness`, tan-cli#204): `west sdk install`, the remedy
     `zephyr_sdk_check` names, extracts the `.7z` toolchain archive by
     delegating to `patoolib`, which shells out to one of `SEVEN_ZIP_PROGRAMS`
