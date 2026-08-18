@@ -10,7 +10,7 @@ does; all of them change how a first-time user finds it.
 
 ## Goal
 
-A user who has just installed `tan` should be able to (a) see the 32 commands
+A user who has just installed `tan` should be able to (a) see the 31 commands
 organised rather than alphabetised, (b) read `--help` without hitting the port's
 own changelog, (c) be told what to type next when a command refuses, and (d) get
 a useful answer out of `presets` and `examples` by default.
@@ -75,11 +75,12 @@ signal about which four a new user needs.
 | Setup | `doctor` `bootstrap` `sdk` `completion` |
 | Start a project | `init` `scaffold` `examples` `presets` `explain` |
 | Configure | `validate` `generate` `migrate` `kconfig` `model` `lock` `quality` |
-| Build & run | `build` `run` `clean` `size` `image` `renode` |
+| Build & run | `build` `run` `clean` `size` `image` |
 | Hardware | `flash` `monitor` `debug-config` `faultdecode` |
 | Inspect & author | `inspect` `diff` `trace` `support-bundle` `pinmux` `new-som` |
 
-32 total; every registered command appears exactly once.
+31 total; every registered command appears exactly once. (Was 32 when this
+shipped; `renode` was removed from the surface afterwards.)
 
 **Test impact.** `_SUBCOMMAND_NAMES` (`tan/cli.py:128-131`) derives from
 `app.registered_commands` and is unaffected by a panel kwarg. Any test asserting

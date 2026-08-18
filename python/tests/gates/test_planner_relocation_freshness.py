@@ -656,7 +656,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-
 #: -- the ninth source the same review named -- is deliberately NOT re-added:
 #: it is already a key above (added for `tan/planner/project_loader.py` and
 #: `tan/planner/som_metadata.py`), and its OWN additional hand-port sites
-#: (`tan/core/renode_plan.py`, `tan/commands/new_som_cmd.py`) are already
+#: (`tan/commands/new_som_cmd.py`) are already
 #: covered by that one entry -- `HAND_PORT_HASHES` is keyed by the alp-sdk
 #: source path, not by the consuming `tan` file, so a second key for the same
 #: path would be a no-op duplicate, not a new audit.

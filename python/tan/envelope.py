@@ -335,11 +335,11 @@ class SdkDisclosure:
         self.issues = list(issues)
 
 
-#: The four commands resolving the SDK through `resolve_sdk_root_wide` rather
+#: The three commands resolving the SDK through `resolve_sdk_root_wide` rather
 #: than `resolve_sdk_root_ladder` (tan-cli#407). Only used to label WHICH side
 #: of a divergence the reader is holding; getting it wrong would swap two
 #: labels in a warning, never change which root a command uses.
-WIDE_LADDER_COMMANDS = frozenset({"init", "generate", "examples", "renode"})
+WIDE_LADDER_COMMANDS = frozenset({"init", "generate", "examples"})
 
 
 class Envelope:

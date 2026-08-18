@@ -384,9 +384,9 @@ def _abs_posix(path: str) -> str:
     return os.path.abspath(path).replace("\\", "/")
 
 
-#: tan-cli#408: one implementation, in `tan.core.shapes`. Three modules
-#: carried a private copy of this and they had already drifted in TYPE --
-#: this one took a `Path`, `flash_cmd`'s and `renode_cmd`'s took a `str`.
+#: tan-cli#408: one implementation, in `tan.core.shapes`. The modules that
+#: carried a private copy of this had already drifted in TYPE --
+#: this one took a `Path`, `flash_cmd`'s took a `str`.
 #: Imported under the same private name so no call site here moves.
 _is_sdk_root = is_sdk_root
 
@@ -459,9 +459,9 @@ def resolve_sdk_root_ladder(sdk_root_arg: str | None, workspace_root: Path) -> S
     """The NARROW of this port's TWO discovery ladders,
     shared by the thirteen commands the oracle resolves narrowly (`build`,
     `doctor`, `clean`, `run`, `flash`, `size`, `image`, `kconfig`, `validate`,
-    `presets`, `inspect`, `trace`, `sdk current`). The other four -- `init`,
-    `generate`, `examples`, `renode` -- take [`resolve_sdk_root_wide`], below.
-    The measurement that splits 13 from 4 is the last paragraph here, and is
+    `presets`, `inspect`, `trace`, `sdk current`). The other three -- `init`,
+    `generate` and `examples` -- take [`resolve_sdk_root_wide`], below.
+    The measurement that splits 13 from 3 is the last paragraph here, and is
     deliberately not repeated there.
 
     `--sdk-root` (terminal, I-31) > the project's own pin (`.alp/sdk-path`,
@@ -500,13 +500,13 @@ def resolve_sdk_root_ladder(sdk_root_arg: str | None, workspace_root: Path) -> S
     -- `build`, `doctor`, `clean`, `run`, `flash`, `size`, `image`, `kconfig`,
     `validate`, `presets`, `inspect`, `trace`, `sdk current` -- resolve the
     LATERAL one there, i.e. the narrow order this ladder already has; only
-    `init`, `generate`, `examples` and `renode` take the child. The oracle
+    `init`, `generate` and `examples` take the child. The oracle
     carries two resolutions, not one, and this ladder mirrors the majority
     (narrow) one plus the wide walk as its tail. Inverting it to match the
-    other four would move the SDK root under thirteen commands, and a moved
+    other three would move the SDK root under thirteen commands, and a moved
     root is what `plan_exec.sdk_stamp_action` reads as a switch: every existing
     such workspace would take the `build.sdk-switch-pristine` branch on its
-    next build and lose every slice's build dir. The four wide commands were
+    next build and lose every slice's build dir. The three wide commands were
     the real gap; they now have their own helper below, which is why this one
     stays exactly as it is.
 
@@ -543,8 +543,8 @@ def resolve_sdk_root_ladder(sdk_root_arg: str | None, workspace_root: Path) -> S
 
 
 def resolve_sdk_root_wide(sdk_root_arg: str | None, workspace_root: Path) -> SdkRootResolution:
-    """The WIDE ladder, for the four commands the oracle routes through
-    `util.rs`'s `resolve_sdk_root`: `init`, `generate`, `examples`, `renode`.
+    """The WIDE ladder, for the three commands the oracle routes through
+    `util.rs`'s `resolve_sdk_root`: `init`, `generate`, `examples`.
     Same [`SdkRootResolution`] shape as [`resolve_sdk_root_ladder`], same
     field meanings.
 
@@ -604,7 +604,7 @@ _NARROW_COMMANDS = (
     "build, doctor, clean, run, flash, size, image, kconfig, validate, "
     "presets, inspect, trace and sdk current"
 )
-_WIDE_COMMANDS = "init, generate, examples and renode"
+_WIDE_COMMANDS = "init, generate and examples"
 
 
 def sdk_ladder_divergence_issue(
@@ -1542,7 +1542,7 @@ def _build(
         raise BuildError(
             "build.unsupported-build-root",
             f"plan buildRoot `{plan.build_root}` is not `{CONSUMER_BUILD_ROOT}`; "
-            "tan's flash/size/image/renode read "
+            "tan's flash/size/image read "
             "`<project>/build/system-manifest.yaml`, so building elsewhere "
             "would leave them reading a stale or missing manifest",
             ExitCode.RUNTIME_FAILURE,

@@ -44,7 +44,7 @@ skipped) · **2** the harness could not start.
 workspace beside `--sdk-root`), the workspace/build phases `SKIP` and the
 whole walk finishes in under a minute — comparable to the `~20s` discovery
 phase alone. With a bootstrapped workspace, budget several minutes more for
-the real `build`/`run`/`renode` steps on top of whatever bootstrapping itself
+the real `build`/`run` steps on top of whatever bootstrapping itself
 costs (10+ minutes and several GB of disk the first time — see below).
 
 **"Read-only" is a real, enforced promise.** Every step that WRITES into
@@ -85,13 +85,13 @@ before trusting anything this script goes on to report from inside it.
 | `FAIL`  | did not — a regression, or an expectation that needs correcting |
 | `XFAIL` | a known defect, still broken. Pinned to an open issue. Run stays green |
 | `XPASS` | **a known defect now passes.** Retire the entry from `cases.sh` |
-| `SKIP`  | a precondition was absent (no bootstrapped workspace, no `renode`, …) |
+| `SKIP`  | a precondition was absent (no bootstrapped workspace, no toolchain, …) |
 
 `XPASS` fails the run on purpose. A harness that stays green while its own
 expectations rot is worse than no harness.
 
 `SKIP` does NOT fail the run by default — a `--phase` run, a host with no
-`renode`, and a not-yet-bootstrapped workspace are all legitimate reasons the
+toolchain, and a not-yet-bootstrapped workspace are all legitimate reasons the
 whole surface did not walk, and none of them are a defect. The summary always
 says how many were skipped and offers `--strict` (see above) for the case
 where you specifically want "0 skip" enforced too.
@@ -142,11 +142,10 @@ prints the expected line while exiting wrong (or crashing) still passes —
 measured on `run`, where a stub that printed the built-message while exiting
 5 scored a clean PASS on "run does not flash the board". A separate `step` +
 `step_out` pair closes that but re-runs the command twice, which is real cost
-on a multi-minute `build`/`run`/`renode`; `step_out_rc` asserts both from ONE
+on a multi-minute `build`/`run`; `step_out_rc` asserts both from ONE
 invocation. `xstep` and `xstep_out` also refuse to score a **timeout** (RC
 124) as XPASS — "not the broken exit code" is not evidence a defect is fixed,
-and a hang is the single likeliest failure shape for the remaining `renode`
-`xstep` (#448).
+and a hang is the likeliest failure shape for any long-running step.
 
 `envelope` checks `command`/`ok`/`exitCode`/`data` are present, that
 `ok == (exitCode == 0)`, and — load-bearing in a different way — that the
@@ -185,17 +184,13 @@ this one needs your real environment to mean anything.
 ## Known-defect ledger
 
 Expectations target **tan 0.5.2** (re-derived against `dev`, 2026-08-08 — see
-"Re-derived against dev" below for what moved since 0.5.1). One `xstep`
-remains:
+"Re-derived against dev" below for what moved since 0.5.1). The ledger is
+currently **empty**: the last entry was #448 (`renode` never reaches the app
+console), retired when `tan renode` was removed outright rather than fixed.
 
-| Issue | What is asserted as broken |
-|---|---|
-| [#448](https://github.com/alplabai/tan-cli/issues/448) | `renode` never reaches the app console |
-
-#448 is a support **pause**, not a removal — the maintainer reframed it on
-2026-08-04 and the issue now reads *"emit a support-paused warning; retain the
-command, modules, fixtures and CI models"*. The entry therefore stays until the
-boot itself is fixed; it is not waiting for `tan renode` to disappear.
+The `xstep`/`xstep_out` mechanism is kept with no callers — the next known
+defect wires straight into it. Do NOT delete it from `lib.sh` on the grounds
+that nothing uses it today.
 
 ### What this harness has already caught
 
@@ -212,7 +207,7 @@ assertions in `cases.sh`, so the fixed behaviour is what gets defended:
 | [#457](https://github.com/alplabai/tan-cli/issues/457) | `generate --all` is re-runnable | second run exits 0 |
 | [#458](https://github.com/alplabai/tan-cli/issues/458) | `pinmux` prints its issues | the error line must appear |
 | [#469](https://github.com/alplabai/tan-cli/issues/469) | no stringified `None`; bootstraps in place | `--dry-run` exits 0 |
-| [#470](https://github.com/alplabai/tan-cli/issues/470) | `renode` honours `--project` | `--project` used throughout |
+| [#470](https://github.com/alplabai/tan-cli/issues/470) | `renode` honours `--project` | n/a — `tan renode` has since been removed |
 
 #469 and #470 were found *by writing this harness*, not by the manual pass that
 produced the rest.
@@ -252,11 +247,6 @@ the assumption it still held — two of them did NOT:
   DOES exit 2 because the table parsed successfully and was found empty.
   Measured directly; this file now asserts exit 0 for the unknown-family
   case and does not "fix" it to 2.
-- **`renode` without a build, and `renode` without `--core` on a
-  multi-slice manifest, both exit 1 (`RUNTIME_FAILURE`)**, not merely "not
-  0" — every `RenodeError` on these paths falls through `fail_sdk()`'s
-  default exit code. Verified against `renode_plan.py` and, for the
-  no-build case, against the real binary.
 - **`run` without `--flash`, once built, exits 0** and prints the literal
   line `run: built; pass --flash to program the board.` — `run_cmd.py`'s
   `BUILD_ONLY` action returns the build's own exit code, `SUCCESS` for a
@@ -275,15 +265,15 @@ directory. Noted here so the next re-derivation does not have to rediscover
 that they were checked and found not to apply, rather than skipped.
 
 Full-surface phases needing a real bootstrapped workspace (`quality`,
-`migrate`, `lock`, `kconfig`, the real `build`/`run`/`renode`) were **not**
+`migrate`, `lock`, `kconfig`, the real `build`/`run`) were **not**
 re-run end-to-end this pass — `--allow-bootstrap` costs several GB of disk
 and 10+ minutes and needs a Zephyr toolchain this environment did not carry.
-Their expectations were re-derived from source (`renode_plan.py`,
-`run_cmd.py`, `debug_config_cmd.py`, `exit_codes.py`) and, where a lighter
+Their expectations were re-derived from source (`run_cmd.py`,
+`debug_config_cmd.py`, `exit_codes.py`) and, where a lighter
 proxy exists, measured directly against the real binary and a real alp-sdk
 `dev` checkout: `build --materialise` (needs no workspace) and the pre-build
-refusals for `size`/`image`/`renode` all passed as asserted. The real
-`build`/`run`/`renode` steps carry the same source-derived confidence as the
+refusals for `size`/`image` all passed as asserted. The real
+`build`/`run` steps carry the same source-derived confidence as the
 rest of this section but were not run end-to-end here — run
 `--allow-bootstrap` yourself to confirm them on a host that can afford the
 disk and time.

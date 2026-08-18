@@ -50,7 +50,6 @@ from tan.commands.model_cmd import model
 from tan.commands.monitor_cmd import monitor
 from tan.commands.new_som_cmd import new_som
 from tan.commands.presets_cmd import presets
-from tan.commands.renode_cmd import renode
 from tan.commands.run_cmd import run
 from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
@@ -170,7 +169,6 @@ app.command("presets", rich_help_panel="Start a project")(presets)
 app.command(
     "quality", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
 )(quality)
-app.command("renode", rich_help_panel="Build & run")(renode)
 app.command("run", rich_help_panel="Build & run")(run)
 app.command("scaffold", rich_help_panel="Start a project")(scaffold)
 app.command("sdk", rich_help_panel="Setup")(sdk)
