@@ -124,16 +124,37 @@ jobs:
   # widening of this job.
   python:
     runs-on: ubuntu-latest
-    # 60, and the number is set by the RELEASE path, not the PR one. This job
-    # is 6-8 minutes on a `pull_request`/`merge_group` run but **23 minutes**
-    # on a release tag (run 31834718564, `v0.6.0-rc1`), because release.yml
-    # calls this workflow with `sdk_parity: true` (release.yml:235) and that
-    # switches on the planner byte-parity and planner-binding suites which
-    # SKIP without an alp-sdk checkout. A cap chosen from the PR measurement
-    # would pass every PR and then fail the tag -- the most expensive place in
-    # this repo to be wrong. 30 would leave that 23-minute run 30% headroom;
-    # 60 leaves it bounded without being a tripwire.
-    timeout-minutes: 60
+    # Two numbers, because this job has two workloads and one flat cap has to
+    # be wrong for one of them.
+    #
+    # `sdk_parity` (declared above, `type: boolean, default: false`) is the
+    # whole difference: it switches on the planner byte-parity and
+    # planner-binding suites, which SKIP without an alp-sdk checkout -- 282 of
+    # 1163 tests. `release.yml:235` passes true; nothing else does.
+    #
+    #   PR / merge_group  6-11 min   measured across the last 25 successful
+    #                                runs (min 6m; p100 11m, run 32174278683)
+    #   release tag         23 min   run 31834718564, `v0.6.0-rc1`
+    #                                (1422s = 23.7m)
+    #
+    # A flat cap taken from the PR measurement passes every PR and then fails
+    # the tag, which is the most expensive place in this repo to be wrong. A
+    # flat 60 avoids that but leaves the >99% of runs that are PRs held for an
+    # hour against an 11-minute p100. The expression gets both: `inputs` is
+    # null on `pull_request`/`push`/`merge_group`, so `inputs.sdk_parity` is
+    # falsy there and this reads 30; on the `workflow_call` from release.yml it
+    # reads 60.
+    #
+    # 30 rather than 20 on the PR leg: p100 is 11m and trending up (the same
+    # trend visible on the release leg, 633s -> 1422s), so 20 is 1.8x headroom
+    # on a number that has moved. Both legs stay far under GitHub's own
+    # 360-minute default, which is what a hang catcher has to beat.
+    #
+    # NOTE for tan-cli#854, which generalises `parity.yml`'s timeout gate to
+    # every PR-triggered workflow: this value is a STRING expression, not an
+    # int. That gate's `isinstance(timeout, int)` assertion has to learn about
+    # expressions or it will red on this line.
+    timeout-minutes: ${{ inputs.sdk_parity && 60 || 30 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
