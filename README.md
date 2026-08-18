@@ -303,26 +303,79 @@ The stable top-level envelope is:
 
 **You do not need a flag for this.** tan already treats a run as
 non-interactive when `stdin` or `stderr` is not a terminal — piped, redirected,
-or a CI runner — and `--format json` counts too. That rule is applied unasked
-(`tan/core/consent.py`'s `can_prompt`), and it is deliberately not keyed on
-`stdout`, so `tan ... --format json | jq` from a real terminal still behaves
-interactively. Where a command has a documented default it takes it; where it
-has none it fails rather than asking.
+or a CI runner — and `--format json` settles it on its own, whatever the
+terminal looks like. That rule is applied unasked (`tan/core/consent.py`'s
+`can_prompt`, whose `not json_mode` is an unconditional term). It reads `stdin`
+and `stderr` and deliberately never `stdout` — which matters more than it
+sounds, because in text mode nothing is written to stdout at all
+(`tan/env.py`). `stderr` is therefore both the report channel and half the
+consent gate: `tan doctor --fix 2> log.txt` from a real terminal is treated as
+unattended and the fix is suppressed (`doctor.fix-suppressed`), while
+`> log.txt` leaves consent untouched and captures an empty file. Where a
+command has a documented default it takes it; where it has none it fails rather
+than asking.
 
 `--ci` and `--non-interactive` exist as explicit "do not ask me" signals on top
-of that, but they are **per-command flags, not global ones**, and `tan build`
-refuses both outright:
+of that, and **every registered command parses them**:
+`tan/core/global_flags.py` holds the shared spec and injects it into any
+command that does not already declare the flag itself. What keeps that true is
+split in two. `tests/gates/test_global_flags_gate.py` fails the build for the
+29 commands that reject an unknown option; it cannot speak for `lock`,
+`migrate` and `quality`, which register `ignore_unknown_options`
+(`west_forward_cmd.py`) and would swallow an undeclared flag into the `west`
+passthrough rather than reject it — those three are held by
+`test_west_forward_command.py`'s
+`test_a_leading_global_flag_is_consumed_not_forwarded`. They are not ROOT
+options either: a leading one is relocated across the subcommand boundary, so
+`tan --ci doctor` and `tan doctor --ci` are the same run, while a bare
+`tan --ci` with no subcommand is `No such option: --ci`.
+
+`tan build` parses them and then refuses the whole invocation — and not only
+these two. Seven of the ten flags in that shared set are deferred there
+(`--target`, `--all`, `--verbose`, `--quiet`, `--no-color`,
+`--non-interactive`, `--ci`; `build_cmd.py`'s `_DEFERRED_FLAGS`), each with the
+same envelope but for the message, which names the flag it refused. Of those
+ten only `--project`, `--board-yaml` and `--sdk-root` survive; `build`'s own
+`--plan-from`, `--materialise`, `--native`, `--execute`, `--build-root` and
+`--format` are unaffected:
 
 ```console
 $ tan build --ci --format json
-{"command":"build","ok":false,"exitCode":1,...,"issues":[{"code":"cli.command-deferred",
- "severity":"error","message":"`tan build --ci` is deferred and not available in this
- build (see https://github.com/alplabai/tan-cli/issues/427)."}]}
+{"command":"build","ok":false,"exitCode":1,...,"data":{"message":"`tan build --ci` is
+ deferred and not available in this build (see
+ https://github.com/alplabai/tan-cli/issues/427)."},"issues":[{"code":"cli.command-deferred",
+ "severity":"error","message":"..."}]}
 ```
 
-So a script that adds `--ci` to every tan invocation breaks on `build` and gains
-nothing on the rest. Rely on the stdio rule; reach for the flags only where you
-have checked the command accepts them.
+So a script that adds `--ci` to every tan invocation breaks on `build`.
+Elsewhere it does three separate things, and only the first is consent:
+
+* **Consent**, on the two commands that read the flag for it — `doctor --fix`
+  (`doctor_cmd.py`'s `fix_allowed`) and `scaffold` (`scaffold_cmd.py`'s
+  `interactive`), both through `can_prompt`. This is the half worth reaching
+  for: it is what stops `tan doctor --fix` running unattended
+  `winget install`s under a pty-allocating runner. It is NOT the whole
+  prompting surface, though — `new-som` prompts too, gates on stdio alone
+  (`stdin_is_tty() and stderr_is_tty()`, `new_som_cmd.py`) and `del`s both
+  flags unread, so under that same pty-allocating runner `tan new-som --ci`
+  blocks on `New SoM SKU (E1M-<UPPERCASE> shaped)` forever. Pass its required
+  flags there instead.
+* **Colour**, which has nothing to do with prompting. Inside `tan/env.py`'s
+  `use_color` (`if no_color or ci or no_color_requested()`) `--ci` is a second
+  spelling of `--no-color`, so on `doctor` and `size` — that helper's only two
+  callers — it changes text output where no prompt was ever possible. It is not
+  a synonym outside it: `faultdecode` colours through its own
+  `_use_color(no_color)` and ignores `--ci`. `--non-interactive` changes colour
+  nowhere.
+* **The refusal message.** Where stdio is already non-tty the rule above has
+  decided first, but `--ci` still names itself in `doctor`'s
+  `doctor.fix-suppressed` reason list — an `issues[]` difference a JSON
+  consumer sees.
+
+Rely on the stdio rule for the consent half; reach for `--ci` on `doctor` and
+`scaffold` when you want that refusal regardless of what stdio looks like, and
+never on `build`, which refuses `--verbose`, `--quiet`, `--no-color`,
+`--target` and `--all` identically.
 
 ## How tan fits with the SDK
 

@@ -273,8 +273,11 @@ paragraph and the file disagree, the file wins:
   `checksums.txt` decides between them. It is not a function returning one raw
   name.
 * The unpublished pair is `win32/arm64` and `linux/arm64` -- the extension
-  tracks them per version in `UNPUBLISHED_TARGETS`, e.g.
-  `"0.6.0-rc1": ["win32/arm64", "linux/arm64"]`.
+  tracks them per version in `HOSTS_WITHOUT_RELEASE_ASSET`, at
+  `src/alpCli/service.ts:168` on `origin/main` (the branch the link above
+  points at) and `:211` on `origin/dev`. The entry
+  `"0.6.0-rc1": ["win32/arm64", "linux/arm64"]` exists only on `dev`; main's
+  table still ends at `"0.5.1"`, matching its `SUPPORTED_CLI_VERSION` pin.
 
 `release.yml`'s header calls this document the thing the extension "MUST match
 exactly". That claim is only checkable if something fails when the two drift,
