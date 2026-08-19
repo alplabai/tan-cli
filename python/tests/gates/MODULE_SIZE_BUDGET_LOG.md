@@ -175,5 +175,11 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/cli.py: 1008 -> 1006
     - tan/commands/renode_cmd.py: 1587 -> dropped (module deleted)
     - function_count_budget: 261 -> 252
+- 2026-08-18 -- tan-cli#826: nine oracle-parity citations swept off the test modules tan-cli#269 deleted. Four of them said a deliberate divergence was PINNED by one of those modules; the correct replacement is not "unpinned" (an adversarial re-read of the first draft measured live tan-side tests holding all four) but the NAME of the test that took over, and cli.py's stderr rule had to be narrowed from "nothing compares stderr" to "Click's rendering is unpinned" for the same reason -- ~500 assertions under python/tests/ take stderr as their subject. Naming the real pin costs more words than either wrong version did. No code changed; every line here is a comment or docstring. scaffold.py's `_vendored_files` was kept under the 50-line function cap by tightening its wording rather than by raising the cap, so function_count_budget stays at 252.
+    - tan/cli.py: 1006 -> 1015
+    - tan/commands/debug_config_cmd.py: 1949 -> 1954
+    - tan/commands/size_cmd.py: 842 -> 849
+    - tan/core/flash_plan.py: 3199 -> 3205
+    - tan/core/scaffold.py: 1510 -> 1512
 - 2026-08-18 -- tan-cli#846: port alp-sdk#1535's _tag_resolves guard into _docs_ref (tan/planner/template.py), a verbatim relocation of scripts/alp_template.py where the same guard already lives upstream
     - tan/planner/template.py: 1436 -> 1470
