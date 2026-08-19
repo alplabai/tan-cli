@@ -60,6 +60,7 @@ from typing import Any
 
 import typer
 
+from tan.core.shapes import is_dir as _is_dir, is_file as _is_file
 from tan.commands.build_output import (
     ManifestInvalid,
     ManifestUnavailable,
@@ -323,23 +324,6 @@ def _copy_file(src: str, dst: str) -> None:
             if not chunk:
                 break
             writer.write(chunk)
-
-
-def _is_dir(path: str) -> bool:
-    try:
-        return os.path.isdir(path)
-    except (OSError, ValueError):
-        return False
-
-
-def _is_file(path: str) -> bool:
-    try:
-        return os.path.isfile(path)
-    except (OSError, ValueError):
-        # A path the OS refuses to stat at all (a too-long name, an embedded NUL
-        # from a hand-edited manifest) is "not a file", never an exception that
-        # escapes the envelope.
-        return False
 
 
 def _assemble_bundle(

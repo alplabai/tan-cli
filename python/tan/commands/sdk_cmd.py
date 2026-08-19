@@ -90,6 +90,7 @@ from typing import Any
 import typer
 
 from tan.core.global_flags import accept_global_flags
+from tan.core.shapes import SDK_MARKER
 from tan.core.proxy import (
     HTTPS_PROXY_ENV_VARS,
     host_of,
@@ -107,10 +108,10 @@ from tan.output_format import FORMAT_HELP, OutputFormat
 #: `tan_core::sdk::GITHUB_RELEASES_URL`.
 GITHUB_RELEASES_URL = "https://api.github.com/repos/alplabai/alp-sdk/releases"
 
-#: `scripts/alp_project.py` is THE marker for an alp-sdk checkout (I-31) -- the
-#: same literal `tan_core::project::contains_loader_script` hardcodes. Spelled
-#: once here; `build_cmd.SDK_MARKER` is the same fact for the build path.
-SDK_MARKER = ("scripts", "alp_project.py")
+#: Re-exported, NOT respelled. This file used to carry its own
+#: `("scripts", "alp_project.py")` under a comment claiming it was "spelled
+#: once here" -- it was spelled twice, and `tan.core.shapes` held the other
+#: (tan-cli#815). Relocating the I-31 marker is a one-line change there now.
 
 #: Wall-clock ceiling on the ONE network call in this file. Every subprocess and
 #: socket probe in the port carries a timeout; `urlopen` without one blocks on
@@ -614,30 +615,6 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
     return ActiveSdk(None, "none", broken_project_pin)
 
 
-def rejected_sdk_root_message(sdk_root: str, consequence: str) -> str:
-    """The `<command>.sdk-root-unresolved` message for a `--sdk-root` the
-    loader-marker check REJECTED, naming the value the caller typed.
-
-    `--sdk-root` is TERMINAL (I-31), so a path without `scripts/alp_project.py`
-    resolves to nothing rather than falling through. The messages on that branch
-    used to be the same string as the no-flag one -- "pass `--sdk-root <path>` to
-    name the checkout", the flag the user had just passed -- with the failing
-    value nowhere in the envelope or the stderr text (tan-cli#497 defect 7). So
-    the reader had no way to see WHICH path was rejected or why, on the one
-    surface that knew both.
-
-    `consequence` is the caller's own "and so you got this instead" clause,
-    because it differs per command (an empty example catalogue, built-in preset
-    defaults) and is the half a reader acts on. The no-flag message is
-    deliberately NOT routed through here: it is byte-pinned for `presets` by the
-    `presets-no-sdk` golden envelope and the oracle-parity case, and there is no
-    typed value to name on that branch anyway.
-    """
-    marker = "/".join(SDK_MARKER)
-    return (
-        f'alp-sdk root is unresolved: --sdk-root "{sdk_root}" is not an alp-sdk '
-        f"checkout ({marker} not found under it). {consequence}"
-    )
 
 
 def project_pin_issue(broken_project_pin: str | None, tier: str) -> Issue | None:

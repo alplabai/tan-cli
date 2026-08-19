@@ -185,3 +185,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/planner/template.py: 1436 -> 1470
 - 2026-08-19 -- tan-cli#856: corrected the stale --fix sudo help text (3 lines longer)
     - tan/commands/doctor_cmd.py: 4035 -> 4038
+- 2026-08-19 -- tan-cli#815: the shapes.py dedup finished. Six private helper definitions deleted (_is_file x4, _is_dir x2) plus sdk_cmd's duplicate SDK_MARKER and rejected_sdk_root_message, so seven modules SHRINK here. clean_cmd.py grows by exactly 1: it had no `from tan.core` import at all and now needs one line for SDK_MARKER, which it previously took from sdk_cmd's second spelling of the same literal.
+    - tan/commands/clean_cmd.py: 1119 -> 1120
