@@ -16,10 +16,12 @@ on the commit that proposed it.
 The RECEIVER (alp-e2e, private repo, PR #1: `.github/workflows/pin-move-verify.yml`
 + `alpe2e/pinverify.py` + `journeys/build-tuple.sh`) already exists and is
 proven on two real tuples. This module is the SENDER's pure logic: which
-pin sites in THIS repo name an alp-sdk ref, whether a given PR touched one,
-how to build a dispatch the receiver's own `alpe2e.pinverify.parse_payload`
-will accept, and how to turn a polled Check Run into a pass/fail this repo's
-CI can require. Everything here is pure and unit-tested (see
+pin sites in THIS repo name an alp-sdk ref, whether a given PR MOVED a pin
+VALUE at one (touching the file is not enough -- see "TOUCHED IS NOT MOVED"
+below), how to build a dispatch the receiver's own
+`alpe2e.pinverify.parse_payload` will accept, and how to turn a polled Check
+Run into a pass/fail this repo's CI can require. Everything here is pure and
+unit-tested (see
 `python/tests/scripts/test_pin_move_verify.py`); the workflow that shells
 `git diff`, mints a token, calls `gh api`, and polls is the thin, deliberately
 under-tested impure boundary -- same split `alpe2e.pinverify` itself
@@ -152,6 +154,34 @@ coverage:
   * `python/tan/version.py`'s `TAN_VERSION` -- this repo's OWN version, not
     a reference to another repo. Not a cross-repo pin at all.
 
+TOUCHED IS NOT MOVED
+---------------------
+
+ADR-0029 keys both of its acceptance clauses on VALUE MOVEMENT, not on file
+membership: clause 2 is "no pin entry moves without a green run on the new
+value", and clause 3 restates it as "a manifest edit that CHANGES A VALUE is
+rejected unless it carries a proof reference to a green run on that value".
+`touched_pin_sites` alone is therefore BROADER than the ADR it enforces --
+a comment reflow, a CI step removal, or a rename inside `parity.yml` demanded
+a full cross-repo dispatch (and, until the App is provisioned, a hard failure)
+with `PINNED_SDK_TAG` byte-identical to base. Real case: tan-cli PR #848
+removes Renode steps from `parity.yml`'s `seam2` job and moves no pin value at
+all.
+
+So `detect` reports BOTH. `touched` keeps its old meaning (which pin-bearing
+FILES the diff includes -- still worth printing in a summary), and `moved`,
+the flag the workflow actually gates on, is true only when a touched site's
+extracted pin VALUE differs between base and head. `PIN_VALUE_EXTRACTORS`
+below holds one extractor per site, each refusing to guess: it wants exactly
+the pins that site is declared to carry (`PIN_SITES`), and raises otherwise.
+
+The fallback is CONSERVATIVE in one direction only, and that is not
+negotiable: a site with no extractor, an extraction that RAISES at either
+revision, and a file added or deleted at either revision all count as MOVED.
+An extraction failure that quietly downgraded to "nothing to dispatch" would
+turn this narrowing into the exact hole the gate exists to close -- so every
+uncertain shape lands on the dispatch side, never on the skip side.
+
 WHAT `tan_ref` MEANS FOR THESE PINS, STATED HONESTLY
 -----------------------------------------------------
 
@@ -181,7 +211,7 @@ import pathlib
 import re
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -210,8 +240,11 @@ class PayloadError(ValueError):
 # discipline `test_planner_relocation_freshness.py` applies to alp-sdk,
 # pointed at alp-e2e instead. `python/tests/scripts/
 # test_pin_move_verify_contract_mirror.py` re-extracts and re-hashes the
-# same block from a local alp-e2e checkout bound at `$ALP_E2E_ROOT`; without
-# it the gate SKIPS, loudly, never a silent pass.
+# same block from a local alp-e2e checkout bound at `$ALP_E2E_ROOT`. That
+# check SKIPS -- loudly, never a silent pass -- with `$ALP_E2E_ROOT` unset,
+# or bound at a real alp-e2e checkout that genuinely does not carry this
+# contract anywhere in its tree yet; every other shape (including the
+# contract having moved to a different file) is a FAIL, not a skip.
 # ---------------------------------------------------------------------------
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]{0,99}$")
 _SKU = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -239,17 +272,24 @@ SOURCE_REPO = "alplabai/tan-cli"
 #: cheapest tuple that still exercises both toolchains it currently proves.
 DEFAULT_SOMS: tuple[str, ...] = ("E1M-V2N101", "E1M-AEN801")
 
-#: repo-relative path -> the pin constant(s) it carries, informational only
-#: (used for the human-readable `detect` report). See this module's own
+#: The three pin-bearing paths, named once so `PIN_SITES` and
+#: `PIN_VALUE_EXTRACTORS` below cannot drift apart on a typo.
+FRESHNESS_GATE = "python/tests/gates/test_planner_relocation_freshness.py"
+PARITY_YML = ".github/workflows/parity.yml"
+CI_YML = ".github/workflows/ci.yml"
+
+#: repo-relative path -> the pin constant(s) it carries. Used for the
+#: human-readable `detect` report AND, for the freshness gate, as the exact
+#: set `extract_freshness_pins` demands to find. See this module's own
 #: docstring for the full sweep, including the sites deliberately excluded.
 PIN_SITES: dict[str, tuple[str, ...]] = {
-    "python/tests/gates/test_planner_relocation_freshness.py": (
+    FRESHNESS_GATE: (
         "PINNED_SDK_COMMIT",
         "HAND_PORT_PINNED_SDK_COMMIT",
         "STRICT_LOADERS_PINNED_SDK_COMMIT",
     ),
-    ".github/workflows/parity.yml": ("PINNED_SDK_TAG",),
-    ".github/workflows/ci.yml": ("the `sdk_parity` job's alp-sdk checkout `ref:`",),
+    PARITY_YML: ("PINNED_SDK_TAG",),
+    CI_YML: ("the `sdk_parity` job's alp-sdk checkout `ref:`",),
 }
 
 
@@ -267,6 +307,17 @@ def touched_pin_sites(changed_files: Iterable[str]) -> tuple[str, ...]:
 
 _PINNED_SDK_TAG_LINE = re.compile(r"^\s*PINNED_SDK_TAG:\s*(\S+)\s*$", re.MULTILINE)
 
+#: Counted INDEPENDENTLY of the strict line pattern above, and required to
+#: agree with it. `!= 1` strict MATCHES is not the same question as `!= 1`
+#: pin: a second `PINNED_SDK_TAG` written in a shape the anchored pattern
+#: cannot see (a flow mapping, a continuation, a trailing comment on the same
+#: line) would leave exactly one match and be returned happily, silently
+#: grading one of two live pins. Two counts that must agree turn "a shape I
+#: cannot parse" into a refusal instead of a guess. Zero occurrences in
+#: `parity.yml`'s prose today (measured: the file's many other mentions write
+#: `PINNED_SDK_TAG` without the colon), so this is not over-sensitive.
+_PINNED_SDK_TAG_ANY = re.compile(r"PINNED_SDK_TAG[ \t]*:")
+
 
 def extract_pinned_sdk_tag(parity_yml_text: str) -> str:
     """The one `PINNED_SDK_TAG:` value in `parity.yml`'s workflow-level
@@ -276,12 +327,179 @@ def extract_pinned_sdk_tag(parity_yml_text: str) -> str:
     steps already apply to the freshness gate's pins.
     """
     matches = _PINNED_SDK_TAG_LINE.findall(parity_yml_text)
-    if len(matches) != 1:
+    occurrences = len(_PINNED_SDK_TAG_ANY.findall(parity_yml_text))
+    if len(matches) != 1 or occurrences != 1:
         raise PayloadError(
             "expected exactly ONE '^PINNED_SDK_TAG:' line in parity.yml, "
-            f"found {len(matches)} -- refusing to guess which one is live"
+            f"found {len(matches)} readable ({occurrences} 'PINNED_SDK_TAG:' "
+            "occurrence(s) in total) -- refusing to guess which one is live"
         )
     return matches[0]
+
+
+#: `ci.yml`'s pin is prose in `PIN_SITES` ("the `sdk_parity` job's alp-sdk
+#: checkout `ref:`") but a perfectly extractable literal in the file: the
+#: `ref:` line immediately under the `repository: alplabai/alp-sdk` line of
+#: that job's `actions/checkout` step. Anchoring on the repository line, not
+#: on "the only `ref:` in the file", is what keeps this from silently
+#: grading some future unrelated checkout's ref as the pin.
+#:
+#: TWO COUNTS, NOT ONE, AND THAT IS THE WHOLE POINT. "!= 1 MATCHES of the
+#: two-line pattern" is NOT the same question as "!= 1 alp-sdk checkout": a
+#: SECOND alp-sdk checkout written in any shape this pattern cannot see --
+#: the keys reordered, a `path:` line between `repository:` and `ref:`, an
+#: inline flow map, a quoted repo name -- leaves exactly ONE match, and an
+#: extractor that only counted matches would return that one happily while a
+#: move of the OTHER ref reported `moved: false`. So `_ALP_SDK_CHECKOUT`
+#: below counts the `repository:` lines INDEPENDENTLY and
+#: `extract_ci_sdk_parity_ref` refuses whenever the two counts disagree: an
+#: unparseable-but-present second checkout RAISES, which `moved_pin_sites`
+#: turns into MOVED -- i.e. the site degrades to today's touch-based
+#: behaviour instead of guessing. Not hypothetical:
+#: `.github/workflows/parity.yml` already runs SEVEN alp-sdk checkouts (three
+#: of them audit roots at `:768-849`), so a second one in `ci.yml` is the
+#: obvious next change, not a contrived one.
+#: Every `repository: alplabai/alp-sdk` line, however that checkout step
+#: is otherwise written -- counted against the strict pattern's matches
+#: above. The optional quote is there because YAML accepts a quoted
+#: scalar for the repo name too.
+_ALP_SDK_CHECKOUT = re.compile(r"repository:[ \t]*['\"]?alplabai/alp-sdk\b")
+
+
+_CI_SDK_PARITY_REF = re.compile(
+    r"^[ \t]*repository:[ \t]*alplabai/alp-sdk[ \t]*\r?\n[ \t]*ref:[ \t]*(\S+)[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def extract_ci_sdk_parity_ref(ci_yml_text: str) -> str:
+    """The `sdk_parity` job's alp-sdk checkout `ref:` value out of `ci.yml`.
+
+    Same discipline as `extract_pinned_sdk_tag`: exactly one match or refuse.
+    """
+    matches = _CI_SDK_PARITY_REF.findall(ci_yml_text)
+    checkouts = len(_ALP_SDK_CHECKOUT.findall(ci_yml_text))
+    if len(matches) != 1 or checkouts != 1:
+        raise PayloadError(
+            "expected exactly ONE 'repository: alplabai/alp-sdk' checkout with a "
+            f"'ref:' line directly under it in ci.yml, found {len(matches)} "
+            f"readable ({checkouts} alp-sdk checkout(s) in total) -- refusing to "
+            "guess which one is the sdk_parity pin"
+        )
+    return matches[0]
+
+
+#: Every assignment to one of those three names, at any indentation and
+#: in any shape -- counted against the strict line pattern below for the
+#: same reason `_ALP_SDK_CHECKOUT` is: an indented or otherwise
+#: unparseable SECOND assignment must RAISE (=> MOVED), never leave the
+#: strict pattern happily returning the three it can see. Zero false
+#: positives in the gate file today (measured: exactly three `NAME =`
+#: occurrences; its many prose mentions carry no `=`).
+_FRESHNESS_PIN_ANY = re.compile(
+    r"\b(PINNED_SDK_COMMIT|HAND_PORT_PINNED_SDK_COMMIT"
+    r"|STRICT_LOADERS_PINNED_SDK_COMMIT)[ \t]*=(?!=)"
+)
+
+_FRESHNESS_PIN_LINE = re.compile(
+    r"^(PINNED_SDK_COMMIT|HAND_PORT_PINNED_SDK_COMMIT|STRICT_LOADERS_PINNED_SDK_COMMIT)"
+    r"[ \t]*=[ \t]*\"([0-9a-fA-F]{40})\"",
+    re.MULTILINE,
+)
+
+
+def extract_freshness_pins(gate_text: str) -> tuple[str, ...]:
+    """The freshness gate's three alp-sdk commit pins, name-sorted.
+
+    Demands exactly one assignment for each name `PIN_SITES` declares this
+    file to carry -- the same `^PINNED_SDK_COMMIT = "..."` shape (and the
+    same "found N, refusing to guess" reflex) `parity.yml`'s own `grep -oE`
+    steps already apply to this file. A missing, renamed, duplicated, or
+    non-40-hex pin raises, and `moved_pin_sites` treats that as MOVED.
+
+    The ~40 `PINNED_HASHES` entries alongside them (and `HAND_PORT_HASHES` /
+    `STRICT_LOADERS_HASH`) are deliberately NOT read. The reason is NOT that
+    they move in lockstep with these three -- nothing enforces that, and it is
+    an argument from history at best (measured over that file's entire
+    history: no commit has ever changed a hash without also moving at least
+    one pin line, but the pin it moved is not always the one that bundle
+    belongs to). The real reason is a mechanism, one workflow over: a hash
+    edit is already gated harder and more directly than any dispatch could
+    manage. `.github/workflows/parity.yml` clones all three audit roots at the
+    very pins extracted here (`:768-849`), binds `ALP_SDK_ROOT` /
+    `ALP_SDK_HAND_PORT_ROOT` / `ALP_SDK_STRICT_LOADERS_ROOT`, and asserts BY
+    FULL NODE ID that all three hash tests printed `PASSED` (`:902-931`) --
+    so a bogus hash reds seam1, a BLOCKING check, while a skip is a hard
+    failure rather than a green no-op. A dispatch could not certify that claim
+    in any case: see this module's own `CERTIFIABILITY: none` note for this
+    site -- the published tan a tuple installs predates whatever the PR just
+    re-audited, by construction.
+    """
+    found = _FRESHNESS_PIN_LINE.findall(gate_text)
+    expected = PIN_SITES[FRESHNESS_GATE]
+    assignments = sorted(_FRESHNESS_PIN_ANY.findall(gate_text))
+    if sorted(name for name, _ in found) != sorted(expected) or assignments != sorted(expected):
+        raise PayloadError(
+            "expected exactly one '^<NAME> = \"<40-hex>\"' assignment for each of "
+            f"{', '.join(expected)} in {FRESHNESS_GATE}, found "
+            f"{[name for name, _ in found]} readable out of {assignments} "
+            "assignment(s) in total -- refusing to guess which pins are live"
+        )
+    return tuple(value for _, value in sorted(found))
+
+
+#: repo-relative path -> how to read that site's pin VALUE(s) out of its
+#: text. A `PIN_SITES` key missing from here has no reliable extractor and is
+#: MOVED whenever it is touched -- see "TOUCHED IS NOT MOVED" in the module
+#: docstring. (All three have one today; the fallback exists for the next
+#: site added, so that adding it to `PIN_SITES` alone is always the SAFE
+#: half-step.)
+PIN_VALUE_EXTRACTORS: dict[str, Callable[[str], tuple[str, ...]]] = {
+    FRESHNESS_GATE: extract_freshness_pins,
+    PARITY_YML: lambda text: (extract_pinned_sdk_tag(text),),
+    CI_YML: lambda text: (extract_ci_sdk_parity_ref(text),),
+}
+
+
+def moved_pin_sites(
+    sites: Iterable[str],
+    read_at: Callable[[str, str], str | None],
+    *,
+    base: str,
+    head: str,
+) -> tuple[str, ...]:
+    """Of `sites` (normally `touched_pin_sites`' output), those whose pin
+    VALUE actually differs between `base` and `head`. Pure: `read_at(rev,
+    path)` supplies the file text at a revision, or `None` when it is not
+    there (or not readable) -- `_cmd_detect` hands it a `git show` wrapper,
+    the tests hand it a dict.
+
+    Fails toward MOVED in every uncertain shape (no extractor, extraction
+    raises, file added or deleted). ADR-0029 clause 2 is the reason: an
+    unverified pin move must not pass, so a value this function cannot READ
+    is never a value it reports as unchanged.
+    """
+    return tuple(site for site in sites if _site_moved(site, read_at, base=base, head=head))
+
+
+def _site_moved(
+    site: str,
+    read_at: Callable[[str, str], str | None],
+    *,
+    base: str,
+    head: str,
+) -> bool:
+    extract = PIN_VALUE_EXTRACTORS.get(site)
+    if extract is None:
+        return True
+    try:
+        before = read_at(base, site)
+        after = read_at(head, site)
+        if before is None or after is None:
+            return True
+        return extract(before) != extract(after)
+    except Exception:  # noqa: BLE001 -- deliberate: see the docstring above
+        return True
 
 
 def _field(value: str | None, name: str, pattern: re.Pattern[str], hint: str) -> str:
@@ -390,11 +608,17 @@ def _mirrored_contract_text() -> str:
 #: alp-e2e checkout bound at `$ALP_E2E_ROOT`; a mismatch means either side
 #: moved and this constant needs a hand re-audit (diff `alpe2e/pinverify.py`,
 #: port the delta, update this hash and the "last audited" note below).
-#: Without `$ALP_E2E_ROOT` that test SKIPS, loudly, never a silent pass.
+#: That test SKIPS -- loudly, never a silent pass -- only with
+#: `$ALP_E2E_ROOT` unset or bound at a checkout that genuinely does not
+#: carry this contract anywhere yet; a moved/renamed contract module is a
+#: FAIL there, never a skip.
 #:
 #: Last re-audited by hand against alp-e2e commit
-#: `fe8202890afb405e132482d9b7a23a76348bd710` (2026-08-16, alp-e2e PR #1).
-#: tan-cli#835 tracks the next re-audit.
+#: `fe8202890afb405e132482d9b7a23a76348bd710` (re-audited 2026-08-18, no
+#: drift found; first audited 2026-08-16, alp-e2e PR #1). That commit is
+#: the tip of alp-e2e's UNMERGED branch `feat/pin-move-verify-receiver` --
+#: it is not on `main`, and `alpe2e/pinverify.py` does not exist on `main`
+#: at all yet. tan-cli#835 tracks the next re-audit.
 MIRRORED_CONTRACT_TEXT = _mirrored_contract_text()
 MIRRORED_CONTRACT_HASH = "62ebc38153106a76b095670645e594394104534d5e35bb10250f9013260b48be"
 
@@ -561,14 +785,45 @@ def _changed_files(repo_root: pathlib.Path, base: str, head: str) -> list[str]:
     return [ln for ln in out.stdout.splitlines() if ln.strip()]
 
 
+def _git_show(repo_root: pathlib.Path, rev: str, path: str) -> str | None:
+    """`git show <rev>:<path>`, or `None` when git cannot produce it -- the
+    path did not exist at that revision, or the revision itself is
+    unreadable. Both collapse to `None` on purpose: `moved_pin_sites` turns
+    either into MOVED, so there is nothing for a caller to do with the
+    distinction and no shape in which a git failure can read as "unchanged".
+    """
+    out = subprocess.run(
+        ["git", "-C", str(repo_root), "show", f"{rev}:{path}"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return out.stdout if out.returncode == 0 else None
+
+
 def _cmd_detect(args: argparse.Namespace) -> int:
     repo_root = pathlib.Path(args.repo_root).resolve()
     changed = _changed_files(repo_root, args.base, args.head)
     sites = touched_pin_sites(changed)
-    doc = {"touched": bool(sites), "sites": list(sites), "changed_files": changed}
+    moved = moved_pin_sites(
+        sites,
+        lambda rev, path: _git_show(repo_root, rev, path),
+        base=args.base,
+        head=args.head,
+    )
+    doc = {
+        "touched": bool(sites),
+        "sites": list(sites),
+        "moved": bool(moved),
+        "moved_sites": list(moved),
+        "changed_files": changed,
+    }
     print(json.dumps(doc, indent=2))
     _emit("touched", "true" if sites else "false")
     _emit("sites", ",".join(sites))
+    _emit("moved", "true" if moved else "false")
+    _emit("moved_sites", ",".join(moved))
     return 0
 
 
@@ -632,7 +887,9 @@ def cli(argv: Sequence[str]) -> int:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    d = sub.add_parser("detect", help="which pin sites a base..head diff touched")
+    d = sub.add_parser(
+        "detect", help="which pin sites a base..head diff touched, and which MOVED a value"
+    )
     d.add_argument("--base", required=True)
     d.add_argument("--head", required=True)
     d.add_argument("--repo-root", default=".")

@@ -1555,9 +1555,12 @@ def test_readme_quickstart_names_the_current_zephyr_sdk_install_command():
 # sevenZip (tan-cli#286 second pass, finding 3) -- the `zephyrSdk` Fail names
 # `west sdk install` as the whole remedy, but on native Windows that command
 # cannot complete without 7-Zip on PATH (`tan.core.bootstrap`'s
-# `manual_install_windows` prose). Mirrors `crate::build_readiness`'s
-# `sevenZip` sibling, gated exactly `probe.is_windows && !probe.zephyr_sdk`
-# (tan-cli#204).
+# `manual_install_windows` prose). Ported from `crate::build_readiness`'s
+# `sevenZip` sibling, which gated exactly `probe.is_windows &&
+# !probe.zephyr_sdk` (tan-cli#204) -- tan-cli#736 dropped the
+# `!probe.zephyr_sdk` half, so the live gate is `os.name == "nt"` and nothing
+# else. The two tests below assert both halves of that: present on Windows,
+# and STILL present once the SDK is detected.
 # --------------------------------------------------------------------------
 
 
@@ -1601,11 +1604,16 @@ class _FixedOsName:
         return self._name
 
 
-def test_collect_adds_seven_zip_only_on_windows_while_the_sdk_is_absent(tmp_path, monkeypatch):
+def test_collect_adds_seven_zip_on_windows(tmp_path, monkeypatch):
     """Finding 3 (tan-cli#286 third pass): the scan roots are stubbed outright
     -- `/opt` is one of `_zephyr_sdk_scan_roots`'s roots unconditionally, so a
-    developer host with a real `/opt/zephyr-sdk-*` would otherwise flip this
-    to `zephyrSdk` detected and drop `sevenZip` from the check list."""
+    developer host with a real `/opt/zephyr-sdk-*` would otherwise decide
+    `zephyrSdk` for reasons unrelated to what this case sets up.
+
+    The stubbing is no longer what keeps `sevenZip` in the list -- tan-cli#736
+    made that gate `os.name == "nt"` alone, and the sibling case below asserts
+    the check survives a DETECTED SDK. Kept anyway so this case tests the
+    absent-SDK arm deterministically on any developer machine."""
     monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("nt"))
     monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
     monkeypatch.setattr(

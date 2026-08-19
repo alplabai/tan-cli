@@ -171,5 +171,9 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/validate_cmd.py: 1587 -> 1591
 - 2026-08-16 -- tan-cli#799: validate's sdk.* seam-issue text now carries a severity prefix, matching clean/size/image/run
     - tan/commands/validate_cmd.py: 1591 -> 1613
+- 2026-08-18 -- tan-cli#448: Renode is retired repo-wide; the `tan renode` verb and the three modules behind it (`tan/commands/renode_cmd.py`, `tan/core/renode_plan.py`, `tan/core/renode_sim.py`) are deleted, so `regen_module_size_budget.py` was re-run -- shrink-only, no `--reason` needed
+    - tan/cli.py: 1008 -> 1006
+    - tan/commands/renode_cmd.py: 1587 -> dropped (module deleted)
+    - function_count_budget: 261 -> 252
 - 2026-08-18 -- tan-cli#846: port alp-sdk#1535's _tag_resolves guard into _docs_ref (tan/planner/template.py), a verbatim relocation of scripts/alp_template.py where the same guard already lives upstream
     - tan/planner/template.py: 1436 -> 1470

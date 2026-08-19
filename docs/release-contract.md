@@ -248,30 +248,43 @@ inherent to musl or to PyInstaller.
 
 ### Reference `releaseAssetForTarget` (vscode side)
 
-This is the extension's map **as it stands today**, kept here so the mismatch is
-visible: `linux:x64` still resolves to the `-musl` triple, which this release
-does not publish. Nothing breaks, because `SUPPORTED_CLI_VERSION` is still
-pinned to the last Rust release and the extension therefore never fetches a
-v0.5.0 asset at all. Repointing `linux:x64` to `x86_64-unknown-linux-gnu`
-travels with that pin move (#268), not before it.
+**Do not re-embed the extension's table here.** An in-repo snapshot of another
+repo's function is exactly what rotted: the block this replaces claimed
+`linux:x64` "still resolves to the `-musl` triple" and that
+`SUPPORTED_CLI_VERSION` was "still pinned to the last Rust release", and both
+had been false for 13 days when `v0.6.0-rc1` was cut (tan-cli#800). It also
+told the reader NOT to repoint `linux:x64` yet -- advice that, followed, would
+have reintroduced the `-musl` 404 that alp-sdk-vscode#444 removed.
 
-```ts
-function releaseAssetForTarget(platform: NodeJS.Platform, arch: string): string {
-  const triple = {
-    "win32:x64": "x86_64-pc-windows-msvc",
-    "win32:arm64": "aarch64-pc-windows-msvc",
-    // musl, NOT gnu — see the glibc floor below. Changing these two back
-    // reintroduces the -gnu asset's glibc floor (measured GLIBC_2.30 on
-    // v0.3.1), which breaks pre-Ubuntu-20.04 / pre-Debian-11 consumers.
-    "linux:x64": "x86_64-unknown-linux-musl",
-    "linux:arm64": "aarch64-unknown-linux-musl",
-    "darwin:x64": "x86_64-apple-darwin",
-    "darwin:arm64": "aarch64-apple-darwin",
-  }[`${platform}:${arch}`];
-  if (!triple) throw new Error(`unsupported platform ${platform}/${arch}`);
-  return platform === "win32" ? `tan-${triple}.exe` : `tan-${triple}`;
-}
-```
+The authority is the extension's own source:
+[`alp-sdk-vscode` `src/alpCli/service.ts`](https://github.com/alplabai/alp-sdk-vscode/blob/main/src/alpCli/service.ts).
+Read it there rather than here.
+
+Measured 2026-08-18 against that checkout, for orientation only -- if this
+paragraph and the file disagree, the file wins:
+
+* `SUPPORTED_CLI_VERSION` is `"0.5.1"` on `origin/main` and `"0.6.0-rc1"` on
+  `origin/dev`. Neither pins a Rust release; the extension has fetched the
+  Python `tan` since 2026-08-01.
+* `TARGETS` is keyed `platform/arch` (a slash, not a colon) and `linux/x64`
+  maps to `x86_64-unknown-linux-gnu`, carrying the comment
+  `// ── gnu, NOT musl. Do not "restore" -musl here (#444) ──`. It is a table
+  of triples from which two candidate asset names are built; the release's own
+  `checksums.txt` decides between them. It is not a function returning one raw
+  name.
+* The unpublished pair is `win32/arm64` and `linux/arm64` -- the extension
+  tracks them per version in `HOSTS_WITHOUT_RELEASE_ASSET`, at
+  `src/alpCli/service.ts:168` on `origin/main` (the branch the link above
+  points at) and `:211` on `origin/dev`. The entry
+  `"0.6.0-rc1": ["win32/arm64", "linux/arm64"]` exists only on `dev`; main's
+  table still ends at `"0.5.1"`, matching its `SUPPORTED_CLI_VERSION` pin.
+
+`release.yml`'s header calls this document the thing the extension "MUST match
+exactly". That claim is only checkable if something fails when the two drift,
+and nothing does today: `python/tests/gates/test_release_docs_match_the_workflow.py`
+parses `## Targets published`, asset counts, publish jobs and install commands,
+and never reads this section. Until such a gate exists, treat the list above as
+dated orientation, not as the contract's teeth.
 
 ## glibc floor (the Linux asset)
 
@@ -345,26 +358,37 @@ in a published alp-sdk **tag**:
 git -C <alp-sdk> tag --contains <commit>      # non-empty, or the tag is premature
 ```
 
-**Currently outstanding — do not cut a tan release carrying the AEN board emit
-until this clears:**
+**Cleared for a PRE-RELEASE floor, not for the current stable — read both rows
+before cutting a tan release carrying the AEN board emit:**
 
 | Requirement | alp-sdk commit | In a tag? |
 |---|---|---|
-| SE-owned ATOC reservation (`atoc` in `memory_map:`) — alp-sdk#1289 | `d639e777` | **NO** — `git tag --contains d639e777` is empty; `git merge-base --is-ancestor d639e777 v0.15.0` is false |
-| `zephyr_peripherals_dtsi` on the SoC JSON — alp-sdk#1352 | `7d58ef32` | **NO** — descendant of the above, same answer |
+| SE-owned ATOC reservation (`atoc` in `memory_map:`) — alp-sdk#1289 | `d639e777` | **YES, pre-release only** — `git tag --contains d639e777` → `v0.16.0-rc1`; `git merge-base --is-ancestor d639e777 v0.15.0` is still false |
+| `zephyr_peripherals_dtsi` on the SoC JSON — alp-sdk#1352 | `7d58ef32` | **YES, pre-release only** — descendant of the above, same answer |
 
 Both are reached by `tan generate --target zephyr-board` on any `E1M-AEN*`
-SKU, so today that command fails against **every** released alp-sdk. Until an
-alp-sdk release contains `7d58ef32`, a tan tag carrying this planner ships a
-subcommand that cannot succeed for AEN users on any SDK they can install.
+SKU. Measured 2026-08-17 against alp-sdk's published releases: `v0.16.0-rc1`
+(pre-release, 2026-08-15T02:05:12Z) contains both commits, and `v0.15.0` —
+still the `Latest` stable, 2026-08-07T13:36:18Z — contains neither. So the
+command now succeeds from `v0.16.0-rc1` onward and still fails on the newest
+STABLE alp-sdk a user gets by default.
 
-**When that release exists**, two strings stop being true and must be
-revisited in the same change: `zephyr_board.py`'s ATOC refusal says *"upgrade
-alp-sdk to a release that includes alp-sdk#1289"* (an issue number, not a
-version — replace it with the actual floor once one exists), and this table's
-"In a tag?" column. Both live upstream in alp-sdk
-`scripts/gen_zephyr_board.py`, so the string fix is an alp-sdk change
-re-synced in, never a patch to the mirror. Tracked as **alp-sdk#1354**, which
+**The call this leaves you.** The gate's stated condition — contained in a
+published alp-sdk tag — is met. Whether that is enough is a judgement the
+table cannot make: cutting now ships an AEN board emit whose floor is a
+pre-release, so an AEN user on stable `v0.15.0` still cannot run
+`tan generate --target zephyr-board`. Waiting for alp-sdk `v0.16.0` final
+removes the caveat outright. Record which one you chose in the release PR —
+this section exists because that reasoning kept being re-derived.
+
+**That release now exists** (`v0.16.0-rc1`), so this trigger has fired and is
+half executed. The table's "In a tag?" column above is updated. The other half
+is NOT done: `zephyr_board.py`'s ATOC refusal still says *"upgrade alp-sdk to
+a release that includes alp-sdk#1289"* (an issue number, not a version —
+replace it with the actual floor, which now exists). It lives upstream in
+alp-sdk `scripts/gen_zephyr_board.py:687`, so the string fix is an alp-sdk
+change re-synced in, never a patch to the mirror. Tracked as **alp-sdk#1354**
+(open), which
 also carries the reason the ATOC message is not the one a user actually sees
 today: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an ancestor of
 `7d58ef32`, so every checkout with the field already has the region.

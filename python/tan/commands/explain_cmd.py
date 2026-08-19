@@ -631,8 +631,8 @@ def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[
     same join `build_cmd.build`/`run_cmd.run`/`inspect_cmd.inspect` use, so an
     absolute `--project` replaces the cwd outright rather than nesting under it.
 
-    Narrow because `explain` is not one of the four commands the oracle routes
-    wide (`init`/`generate`/`examples`/`renode`), so following the
+    Narrow because `explain` is not one of the three commands the oracle routes
+    wide (`init`/`generate`/`examples`), so following the
     thirteen-command majority makes `tan explain --code` answer out of the same
     checkout `tan validate` used in the same directory -- the only reason to
     look a code up while a build is failing. `--project` IS read here (unlike

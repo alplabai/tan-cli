@@ -2078,36 +2078,34 @@ def test_the_fallback_constants_match_the_real_manifest_field_for_field():
     `from_manifest` excepted, which is the parse-vs-fallback flag itself and
     differs by construction.
 
-    `install` gets a SECOND, narrower exemption now (tan-cli#760's second
-    half): `REAL_MANIFEST` tracks `parity.yml`'s `PINNED_SDK_TAG`, a pin onto
-    alp-sdk `main` -- which, as of this writing, has not yet merged
-    alp-sdk#1471 (landed on `dev` @ `7a419865`) and so still declares
-    `install.linux` in the pre-alp-sdk#1464 FLAT shape (normalised here to
-    `{"apt": {...}}`, no `dnf` key -- see `normalize_linux_install`). The
-    fallback (`_fallback_install_commands`) is deliberately re-pinned AHEAD
-    of that gap, to `dev` @ `7a419865`, so a customer with no manifest at all
-    (or a manifest whose `install.linux` is itself malformed) still gets a
-    working `dnf` remedy on a Fedora/Rocky host rather than being stuck with
-    `command: null` for want of an update-averse hardcoded table. `apt` and
-    every other field still compare byte-for-byte; only the ADDITIONAL `dnf`
-    key is exempted, and the second assertion below fails loudly -- naming
-    exactly what to narrow -- the day `PINNED_SDK_TAG` catches up.
+    `install` carried a SECOND, narrower exemption from tan-cli#760's second
+    half until tan-cli#846: `REAL_MANIFEST` tracks `parity.yml`'s
+    `PINNED_SDK_TAG`, and that pin sat behind alp-sdk#1471 (landed on `dev`
+    @ `7a419865`), so the fixture still declared `install.linux` in the
+    pre-alp-sdk#1464 FLAT shape (normalised to `{"apt": {...}}`, no `dnf`
+    key -- see `normalize_linux_install`) while `_fallback_install_commands`
+    was deliberately re-pinned AHEAD of that gap so a customer with no
+    manifest at all still got a working `dnf` remedy on a Fedora/Rocky host.
+    That exemption existed with a self-cancelling assertion attached, and
+    tan-cli#846's bump to `94378a056549c7377d714a7f2b68878aca8fea01` fired
+    it: the pin has caught up, the re-vendored fixture carries #1471's `dnf`
+    sub-map, and the comparison is back to blanket field-for-field with
+    `from_manifest` the only exemption left.
     """
     manifest = parse_bootstrap_manifest(REAL_MANIFEST)
     fallback = fallback_facts(manifest.python_min_version)
     for field in vars(manifest):
-        if field in ("from_manifest", "install"):
+        if field == "from_manifest":
             continue
         assert getattr(fallback, field) == getattr(manifest, field), field
 
+    # Named explicitly on top of the loop above: `install` is the one field
+    # that has been exempted before, and a nested dict compares equal on the
+    # loop's single `==` without saying WHICH sub-map drifted.
     assert fallback.install[MACOS] == manifest.install[MACOS]
     assert fallback.install[WINDOWS] == manifest.install[WINDOWS]
     assert fallback.install[LINUX][LINUX_PM_APT] == manifest.install[LINUX][LINUX_PM_APT]
-    assert LINUX_PM_DNF in fallback.install[LINUX], "the dev-pinned re-vendor regressed"
-    assert LINUX_PM_DNF not in manifest.install[LINUX], (
-        "REAL_MANIFEST now carries alp-sdk#1471's dnf data -- narrow this "
-        "exemption back to a blanket field-for-field comparison"
-    )
+    assert fallback.install[LINUX][LINUX_PM_DNF] == manifest.install[LINUX][LINUX_PM_DNF]
 
 
 def test_no_instruction_in_the_vendored_manifest_names_a_refused_subcommand():
@@ -2361,11 +2359,14 @@ def test_every_host_gets_its_own_package_managers_command_for_one_tool():
     # guess (tan-cli#760's second half).
     assert facts.install_for_host(LINUX) == {}
     assert facts.install_for_host(LINUX, linux_pm=None) == {}
-    # `REAL_MANIFEST` still declares `install.linux` in the pre-alp-sdk#1471
-    # FLAT shape (Debian's, unconditionally) -- normalised here as `apt`'s
-    # sub-map (see `normalize_linux_install`), so querying it under `dnf`
-    # must come back empty, never Debian's commands read out as dnf's.
-    assert facts.install_for_host(LINUX, linux_pm=LINUX_PM_DNF) == {}
+    # `REAL_MANIFEST` declared `install.linux` in the pre-alp-sdk#1471 FLAT
+    # shape (Debian's, unconditionally) until tan-cli#846's pin bump; a `dnf`
+    # query came back empty then. It now carries alp-sdk#1464/#1471's PM-keyed
+    # shape, so `dnf` resolves to dnf's OWN commands -- which is the same
+    # invariant either way: a Fedora host never gets Debian's line under it.
+    assert facts.install_for_host(LINUX, linux_pm=LINUX_PM_DNF)["cmake"] == (
+        "sudo dnf install -y cmake"
+    )
 
 
 def test_macos_reads_its_own_tool_list_and_falls_back_to_posix_without_one():
@@ -2687,8 +2688,14 @@ def test_normalize_and_select_round_trip_the_new_and_legacy_linux_shapes():
     not merely a wrong value.
 
     Covers design decision (4): a manifest whose `install.linux` is still the
-    pre-alp-sdk#1471 FLAT shape (`REAL_MANIFEST`) is read AS `apt`'s sub-map
-    -- correct on a real apt host, and never leaked to a `dnf` one."""
+    pre-alp-sdk#1471 FLAT shape is read AS `apt`'s sub-map -- correct on a
+    real apt host, and never leaked to a `dnf` one. That branch used to be
+    exercised straight off `REAL_MANIFEST`, with a self-cancelling guard for
+    the day the fixture caught up; tan-cli#846's pin bump is that day, so the
+    legacy shape now comes from a literal (`FEDORA_AWARE_INSTALL_LINUX`'s own
+    `apt` sub-map, which IS what a flat `install.linux` looks like) and the
+    guard is inverted onto `REAL_MANIFEST` to catch a re-vendor going
+    backwards."""
     new_shape = normalize_linux_install(FEDORA_AWARE_INSTALL_LINUX)
     assert new_shape[LINUX_PM_APT]["cmake"] == (
         "sudo apt-get install -y --no-install-recommends cmake"
@@ -2696,11 +2703,12 @@ def test_normalize_and_select_round_trip_the_new_and_legacy_linux_shapes():
     assert new_shape[LINUX_PM_DNF]["cmake"] == "sudo dnf install -y cmake"
     assert "ninja" not in new_shape[LINUX_PM_DNF]
 
-    legacy_raw = json.loads(REAL_MANIFEST)["prerequisites"]["install"]["linux"]
-    assert all(isinstance(v, str) for v in legacy_raw.values()), (
-        "REAL_MANIFEST caught up to the PM-keyed shape -- this fixture is "
-        "no longer exercising the legacy branch this test is about"
+    real_raw = json.loads(REAL_MANIFEST)["prerequisites"]["install"]["linux"]
+    assert all(isinstance(v, dict) for v in real_raw.values()), (
+        "REAL_MANIFEST went back to the FLAT shape -- a re-vendor moved the "
+        "pin backwards past alp-sdk#1471, or the fixture was hand-edited"
     )
+    legacy_raw = FEDORA_AWARE_INSTALL_LINUX[LINUX_PM_APT]
     legacy_shape = normalize_linux_install(legacy_raw)
     assert legacy_shape == {LINUX_PM_APT: legacy_raw}
     assert select_linux_install(legacy_shape, LINUX_PM_APT) == legacy_raw

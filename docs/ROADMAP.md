@@ -125,6 +125,17 @@ real by `v0.5.0-rc4`. What is still deferred to `v0.6.0` is narrower — the
 known oracle divergences filed during the port (see the `deferred` label) —
 and the oracle's own retirement, which landed here rather than at `v0.7.0`.
 
+**`tan renode` is removed.** The verb, `tan/core/renode_plan.py`,
+`tan/core/renode_sim.py` and the 27 published `renode.*` issue codes all go;
+`renode --sim-mode` (#77) shipped in the `v0.5.0` RC cycle and does not
+survive into `v0.6.0`. Renode is retired repo-wide, not paused: alp-sdk#1539
+re-instates and widens ADR-0022's retirement, deleting its four
+`pr-renode-*` workflows and the `examples/aen/aen-sim-vision` example, and
+`parity.yml`'s `seam2` job now stops at the ARM-ELF assertion instead of
+booting the artefact. Dropping registered codes SHRINKS the
+`envelope-contract.json` release asset, so this is a breaking CLI-surface
+change carried by `v0.6.0`, not an additive one.
+
 Deferred is not a bug backlog — the `deferred` label means *chosen*, and each
 issue records what the oracle does so the choice can be re-read later.
 

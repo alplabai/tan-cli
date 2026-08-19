@@ -45,7 +45,7 @@ via `complete -C`), before and after.
 
 - **bash keyed every decision off `${COMP_WORDS[1]}`**, which is the
   subcommand only when nothing precedes it. Before: `tan --sdk-root /x <TAB>`
-  offered not one of the 32 command names (the `$cword -eq 1` gate missed) and
+  offered not one of the 31 command names (the `$cword -eq 1` gate missed) and
   `tan --sdk-root /x size --<TAB>` offered no
   `--build-root`/`--board`/`--fail-over-budget` (the per-command `case`
   missed). Both now read one `$subcmd` scanned once at the top of
@@ -66,7 +66,7 @@ via `complete -C`), before and after.
   `complete -C 'tan --sdk-root /x '` returned NOTHING at all: no command
   names, and no flags either, because fish offers options only when the
   current token starts with `-`. Now gated on `not
-  __fish_seen_subcommand_from <the 32>`, which ignores flag values. (fish's
+  __fish_seen_subcommand_from <the 31>`, which ignores flag values. (fish's
   per-command flags were already correct -- `__fish_seen_subcommand_from`
   scans every word -- so only the command-list half was broken.)
 
@@ -76,7 +76,7 @@ this port owns them now and they are fixed rather than preserved.
 
 **A fifth, hand-edited exception, tan-cli#503: `--version` is offered at the
 root only.** All three captures listed it in the always-available flag set, so
-it was offered on all 32 subcommands, and no subcommand prints a version for
+it was offered on all 31 subcommands, and no subcommand prints a version for
 it: measured, 29 answer Click's `No such option: --version (Possible options:
 --verbose)`, `lock` forwards it to `west` (`unexpected arguments:
 ['--version']`), and `quality`/`migrate` refuse earlier on their own required
@@ -169,7 +169,7 @@ _TARGETS_MARK = "@TARGETS@"
 _TARGET_VALUES = " ".join(
     (*ALL_EMIT_MODES, ZEPHYR_BOARD, COMPOSED_ROUTE_TABLE, IPC_CONTRACT_H)
 )
-#: The 32 subcommand names, in the captured scripts' own order (tan-cli#503).
+#: The 31 subcommand names, in the captured scripts' own order (tan-cli#503).
 #: fish needs them TWICE -- once as the command list it offers, and once as
 #: the `not __fish_seen_subcommand_from ...` condition that decides whether a
 #: subcommand has been typed yet -- so they are spliced rather than written
@@ -180,7 +180,7 @@ _COMMANDS_MARK = "@COMMANDS@"
 _COMMAND_NAMES = (
     "validate generate init scaffold examples doctor completion diff presets "
     "pinmux explain inspect trace debug-config support-bundle sdk bootstrap "
-    "build kconfig image flash run clean renode size migrate lock quality "
+    "build kconfig image flash run clean size migrate lock quality "
     "model monitor new-som faultdecode"
 )
 
@@ -218,7 +218,7 @@ _tan_complete() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cword=${COMP_CWORD}
 
-  local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode"
+  local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean size migrate lock quality model monitor new-som faultdecode"
   # `--version` is deliberately NOT in `global_flags` but IS in `root_flags`
   # (tan-cli#503): it is root-only, and no subcommand prints a version for it
   # -- see the module docstring's fifth exception for the measurement on all
@@ -252,7 +252,7 @@ _tan_complete() {
   # `tan --sdk-root C:/proj size --<TAB>` as `(tan --sdk-root C : /proj size
   # --)` with `COMP_CWORD=6`. Plain skip-N arithmetic lands on `=` or `:` in
   # both, so the scan has to step over a `=` that follows a value flag, and
-  # to treat a bare word as the subcommand only when it IS one of the 32.
+  # to treat a bare word as the subcommand only when it IS one of the 31.
   # `--sdk-root=/x` is a supported argv (`tan --sdk-root=/nonexistent
   # validate` parses and runs), so this is not a hypothetical shape.
   local value_flags="--project --board-yaml --sdk-root --target --format"
@@ -287,7 +287,7 @@ _tan_complete() {
   done
   # The word being completed sits in a flag's VALUE slot (`tan --sdk-root
   # <TAB>` -- a path, and `tan --sdk-root=<TAB>`, whose `prev` is the split-off
-  # `=`), not the subcommand slot. Offering 32 command names there would be a
+  # `=`), not the subcommand slot. Offering 31 command names there would be a
   # new wrong answer, so this shape keeps the pre-existing fall-through.
   for vf in $value_flags; do
     [[ "$prev" == "$vf" ]] && at_value=1 && break
@@ -380,9 +380,6 @@ _tan_complete() {
     clean)
       COMPREPLY=( $(compgen -W "$global_flags --build-root --dry-run" -- "$cur") )
       ;;
-    renode)
-      COMPREPLY=( $(compgen -W "$global_flags --build-root --board --core --image-bundle --log --timeout --expect --sim-mode" -- "$cur") )
-      ;;
     size)
       COMPREPLY=( $(compgen -W "$global_flags --build-root --board --fail-over-budget" -- "$cur") )
       ;;
@@ -424,7 +421,6 @@ _tan() {
     'flash:Flash slices and helper MCUs onto the device'
     'run:Build then run the project'
     'clean:Remove the build dir and state cache'
-    'renode:Boot the built manifest in headless Renode'
     'size:Report per-slice firmware footprint'
     'migrate:Migrate board.yaml to the current schema'
     'lock:Pin/lock library dependencies'
@@ -446,7 +442,7 @@ _tan() {
   # #92 round-3 FINDING 1).
   #
   # `--version` is the ONE flag that is not in that set (tan-cli#503): it is
-  # root-only, refused by all 32 subcommands, so it is spliced into the root
+  # root-only, refused by all 31 subcommands, so it is spliced into the root
   # `_arguments -C` call below and into no arm.
   local -a global_args
   global_args=(
@@ -572,9 +568,6 @@ _tan() {
         clean)
           _arguments '--build-root[Override build root]:path:_files -/' '--dry-run[List targets without removing]' "${global_args[@]}"
           ;;
-        renode)
-          _arguments '--build-root[Override build root]:path:_files -/' '--board[Override SoM SKU]' '--core[Zephyr slice core id]' '--image-bundle[Pre-built artefacts dir]:path:_files -/' '--log[Console log file]:path:_files' '--timeout[Wall-clock cap in seconds]' '--expect[Stop early on this substring]' '--sim-mode[Studio hardware-simulator mode]' "${global_args[@]}"
-          ;;
         size)
           _arguments '--build-root[Override build root]:path:_files -/' '--board[Override SoM SKU]' '--fail-over-budget[Exit non-zero over budget]' "${global_args[@]}"
           ;;
@@ -652,7 +645,7 @@ complete -c tan -n '__fish_seen_subcommand_from build' -l manifest-from -d 'Read
 complete -c tan -n '__fish_seen_subcommand_from build' -l no-auto-bootstrap -d 'Never bootstrap implicitly'
 complete -c tan -n '__fish_seen_subcommand_from build' -l pristine -d 'Force-wipe build dirs before dispatch'
 complete -c tan -n '__fish_seen_subcommand_from kconfig' -l core -d 'Core id to scope the menu to'
-complete -c tan -n '__fish_seen_subcommand_from image flash clean renode size' -l build-root -d 'Override build root'
+complete -c tan -n '__fish_seen_subcommand_from image flash clean size' -l build-root -d 'Override build root'
 complete -c tan -n '__fish_seen_subcommand_from flash' -l dry-run -d 'Print planned commands only'
 complete -c tan -n '__fish_seen_subcommand_from flash' -l core -d 'Flash only this core'
 complete -c tan -n '__fish_seen_subcommand_from flash' -l helper -d 'Flash only this helper MCU'
@@ -660,13 +653,7 @@ complete -c tan -n '__fish_seen_subcommand_from flash' -l skip-missing-tools -d 
 complete -c tan -n '__fish_seen_subcommand_from run' -l flash -d 'Flash the board after building'
 complete -c tan -n '__fish_seen_subcommand_from run' -l core -d 'Flash only this core'
 complete -c tan -n '__fish_seen_subcommand_from clean' -l dry-run -d 'List targets without removing'
-complete -c tan -n '__fish_seen_subcommand_from renode size' -l board -d 'Override SoM SKU'
-complete -c tan -n '__fish_seen_subcommand_from renode' -l core -d 'Zephyr slice core id'
-complete -c tan -n '__fish_seen_subcommand_from renode' -l image-bundle -d 'Pre-built artefacts dir'
-complete -c tan -n '__fish_seen_subcommand_from renode' -l log -d 'Console log file'
-complete -c tan -n '__fish_seen_subcommand_from renode' -l timeout -d 'Wall-clock cap in seconds'
-complete -c tan -n '__fish_seen_subcommand_from renode' -l expect -d 'Stop early on this substring'
-complete -c tan -n '__fish_seen_subcommand_from renode' -l sim-mode -d 'Studio hardware-simulator mode'
+complete -c tan -n '__fish_seen_subcommand_from size' -l board -d 'Override SoM SKU'
 complete -c tan -n '__fish_seen_subcommand_from size' -l fail-over-budget -d 'Exit non-zero over budget'
 """
 

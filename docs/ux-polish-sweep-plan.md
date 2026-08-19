@@ -46,18 +46,19 @@ Tasks 1, 2 and 4 are file-disjoint and may run concurrently. Task 3 touches `tan
 - Consumes: nothing from earlier tasks.
 - Produces: every `CommandInfo` in `app.registered_commands` gains a non-empty `rich_help_panel: str`. Task 3 does not read it, but must not drop it when editing the same file.
 
-**Background the implementer needs:** `tan/cli.py` registers all 32 subcommands with explicit `app.command("name")(func)` calls, deliberately — PyInstaller follows the static import graph only, so an importlib auto-registry produces a frozen binary that cannot find its own commands. Do not restructure the table. `rich_help_panel` is a Typer 0.27 keyword on `app.command()`; it only affects rendering.
+**Background the implementer needs:** `tan/cli.py` registers all 31 subcommands with explicit `app.command("name")(func)` calls, deliberately — PyInstaller follows the static import graph only, so an importlib auto-registry produces a frozen binary that cannot find its own commands. Do not restructure the table. `rich_help_panel` is a Typer 0.27 keyword on `app.command()`; it only affects rendering.
 
 `_SUBCOMMAND_NAMES` (`tan/cli.py:128-131`) derives from this same table and is unaffected by adding a keyword argument.
 
-**Panel assignment** (32 commands, each appearing exactly once):
+**Panel assignment** (31 commands, each appearing exactly once — 32 when this
+shipped; `renode` was removed from the surface afterwards):
 
 | Panel string | Commands |
 |---|---|
 | `"Setup"` | `doctor` `bootstrap` `sdk` `completion` |
 | `"Start a project"` | `init` `scaffold` `examples` `presets` `explain` |
 | `"Configure"` | `validate` `generate` `migrate` `kconfig` `model` `lock` `quality` |
-| `"Build & run"` | `build` `run` `clean` `size` `image` `renode` |
+| `"Build & run"` | `build` `run` `clean` `size` `image` |
 | `"Hardware"` | `flash` `monitor` `debug-config` `faultdecode` |
 | `"Inspect & author"` | `inspect` `diff` `trace` `support-bundle` `pinmux` `new-som` |
 
@@ -134,7 +135,6 @@ app.command("presets", rich_help_panel="Start a project")(presets)
 app.command(
     "quality", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
 )(quality)
-app.command("renode", rich_help_panel="Build & run")(renode)
 app.command("run", rich_help_panel="Build & run")(run)
 app.command("scaffold", rich_help_panel="Start a project")(scaffold)
 app.command("sdk", rich_help_panel="Setup")(sdk)
