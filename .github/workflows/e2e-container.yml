@@ -119,6 +119,7 @@ on:
       - "scripts/e2e-container.sh"
       - "scripts/e2e-full.sh"
       - "scripts/e2e-linux-freeze.sh"
+      - "scripts/ci/apt-bounded.sh"
       - ".github/workflows/e2e-container.yml"
 
 # Same rule as ci.yml/getting-started.yml: a newer push to a PR supersedes the
@@ -149,8 +150,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: shellcheck scripts/e2e-*.sh
-        run: shellcheck -S warning scripts/e2e-container.sh scripts/e2e-full.sh scripts/e2e-linux-freeze.sh
+      - name: shellcheck scripts/e2e-*.sh scripts/ci/*.sh
+        run: shellcheck -S warning scripts/e2e-container.sh scripts/e2e-full.sh scripts/e2e-linux-freeze.sh scripts/ci/apt-bounded.sh
 
   container:
     name: "clean container: ${{ github.event.inputs.image || 'ubuntu:24.04' }}"
@@ -172,9 +173,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/python:/src" -w /src python:3.12-slim-bullseye bash -euc '
-            apt-get update -qq
-            apt-get install -y -qq --no-install-recommends binutils
+          docker run --rm -v "$PWD/python:/src" -v "$PWD/scripts:/scripts:ro" -w /src python:3.12-slim-bullseye bash -euc '
+            bash /scripts/ci/apt-bounded.sh update -qq
+            bash /scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet --upgrade pip
             /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"

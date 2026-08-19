@@ -181,8 +181,8 @@ jobs:
       - name: ensure zsh is on PATH (zsh-driven completion tests)
         run: |
           if ! command -v zsh >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends zsh
+            bash scripts/ci/apt-bounded.sh update
+            bash scripts/ci/apt-bounded.sh install -y --no-install-recommends zsh
           fi
       # `pip install -e ./python` and NOT a hand-listed dependency set: this job
       # must fail when the DECLARED dependencies are wrong, which is the defect
