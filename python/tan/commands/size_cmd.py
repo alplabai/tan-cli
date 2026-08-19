@@ -18,8 +18,15 @@ anti-pattern #22 -- shelling the SDK gives a command a checkout dependency it
 does not have, and no gate catches the first one). A missing SDK is not fatal:
 the budget resolves `unknown` and measurement still runs.
 
-Divergences from the oracle, all deliberate and all pinned by
-`tests/parity/test_image_size_oracle.py`:
+Divergences from the retired v0.4.1 oracle, all deliberate.
+`tests/parity/test_image_size_oracle.py` pinned them until tan-cli#269 deleted
+the oracle axis with `crates/`. They did not go unpinned: the nesting bullet is
+held tan-side by `tests/commands/test_size_command.py`'s
+`test_i18_nested_west_output_is_measured_not_reported_not_built` and
+`test_the_un_nested_path_still_wins_when_both_exist`, and the candidate ORDER
+by `tests/core/test_system_manifest.py`'s
+`test_i18_nesting_is_probed_after_the_plain_path_never_before`. The size-tool
+timeout below is the one that really is unpinned:
   - a `zephyr.elf` (or `rom.json`/`ram.json`) that landed in west's nested
     `<build_dir>/build/` is FOUND rather than reported `not-built`. That is I-18:
     `west build` is emitted with no `-d`, and the shipped binary reconciles the
