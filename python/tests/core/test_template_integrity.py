@@ -91,6 +91,22 @@ _SDK_LINK_REF = re.compile(r"https://github\.com/alplabai/alp-sdk/(?:blob|tree)/
 #: this tree came from. Keep that line's shape if the manifest is reworded.
 _MANIFEST_REF = re.compile(r"^- Ref: `([^`]+)`", re.M)
 
+#: `MANIFEST.md`'s `- Commit:` line -- where the vendored BYTES came from, as
+#: distinct from `- Ref:`, which is the ref the rendered LINKS name. Nothing
+#: read this line until tan-cli#821: it had asserted since 2026-08-09 that its
+#: commit was "the same commit `parity.yml`'s `PINNED_SDK_TAG` now names",
+#: which stopped being true four days later when the vendor point moved and
+#: this line did not. Unread provenance is provenance that drifts.
+_MANIFEST_COMMIT = re.compile(r"^- Commit: \*\*`([0-9a-f]{7,40})`\*\*", re.M)
+
+#: The same fact, stated a second time in the `## Source` summary -- short sha
+#: on one line, full sha in the parenthetical below it.
+_MANIFEST_VENDOR_POINT = re.compile(
+    r"^- \*\*Current vendor point \(all templates\):\*\* \*\*`([0-9a-f]{7,40})`\*\*\s*\n"
+    r"\s*\(`([0-9a-f]{40})`",
+    re.M,
+)
+
 #: A ref that must NEVER exist as an alp-sdk tag, hardcoded rather than
 #: derived from the live vendor ref. The original control derived it by
 #: stripping `ref`'s pre-release suffix (`v0.15.0-rc1` -> `v0.15.0`) -- exactly
@@ -127,6 +143,49 @@ def _vendor_ref() -> str:
     match = _MANIFEST_REF.search(manifest)
     assert match, f"no '- Ref: `<ref>`' line in {VENDORED_ROOT / 'MANIFEST.md'}"
     return match.group(1)
+
+
+def test_the_manifest_states_one_vendor_point_not_two():
+    """tan-cli#821(b): `MANIFEST.md` records the vendor commit TWICE -- once as
+    the `## Source` summary's "Current vendor point" bullet, once as the
+    `- Commit:` line in the re-vendor log. Nothing compared them, so they
+    disagreed for six days: `- Commit:` still named `f30f4d4b` after
+    tan-cli#714 moved the tree to `d00dbdc1`. The same line also asserted an
+    identity with `parity.yml`'s `PINNED_SDK_TAG` which had already broken the
+    day the line was written -- tan-cli#593 moved the pin 21h44m later -- so
+    the two halves went stale independently and neither had a reader.
+
+    Worst case is bounded -- a maintainer re-runs `--emit scaffold` against the
+    wrong checkout, gets a bogus byte diff, and `scaffold_byte_parity.py` says
+    so within one round -- but the cost is a wasted round every time, and the
+    file is the only record of where these bytes came from.
+    """
+    manifest = (VENDORED_ROOT / "MANIFEST.md").read_text(encoding="utf-8")
+
+    commit_match = _MANIFEST_COMMIT.search(manifest)
+    assert commit_match, (
+        "no '- Commit: **`<sha>`**' line in MANIFEST.md. If the line was "
+        "reworded, keep its shape or update _MANIFEST_COMMIT in the same "
+        "change -- this is the only reader it has."
+    )
+    point_match = _MANIFEST_VENDOR_POINT.search(manifest)
+    assert point_match, (
+        "no '- **Current vendor point (all templates):** **`<short>`**' bullet "
+        "followed by its full sha in MANIFEST.md; same rule as above."
+    )
+
+    commit, short, full = commit_match.group(1), point_match.group(1), point_match.group(2)
+    assert commit == short, (
+        f"MANIFEST.md disagrees with itself about where the vendored bytes came "
+        f"from: '- Commit:' says {commit!r}, 'Current vendor point' says "
+        f"{short!r}. Re-vendoring moves BOTH, or the next person emits against "
+        f"the wrong checkout and spends a round on a byte diff that was never "
+        f"a real divergence (tan-cli#821)."
+    )
+    assert full.startswith(short), (
+        f"the vendor-point bullet's short sha {short!r} is not a prefix of the "
+        f"full sha {full!r} on the line below it."
+    )
 
 
 def _tag_exists(ref: str) -> bool | None:
