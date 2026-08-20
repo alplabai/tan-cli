@@ -17,12 +17,18 @@ WHAT THIS FILE ADDS, and what it deliberately does not.
    which no test can act on. `HAND_PORT_TAN_SIDE` names the tan file(s) for
    each upstream source.
 
-2. There is NO SILENT THIRD STATE. Every `HAND_PORT_HASHES` key must be
-   classified as exactly one of: mapped to tan file(s), declared unfit for a
-   file-level pairing with a reason, or declared already-drifted with the
-   issue tracking it. Adding a tenth upstream pin without saying which tan
-   code it governs now fails here, which is the shape that let the nine
-   `scripts/alp_cli/*` entries sit unmapped since they were added.
+2. EVERY CLASSIFICATION CARRIES INFORMATION, not just a key. Each
+   `HAND_PORT_HASHES` key must be exactly one of: mapped to tan file(s) that
+   exist, declared unfit for a file-level pairing with a reason THAT NAMES THE
+   TAN FILE the port really lives in, or declared already-drifted with the
+   issue tracking it -- and the last two tables are each bounded by a pinned
+   literal, so neither can grow quietly.
+
+   The first draft bounded only the drift ledger. Review then reproduced
+   tan-cli#778's own failure one table over: moving all 19 keys into
+   `HAND_PORT_NO_TAN_FILE_PAIRING` with the reason `"lol"` left the gate at
+   `6 passed`, auditing nothing. A classification that costs nothing to write
+   is not a classification.
 
 3. A SYMBOL-LEVEL parity check, for one entry, as the worked example of the
    instrument that actually closes #778.
@@ -51,6 +57,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 import re
 
 import pytest
@@ -120,6 +127,11 @@ HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
 #: file-level pairing would red on every unrelated edit to a large, actively
 #: changed module, so claiming one would be worse than declaring the gap.
 #: These are the entries #778's follow-up must reach with symbol-level checks.
+#:
+#: Each reason MUST name the `tan/...py` file the port actually lives in, and
+#: that file must exist -- an entry here still has to say where our side is,
+#: it is only declining to pin the whole file. `_PAIRING_MAY_ONLY_CONTAIN`
+#: below bounds the set the same way the drift ledger is bounded.
 HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
     "scripts/alp_cli/diagnostic_format.py": (
         "the port is a ~150-line region inside tan/commands/validate_cmd.py "
@@ -127,7 +139,7 @@ HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
         "exit-code classification and spawn behaviour"
     ),
     "scripts/alp_cli/validate.py": (
-        "no real counterpart: validate_cmd.py is a port of the retired Rust "
+        "no real counterpart: tan/commands/validate_cmd.py is a port of the retired Rust "
         "oracle's validate.rs. What crossed is the --format human/json/sarif "
         "concept, which tan deliberately diverges on, plus two indent=2 calls"
     ),
@@ -165,6 +177,62 @@ HAND_PORT_KNOWN_DRIFT: dict[str, str] = {
         "pairing to HAND_PORT_TAN_SIDE when that lands."
     ),
 }
+
+
+#: The ONLY hand-ports allowed to decline a file-level pairing. Pinned for the
+#: reason the drift ledger is: review demonstrated that an unbounded table is
+#: an escape hatch, not a classification.
+_PAIRING_MAY_ONLY_CONTAIN: frozenset[str] = frozenset(
+    {
+        "scripts/alp_cli/diagnostic_format.py",
+        "scripts/alp_cli/validate.py",
+        "scripts/alp_cli/validator.py",
+        "scripts/sentinels.py",
+    }
+)
+
+#: A tan-side path, as written in a reason string.
+_TAN_PATH = re.compile(r"tan/[\w/]+\.py")
+
+
+def test_the_unpairable_table_cannot_grow_without_saying_so():
+    """The bound review asked for. Same mechanism as the drift ledger: adding
+    an entry means editing this literal in the same diff, where a reviewer
+    sees it."""
+    added = sorted(set(HAND_PORT_NO_TAN_FILE_PAIRING) - _PAIRING_MAY_ONLY_CONTAIN)
+    assert not added, (
+        "these hand-ports were declared unpairable without being added to "
+        "_PAIRING_MAY_ONLY_CONTAIN:\n  " + "\n  ".join(added) + "\n\n"
+        "Declining to pin a file is a judgement about that port's shape, not "
+        "a way out of a red. Say in review why a file-level pairing is the "
+        "wrong instrument for it."
+    )
+    removed = sorted(_PAIRING_MAY_ONLY_CONTAIN - set(HAND_PORT_NO_TAN_FILE_PAIRING))
+    assert not removed, (
+        "these are permitted to decline a pairing but no longer do -- drop "
+        "them from _PAIRING_MAY_ONLY_CONTAIN too:\n  " + "\n  ".join(removed)
+    )
+
+
+def test_every_unpairable_reason_names_the_tan_file_it_lives_in():
+    """An entry here declines to pin a FILE; it does not get to decline saying
+    where our side is. Review moved all 19 keys in with the reason `"lol"` and
+    the gate stayed green -- that is the hole, and a non-empty check does not
+    close it."""
+    bad = []
+    for source, reason in HAND_PORT_NO_TAN_FILE_PAIRING.items():
+        named = _TAN_PATH.findall(reason)
+        if not named:
+            bad.append(f"{source}: names no tan/...py file")
+            continue
+        missing = [n for n in named if not (PACKAGE_ROOT / n).is_file()]
+        if missing:
+            bad.append(f"{source}: names {missing}, which do not exist")
+    assert not bad, (
+        "every HAND_PORT_NO_TAN_FILE_PAIRING reason must name the tan file "
+        "the port actually lives in, and that file must exist:\n  "
+        + "\n  ".join(bad)
+    )
 
 
 def test_every_pinned_hand_port_says_which_tan_code_it_governs():
@@ -423,7 +491,6 @@ def _function_body_source(tree: ast.Module, name: str) -> str:
             "refuses to guess which one is live"
         )
     for node in matches:
-        if True:
             body = node.body
             if (
                 body
