@@ -183,8 +183,16 @@ this one needs your real environment to mean anything.
 
 ## Known-defect ledger
 
-Expectations target **tan 0.5.2** (re-derived against `dev`, 2026-08-08 — see
-"Re-derived against dev" below for what moved since 0.5.1). The ledger is
+Expectations target the `dev` TREE at `4838652`, 2026-08-08 — not a release
+(see "Re-derived against dev" below; its "16 commits" is `8abfe0f..4838652`,
+measured). They used to say "tan 0.5.2", which is what the tree carried then
+(`0.5.2-rc1.dev0`) but never became a tag: the release that would have carried
+it was renumbered to `v0.6.0-rc1` (release commit `e2f5021`, because the
+milestone being closed was v0.6.0 and the section carried a Removed block).
+**A re-derivation against current `dev` is due — NOT against `v0.6.0-rc1`.**
+That tag predates tan-cli#848 and still registers `renode`, which this file has
+already dropped, so a run against it fails the command-surface-drift step below
+on the harness's own terms. The ledger is
 currently **empty**: the last entry was #448 (`renode` never reaches the app
 console), retired when `tan renode` was removed outright rather than fixed.
 

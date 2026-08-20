@@ -473,7 +473,43 @@ env:
   #
   # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
   # predates every commit this bump exists to pick up.
-  PINNED_SDK_TAG: 88318e759958529fbbd8fe9d481373681c0fa78d
+  #
+  # `88318e75` -> `94378a05` (tan-cli#846). This RETIRES the `88318e75` hold
+  # recorded in `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`
+  # comment, by the exit that comment's own reasoning implies rather than the
+  # one it named. The hold was never about `v0.16.0` being CUT -- it was about
+  # a pin past alp-sdk's `v0.16.0` version bump making the scaffold emit
+  # `https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/...` links while no
+  # such tag exists. alp-sdk#1535 (`94378a05`) makes `_docs_ref()` require the
+  # tag to RESOLVE before pinning to it, so that checkout degrades to `main`
+  # instead of shipping a 404, and the hold has nothing left to protect.
+  # tan-cli#846 ports the same `_tag_resolves()` guard into
+  # `tan/planner/template.py`, so tan's own emit agrees rather than diverging.
+  #
+  # `PINNED_SDK_COMMIT` and `ci.yml`'s `sdk_parity` `ref:` move to the same
+  # commit in this change. `HAND_PORT_PINNED_SDK_COMMIT` deliberately does
+  # NOT -- alp-sdk#1471's `scripts/alp_cli/doctor.py` delta is unported, and
+  # re-pinning would freeze that drift as reviewed; see that pin's own
+  # comment. `STRICT_LOADERS_PINNED_SDK_COMMIT` does not move either:
+  # `scripts/strict_loaders.py` does not appear in the `88318e75..94378a05`
+  # diff at all.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `94378a05` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        RE-VENDORED, 8345 -> 8643 bytes: alp-sdk#1464/#1471
+  #     land in this range and `metadata/bootstrap.json`'s `install.linux`
+  #     gains the package-manager level (`{"apt": {...}, "dnf": {...}}`).
+  #     `tan.core.bootstrap` already reads both shapes (tan-cli#760), and
+  #     `test_the_fallback_constants_match_the_real_manifest_field_for_field`
+  #     had a self-cancelling `dnf` exemption for exactly this day -- it
+  #     fired, and the comparison is narrowed back to blanket field-for-
+  #     field. MATCH (8643 bytes, byte-identical) after.
+  #   - scaffold         RE-VENDORED, 7 READMEs (`v0.15.0` -> `main` doc
+  #     links, the #1535 degradation above) -- 7 FAIL / 2 PASS before, 9/9
+  #     PASS rc 0 after. See `python/tan/templates/vendored/MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards
+  PINNED_SDK_TAG: 94378a056549c7377d714a7f2b68878aca8fea01
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
@@ -1214,8 +1250,8 @@ jobs:
       - name: host deps
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci/apt-bounded.sh update
+          bash scripts/ci/apt-bounded.sh install -y --no-install-recommends \
               ninja-build device-tree-compiler gperf ca-certificates curl gnupg xz-utils
 
       - name: west + SDK python deps
@@ -1482,8 +1518,8 @@ jobs:
       - name: host deps
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci/apt-bounded.sh update
+          bash scripts/ci/apt-bounded.sh install -y --no-install-recommends \
               ninja-build device-tree-compiler gperf ca-certificates curl xz-utils \
               pkg-config libusb-1.0-0-dev libudev-dev
 

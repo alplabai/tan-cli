@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -1072,13 +1073,46 @@ def _core_board(sku: str, core_id: str | None, metadata_root: Path) -> str | Non
     return (topology.get(core_id) or {}).get("board")
 
 
+def _tag_resolves(base_dir: Path, tag: str) -> bool:
+    """Whether `tag` exists in `base_dir`'s git checkout.
+
+    Local-only: `git rev-parse` against the checkout's own refs, never a
+    network call -- scaffolding must work offline, and a scaffold that
+    stalled on `git ls-remote` would be a worse defect than the dead link
+    this guards. A checkout that fetched from origin has origin's tags, so
+    "resolves here" is the closest offline proxy for "resolves on GitHub"
+    available, and every way it can be wrong (no git binary, tarball
+    export, `--no-tags` clone, shallow CI checkout) fails the same
+    direction: no tag found, pin to `main`, links stay live.
+
+    Ported verbatim from alp-sdk `scripts/alp_template.py::_tag_resolves`
+    (issue #1508 / alp-sdk#1535)."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(base_dir), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
+            capture_output=True,
+            check=False,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):  # no git binary, not a repo
+        return False
+
+
 def _docs_ref(base_dir: Path) -> str:
     """The GitHub ref a scaffolded README's doc links should pin to
     (issue #864 Fable-review MINOR H): `metadata/sdk_version.yaml`'s
     own `v<version>` tag when `status: released` (a released checkout's
     docs are stable at that tag; linking `main` could point at docs
     that have since changed or moved), else `main` -- an unreleased/
-    development checkout has no matching tag yet to pin to."""
+    development checkout has no matching tag yet to pin to.
+
+    The tag has to RESOLVE, not merely be declared (tan-cli#846, porting
+    alp-sdk#1535). Between an rc cut and its GA tag `sdk_version.yaml`
+    says `version: 0.16.0` / `status: released` while only
+    `v0.16.0-rc1` exists on the bound checkout -- branching on the
+    declared pair alone put a dead
+    `https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/...` link in
+    every project scaffolded in that window. A missing tag degrades to
+    `main` instead of shipping a 404."""
     try:
         doc = yaml.safe_load(
             (base_dir / "metadata" / "sdk_version.yaml").read_text(encoding="utf-8")
@@ -1086,7 +1120,7 @@ def _docs_ref(base_dir: Path) -> str:
     except OSError:
         return "main"
     version = doc.get("version")
-    if doc.get("status") == "released" and version:
+    if doc.get("status") == "released" and version and _tag_resolves(base_dir, f"v{version}"):
         return f"v{version}"
     return "main"
 

@@ -7,10 +7,15 @@
 # destroys what the earlier phases produced -- so it runs last. Run a single
 # phase with `--phase <name>` when you only care about one link.
 #
-# Expectations target tan 0.5.2 (re-derived against `dev` -- run every
-# assertion below against the real binary/SDK before trusting an OLDER
-# recorded expectation; see the "--version" and command-surface-drift steps
-# right below, which exist to catch a case list that fell out of sync). Every
+# Expectations target the `dev` TREE at 4838652, 2026-08-08 -- not a release.
+# The number they used to name, 0.5.2, is what the tree carried then
+# (0.5.2-rc1.dev0) but exists in no tag; it was renumbered to v0.6.0-rc1. A
+# re-derivation against CURRENT `dev` is due -- NOT against v0.6.0-rc1, which
+# predates tan-cli#848 and still registers `renode` that this file has already
+# dropped. Run every assertion below against the real binary/SDK before
+# trusting an OLDER recorded expectation; see the "--version" and
+# command-surface-drift steps right below, which exist to catch a case list
+# that fell out of sync. Every
 # `xstep`/`xstep_out` entry is a defect with an open issue: while the bug
 # stands the run is green, and the day it is fixed the harness reports XPASS,
 # exits non-zero, and names the entry to delete. Do not convert an XPASS back

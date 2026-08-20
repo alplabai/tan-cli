@@ -91,14 +91,15 @@ echo
 $DOCKER run --rm \
   $MOUNT_ARGS \
   -v "$HARNESS:/e2e-full.sh:ro" \
+  -v "$HERE:/scripts:ro" \
   -e "ALP_SDK_REF=${ALP_SDK_REF:-dev}" \
   -e "ZEPHYR_SDK_VERSION=${ZEPHYR_SDK_VERSION:-1.0.1}" \
   -e "ZEPHYR_SDK_INSTALL_TIMEOUT=${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}" \
   "$IMAGE" bash -c '
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >/dev/null 2>&1
-apt-get install -y -qq --no-install-recommends ca-certificates git python3 >/dev/null 2>&1
+bash /scripts/ci/apt-bounded.sh update -qq >/dev/null 2>&1
+bash /scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends ca-certificates git python3 >/dev/null 2>&1
 
 echo "=== host shape (what a customer actually has) ==="
 for t in git python3 west cmake ninja dtc gperf; do

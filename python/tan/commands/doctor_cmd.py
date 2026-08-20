@@ -3748,11 +3748,14 @@ def doctor(
         False,
         "--fix",
         help="Run the manifest's own install command (ADR 0021) for any "
-        "hostPrerequisites tool this host is missing, when it needs no "
-        "elevation. A command that needs `sudo` is printed, never run -- tan "
-        "never spawns sudo. Only in an interactive, non-CI, text-mode run "
-        "(--non-interactive/--ci/--format json all disable it): a repair a "
-        "human did not watch happen is not consent.",
+        "hostPrerequisites tool this host is missing. A command needing no "
+        "elevation runs for any caller; a `sudo`-prefixed one runs too, but "
+        "only when this process is already root, with the literal `sudo` "
+        "word stripped first -- tan itself never spawns the `sudo` program. "
+        "A non-root caller instead gets that command printed to run by hand. "
+        "Only in an interactive, non-CI, text-mode run (a real terminal on "
+        "both stdin and stderr; --non-interactive/--ci/--format json all "
+        "disable it): a repair a human did not watch happen is not consent.",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     non_interactive: bool = typer.Option(

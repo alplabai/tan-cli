@@ -404,6 +404,52 @@ def test_debug_config_and_support_bundle_still_keep_target_kind_and_server():
     assert "-l server" in FISH_SCRIPT
 
 
+def test_explain_completion_offers_the_code_flag():
+    """`tan explain --code <ALP-Bxxx|ALP_ERR_*>` shipped in v0.6.0-rc1
+    (`explain_cmd.py`'s `--code`), and all three emitted scripts offered only
+    `--template` (tan-cli#834).
+
+    `explain`'s own overview omits `--code` deliberately -- a line there would
+    break the golden (`explain_cmd.py`'s `_overview()`) -- so the advertised
+    surfaces are `--help`, the code-shaped-argument hint (`_code_hint`, which
+    shipped in the same commit as `--code`), and this. Completion was the one
+    still silent.
+
+    Nothing regenerates per-command flags: the six markers `_fill_formats`
+    splices refresh the `--format` value lists, `generate --target`'s list and
+    the command NAMES -- never a command's own flags. A flag added to any
+    command drifts silently until a test like this one names it."""
+    bash_arm = _case_arm_lines(BASH_SCRIPT, "explain)")
+    assert bash_arm, f"no `explain)` arm in the bash script:\n{BASH_SCRIPT}"
+    assert any("--code" in line for line in bash_arm), bash_arm
+
+    zsh_arm = _case_arm_lines(ZSH_SCRIPT, "explain)")
+    assert zsh_arm, f"no `explain)` arm in the zsh script:\n{ZSH_SCRIPT}"
+    assert any("--code" in line for line in zsh_arm), zsh_arm
+
+    # fish spells its flags `-l code`, with no leading dashes.
+    fish_lines = [
+        line
+        for line in FISH_SCRIPT.splitlines()
+        if "__fish_seen_subcommand_from explain'" in line
+    ]
+    assert fish_lines, f"no `explain` completions in the fish script:\n{FISH_SCRIPT}"
+    assert any("-l code" in line for line in fish_lines), fish_lines
+
+
+def test_explain_completion_still_offers_the_template_flag():
+    """Control for the above: `--code` is ADDED beside `--template`, never in
+    place of it. `--template` is the flag `explain`'s overview does advertise,
+    so losing it here would be the more visible regression of the two."""
+    assert any("--template" in line for line in _case_arm_lines(BASH_SCRIPT, "explain)"))
+    assert any("--template" in line for line in _case_arm_lines(ZSH_SCRIPT, "explain)"))
+    assert any(
+        "-l template" in line
+        for line in FISH_SCRIPT.splitlines()
+        if "__fish_seen_subcommand_from explain'" in line
+    )
+
+
 # ---------------------------------------------------------------------------
 # tan-cli#503: bash/zsh `--format` completion must find the real subcommand
 # even when a global flag (with a value) precedes it.
