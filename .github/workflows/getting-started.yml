@@ -126,8 +126,8 @@ jobs:
       - name: host prerequisites (what bootstrap refuses without)
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci/apt-bounded.sh update
+          bash scripts/ci/apt-bounded.sh install -y --no-install-recommends \
               ninja-build device-tree-compiler gperf xz-utils
 
       # Pinned, NOT `3.x` like parity.yml's. `3.x` floats to whatever is newest
@@ -233,9 +233,9 @@ jobs:
       - name: freeze tan from this checkout in python:3.12-slim-bullseye (python/scripts/build_binary.sh) and swap it in
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/python:/src" -w /src python:3.12-slim-bullseye bash -euc '
-            apt-get update -qq
-            apt-get install -y -qq --no-install-recommends binutils
+          docker run --rm -v "$PWD/python:/src" -v "$PWD/scripts:/scripts:ro" -w /src python:3.12-slim-bullseye bash -euc '
+            bash /scripts/ci/apt-bounded.sh update -qq
+            bash /scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet --upgrade pip
             /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"

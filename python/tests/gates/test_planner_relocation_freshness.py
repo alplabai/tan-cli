@@ -386,7 +386,30 @@ from tests.conftest import sdk_root
 #: dev commit at or past the bump and RE-VENDOR the seven scaffold READMEs
 #: in that same change. The three hash tables below need no re-audit when
 #: that happens -- they already match `e9aea71b`.
-PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk origin/main -- NOT dev, see above
+#:
+#: `88318e75` -> `94378a05` (tan-cli#846). The hold above is RETIRED, by the
+#: other exit its own reasoning implies: it was never about `v0.16.0` being
+#: cut, it was about the scaffold emit rendering a `blob/v0.16.0/` link that
+#: 404s. alp-sdk#1535 (`94378a05`) makes `_docs_ref()` require the tag to
+#: RESOLVE before pinning to it, so a checkout at the `v0.16.0` version bump
+#: with no `v0.16.0` tag degrades to `main` instead. The seven scaffold
+#: READMEs the hold named are re-vendored to `main` in this same change
+#: (measured: `scaffold_byte_parity.py --sdk <94378a05>` 9/9 PASS, rc 0
+#: after; 7 FAIL / 2 PASS before), and `parity.yml`'s `PINNED_SDK_TAG` plus
+#: `ci.yml`'s `sdk_parity` `ref:` move with it.
+#:
+#: NOT a behavioural re-pin for THIS table: `scripts/alp_orchestrate/**` and
+#: `scripts/strict_loaders.py` are byte-identical across `88318e75..
+#: 94378a05` (`git diff --stat` over both paths is empty), so every
+#: `PINNED_HASHES` and `STRICT_LOADERS_HASH` entry below is unchanged and
+#: nothing unaudited is re-frozen by moving this line. The whole alp-sdk
+#: delta in that range is `scripts/alp_cli/doctor.py`,
+#: `scripts/alp_template.py`, `scripts/bootstrap.{sh,ps1}`,
+#: `scripts/check_bootstrap_manifest.py` and
+#: `scripts/west_commands/alp_emit.py` -- all `HAND_PORT_HASHES` territory,
+#: which is why `HAND_PORT_PINNED_SDK_COMMIT` stays at `88318e75` and does
+#: NOT move with this pin. See that pin's own comment.
+PINNED_SDK_COMMIT = "94378a056549c7377d714a7f2b68878aca8fea01"  # alp-sdk dev -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -589,7 +612,41 @@ PINNED_HASHES: dict[str, str] = {
 #: from a real drift; it never even ran the comparison. `faultdecode.py` now
 #: joins this table (11th entry) so the next SDK-side change to it is
 #: audited the same way as everything else here.
-HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk origin/main -- NOT dev, see PINNED_SDK_COMMIT
+#:
+#: tan-cli#846: `scripts/alp_template.py`'s `HAND_PORT_HASHES` entry below is
+#: DELIBERATELY left at its `88318e75` value (`9321c7e3...`) even though
+#: `tan/planner/template.py` itself is now ported PAST that pin --
+#: `_docs_ref()` carries alp-sdk#1535's `_tag_resolves()` guard, which
+#: landed at alp-sdk `94378a05` (`scripts/alp_template.py` sha256
+#: `5d453c5d...` there), a commit this pin does not reach. Moving the pin
+#: to `94378a05` to match would look like the more "correct" state but is
+#: NOT: `scripts/alp_cli/doctor.py` also changed inside `88318e75..94378a05`
+#: (`efeaf65c`, alp-sdk#1471 -- `f2faa07c...` at the pin vs `fe109d98...`
+#: at `94378a05`) and that delta is NOT ported into `tan/commands/
+#: doctor_cmd.py` / `tan/core/doctor_libraries.py`. Re-pinning HAND_PORT_
+#: PINNED_SDK_COMMIT to `94378a05` would re-freeze `doctor.py`'s hash at
+#: its unaudited-but-now-"current" value, silently declaring that drift
+#: reviewed when it never was -- the exact tan-cli#308/#275 failure mode
+#: this whole file exists to prevent, just aimed at a hash instead of a
+#: skip. So the pin stays at `88318e75`, `scripts/alp_template.py` sits
+#: ahead of it on its own, and `python/scripts/planner_resync.py` will
+#: keep re-proposing #1535 as "still unported" until this comment is
+#: read and the whole table -- not just the one file this fix touched --
+#: is re-audited and re-pinned together.
+#:
+#: `PINNED_SDK_COMMIT` HAS since moved to `94378a05` (tan-cli#846's pin
+#: bump) and this pin still has not, which is the SPLIT the two pins exist
+#: to be able to express. It is safe there and not here for one reason:
+#: `scripts/alp_orchestrate/**` is byte-identical across
+#: `88318e75..94378a05`, so that pin re-freezes nothing, while THIS table's
+#: surface (`scripts/alp_cli/doctor.py`, `scripts/bootstrap.{sh,ps1}`,
+#: `scripts/check_bootstrap_manifest.py`,
+#: `scripts/west_commands/alp_emit.py`, plus `scripts/alp_template.py`)
+#: is exactly what moved in that range. `conftest.py`'s tan-cli#691
+#: pin-disagreement warning compares `PINNED_SDK_COMMIT` against
+#: `PINNED_SDK_TAG`, not this pin, so the split below stays silent by
+#: design -- this comment is the record that it is deliberate.
+HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk origin/main -- deliberately BEHIND PINNED_SDK_COMMIT, see above
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its

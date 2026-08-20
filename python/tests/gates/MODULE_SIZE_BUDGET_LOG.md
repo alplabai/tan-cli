@@ -181,5 +181,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/size_cmd.py: 842 -> 849
     - tan/core/flash_plan.py: 3199 -> 3205
     - tan/core/scaffold.py: 1510 -> 1512
+- 2026-08-18 -- tan-cli#846: port alp-sdk#1535's _tag_resolves guard into _docs_ref (tan/planner/template.py), a verbatim relocation of scripts/alp_template.py where the same guard already lives upstream
+    - tan/planner/template.py: 1436 -> 1470
 - 2026-08-19 -- tan-cli#856: corrected the stale --fix sudo help text (3 lines longer)
     - tan/commands/doctor_cmd.py: 4035 -> 4038

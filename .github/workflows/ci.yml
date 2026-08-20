@@ -181,8 +181,8 @@ jobs:
       - name: ensure zsh is on PATH (zsh-driven completion tests)
         run: |
           if ! command -v zsh >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends zsh
+            bash scripts/ci/apt-bounded.sh update
+            bash scripts/ci/apt-bounded.sh install -y --no-install-recommends zsh
           fi
       # `pip install -e ./python` and NOT a hand-listed dependency set: this job
       # must fail when the DECLARED dependencies are wrong, which is the defect
@@ -351,12 +351,26 @@ jobs:
       # `PINNED_SDK_COMMIT` comment for the full per-commit breakdown of
       # what was ported into `tan/planner/loader.py` / `manifest.py` /
       # `models.py` / `orchestrator.py`.
+      #
+      # `88318e75` -> `94378a05` for tan-cli#846, again in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` and `PINNED_SDK_COMMIT`. It carries
+      # alp-sdk#1535, which is the RETIREMENT CONDITION the `88318e75` hold
+      # was written against: that hold existed only because a pin past the
+      # `v0.16.0` version bump made the scaffold emit
+      # `https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/...` links
+      # while no `v0.16.0` tag exists. #1535 makes `_docs_ref()` require the
+      # tag to RESOLVE before pinning to it, so those links degrade to `main`
+      # instead of 404ing, and the hold has nothing left to protect. The seven
+      # scaffold READMEs the hold's own comment named are re-vendored in this
+      # same change. `HAND_PORT_PINNED_SDK_COMMIT` deliberately does NOT move
+      # with it -- see that pin's own comment (alp-sdk#1471's
+      # `scripts/alp_cli/doctor.py` delta is unported).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 88318e759958529fbbd8fe9d481373681c0fa78d
+          ref: 94378a056549c7377d714a7f2b68878aca8fea01
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
