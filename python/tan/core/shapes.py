@@ -65,11 +65,17 @@ def is_file(path: Path | str) -> bool:
 
     Four private copies preceded this one (tan-cli#815): `size_cmd`,
     `image_cmd` and `flash_cmd` each held a byte-identical `str` version, and
-    `bootstrap_cmd`'s had already drifted in BOTH directions it could -- it
-    took a `Path` and caught only `OSError`, not `(OSError, ValueError)`.
-    That is the exact failure this module's docstring was written about, so
-    the signature is `Path | str` for the same reason `is_sdk_root`'s is:
-    callers keep whichever they already hold.
+    `bootstrap_cmd`'s took a `Path` -- the TYPE drift this module's docstring
+    was written about, so the signature is `Path | str` for the same reason
+    `is_sdk_root`'s is: callers keep whichever they already hold.
+
+    Its narrower `except OSError` (the others caught `(OSError, ValueError)`)
+    was INERT: `pathlib` catches `ValueError` inside `Path.is_file()`, so
+    there was nothing to miss. Measured, not assumed -- an earlier draft of
+    tan-cli#815 called that half a behaviour change and it was not. The type
+    change does move one input: `Path('')` normalises to `Path('.')`, so the
+    old `_is_dir("")` answered `True` where this answers `False`. Unreachable
+    from its call sites, every one of which passes a join.
 
     All three `str` callers read `build/system-manifest.yaml`, whose values
     are manifest-supplied strings that may carry an embedded NUL or an

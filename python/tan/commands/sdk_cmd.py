@@ -90,6 +90,10 @@ from typing import Any
 import typer
 
 from tan.core.global_flags import accept_global_flags
+# Re-exported, NOT respelled: this file used to carry its own
+# `("scripts", "alp_project.py")` under a comment claiming it was "spelled
+# once here" -- it was spelled twice (tan-cli#815). Relocating the I-31
+# marker is a one-line change in `shapes.py` now.
 from tan.core.shapes import SDK_MARKER
 from tan.core.proxy import (
     HTTPS_PROXY_ENV_VARS,
@@ -108,10 +112,6 @@ from tan.output_format import FORMAT_HELP, OutputFormat
 #: `tan_core::sdk::GITHUB_RELEASES_URL`.
 GITHUB_RELEASES_URL = "https://api.github.com/repos/alplabai/alp-sdk/releases"
 
-#: Re-exported, NOT respelled. This file used to carry its own
-#: `("scripts", "alp_project.py")` under a comment claiming it was "spelled
-#: once here" -- it was spelled twice, and `tan.core.shapes` held the other
-#: (tan-cli#815). Relocating the I-31 marker is a one-line change there now.
 
 #: Wall-clock ceiling on the ONE network call in this file. Every subprocess and
 #: socket probe in the port carries a timeout; `urlopen` without one blocks on
@@ -613,8 +613,6 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
         return ActiveSdk(discovered, "discovery", broken_project_pin)
 
     return ActiveSdk(None, "none", broken_project_pin)
-
-
 
 
 def project_pin_issue(broken_project_pin: str | None, tier: str) -> Issue | None:

@@ -13,9 +13,9 @@ stopped half-done for four releases:
     "Spelled once here". Nine commands split down the middle over which copy
     they imported.
   * `_is_file` had FOUR: three byte-identical `str` versions and a
-    `bootstrap_cmd` one that had already drifted in both directions available
-    to it -- `Path` instead of `str`, and `except OSError` instead of
-    `except (OSError, ValueError)`.
+    `bootstrap_cmd` one that had drifted in TYPE -- `Path` instead of `str`.
+    (It also caught only `OSError`; that half was inert, because `pathlib`
+    catches `ValueError` inside `Path.is_file()`.)
 
 Every duplicate was byte-identical at the time, so nothing misbehaved and no
 test could tell. That is the whole hazard: the cost is paid later, by the edit
@@ -44,6 +44,7 @@ definitions of `is_sdk_root` when there is one and two aliases.
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 
 import pytest
@@ -75,11 +76,14 @@ _NOT_THE_SAME_HELPER: dict[tuple[str, str], str] = {
 }
 
 
-def _module_level_definitions() -> dict[str, list[str]]:
+@functools.cache
+def _module_level_definitions() -> dict[str, tuple[str, ...]]:
     """`{name: [file, ...]}` for every module-level `def` and assignment under
     `python/tan/`. Module level only: a nested helper inside one function is
     not a competing definition of anything."""
     found: dict[str, list[str]] = {}
+    # Cached: six parametrised cases plus three whole-file tests would
+    # otherwise re-parse all of python/tan/ nine times over.
     for path in sorted(TAN_ROOT.rglob("*.py")):
         rel = path.relative_to(TAN_ROOT.parent).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -100,7 +104,7 @@ def _module_level_definitions() -> dict[str, list[str]]:
                     names = [node.target.id]
             for name in names:
                 found.setdefault(name, []).append(rel)
-    return found
+    return {name: tuple(rels) for name, rels in found.items()}
 
 
 @pytest.mark.parametrize("helper", sorted(_OWNED_BY_SHAPES), ids=lambda h: h)
@@ -138,6 +142,48 @@ def test_a_shapes_helper_is_defined_exactly_once(helper):
     )
 
 
+def test_the_ownership_list_covers_everything_shapes_actually_owns():
+    """Anti-rot for `_OWNED_BY_SHAPES` itself -- the one input this file had
+    with neither anti-rot nor anti-vacuity.
+
+    A hand-maintained list protects today's six helpers and nothing added
+    tomorrow, which is the tan-cli#275 pattern this file's own docstring
+    cites. Demonstrated in review: adding `def is_symlink` to `shapes.py` AND
+    a private `def _is_symlink` to `size_cmd.py` left all eight tests green,
+    because the new helper was in neither list. Reading the ownership from
+    `shapes.py` closes that: a new helper there reds until it is declared.
+    """
+    shapes = ast.parse(
+        (TAN_ROOT / "core" / "shapes.py").read_text(encoding="utf-8")
+    )
+    owned = set()
+    for node in shapes.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            owned.add(node.name)
+        elif isinstance(node, ast.Assign):
+            if isinstance(node.value, (ast.Name, ast.Attribute)):
+                continue
+            owned.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    # Module-private helpers of `shapes.py` itself are not shared surface.
+    owned = {name for name in owned if not name.startswith("_")}
+
+    undeclared = sorted(owned - set(_OWNED_BY_SHAPES))
+    assert not undeclared, (
+        "tan/core/shapes.py defines these and _OWNED_BY_SHAPES does not claim "
+        f"them, so nothing stops a private copy appearing beside a caller:\n  "
+        + "\n  ".join(undeclared)
+        + "\n\nAdd each with a one-line note saying what it is for -- the note "
+        "is what a failure quotes back, and 'duplicate definition' alone does "
+        "not tell the reader which copy is the real one."
+    )
+
+    retired = sorted(set(_OWNED_BY_SHAPES) - owned)
+    assert not retired, (
+        "_OWNED_BY_SHAPES claims these and tan/core/shapes.py no longer "
+        f"defines them -- drop them in the same change:\n  " + "\n  ".join(retired)
+    )
+
+
 def test_the_declared_lookalikes_still_exist():
     """Anti-rot for `_NOT_THE_SAME_HELPER`. An exemption for a definition that
     was since deleted or renamed reads as a live carve-out and quietly widens
@@ -162,4 +208,4 @@ def test_the_walk_actually_finds_definitions():
     defs = _module_level_definitions()
     assert len(defs) > 500, f"only {len(defs)} module-level names found under {TAN_ROOT}"
     assert "SDK_MARKER" in defs, sorted(defs)[:20]
-    assert defs["SDK_MARKER"] == ["tan/core/shapes.py"], defs["SDK_MARKER"]
+    assert defs["SDK_MARKER"] == ("tan/core/shapes.py",), defs["SDK_MARKER"]
