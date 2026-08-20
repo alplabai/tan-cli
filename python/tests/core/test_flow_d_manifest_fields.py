@@ -432,9 +432,16 @@ def _resolved_cores(loader_mod, soc_spec: dict, som_preset: dict):
     core_entry = {"os": "zephyr", "app": "alp-stock-shim"}
     som_preset = {**som_preset, "topology": {"m55_hp": core_entry}}
     soc_spec = {**soc_spec, "cores": [{"id": "m55_hp", "type": "cortex-m55"}]}
+    # The trailing `metadata_root` is alp-sdk#1485's (ported in tan-cli#868):
+    # the stage threads the project's own root down to `_enforce_loader_rules`
+    # instead of letting it read the module-level bound one. These inputs
+    # never leave the dicts above, so the bound root is the right answer here
+    # -- the argument exists so a `--metadata-root` project cannot be
+    # validated against a tree it was not resolved from.
     cores, _ipc = loader_mod._validate_topology_cores(
         {"cores": {"m55_hp": core_entry}}, som_preset, soc_spec,
-        som_preset.get("sku", "E1M-AEN801"), "alif:ensemble:e8", {}, None)
+        som_preset.get("sku", "E1M-AEN801"), "alif:ensemble:e8", {}, None,
+        loader_mod.METADATA_ROOT)
     return cores
 
 

@@ -82,10 +82,10 @@ def _boot_target_is_single_slot(project: BoardProject) -> bool:
     "slot1"/"scratch" can answer True (single-slot) on a target that
     generates both. `_aen_role_slot0_map` asks the real question: does
     THIS role have its own `<role>_slot0` region (the only shape that
-    drops slot1/scratch, alp-sdk#1069 -- E1M-AEN801 is the only SKU that
-    sets one today: both M55 cores share one physical App MRAM, so slot0
-    is split into per-core windows and the secondary/scratch slot was
-    dropped rather than forced to fit)?
+    drops slot1/scratch, alp-sdk#1069 -- every AEN preset sets one: each
+    SoM's M55 cores share one physical App MRAM, so slot0 is split into
+    per-core windows and the secondary/scratch slot was dropped rather
+    than forced to fit)?
 
     Only `m55_he`/`m55_hp` roles are AEN slot0-XIP cores (same convention
     as `loader._resolve_slot0_load_address`); a project with neither in

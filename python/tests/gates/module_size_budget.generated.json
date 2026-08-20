@@ -24,11 +24,11 @@
     "tan/core/debug_launch.py": 1275,
     "tan/core/flash_plan.py": 3205,
     "tan/core/scaffold.py": 1512,
-    "tan/planner/kconfig.py": 2088,
-    "tan/planner/loader.py": 1313,
+    "tan/planner/kconfig.py": 2092,
+    "tan/planner/loader.py": 1335,
     "tan/planner/template.py": 1470,
     "tan/planner/zephyr_board.py": 1486
   },
-  "function_count_budget": 252,
+  "function_count_budget": 254,
   "function_worst_budget": 747
 }

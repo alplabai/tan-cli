@@ -509,7 +509,34 @@ env:
   #     links, the #1535 degradation above) -- 7 FAIL / 2 PASS before, 9/9
   #     PASS rc 0 after. See `python/tan/templates/vendored/MANIFEST.md`.
   #   - seam1_field_diff PASS, rc 0 -- all 6 boards
-  PINNED_SDK_TAG: 94378a056549c7377d714a7f2b68878aca8fea01
+  # `94378a05` -> `ac38a069` (tan-cli#868). Moved because the audit moved, not
+  # the other way round: alp-sdk's `notify-planner-drift` job filed #868 after
+  # three dispatched runs went red against alp-sdk `dev`, and the four commits
+  # behind it -- `522ea320` (#1482), `85b6b905` (#1485), `064fc17b` (#1484),
+  # `54f67c7e` (#1602/#1556), plus alp-sdk#1487's chip table out of
+  # `HAND_PORT_HASHES` territory -- are ported into `tan/planner/` in this
+  # change. `PINNED_SDK_COMMIT` and `ci.yml`'s `sdk_parity` `ref:` move to the
+  # SAME commit here; leaving this one behind is exactly the split
+  # `tests/conftest.py`'s tan-cli#691 warning exists to catch, and it would
+  # point seam1's checkout at a tree whose hashes no longer match the audit.
+  # `HAND_PORT_PINNED_SDK_COMMIT` deliberately does NOT move -- four of its
+  # five moved sources are unported; see that pin's own comment.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `ac38a069` before landing (Windows host, `py -3.14`):
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8643 bytes, byte-identical -- no re-vendor;
+  #     `metadata/bootstrap.json` does not appear in the `94378a05..ac38a069`
+  #     diff at all)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9, rc 0 -- no re-vendor. `scripts/
+  #     alp_template.py` is unchanged in this range, so #1535's `_docs_ref()`
+  #     degradation the last bump turned on still renders the same links.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, same allowed-delta set
+  #   - planner byte-parity (`tests/parity/`, `ALP_SDK_PARITY_ROOT` at
+  #     `ac38a069`): 82 failed / 686 passed / 8 skipped BEFORE the port,
+  #     0 failed / 768 passed / 8 skipped after
+  PINNED_SDK_TAG: ac38a069f18c9c58066f874f0e474e9540ede862
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

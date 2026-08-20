@@ -185,3 +185,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/planner/template.py: 1436 -> 1470
 - 2026-08-19 -- tan-cli#856: corrected the stale --fix sudo help text (3 lines longer)
     - tan/commands/doctor_cmd.py: 4035 -> 4038
+- 2026-08-20 -- tan-cli#868: the alp-sdk 94378a05..ac38a069 planner re-sync. kconfig.py +4 (the metadata-root argument threaded through _emit_subsystems / _per_core_library_kconfig / the six library-layer calls, alp-sdk#1485) and loader.py +22 (the same threading through _validate_topology_cores, plus the corrected _resolve_slot0_load_address docstring alp-sdk#1445 rewrote). Both are MIRROR modules of scripts/alp_orchestrate/: extracting here would put tan's copy out of shape with the upstream file every re-sync 3-way-merges against, which is the drift this repo pays a whole gate to prevent. partition.py grew by 260 lines on the same port and stayed inside its existing budget.
+    - tan/planner/kconfig.py: 2088 -> 2092
+    - tan/planner/loader.py: 1313 -> 1335
+    - function_count_budget: 252 -> 254
