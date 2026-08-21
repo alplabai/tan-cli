@@ -52,6 +52,7 @@ from typing import Any
 
 import typer
 
+from tan.core.shapes import is_file as _is_file
 from tan.commands.build_output import (
     ManifestInvalid,
     ManifestUnavailable,
@@ -188,16 +189,6 @@ def _read_text(path: str) -> str | None:
             return handle.read()
     except (OSError, UnicodeDecodeError, ValueError):
         return None
-
-
-def _is_file(path: str) -> bool:
-    try:
-        return os.path.isfile(path)
-    except (OSError, ValueError):
-        # A path the OS refuses to stat at all (a too-long name, an embedded NUL
-        # from a hand-edited manifest) is "not a file", never an exception that
-        # escapes the envelope.
-        return False
 
 
 def _extract_sizes(

@@ -105,12 +105,11 @@ from tan.commands.build_cmd import _planner_python
 from tan.commands.doctor_cmd import probe
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
-    SDK_MARKER,
     global_default_foreign_project_issue,
     project_pin_issue,
     resolve_sdk_tiered,
 )
-from tan.core.shapes import rejected_sdk_root_message
+from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
 from tan.env import stderr_is_tty, stdin_is_tty
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
