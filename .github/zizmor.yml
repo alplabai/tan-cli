@@ -25,13 +25,13 @@
 # left visible rather than suppressed: eight low-confidence
 # `template-injection` hits on step outputs this repository produces itself
 # (`steps.floor.outputs.version` from pyproject, `steps.ref.outputs.sha` from
-# `git rev-parse`, `steps.gate.outputs.verdict` from `planner_resync.py`), one
-# `artipacked` on the single checkout that must keep its credential because it
-# pushes (`planner-resync.yml`, commented in place), and `superfluous-actions`
-# on the release publisher. `--min-severity medium` already keeps them out of
-# the verdict, so listing them here would only hide them from a human reading
-# the full report -- `zizmor .github/workflows/` with no flags still shows all
-# 52.
+# `git rev-parse`, `steps.gate.outputs.verdict` from `planner_resync.py`), the
+# TWO `artipacked` findings (below) on the checkouts that must keep their
+# credential because they push (commented in place at each site), and
+# `superfluous-actions` on the release publisher. `--min-severity medium`
+# already keeps them out of the verdict, so listing them here would only hide
+# them from a human reading the full report -- `zizmor .github/workflows/`
+# with no flags still shows all of them.
 #
 # ONE MORE THING A REVIEWER SHOULD KNOW: these ignores are LINE-SCOPED, so
 # they rot when the lines move. They rot LOUDLY -- the finding comes back and
@@ -54,3 +54,11 @@ rules:
       # verdict would depend on whether the GitHub API answered -- and a gate
       # that goes red on someone else's rate limit gets ignored, then removed.
       - planner-resync.yml:140:9
+
+      # release.yml's `propose-dev-version-bump` job (tan-cli#770), the same
+      # shape for the same reason: its `dev` checkout must keep its
+      # credential because the job's own later step pushes
+      # `auto/dev-version-bump-<tag>` through the remote this checkout
+      # leaves configured, and nothing downstream sets up a token remote of
+      # its own. The step carries the same explanation inline.
+      - release.yml:1202:9
