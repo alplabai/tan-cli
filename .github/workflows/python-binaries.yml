@@ -109,6 +109,18 @@ jobs:
             os: windows-11-arm
             machine: "0xaa64" # IMAGE_FILE_MACHINE_ARM64
     runs-on: ${{ matrix.os }}
+    # tan-cli#855: no bound at all -- inherited GitHub's 360-minute default on
+    # a `workflow_dispatch`-only proof workflow nobody watches by default.
+    # Sized above clean-host.yml's `freeze-and-smoke` (20, the closest sibling
+    # -- the SAME freeze steps: clean venv, pip install, build_binary.sh) to
+    # cover the extra work this job does that freeze-and-smoke does not: TWO
+    # checkouts per leg (this repo + a full alp-sdk clone) and, when
+    # `inputs.verify` is true (the default), `verify_binary.sh`'s five
+    # per-asset proofs (version / --output / emit / init / CA trust anchors)
+    # on top of the arch check. Not sized to release.yml's `build` job (30):
+    # that job skips verify_binary.sh entirely, so this leg does strictly
+    # more per matrix entry.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -198,6 +210,12 @@ jobs:
             os: ubuntu-24.04-arm
             libc: musl
     runs-on: ${{ matrix.os }}
+    # Same reasoning as the `windows` job above -- see that job's comment.
+    # The `linux` leg additionally builds inside `docker run` (apt-bounded
+    # install of binutils + a venv inside the container) rather than a bare
+    # setup-python step, which is more setup per leg, not less; 45 still
+    # covers it with the same headroom the windows leg has.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -284,6 +302,8 @@ jobs:
             os: macos-latest
             cputype: "0x0100000c" # CPU_TYPE_ARM64
     runs-on: ${{ matrix.os }}
+    # Same reasoning as the `windows` job above -- see that job's comment.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -373,6 +393,11 @@ jobs:
   checksums:
     needs: [windows, linux, macos]
     runs-on: ubuntu-latest
+    # tan-cli#855: download 8 small artifacts + `sha256sum` them -- no build,
+    # no toolchain, no network beyond the artifact download. Matches
+    # e2e-container.yml's `shellcheck` (5), the lightest bound in the repo for
+    # a job that still does real, if brief, work.
+    timeout-minutes: 5
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
