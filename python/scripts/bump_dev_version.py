@@ -12,7 +12,7 @@ the moment a tag is pushed, `dev`'s `TAN_VERSION` equals a published release
 Every PR opened against `dev` then fails `version-identity.yml`'s
 `not-a-released-version` job on a check unrelated to its own diff, until a
 human notices and bumps four files by hand. That has happened twice
-(tan-cli#461 -> `0.5.2-rc1.dev0`, tan-cli#768 -> `0.6.0-rc2.dev0`), both by
+(tan-cli#479 -> `0.5.2-rc1.dev0`, tan-cli#768 -> `0.6.0-rc2.dev0`), both by
 hand, both the same recurrence one release apart.
 
 This script is the arithmetic + the four-file edit those two fixes each did

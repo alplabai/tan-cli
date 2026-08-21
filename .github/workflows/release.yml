@@ -1152,7 +1152,7 @@ jobs:
   # `version_check.py --not-released` exists to refuse. Every PR opened
   # against `dev` then fails `version-identity.yml`'s `not-a-released-version`
   # job on a check unrelated to its own diff, until a human notices and bumps
-  # four files by hand. That has happened twice (tan-cli#461 -> 0.5.2-rc1.dev0,
+  # four files by hand. That has happened twice (tan-cli#479 -> 0.5.2-rc1.dev0,
   # #768 -> 0.6.0-rc2.dev0), both hand-carried, both the same recurrence one
   # release apart.
   #
@@ -1268,12 +1268,35 @@ jobs:
           git push -q -f origin "${branch}"
 
           title="chore(release): move dev off the published ${GITHUB_REF_NAME}"
-          body="Automated dev-version bump off \`${GITHUB_REF_NAME}\` (tan-cli#770). Computed and applied by \`python/scripts/bump_dev_version.py\`; review and merge to clear \`version-identity\`'s \`not-a-released-version\` check on every other open PR against \`dev\`."
+          # The recursion guard is stated IN the body, the way
+          # planner-resync.yml states its own (that file's header, and the
+          # body it writes at its "open the PR" step). A PR opened by
+          # GITHUB_TOKEN does not trigger `pull_request` workflows, so none
+          # of dev's five required checks -- `seam1 -- plan-shape parity`,
+          # `python -- pytest across python/` on ubuntu/windows/macos, and
+          # `zizmor · workflow security` -- start by themselves here. Left
+          # unsaid, this PR sits unmergeable with no explanation and a human
+          # has to work out why, which is the toil tan-cli#770 exists to
+          # remove rather than relocate.
+          {
+            echo "Automated dev-version bump off \`${GITHUB_REF_NAME}\` (tan-cli#770)."
+            echo "Computed and applied by \`python/scripts/bump_dev_version.py\`; review"
+            echo "and merge to clear \`version-identity\`'s \`not-a-released-version\`"
+            echo "check on every other open PR against \`dev\`."
+            echo
+            echo "**This PR's own checks did not start, and that is expected.**"
+            echo "It was opened by \`GITHUB_TOKEN\`, and GitHub's recursion guard"
+            echo "means a PR opened that way does not trigger \`pull_request\`"
+            echo "workflows -- so none of the five checks \`dev\` requires for merge"
+            echo "will run until a human nudges it. Close and reopen the PR, or push"
+            echo "an empty commit, to get the full suite. Same one-click cost, and"
+            echo "the same reason, as \`planner-resync.yml\`'s proposal PRs."
+          } > "${RUNNER_TEMP}/dev-bump-body.md"
           existing="$(gh pr list --head "${branch}" --base dev --state open --json number -q '.[0].number' || true)"
           if [ -n "${existing}" ]; then
-            gh pr edit "${existing}" --title "${title}" --body "${body}"
+            gh pr edit "${existing}" --title "${title}" --body-file "${RUNNER_TEMP}/dev-bump-body.md"
           else
-            gh pr create --base dev --head "${branch}" --title "${title}" --body "${body}"
+            gh pr create --base dev --head "${branch}" --title "${title}" --body-file "${RUNNER_TEMP}/dev-bump-body.md"
           fi
 
       # The one place this job could still fail QUIETLY: `gh pr create`/`edit`

@@ -33,7 +33,7 @@ import version_check as vc  # noqa: E402
 @pytest.mark.parametrize(
     ("released", "expected"),
     [
-        # The two REAL precedents this rule was read off of (tan-cli#461,
+        # The two REAL precedents this rule was read off of (tan-cli#479,
         # tan-cli#768) -- see python/tan/version.py's own comment history.
         ("0.5.1", "0.5.2-rc1.dev0"),
         ("0.6.0-rc1", "0.6.0-rc2.dev0"),
