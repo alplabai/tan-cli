@@ -491,7 +491,7 @@ def test_a_dead_network_returns_a_message_never_an_exception(
     # opener (its own `ProxyHandler`, because urllib's env-derived one ignores
     # `ALL_PROXY` on an https request), so the module-level `urlopen` is no
     # longer the call this path makes.
-    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.OpenerDirector.open", boom)
+    monkeypatch.setattr("urllib.request.OpenerDirector.open", boom)
     releases, error = _fetch_releases()
     assert releases == []
     assert error is not None and expect_in_message in error
@@ -939,9 +939,9 @@ def test_all_proxy_is_installed_on_the_opener_urllib_would_have_ignored(monkeypa
                 seen["proxies"] = dict(handler.proxies)
         return real_build_opener(*handlers)
 
-    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.build_opener", capture)
+    monkeypatch.setattr("urllib.request.build_opener", capture)
     monkeypatch.setattr(
-        "tan.commands.sdk_cmd.urllib.request.OpenerDirector.open",
+        "urllib.request.OpenerDirector.open",
         lambda *a, **k: (_ for _ in ()).throw(OSError("connect: refused")),
     )
 
@@ -976,9 +976,9 @@ def test_no_proxy_sends_the_request_direct_and_stops_blaming_the_proxy(monkeypat
                 seen["proxies"] = dict(handler.proxies)
         return real_build_opener(*handlers)
 
-    monkeypatch.setattr("tan.commands.sdk_cmd.urllib.request.build_opener", capture)
+    monkeypatch.setattr("urllib.request.build_opener", capture)
     monkeypatch.setattr(
-        "tan.commands.sdk_cmd.urllib.request.OpenerDirector.open",
+        "urllib.request.OpenerDirector.open",
         lambda *a, **k: (_ for _ in ()).throw(OSError("connect: refused")),
     )
 

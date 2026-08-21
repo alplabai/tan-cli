@@ -185,6 +185,16 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/planner/template.py: 1436 -> 1470
 - 2026-08-19 -- tan-cli#856: corrected the stale --fix sudo help text (3 lines longer)
     - tan/commands/doctor_cmd.py: 4035 -> 4038
-- 2026-08-21 -- tan-cli#825: hedge cmake/alp.cmake as PLANNED (unmerged) across generate_cmd.py and template.py
+- 2026-08-19 -- tan-cli#815: the shapes.py dedup finished. Six private helper definitions deleted (_is_file x4, _is_dir x2) plus sdk_cmd's duplicate SDK_MARKER and rejected_sdk_root_message, so seven modules shrink in the tree; the five tracked in this file are below. clean_cmd.py grows by exactly 1: it had no `from tan.core` import at all and now needs one line for SDK_MARKER, which it previously took from sdk_cmd's second spelling of the same literal.
+    - tan/commands/clean_cmd.py: 1119 -> 1120
+- 2026-08-20 -- tan-cli#810: four single-use imports moved into their call sites, so a bare `tan --version` stops loading click.testing, jsonschema, PyYAML and urllib.request (427 -> 279 modules, measured). The lines are the deferred imports plus the comment at each site saying why it is not at module scope; sdk_cmd also gains a TYPE_CHECKING block and the paragraph explaining why `_releases_opener`'s return annotation had to be respelled. REGENERATED on the merge with dev rather than resolving the ratchet conflict by side-picking: #858/#862/#851 moved tan/cli.py too, so BOTH sides' numbers were wrong for the merged tree -- ours said 1012, dev's said 1015, the merged file is 1021.
+    - tan/cli.py: 1015 -> 1021
+    - tan/commands/new_som_cmd.py: 1361 -> 1381
+    - tan/commands/sdk_cmd.py: 1415 -> 1441
+- 2026-08-21 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/cli.py: 1015 -> 1021
+    - tan/commands/new_som_cmd.py: 1360 -> 1380
+    - tan/commands/sdk_cmd.py: 1392 -> 1416
+- 2026-08-21 -- tan-cli#825: correcting the cmake/alp.cmake present-tense claim added 12 comment lines to tan/commands/generate_cmd.py (1348 -> 1360) and 2 to tan/planner/template.py (1470 -> 1472). Both are prose in place of a false statement -- alp.cmake is absent at alp-sdk v0.16.0-rc1, dev and main -- so there is no code to extract; the alternative to the raise is leaving the documentation wrong.
     - tan/commands/generate_cmd.py: 1348 -> 1360
     - tan/planner/template.py: 1470 -> 1472
