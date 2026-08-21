@@ -183,9 +183,33 @@ def resolve_tool(tool: str, env: Mapping[str, str]) -> ToolResolution:
         if not directory:
             continue
         for name in names:
-            candidate = Path(directory) / name
-            if candidate.is_file():
-                return ToolResolution(str(candidate), f"PATH: {path}")
+            # `os.path`, not `pathlib`, and the difference is MEASURED rather
+            # than stylistic (tan-cli#811). This is the only remaining site
+            # with the shape: a full miss probes every `%PATH%` entry x every
+            # `%PATHEXT%` suffix, which on the host that issue measured is 92
+            # dirs x 15 names = 1380 candidates, and a `Path` object is built
+            # and thrown away for each. Same loop, same candidate set, only
+            # the construction and stat swapped: 0.0389 -> 0.0177 s per miss,
+            # 2.2x. POSIX never reaches here (it returns via `shutil.which`
+            # above), so this is a Windows-only cost and a Windows-only fix.
+            if os.path.isfile(os.path.join(directory, name)):
+                # The RETURN is still built the pathlib way, once, on the
+                # winner -- deliberately NOT `os.path.join`'s own string.
+                # `os.path.join` preserves whatever separators the `%PATH%`
+                # entry carried (`os.path.join("C:/Windows/System32",
+                # "cmd.exe")` is `'C:/Windows/System32\\cmd.exe'`) where
+                # `str(Path(...) / ...)` normalises to
+                # `'C:\\Windows\\System32\\cmd.exe'`, and this string is
+                # customer-visible -- `renode_cmd.py` documents
+                # `data.renodeArgv[0]` as carrying this resolution's own
+                # casing. tan-cli#811 proposed `os.path.normpath` on the
+                # return to close that gap; it does, but it ALSO collapses
+                # `..`, which pathlib does not, so a `%PATH%` entry written
+                # relative to a parent would come back rewritten. Rebuilding
+                # the winner with the original expression is byte-identical
+                # instead of merely equivalent, and costs one `Path` per HIT,
+                # never per candidate.
+                return ToolResolution(str(Path(directory) / name), f"PATH: {path}")
     return ToolResolution(None, f"PATH: {path}")
 
 
@@ -197,9 +221,26 @@ def windows_candidate_names(tool: str, pathext: str) -> list[str]:
 
     Split out as a pure function purely so the Windows candidate set can be
     unit-tested from any host: `resolve_tool`'s Windows branch is unreachable
-    on POSIX and cannot be forced there (`Path` dispatches on `os.name` at
-    construction, so patching it raises `NotImplementedError: cannot
-    instantiate 'WindowsPath'`). The Rust oracle splits its own search core
+    on POSIX and must not be forced there. The reason is NOT the one this
+    said before tan-cli#811, and the difference matters -- measured on
+    CPython 3.14.7, patching `os.name` to `"nt"` on a POSIX host:
+
+      * `Path("git")` CONSTRUCTS, returning a `WindowsPath`. The refusal moved
+        to the first operation that builds a NEW one: `WindowsPath / str`
+        raises `pathlib.UnsupportedOperation: cannot instantiate 'WindowsPath'
+        on your system` (a `NotImplementedError` subclass -- renamed in 3.13,
+        not removed).
+      * The lexical and stat methods do not raise, they LIE:
+        `Path("/usr/bin/git").is_absolute()` is `False` and
+        `Path("/etc/hosts").is_file()` is `False` under the patch.
+      * Since tan-cli#811 moved the miss loop below off pathlib, a patched
+        MISS now completes with no exception at all and answers
+        `ToolResolution(None, ...)`.
+
+    So the barrier is quiet, not loud: a POSIX test that patches `os.name` to
+    reach the walk gets a plausible `None` rather than an error telling it to
+    stop. Test the pure candidate set here instead, and leave the walk itself
+    to the Windows CI legs. The Rust oracle splits its own search core
     out for exactly this reason and says so
     (`crates/tan-cli/src/util.rs::find_on_path`, "Pure search core split out
     of `windows_path_lookup` purely for unit testing").

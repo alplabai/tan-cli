@@ -537,8 +537,10 @@ def test_the_windows_walk_never_considers_the_bare_extensionless_name(tool, expe
 
     Portable by construction: the walk's candidate names are a pure function
     precisely so this runs on Linux CI, where `resolve_tool`'s Windows branch
-    cannot be reached at all (`Path` dispatches on `os.name` at construction,
-    so patching `os.name` raises rather than reaching it)."""
+    cannot be reached faithfully, and since tan-cli#811 cannot be reached
+    LOUDLY either -- patching `os.name` on a POSIX host no longer raises on
+    the way in, it walks and answers `None`. `windows_candidate_names`'
+    docstring carries the measured behaviour."""
 
     names = windows_candidate_names(tool, ".COM;.EXE;.BAT;.CMD")
     assert names == expected
@@ -560,6 +562,61 @@ def test_an_empty_pathext_entry_never_becomes_the_bare_name_by_accident():
 
     assert windows_candidate_names("npm", ".COM;;.EXE;") == ["npm.COM", "npm.EXE"]
     assert windows_candidate_names("npm", "") == []
+
+
+def test_the_windows_walk_returns_the_pathlib_spelling_not_the_join_spelling():
+    """tan-cli#811 moved the walk's per-candidate probe off `pathlib` for
+    cost, but deliberately did NOT move the RETURNED string with it. This
+    pins that split, because the obvious "simplification" -- return
+    `os.path.join`'s own result, or `os.path.normpath` it as #811's suggested
+    fix proposed -- is wrong in a way no other test here would catch.
+
+    `ntpath` and `PureWindowsPath` implement Windows semantics on ANY host,
+    which is the only way to pin this from POSIX at all: the walk itself is
+    unreachable here (see `windows_candidate_names`' docstring).
+
+    Two facts, measured:
+
+    1. `os.path.join` PRESERVES whatever separators the `%PATH%` entry
+       carried; `str(Path(...) / ...)` normalises them. The resolution is
+       customer-visible -- `renode_cmd` documents `data.renodeArgv[0]` as
+       carrying it -- so this is not cosmetic.
+    2. `os.path.normpath` closes that gap for ordinary entries but ALSO
+       collapses `..`, which pathlib does not. A `%PATH%` entry written
+       relative to a parent would come back REWRITTEN, pointing at the same
+       file under a name the host never gave us.
+    """
+    import ntpath
+    from pathlib import PureWindowsPath
+
+    # (1) plain entry, forward slashes -- join and pathlib disagree
+    joined = ntpath.join("C:/Windows/System32", "cmd.exe")
+    pathlib_spelling = str(PureWindowsPath("C:/Windows/System32") / "cmd.exe")
+    assert joined == "C:/Windows/System32\\cmd.exe"
+    assert pathlib_spelling == "C:\\Windows\\System32\\cmd.exe"
+    assert joined != pathlib_spelling, "join is not a drop-in for the return"
+    assert ntpath.normpath(joined) == pathlib_spelling, (
+        "normpath does close the gap HERE -- which is exactly why it looks "
+        "safe until the case below"
+    )
+
+    # (2) an entry containing `..` -- normpath rewrites it, pathlib keeps it
+    parent_relative = "C:/tools/../tools/bin"
+    kept = str(PureWindowsPath(parent_relative) / "west.exe")
+    rewritten = ntpath.normpath(ntpath.join(parent_relative, "west.exe"))
+    assert kept == "C:\\tools\\..\\tools\\bin\\west.exe"
+    assert rewritten == "C:\\tools\\bin\\west.exe"
+    assert kept != rewritten, "normpath is not a drop-in for the return either"
+
+    # (3) and the module still builds the return the way (1) and (2) require
+    import tan.core.tool_lookup as tool_lookup_module
+
+    source = Path(tool_lookup_module.__file__).read_text(encoding="utf-8")
+    assert "str(Path(directory) / name)" in source, (
+        "the Windows walk no longer returns the pathlib spelling -- if that "
+        "was deliberate, the two divergences above are what changed for the "
+        "customer, and this test is where to say so"
+    )
 
 
 # ── tan size ────────────────────────────────────────────────────────────────
@@ -614,9 +671,9 @@ def test_terminate_spawns_the_resolved_taskkill(monkeypatch, spy):
 
     `os.name` is patched rather than skipped-unless-Windows so this runs
     everywhere. What is stubbed is the LOOKUP, not the decision under test:
-    `pathlib.Path` dispatches on `os.name` at construction, so any real
-    resolution under the patch would raise `NotImplementedError` ("cannot
-    instantiate 'WindowsPath'") on a POSIX host. `raising=False` so the stub
+    a real resolution under the patch cannot be trusted on a POSIX host --
+    it either raises `pathlib.UnsupportedOperation` or, since tan-cli#811,
+    quietly answers `None`; see `windows_candidate_names`' docstring. `raising=False` so the stub
     installs against the pre-fix module too -- the point is that this then fails
     on the ASSERTION below (`argv[0]` is `'taskkill'`), not on a missing
     attribute. The real lookup is pinned unpatched by the test after this one."""
