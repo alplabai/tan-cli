@@ -21,6 +21,27 @@ from typing import NamedTuple
 #: identical however pytest (or the regen script) was started.
 PACKAGE = Path(__file__).resolve().parents[2] / "tan"
 
+#: `python/tests`, the sibling tree -- MEASURED but never gated (tan-cli#817).
+#: Found the same cwd-independent way as `PACKAGE` above.
+#:
+#: The scope decision this encodes, made deliberately and recorded here so it
+#: is not rediscovered from a failing hash: the ratchet gates `tan/**` and
+#: only OBSERVES `tests/**`. tan-cli#817's actual complaint was not that test
+#: files grow, it was that they grow INVISIBLY -- "there is no number for a
+#: PR to move, so the growth is not visible in review or in a diff of the
+#: generated file". Measuring closes that; gating would not have been free.
+#: Measured on 60 consecutive `dev` commits, 36% of them GREW a `tests/**`
+#: file already over `MODULE_CAP`, so a per-file ratchet here would have made
+#: better than one PR in three write a `--reason` ledger entry, and the ledger
+#: would fill with "added test cases" -- taxing exactly the behaviour this
+#: repo wants and burying the `tan/**` reasons that are the log's whole point.
+#:
+#: So `observed_tests` in the generated file is a RECORD, never a ceiling.
+#: Nothing in the gate compares it to a threshold; the only thing that can
+#: fail on it is going STALE, which a plain `regen` fixes with no `--reason`.
+#: That is pinned by `test_the_observed_test_tree_is_recorded_not_gated`.
+TEST_ROOT = Path(__file__).resolve().parents[1]
+
 GENERATED_PATH = Path(__file__).resolve().parent / "module_size_budget.generated.json"
 LOG_PATH = Path(__file__).resolve().parent / "MODULE_SIZE_BUDGET_LOG.md"
 
@@ -48,6 +69,32 @@ class MeasuredState(NamedTuple):
 
 def modules() -> list[Path]:
     return sorted(PACKAGE.rglob("*.py"))
+
+
+def test_tree_modules() -> list[Path]:
+    """The observed tree (tan-cli#817). Deliberately a SEPARATE enumeration
+    from `modules()` rather than a second root folded into it: everything
+    downstream of `modules()` is gated, and a walk that yielded both would
+    put `tests/**` inside the ratchet by accident -- the exact outcome the
+    scope decision above rejects."""
+    return sorted(TEST_ROOT.rglob("*.py"))
+
+
+def measure_observed_tests() -> dict[str, int]:
+    """Line counts for the `tests/**` files over `MODULE_CAP`, keyed the same
+    way `modules` is (both go through `rel()`, which relativises to
+    `PACKAGE.parent`, so `tan/...` and `tests/...` are siblings in the file).
+
+    Same threshold as the gated side on purpose: the number answers "which
+    files are over the house guideline", and the guideline does not change
+    because a file holds tests. What changes is the CONSEQUENCE -- see
+    `TEST_ROOT`."""
+    out: dict[str, int] = {}
+    for path in test_tree_modules():
+        lines = len(path.read_text(encoding="utf-8").splitlines())
+        if lines > MODULE_CAP:
+            out[rel(path)] = lines
+    return out
 
 
 def rel(path: Path) -> str:
@@ -84,11 +131,15 @@ def measure_current() -> MeasuredState:
     return MeasuredState(modules=module_lines, function_count=len(found), function_worst=worst)
 
 
-def load_generated() -> MeasuredState:
-    """Parse the committed file. Raises on a duplicate `modules` key: Python's
+def _load_json() -> dict:
+    """Parse the committed file once. Raises on a duplicate key: Python's
     (and JSON's) own "last write wins" dict-literal collapse is exactly the
     silent-drop shape tan-cli#586 found in the previous hand-maintained dict,
-    and a generated file is not immune to a bad hand-edit landing anyway."""
+    and a generated file is not immune to a bad hand-edit landing anyway.
+
+    Split out of `load_generated` by tan-cli#817 so the observed section can
+    be read through the SAME duplicate-key check rather than a second, laxer
+    `json.loads` that would not have it."""
     raw = GENERATED_PATH.read_text(encoding="utf-8")
     seen: dict[str, int] = {}
     duplicates: list[str] = []
@@ -108,6 +159,12 @@ def load_generated() -> MeasuredState:
             f"{sorted(set(duplicates))} (tan-cli#586 class -- the last spelling "
             "silently wins and any other is dead weight)"
         )
+    return data
+
+
+def load_generated() -> MeasuredState:
+    """The GATED half of the committed file."""
+    data = _load_json()
     module_map = {str(k): int(v) for k, v in data["modules"].items()}
     return MeasuredState(
         modules=module_map,
@@ -116,7 +173,14 @@ def load_generated() -> MeasuredState:
     )
 
 
-def dump_generated(state: MeasuredState) -> str:
+def load_observed_tests() -> dict[str, int]:
+    """The OBSERVED half. Absent key reads as empty rather than raising, so
+    the first regen after tan-cli#817 seeds the section instead of failing on
+    a file that predates it."""
+    return {str(k): int(v) for k, v in _load_json().get("observed_tests", {}).items()}
+
+
+def dump_generated(state: MeasuredState, observed_tests: dict[str, int]) -> str:
     """Canonical text form -- sorted keys, 2-space indent, one trailing
     newline. Deterministic so two independent regen runs against the same
     tree byte-for-byte agree, and so a diff shows only the numbers that
@@ -131,5 +195,13 @@ def dump_generated(state: MeasuredState) -> str:
         "modules": dict(sorted(state.modules.items())),
         "function_count_budget": state.function_count,
         "function_worst_budget": state.function_worst,
+        "observed_tests_are_not_a_budget": "Every key under `observed_tests` "
+        "is a MEASUREMENT of python/tests/**, never a ceiling (tan-cli#817). "
+        "Nothing compares these to a threshold and no growth here needs a "
+        "--reason; the only failure they can cause is going stale, which a "
+        "plain `python scripts/regen_module_size_budget.py` fixes. See "
+        "`TEST_ROOT` in _module_size_budget_core.py for why this tree is "
+        "observed rather than gated.",
+        "observed_tests": dict(sorted(observed_tests.items())),
     }
     return json.dumps(payload, indent=2, sort_keys=False) + "\n"
