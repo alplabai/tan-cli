@@ -237,7 +237,18 @@ sums_url="${BASE_URL}/${VERSION}/checksums.txt"
 tmp="$(mktemp)"
 sums="$(mktemp)"
 stage="$(mktemp -d)"
-trap 'rm -f "$tmp" "$sums"; rm -rf "$stage"' EXIT
+# tan-cli#803: declared (empty) before the trap is installed, and included in
+# it from the start, so the trap always removes whatever $payload currently
+# holds -- "" here, "$tmp" once the raw layout aliases it (a harmless repeat of
+# the same rm), or the archive layout's generated-launcher temp file once that
+# is created further down. Without this, that launcher file (mktemp'd well
+# AFTER this trap was installed) was never a member of it at all: every EXIT
+# before the commit `mv` consumes it -- the health-check refusal, the
+# commit-failure rollback, or any unguarded failure in between under `set -eu`
+# -- leaked it, while $tmp/$sums/$stage were correctly cleaned up right beside
+# it. Single-quoted, so $payload is read at TRAP-FIRE time, not now.
+payload=""
+trap 'rm -f "$tmp" "$sums" "$payload"; rm -rf "$stage"' EXIT
 
 # ---------------------------------------------------------------------------
 # Verify what lands against the checksums.txt published in the SAME release.
@@ -857,7 +868,24 @@ fi
 if [ "$already_on_path" = "1" ]; then
 	: # already on PATH -- 'tan' works from any shell
 else
-	if [ "$MODIFY_PATH" = "1" ]; then
+	if [ "$MODIFY_PATH" = "1" ] && [ -z "${HOME:-}" ]; then
+		# tan-cli#803: every rc path picked below is "$HOME/<dotfile>". With
+		# `set -eu`, dereferencing $HOME while it is unset would abort the
+		# SCRIPT on the first such line -- and that abort happens well past
+		# tan-cli#434's own rollback boundary: the install above has already
+		# committed and printed its success line. This case is real, not
+		# hypothetical: INSTALL_DIR's own "${TAN_INSTALL_DIR:-$HOME/.local/bin}"
+		# fallback at the top of the script only evaluates $HOME when
+		# TAN_INSTALL_DIR is UNSET -- so a caller that sets TAN_INSTALL_DIR
+		# explicitly (a container running as an arbitrary UID with no
+		# /etc/passwd entry and HOME unset, e.g.) sails straight past that
+		# earlier reference and only meets the unset $HOME here, after the
+		# point of no return. Degrade to the same manual-PATH message
+		# --no-modify-path prints below instead of letting a PATH-convenience
+		# step turn an already-successful, already-verified install into a
+		# nonzero exit.
+		echo "install.sh: \$HOME is not set -- cannot determine or update a shell rc file. Add ${INSTALL_DIR} to PATH yourself:  export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
+	elif [ "$MODIFY_PATH" = "1" ]; then
 		# Pick the login shell's rc file and the syntax it actually parses
 		# (idempotent append), and announce it -- never edit a dotfile
 		# silently. This is what makes a no-sudo user-local install usable
@@ -935,9 +963,26 @@ else
 			# does not have yet -- every other rc path here is directly under
 			# $HOME, which already exists, so this is a no-op for them.
 			mkdir -p "$(dirname -- "$rc")" 2>/dev/null || true
-			printf '\n%s\n' "$path_line" >>"$rc"
-			echo "install.sh: added ${INSTALL_DIR} to PATH in ${rc}."
-			echo "install.sh: open a NEW shell (or run:  ${source_hint}) to use 'tan' anywhere. Undo: delete that line."
+			# tan-cli#803: this append is a PATH-convenience step reached only
+			# after the commit above has already succeeded and printed its
+			# success line (tan-cli#434's rollback boundary is well behind
+			# this point) -- yet under `set -eu` it was UNGUARDED, and `printf`
+			# is not a POSIX special builtin, so ITS OWN redirect failure (not
+			# a builtin whose error `set -e` would ignore) aborts the script
+			# right here. Reachable for real: a root-owned rc file under a
+			# user-owned $HOME, an immutable (chattr +i) rc, or a read-only/NFS
+			# home all fail this write while the install itself is already
+			# fine. Guard it the same way the chown/ACL hardening steps a
+			# little above already are ("an install that already succeeded
+			# must not be turned into a failure over this hardening step") and
+			# fall back to the same manual-PATH message --no-modify-path
+			# prints, rather than report a successful install as a failure.
+			if printf '\n%s\n' "$path_line" >>"$rc" 2>/dev/null; then
+				echo "install.sh: added ${INSTALL_DIR} to PATH in ${rc}."
+				echo "install.sh: open a NEW shell (or run:  ${source_hint}) to use 'tan' anywhere. Undo: delete that line."
+			else
+				echo "install.sh: could not update ${rc} to add ${INSTALL_DIR} to PATH -- add it yourself:  export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
+			fi
 		fi
 	else
 		echo "install.sh: ${INSTALL_DIR} is not on PATH -- add:  export PATH=\"${INSTALL_DIR}:\$PATH\"  (or re-run without --no-modify-path)"
