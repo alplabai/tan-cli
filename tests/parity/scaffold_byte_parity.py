@@ -128,11 +128,15 @@ def un_edit_iot_extra_conf_order(text: str) -> str:
 #: that is correct (V2N101/V2M101 are the same PCB, same `preset:`/`cores:`/
 #: `pins:`), but here it is a cross-family swap (`alif-ensemble` ->
 #: `renesas-rzv2n-deepx`) that leaves `preset: e1m-evk`, `cores:` and `pins:`
-#: all pinned to the Alif module -- measured: `tan validate` refuses with
-#: ALP-B007 (board/family mismatch), then two more hard exits (`cores:` names
-#: unknown ids, then a `pins:` route not on the resolved board) once that is
-#: patched around. Matches the literal sentence, not a paraphrase, so an
-#: unrelated README edit still fails this gate.
+#: all pinned to the Alif module -- measured: `tan validate` refuses
+#: with ALP-B007 (board/family mismatch), and keeps refusing as each message
+#: is patched around (`cores:` names unknown ids, a `libraries:` entry scoped
+#: to a core the flip left undeclared, a `pins:` route not on the resolved
+#: board, a pad macro that does not match the resolved pad). Deliberately no
+#: count here: an earlier revision of this comment said "two more hard exits"
+#: and a re-measurement found four, because how far the cascade runs depends
+#: on how far the customer patches forward. Matches the literal sentence, not
+#: a paraphrase, so an unrelated README edit still fails this gate.
 _EDGE_AI_AEN801_README_DEEPX_NOTE = (
     "For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template\n"
     "edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,\n"

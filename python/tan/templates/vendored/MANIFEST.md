@@ -384,9 +384,15 @@ strictness exists to catch.
    hosts only `alif-ensemble`/`nxp-imx9`, not V2M101's
    `renesas-rzv2n-deepx`), plus Alif-shaped `cores:`/`pins:`. MEASURED against
    `v0.16.0-rc1`: performing exactly the documented edit and nothing else,
-   `tan validate` refuses three times in a row (ALP-B007 board/family
-   mismatch, then an unknown-`cores:` refusal, then a `pins:` route not on
-   the resolved board). Rewritten to tell the customer to re-scaffold
+   `tan validate` refuses on ALP-B007 (board/family mismatch) -- and keeps
+   refusing as each message is fixed forward, through unknown `cores:` ids,
+   a `libraries:` entry scoped to a core the flip left undeclared, a `pins:`
+   route absent from the resolved board, and a pad macro that does not match
+   the resolved pad. No count is pinned here on purpose: an earlier revision
+   of this entry said "three times in a row" and a re-measurement found five,
+   because the cascade depends on how far the customer patches forward. The
+   load-bearing fact is that it does not terminate in a working project, not
+   how many messages it takes. Rewritten to tell the customer to re-scaffold
    (`tan init --template edge-ai-starter --som E1M-V2M101`) instead of
    editing `som.sku` in place. Fix belongs upstream, in alp-sdk's
    `examples/ai/cold-chain-monitor/README.md`; declared here pending that fix
