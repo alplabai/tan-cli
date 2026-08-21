@@ -111,7 +111,7 @@ def test_embedded_scripts_are_nonempty_and_shell_specific():
 def test_embedded_scripts_list_every_registered_subcommand():
     """Drift guard: every verb `tan.cli` registers must tab-complete on all
     three shells. Reads `tan.cli._SUBCOMMAND_NAMES` (a frozenset this file
-    only imports, never edits) rather than hand-duplicating the 32-name list a
+    only imports, never edits) rather than hand-duplicating the 31-name list a
     third time -- the same reasoning the oracle's own
     `embedded_scripts_list_every_cli_command` gives for reading clap's command
     graph instead of a hand-kept copy. Word-boundary, not substring: a bare
@@ -402,6 +402,52 @@ def test_debug_config_and_support_bundle_still_keep_target_kind_and_server():
     assert "--server" in ZSH_SCRIPT
     assert "-l target-kind" in FISH_SCRIPT
     assert "-l server" in FISH_SCRIPT
+
+
+def test_explain_completion_offers_the_code_flag():
+    """`tan explain --code <ALP-Bxxx|ALP_ERR_*>` shipped in v0.6.0-rc1
+    (`explain_cmd.py`'s `--code`), and all three emitted scripts offered only
+    `--template` (tan-cli#834).
+
+    `explain`'s own overview omits `--code` deliberately -- a line there would
+    break the golden (`explain_cmd.py`'s `_overview()`) -- so the advertised
+    surfaces are `--help`, the code-shaped-argument hint (`_code_hint`, which
+    shipped in the same commit as `--code`), and this. Completion was the one
+    still silent.
+
+    Nothing regenerates per-command flags: the six markers `_fill_formats`
+    splices refresh the `--format` value lists, `generate --target`'s list and
+    the command NAMES -- never a command's own flags. A flag added to any
+    command drifts silently until a test like this one names it."""
+    bash_arm = _case_arm_lines(BASH_SCRIPT, "explain)")
+    assert bash_arm, f"no `explain)` arm in the bash script:\n{BASH_SCRIPT}"
+    assert any("--code" in line for line in bash_arm), bash_arm
+
+    zsh_arm = _case_arm_lines(ZSH_SCRIPT, "explain)")
+    assert zsh_arm, f"no `explain)` arm in the zsh script:\n{ZSH_SCRIPT}"
+    assert any("--code" in line for line in zsh_arm), zsh_arm
+
+    # fish spells its flags `-l code`, with no leading dashes.
+    fish_lines = [
+        line
+        for line in FISH_SCRIPT.splitlines()
+        if "__fish_seen_subcommand_from explain'" in line
+    ]
+    assert fish_lines, f"no `explain` completions in the fish script:\n{FISH_SCRIPT}"
+    assert any("-l code" in line for line in fish_lines), fish_lines
+
+
+def test_explain_completion_still_offers_the_template_flag():
+    """Control for the above: `--code` is ADDED beside `--template`, never in
+    place of it. `--template` is the flag `explain`'s overview does advertise,
+    so losing it here would be the more visible regression of the two."""
+    assert any("--template" in line for line in _case_arm_lines(BASH_SCRIPT, "explain)"))
+    assert any("--template" in line for line in _case_arm_lines(ZSH_SCRIPT, "explain)"))
+    assert any(
+        "-l template" in line
+        for line in FISH_SCRIPT.splitlines()
+        if "__fish_seen_subcommand_from explain'" in line
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -713,7 +759,7 @@ def test_fish_target_completion_lists_every_valid_generate_target():
 
 @pytest.mark.skipif(not _bash_available(), reason="no bash on this host")
 def test_bash_completion_offers_subcommands_past_a_leading_global_flag():
-    """`tan --sdk-root /x <TAB>` used to offer not one of the 32 subcommand
+    """`tan --sdk-root /x <TAB>` used to offer not one of the 31 subcommand
     names: the gate that emits them was `[[ $cword -eq 1 ]]`, and `--sdk-root
     /x` puts the cursor at word 3."""
     reply = _bash_complete(["tan", "--sdk-root", "/x", ""])
@@ -758,7 +804,7 @@ def test_bash_completion_does_not_offer_subcommands_in_a_flag_value_slot():
     not a subcommand. The scan steps past the cursor word there, and that
     overshoot is what `at_value` detects: without it, the empty `$subcmd`
     would be read as "no subcommand typed yet" and the completion would start
-    offering 32 command names where a directory belongs."""
+    offering 31 command names where a directory belongs."""
     reply = _bash_complete(["tan", "--sdk-root", ""])
     assert "validate" not in reply
     assert "size" not in reply
@@ -997,7 +1043,7 @@ def test_spliced_command_names_match_the_registered_command_surface():
     from tan.cli import _SUBCOMMAND_NAMES
 
     assert set(_COMMAND_NAMES.split()) == set(_SUBCOMMAND_NAMES)
-    assert len(_COMMAND_NAMES.split()) == 32
+    assert len(_COMMAND_NAMES.split()) == 31
 
 
 def test_subcommand_format_overrides_a_leading_root_format():

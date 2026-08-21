@@ -1005,9 +1005,7 @@ PROBE_TOOLS: frozenset[str] = frozenset(
         # Zephyr's meta-tool: the single biggest divergence measured (74
         # resolutions across the suite on the bench host, none on CI).
         "west",
-        # Emulator + image writer, same class: probed by `renode_cmd` /
-        # `flash_cmd`, absent from every runner.
-        "renode",
+        # Image writer: probed by `flash_cmd`, absent from every runner.
         "bmaptool",
         # Zephyr-SDK-only; `faultdecode_cmd` tries it ahead of the ordinary
         # `llvm-addr2line`/`addr2line` pair, which are NOT listed here.

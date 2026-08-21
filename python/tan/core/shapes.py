@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Two questions five command modules each answered with their own private
+"""Two questions four command modules each answered with their own private
 copy: "is this directory an alp-sdk checkout?" and "what shape is this YAML
 value?" (tan-cli#408).
 
-Neither is domain logic worth five implementations. `_is_sdk_root` had three
-(`build_cmd.py`, `flash_cmd.py`, `renode_cmd.py`) and `_yaml_kind` two
+Neither is domain logic worth four implementations. `_is_sdk_root` had two
+(`build_cmd.py`, `flash_cmd.py`) and `_yaml_kind` two
 (`diff_cmd.py`, `pinmux_cmd.py`), and the copies had already drifted in TYPE
--- two took `str`, one took `Path` -- which is exactly how a "same" helper
+-- one took `str`, one took `Path` -- which is exactly how a "same" helper
 stops being the same one.
 
 Lives under `tan.core` rather than beside any one caller because
@@ -22,8 +22,11 @@ from pathlib import Path
 from typing import Any
 
 #: THE marker for an alp-sdk checkout (I-31), as path segments so callers can
-#: join it either way. `build_cmd.SDK_MARKER` was the previous single
-#: spelling and now re-exports this one.
+#: join it either way. THE single spelling: `build_cmd` and, since
+#: tan-cli#815, `sdk_cmd` both re-export this one rather than holding a
+#: literal of their own. Relocating `scripts/alp_project.py` is a one-line
+#: change here, which is the whole point -- a second literal meant missing it
+#: silently broke SDK resolution in five commands.
 SDK_MARKER = ("scripts", "alp_project.py")
 
 
@@ -31,13 +34,13 @@ def is_sdk_root(path: Path | str) -> bool:
     """Whether `path` is an alp-sdk checkout -- port of `util.rs::
     has_loader_script`, and INCAPABLE OF RAISING.
 
-    Accepts `Path` or `str` because the three copies this replaces disagreed:
-    `build_cmd`'s took a `Path`, `flash_cmd`'s and `renode_cmd`'s took a
-    `str`. Callers keep whichever they already hold rather than converting at
+    Accepts `Path` or `str` because the copies this replaces disagreed:
+    `build_cmd`'s took a `Path`, `flash_cmd`'s took a `str`. Callers keep
+    whichever they already hold rather than converting at
     every site.
 
     tan-cli#408 asks for a deliberate decision on the `except (OSError,
-    ValueError)` guard the two string-based copies carried, so: **it stays**,
+    ValueError)` guard the string-based copy carried, so: **it stays**,
     and the reason is that this is a PRE-FLIGHT guard. Every caller is asking
     "may I use this?" in a command whose whole job is to answer with an
     envelope; a path with an embedded NUL or an unreadable parent must read
@@ -52,6 +55,52 @@ def is_sdk_root(path: Path | str) -> bool:
     """
     try:
         return os.path.isfile(os.path.join(str(path), *SDK_MARKER))
+    except (OSError, ValueError):
+        return False
+
+
+def is_file(path: Path | str) -> bool:
+    """`os.path.isfile`, INCAPABLE OF RAISING -- the same pre-flight contract
+    `is_sdk_root` above documents at length.
+
+    Four private copies preceded this one (tan-cli#815): `size_cmd`,
+    `image_cmd` and `flash_cmd` each held a byte-identical `str` version, and
+    `bootstrap_cmd`'s took a `Path` -- the TYPE drift this module's docstring
+    was written about, so the signature is `Path | str` for the same reason
+    `is_sdk_root`'s is: callers keep whichever they already hold.
+
+    Its narrower `except OSError` (the others caught `(OSError, ValueError)`)
+    was INERT: `pathlib` catches `ValueError` inside `Path.is_file()`, so
+    there was nothing to miss. Measured, not assumed -- an earlier draft of
+    tan-cli#815 called that half a behaviour change and it was not. The type
+    change does move one input: `Path('')` normalises to `Path('.')`, so the
+    old `_is_dir("")` answered `True` where this answers `False`. Unreachable
+    from its call sites, every one of which passes a join.
+
+    All three `str` callers read `build/system-manifest.yaml`, whose values
+    are manifest-supplied strings that may carry an embedded NUL or an
+    overlong component. Such a path is "not a file", never an exception
+    escaping the envelope.
+    """
+    try:
+        return os.path.isfile(path)
+    except (OSError, ValueError):
+        return False
+
+
+def is_dir(path: Path | str) -> bool:
+    """`os.path.isdir`, INCAPABLE OF RAISING -- `is_file`'s sibling, same
+    contract and same two prior copies (`image_cmd` took `str` and caught
+    `(OSError, ValueError)`, `bootstrap_cmd` took `Path` and caught `OSError`).
+
+    NOT the same question as `presets_cmd._is_dir` or
+    `examples_cmd._is_dir_no_follow`, which take an `os.DirEntry` and differ
+    on whether symlinks are followed. Those are a different predicate with a
+    deliberate divergence recorded at each site; they are not copies of this
+    and must not be folded into it.
+    """
+    try:
+        return os.path.isdir(path)
     except (OSError, ValueError):
         return False
 
@@ -83,11 +132,12 @@ def rejected_sdk_root_message(sdk_root: str, consequence: str) -> str:
     no typed value to name on it, and for `presets` its exact string is
     byte-pinned by the `presets-no-sdk` golden envelope.
 
-    NOTE FOR WHOEVER MERGES SECOND: tan-cli#620 adds a same-named helper to
-    `tan/commands/sdk_cmd.py` for `examples`/`presets`, with this same body.
-    The two must be collapsed onto this one -- `tan.core` imports no command
-    module, so this is the direction that cannot cycle (see the module
-    docstring), and `SDK_MARKER` already lives here.
+    tan-cli#620 landed a same-named helper in `tan/commands/sdk_cmd.py` with
+    a byte-identical body, and the note here asking for the two to be
+    collapsed sat unexecuted for four releases (tan-cli#815). They are one
+    function now: `sdk_cmd` imports this one. The direction is the only one
+    that cannot cycle -- `tan.core` imports no command module (see the module
+    docstring).
     """
     marker = "/".join(SDK_MARKER)
     return (

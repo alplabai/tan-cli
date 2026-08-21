@@ -234,9 +234,10 @@ jobs:
               /tmp/v/bin/pip install --quiet -e ".[monitor]" '"$BUILD_DEPS"'
               PYTHON=/tmp/v/bin/python bash scripts/build_binary.sh'
           else
-            docker run --rm -v "$PWD/python:/w" -w /w "$GNU_IMAGE" bash -c '
+            docker run --rm -v "$PWD/python:/w" -v "$PWD/scripts:/scripts:ro" -w /w "$GNU_IMAGE" bash -c '
               set -e
-              apt-get -qq update && apt-get -qq install -y binutils
+              bash /scripts/ci/apt-bounded.sh update -qq
+              bash /scripts/ci/apt-bounded.sh install -qq -y binutils
               python -m venv /tmp/v
               /tmp/v/bin/pip install --quiet -e ".[monitor]" '"$BUILD_DEPS"'
               PYTHON=/tmp/v/bin/python bash scripts/build_binary.sh'

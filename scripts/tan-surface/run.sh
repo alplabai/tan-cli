@@ -9,7 +9,7 @@
 # NOT `set -e`: a step that exits non-zero is a RESULT, not a reason to stop
 # walking. The exit status of the whole run comes from summary().
 #
-# File-wide: SOM/TEMPLATE/CORE/EXPECT_MARKER/LEDGER/PROJ_NAME/MODE and friends
+# File-wide: SOM/TEMPLATE/CORE/LEDGER/PROJ_NAME/MODE and friends
 # read like dead stores in this file because they are consumed by cases.sh and
 # lib.sh, which are sourced through the dynamic "$HERE" path. shellcheck cannot
 # follow that, so it reports every one of them unused.
@@ -34,7 +34,6 @@ PROJ_NAME="tan-surface-app"
 TEMPLATE=sensor-starter
 SOM=E1M-AEN801
 CORE=m55_hp
-EXPECT_MARKER="[i2c-master]"
 WORK=""
 WORK_CREATED=0
 PHASES=all
@@ -63,13 +62,13 @@ Options
   --phase NAME         discovery|project|generate|workspace|build|diag|teardown|all
   --som SKU            SoM for the scaffolded project (default: E1M-AEN801)
   --template ID        template for the scaffolded project (default: sensor-starter)
-  --core ID            core for kconfig/renode (default: m55_hp)
+  --core ID            core for kconfig/debug-config (default: m55_hp)
   --allow-mutate       permit steps that WRITE into --project
   --allow-bootstrap    permit `tan bootstrap` (copies the SDK; slow, GBs of disk)
   --keep               keep the sandbox after the run
   --json FILE          append a machine-readable result ledger
   --strict             also fail the run if anything was SKIPped (workspace,
-                        renode, ... not detected) -- "green" then means "the
+                        toolchain, ... not detected) -- "green" then means "the
                         whole surface ran", not just "nothing that ran failed"
   -h, --help           this text
 

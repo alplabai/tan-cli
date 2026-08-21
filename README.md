@@ -127,9 +127,11 @@ install` needs a 7-Zip-compatible archive tool on `PATH` instead -- west
 delegates `.7z` extraction to `patoolib`, which shells out to an external
 `7z`/`7za`/`7zr`/`7zz`/`7zzs`/`unar` binary and has no pure-Python fallback
 (`winget install -e --id 7zip.7zip`). `tan doctor` has a dedicated `sevenZip`
-check for this, on native Windows, once the Zephyr SDK is not yet detected: it
-warns when none of those binaries is on `PATH` and names the same `winget`
-command.
+check for this, on every native-Windows host: it warns when none of those
+binaries is on `PATH` and names the same `winget` command. It does not wait for
+the Zephyr SDK to be missing first — a host that already has the SDK and no
+7-Zip is exactly the host whose next `west sdk install` dies with
+`Zephyr SDK setup requires '7z'` (tan-cli#736).
 
 Do not assemble any of these lists by hand. `tan doctor` reads its checks from
 the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK
@@ -241,7 +243,6 @@ move.
 | Check the host setup | `tan doctor` |
 | Start a serial monitor | `tan monitor` |
 | Generate debugger settings | `tan debug-config` |
-| Run with Renode | `tan renode` |
 | List examples and presets | `tan examples`, `tan presets` |
 | Explain resolved project settings | `tan inspect` |
 | Explain a template or generation target | `tan explain` |
@@ -299,9 +300,81 @@ The stable top-level envelope is:
 {command, ok, exitCode, project, sdk, data, issues}
 ```
 
-Use `--ci` or `--non-interactive` in automation. Commands then refuse prompts
-and unattended host changes instead of waiting for input. Redirected or piped
-stdio is treated as non-interactive too.
+**You do not need a flag for this.** tan already treats a run as
+non-interactive when `stdin` or `stderr` is not a terminal — piped, redirected,
+or a CI runner — and `--format json` settles it on its own, whatever the
+terminal looks like. That rule is applied unasked (`tan/core/consent.py`'s
+`can_prompt`, whose `not json_mode` is an unconditional term). It reads `stdin`
+and `stderr` and deliberately never `stdout` — which matters more than it
+sounds, because in text mode nothing is written to stdout at all
+(`tan/env.py`). `stderr` is therefore both the report channel and half the
+consent gate: `tan doctor --fix 2> log.txt` from a real terminal is treated as
+unattended and the fix is suppressed (`doctor.fix-suppressed`), while
+`> log.txt` leaves consent untouched and captures an empty file. Where a
+command has a documented default it takes it; where it has none it fails rather
+than asking.
+
+`--ci` and `--non-interactive` exist as explicit "do not ask me" signals on top
+of that, and **every registered command parses them**:
+`tan/core/global_flags.py` holds the shared spec and injects it into any
+command that does not already declare the flag itself. What keeps that true is
+split in two. `tests/gates/test_global_flags_gate.py` fails the build for the
+29 commands that reject an unknown option; it cannot speak for `lock`,
+`migrate` and `quality`, which register `ignore_unknown_options`
+(`west_forward_cmd.py`) and would swallow an undeclared flag into the `west`
+passthrough rather than reject it — those three are held by
+`test_west_forward_command.py`'s
+`test_a_leading_global_flag_is_consumed_not_forwarded`. They are not ROOT
+options either: a leading one is relocated across the subcommand boundary, so
+`tan --ci doctor` and `tan doctor --ci` are the same run, while a bare
+`tan --ci` with no subcommand is `No such option: --ci`.
+
+`tan build` parses them and then refuses the whole invocation — and not only
+these two. Seven of the ten flags in that shared set are deferred there
+(`--target`, `--all`, `--verbose`, `--quiet`, `--no-color`,
+`--non-interactive`, `--ci`; `build_cmd.py`'s `_DEFERRED_FLAGS`), each with the
+same envelope but for the message, which names the flag it refused. Of those
+ten only `--project`, `--board-yaml` and `--sdk-root` survive; `build`'s own
+`--plan-from`, `--materialise`, `--native`, `--execute`, `--build-root` and
+`--format` are unaffected:
+
+```console
+$ tan build --ci --format json
+{"command":"build","ok":false,"exitCode":1,...,"data":{"message":"`tan build --ci` is
+ deferred and not available in this build (see
+ https://github.com/alplabai/tan-cli/issues/427)."},"issues":[{"code":"cli.command-deferred",
+ "severity":"error","message":"..."}]}
+```
+
+So a script that adds `--ci` to every tan invocation breaks on `build`.
+Elsewhere it does three separate things, and only the first is consent:
+
+* **Consent**, on the two commands that read the flag for it — `doctor --fix`
+  (`doctor_cmd.py`'s `fix_allowed`) and `scaffold` (`scaffold_cmd.py`'s
+  `interactive`), both through `can_prompt`. This is the half worth reaching
+  for: it is what stops `tan doctor --fix` running unattended
+  `winget install`s under a pty-allocating runner. It is NOT the whole
+  prompting surface, though — `new-som` prompts too, gates on stdio alone
+  (`stdin_is_tty() and stderr_is_tty()`, `new_som_cmd.py`) and `del`s both
+  flags unread, so under that same pty-allocating runner `tan new-som --ci`
+  blocks on `New SoM SKU (E1M-<UPPERCASE> shaped)` forever. Pass its required
+  flags there instead.
+* **Colour**, which has nothing to do with prompting. Inside `tan/env.py`'s
+  `use_color` (`if no_color or ci or no_color_requested()`) `--ci` is a second
+  spelling of `--no-color`, so on `doctor` and `size` — that helper's only two
+  callers — it changes text output where no prompt was ever possible. It is not
+  a synonym outside it: `faultdecode` colours through its own
+  `_use_color(no_color)` and ignores `--ci`. `--non-interactive` changes colour
+  nowhere.
+* **The refusal message.** Where stdio is already non-tty the rule above has
+  decided first, but `--ci` still names itself in `doctor`'s
+  `doctor.fix-suppressed` reason list — an `issues[]` difference a JSON
+  consumer sees.
+
+Rely on the stdio rule for the consent half; reach for `--ci` on `doctor` and
+`scaffold` when you want that refusal regardless of what stdio looks like, and
+never on `build`, which refuses `--verbose`, `--quiet`, `--no-color`,
+`--target` and `--all` identically.
 
 ## How tan fits with the SDK
 
@@ -313,7 +386,7 @@ VS Code UI          CLI      metadata, schemas, examples, west extensions
 - `alp-sdk`: hardware metadata, schemas, examples, and the remaining
   `west alp-*` extensions.
 - `tan`: SDK selection, planning, build execution, and the manifest that
-  `flash`/`size`/`image`/`renode` read.
+  `flash`/`size`/`image` read.
 - `alp-sdk-vscode`: an optional UI that invokes `tan`.
 
 A successful build writes `build/system-manifest.yaml`, which records the
@@ -347,7 +420,7 @@ backstop, not a substitute for using a venv in the first place.
 
 That run means the same thing on every machine, including a bench host with
 real debug tooling installed. The suite neutralises the debug/flash probe
-identities — `JLinkExe`, `openocd`, `pyocd`, `west`, `renode` and friends —
+identities — `JLinkExe`, `openocd`, `pyocd`, `west` and friends —
 for its own duration (`python/tests/conftest.py`, `PROBE_TOOLS`), so a
 which()-gated branch answers the way it answers on a CI runner rather than the
 way this host happens to be provisioned. Before that (tan-cli#603) seven

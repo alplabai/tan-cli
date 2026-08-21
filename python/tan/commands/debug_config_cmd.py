@@ -1126,11 +1126,16 @@ def _invalid_argument_failure(
     unreadable or malformed EXISTING launch.json. Neither is reachable from a
     flag value.
 
-    A DELIBERATE DIVERGENCE from the Rust oracle, which exits 5 here --
-    measured (`target/release/tan debug-config --target-kind bogus` -> 5), and
-    pinned by `test_oracle_parity.py`'s own comment ("Pins exit 5 ... across
-    both implementations"). That CASE is updated in the same commit with the
-    divergence recorded, rather than left to fail."""
+    A DELIBERATE DIVERGENCE from the retired Rust oracle, which exited 5
+    here -- measured (`target/release/tan debug-config --target-kind bogus` ->
+    5) while both implementations existed. `test_oracle_parity.py` pinned it
+    ("Pins exit 5 ... across both implementations") until tan-cli#269 deleted
+    that module with `crates/`, so there is no CASE table left to update in the
+    same commit. The line is pinned tan-side instead, on both sides of it:
+    `tests/commands/test_debug_config_command.py`'s
+    `test_a_refused_selector_is_a_coded_envelope_at_exit_2` holds the 2, and
+    `test_a_malformed_existing_launch_json_stays_an_internal_failure` holds the
+    reserved 5."""
     return _failure(
         generated_at=generated_at,
         target=target,

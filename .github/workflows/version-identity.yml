@@ -41,6 +41,10 @@ jobs:
   not-a-released-version:
     name: TAN_VERSION is not an existing tag's
     runs-on: ubuntu-latest
+    # A `fetch-depth: 0` checkout and one tag comparison -- measured under a
+    # minute (run 32046563751). The only unbounded job left in a
+    # PR-triggered workflow after ci.yml's four above (tan-cli#844).
+    timeout-minutes: 10
     steps:
       # fetch-depth: 0 — the whole point. `fetch-tags: true` with a shallow
       # fetch would also do, but 0 cannot be silently defeated by a future

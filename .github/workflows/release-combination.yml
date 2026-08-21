@@ -191,8 +191,8 @@ jobs:
         if: ${{ !matrix.expect_refuse }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci/apt-bounded.sh update
+          bash scripts/ci/apt-bounded.sh install -y --no-install-recommends \
               ninja-build device-tree-compiler gperf xz-utils
 
       - name: python (west needs it; the released tan binary does not)

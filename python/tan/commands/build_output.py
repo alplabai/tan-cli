@@ -134,7 +134,7 @@ def resolve_metadata_sdk_root(
     `.alp/sdk-path` pin > the machine-global default (`~/.alp/sdk-default`) >
     the positional walk (`resolve_sdk_root_ladder`, the NARROW ladder shared
     with `build`/`doctor`/the ten other narrowly-resolving commands -- not the
-    wide one `init`/`generate`/`examples`/`renode` take). No `ALP_SDK_ROOT` tier
+    wide one `init`/`generate`/`examples` take). No `ALP_SDK_ROOT` tier
     (tried and reverted -- see `resolve_sdk_root_ladder`'s own docstring).
 
     Kept separate from [`resolve_project_context`] because the oracle keeps them

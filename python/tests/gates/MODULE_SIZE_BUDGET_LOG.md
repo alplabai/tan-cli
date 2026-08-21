@@ -204,3 +204,31 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/validate_cmd.py: 1587 -> 1591
 - 2026-08-16 -- tan-cli#799: validate's sdk.* seam-issue text now carries a severity prefix, matching clean/size/image/run
     - tan/commands/validate_cmd.py: 1591 -> 1613
+- 2026-08-18 -- tan-cli#448: Renode is retired repo-wide; the `tan renode` verb and the three modules behind it (`tan/commands/renode_cmd.py`, `tan/core/renode_plan.py`, `tan/core/renode_sim.py`) are deleted, so `regen_module_size_budget.py` was re-run -- shrink-only, no `--reason` needed
+    - tan/cli.py: 1008 -> 1006
+    - tan/commands/renode_cmd.py: 1587 -> dropped (module deleted)
+    - function_count_budget: 261 -> 252
+- 2026-08-18 -- tan-cli#826: nine oracle-parity citations swept off the test modules tan-cli#269 deleted. Four of them said a deliberate divergence was PINNED by one of those modules; the correct replacement is not "unpinned" (an adversarial re-read of the first draft measured live tan-side tests holding all four) but the NAME of the test that took over, and cli.py's stderr rule had to be narrowed from "nothing compares stderr" to "Click's rendering is unpinned" for the same reason -- ~500 assertions under python/tests/ take stderr as their subject. Naming the real pin costs more words than either wrong version did. No code changed; every line here is a comment or docstring. scaffold.py's `_vendored_files` was kept under the 50-line function cap by tightening its wording rather than by raising the cap, so function_count_budget stays at 252.
+    - tan/cli.py: 1006 -> 1015
+    - tan/commands/debug_config_cmd.py: 1949 -> 1954
+    - tan/commands/size_cmd.py: 842 -> 849
+    - tan/core/flash_plan.py: 3199 -> 3205
+    - tan/core/scaffold.py: 1510 -> 1512
+- 2026-08-18 -- tan-cli#846: port alp-sdk#1535's _tag_resolves guard into _docs_ref (tan/planner/template.py), a verbatim relocation of scripts/alp_template.py where the same guard already lives upstream
+    - tan/planner/template.py: 1436 -> 1470
+- 2026-08-19 -- tan-cli#856: corrected the stale --fix sudo help text (3 lines longer)
+    - tan/commands/doctor_cmd.py: 4035 -> 4038
+- 2026-08-19 -- tan-cli#815: the shapes.py dedup finished. Six private helper definitions deleted (_is_file x4, _is_dir x2) plus sdk_cmd's duplicate SDK_MARKER and rejected_sdk_root_message, so seven modules shrink in the tree; the five tracked in this file are below. clean_cmd.py grows by exactly 1: it had no `from tan.core` import at all and now needs one line for SDK_MARKER, which it previously took from sdk_cmd's second spelling of the same literal.
+    - tan/commands/clean_cmd.py: 1119 -> 1120
+- 2026-08-20 -- tan-cli#810: four single-use imports moved into their call sites, so a bare `tan --version` stops loading click.testing, jsonschema, PyYAML and urllib.request (427 -> 279 modules, measured). The lines are the deferred imports plus the comment at each site saying why it is not at module scope; sdk_cmd also gains a TYPE_CHECKING block and the paragraph explaining why `_releases_opener`'s return annotation had to be respelled. REGENERATED on the merge with dev rather than resolving the ratchet conflict by side-picking: #858/#862/#851 moved tan/cli.py too, so BOTH sides' numbers were wrong for the merged tree -- ours said 1012, dev's said 1015, the merged file is 1021.
+    - tan/cli.py: 1015 -> 1021
+    - tan/commands/new_som_cmd.py: 1361 -> 1381
+    - tan/commands/sdk_cmd.py: 1415 -> 1441
+- 2026-08-21 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/cli.py: 1015 -> 1021
+    - tan/commands/new_som_cmd.py: 1360 -> 1380
+    - tan/commands/sdk_cmd.py: 1392 -> 1416
+- 2026-08-21 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/model_cmd.py: new entry at 1059
+    - tan/model/adapters/ethos_u.py: new entry at 886
+    - function_count_budget: 252 -> 264

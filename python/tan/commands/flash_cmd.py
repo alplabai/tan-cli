@@ -96,6 +96,7 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 
 import typer
 
+from tan.core.shapes import is_file as _is_file
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.dp_id import (
@@ -3310,15 +3311,6 @@ def _flow_d_preflight(
         "unset the script selects NO probe, which on a host carrying more than "
         "one J-Link cannot connect at all (tan-cli#353)."
     )
-
-
-def _is_file(path: str) -> bool:
-    """`Path::is_file`, incapable of raising -- it is called on manifest-supplied
-    strings, which may hold a NUL byte or overlong component."""
-    try:
-        return os.path.isfile(path)
-    except (OSError, ValueError):
-        return False
 
 
 def _yocto_wic_block_device_refusal(

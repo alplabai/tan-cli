@@ -6,10 +6,9 @@ ADR-0020 (alp-sdk#855 amendment) requires a two-seam parity gate before the
 `tan`-is-sole-executor migration can release. This is seam 1: **plan-shape**
 parity -- does a live `--emit build-plan` from the alp-sdk checkout under test
 still match the frozen oracle's command / env / appDir / skip-fail-decision
-shape, field for field? Seam 2 (materialise byte-check + a real build + a
-Renode smoke test) is a documented follow-up that needs a Linux toolchain
-runner -- see `tests/parity/README.md` and the `seam2` placeholder job in
-`.github/workflows/parity.yml`.
+shape, field for field? Seam 2 (materialise byte-check + a real build) needs
+a Linux toolchain runner -- see `tests/parity/README.md` and the `seam2` job
+in `.github/workflows/parity.yml`.
 
 tan-cli#320 addendum: a live `--emit build-plan` can legitimately REFUSE a
 board the frozen oracle captured as buildable -- alp-sdk#1025 taught the
