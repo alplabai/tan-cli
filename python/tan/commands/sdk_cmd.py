@@ -81,11 +81,15 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover
+    # Type-checker only. `urllib.request` is deferred into the two functions
+    # that use it (tan-cli#810), so this name exists for annotations and
+    # costs nothing at runtime -- `TYPE_CHECKING` is False in a real run.
+    from urllib.request import OpenerDirector
 
 import typer
 
@@ -912,7 +916,7 @@ def _unroutable_proxy_refusal(proxy: str | None, url: str) -> str | None:
     )
 
 
-def _releases_opener(proxy: str | None) -> urllib.request.OpenerDirector:
+def _releases_opener(proxy: str | None) -> OpenerDirector:
     """An opener carrying OUR proxy decision, never urllib's own.
 
     `urlopen` derives its handler from `getproxies_environment()`, which maps
@@ -923,7 +927,27 @@ def _releases_opener(proxy: str | None) -> urllib.request.OpenerDirector:
     what `ALL_PROXY` means, and an EMPTY mapping means DIRECT -- not "fall back
     to the environment", which would re-open the `NO_PROXY` half of the same
     defect.
+
+    tan-cli#810: `urllib.request` is imported HERE rather than at module scope.
+    `cli.py` static-imports every command module, so this file's module-scope
+    `import urllib.request` -- which drags `email`, `http` and `ssl` behind it
+    -- was paid by `tan --version`, for a stack only the two network functions
+    in this file ever touch.
+
+    The return annotation is spelled `OpenerDirector`, bound by the
+    `TYPE_CHECKING` block at the top rather than by a runtime import, and that
+    is deliberate: an annotation binds in the MODULE namespace, not the
+    function's, so `-> urllib.request.OpenerDirector` would have named
+    something no longer there. `from __future__ import annotations` keeps it a
+    string, so nothing breaks at def or call time -- but
+    `typing.get_type_hints()` on this function would raise `NameError`, and
+    that API is live in this very file (`accept_global_flags` calls it,
+    `core/global_flags.py`). It is aimed at the `sdk` COMMAND callback, never
+    at this private helper, so the two do not meet; do not add a wrapper that
+    resolves hints here without re-reading this paragraph.
     """
+    import urllib.request  # noqa: PLC0415
+
     return urllib.request.build_opener(
         urllib.request.ProxyHandler({} if proxy is None else {"http": proxy, "https": proxy}),
         urllib.request.HTTPSHandler(context=default_ssl_context()),
@@ -941,6 +965,8 @@ def _fetch_releases(url: str = GITHUB_RELEASES_URL) -> tuple[list[dict[str, Any]
     transport error escaping here is the port's recurring bug class (a traceback
     on stderr, nothing on stdout, and an extension that renders nothing).
     """
+    import urllib.request  # noqa: PLC0415 -- deferred, see `_releases_opener`
+
     request = urllib.request.Request(  # noqa: S310 -- constant https:// endpoint
         url,
         headers={

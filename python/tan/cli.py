@@ -21,7 +21,6 @@ import io
 import sys
 
 import typer
-from click.testing import CliRunner
 from typer.core import TyperCommand
 from typer.main import get_command, get_command_name
 
@@ -475,7 +474,14 @@ def _emit_help_envelope(argv: list[str]) -> int:
     `sys.exit` it: `tan --format json badcmd --help` renders help for an
     unknown command, which Click (and the oracle) both exit 2 for, and a
     process exit of 0 there would contradict the very envelope on stdout.
+
+    tan-cli#810: `CliRunner` is imported HERE, not at module scope. It is the
+    only use of `click.testing` in the package -- a TEST helper reached on one
+    production path -- and `cli.py` is imported by every `tan` invocation,
+    `tan --version` included, for a branch almost none of them take.
     """
+    from click.testing import CliRunner  # noqa: PLC0415
+
     result = CliRunner().invoke(get_command(app), argv, prog_name="tan")
     message = result.output.strip()
     code = result.exit_code

@@ -68,7 +68,6 @@ import sys
 from pathlib import Path
 
 import typer
-import yaml
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, resolve_sdk_tiered, sdk_resolution_issues
@@ -161,6 +160,10 @@ def _resolve_core(core_arg: str | None, board_yaml: str) -> str:
             "kconfig.board-yaml-missing",
             f"failed to read board.yaml at `{board_yaml}`: {err}",
         ) from err
+    import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see `new_som_cmd`'s
+    #                                 `_yaml_scalar` for why this file must not
+    #                                 import PyYAML at module scope.
+
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as err:
