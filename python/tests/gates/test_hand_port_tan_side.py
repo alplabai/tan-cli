@@ -7,6 +7,9 @@ at a hash that already carried alp-sdk#1271's `_PATH_OPT_KEYS` fix, while
 tan's `_resolve_compile` was still pre-fix -- so `tan model build` resolved
 DRP-AI's `input_shape` (`"1,3,224,224"`), `input_name` and `product` into
 absolute filesystem paths, in a release, with that gate green the whole time.
+(That specific defect is FIXED as of tan-cli#791; `HAND_PORT_KNOWN_DRIFT`
+below is empty because of it. The gate stays -- it exists for the next such
+correspondence, not for that one instance.)
 Verifying one side of a two-sided correspondence cannot fail on the other
 side; nothing had replaced the missing assurance.
 
@@ -167,16 +170,18 @@ HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
 #: failure reproduced one file later. So the permitted contents are pinned as
 #: a literal in `_LEDGER_MAY_ONLY_CONTAIN` below: growing this table requires
 #: editing that set too, in a diff a reviewer sees.
-HAND_PORT_KNOWN_DRIFT: dict[str, str] = {
-    "scripts/alp_cli/model.py": (
-        "tan/commands/model_cmd.py's _resolve_compile is still pre-alp-sdk#1271: "
-        "it resolves EVERY string compile option to a path, so DRP-AI's "
-        "input_shape/input_name/product are corrupted into filesystem paths. "
-        "Upstream restricts this to _PATH_OPT_KEYS = {config, calibration, "
-        "images, spec}. Tracked by tan-cli#777; delete this entry and add the "
-        "pairing to HAND_PORT_TAN_SIDE when that lands."
-    ),
-}
+#:
+#: EMPTY, and that is the good state. Its one entry -- `scripts/alp_cli/model.py`,
+#: recording that `_resolve_compile` was still pre-alp-sdk#1271 -- was dropped
+#: when tan-cli#791 merged `dev`, because that PR closes BOTH halves of it:
+#: `scripts/alp_cli/model.py` is no longer pinned in `HAND_PORT_HASHES` at all
+#: (ADR-0028 relocated the engine into `tan/model/**`, see that pin's own
+#: comment), and `tan/commands/model_cmd.py` now carries
+#: `_PATH_OPT_KEYS = {"config", "calibration", "images", "spec"}` with
+#: `_resolve_compile` restricted to it, so shape strings, node names and
+#: product ids pass through unchanged. Verified on the merged tree, not
+#: assumed from the pin being gone.
+HAND_PORT_KNOWN_DRIFT: dict[str, str] = {}
 
 
 #: The ONLY hand-ports allowed to decline a file-level pairing. Pinned for the
@@ -316,7 +321,7 @@ def test_every_declared_tan_counterpart_exists_on_disk():
 #: The ONLY hand-ports allowed to sit in `HAND_PORT_KNOWN_DRIFT`. Pinned as a
 #: literal so the ledger cannot grow quietly: adding an entry means editing
 #: this set in the same diff, with the reason visible to a reviewer.
-_LEDGER_MAY_ONLY_CONTAIN: frozenset[str] = frozenset({"scripts/alp_cli/model.py"})
+_LEDGER_MAY_ONLY_CONTAIN: frozenset[str] = frozenset()
 
 #: A tracking reference is `<repo>#<number>`. A bare `tan-cli#` passed the
 #: substring test this replaced, so the reason string could name no issue at

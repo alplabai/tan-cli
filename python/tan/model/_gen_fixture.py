@@ -22,7 +22,11 @@ from pathlib import Path
 from .manifest import Manifest, Tensor, Target, Coverage
 from .package import write_package
 
-_SDK_MARKER = ("scripts", "alp_project.py")
+#: Aliased, never redefined (tan-cli#815). This used to be a second literal
+#: spelling of the same tuple; the copy was byte-identical the day it landed,
+#: which is exactly when a second copy is cheapest to remove. The private name
+#: is kept because this module's call sites use it.
+from tan.core.shapes import SDK_MARKER as _SDK_MARKER  # noqa: E402
 
 
 def _manifest() -> Manifest:

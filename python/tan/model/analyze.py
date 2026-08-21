@@ -36,7 +36,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
 
 from .adapters import CompilerAdapter
 from .adapters.cpu import CpuAdapter
@@ -191,6 +190,14 @@ def resolve_ethos_u_variant(sku: str, *, metadata_root: Path) -> str | None:
     preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
     if not preset_path.is_file():
         return None
+    # Deferred, not module-scope (tan-cli#810). `tan/cli.py` imports every
+    # command module, `model_cmd` imports `tan.core.model_check`, and that
+    # imports THIS module -- so a module-scope `import yaml` here is paid by
+    # `tan --version`. This is the only `yaml` call in the file, and
+    # `tan/commands/monitor_cmd.py`'s `import serial` is the in-tree pattern.
+    # Pinned by `tests/gates/test_cli_import_is_lean.py`.
+    import yaml  # noqa: PLC0415
+
     preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
     # `or {}`, not a `.get(..., {})` default: a preset carrying an explicit
     # but EMPTY `inference:` block parses to `{"inference": None}`, and the

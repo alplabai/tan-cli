@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-import yaml
 
 from tan.soc_ref import resolve_soc_path
 
@@ -236,6 +235,12 @@ def resolve_targets(sku: str, *, metadata_root: Path) -> list[TargetSpec]:
     preset_path = metadata_root / "e1m_modules" / f"{sku}.yaml"
     if not preset_path.is_file():
         raise FileNotFoundError(f"no SoM preset for SKU {sku} at {preset_path}")
+    # Deferred, same reason as `analyze.py`'s (tan-cli#810): `tan/cli.py`
+    # imports every command module, and the chain from `model_cmd` reaches
+    # this file, so a module-scope `import yaml` here is paid by
+    # `tan --version`. Pinned by `tests/gates/test_cli_import_is_lean.py`.
+    import yaml  # noqa: PLC0415
+
     preset = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
 
     silicon = preset["silicon"]                                 # host SoC, e.g. "alif:ensemble:e7"

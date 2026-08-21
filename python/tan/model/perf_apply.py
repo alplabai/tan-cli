@@ -44,7 +44,6 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 
-import yaml
 
 from .analyze import BackendReport, OpVerdict
 from .perf import PerfPoint, coverage_from_placement, find_perf_points
@@ -141,6 +140,14 @@ def _resolve_hw_rev(sku: str, metadata_root: Path, declared: str | None) -> str 
     would have been served r1's if the preset defaulted there)."""
     if declared:
         return declared
+    # Deferred, same reason as `analyze.py` and `targets.py` (tan-cli#810):
+    # the chain from `model_cmd` reaches this file on a bare `import tan.cli`.
+    # Per-function, not once at the top of the module -- BOTH the parse and
+    # the `except yaml.YAMLError` below need the name bound, and this file has
+    # two independent readers of the same preset. Pinned by
+    # `tests/gates/test_cli_import_is_lean.py`.
+    import yaml  # noqa: PLC0415
+
     preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
     if not preset_path.is_file():
         return None
@@ -237,6 +244,9 @@ def _topology_core_ids(sku: str, metadata_root: Path) -> set[str]:
     means refuse" reading `find_perf_points` already gives a `None` `hw_rev`
     (`PerfPoint.hw_rev` is REQUIRED and non-empty, so it can never equal an
     unresolvable query value either)."""
+    # Deferred per-function -- see the note on the first preset reader above.
+    import yaml  # noqa: PLC0415
+
     preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
     try:
         preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
