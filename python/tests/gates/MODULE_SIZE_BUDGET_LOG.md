@@ -132,3 +132,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 255 -> 256
 - 2026-08-14 -- rebase onto #745: recompute after tan-cli#744's planner growth and tan-cli#747/#746 landed in the same budget
     - function_count_budget: 256 -> 257
+- 2026-08-21 -- tan-cli#811: doctor_cmd.on_path's pathlib->os.path perf-fix docstring carries the measured before/after evidence house style requires; +11 lines, not split out
+    - tan/commands/doctor_cmd.py: 4003 -> 4014

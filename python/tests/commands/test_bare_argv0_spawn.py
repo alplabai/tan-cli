@@ -543,6 +543,53 @@ def test_an_empty_pathext_entry_never_becomes_the_bare_name_by_accident():
     assert windows_candidate_names("npm", "") == []
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="resolve_tool's Windows walk cannot be reached from POSIX -- Path "
+    "dispatches on os.name at construction (tool_lookup.py's own docstring)",
+)
+def test_resolve_tool_windows_walk_normalises_its_hit(tmp_path, monkeypatch):
+    """tan-cli#811's other half: `tool_lookup.resolve_tool`'s Windows branch
+    took the same `Path(directory) / name` + `Path.is_file()` -> `os.path.join`
+    + `os.path.isfile` swap as `doctor_cmd.on_path`. Pin that the returned
+    string is still the `os.path.normpath`-equivalent of what `str(Path(...))`
+    used to produce -- this value becomes `argv[0]` for a real spawn
+    (`resolve_program_positions`), so a stray forward slash or missing
+    normalisation here is a spawn-time regression, not a cosmetic one.
+
+    `normcase` on both sides, not a bare `==`: the walk's winning candidate is
+    `tan811tool.EXE` (built from `%PATHEXT%`'s own casing, per
+    `windows_candidate_names`), matched against the on-disk `tan811tool.exe`
+    only because NTFS lookups are case-insensitive -- the SAME casing
+    behaviour the pre-fix `Path.is_file()` walk had, since it is a predicate
+    over the candidate string, never a report of the disk's own spelling.
+
+    The `isinstance(..., str)` assertion at the end is the one that actually
+    fails on the pre-fix code: on 3.14 `Path.is_file()` itself delegates to
+    `os.path.isfile(self)`, so patching `os.path.isfile` alone cannot tell
+    the two implementations apart by CALL COUNT -- only by what gets handed
+    to it, a `Path` before this fix and a plain `os.path.join` string after."""
+    from tan.core.tool_lookup import resolve_tool
+
+    real_dir = tmp_path / "realbin"
+    _executable(real_dir, "tan811tool")
+
+    probed: list = []
+    real_isfile = os.path.isfile
+    monkeypatch.setattr(os.path, "isfile", lambda p: (probed.append(p), real_isfile(p))[1])
+
+    resolution = resolve_tool("tan811tool", {"PATH": str(real_dir), "PATHEXT": ".COM;.EXE;.BAT;.CMD"})
+
+    expected = os.path.normpath(os.path.join(str(real_dir), "tan811tool.EXE"))
+    assert resolution.resolved is not None
+    assert os.path.normcase(resolution.resolved) == os.path.normcase(expected), resolution.resolved
+    assert probed, "resolve_tool's Windows walk never probed a single candidate"
+    assert all(isinstance(p, str) for p in probed), (
+        f"a candidate was a pathlib.Path, not a plain str -- the tan-cli#811 "
+        f"os.path.join swap regressed back to per-candidate Path construction: {probed}"
+    )
+
+
 # ── tan size ────────────────────────────────────────────────────────────────
 
 

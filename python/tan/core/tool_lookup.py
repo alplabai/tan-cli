@@ -174,14 +174,21 @@ def resolve_tool(tool: str, env: Mapping[str, str]) -> ToolResolution:
     path = env.get("PATH")
     if not path:
         return ToolResolution(None, "PATH is unset")
+    # tan-cli#811: `os.path.join`/`os.path.isfile`, not `Path(directory) /
+    # name` + `Path.is_file()` -- same candidate set, same one-stat-per-
+    # candidate cost, but without pathlib's per-join path re-parse; see
+    # `doctor_cmd.on_path`'s docstring for the measured before/after. As
+    # there, `os.path.normpath` runs only on the value actually returned
+    # (a miss never touches it), and only there because `str(Path(...))`
+    # is what this used to hand back.
     names = windows_candidate_names(tool, env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD"))
     for directory in path.split(os.pathsep):
         if not directory:
             continue
         for name in names:
-            candidate = Path(directory) / name
-            if candidate.is_file():
-                return ToolResolution(str(candidate), f"PATH: {path}")
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate):
+                return ToolResolution(os.path.normpath(candidate), f"PATH: {path}")
     return ToolResolution(None, f"PATH: {path}")
 
 

@@ -406,6 +406,17 @@ def on_path(command: str) -> str | None:
     tooling -- and a later flow would spawn exactly that project-controlled
     binary. `crate::util::command_on_path` walks PATH by hand for this reason;
     so does this.
+
+    **tan-cli#811.** `os.path.join`/`os.path.isfile`, not `Path(directory) /
+    (command + ext)` + `Path.is_file()` -- same one-stat-per-candidate cost,
+    but a string join beats a `PurePath` parse/validate on every candidate.
+    Measured (48-entry PATH, 15 suffixes, full miss, 3 runs of 20 calls):
+    pathlib 0.0047-0.0051 s/call, os.path 0.0030-0.0031 s/call (~1.6x; see
+    the commit message for the full before/after and issue #811's own
+    92-entry/1380-candidate numbers). `os.path.normpath` runs ONLY on the
+    returned value, never per candidate: `renode_cmd.py:78` documents this
+    string as envelope-visible, so a hit still needs the `str(Path(...))`
+    casing this used to produce.
     """
     raw = os.environ.get("PATH") or ""
     if os.name == "nt":
@@ -420,10 +431,10 @@ def on_path(command: str) -> str | None:
         if not directory:
             continue
         for ext in exts:
-            candidate = Path(directory) / (command + ext)
+            candidate = os.path.join(directory, command + ext)
             try:
-                if candidate.is_file() and os.access(candidate, os.X_OK):
-                    return str(candidate)
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    return os.path.normpath(candidate)
             except OSError:
                 # A PATH entry on a dead network share, a name too long for the
                 # filesystem: skip the entry, never fail the command.

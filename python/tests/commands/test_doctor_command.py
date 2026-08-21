@@ -1865,6 +1865,92 @@ def test_path_lookup_never_consults_the_current_directory(tmp_path, monkeypatch)
     assert doctor_cmd.on_path("west") is None
 
 
+@pytest.mark.skipif(os.name != "nt", reason="PATHEXT search order is Windows-only")
+def test_on_path_normalises_a_hit_and_stops_walking_at_it(tmp_path, monkeypatch):
+    """tan-cli#811: `on_path` swapped `Path(directory) / (command + ext)` +
+    `Path.is_file()` for `os.path.join` + `os.path.isfile`, for cost, not
+    behaviour -- this pins the three things that swap could quietly break.
+
+    (1) The returned string is still `os.path.normpath`-equivalent to what
+    `str(Path(...))` used to hand back -- `renode_cmd.py:78` documents that
+    this exact string is customer-visible (`data.renodeArgv[0]`), so a
+    format drift here is not cosmetic.
+    (2) The walk still STOPS at the first hit. `command` alone (no
+    extension) and each of `.COM`/`.EXE` sort before `.BAT` in `exts = [""]
+    + PATHEXT`, none of which exist here, so a correct walk tries exactly
+    3 misses in `hit_dir` before the `.BAT` hit and NEVER reaches
+    `unreached_dir`, the next `%PATH%` entry.
+    (3) Every candidate probed is a plain `str`, not a `pathlib.Path` -- this
+    is the actual FIX, and the one assertion below that fails on the
+    pre-fix code: on 3.14, `Path.is_file(follow_symlinks=True)` itself calls
+    `os.path.isfile(self)` (`pathlib._local.PathBase.is_file`), so patching
+    `os.path.isfile` sees candidates from BOTH implementations, but the
+    pre-fix walk hands it the `Path` object it just built -- paying the
+    per-candidate parse/validate cost this issue measured -- while the
+    post-fix walk hands it the `os.path.join` string directly.
+    """
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    hit_dir = tmp_path / "hit_dir"
+    hit_dir.mkdir()
+    unreached_dir = tmp_path / "unreached_dir"
+    unreached_dir.mkdir()
+    target = hit_dir / "tan811probe.BAT"
+    target.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join([str(empty_dir), str(hit_dir), str(unreached_dir)])
+    )
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+    probed: list = []
+    real_isfile = os.path.isfile
+    monkeypatch.setattr(os.path, "isfile", lambda p: (probed.append(p), real_isfile(p))[1])
+
+    resolved = doctor_cmd.on_path("tan811probe")
+
+    assert resolved == os.path.normpath(str(target)), resolved
+    assert not any(str(unreached_dir) in str(p) for p in probed), (
+        f"walked past the hit into the next PATH entry: {probed}"
+    )
+    # empty_dir: 5 misses ("" + 4 PATHEXT suffixes). hit_dir: "", .COM, .EXE
+    # miss, .BAT hits -- 4 candidates, not 5, because the hit short-circuits
+    # the inner loop before .CMD is ever tried.
+    assert len(probed) == 5 + 4, f"expected 9 candidates probed, saw {len(probed)}: {probed}"
+    assert all(isinstance(p, str) for p in probed), (
+        f"a candidate was a pathlib.Path, not a plain str -- the tan-cli#811 "
+        f"os.path.join swap regressed back to per-candidate Path construction: {probed}"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PATHEXT search order is Windows-only")
+def test_on_path_full_miss_probes_every_candidate_exactly_once(tmp_path, monkeypatch):
+    """Pins the loop's own asymptotics so the tan-cli#811 cost fix can never
+    quietly turn into a candidate-set change: a full miss must probe every
+    (PATH entry x PATHEXT suffix) candidate exactly once, matching the
+    `len(PATH entries) * len(exts)` count issue #811 measured (1380 on its
+    92-entry host) -- not fewer (a narrower search than before) and not more
+    (the extra per-candidate work #811 exists to remove, reintroduced)."""
+    dirs = [tmp_path / f"d{i}" for i in range(4)]
+    for d in dirs:
+        d.mkdir()
+    monkeypatch.setenv("PATH", os.pathsep.join(str(d) for d in dirs))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+    probed: list = []
+    real_isfile = os.path.isfile
+    monkeypatch.setattr(os.path, "isfile", lambda p: (probed.append(p), real_isfile(p))[1])
+
+    assert doctor_cmd.on_path("tan811-full-miss-probe") is None
+    exts = 1 + 4  # "" + 4 PATHEXT suffixes
+    assert len(probed) == len(dirs) * exts, f"expected {len(dirs) * exts}, saw {len(probed)}"
+    assert len(set(str(p) for p in probed)) == len(probed), f"a candidate was probed twice: {probed}"
+    assert all(isinstance(p, str) for p in probed), (
+        f"a candidate was a pathlib.Path, not a plain str -- the tan-cli#811 "
+        f"os.path.join swap regressed back to per-candidate Path construction: {probed}"
+    )
+
+
 # --------------------------------------------------------------------------
 # Framing
 # --------------------------------------------------------------------------
