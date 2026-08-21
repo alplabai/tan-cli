@@ -123,6 +123,57 @@ def un_edit_iot_extra_conf_order(text: str) -> str:
     return _IOT_EXTRA_CONF_PREPEND.sub(r"list(APPEND \1)", text)
 
 
+#: tan-cli#814: the emit's own sentence tells the customer to flip `som.sku`
+#: to `E1M-V2M101` in `board.yaml` and stop there. On the `E1M-V2N101` sibling
+#: that is correct (V2N101/V2M101 are the same PCB, same `preset:`/`cores:`/
+#: `pins:`), but here it is a cross-family swap (`alif-ensemble` ->
+#: `renesas-rzv2n-deepx`) that leaves `preset: e1m-evk`, `cores:` and `pins:`
+#: all pinned to the Alif module -- measured: `tan validate` refuses with
+#: ALP-B007 (board/family mismatch), then two more hard exits (`cores:` names
+#: unknown ids, then a `pins:` route not on the resolved board) once that is
+#: patched around. Matches the literal sentence, not a paraphrase, so an
+#: unrelated README edit still fails this gate.
+_EDGE_AI_AEN801_README_DEEPX_NOTE = (
+    "For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template\n"
+    "edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,\n"
+    "`cores:` and `pins:` pinned to this module and `tan validate` refuses it."
+)
+_EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED = (
+    "Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path."
+)
+
+
+def un_edit_edge_ai_aen801_readme_deepx_note(text: str) -> str:
+    """tan-cli#814: undo the README correction above to recover the emit's
+    own (still-wrong) sentence -- alp-sdk has not been fixed yet, so the live
+    emit still says this."""
+    return text.replace(
+        _EDGE_AI_AEN801_README_DEEPX_NOTE, _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
+    )
+
+
+#: Same tan-cli#814 defect, the `board.yaml` comment that reinforces the bad
+#: README instruction one file over.
+_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE = (
+    "and classifies the integrity state.  The V2N\n"
+    "# DEEPX path is a separate scaffold (--som E1M-V2M101), not a som.sku flip\n"
+    "# here -- see this project's README."
+)
+_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED = (
+    "and classifies the integrity state.  Same source\n"
+    "# targets the V2N DEEPX path when som.sku is flipped."
+)
+
+
+def un_edit_edge_ai_aen801_board_yaml_deepx_note(text: str) -> str:
+    """tan-cli#814: undo the `board.yaml` comment correction to recover the
+    emit's own (still-wrong) comment."""
+    return text.replace(
+        _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE,
+        _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED,
+    )
+
+
 #: The hand-edits `python/tan/templates/vendored/MANIFEST.md` declares under
 #: "Deliberate edits on top of the emit" -- the only bytes in that tree that
 #: are NOT what `--emit scaffold` produced, each because the emit's own output
@@ -156,6 +207,18 @@ DELIBERATE_EDITS: dict[tuple[str, str, str], tuple[str, Callable[[str], str]]] =
         "tan-cli#379: list(PREPEND EXTRA_CONF_FILE ...) so a caller's own "
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
         un_edit_iot_extra_conf_order,
+    ),
+    ("edge-ai", "E1M-AEN801", "README.md"): (
+        "tan-cli#814: the emit's `Flip som.sku to E1M-V2M101` sentence is a "
+        "cross-family swap here (alif-ensemble -> renesas-rzv2n-deepx) that "
+        "tan validate refuses; the E1M-V2N101 sibling's identical sentence "
+        "is correct and untouched",
+        un_edit_edge_ai_aen801_readme_deepx_note,
+    ),
+    ("edge-ai", "E1M-AEN801", "board.yaml"): (
+        "tan-cli#814: same defect as the README entry above, the comment "
+        "one file over that reinforces it",
+        un_edit_edge_ai_aen801_board_yaml_deepx_note,
     ),
     # tan-cli#501 review finding 1: a matching PREPEND was added to the four
     # `sensor`/`diagnostics` CMakeLists.txt files under the same
@@ -386,6 +449,20 @@ def self_check() -> None:
     as_emitted, failures = undo_declared_edits(template, sku, {path: drifted})
     assert not [f for f in failures if f.startswith(f"{path}:")], failures
     assert diff_trees({path: as_emitted[path]}, {path: emitted}) == [f"{path}: content differs"]
+
+    # tan-cli#814's two entries: the un_edit must round-trip the corrected
+    # README/board.yaml prose back onto the emit's own (still-wrong) sentence,
+    # and be registered under the exact (template, sku, path) diff_trees keys on.
+    assert ("edge-ai", "E1M-AEN801", "README.md") in DELIBERATE_EDITS
+    assert (
+        un_edit_edge_ai_aen801_readme_deepx_note(_EDGE_AI_AEN801_README_DEEPX_NOTE)
+        == _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
+    )
+    assert ("edge-ai", "E1M-AEN801", "board.yaml") in DELIBERATE_EDITS
+    assert (
+        un_edit_edge_ai_aen801_board_yaml_deepx_note(_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE)
+        == _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED
+    )
 
     # `missing_extras` needs a real SDK checkout (a live example directory) to
     # say anything -- `resolve_example_dir` returning `None` (no SDK bound) is

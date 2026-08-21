@@ -72,14 +72,14 @@ curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | 
 See [`docs/release-contract.md`](docs/release-contract.md) for asset names,
 manual verification, and OS support.
 
-The v0.5 release publishes four archives:
+Every release publishes four archives:
 
 - Windows x64
 - Linux x64 with glibc
 - macOS x64
 - macOS arm64
 
-Linux arm64, Linux musl, and Windows arm64 do not have prebuilt v0.5 archives.
+Linux arm64, Linux musl, and Windows arm64 do not have prebuilt archives.
 Install from source on those hosts.
 
 ### From source
@@ -248,8 +248,13 @@ move.
 | Explain a template or generation target | `tan explain` |
 | Show help | `tan <command> --help` |
 
-On a multi-core SoM, `debug-config` needs `--core <name>` to pick a target;
-without it, it exits 2 with `debug-config.target-kind-ambiguous`.
+When a project's `build/system-manifest.yaml` names more than one debug
+target class (e.g. a `yocto` A-cluster slice beside a `zephyr` M-core slice),
+`debug-config` exits 2 with `debug-config.target-kind-ambiguous`; pass
+`--target-kind <zephyr-mcu|baremetal-mcu|yocto-userspace|native-host>`, or
+`--core <core_id>` to narrow to one slice. A multi-core SoM whose cores all
+share one target class (e.g. two Zephyr cores) is unaffected -- the classes
+fold to one and no flag is needed.
 
 The full command surface also includes `scaffold`, `completion`, `diff`,
 `pinmux`, `inspect`, `trace`, `support-bundle`, `kconfig`, `faultdecode`,
@@ -282,7 +287,7 @@ one-off override:
 tan build --sdk-root /path/to/alp-sdk
 ```
 
-`tan sdk list` and `tan sdk current` work in v0.5. `tan sdk install` and
+`tan sdk list` and `tan sdk current` work today. `tan sdk install` and
 `tan sdk switch` are not implemented yet, so clone the SDK yourself and use
 `--sdk-root` or let `tan init` write the project pin.
 
@@ -297,8 +302,11 @@ tan build --format json
 The stable top-level envelope is:
 
 ```text
-{command, ok, exitCode, project, sdk, data, issues}
+{command, ok, exitCode, project, data, issues}
 ```
+
+plus an optional `sdk` object, present only on commands that resolved an
+alp-sdk checkout -- absent, never null, when none was resolved.
 
 **You do not need a flag for this.** tan already treats a run as
 non-interactive when `stdin` or `stderr` is not a terminal — piped, redirected,

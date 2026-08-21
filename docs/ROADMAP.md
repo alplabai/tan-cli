@@ -39,8 +39,8 @@ The stable line and the current opt-in pre-release line:
 
 | Component | Stable | Opt-in / pre-release |
 |---|---|---|
-| alp-sdk | **v0.15.0** | none live; tan parity may pin a newer exact commit than the latest tag |
-| tan | **v0.5.1** — shipping Python port | none live |
+| alp-sdk | **v0.15.0** | **v0.16.0-rc1** |
+| tan | **v0.5.1** — shipping Python port | **v0.6.0-rc1** |
 | Alp IDE | **v0.4.0** | **v0.5.x** pre-release channel |
 
 The Python `tan` line is now stable: `v0.5.0` shipped general availability and

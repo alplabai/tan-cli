@@ -310,8 +310,9 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **one** live entry (the
-`iot` CMakeLists edit). tan-cli#384's seven `README.md` doc-link entries are
+The `DELIBERATE_EDITS` table below currently carries **three** live entries
+(the `iot` CMakeLists edit, plus the two tan-cli#814 `edge-ai`/`E1M-AEN801`
+entries added below). tan-cli#384's seven `README.md` doc-link entries are
 NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0` tag
 (see "Current vendor point" above); listed here only as history, not as a
 current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists edits
@@ -374,6 +375,26 @@ strictness exists to catch.
    plain `list(APPEND …)`, which is what `--emit scaffold` produces unedited
    for these four files, so they carry no deliberate edit anymore and this
    entry is not live.
+4. **`edge-ai`/`E1M-AEN801`'s `README.md`: the DEEPX DX-M1 retarget sentence
+   (tan-cli#814).** The emit says "Flip `som.sku` in `board.yaml` to
+   `E1M-V2M101` for the DEEPX DX-M1 path" — correct on the `E1M-V2N101`
+   sibling (V2N101/V2M101 share one PCB, so every other field the flip
+   leaves untouched already matches), but wrong here: `E1M-AEN801`'s
+   `board.yaml` pins `preset: e1m-evk` (which `metadata/boards/e1m-evk.yaml`
+   hosts only `alif-ensemble`/`nxp-imx9`, not V2M101's
+   `renesas-rzv2n-deepx`), plus Alif-shaped `cores:`/`pins:`. MEASURED against
+   `v0.16.0-rc1`: performing exactly the documented edit and nothing else,
+   `tan validate` refuses three times in a row (ALP-B007 board/family
+   mismatch, then an unknown-`cores:` refusal, then a `pins:` route not on
+   the resolved board). Rewritten to tell the customer to re-scaffold
+   (`tan init --template edge-ai-starter --som E1M-V2M101`) instead of
+   editing `som.sku` in place. Fix belongs upstream, in alp-sdk's
+   `examples/ai/cold-chain-monitor/README.md`; declared here pending that fix
+   and a re-vendor.
+5. **`edge-ai`/`E1M-AEN801`'s `board.yaml`: the comment reinforcing the same
+   sentence (tan-cli#814).** "Same source targets the V2N DEEPX path when
+   som.sku is flipped" is the comment-form of entry 4's defect, one file
+   over. Reworded to point at the re-scaffold instead.
 
 ## Template x SKU matrix vendored
 

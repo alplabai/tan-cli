@@ -1001,7 +1001,9 @@ def _scaffold_cmakelists(text: str) -> str:
     Two shapes exist across the catalog's example CMakeLists.txt files
     today: the `if(DEFINED ENV{ALP_SDK_ROOT}) ... else()
     get_filename_component(...)` guess most examples carry immediately
-    above `include(${ALP_SDK_ROOT}/cmake/alp.cmake)`, and
+    above a direct `execute_process(... scripts/alp_project.py ...)`
+    call (PLANNED to become `include(${ALP_SDK_ROOT}/cmake/alp.cmake)`
+    once that helper merges -- unmerged, tan-cli#825), and
     `cold-chain-monitor`'s own hardcoded
     `${CMAKE_CURRENT_SOURCE_DIR}/../../../scripts/alp_project.py` call
     with no ALP_SDK_ROOT resolution at all (worse: no override is even

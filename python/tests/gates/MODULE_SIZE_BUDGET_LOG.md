@@ -185,3 +185,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/planner/template.py: 1436 -> 1470
 - 2026-08-19 -- tan-cli#856: corrected the stale --fix sudo help text (3 lines longer)
     - tan/commands/doctor_cmd.py: 4035 -> 4038
+- 2026-08-21 -- tan-cli#825: hedge cmake/alp.cmake as PLANNED (unmerged) across generate_cmd.py and template.py
+    - tan/commands/generate_cmd.py: 1348 -> 1360
+    - tan/planner/template.py: 1470 -> 1472

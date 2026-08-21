@@ -40,18 +40,20 @@ the [repo README](../README.md).
   verifies its SHA-256 against the pinned digest, and only then installs it.
 - `bin/tan.js` forwards `tan …` invocations to `tan-cli-lib/tan[.exe]`.
 
-**From v0.5.0 — the transition tag, not cut yet — the asset becomes an
-archive of a PyInstaller `--onedir` freeze**, not a raw binary
+**From v0.5.0 (shipped 2026-08-04) the asset is an archive of a PyInstaller
+`--onedir` freeze**, not a raw binary
 ([#349](https://github.com/alplabai/tan-cli/issues/349)). Every tag published
-so far, including `v0.5.0-rc4`, still ships the raw binary this shim asks for
-as a fallback; asking for the archive name unconditionally was
-[#362](https://github.com/alplabai/tan-cli/issues/362) — a name no published
-tag carries yet, so it 404'd, including at this shim's own pinned version.
-`postinstall.js`'s `selectRelease` decides which shape a given tag actually
-published from its `checksums.txt` (the same rule `install.sh` /
-`install.ps1` follow, [#356](https://github.com/alplabai/tan-cli/issues/356)),
-never from the version number, so both shapes install correctly for as long as
-raw tags remain installable.
+since, including this shim's own pinned version, ships only that archive
+shape; the raw `tan-<target>[.exe]` name this shim also asks for is a legacy
+fallback reachable only on `v0.4.1` and earlier. Asking for the archive name
+unconditionally, before any tag published it, was
+[#362](https://github.com/alplabai/tan-cli/issues/362) — it 404'd on every tag
+that existed at the time. `postinstall.js`'s `selectRelease` decides which
+shape a given tag actually published from its `checksums.txt` (the same rule
+`install.sh` / `install.ps1` follow,
+[#356](https://github.com/alplabai/tan-cli/issues/356)), never from the
+version number, so both shapes still install correctly if an old tag is ever
+requested by `--version`.
 
 The archive's one top-level entry is `tan/`, holding `tan` (`tan.exe` on
 Windows) plus `_internal/`, the runtime — **the executable does not run

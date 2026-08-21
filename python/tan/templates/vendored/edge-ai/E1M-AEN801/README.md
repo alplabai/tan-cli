@@ -48,7 +48,9 @@ west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .
 west flash
 ```
 
-Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path.
+For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template
+edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,
+`cores:` and `pins:` pinned to this module and `tan validate` refuses it.
 
 ## Model
 
