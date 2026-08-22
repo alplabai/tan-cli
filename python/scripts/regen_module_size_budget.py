@@ -34,8 +34,12 @@ deliberately different so the reason a number moved stays visible in the
                          reviewed branches, each of which already justified
                          its own growth (with its own --reason) before it
                          merged. No new judgement call is being made here, so
-                         no new ledger entry is written -- the reasons already
-                         exist, on the two commits this merge combined.
+                         the ledger line it writes carries no reason of its
+                         own -- it records the re-measurement and points at
+                         the two commits this merge combined, which is where
+                         the reasons already are. (This used to say "no new
+                         ledger entry is written". The code has always written
+                         one; the sentence was wrong, not the behaviour.)
 
 Usage:
 
@@ -46,6 +50,32 @@ Usage:
     python scripts/regen_module_size_budget.py --check          # exit 1 if
                                                                   stale, write
                                                                   nothing
+
+The file also carries an `observed_tests` section (tan-cli#817): line counts
+for `python/tests/**` over the cap. Those are a RECORD, not a budget. They are
+refreshed by every plain run above, they never require `--reason`, and they
+never write a ledger line -- growing a test file is not a ceiling raise. See
+`TEST_ROOT` in `tests/gates/_module_size_budget_core.py` for the scope
+decision and the measurements behind it.
+
+Two consequences of that section being refreshed UNCONDITIONALLY, on every
+write path, worth knowing before you run this (review of #875):
+
+* A contributor raising a `tan/**` ceiling with `--reason` also commits
+  whatever `tests/**` drift has accumulated on `dev` since the last refresh,
+  in the same file. That is live, not hypothetical -- and it is the same
+  absolute-measurement conflict surface tan-cli#668 created this file to
+  remove. `--merge-resync` resolves it for the observed section exactly as it
+  does for the budgeted one: re-measure the merged tree and record it, no new
+  judgement call.
+* `--check` and the pytest gate do not agree on what "stale" means, on
+  purpose. `--check` compares EXACTLY and reds on a one-line drift;
+  `tests/gates/test_module_size_budget.py` tolerates `max(200, 10%)` of the
+  recorded count so an ordinary PR is not taxed, and only demands agreement
+  on WHICH files are over the cap. A tree can therefore satisfy the gate and
+  still be `--check`-stale. Only the gate runs in CI -- this script is in no
+  workflow -- so that asymmetry costs nothing today, but do not read a green
+  `pytest` as a green `--check`.
 """
 from __future__ import annotations
 
@@ -103,14 +133,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     current = core.measure_current()
+    observed = core.measure_observed_tests()
     if core.GENERATED_PATH.exists():
         try:
             committed = core.load_generated()
+            committed_observed = core.load_observed_tests()
         except ValueError as err:
             print(f"error: {err}", file=sys.stderr)
             return 1
     else:
         committed = core.MeasuredState(modules={}, function_count=0, function_worst=0)
+        committed_observed = {}
 
     module_grown, module_shrunk = _deltas(committed.modules, current.modules)
     count_grown, count_shrunk = _scalar_delta(
@@ -122,7 +155,14 @@ def main(argv: list[str] | None = None) -> int:
     grown = module_grown + count_grown + worst_grown
     shrunk = module_shrunk + count_shrunk + worst_shrunk
 
-    if not grown and not shrunk:
+    # tan-cli#817: the observed `tests/**` deltas are computed and REPORTED,
+    # and deliberately kept out of `grown`/`shrunk` above. Those two lists are
+    # what the `--reason` refusal below reads, so folding the observed side
+    # into them would silently convert this record into the ratchet the scope
+    # decision rejected -- see `TEST_ROOT` in _module_size_budget_core.py.
+    observed_moved, observed_settled = _deltas(committed_observed, observed)
+
+    if not grown and not shrunk and not observed_moved and not observed_settled:
         print("module_size_budget.generated.json already matches the measured tree.")
         return 0
 
@@ -130,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         print("module_size_budget.generated.json is stale:")
         for line in grown + shrunk:
             print(f"  {line}")
+        for line in observed_moved + observed_settled:
+            print(f"  observed: {line}")
         print("Run `python scripts/regen_module_size_budget.py` to refresh it.")
         return 1
 
@@ -145,12 +187,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    core.GENERATED_PATH.write_text(core.dump_generated(current), encoding="utf-8")
+    core.GENERATED_PATH.write_text(core.dump_generated(current, observed), encoding="utf-8")
     print(f"wrote {core.GENERATED_PATH}")
     for line in shrunk:
         print(f"  shrunk: {line}")
     for line in grown:
         print(f"  grown:  {line}")
+    for line in observed_settled + observed_moved:
+        print(f"  observed (tests/, not gated): {line}")
 
     if grown and args.reason:
         _append_log(args.reason, grown)

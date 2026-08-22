@@ -32,6 +32,25 @@ in the same "keep both sides" shape that is already correct for
 state, so two branches that each grow a module produce two non-conflicting
 lines instead of one contested number.
 
+## What this gates, and what it only watches (tan-cli#817)
+
+GATED: `python/tan/**`. OBSERVED, never gated: `python/tests/**`.
+
+That distinction is the whole of tan-cli#817, and it is stated here because
+the issue's first complaint was that it was stated nowhere -- "a reader who
+finds test_module_size_budget.py reasonably concludes the repo has file-size
+drift under control", while half the Python in the repo, including its single
+largest file, sat outside every number on this page. It no longer sits outside
+the MEASUREMENT: `observed_tests` in the generated file records every
+`tests/**` file over the cap, so growth shows up in a diff. It still sits
+outside the ENFORCEMENT, deliberately and for a measured reason -- see
+`TEST_ROOT` in `_module_size_budget_core.py`, and
+`test_the_observed_test_tree_is_recorded_not_gated` below, which pins the
+decision end-to-end rather than trusting this paragraph.
+
+`tan/planner/**` is a third case: inside the walk, named as out of scope
+because it is a hash-audited mirror of upstream.
+
 ## Why a pytest gate and not a ruff job
 
 `python -- pytest across python/` is ALREADY a required context on `main` and
@@ -51,6 +70,7 @@ safe and the script applies it without asking.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -149,6 +169,156 @@ def test_the_mirrored_planner_is_named_as_out_of_scope():
     assert mirrored, "no mirrored planner module is budgeted -- has the mirror moved?"
     for rel in mirrored:
         assert (core.PACKAGE.parent / rel).exists(), f"{rel} is budgeted but missing"
+
+
+#: How far the `observed_tests` record may drift from the tree before it is
+#: called rotten, and both halves are MEASURED rather than picked round
+#: (tan-cli#817). Over 60 consecutive `dev` commits, 22 grew a `tests/**` file
+#: already over the cap, by a median of 65 lines, p90 365, max 577.
+#:
+#: * The 10% keeps the record honest at the only resolution it claims: its job
+#:   is "test_flash_command.py is about 8000 lines", so a proportional bound
+#:   preserves that on a big file where a flat one would not.
+#: * The 200 floor is ~3x the measured median per-commit growth and above its
+#:   75th percentile, so no ordinary PR reds this on its own -- the record
+#:   only goes stale after several PRs pile onto the same file.
+#:
+#: This is NOT the ratchet's growth check wearing a different hat. It fails
+#: only on DRIFT, in either direction, and a plain `regen` clears it with no
+#: `--reason` and no ledger entry. See `TEST_ROOT` in the core module.
+OBSERVED_DRIFT_FRACTION = 0.10
+OBSERVED_DRIFT_FLOOR = 200
+
+
+def test_the_observed_test_record_has_not_rotted():
+    """A record nobody refreshes is worse than no record: it reads as current
+    and is not. The fix is always the same one line -- `python
+    scripts/regen_module_size_budget.py`, no flag.
+
+    Two ways to rot, and BOTH are checked. An earlier version of this test
+    walked only the committed record, so it could notice a file already in
+    the record drifting and was blind to a `tests/**` file that crossed
+    `MODULE_CAP` after the record was written -- i.e. to every new oversized
+    test file, on day one. Reproduced before the fix: a fresh 9000-line
+    `tests/commands/test_zz_brand_new_huge.py`, larger than the current
+    record-holder, left this file at `8 passed`. The only thing that caught
+    it was `regen --check` (rc=1), and `regen_module_size_budget.py` appears
+    in no workflow, so nothing in CI saw it at all (review of #875).
+
+    A membership gap is a RECORD gap, not a budget breach, so this stays
+    inside tan-cli#817's decision: it fails, and a plain `regen` with no
+    `--reason` and no ledger entry clears it. That is the whole difference
+    from the `tan/**` ratchet above, which demands a written reason."""
+    recorded = core.load_observed_tests()
+    assert recorded, (
+        "`observed_tests` is empty -- tan-cli#817 exists because nothing "
+        "measured python/tests/**, and an empty section is that state again"
+    )
+
+    rotten = []
+    for rel, count in sorted(recorded.items()):
+        path = core.PACKAGE.parent / rel
+        if not path.exists():
+            rotten.append(f"{rel}: recorded at {count} but no longer exists")
+            continue
+        lines = len(path.read_text(encoding="utf-8").splitlines())
+        allowed = max(OBSERVED_DRIFT_FLOOR, int(count * OBSERVED_DRIFT_FRACTION))
+        if abs(lines - count) > allowed:
+            rotten.append(f"{rel}: recorded {count}, now {lines} (drift > {allowed})")
+
+    # The membership half: measure the tree, and compare WHICH files are over
+    # the cap -- not how big they are, which the drift bound above already
+    # tolerates. Both directions, because both mean the same thing (the file
+    # says something about `tests/**` that the tree does not).
+    measured = core.measure_observed_tests()
+    for rel in sorted(set(measured) - set(recorded)):
+        rotten.append(
+            f"{rel}: {measured[rel]} lines, over the {core.MODULE_CAP}-line "
+            "cap and missing from the record entirely"
+        )
+    for rel in sorted(set(recorded) - set(measured)):
+        path = core.PACKAGE.parent / rel
+        if path.exists():
+            rotten.append(
+                f"{rel}: recorded, but no longer over the {core.MODULE_CAP}-"
+                "line cap"
+            )
+
+    assert rotten == [], (
+        "the observed python/tests/** record has drifted from the tree (run "
+        "`python scripts/regen_module_size_budget.py` -- no flag, this is not "
+        "a budget):\n  " + "\n  ".join(rotten)
+    )
+
+
+def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
+    """tan-cli#817's decision, pinned end-to-end rather than asserted in prose:
+    a `tests/**` file growing past the cap must regenerate CLEANLY, with no
+    `--reason`, and must write NOTHING to the append-only ledger. If someone
+    later folds the observed deltas into `grown`, this is what says no.
+
+    Hermetic: every path the script touches is redirected into `tmp_path`, so
+    this neither reads nor writes the real tree.
+    """
+    import importlib.util
+
+    regen_path = core.PACKAGE.parent / "scripts" / "regen_module_size_budget.py"
+    spec = importlib.util.spec_from_file_location("_regen_under_test", regen_path)
+    regen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(regen)
+    # The script reaches its measurement module through its OWN `sys.path`
+    # insert, so `regen.core` is a second module object loaded from the same
+    # file -- patching this gate's `core` would not reach the script. Verified
+    # rather than assumed: the two `__file__`s match, the objects do not.
+    # Both halves are asserted -- the comment claimed the distinctness and
+    # only the `__file__` match was checked, so if the gate ever switched to
+    # the script's bare module spelling the two would collapse into one
+    # object and this would still have passed (review of #875).
+    assert Path(regen.core.__file__) == Path(core.__file__)
+    assert regen.core is not core
+    target = regen.core
+
+    package = tmp_path / "tan"
+    (package / "sub").mkdir(parents=True)
+    (package / "sub" / "small.py").write_text("x = 1\n", encoding="utf-8")
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    big_test = tests_root / "test_big.py"
+    big_test.write_text("# line\n" * 900, encoding="utf-8")
+
+    generated = tmp_path / "module_size_budget.generated.json"
+    ledger = tmp_path / "LOG.md"
+    monkeypatch.setattr(target, "PACKAGE", package)
+    monkeypatch.setattr(target, "TEST_ROOT", tests_root)
+    monkeypatch.setattr(target, "GENERATED_PATH", generated)
+    monkeypatch.setattr(target, "LOG_PATH", ledger)
+
+    # 1. Seeding an observed entry: clean, no flag, no ledger.
+    assert regen.main([]) == 0
+    assert json.loads(generated.read_text())["observed_tests"] == {"tests/test_big.py": 900}
+    assert not ledger.exists(), "seeding the observed record must not touch the ledger"
+
+    # 2. The decision itself: that file GROWS past the cap, a lot. Still clean,
+    #    still no flag, still nothing in the ledger.
+    big_test.write_text("# line\n" * 2400, encoding="utf-8")
+    assert regen.main([]) == 0, (
+        "growing a tests/** file was refused -- the observed record has been "
+        "turned into a ratchet, which is the decision tan-cli#817 rejected"
+    )
+    assert json.loads(generated.read_text())["observed_tests"] == {"tests/test_big.py": 2400}
+    assert not ledger.exists(), "observed growth must never write a ledger entry"
+
+    # 3. The contrast, so none of the above passes for the wrong reason: the
+    #    SAME growth on the gated side IS refused without a reason.
+    (package / "sub" / "small.py").write_text("# line\n" * 2400, encoding="utf-8")
+    assert regen.main([]) == 1, (
+        "a tan/** module grew past the cap and regen accepted it without "
+        "--reason -- then the asymmetry proved above is not a decision, the "
+        "ratchet is simply off"
+    )
+    assert not ledger.exists()
+    assert regen.main(["--reason", "deliberate"]) == 0
+    assert "deliberate" in ledger.read_text(), "the gated side still logs its reasons"
 
 
 def test_the_generated_budget_has_no_duplicate_module_keys():
