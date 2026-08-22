@@ -20,7 +20,9 @@ a mock standing in for the thing under test -- the defect was never in ELF
 parsing, it was in WHICH TREE gets walked and whether a thin result is trusted,
 which is exactly what these drive. Injecting keeps them running on all three
 required legs; `test_the_real_reader_resolves_a_floor_from_host_libraries`
-covers the pyelftools half on a host that has ELFs to parse.
+covers the pyelftools half on a host that has both ELFs and the wheel. The real
+coverage of that half is the container step itself, in `release.yml` and
+`clean-host.yml`, which runs the scan over an actual `dist/tan/`.
 """
 
 from __future__ import annotations
@@ -154,6 +156,21 @@ def test_the_real_reader_resolves_a_floor_from_host_libraries():
     # host's own libraries rather than a checked-in fixture: a committed ELF
     # would rot, and the point is that the reader works against real symbol
     # versioning.
+    #
+    # `pyelftools` is deliberately NOT a declared test dependency: it is
+    # installed only inside the freeze container, by the two lines in
+    # release.yml and clean-host.yml that run this scan for real over a real
+    # `dist/tan/`. That container step IS the load-bearing coverage of the
+    # reader; this arm is belt-and-braces for a developer who happens to have
+    # the package. The import guard is SEPARATE from the platform guard above
+    # on purpose -- collapsing them would report "needs a host with versioned
+    # ELFs" on a Linux box that simply lacks the wheel, and the next reader
+    # would believe the wrong thing. (Found the hard way: the platform skip
+    # hid this on macOS and the ubuntu leg then failed with
+    # ModuleNotFoundError.)
+    pytest.importorskip(
+        "elftools", reason="pyelftools is container-only; see the comment above"
+    )
     candidates = [
         p
         for p in Path("/lib/x86_64-linux-gnu").glob("lib*.so*")
