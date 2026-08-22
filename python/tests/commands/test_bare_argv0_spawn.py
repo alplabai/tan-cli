@@ -610,24 +610,55 @@ def test_the_windows_walk_returns_the_pathlib_spelling_not_the_join_spelling(
     )
     assert resolution.resolved == pathlib_spelling, resolution
     assert resolution.resolved != join_spelling
-    assert resolution.resolved != os.path.normpath(join_spelling)
+
+    # `normpath` AGREES with the pathlib spelling here, and saying so is the
+    # point: that is exactly why returning `os.path.normpath(join)` -- what
+    # tan-cli#811 suggested -- looks safe. `ntpath` explicitly rather than
+    # `os.path`, so this states Windows semantics on either host; the case
+    # that separates them is the `..` entry in the test below.
+    assert ntpath.normpath(ntpath.join(entry, "west.EXE")) == pathlib_spelling
 
 
-def test_the_windows_walk_keeps_a_parent_relative_entry_unrewritten():
-    """The half of the return decision that `normpath` would break, kept
-    portable and lexical because no filesystem can carry both spellings at
-    once: `os.path.normpath` collapses `..`, `PureWindowsPath` does not. A
-    `%PATH%` entry written relative to a parent would come back pointing at
-    the same file under a name the host never gave us -- and `build_cmd`
-    publishes this string as `data.slices[].resolvedTool`."""
-    parent_relative = "C:/tools/../tools/bin"
+def test_the_windows_walk_keeps_a_parent_relative_entry_unrewritten(
+    tmp_path, monkeypatch
+):
+    """The half of the return decision that `normpath` WOULD break, driven
+    through the real walk.
 
-    kept = str(PureWindowsPath(parent_relative) / "west.exe")
-    rewritten = ntpath.normpath(ntpath.join(parent_relative, "west.exe"))
+    `os.path.normpath` collapses `..`; `PureWindowsPath` does not. So a
+    `%PATH%` entry written relative to a parent comes back pointing at the
+    same file under a name the host never gave us -- and `build_cmd`
+    publishes this string as `data.slices[].resolvedTool`.
 
-    assert kept == "C:\\tools\\..\\tools\\bin\\west.exe"
-    assert rewritten == "C:\\tools\\bin\\west.exe"
-    assert kept != rewritten, "normpath is not a drop-in for the return"
+    This must drive `resolve_tool` rather than compare the two spellings
+    lexically, and the reason is a hole the first version of these tests had
+    (review of #874, then CI): on Windows `os.path` IS `ntpath`, so for an
+    ordinary entry `normpath(join(...))` and the pathlib spelling are the
+    same string. A lexical `..` test plus a plain-entry walk test therefore
+    left "return `normpath(join(...))`" uncaught on the only platform this
+    code runs on -- each test failed it for a POSIX-only reason. Here the
+    `..` survives into a real resolution, which no `normpath` return can
+    produce on any host.
+    """
+    real = tmp_path / "tools" / "bin"
+    real.mkdir(parents=True)
+    (real / "west.EXE").write_bytes(b"")
+    # `<tmp>/tools/../tools/bin` -- a genuine directory reached by a
+    # parent-relative route, so the probe hits and the spelling is the only
+    # thing under test.
+    entry = str(tmp_path / "tools" / ".." / "tools" / "bin").replace("\\", "/")
+
+    monkeypatch.setattr(os, "name", "nt")
+    resolution = resolve_tool("west", {"PATH": entry, "PATHEXT": ".EXE"})
+
+    kept = str(PureWindowsPath(entry) / "west.EXE")
+    rewritten = ntpath.normpath(ntpath.join(entry, "west.EXE"))
+    assert ".." in kept and ".." not in rewritten, (
+        "the fixture stopped exercising the collapse, so the assertion below "
+        "would pass either way"
+    )
+    assert resolution.resolved == kept, resolution
+    assert resolution.resolved != rewritten
 
 
 def test_an_unreadable_path_entry_is_skipped_not_raised(tmp_path, monkeypatch):
