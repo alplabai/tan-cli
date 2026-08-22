@@ -57,6 +57,25 @@ refreshed by every plain run above, they never require `--reason`, and they
 never write a ledger line -- growing a test file is not a ceiling raise. See
 `TEST_ROOT` in `tests/gates/_module_size_budget_core.py` for the scope
 decision and the measurements behind it.
+
+Two consequences of that section being refreshed UNCONDITIONALLY, on every
+write path, worth knowing before you run this (review of #875):
+
+* A contributor raising a `tan/**` ceiling with `--reason` also commits
+  whatever `tests/**` drift has accumulated on `dev` since the last refresh,
+  in the same file. That is live, not hypothetical -- and it is the same
+  absolute-measurement conflict surface tan-cli#668 created this file to
+  remove. `--merge-resync` resolves it for the observed section exactly as it
+  does for the budgeted one: re-measure the merged tree and record it, no new
+  judgement call.
+* `--check` and the pytest gate do not agree on what "stale" means, on
+  purpose. `--check` compares EXACTLY and reds on a one-line drift;
+  `tests/gates/test_module_size_budget.py` tolerates `max(200, 10%)` of the
+  recorded count so an ordinary PR is not taxed, and only demands agreement
+  on WHICH files are over the cap. A tree can therefore satisfy the gate and
+  still be `--check`-stale. Only the gate runs in CI -- this script is in no
+  workflow -- so that asymmetry costs nothing today, but do not read a green
+  `pytest` as a green `--check`.
 """
 from __future__ import annotations
 

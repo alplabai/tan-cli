@@ -192,9 +192,23 @@ OBSERVED_DRIFT_FLOOR = 200
 
 def test_the_observed_test_record_has_not_rotted():
     """A record nobody refreshes is worse than no record: it reads as current
-    and is not. This is the only way `observed_tests` can fail, and the fix is
-    always the same one line -- `python scripts/regen_module_size_budget.py`,
-    no flag."""
+    and is not. The fix is always the same one line -- `python
+    scripts/regen_module_size_budget.py`, no flag.
+
+    Two ways to rot, and BOTH are checked. An earlier version of this test
+    walked only the committed record, so it could notice a file already in
+    the record drifting and was blind to a `tests/**` file that crossed
+    `MODULE_CAP` after the record was written -- i.e. to every new oversized
+    test file, on day one. Reproduced before the fix: a fresh 9000-line
+    `tests/commands/test_zz_brand_new_huge.py`, larger than the current
+    record-holder, left this file at `8 passed`. The only thing that caught
+    it was `regen --check` (rc=1), and `regen_module_size_budget.py` appears
+    in no workflow, so nothing in CI saw it at all (review of #875).
+
+    A membership gap is a RECORD gap, not a budget breach, so this stays
+    inside tan-cli#817's decision: it fails, and a plain `regen` with no
+    `--reason` and no ledger entry clears it. That is the whole difference
+    from the `tan/**` ratchet above, which demands a written reason."""
     recorded = core.load_observed_tests()
     assert recorded, (
         "`observed_tests` is empty -- tan-cli#817 exists because nothing "
@@ -211,6 +225,24 @@ def test_the_observed_test_record_has_not_rotted():
         allowed = max(OBSERVED_DRIFT_FLOOR, int(count * OBSERVED_DRIFT_FRACTION))
         if abs(lines - count) > allowed:
             rotten.append(f"{rel}: recorded {count}, now {lines} (drift > {allowed})")
+
+    # The membership half: measure the tree, and compare WHICH files are over
+    # the cap -- not how big they are, which the drift bound above already
+    # tolerates. Both directions, because both mean the same thing (the file
+    # says something about `tests/**` that the tree does not).
+    measured = core.measure_observed_tests()
+    for rel in sorted(set(measured) - set(recorded)):
+        rotten.append(
+            f"{rel}: {measured[rel]} lines, over the {core.MODULE_CAP}-line "
+            "cap and missing from the record entirely"
+        )
+    for rel in sorted(set(recorded) - set(measured)):
+        path = core.PACKAGE.parent / rel
+        if path.exists():
+            rotten.append(
+                f"{rel}: recorded, but no longer over the {core.MODULE_CAP}-"
+                "line cap"
+            )
 
     assert rotten == [], (
         "the observed python/tests/** record has drifted from the tree (run "
@@ -238,7 +270,12 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
     # insert, so `regen.core` is a second module object loaded from the same
     # file -- patching this gate's `core` would not reach the script. Verified
     # rather than assumed: the two `__file__`s match, the objects do not.
+    # Both halves are asserted -- the comment claimed the distinctness and
+    # only the `__file__` match was checked, so if the gate ever switched to
+    # the script's bare module spelling the two would collapse into one
+    # object and this would still have passed (review of #875).
     assert Path(regen.core.__file__) == Path(core.__file__)
+    assert regen.core is not core
     target = regen.core
 
     package = tmp_path / "tan"
