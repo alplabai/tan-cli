@@ -247,7 +247,7 @@ jobs:
       # ubuntu-latest links its glibc and ships a floor no supported distro
       # meets. `docker run` from a normal job (not a job-level `container:`)
       # so checkout/setup-python keep working on the host.
-      - name: freeze tan (python:3.12-slim-bullseye)
+      - name: freeze tan (python:3.12-slim-bullseye) + packaged-binary conformance + glibc floor
         if: ${{ matrix.container }}
         shell: bash
         run: |
@@ -259,6 +259,31 @@ jobs:
             /tmp/venv/bin/pip install --quiet --upgrade pip
             /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
+            # tan-cli#450. THE PR-TIME EXERCISE OF THE PACKAGING PATH.
+            # The three lines below are what the container leg in release.yml
+            # runs after its own build_binary.sh, and until now they ran there
+            # and NOWHERE else -- release.yml triggers on a v* tag, so a break
+            # in either could only be discovered by pushing a tag, and a tag
+            # cannot be un-pushed. v0.5.0 published zero assets for exactly
+            # that reason.
+            #
+            # This job is the right home rather than a new workflow: it already
+            # freezes the SAME artifact in the SAME container on every pull
+            # request, so the exercise costs three commands instead of a second
+            # freeze that could drift from the shipping recipe.
+            #
+            # The size ceiling needs nothing added here -- build_binary.sh
+            # sources artifact_ceilings.env and enforces it itself (see that
+            # file header: sourced, not copied), so the freeze line above
+            # already covers the ceiling on every PR.
+            #
+            # NOTE FOR EDITORS: every line in this docker body is inside
+            # bash -euc with SINGLE quotes. Do not write an apostrophe here --
+            # it closes the shell string. release.yml escapes one the hard way
+            # if you ever need to.
+            /tmp/venv/bin/pip install --quiet pytest pyelftools
+            /tmp/venv/bin/python -m pytest tests/conformance/test_packaged_binary.py -q
+            /tmp/venv/bin/python scripts/glibc_floor_scan.py
           '
 
       # The actual gate: --version / doctor / sdk list --online / bootstrap
