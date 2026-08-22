@@ -192,24 +192,87 @@ def resolve_tool(tool: str, env: Mapping[str, str]) -> ToolResolution:
             # the construction and stat swapped: 0.0389 -> 0.0177 s per miss,
             # 2.2x. POSIX never reaches here (it returns via `shutil.which`
             # above), so this is a Windows-only cost and a Windows-only fix.
+            #
+            # **This is not a pure cost swap, and the difference is the
+            # SHIPPED floor, not an edge case** (review of #874). On 3.14
+            # `Path.is_file()` IS `os.path.isfile` (`if follow_symlinks:
+            # return os.path.isfile(self)`), so the two are the same call.
+            # On 3.12 and 3.13 they are not: `Path.is_file()` re-raises any
+            # `OSError` outside `_IGNORED_ERRNOS`/`_IGNORED_WINERRORS`, while
+            # `genericpath.isfile` swallows every `OSError` and `ValueError`.
+            # `pyproject.toml` pins `requires-python = ">=3.12"` and the
+            # frozen binaries customers install are built on 3.12, so the
+            # divergence ships. Measured on this tree, one unreadable
+            # directory, same file:
+            #
+            #     3.12.14  Path.is_file() -> PermissionError errno=13
+            #              os.path.isfile() -> False
+            #     3.13.15  Path.is_file() -> PermissionError errno=13
+            #              os.path.isfile() -> False
+            #     3.14.7   both -> False
+            #
+            # Reachable on Windows: `ERROR_ACCESS_DENIED (5)` and
+            # `ERROR_SHARING_VIOLATION (32)` both map to `EACCES` in
+            # `PC/errmap.h`, so a `%PATH%` entry on a share whose credentials
+            # have expired, or an ACL-locked directory, used to abort the
+            # whole walk -- even when the tool sat in a LATER entry.
+            #
+            # Skipping it is the DELIBERATE choice, not a side effect. This
+            # loop carries no `try` of its own, so whatever the predicate
+            # raises escapes `resolve_tool` entirely; no call site guards
+            # it and `tan/cli.py` installs no top-level handler, so on
+            # 3.12/3.13 that `PermissionError` was a traceback where an
+            # envelope belongs. `tan/core/shapes.py` already states this
+            # repo's position for exactly this shape -- "a path with an
+            # embedded NUL or an unreadable parent must read as 'not an SDK
+            # root', never as a traceback where a refusal belongs" -- and a
+            # `%PATH%` entry tan cannot stat is the same question. An entry
+            # that is skipped is not silent: a tool found nowhere answers
+            # `resolved=None`, which `build_cmd` routes through
+            # `executionPolicy.missingTool` (`build_cmd._dispatch`, default
+            # skip) and names in the refusal. Pinned by
+            # `test_an_unreadable_path_entry_is_skipped_not_raised`.
+            #
+            # One asymmetry this leaves, small but real: the string PROBED is
+            # no longer the string RETURNED. `os.path.join` keeps a `.` or a
+            # duplicated separator the `%PATH%` entry carried where the
+            # `PureWindowsPath` return below collapses it, so
+            # `C:\\Windows\\.\\System32` probes 30 characters and returns 28.
+            # Against the 260-char `MAX_PATH` on a host without long paths
+            # enabled, a candidate within two characters of the limit can now
+            # miss where it previously hit.
             if os.path.isfile(os.path.join(directory, name)):
                 # The RETURN is still built the pathlib way, once, on the
                 # winner -- deliberately NOT `os.path.join`'s own string.
                 # `os.path.join` preserves whatever separators the `%PATH%`
                 # entry carried (`os.path.join("C:/Windows/System32",
                 # "cmd.exe")` is `'C:/Windows/System32\\cmd.exe'`) where
-                # `str(Path(...) / ...)` normalises to
+                # `str(PureWindowsPath(...) / ...)` normalises to
                 # `'C:\\Windows\\System32\\cmd.exe'`, and this string is
-                # customer-visible -- `renode_cmd.py` documents
-                # `data.renodeArgv[0]` as carrying this resolution's own
-                # casing. tan-cli#811 proposed `os.path.normpath` on the
-                # return to close that gap; it does, but it ALSO collapses
-                # `..`, which pathlib does not, so a `%PATH%` entry written
-                # relative to a parent would come back rewritten. Rebuilding
-                # the winner with the original expression is byte-identical
-                # instead of merely equivalent, and costs one `Path` per HIT,
-                # never per candidate.
-                return ToolResolution(str(Path(directory) / name), f"PATH: {path}")
+                # customer-visible: `build_cmd` publishes it as
+                # `data.slices[].resolvedTool` (`build_cmd._slice_result`
+                # sets it unconditionally).
+                # tan-cli#811 proposed `os.path.normpath` on the return to
+                # close that gap; it does, but it ALSO collapses `..`, which
+                # pathlib does not, so a `%PATH%` entry written relative to a
+                # parent would come back rewritten. Rebuilding the winner
+                # with the original expression is byte-identical instead of
+                # merely equivalent, and costs one path object per HIT, never
+                # per candidate.
+                #
+                # `PureWindowsPath`, not `Path`, and that is a TESTABILITY
+                # fix rather than a behaviour one (review of #874). The two
+                # produce the same string on Windows by inheritance, not by
+                # coincidence: `WindowsPath.__mro__` contains
+                # `PureWindowsPath`, `__str__` and `__truediv__` are the SAME
+                # objects on both, and both carry the frozen `ntpath` parser
+                # (verified on 3.12.14 and 3.14.7). But `Path` here made the
+                # hit path unreachable from a POSIX test -- `WindowsPath /
+                # str` refuses to build -- which is how this walk's only
+                # regression test decayed into grepping its own source. This
+                # module already uses `PureWindowsPath` for the same reason
+                # in `windows_candidate_names` below.
+                return ToolResolution(str(PureWindowsPath(directory) / name), f"PATH: {path}")
     return ToolResolution(None, f"PATH: {path}")
 
 
@@ -219,31 +282,35 @@ def windows_candidate_names(tool: str, pathext: str) -> list[str]:
     and otherwise `tool` + each `%PATHEXT%` suffix -- **never the bare,
     extensionless name itself.**
 
-    Split out as a pure function purely so the Windows candidate set can be
-    unit-tested from any host: `resolve_tool`'s Windows branch is unreachable
-    on POSIX and must not be forced there. The reason is NOT the one this
-    said before tan-cli#811, and the difference matters -- measured on
-    CPython 3.14.7, patching `os.name` to `"nt"` on a POSIX host:
-
-      * `Path("git")` CONSTRUCTS, returning a `WindowsPath`. The refusal moved
-        to the first operation that builds a NEW one: `WindowsPath / str`
-        raises `pathlib.UnsupportedOperation: cannot instantiate 'WindowsPath'
-        on your system` (a `NotImplementedError` subclass -- renamed in 3.13,
-        not removed).
-      * The lexical and stat methods do not raise, they LIE:
-        `Path("/usr/bin/git").is_absolute()` is `False` and
-        `Path("/etc/hosts").is_file()` is `False` under the patch.
-      * Since tan-cli#811 moved the miss loop below off pathlib, a patched
-        MISS now completes with no exception at all and answers
-        `ToolResolution(None, ...)`.
-
-    So the barrier is quiet, not loud: a POSIX test that patches `os.name` to
-    reach the walk gets a plausible `None` rather than an error telling it to
-    stop. Test the pure candidate set here instead, and leave the walk itself
-    to the Windows CI legs. The Rust oracle splits its own search core
-    out for exactly this reason and says so
+    Split out as a pure function so the Windows candidate set can be
+    unit-tested from any host, mirroring the Rust oracle, which splits its own
+    search core out for the same reason and says so
     (`crates/tan-cli/src/util.rs::find_on_path`, "Pure search core split out
     of `windows_path_lookup` purely for unit testing").
+
+    What this said before tan-cli#811 -- that `resolve_tool`'s Windows branch
+    is unreachable from POSIX because `pathlib.Path` "dispatches on `os.name`
+    at construction, so patching it raises" -- was wrong in both halves, and
+    three tests here were built on the false version. Measured on 3.12.14 and
+    3.14.7: `Path("git")` under a patched `os.name` CONSTRUCTS a
+    `WindowsPath` (`Path.__new__` reaches `object.__new__(cls)`, bypassing
+    the raising subclass `__new__`), and the lexical and stat methods then do
+    not raise, they LIE -- `Path("/usr/bin/git").is_absolute()` is `False`.
+    Where a refusal does happen (`WindowsPath / str`, or `WindowsPath(...)`
+    directly) it is a plain `NotImplementedError` on the SHIPPED floor:
+    `pathlib` has no `UnsupportedOperation` attribute at all on 3.12, which
+    3.13 renamed it into as a `NotImplementedError` subclass.
+
+    So since tan-cli#811 the walk is DELIBERATELY reachable from POSIX and is
+    driven there -- the miss loop probes through `os.path`, the hit spells
+    with `PureWindowsPath` -- because while it was not, this walk's only
+    regression test decayed into grepping the module's own source.
+
+    A patched-`os.name` test proves less than it runs: `os.path` stays
+    `posixpath`, so the probe joins with `/` against a real POSIX filesystem
+    while the return spells with `\\`. Such a test pins candidate ORDER, the
+    skip-don't-raise decision and the returned SPELLING -- not Windows path
+    syntax on the probe, which is this function's own job.
 
     Excluding the bare name is the one deliberate Windows-arm behaviour
     change tan-cli#567 makes; this module's own docstring carries the whole
