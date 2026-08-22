@@ -20,9 +20,10 @@ not only the mechanism.
 from __future__ import annotations
 
 import io
+import ntpath
 import os
 import subprocess
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -30,7 +31,7 @@ from tan.commands import doctor_cmd, flash_cmd, size_cmd
 from tan.commands.build import execute as execute_module
 from tan.core.bootstrap import venv_layout
 from tan.core.flash_plan import FlashInputs, FlashPlan
-from tan.core.tool_lookup import ToolResolution, windows_candidate_names
+from tan.core.tool_lookup import ToolResolution, resolve_tool, windows_candidate_names
 from tan.planner_root import bind_sdk_root
 from tests.conftest import sdk_root
 
@@ -537,8 +538,10 @@ def test_the_windows_walk_never_considers_the_bare_extensionless_name(tool, expe
 
     Portable by construction: the walk's candidate names are a pure function
     precisely so this runs on Linux CI, where `resolve_tool`'s Windows branch
-    cannot be reached at all (`Path` dispatches on `os.name` at construction,
-    so patching `os.name` raises rather than reaching it)."""
+    cannot be reached faithfully, and since tan-cli#811 cannot be reached
+    LOUDLY either -- patching `os.name` on a POSIX host no longer raises on
+    the way in, it walks and answers `None`. `windows_candidate_names`'
+    docstring carries the measured behaviour."""
 
     names = windows_candidate_names(tool, ".COM;.EXE;.BAT;.CMD")
     assert names == expected
@@ -560,6 +563,159 @@ def test_an_empty_pathext_entry_never_becomes_the_bare_name_by_accident():
 
     assert windows_candidate_names("npm", ".COM;;.EXE;") == ["npm.COM", "npm.EXE"]
     assert windows_candidate_names("npm", "") == []
+
+
+def test_the_windows_walk_returns_the_pathlib_spelling_not_the_join_spelling(
+    tmp_path, monkeypatch
+):
+    """tan-cli#811 moved the walk's per-candidate probe off `pathlib` for
+    cost, but deliberately did NOT move the RETURNED string with it. This
+    pins that split, because the obvious "simplification" -- return
+    `os.path.join`'s own result, or `os.path.normpath` it as #811's suggested
+    fix proposed -- is wrong in a way nothing else here would catch.
+
+    This drives the real `resolve_tool` walk. An earlier version of this test
+    asserted `"str(Path(directory) / name)" in source` instead, which failed
+    open in both directions: a behaviour-preserving rename reddened it, and
+    adding an earlier `return os.path.join(...)` above the real one left the
+    substring in the file, so the join spelling would have shipped green
+    (review of #874). The walk became drivable from POSIX when the return
+    moved from `Path` to `PureWindowsPath` -- see `resolve_tool`.
+
+    The `%PATH%` entry is deliberately FORWARD-slashed. That is what makes
+    the two spellings differ on BOTH hosts: on native Windows a `tmp_path`
+    entry is already backslashed, so `os.path.join` and `PureWindowsPath`
+    would agree and the test would prove nothing on the one platform this
+    code runs on.
+
+    The fixture file is `west.EXE`, matching the `%PATHEXT%` suffix's own
+    case, because the candidate name is `tool + ext` verbatim. A lowercase
+    `west.exe` here resolves on a case-INSENSITIVE filesystem (macOS APFS)
+    and misses on a case-sensitive one (the ubuntu-latest legs), which is a
+    green-here/red-there shape this repo has been bitten by before.
+    """
+    hit_dir = tmp_path / "bin"
+    hit_dir.mkdir()
+    (hit_dir / "west.EXE").write_bytes(b"")
+    entry = str(hit_dir).replace("\\", "/")
+
+    monkeypatch.setattr(os, "name", "nt")
+    resolution = resolve_tool("west", {"PATH": entry, "PATHEXT": ".EXE"})
+
+    pathlib_spelling = str(PureWindowsPath(entry) / "west.EXE")
+    join_spelling = os.path.join(entry, "west.EXE")
+    assert pathlib_spelling != join_spelling, (
+        "the fixture stopped distinguishing the two spellings on this host, "
+        "so the assertion below would pass either way"
+    )
+    assert resolution.resolved == pathlib_spelling, resolution
+    assert resolution.resolved != join_spelling
+
+    # `normpath` AGREES with the pathlib spelling here, and saying so is the
+    # point: that is exactly why returning `os.path.normpath(join)` -- what
+    # tan-cli#811 suggested -- looks safe. `ntpath` explicitly rather than
+    # `os.path`, so this states Windows semantics on either host; the case
+    # that separates them is the `..` entry in the test below.
+    assert ntpath.normpath(ntpath.join(entry, "west.EXE")) == pathlib_spelling
+
+
+def test_the_windows_walk_keeps_a_parent_relative_entry_unrewritten(
+    tmp_path, monkeypatch
+):
+    """The half of the return decision that `normpath` WOULD break, driven
+    through the real walk.
+
+    `os.path.normpath` collapses `..`; `PureWindowsPath` does not. So a
+    `%PATH%` entry written relative to a parent comes back pointing at the
+    same file under a name the host never gave us -- and `build_cmd`
+    publishes this string as `data.slices[].resolvedTool`.
+
+    This must drive `resolve_tool` rather than compare the two spellings
+    lexically, and the reason is a hole the first version of these tests had
+    (review of #874, then CI): on Windows `os.path` IS `ntpath`, so for an
+    ordinary entry `normpath(join(...))` and the pathlib spelling are the
+    same string. A lexical `..` test plus a plain-entry walk test therefore
+    left "return `normpath(join(...))`" uncaught on the only platform this
+    code runs on -- each test failed it for a POSIX-only reason. Here the
+    `..` survives into a real resolution, which no `normpath` return can
+    produce on any host.
+    """
+    real = tmp_path / "tools" / "bin"
+    real.mkdir(parents=True)
+    (real / "west.EXE").write_bytes(b"")
+    # `<tmp>/tools/../tools/bin` -- a genuine directory reached by a
+    # parent-relative route, so the probe hits and the spelling is the only
+    # thing under test.
+    entry = str(tmp_path / "tools" / ".." / "tools" / "bin").replace("\\", "/")
+
+    monkeypatch.setattr(os, "name", "nt")
+    resolution = resolve_tool("west", {"PATH": entry, "PATHEXT": ".EXE"})
+
+    kept = str(PureWindowsPath(entry) / "west.EXE")
+    rewritten = ntpath.normpath(ntpath.join(entry, "west.EXE"))
+    assert ".." in kept and ".." not in rewritten, (
+        "the fixture stopped exercising the collapse, so the assertion below "
+        "would pass either way"
+    )
+    assert resolution.resolved == kept, resolution
+    assert resolution.resolved != rewritten
+
+
+def test_an_unreadable_path_entry_is_skipped_not_raised(tmp_path, monkeypatch):
+    """A `%PATH%` entry tan cannot stat is skipped, and the walk continues to
+    a LATER entry that resolves.
+
+    This is the behaviour delta tan-cli#811 shipped, pinned deliberately
+    rather than left as a side effect of the swap (review of #874). On the
+    shipped floor the two predicates genuinely disagree -- measured, one
+    unreadable directory, same file:
+
+        3.12.14 / 3.13.15   Path.is_file() -> PermissionError errno=13
+                            os.path.isfile() -> False
+        3.14.7              both -> False
+
+    and the loop carries no `try` of its own, so before the swap that
+    `PermissionError` escaped `resolve_tool` as a traceback -- on Windows via
+    `ERROR_ACCESS_DENIED (5)` / `ERROR_SHARING_VIOLATION (32)`, both `EACCES`
+    -- killing the whole walk even when the tool sat in a later entry.
+
+    Skipped, not silent: a tool found in NO entry answers `resolved=None`,
+    which `build_cmd` routes through `executionPolicy.missingTool` and names
+    in the refusal.
+    """
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "west.EXE").write_bytes(b"")
+    later = tmp_path / "later"
+    later.mkdir()
+    (later / "west.EXE").write_bytes(b"")
+
+    os.chmod(locked, 0o000)
+    try:
+        try:
+            os.stat(os.path.join(str(locked), "west.EXE"))
+        except PermissionError:
+            pass
+        except OSError as exc:
+            pytest.skip(f"host raised {exc.errno}, not EACCES, for a 0o000 directory")
+        else:
+            pytest.skip(
+                "this host does not enforce directory permissions (native "
+                "Windows, or running as root in a container), so there is no "
+                "unreadable entry to skip"
+            )
+
+        monkeypatch.setattr(os, "name", "nt")
+        entries = os.pathsep.join(
+            (str(locked).replace("\\", "/"), str(later).replace("\\", "/"))
+        )
+        resolution = resolve_tool("west", {"PATH": entries, "PATHEXT": ".EXE"})
+    finally:
+        os.chmod(locked, 0o755)
+
+    assert resolution.resolved == str(
+        PureWindowsPath(str(later).replace("\\", "/")) / "west.EXE"
+    ), resolution
 
 
 # ── tan size ────────────────────────────────────────────────────────────────
@@ -613,11 +769,12 @@ def test_terminate_spawns_the_resolved_taskkill(monkeypatch, spy):
     `'taskkill'`.
 
     `os.name` is patched rather than skipped-unless-Windows so this runs
-    everywhere. What is stubbed is the LOOKUP, not the decision under test:
-    `pathlib.Path` dispatches on `os.name` at construction, so any real
-    resolution under the patch would raise `NotImplementedError` ("cannot
-    instantiate 'WindowsPath'") on a POSIX host. `raising=False` so the stub
-    installs against the pre-fix module too -- the point is that this then fails
+    everywhere. What is stubbed is the LOOKUP, not the decision under test --
+    not because a patched resolution cannot work (since tan-cli#811 the walk
+    is deliberately drivable from POSIX, and the two tests above do drive
+    it), but because THIS test is about what reaches `argv[0]` on the cancel
+    path, and a real walk would make it depend on the host's `%PATH%`.
+    `raising=False` so the stub installs against the pre-fix module too -- the point is that this then fails
     on the ASSERTION below (`argv[0]` is `'taskkill'`), not on a missing
     attribute. The real lookup is pinned unpatched by the test after this one."""
     resolved = "/abs/System32/taskkill.exe"
