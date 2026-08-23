@@ -114,6 +114,26 @@ _EXTENSION = {
 #: is a contract between the two and must not be changed on one side alone.
 SDK_TOKEN = "<SDK>"
 
+#: What `"sdkCommit"` is replaced by, for the same contract reason.
+#:
+#: `emit_build_plan` fills that field from `git rev-parse --short HEAD` on the
+#: bound checkout (`tan/planner/buildplan.py:365-366`, emitted at `:643`), and
+#: `--short` picks its own length from the repository's object count. Measured:
+#: the SAME commit rendered `"94378a05"` (8) from a local worktree and
+#: `"94378a0"` (7) from CI's `fetch-depth: 1` checkout, and an exported tree
+#: with no `.git` at all rendered `null`. Three answers, one commit, none of
+#: them a property of the planner -- so freezing any of them makes the fixture
+#: a statement about how the checkout was made.
+#:
+#: The identity this field gestures at is not lost, it is checked properly
+#: instead: `test_the_bound_checkout_is_the_ref_the_fixture_was_captured_from`
+#: compares the FULL 40-character HEAD against PROVENANCE.txt, which no
+#: abbreviation length can make ambiguous.
+SDK_COMMIT_TOKEN = "<SDK_COMMIT>"
+
+#: `"sdkCommit": "94378a0",` / `"sdkCommit": null,` -- both spellings.
+_SDK_COMMIT_FIELD = re.compile(r'("sdkCommit":\s*)(?:"[0-9a-f]+"|null)')
+
 #: Patterns that must not survive normalisation. Each one is a way a golden
 #: could become host-bound or time-bound; see the module docstring.
 _VOLATILE = (
@@ -123,6 +143,12 @@ _VOLATILE = (
     ("epoch seconds", re.compile(r"\b1[7-9]\d{8}\b")),
     ("memory address", re.compile(r"0x7f[0-9a-f]{8,}")),
     ("temp directory", re.compile(r"pytest-of-|/T/tmp")),
+    # The one that got through the first capture. It is listed as volatile
+    # rather than left to the substitution above so that a RENAMED field, or a
+    # second `git rev-parse` result appearing somewhere new, fails here instead
+    # of being frozen: the first fixture captured `"sdkCommit": null` off an
+    # exported tree and reded 99 of 100 build-plan cases on CI's real clone.
+    ("raw sdkCommit", re.compile(r'"sdkCommit":\s*(?:"[0-9a-f]+"|null)')),
 )
 
 
@@ -140,7 +166,7 @@ def normalise(text: str, sdk: Path) -> str:
     """
     for spelling in (sdk.as_posix(), str(sdk)):
         text = text.replace(spelling, SDK_TOKEN)
-    return text
+    return _SDK_COMMIT_FIELD.sub(rf'\1"{SDK_COMMIT_TOKEN}"', text)
 
 
 def find_volatile(text: str) -> str | None:

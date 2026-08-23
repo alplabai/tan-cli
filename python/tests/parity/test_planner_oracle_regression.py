@@ -99,6 +99,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -133,6 +134,7 @@ _EXTENSION = {
 #: The substitution `capture_planner_oracle.py` applied. A contract between the
 #: two files; changing it on one side alone reds every case.
 SDK_TOKEN = "<SDK>"
+SDK_COMMIT_TOKEN = "<SDK_COMMIT>"
 
 
 def _oracle_root() -> Path | None:
@@ -185,7 +187,7 @@ GOLDENS = _goldens()
 #: it against `capture_planner_oracle.py::render` should not have to open a
 #: third file to do it.
 _CHILD = r'''
-import json, sys
+import json, re, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 modes = sys.argv[2].split(",")
@@ -221,6 +223,12 @@ for board in sorted((root / "examples").rglob("board.yaml")):
         kind, text = render(board, mode)
         for spelling in (root.as_posix(), str(root)):
             text = text.replace(spelling, "<SDK>")
+        # See capture_planner_oracle.py: `git rev-parse --short` answers with a
+        # length chosen from the repository's object count, so the SAME commit
+        # renders 8 characters locally, 7 under CI's `fetch-depth: 1`, and
+        # `null` from a tree with no `.git`.
+        text = re.sub(r'("sdkCommit":\s*)(?:"[0-9a-f]+"|null)',
+                      r'\1"<SDK_COMMIT>"', text)
         out[f"{rel}::{mode}"] = [kind, text]
 sys.stdout.write(json.dumps(out))
 '''
@@ -257,6 +265,43 @@ def test_the_fixture_is_present_and_was_captured_from_a_named_ref():
         f"only {len(GOLDENS)} goldens under {EMITS} -- 700 were captured at "
         "94378a05 (100 boards x 7 modes). A shrunken fixture silently shrinks "
         "this gate; regenerate with scripts/capture_planner_oracle.py."
+    )
+
+
+def test_the_bound_checkout_is_the_ref_the_fixture_was_captured_from():
+    """HEAD must be the FULL commit PROVENANCE.txt names.
+
+    This is what replaces freezing `"sdkCommit"` into the goldens. That field
+    carries `git rev-parse --short`, whose length depends on the checkout's
+    object count -- 8 characters from a local worktree, 7 from CI's
+    `fetch-depth: 1`, `null` from an export -- so it could never have answered
+    "is this the right tree" without also answering "how was it cloned".
+    Forty characters cannot be ambiguous.
+
+    Skips rather than fails when HEAD is unreadable: an exported tree is a
+    legitimate way to hold the oracle, and the board-set check below still
+    catches a wrong one. A MISMATCH is never a skip.
+    """
+    assert ORACLE is not None
+    recorded = ""
+    for line in (FIXTURE / "PROVENANCE.txt").read_text(encoding="utf-8").splitlines():
+        if line.startswith("alp-sdk ref"):
+            recorded = line.split()[-1]
+            break
+    assert len(recorded) == 40, (
+        f"PROVENANCE.txt records {recorded!r}, not a full 40-character commit. "
+        "An abbreviated ref cannot be compared unambiguously."
+    )
+    head = subprocess.run(
+        ["git", "-C", str(ORACLE), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head.returncode != 0:
+        pytest.skip(f"{ORACLE} is not a git checkout, so HEAD cannot be read")
+    assert head.stdout.strip() == recorded, (
+        f"{ORACLE_ROOT_VAR} is at {head.stdout.strip()}, but this fixture was "
+        f"captured from {recorded}. Every golden below would be measuring the "
+        "wrong tree. Fix the checkout ref, or regenerate the fixture."
     )
 
 

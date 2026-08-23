@@ -3,7 +3,7 @@
   "planPathMode": "tokened",
   "generatedBy": "scripts/alp_orchestrate.py",
   "sdkVersion": "0.16.0",
-  "sdkCommit": null,
+  "sdkCommit": "<SDK_COMMIT>",
   "boardYaml": "<SDK>/examples/ai/visual-defect-detection/board.yaml",
   "sku": "E1M-AEN801",
   "buildRoot": "build",
