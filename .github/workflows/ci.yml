@@ -365,12 +365,23 @@ jobs:
       # same change. `HAND_PORT_PINNED_SDK_COMMIT` deliberately does NOT move
       # with it -- see that pin's own comment (alp-sdk#1471's
       # `scripts/alp_cli/doctor.py` delta is unported).
+      #
+      # `94378a05` -> `ac38a069` for tan-cli#868, in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` and `test_planner_relocation_
+      # freshness.py`'s `PINNED_SDK_COMMIT` -- the three MUST be bumped
+      # together, and `tests/conftest.py`'s tan-cli#691 warning fires when
+      # they are not. What moved is an AUDIT: alp-sdk#1485/#1484/#1556 are
+      # ported into `tan/planner/` and alp-sdk#1487's chip -> subsystem
+      # entries into `slugs.py` (that last one is `HAND_PORT_HASHES`
+      # territory, which is why nothing here caught it -- see
+      # `PINNED_SDK_COMMIT`'s comment). `HAND_PORT_PINNED_SDK_COMMIT` still
+      # does not move.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 94378a056549c7377d714a7f2b68878aca8fea01
+          ref: ac38a069f18c9c58066f874f0e474e9540ede862
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a

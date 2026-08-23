@@ -409,7 +409,50 @@ from tests.conftest import sdk_root
 #: `scripts/west_commands/alp_emit.py` -- all `HAND_PORT_HASHES` territory,
 #: which is why `HAND_PORT_PINNED_SDK_COMMIT` stays at `88318e75` and does
 #: NOT move with this pin. See that pin's own comment.
-PINNED_SDK_COMMIT = "94378a056549c7377d714a7f2b68878aca8fea01"  # alp-sdk dev -- see above
+#:
+#: `94378a05` -> `ac38a069` (tan-cli#868). A BEHAVIOURAL re-pin, and the first
+#: one here that is: ten of the twenty-one entries below move, and every one
+#: of them moved because a delta was PORTED into `tan/planner/`, not because a
+#: hash was refreshed. The range holds four alp-sdk commits touching
+#: `scripts/alp_orchestrate/` -- `522ea320` (#1482), `85b6b905` (#1485),
+#: `064fc17b` (#1484) and `54f67c7e` (#1602, carrying #1556) -- and they land
+#: as three ports:
+#:
+#:   * alp-sdk#1485 (every resolver reads the PROJECT's metadata root, not the
+#:     module-level constant) was already fixed independently in tan as
+#:     tan-cli#573, so only the residue moved: `libraries.py`'s nine
+#:     `= METADATA_ROOT` defaults became required parameters, `kconfig.py`'s
+#:     `_per_core_library_kconfig` / `_emit_subsystems` / library-layer calls
+#:     now pass `project.effective_metadata_root()`, `slugs.peripheral_kconfig`
+#:     lost its import-time module constant and took the root as an argument
+#:     (with #1545's validation), and `loader._validate_topology_cores` threads
+#:     the root down to `_enforce_loader_rules`.
+#:   * alp-sdk#1484 + #1556 (a `carveout: false` region is not a flash device;
+#:     a defaulted `dt_label` may not reach `status: ok`) had NO tan-side
+#:     equivalent and was ported wholesale into `partition.py`.
+#:   * alp-sdk#1487's chip -> subsystem entries. This one is not in the range
+#:     at all -- it is `HAND_PORT_HASHES` territory
+#:     (`scripts/alp_project_emit/__init__.py`), pinned at the older
+#:     `HAND_PORT_PINNED_SDK_COMMIT`, which is exactly why nothing here caught
+#:     it: tan's `_CHIP_SUBSYSTEMS` was missing ten SoM-intrinsic chips and
+#:     `gd32g553` -> `("SPI", "I2C")`, so tan emitted no `CONFIG_SPI=y` on any
+#:     GD32-bearing SoM and alp-sdk did. That single line is what the
+#:     dispatched parity suite reported as `--emit build-plan differs -- line
+#:     24` on 57 boards. `tests/planner/test_chip_subsystem_table_tracks_alp_
+#:     sdk.py` now compares that table against the bound checkout directly, so
+#:     the next such addition fails by NAME here rather than as a byte-diff in
+#:     a build-plan blob.
+#:
+#: `HAND_PORT_PINNED_SDK_COMMIT` deliberately does NOT move with this pin. The
+#: other five hand-port sources in its own range (`gen_zephyr_board.py`,
+#: `alp_project_loader.py`, `alp_template.py`, `alp_project_emit/__init__.py`
+#: and `alp_project_emit/west_libs.py`) are NOT audited by this change --
+#: `west_libs.py`'s #1485 threading was ported because tan's copy of
+#: `_emit_west_libraries` would not otherwise compile against the new
+#: `libraries.py` signature, and that is a consequence, not an audit. Moving
+#: that pin would re-freeze four unaudited files. It stays red-capable, which
+#: is the honest state.
+PINNED_SDK_COMMIT = "ac38a069f18c9c58066f874f0e474e9540ede862"  # alp-sdk dev -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -420,24 +463,24 @@ PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "03b610ce02d1819d09ad3d5d233bbbd46b950bdc09448748b17ebc5a1b57f272",
     "buildplan.py": "54c49e8bd21dc0a283b6499b6b39314b089cf2cd65166451f884df614b7dca9f",
-    "carveout.py": "23e7920110c333a1f3cbf51ce186c4c2cebdb3ef1573c06df64ca1e9a80be478",
+    "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "4c4a5abea3b1316d66e01f8bcd2e32411c28863179c9983746c06be52e415d30",
+    "kconfig.py": "33671fc14bac333da568ca02e42ee872acb70cae31e6b29b4336b51a366a7276",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
-    "libraries.py": "bf4fd845248067f7713ce270ced265ba2a2c981f91f34911fe446849e9f57a5d",
-    "loader.py": "1dc9fb7a75c454e601584e6b50d77a7edaae38859ae4587997c6dc7888948552",
+    "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
+    "loader.py": "136e674d0b2594f99004d99dc0e1c9e116c477f764d759a3919668141182cffe",
     "manifest.py": "f38de96a9626672bc08f181e09b3a545d8dc846c0423cc6e9dd08c3b96a87d1d",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
-    "models.py": "e84bb25c5121ea96d9971df8ce69218b3eb025f9dad8f3d6286fba1b232241d1",
+    "models.py": "7e174871caa49f4d7f877dc0229571f1961d29d5c6d2214ced58aa1b86b11585",
     "orchestrator.py": "cb6a38e1a2f4200b16da93c1b11512c6e59b963e8e08279d801b8d38e57c3002",
-    "partition.py": "7f37224ff1aa05dd6d943424a664bc4d115dc05853762072854d43ea3628591c",
+    "partition.py": "120f458934f7027175b5d362eec73d34195c282db88f7f0fd41a8c37c9b7a132",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
-    "secure.py": "69b2434301b655ef7b8e478a4c6e65ec3aabcc1669e8139cfb1716bec9d4b507",
-    "slugs.py": "339bffdb8e5fef41eefc0cd2eb05705c2b3e53580c7cfd775e1dd1c65127d5cb",
-    "topology.py": "12f5f62d3adeb9e935594934fd2fc2b1fbeaec6f466d6dd89c329c54e844f3b1",
-    "validate.py": "07202af06235cc4bcd262ff457b0139e93cd9ad01ccf07b35e4d0ef99e05afa0",
+    "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
+    "slugs.py": "93b94c2e950f47bca303cf06894f03a3bc04b4323f7627af7c0836e7c4949355",
+    "topology.py": "da07b0af6e66f9e49f33dcb482729b2a6d210395e14990fa257dc0ee3eb7f781",
+    "validate.py": "b3aad05cb4d5a63bbe0cb96e47c4cb41ce552cc8c05dc296f4ca1099cdc48a90",
 }
 
 #: alp-sdk commit the SDK-SIDE SOURCE FILES in HAND_PORT_HASHES were last
