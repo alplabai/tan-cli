@@ -536,7 +536,44 @@ env:
   #   - planner byte-parity (`tests/parity/`, `ALP_SDK_PARITY_ROOT` at
   #     `ac38a069`): 82 failed / 686 passed / 8 skipped BEFORE the port,
   #     0 failed / 768 passed / 8 skipped after
-  PINNED_SDK_TAG: ac38a069f18c9c58066f874f0e474e9540ede862
+  # `ac38a069` -> `eb96112b` (tan-cli#891). The vendored fixtures had to move
+  # first for a reason unrelated to a planner audit: tan-cli#888 re-vendored
+  # `contract/fixtures/toolchains/toolchains.json` from alp-sdk's just-cut
+  # `v0.16.0` tag (alp-sdk#1603, `e48cc993`, adds `tier`/`licence` to every
+  # toolchain artifact), which left THIS pin naming a checkout
+  # (`ac38a069`, still on the OLD toolchains.json shape) that no longer
+  # matches what got vendored. `eb96112b` is the `release/v0.16.0-merge`
+  # merge alp-sdk tagged `v0.16.0` the same day (2026-08-23) -- the first time
+  # this pin names a RELEASED alp-sdk tag rather than a dev commit.
+  # `PINNED_SDK_COMMIT` and `ci.yml`'s `sdk_parity` `ref:` move to the SAME
+  # commit here, same tan-cli#691 reason as every prior bump.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `eb96112b` before landing (Windows host, `py -3.14`):
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (8168 bytes, byte-identical -- already
+  #     re-vendored by tan-cli#888, unchanged by this move)
+  #   - bootstrap        RE-VENDORED, 8643 -> 9772 bytes: alp-sdk#1605
+  #     (`44de2867`), also inside the `ac38a069..eb96112b` window, adds a
+  #     ~50-line `artifactProvenance` block (per-artifact
+  #     `tier`/`source`/`sizeBytes`/`licence`) to `metadata/bootstrap.json`.
+  #     MATCH, byte-identical, after; `test_bootstrap_command.py`'s
+  #     field-for-field fallback comparison still passes (158 passed).
+  #   - scaffold         RE-VENDORED, 7 READMEs (diagnostics x2, iot,
+  #     minimal x2, sensor x2) -- NOT a code drift: `eb96112b` is itself
+  #     tagged `v0.16.0`, so `alp_template.py`'s `_docs_ref()` (alp-sdk#1508)
+  #     now resolves that tag and renders `blob/v0.16.0/` doc links instead
+  #     of `blob/main/`, the first vendor point where that guard actually
+  #     fires. edge-ai's pair was unaffected and stayed PASS. 7 FAIL / 2 PASS
+  #     before, 9/9 PASS rc 0 after.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, same allowed-delta set
+  # `scripts/alp_orchestrate/**` is byte-identical across `ac38a069..
+  # eb96112b` (`git diff --stat` over that path between the two commits is
+  # empty) -- NOT a behavioural re-pin, every `PINNED_HASHES` entry in
+  # `test_planner_relocation_freshness.py` is unchanged. `HAND_PORT_PINNED_
+  # SDK_COMMIT` and `STRICT_LOADERS_PINNED_SDK_COMMIT` do not move -- see
+  # those pins' own comments.
+  PINNED_SDK_TAG: eb96112ba7d1cc3b4084c985962ea31772177d74
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

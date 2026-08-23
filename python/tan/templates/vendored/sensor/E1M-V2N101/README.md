@@ -4,7 +4,7 @@ Discrete I2C master that reads a known device at a known
 address.  Pattern: open the bus, init the chip driver, loop
 reading the sensor every second, close cleanly.
 
-Contrasts with [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/main/examples/peripheral-io/i2c-scanner) -- the
+Contrasts with [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner) -- the
 scanner *probes* every 7-bit address for ACKs without knowing
 what's behind them; this example *reads* a known sensor.
 
@@ -24,7 +24,7 @@ what's behind them; this example *reads* a known sensor.
 The TMP112 +/-0.5 °C temperature sensor is populated on the
 BRD_I2C management bus of every member of the AEN, V2N, and
 V2N-M1 families per
-[`metadata/chips/tmp112.yaml`](https://github.com/alplabai/alp-sdk/blob/main/metadata/chips/tmp112.yaml).
+[`metadata/chips/tmp112.yaml`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/metadata/chips/tmp112.yaml).
 
 7-bit address depends on the ADD0 strap:
 
@@ -37,9 +37,9 @@ V2N-M1 families per
 
 All current SoM families strap ADD0 to GND, so `TMP112_ADDR_7BIT`
 works unchanged across them (see the `scope:` note in
-[`metadata/chips/tmp112.yaml`](https://github.com/alplabai/alp-sdk/blob/main/metadata/chips/tmp112.yaml),
+[`metadata/chips/tmp112.yaml`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/metadata/chips/tmp112.yaml),
 TMP112 datasheet SBOS473K table 2, or
-[`include/alp/chips/tmp112.h`](https://github.com/alplabai/alp-sdk/blob/main/include/alp/chips/tmp112.h)).
+[`include/alp/chips/tmp112.h`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/chips/tmp112.h)).
 
 ## Build
 
@@ -93,8 +93,8 @@ native_sim (emul I2C, no TMP112 registered):
 
 ## Reference
 
-- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/main/include/alp/peripheral.h) I2C surface.
-- [`<alp/chips/tmp112.h>`](https://github.com/alplabai/alp-sdk/blob/main/include/alp/chips/tmp112.h) -- driver API.
-- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/main/examples/peripheral-io/i2c-scanner) -- discovery companion.
-- [`examples/peripheral-io/i2c-slave/`](https://github.com/alplabai/alp-sdk/tree/main/examples/peripheral-io/i2c-slave) -- slave-mode companion, built on the `alp_i2c_target_*` surface.
+- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/peripheral.h) I2C surface.
+- [`<alp/chips/tmp112.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/chips/tmp112.h) -- driver API.
+- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner) -- discovery companion.
+- [`examples/peripheral-io/i2c-slave/`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-slave) -- slave-mode companion, built on the `alp_i2c_target_*` surface.
 - TMP112 datasheet (TI SBOS473K).

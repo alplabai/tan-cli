@@ -376,12 +376,21 @@ jobs:
       # territory, which is why nothing here caught it -- see
       # `PINNED_SDK_COMMIT`'s comment). `HAND_PORT_PINNED_SDK_COMMIT` still
       # does not move.
+      #
+      # `ac38a069` -> `eb96112b` (tan-cli#891): NOT an audit move this time --
+      # the vendored fixtures (`contract/fixtures/toolchains/toolchains.json`,
+      # re-vendored from alp-sdk `v0.16.0` by tan-cli#888) and this checkout
+      # have to name the same commit, and `eb96112b` is the `v0.16.0` release
+      # merge itself. See `parity.yml`'s `PINNED_SDK_TAG` comment for the full
+      # per-fixture re-measurement (toolchain-lock/kconfig/bootstrap/scaffold)
+      # and the `scripts/alp_orchestrate/**` byte-identity check that keeps
+      # this a non-behavioural move for `PINNED_HASHES`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: ac38a069f18c9c58066f874f0e474e9540ede862
+          ref: eb96112ba7d1cc3b4084c985962ea31772177d74
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
