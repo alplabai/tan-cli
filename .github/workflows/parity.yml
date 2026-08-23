@@ -511,6 +511,24 @@ env:
   #   - seam1_field_diff PASS, rc 0 -- all 6 boards
   PINNED_SDK_TAG: 94378a056549c7377d714a7f2b68878aca8fea01
 
+  # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
+  # deliberately one that does NOT track `PINNED_SDK_TAG` above.
+  #
+  # tan-cli#270 deletes `scripts/alp_orchestrate/` from alp-sdk. It does not
+  # rewrite history, so a pre-#270 ref still ships the planner and can still be
+  # cloned -- that is what makes the byte-parity layer survive at all. But the
+  # two pins answer different questions and must be free to diverge:
+  #
+  #   PINNED_SDK_TAG                 the alp-sdk tan TRACKS. Moves forward.
+  #   PINNED_PLANNER_ORACLE_SDK_REF  the last alp-sdk that HAD a planner. Stops.
+  #
+  # Bumping this one past #270 does not degrade the gate gracefully -- it
+  # removes it. `tests/fixtures/planner_oracle/PROVENANCE.txt` records the ref
+  # these goldens were captured from; the two must name the same commit, and
+  # `test_planner_oracle_regression.py` fails loudly rather than quietly if the
+  # bound checkout is not that one.
+  PINNED_PLANNER_ORACLE_SDK_REF: 94378a056549c7377d714a7f2b68878aca8fea01
+
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
   # repository, plus `alplabai/alp-sdk`, which is public, so the default
@@ -1869,6 +1887,31 @@ jobs:
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
 
+      # tan-cli#509. A SECOND alp-sdk checkout, at the frozen planner-oracle
+      # ref -- the same shape as the three audit-commit clones in the seam1 job
+      # above (`alp-sdk-planner-audit`, `alp-sdk-hand-port-audit`,
+      # `alp-sdk-strict-loaders-audit`), for the same reason: two questions,
+      # two refs, one of which must not move.
+      #
+      # This supplies only the INPUTS -- `examples/**/board.yaml` and
+      # `metadata/**`. The expected OUTPUT is checked in, at
+      # `python/tests/fixtures/planner_oracle/`, so the comparison survives
+      # alp-sdk deleting the planner, rewriting history, or being unreachable.
+      # Pinning the inputs too is what keeps a red repairable: the fixture can
+      # only ever be regenerated from a pre-#270 ref, so tracked inputs against
+      # a freezable-only fixture would be a gate with no repair path.
+      #
+      # NOT vendored: ADR-0017 / I-26 keeps hardware facts in alp-sdk, and
+      # copying `metadata/**` in here would make a second, staling copy of the
+      # data whose late binding caused tan-cli#485.
+      - name: clone alp-sdk at the frozen planner-oracle commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: alplabai/alp-sdk
+          ref: ${{ env.PINNED_PLANNER_ORACLE_SDK_REF }}
+          path: alp-sdk-planner-oracle
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -1909,8 +1952,17 @@ jobs:
         working-directory: python
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
+          # tan-cli#509. Its OWN variable, NOT ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT:
+          # fifteen other test modules read those two to track live metadata
+          # FORWARD, and pointing either at a frozen ref would silently repoint
+          # all of them at a snapshot.
+          ALP_PLANNER_ORACLE_ROOT: ${{ github.workspace }}/alp-sdk-planner-oracle
         run: |
           set -euo pipefail
+          if [ ! -f "${ALP_PLANNER_ORACLE_ROOT}/metadata/catalog.json" ]; then
+            echo "::error::ALP_PLANNER_ORACLE_ROOT is bound to ${ALP_PLANNER_ORACLE_ROOT}, which has no metadata/catalog.json -- test_planner_oracle_regression.py would SKIP all 702 of its cases while this job reported green. Fix the 'clone alp-sdk at the frozen planner-oracle commit' step above."
+            exit 1
+          fi
           if [ ! -f "${ALP_SDK_ROOT}/scripts/alp_project.py" ]; then
             echo "::error::ALP_SDK_ROOT is bound to ${ALP_SDK_ROOT}, which has no scripts/alp_project.py -- tests/conftest.py::sdk_root() would return None and every SDK-gated module would SKIP while this job still reported green. Fix the 'clone alp-sdk' step above."
             exit 1

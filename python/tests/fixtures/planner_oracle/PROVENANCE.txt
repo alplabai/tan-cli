@@ -1,0 +1,57 @@
+THE FROZEN alp-sdk PLANNER ORACLE (tan-cli#509)
+===============================================
+
+alp-sdk ref   94378a056549c7377d714a7f2b68878aca8fea01
+boards        100
+emits         700  (7 of them error-contract, captured as .error)
+bytes         1,140,006
+modes         build-plan system-manifest ipc-contract-h dts-reservations dts-partitions storage-mounts-c tfm-sysbuild-conf
+
+WHAT THESE BYTES ARE. The output of alp-sdk's `scripts/alp_orchestrate/` at the
+ref above, rendered over every `board.yaml` under that checkout's `examples/`,
+for every mode listed. They are the last independent implementation tan's
+planner can be checked against: tan-cli#270 deletes `scripts/alp_orchestrate/`
+from alp-sdk, after which tan is the only implementation left and a live
+comparison has no counterparty.
+
+HOW TO REGENERATE. Check out alp-sdk at a ref that still ships the planner --
+the one above unless there is a reason to move -- and run, from `python/`:
+
+    python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref <ref>
+
+An exported tree (`git archive`) has no `.git`, so `--sdk-ref` is required
+there. The tool refuses to write if any emit still carries a host path, a
+timestamp or another volatile value after normalisation.
+
+WHEN TO REGENERATE, AND WHAT THE DIFF MEANS. Whenever
+`tests/parity/test_planner_oracle_regression.py` goes red for a change you
+believe is CORRECT. The resulting diff is not noise to be waved through -- it
+is the whole reason this fixture holds output rather than a pinned source ref.
+It shows, in DTS and JSON and C, exactly which emitted bytes moved.
+
+Two shapes reach it and they are not the same:
+
+  * `tan/planner/**` changed. The diff is the behaviour change, in full. Review
+    it as you would review the emitted artefact itself.
+  * `PINNED_SDK_TAG` moved and the new `metadata/**` changes what tan emits.
+    That is tan-cli#485's mechanism made visible: tan binds alp-sdk's DATA late
+    and its LOGIC early, so a new metadata field lands instantly while the rule
+    interpreting it is hand-carried. The diff is the signal that was missing
+    when `CONFIG_ALP_SDK_CHIP_NONE=y` reached `dev`.
+
+The paths in `boardYaml` are `<SDK>`-normalised; see
+`capture_planner_oracle.py` for why, and for the refusal that keeps it true.
+
+WHAT THESE BYTES DO NOT COVER
+-----------------------------
+
+`dts-partitions` is a stub on all 100 boards -- no example declares `storage:`
+-- so the partition `reg = <base size>` arithmetic at
+`tan/planner/headers.py:196-202` is exercised by nothing here. `ipc-contract-h`
+is a stub on 99 of 100 and `tfm-sysbuild-conf` is empty on 98 of 100.
+`build-plan` (873,260 B) and `system-manifest` (123,128 B) carry 87% of the
+substance.
+
+The live suite this replaces walks the same 100 boards and has the same blind
+spot, so nothing was lost in the freeze. Closing it needs an alp-sdk example
+that declares `storage:`.
