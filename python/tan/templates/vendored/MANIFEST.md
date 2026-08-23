@@ -254,12 +254,29 @@ from an un-revendored SDK change.
   `main` — a live ref — instead of rendering 40 links that 404. This line
   goes back to a `v<version>` the moment alp-sdk cuts that tag and the pin
   moves past it; `scaffold_byte_parity.py` is what will say so.
-- Commit: **`f30f4d4b`** (alp-sdk `dev`) — the checkout the emit was RUN
-  against, and the same commit `parity.yml`'s `PINNED_SDK_TAG` now names.
-  Distinct from `Ref:` above on purpose: `Ref:` is the ref the rendered LINKS
-  name (a browsable tag, `v0.15.0`), `Commit:` is where the BYTES came from.
-  `f30f4d4b` is 6 contract-surface commits past the `v0.15.0` tag, which is
-  why the two are not one line.
+- Commit: **`94378a05`** (alp-sdk `dev`) — the checkout the emit was RUN
+  against, matching the "Current vendor point" bullet above, which is now
+  asserted by `python/tests/core/test_template_integrity.py` rather than left
+  to agree by hand.
+
+  This line used to say `f30f4d4b` and assert it was "the same commit
+  `parity.yml`'s `PINNED_SDK_TAG` now names". Both halves went stale, and in
+  that order. tan-cli#582 wrote it on 2026-08-09, setting the vendor point,
+  this line and the pin all to `f30f4d4b`. The IDENTITY broke the same day —
+  tan-cli#593 moved the pin to `ccd34f06` 21h44m later — and the COMMIT went
+  stale on 2026-08-13, when tan-cli#714 moved the tree to `d00dbdc1` and left
+  this line behind. tan-cli#851 then re-vendored onto `94378a05` and demoted
+  `d00dbdc1` to history, without this line moving either time. Nothing read
+  it, so nothing could say.
+
+  The two refs are not independent by design: #714 and #851 each set the
+  vendor point and the pin together, so they are equal at capture and diverge
+  only as the pin keeps moving afterwards — which is what "PINNED_SDK_TAG has
+  since moved past this vendor point, deliberately" above describes.
+
+  Distinct from `Ref:` on purpose, and the distinction is NOT tag-vs-commit:
+  `Ref:` is `main` today, for the reason the `Ref:` bullet gives. `Ref:` is
+  what the rendered LINKS name; `Commit:` is where the BYTES came from.
 - Previous: `v0.15.0-rc1` (release tag) / **`996937ac`** — the seven READMEs
   described in the entry below. History below.
 - Previous: **v0.14.0 (`ef79eab0`)** — the release tag, re-vendored for tan
@@ -275,10 +292,27 @@ from an un-revendored SDK change.
     not a hand-substitution that happens to match. Run from WSL: the emit needs
     a Linux host, and the gate cannot be checked on Windows at all.
   - Prior vendor point: `cdfe13684e362c75f6df2b190ec1c3e736c48731` —
-    alp-sdk#1016, which rewrote the `Customer workflow:` header in every example
-    `board.yaml` from "copy this directory … and `west build`" to "`tan init
-    --from-example <category>/<name>` … and `tan build`" (ADR-0020: tan is the
-    whole command surface). Six `board.yaml` files moved; comment-only.
+    alp-sdk#1016, which rewrote the `Customer workflow:` header from "copy this
+    directory … and `west build`" to "`tan init --from-example
+    <category>/<name>` … and `tan build`" (ADR-0020: tan is the whole command
+    surface) in the example `board.yaml` files it touched. Six VENDORED
+    `board.yaml` files moved here as a result; comment-only. (Upstream #1016
+    touched 33 example files — the six is this tree's count, not its.)
+
+    NOT every example: #1016 left four `Customer workflow:` headers untouched
+    upstream, and one of them is vendored here —
+    `examples/connectivity/mqtt-telemetry/board.yaml`, whose copy at
+    `iot/E1M-AEN801/board.yaml:21-23` still says `west build`, byte-faithful
+    to a file still un-rewritten on alp-sdk `origin/dev` and `origin/main`.
+    It is the only one of the four that is a Zephyr `west build` flow.
+
+    It is NOT the only vendored text routing a customer around `tan`: all NINE
+    vendored `README.md` files document `west build`/`west flash` and none
+    mentions `tan` (measured). The `board.yaml` comment is the smaller half.
+    Fixing either is an alp-sdk change plus a re-vendor — a hand-edit here is
+    possible via `scaffold_byte_parity.py`'s `DELIBERATE_EDITS`, but it books
+    a standing divergence somebody unwinds when upstream lands. Tracked by
+    tan-cli#821.
 - Previous: **v0.13.0 (`93ef5726`)** — `minimal` was re-vendored at this commit
   (only its `README.md` doc-version link changed, `v0.11.1` -> `v0.13.0`; the
   scaffold content itself is unchanged since the `a0849e10` vendor point

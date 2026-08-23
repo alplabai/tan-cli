@@ -993,6 +993,17 @@ jobs:
             fi
           done
 
+          # tan-cli#778's gate lives in its OWN file, so the loop above cannot
+          # reach it -- it greps one fixed module name. Its symbol-parity test
+          # is the only one there needing ALP_SDK_HAND_PORT_ROOT, and this job
+          # is the only one that binds it, so an unasserted SKIP exits 0 and
+          # passes silently: verbatim the tan-cli#308 shape that gate's own
+          # docstring invokes.
+          if ! grep -qF "test_hand_port_tan_side.py::test_explain_hand_port_still_agrees_with_its_upstream_symbols PASSED" /tmp/gates.log; then
+            echo "::error::test_explain_hand_port_still_agrees_with_its_upstream_symbols did not PASS in this job -- ALP_SDK_HAND_PORT_ROOT is bound here, so a SKIP means the oracle checkout this job cloned did not resolve (or the test regressed to fail-open), not an absent root."
+            exit 1
+          fi
+
       # test_jlink_aen_device_freshness asks a question the FROZEN audit checkout
       # cannot answer: does tan's JLINK_AEN_DEVICE fallback still agree with the
       # part number alp-sdk ships TODAY. Binding it to the audit commit like the

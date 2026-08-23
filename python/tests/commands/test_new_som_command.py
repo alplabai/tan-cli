@@ -959,7 +959,7 @@ _ENVELOPE_KEYS = {"command", "ok", "exitCode", "project", "data", "issues"}
 
 def _marker_sdk(root: Path) -> Path:
     """A throwaway alp-sdk checkout: the `scripts/alp_project.py` marker
-    (`sdk_cmd.SDK_MARKER`, invariant I-31), permissive schemas, and one board
+    (`tan.core.shapes.SDK_MARKER`, invariant I-31), permissive schemas, and one board
     whose `name:` is the command's own `DEFAULT_BOARD`.
 
     The schemas are deliberately permissive rather than copies of the real

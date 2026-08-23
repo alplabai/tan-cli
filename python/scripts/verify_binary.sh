@@ -12,10 +12,19 @@
 # (e.g. dist/tan/tan or dist/tan/tan.exe), with a `_internal/` sibling
 # directory that check 5/5 below depends on.
 #
-#   1. --version            -- import graph resolves at all. `python/tan/cli.py`
-#                              imports `click.testing`, which typer 0.27 no
-#                              longer pulls in, so a clean-venv build dies here
-#                              with ModuleNotFoundError before printing a byte.
+#   1. --version            -- import graph resolves at all.
+#                              tan-cli#810 NARROWED what this proves: `cli.py`
+#                              used to import `click.testing` at module scope
+#                              (typer 0.27 stopped pulling it in, so a
+#                              clean-venv build died right here with
+#                              ModuleNotFoundError before printing a byte).
+#                              That import is now deferred into the
+#                              `--help --format json` path, so `--version` no
+#                              longer touches it and no check below does
+#                              either. `tests/conformance/
+#                              test_packaged_binary.py::
+#                              test_the_artifact_carries_click_testing` is what
+#                              covers it against a real artifact now.
 #   2. generate --help      -- the flag the extension's contract needs exists.
 #                              Released v0.4.1 has no `--output`; a binary that
 #                              runs but lacks it is the wrong binary.

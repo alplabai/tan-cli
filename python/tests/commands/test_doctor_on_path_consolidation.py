@@ -13,12 +13,20 @@ against.
 A behavioural-only test cannot carry that. On POSIX both implementations agree
 by construction (`exts` was `[""]`, which is what `resolve_tool` does), and the
 arm where they genuinely differ -- Windows, where the old copy accepted a bare
-extension-less `%PATH%` file ahead of every suffixed sibling -- is unreachable
-from Linux CI: `resolve_tool`'s Windows branch builds a `Path`, which
-dispatches on `os.name` at construction, so patching `os.name` raises rather
-than reaching it (`test_bare_argv0_spawn.py`'s own note). Hence one
-call-through assertion plus real-filesystem agreement, rather than a re-run of
-the walk.
+extension-less `%PATH%` file ahead of every suffixed sibling -- is not the
+question this file asks. Hence one call-through assertion plus real-filesystem
+agreement, rather than a re-run of the walk.
+
+The reason recorded here until tan-cli#811 was that the Windows branch is
+"unreachable from Linux CI: `resolve_tool`'s Windows branch builds a `Path`,
+which dispatches on `os.name` at construction, so patching `os.name` raises
+rather than reaching it". That was false in both halves -- `Path(str)` under a
+patched `os.name` constructs fine, and the stat methods answer `False` rather
+than raising -- and it is now moot: the walk builds its hit with
+`PureWindowsPath` and IS driven from POSIX by
+`test_bare_argv0_spawn.py::test_the_windows_walk_returns_the_pathlib_spelling
+_not_the_join_spelling`. The choice made here is still the right one, but it
+is a choice about what THIS file pins, not a platform barrier.
 """
 
 from __future__ import annotations
