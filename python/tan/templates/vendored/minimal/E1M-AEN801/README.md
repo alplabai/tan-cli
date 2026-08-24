@@ -60,7 +60,7 @@ tio -b 115200 <your-serial-device>
 
 Per-OS device naming (and the alternative terminals each OS
 prefers) is documented in
-[`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/main/docs/cross-platform-setup.md)
+[`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cross-platform-setup.md)
 section 7.7.
 
 <!-- cross-platform-lint:ignore -->
@@ -95,9 +95,9 @@ LPT)").
 
 ## Reference
 
-- [`docs/firmware-quickstart.md`](https://github.com/alplabai/alp-sdk/blob/main/docs/firmware-quickstart.md)
+- [`docs/firmware-quickstart.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/firmware-quickstart.md)
   -- single-OS bring-up walk-through.
-- [`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/main/docs/cross-platform-setup.md)
+- [`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cross-platform-setup.md)
   -- Windows/macOS/Linux toolchain + serial-port notes.
-- [`docs/troubleshooting.md`](https://github.com/alplabai/alp-sdk/blob/main/docs/troubleshooting.md)
+- [`docs/troubleshooting.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/troubleshooting.md)
   -- common boot/flash/console failures + fixes.

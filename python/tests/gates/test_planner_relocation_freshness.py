@@ -452,7 +452,68 @@ from tests.conftest import sdk_root
 #: `libraries.py` signature, and that is a consequence, not an audit. Moving
 #: that pin would re-freeze four unaudited files. It stays red-capable, which
 #: is the honest state.
-PINNED_SDK_COMMIT = "ac38a069f18c9c58066f874f0e474e9540ede862"  # alp-sdk dev -- see above
+#:
+#: `ac38a069` -> `eb96112b` (tan-cli#891). The first move here that lands on a
+#: RELEASED alp-sdk tag rather than a dev commit: `eb96112b` is the
+#: `release/v0.16.0-merge` merge into `main`, and alp-sdk tagged it `v0.16.0`
+#: the same day (2026-08-23). Not a planner audit at all -- it moved because
+#: the vendored fixtures and the checkout this gate's sibling parity job
+#: compares against have to name the SAME commit. `contract/fixtures/
+#: toolchains/toolchains.json` was re-vendored against `v0.16.0` first
+#: (tan-cli#888), which left `parity.yml`'s `seam1 -- plan-shape parity` job
+#: failing: it still checked alp-sdk out at `ac38a069`, where `metadata/
+#: toolchains.json` has the OLD shape -- alp-sdk#1603 (`e48cc993`) adds
+#: `tier`/`licence` to every toolchain artifact, and that commit sits INSIDE
+#: the `ac38a069..eb96112b` window. Re-measured every seam1 byte-comparison
+#: against `eb96112b`, not just the one that surfaced the drift, because a
+#: pin move is exactly the moment another vendored fixture can go stale
+#: unnoticed:
+#:
+#:   * toolchain-lock: already re-vendored (tan-cli#888), PASS at 8168 bytes
+#:     (was 6592) against `eb96112b` -- unchanged by this move.
+#:   * kconfig-fixture: PASS, 814 bytes, byte-identical -- no re-vendor.
+#:   * bootstrap: DIFFERED. alp-sdk#1605 (`44de2867`), also inside this
+#:     window, adds a ~50-line `artifactProvenance` block (per-artifact
+#:     `tier`/`source`/`sizeBytes`/`licence`) to `metadata/bootstrap.json`.
+#:     Re-vendored `contract/fixtures/bootstrap/manifest.json`, 8643 -> 9772
+#:     bytes; `bootstrap_manifest_parity.py --sdk <eb96112b>` now reports
+#:     MATCH, and `test_bootstrap_command.py`'s field-for-field fallback
+#:     comparison still passes (158 passed).
+#:   * scaffold: 7 of 9 (template, sku) pairs FAILED on `README.md` content --
+#:     NOT a code drift. `eb96112b` is itself tagged `v0.16.0`, so
+#:     `alp_template.py`'s `_docs_ref()` (the alp-sdk#1535 guard: pin doc
+#:     links to the release tag only once it RESOLVES, else fall back to
+#:     `main`) now resolves the tag and renders `blob/v0.16.0/` links instead
+#:     of `blob/main/` -- the first vendor point where that guard actually
+#:     fires. Re-vendored all 7 READMEs (diagnostics x2, iot, minimal x2,
+#:     sensor x2; edge-ai's pair was already unaffected and stayed PASS);
+#:     `scaffold_byte_parity.py --sdk <eb96112b>` is 9/9 PASS, rc 0 after --
+#:     measured against a checkout with tags fetched. The same commit
+#:     without tags reproduces the 7 FAIL / 2 PASS split every time
+#:     (`_tag_resolves()` reads LOCAL refs only, never the network); 9/9 is
+#:     what a tagged clone measures, which is what `parity.yml`'s and
+#:     `ci.yml`'s `clone alp-sdk` steps now always provide
+#:     (`fetch-tags: true`, tan-cli#891).
+#:
+#: NOT a behavioural re-pin for THIS table: `scripts/alp_orchestrate/**` is
+#: byte-identical across `ac38a069..eb96112b` (`git diff --stat` over that
+#: path between the two commits is empty, checked directly against the
+#: worktree), so every `PINNED_HASHES` entry below is unchanged and nothing
+#: unaudited is re-frozen by this move.
+#:
+#: `HAND_PORT_PINNED_SDK_COMMIT` and `STRICT_LOADERS_PINNED_SDK_COMMIT` do NOT
+#: move with this pin -- neither audit's surface is what changed here
+#: (toolchains.json and bootstrap.json are contract/vendored-fixture
+#: territory, not `HAND_PORT_HASHES`/`STRICT_LOADERS_HASH` files), and moving
+#: either would re-freeze unaudited hand-port sources for no reason tied to
+#: this change. `HAND_PORT_PINNED_SDK_COMMIT`'s own trailing comment said
+#: "alp-sdk origin/main" -- that is now stale on its face, not just unmoved:
+#: alp-sdk's `main` advanced past `88318e75` with the `v0.16.0` release, and
+#: `88318e75` is an ancestor of that tag (`git describe` there reads
+#: `v0.15.0-88-g88318e75`; `git tag --contains` lists both `v0.16.0-rc1` and
+#: `v0.16.0`). Corrected below to say what the commit actually is; the pin
+#: value itself is unchanged.
+PINNED_SDK_COMMIT = "eb96112ba7d1cc3b4084c985962ea31772177d74"  # alp-sdk v0.16.0 -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -689,7 +750,7 @@ PINNED_HASHES: dict[str, str] = {
 #: pin-disagreement warning compares `PINNED_SDK_COMMIT` against
 #: `PINNED_SDK_TAG`, not this pin, so the split below stays silent by
 #: design -- this comment is the record that it is deliberate.
-HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk origin/main -- deliberately BEHIND PINNED_SDK_COMMIT, see above
+HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk v0.15.0+88, an ancestor of the released v0.16.0 -- deliberately BEHIND PINNED_SDK_COMMIT, see above
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its

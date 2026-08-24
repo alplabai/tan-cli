@@ -2,7 +2,7 @@
 
 The **connected device** starting point: bring up Wi-Fi, open an
 `mqtts://` (TLS) MQTT client, and publish a telemetry reading on a
-cadence -- the whole path on the portable [`<alp/iot.h>`](https://github.com/alplabai/alp-sdk/blob/main/include/alp/iot.h)
+cadence -- the whole path on the portable [`<alp/iot.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/iot.h)
 surface.
 
 ```
@@ -16,7 +16,7 @@ alp_mqtt_close()                                # clean disconnect
 
 This template ships for **E1M-AEN801 only**. Its transport is the
 **CC3501E Wi-Fi6+BLE coprocessor bridge**
-([`docs/cc3501e-bridge.md`](https://github.com/alplabai/alp-sdk/blob/main/docs/cc3501e-bridge.md)),
+([`docs/cc3501e-bridge.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cc3501e-bridge.md)),
 silicon-validated 2026-06-24. The app never names the bridge -- the
 AEN board emit wires it as the `<alp/iot.h>` Wi-Fi backend from
 `iot.wifi: true` in `board.yaml`.
@@ -44,7 +44,7 @@ is `preview`.
 To keep the focus on the transport, this template publishes a
 **synthetic metric** (device uptime). Swap
 `read_telemetry_value()` for a real sensor read -- e.g. compose it
-with the [`sensor` template](https://github.com/alplabai/alp-sdk/tree/main/examples/peripheral-io/i2c-master) (TMP112
+with the [`sensor` template](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-master) (TMP112
 over `<alp/chips/tmp112.h>`) -- and the publish path is unchanged.
 
 ## Build
@@ -88,6 +88,6 @@ Real hardware (E1M-AEN801, associated + broker reachable):
 
 ## Reference
 
-- [`<alp/iot.h>`](https://github.com/alplabai/alp-sdk/blob/main/include/alp/iot.h) -- Wi-Fi station + MQTT client surface.
-- [`docs/cc3501e-bridge.md`](https://github.com/alplabai/alp-sdk/blob/main/docs/cc3501e-bridge.md) -- the AEN Wi-Fi transport.
-- [`examples/peripheral-io/i2c-master/`](https://github.com/alplabai/alp-sdk/tree/main/examples/peripheral-io/i2c-master) -- the `sensor` template, for a real reading to publish.
+- [`<alp/iot.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/iot.h) -- Wi-Fi station + MQTT client surface.
+- [`docs/cc3501e-bridge.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cc3501e-bridge.md) -- the AEN Wi-Fi transport.
+- [`examples/peripheral-io/i2c-master/`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-master) -- the `sensor` template, for a real reading to publish.
