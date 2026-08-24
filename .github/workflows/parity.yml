@@ -603,7 +603,7 @@ env:
   # `PINNED_SDK_TAG` re-sync (tan-cli#868, landing alp-sdk's real fix for the
   # GD32 bridge's missing `CONFIG_SPI=y`, among others) moved tan/planner/**
   # itself to legitimately emit different bytes -- and PR #884's CI went red
-  # on 19 of 703 cases across 12 boards the moment it merged with `dev`. The
+  # on 19 of 703 cases across 19 boards the moment it merged with `dev`. The
   # isolation held (every failing case rendered against THIS var, confirmed
   # by reproducing locally with `ALP_SDK_ROOT` pointed at the STALE oracle
   # ref and getting the identical 19-case list); what broke is that this pin

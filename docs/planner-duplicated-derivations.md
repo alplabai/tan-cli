@@ -13,9 +13,14 @@ nothing else:
   (`perf(tool-lookup): drop the per-candidate Path from the Windows PATH
   walk (#811) (#874)`).
 - **alp-sdk** -- a frozen checkout at
-  `94378a056549c7377d714a7f2b68878aca8fea01`, which is the commit
-  `python/tests/gates/test_planner_relocation_freshness.py:412` names as
-  `PINNED_SDK_COMMIT`.
+  `94378a056549c7377d714a7f2b68878aca8fea01`. This was the commit
+  `python/tests/gates/test_planner_relocation_freshness.py` named as
+  `PINNED_SDK_COMMIT` when this document was written (`:412` at the
+  time). A later merge on this same PR (tan-cli#509) moved that pin to
+  `eb96112ba7d1cc3b4084c985962ea31772177d74` (`:516` now) without
+  re-running this document's measurements, so every count and
+  hash-match verdict below is dated to `94378a05` unless stated
+  otherwise.
 
 ## Corrections to the inventory in the issue
 
@@ -69,17 +74,25 @@ worth less if the audit that is supposed to notice them diverging is
 itself stale:
 
 - All **21** `PINNED_HASHES` entries (`scripts/alp_orchestrate/*.py`)
-  match at `94378a05`. That is expected -- `PINNED_SDK_COMMIT` IS
-  `94378a05` -- but it means the relocated half of the planner is audited
-  against exactly the tree measured here.
-- **17 of 19** `HAND_PORT_HASHES` entries match at `94378a05`, even
-  though `HAND_PORT_PINNED_SDK_COMMIT` is
+  matched at `94378a05` when this document was written --
+  `PINNED_SDK_COMMIT` WAS `94378a05` then, so the relocated half of the
+  planner was audited against exactly the tree measured here. Re-checked
+  after the later merge that moved `PINNED_SDK_COMMIT` to
+  `eb96112ba7d1cc3b4084c985962ea31772177d74`: still all 21 match there too
+  (`test_relocated_planner_modules_match_the_pinned_sdk_audit` PASSED with
+  `ALP_SDK_ROOT` bound to `eb96112b`) -- expected, since the table is by
+  construction recalibrated to whatever `PINNED_SDK_COMMIT` names.
+- **17 of 19** `HAND_PORT_HASHES` entries matched at `94378a05` (this
+  document's frozen tree -- see above; not re-measured against
+  `PINNED_SDK_COMMIT`'s later `eb96112b` value, since
+  `HAND_PORT_PINNED_SDK_COMMIT` tracks neither), even though
+  `HAND_PORT_PINNED_SDK_COMMIT` is
   `88318e759958529fbbd8fe9d481373681c0fa78d`, deliberately behind. The two
-  that differ are `scripts/alp_template.py` (frozen
+  that differed at `94378a05` are `scripts/alp_template.py` (frozen
   `5d453c5d72c565855090a4c1a77abdc359bae215171b335f82c4f268e95d9014`) and
   `scripts/alp_cli/doctor.py` (frozen
   `fe109d986def5f3942c0fe5c158b2a8cd971d9d04dcb5c118349dbb8e4819e1d`),
-  both already argued for in that file's own comments at lines 620-627.
+  both already argued for in that file's own comments at lines 720-739.
   **Neither is a source of any of the eight derivations below**, so the
   older hand-port pin does not weaken any verdict in this document.
 
@@ -600,12 +613,14 @@ Ordered by what it would take to retire each:
 None of the eight is unguarded, and that is why "duplicated" is tolerable
 rather than urgent. What guards them:
 
-- **`PINNED_HASHES`** (`test_planner_relocation_freshness.py:412` onward)
+- **`PINNED_HASHES`** (`test_planner_relocation_freshness.py:516` onward)
   pins the sha256 of all 21 `scripts/alp_orchestrate/*.py` at
-  `PINNED_SDK_COMMIT = 94378a056549c7377d714a7f2b68878aca8fea01`. Covers
-  derivations 4 (via `slugs.py`, `339bffdb…`) and 6 (via `libraries.py`)
-  and the six planner `TBD` call sites.
-- **`HAND_PORT_HASHES`** (same file, `:720-740`) pins 19 sources outside
+  `PINNED_SDK_COMMIT = eb96112ba7d1cc3b4084c985962ea31772177d74` (moved
+  from `94378a056549c7377d714a7f2b68878aca8fea01` by the same PR, after
+  this document was written). Covers derivations 4 (via `slugs.py`,
+  `339bffdb…`) and 6 (via `libraries.py`) and the six planner `TBD` call
+  sites.
+- **`HAND_PORT_HASHES`** (same file, `:824-844`) pins 19 sources outside
   `alp_orchestrate/` at `HAND_PORT_PINNED_SDK_COMMIT =
   88318e759958529fbbd8fe9d481373681c0fa78d`. Covers derivations 1, 2, 3, 5,
   6 and 7 -- and `scripts/sentinels.py` itself
@@ -652,7 +667,8 @@ Where the net does not reach, measured rather than assumed:
    (`renesas_rzv2n`) match none, which is why neither `slugs.py` nor
    `libraries.py` appears in its `ALLOWED` dict despite carrying 74
    hardware facts between them.
-5. **Three pins at three commits.** `PINNED_SDK_COMMIT` (`94378a05`),
+5. **Three pins at three commits.** `PINNED_SDK_COMMIT` (`eb96112b`, at
+   the time this document was written `94378a05`),
    `HAND_PORT_PINNED_SDK_COMMIT` (`88318e75`) and
    `STRICT_LOADERS_PINNED_SDK_COMMIT`
    (`26b0040e9a762c16aff5c7c53b2e19cc7583b2a4`) are deliberately
