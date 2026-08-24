@@ -113,7 +113,7 @@ jobs:
     # a `workflow_dispatch`-only proof workflow nobody watches by default. 45
     # is a hang catcher, not a derived budget -- measured p100 across these
     # legs is ~1.6 minutes on a real run (30675989571: windows 1.2/1.5, linux
-    # 0.7-0.9, macos 0.7/1.6; 30555358227 the same shape), so 45 is
+    # 0.7-1.0, macos 0.7/1.6; 30555358227 the same shape), so 45 is
     # comfortably ~28x that, not a number sized to the extra work this job
     # does relative to clean-host.yml's `freeze-and-smoke` (20). It carries
     # more setup than that sibling -- TWO checkouts per leg (this repo + a

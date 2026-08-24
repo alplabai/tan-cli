@@ -414,6 +414,24 @@ def test_expression_digits_embedded_in_an_identifier_are_not_extracted(
     assert find_timeout_problems(tmp_path) == []
 
 
+def test_expression_digit_adjacent_to_a_dot_is_not_extracted(tmp_path: Path) -> None:
+    """A plain `\\b\\d+\\b` is NOT enough: `\\b` sits between a word char and a
+    non-word char, and `.` is a NON-word char, so `\\b\\d+\\b` still matches a
+    digit run separated from its neighbour only by a dot -- e.g. the phantom
+    `500` in `${{ matrix.v1.500 && 60 || 30 }}` (a decimal-looking literal,
+    not a real int bound). `_TIMEOUT_EXPR_INT_RE`'s lookaround explicitly
+    excludes `.` as well as identifier chars, so this fixture is clean here
+    and would fail under a `\\b\\d+\\b` mutation (500 is outside 1..120)."""
+    _write_timeout_workflow(
+        tmp_path,
+        "dotdigit.yml",
+        "  build:\n    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: ${{ matrix.v1.500 && 60 || 30 }}\n"
+        "    steps:\n      - run: echo hi\n",
+    )
+    assert find_timeout_problems(tmp_path) == []
+
+
 def test_local_reusable_workflow_caller_is_exempt(tmp_path: Path) -> None:
     """The `uses:`-caller exclusion (release.yml's `gates` / `python-gates`
     shape) had only two all-green real inputs backing it -- this fixture
@@ -443,6 +461,22 @@ def test_cross_repo_uses_caller_is_not_exempt(tmp_path: Path) -> None:
     assert "crosscaller.yml" in problems[0] and "declares no" in problems[0]
 
 
+def test_a_dot_yaml_workflow_is_scanned_too(tmp_path: Path) -> None:
+    """The `*.yaml` half of the widening (`_workflow_files`) had ZERO test
+    coverage: every other fixture in this module writes a `.yml` file, so a
+    mutation back to `sorted(directory.glob("*.yml"))` left every other test
+    green. Write a `.yaml` file with an unbounded job and require it show up
+    -- this is the one fixture that actually exercises the `*.yaml` glob."""
+    _write_timeout_workflow(
+        tmp_path,
+        "zz.yaml",
+        "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n",
+    )
+    problems = find_timeout_problems(tmp_path)
+    assert len(problems) == 1
+    assert "zz.yaml" in problems[0] and "declares no" in problems[0]
+
+
 def test_this_repos_own_workflows_produce_no_timeout_problems() -> None:
     """The real thing this gate exists to guard, in the same
     `find_problems(REPO_ROOT) == []` shape `test_apt_bounded.py` closes on --
@@ -453,20 +487,33 @@ def test_this_repos_own_workflows_produce_no_timeout_problems() -> None:
     assert problems == [], "\n".join(problems)
 
 
-#: The four non-pull_request workflows tan-cli#855 named as carrying
-#: unbounded jobs, mapped to the MINIMUM count of bounded jobs each must
+#: EVERY workflow file's bounded-job count, mapped to the MINIMUM it must
 #: still contribute -- not just presence. Presence alone let a shrink from
 #: `release.yml`'s real 5 bounded jobs (`verify-version`, `build`, `release`,
 #: `publish_npm`, `release_gate` -- `gates`/`python-gates` stay excluded as
 #: LOCAL `uses:` callers) down to 1 pass silently, since the old check only
-#: asked "is release.yml in the set at all". Counts below are the actual
-#: current counts; a future PR that drops a job updates this dict on purpose,
-#: the same anti-shrink shape `_PARITY_JOBS` gives `parity.yml`.
+#: asked "is release.yml in the set at all". Floored for all TEN non-parity
+#: files, not just the four tan-cli#855 named -- a review round on this same
+#: gate pointed out the other six (`ci.yml`, `clean-host.yml`,
+#: `e2e-container.yml`, `getting-started.yml`, `pin-move-verify.yml`,
+#: `version-identity.yml`) could shrink silently too, and there is no reason
+#: this floor should apply to only the four #855 happened to name.
+#: `parity.yml` is deliberately absent: `_PARITY_JOBS` /
+#: `test_every_parity_job_is_bounded` already give it the same anti-shrink
+#: coverage, named per-job rather than as a bare count. Counts below are the
+#: actual current counts; a future PR that drops a job updates this dict on
+#: purpose, the same anti-shrink shape `_PARITY_JOBS` gives `parity.yml`.
 _MIN_BOUNDED_JOBS = {
-    "release.yml": 5,
-    "python-binaries.yml": 4,
+    "ci.yml": 4,
+    "clean-host.yml": 2,
+    "e2e-container.yml": 2,
+    "getting-started.yml": 1,
+    "pin-move-verify.yml": 1,
     "planner-resync.yml": 1,
+    "python-binaries.yml": 4,
     "release-combination.yml": 2,
+    "release.yml": 5,
+    "version-identity.yml": 1,
 }
 
 
@@ -476,8 +523,9 @@ def test_the_every_workflow_job_set_is_not_empty():
     matching, every parametrised case would vanish and the checks would pass
     having examined nothing. Also guards against a silent SHRINK: presence of
     a workflow name in the collected set says nothing about how many of its
-    jobs actually got counted, so each of the four is additionally held to a
-    minimum bounded-job count."""
+    jobs actually got counted, so every non-`parity.yml` workflow is
+    additionally held to a minimum bounded-job count (`_MIN_BOUNDED_JOBS`);
+    `parity.yml` gets the same coverage from `_PARITY_JOBS` instead."""
     cases = _every_workflow_job_cases()
     assert cases, "no (workflow, job) pairs were collected across .github/workflows/ at all"
     counts: dict[str, int] = {}
@@ -486,8 +534,7 @@ def test_the_every_workflow_job_set_is_not_empty():
     for expected, minimum in _MIN_BOUNDED_JOBS.items():
         assert expected in counts, (
             f"{expected} contributed no bounded job to this gate ({sorted(counts)}) "
-            f"-- it is one of the four non-pull_request workflows tan-cli#855 "
-            f"named as carrying unbounded jobs; if it now has zero bounded "
+            f"-- it is named in `_MIN_BOUNDED_JOBS`; if it now has zero bounded "
             f"jobs, `_bounded_jobs`/`_load` stopped parsing it correctly."
         )
         assert counts[expected] >= minimum, (
