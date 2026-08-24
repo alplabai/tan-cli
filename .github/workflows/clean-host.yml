@@ -252,9 +252,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/python:/src" -v "$PWD/scripts:/scripts:ro" -w /src "${{ matrix.container }}" bash -euc '
-            bash /scripts/ci/apt-bounded.sh update -qq
-            bash /scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
+          docker run --rm -v "$PWD:/src" -w /src/python "${{ matrix.container }}" bash -euc '
+            bash /src/scripts/ci/apt-bounded.sh update -qq
+            bash /src/scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet --upgrade pip
             /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"

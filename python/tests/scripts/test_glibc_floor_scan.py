@@ -132,6 +132,64 @@ def test_non_elf_files_are_not_counted(tmp_path):
     assert "found 1 native files" in str(excinfo.value)
 
 
+def test_an_unparseable_elf_magic_file_does_not_count_toward_the_guard(tmp_path):
+    # A file that starts with the ELF magic but is not a real ELF -- a
+    # truncated download, a corrupted extension module -- must not count
+    # toward the native-file guard just because the magic bytes matched. The
+    # heredoc this scan replaced only counted a file after `ELFFile(f)` had
+    # actually constructed; counting on magic bytes alone (as an earlier
+    # revision of this module did) makes the guard strictly weaker than that.
+    root = tmp_path / "dist" / "tan"
+    _elf(root / "corrupt.so")
+    for n in range(5):
+        _elf(root / "_internal" / f"lib{n}.so")
+
+    def reader(path: Path) -> set[str]:
+        if path.name == "corrupt.so":
+            raise gfs.UnreadableElf(str(path))
+        return {"GLIBC_2.30"}
+
+    floor, paths, versions = gfs.scan(root, glibc_versions=reader)
+
+    assert floor == "GLIBC_2.30"
+    assert len(paths) == 5
+    assert all(p.name != "corrupt.so" for p in paths)
+
+
+def test_a_payload_of_only_unparseable_elf_magic_files_is_refused(tmp_path):
+    # If EVERY magic-matched file fails to parse, the count guard must see
+    # zero native files, not the number of magic-only matches -- that is the
+    # precise scenario the previous count-on-magic-bytes shape got wrong.
+    root = tmp_path / "dist" / "tan"
+    for n in range(6):
+        _elf(root / f"corrupt{n}.so")
+
+    def reader(path: Path) -> set[str]:
+        raise gfs.UnreadableElf(str(path))
+
+    with pytest.raises(SystemExit) as excinfo:
+        gfs.scan(root, glibc_versions=reader)
+
+    assert str(excinfo.value) == (
+        "payload scan found 0 native files / 0 GLIBC_ versions under "
+        f"{root}/ -- refusing to guess a floor"
+    )
+
+
+def test_the_real_reader_raises_unreadable_elf_on_a_magic_only_file(tmp_path):
+    # Proves _read_glibc_versions itself raises rather than silently
+    # returning an empty set for a file that only has the magic bytes right --
+    # the property test_an_unparseable_elf_magic_file_does_not_count_toward_
+    # the_guard exercises through an injected reader.
+    pytest.importorskip(
+        "elftools", reason="pyelftools is container-only; see the comment above"
+    )
+    bogus = _elf(tmp_path / "bogus.so", body=b"not a real elf body, just the magic")
+
+    with pytest.raises(gfs.UnreadableElf):
+        gfs._read_glibc_versions(bogus)
+
+
 def test_main_writes_the_floor_where_the_upload_step_reads_it(
     tmp_path, capsys, monkeypatch
 ):

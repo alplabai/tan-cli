@@ -78,14 +78,32 @@ ELF_MAGIC = b"\x7fELF"
 _MIN_NATIVE_FILES = 5
 
 
+class UnreadableElf(Exception):
+    """Raised by a version reader when a magic-matched file is not a real ELF.
+
+    The magic-byte filter in ``iter_native_files`` only proves the first four
+    bytes are ``\\x7fELF``; it says nothing about whether the rest of the file
+    is a parseable ELF. The heredoc this scan replaced counted a file toward
+    ``_MIN_NATIVE_FILES`` only after ``ELFFile(f)`` had actually constructed
+    successfully -- counting on magic bytes alone, as an earlier revision of
+    this module did, makes the guard strictly weaker than that: a directory of
+    truncated or corrupted magic-only files could clear the count guard while
+    carrying no real payload, which is exactly the kind of thin result the
+    guard exists to refuse. ``scan`` catches this and excludes the file from
+    both the count and the version set, rather than silently treating an
+    unreadable file as one that needs nothing.
+    """
+
+
 def _read_glibc_versions(path: Path) -> set[str]:
     """Return every ``GLIBC_*`` symbol version ``path`` asks its loader for.
 
     :param path: an ELF file, already confirmed by its magic bytes.
-    :return: the ``GLIBC_x.y`` names in its ``.gnu.version_r`` section; empty
-        for a file pyelftools cannot read, which the caller then treats the
-        same as a file that needs nothing -- a payload made entirely of
-        unreadable files fails the count guard rather than yielding a floor.
+    :return: the ``GLIBC_x.y`` names in its ``.gnu.version_r`` section; may be
+        empty for a file that parsed fine but carries no versioned needs.
+    :raises UnreadableElf: if pyelftools cannot parse ``path`` at all -- a
+        magic-matched file that is not actually a readable ELF must not count
+        toward the caller's native-file guard.
     """
     from elftools.common.exceptions import ELFError
     from elftools.elf.elffile import ELFFile
@@ -101,8 +119,8 @@ def _read_glibc_versions(path: Path) -> set[str]:
                         versions.update(
                             aux.name for aux in auxes if aux.name.startswith("GLIBC_")
                         )
-    except (ELFError, OSError):
-        return set()
+    except (ELFError, OSError) as exc:
+        raise UnreadableElf(str(path)) from exc
     return versions
 
 
@@ -150,7 +168,11 @@ def scan(
         evaluated once at import, so ``monkeypatch.setattr(mod,
         "_read_glibc_versions", ...)`` would silently not take effect and the
         test would exercise the real reader while believing it had swapped it.
-    :return: ``(floor, native_files, versions_seen)``.
+        May raise ``UnreadableElf`` for a magic-matched file it cannot parse;
+        such a file is excluded from both the returned paths and the guard
+        count rather than counted as one that needs nothing.
+    :return: ``(floor, native_files, versions_seen)`` -- ``native_files`` only
+        the ones the reader actually parsed.
     :raises SystemExit: with a message -- never a bare non-zero -- so a CI log
         says which of the two guards refused, and with what numbers.
     """
@@ -164,8 +186,12 @@ def scan(
     paths: list[Path] = []
     versions: set[str] = set()
     for native in iter_native_files(root):
+        try:
+            native_versions = read(native)
+        except UnreadableElf:
+            continue
         paths.append(native)
-        versions.update(read(native))
+        versions.update(native_versions)
 
     if len(paths) < _MIN_NATIVE_FILES or not versions:
         raise SystemExit(
