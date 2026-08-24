@@ -5,6 +5,29 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.6.1] — Unreleased
+
+### Fixed
+
+- **`version-identity`'s `not-a-released-version` check would have gone red on
+  every PR opened against `dev` the moment `v0.6.0` was tagged.** `dev`'s tip
+  kept `TAN_VERSION = "0.6.0"`, the exact string the published tag claims, so
+  two different builds would answer `tan 0.6.0` and no bug report could tell
+  them apart — the state `version_check.py --not-released` exists to refuse.
+  This is the third recurrence (`0.5.2-rc1.dev0` after `v0.5.1`,
+  `0.6.0-rc2.dev0` after `v0.6.0-rc1`), and the first one bumped BEFORE the
+  red appeared rather than after someone noticed it. `TAN_VERSION` moves to
+  `0.6.1-rc1.dev0` — a final tag takes patch+1 with an `-rc1.dev0` tail, the
+  arithmetic tan-cli#770 reads off those two precedents.
+
+  tan-cli#880 exists to automate exactly this from `release.yml`, but it was
+  still open when `v0.6.0` was tagged, so this bump is by hand again. Worth
+  knowing before that PR lands: its `propose-dev-version-bump` job opens the
+  PR with `gh pr create`, which is the same call `planner-resync.yml` fails on
+  daily with `GitHub Actions is not permitted to create or approve pull
+  requests (createPullRequest)`. Until that repo setting is enabled, the
+  automation reaches the identical wall. tan-cli#770.
+
 ## [0.6.0] — 2026-08-24
 
 *`v0.6.0-rc1` (2026-08-14) was published as a GitHub **pre-release**, so
