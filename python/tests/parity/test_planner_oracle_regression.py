@@ -266,17 +266,33 @@ def rendered() -> dict[str, list[str]]:
             # A wedged render child (an emitter that hangs rather than raises)
             # would otherwise ride the parity leg to its 45-minute job cap
             # instead of producing the stderr[-4000:] diagnostic the assert
-            # below was written for. 300s is generous for one interpreter
-            # start rendering 700 emits (measured well under that locally);
-            # `TimeoutExpired` still carries whatever the child had written to
-            # stderr before it was killed, so the diagnostic below survives.
-            timeout=300,
+            # below was written for. 600s is well clear of what this module
+            # actually costs under load -- measured 102s for the whole module
+            # (the render child alone 30.5s) at load average ~28 on a
+            # contended host; the PR's originally-cited 37s is an unloaded
+            # figure -- and still 4.5x under the 45-minute (2700s) job cap
+            # windows legs run against (parity.yml's own `parity, whole`
+            # note). `TimeoutExpired` still carries whatever the child had
+            # written to stderr before it was killed, so the diagnostic below
+            # survives.
+            timeout=600,
         )
     except subprocess.TimeoutExpired as exc:
+        # `TimeoutExpired.stderr` is BYTES on POSIX even though `text=True`
+        # was passed to `run()` -- CPython builds the exception from the raw
+        # buffers in `Popen._check_timeout`, and only `run()`'s own
+        # `if _mswindows:` arm re-`communicate()`s in text mode before
+        # raising. So `exc.stderr` is `str` on windows legs and `bytes` on
+        # ubuntu/macos legs; decoding unconditionally is what keeps the
+        # diagnostic readable (rather than an escaped bytes repr) on all
+        # three, and keeps `[-4000:]` slicing characters instead of bytes.
+        stderr = exc.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
         pytest.fail(
-            "the render child did not finish within 300s, so nothing was "
+            "the render child did not finish within 600s, so nothing was "
             "compared:\n"
-            f"{(exc.stderr or '')[-4000:]}"
+            f"{(stderr or '')[-4000:]}"
         )
     assert result.returncode == 0, (
         "the render child failed, so nothing was compared:\n"
