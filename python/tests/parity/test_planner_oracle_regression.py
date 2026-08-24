@@ -314,7 +314,7 @@ def test_the_fixture_is_present_and_was_captured_from_a_named_ref():
     assert "alp-sdk ref" in provenance.read_text(encoding="utf-8")
     assert len(GOLDENS) >= 700, (
         f"only {len(GOLDENS)} goldens under {EMITS} -- 700 were captured at "
-        "94378a05 (100 boards x 7 modes). A shrunken fixture silently shrinks "
+        "eb96112b (100 boards x 7 modes). A shrunken fixture silently shrinks "
         "this gate; regenerate with scripts/capture_planner_oracle.py."
     )
 

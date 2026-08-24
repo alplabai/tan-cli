@@ -582,22 +582,53 @@ env:
   PINNED_SDK_TAG: eb96112ba7d1cc3b4084c985962ea31772177d74
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
-  # deliberately one that does NOT track `PINNED_SDK_TAG` above.
+  # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
+  # render in test_planner_oracle_regression.py binds ONLY this var, never
+  # `ALP_SDK_ROOT` -- see that module's `_CHILD` script). It is NOT free to
+  # sit at an arbitrary pre-#270 ref while `PINNED_SDK_TAG` moves, though --
+  # see the postmortem below before touching either pin in isolation.
   #
   # tan-cli#270 deletes `scripts/alp_orchestrate/` from alp-sdk. It does not
   # rewrite history, so a pre-#270 ref still ships the planner and can still be
-  # cloned -- that is what makes the byte-parity layer survive at all. But the
-  # two pins answer different questions and must be free to diverge:
+  # cloned -- that is what makes the byte-parity layer survive at all. Until
+  # #270 lands, the two pins answer related, not independent, questions:
   #
   #   PINNED_SDK_TAG                 the alp-sdk tan TRACKS. Moves forward.
-  #   PINNED_PLANNER_ORACLE_SDK_REF  the last alp-sdk that HAD a planner. Stops.
+  #   PINNED_PLANNER_ORACLE_SDK_REF  the alp-sdk tan/planner/** was last
+  #                                  PORTED FROM / verified against. Moves
+  #                                  in lockstep with `PINNED_SDK_TAG` until
+  #                                  #270 lands, then stops for good.
+  #
+  # POSTMORTEM (tan-cli#509, 2026-08-24): this pin sat at `94378a05` while a
+  # `PINNED_SDK_TAG` re-sync (tan-cli#868, landing alp-sdk's real fix for the
+  # GD32 bridge's missing `CONFIG_SPI=y`, among others) moved tan/planner/**
+  # itself to legitimately emit different bytes -- and PR #884's CI went red
+  # on 19 of 703 cases across 12 boards the moment it merged with `dev`. The
+  # isolation held (every failing case rendered against THIS var, confirmed
+  # by reproducing locally with `ALP_SDK_ROOT` pointed at the STALE oracle
+  # ref and getting the identical 19-case list); what broke is that this pin
+  # had not moved WITH the re-sync that made tan/planner correct. A frozen
+  # fixture whose renderer is correctly isolated from `PINNED_SDK_TAG` is
+  # still not insulated from tan/planner's OWN code changing to track a
+  # newer alp-sdk -- that is a real, recurring cost of freezing OUTPUT
+  # instead of a live comparison, not a bug in the isolation, and it lands
+  # on whoever next re-syncs tan/planner (tan-cli#868, #888 pattern) rather
+  # than on whoever moves this workflow's pins. Regenerating the fixture at
+  # the ref tan/planner now tracks and moving this pin with it -- exactly
+  # what `PROVENANCE.txt`'s own "WHEN TO REGENERATE" section already
+  # documents -- is the correct remedy each time, not a papering-over; the
+  # alternative (rendering against `ALP_SDK_ROOT`/`PINNED_SDK_TAG` instead of
+  # a frozen ref) would resurrect the tan-cli#485 late-binding hazard this
+  # fixture exists to freeze past. This will recur at every future
+  # tan/planner re-sync until #270 actually lands and there is no more
+  # "current alp-sdk tree" to re-sync against.
   #
   # Bumping this one past #270 does not degrade the gate gracefully -- it
   # removes it. `tests/fixtures/planner_oracle/PROVENANCE.txt` records the ref
   # these goldens were captured from; the two must name the same commit, and
   # `test_planner_oracle_regression.py` fails loudly rather than quietly if the
   # bound checkout is not that one.
-  PINNED_PLANNER_ORACLE_SDK_REF: 94378a056549c7377d714a7f2b68878aca8fea01
+  PINNED_PLANNER_ORACLE_SDK_REF: eb96112ba7d1cc3b4084c985962ea31772177d74
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
@@ -2123,8 +2154,14 @@ jobs:
             # and test_the_fixture_is_present_and_was_captured_from_a_named_ref's
             # own `len(GOLDENS) >= 700` assertion).
             parametrised="$(grep -cF 'test_the_emit_matches_the_frozen_oracle[' /tmp/oracle-collect.log || true)"
-            if [ "${collect_status}" -ne 0 ] || [ "${parametrised}" -lt 700 ]; then
-              echo "::error::${GUARD} SKIPPED, which is only legitimate when test_planner_oracle_regression.py is standing in for it -- but that module collected only ${parametrised} of the >=700 goldens it should (collect exit ${collect_status}) against the SAME ALP_PLANNER_ORACLE_ROOT this job already confirmed has a metadata/catalog.json above. A SKIP backed by a near-empty replacement is the exact silent coverage cliff tan-cli#500 exists to red -- see the collect-only output above."
+            # `grep -c` prints nothing (not `0`) when it cannot read the log at
+            # all -- only reachable if the `tee` above failed at open -- and an
+            # empty `parametrised` makes a bare `[ "${parametrised}" -lt 700 ]`
+            # a syntax error ("integer expression expected") that exits 2, which
+            # is FALSE to `if`, which ACCEPTS SILENTLY: the one shape this whole
+            # block exists to refuse. `${parametrised:-0}` closes it.
+            if [ "${collect_status}" -ne 0 ] || [ "${parametrised:-0}" -lt 700 ]; then
+              echo "::error::${GUARD} SKIPPED, which is only legitimate when test_planner_oracle_regression.py is standing in for it -- but that module collected only ${parametrised:-0} of the >=700 goldens it should (collect exit ${collect_status}) against the SAME ALP_PLANNER_ORACLE_ROOT this job already confirmed has a metadata/catalog.json above. A SKIP backed by a near-empty replacement is the exact silent coverage cliff tan-cli#500 exists to red -- see the collect-only output above."
               exit 1
             fi
             echo "::notice::test_planner_oracle_regression.py collected ${parametrised} goldens -- the SKIP above is a legitimate handoff to the tan-cli#509 replacement layer, not a regression."

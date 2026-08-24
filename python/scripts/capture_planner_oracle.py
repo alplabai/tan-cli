@@ -54,7 +54,7 @@ fixture is host-bound".
 
 So the capture normalises the SDK root to `_SDK_TOKEN` and then REFUSES to
 write anything if a host path survives that substitution. Measured at
-`94378a05`, the SDK root is the only volatile content in all 700 emits: after
+`eb96112b`, the SDK root is the only volatile content in all 700 emits: after
 normalisation there are zero remaining absolute paths, timestamps, epoch
 seconds, memory addresses, temp directories or usernames. The refusal exists
 so that a future emitter which starts embedding something else fails here,
@@ -65,7 +65,7 @@ USAGE
 
     python scripts/capture_planner_oracle.py \\
         --sdk /path/to/alp-sdk \\
-        --sdk-ref 94378a056549c7377d714a7f2b68878aca8fea01
+        --sdk-ref eb96112ba7d1cc3b4084c985962ea31772177d74
 
 `--sdk-ref` may be omitted when the checkout is a real git tree; it is REQUIRED
 for an exported tree (`git archive`) that carries no `.git`. It is recorded in
