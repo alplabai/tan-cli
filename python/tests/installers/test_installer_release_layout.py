@@ -123,6 +123,24 @@ RELEASES: dict[str, tuple[str, ...]] = {
         "tan-x86_64-pc-windows-msvc.zip",
         "tan-x86_64-unknown-linux-gnu.tar.gz",
     ),
+    # v0.6.0 (2026-08-24) is the tag `latest` resolves to today, and it
+    # publishes the same four archives. Verified against the real release the
+    # way the entry above says to, not inferred from its predecessor:
+    #   gh release view v0.6.0 --repo alplabai/tan-cli --json assets
+    # returns exactly these four plus `checksums.txt` (483 B) and
+    # `envelope-contract.json` (296588 B), the two this dict omits by the
+    # convention documented above.
+    #
+    # The prediction in the v0.5.1 comment came true on the first tag after it
+    # was written: publishing v0.6.0 reddened the two bare-`latest` tests on
+    # every open PR against `dev` until this entry landed, including PRs that
+    # touched no installer code. That is the alarm working, not a flake.
+    "v0.6.0": (
+        "tan-aarch64-apple-darwin.tar.gz",
+        "tan-x86_64-apple-darwin.tar.gz",
+        "tan-x86_64-pc-windows-msvc.zip",
+        "tan-x86_64-unknown-linux-gnu.tar.gz",
+    ),
 }
 
 #: What the fixture's POSIX executable prints, so a test can tell the payload
