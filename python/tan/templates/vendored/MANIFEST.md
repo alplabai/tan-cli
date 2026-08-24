@@ -105,11 +105,13 @@ from an un-revendored SDK change.
   **Seven** files moved, all `README.md`: `diagnostics`/E1M-AEN801,
   `diagnostics`/E1M-V2N101, `iot`/E1M-AEN801, `minimal`/E1M-AEN801,
   `minimal`/E1M-V2N101, `sensor`/E1M-AEN801 and `sensor`/E1M-V2N101. The only
-  change in each is the doc-link ref: `blob/main/` → `blob/v0.16.0/`.
+  change in each is the doc-link ref: `blob/main/` → `blob/v0.16.0/` (file
+  links) and `tree/main/` → `tree/v0.16.0/` (directory links) — 10 of the 40
+  changed links across these seven files are `tree/`, not `blob/`.
 
   **This is exactly the move the `94378a05` entry below predicted, arriving
   the day it said it would.** `eb96112b` is itself tagged `v0.16.0`, so
-  alp-sdk#1508's `_tag_resolves()` guard in `_docs_ref()` now finds the tag
+  alp-sdk#1535's `_tag_resolves()` guard in `_docs_ref()` now finds the tag
   and renders the version link instead of degrading to `main` — the first
   vendor point where that guard actually fires with a resolving tag. `tan/
   planner/template.py` carries the same guard (ported at tan-cli#846), so
@@ -117,9 +119,13 @@ from an un-revendored SDK change.
 
   `iot`/E1M-AEN801's `CMakeLists.txt` still carries the standing
   `DELIBERATE_EDITS` entry (tan-cli#379's `list(PREPEND EXTRA_CONF_FILE
-  ...)`) and was NOT re-vendored. Verified at `eb96112b`:
-  `scaffold_byte_parity.py` **9/9 PASS** (rc 0); 7 FAIL / 2 PASS before the
-  re-vendor.
+  ...)`) and was NOT re-vendored. Verified at `eb96112b`, against a checkout
+  with tags fetched: `scaffold_byte_parity.py` **9/9 PASS** (rc 0). The same
+  commit without tags reproduces 7 FAIL / 2 PASS every time — `_docs_ref()`'s
+  `_tag_resolves()` guard reads only the checkout's local refs, never the
+  network — which is what this table's own 9/9 claims depend on: `parity.yml`
+  and `ci.yml` now clone alp-sdk with `fetch-tags: true` (tan-cli#891), so a
+  tagged clone is what CI actually measures, not a hand-run artefact.
 
 - **Prior vendor point:** **`94378a05`**
   (`94378a056549c7377d714a7f2b68878aca8fea01`, alp-sdk `dev`) — tan-cli#846's
@@ -272,7 +278,7 @@ from an un-revendored SDK change.
 
   It moved off `main` (tan-cli#846's pin bump) to `v0.16.0` (tan-cli#891) the
   day alp-sdk actually cut that tag — the emit doing its job, not a lost pin.
-  alp-sdk#1508 added `_tag_resolves()` to `_docs_ref()`: the declared
+  alp-sdk#1535 added `_tag_resolves()` to `_docs_ref()`: the declared
   `v<version>` has to RESOLVE before a scaffold pins to it. `eb96112b` is
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the

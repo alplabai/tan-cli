@@ -385,12 +385,26 @@ jobs:
       # per-fixture re-measurement (toolchain-lock/kconfig/bootstrap/scaffold)
       # and the `scripts/alp_orchestrate/**` byte-identity check that keeps
       # this a non-behavioural move for `PINNED_HASHES`.
+      # `fetch-tags: true`, not the default no-tags checkout -- same trap and
+      # same fix as `parity.yml`'s `clone alp-sdk` step (see that step's
+      # comment for the full measurement). This checkout feeds `pytest tests
+      # -q` under `ALP_SDK_ROOT`, and any test that reaches
+      # `tan.planner.template._docs_ref()` against this bound root sees a
+      # `blob/main/`/`tree/main/` degrade instead of `blob/v0.16.0/`/
+      # `tree/v0.16.0/` unless the checkout can resolve the `v0.16.0` tag from
+      # its LOCAL refs -- `_tag_resolves()` (issue #1508 / alp-sdk#1535) makes
+      # no network call, by design, so a tagless clone here silently disagrees
+      # with the vendored scaffold tree `parity.yml` already proved matches a
+      # tagged one. `fetch-depth: 0` is not needed for the same reason it
+      # is not needed there: `git fetch --tags` pulls every tag regardless of
+      # depth, and `v0.16.0` points AT this commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
           ref: eb96112ba7d1cc3b4084c985962ea31772177d74
+          fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a

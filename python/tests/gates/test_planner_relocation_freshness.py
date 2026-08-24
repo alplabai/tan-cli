@@ -481,13 +481,19 @@ from tests.conftest import sdk_root
 #:     comparison still passes (158 passed).
 #:   * scaffold: 7 of 9 (template, sku) pairs FAILED on `README.md` content --
 #:     NOT a code drift. `eb96112b` is itself tagged `v0.16.0`, so
-#:     `alp_template.py`'s `_docs_ref()` (the alp-sdk#1508 guard: pin doc
+#:     `alp_template.py`'s `_docs_ref()` (the alp-sdk#1535 guard: pin doc
 #:     links to the release tag only once it RESOLVES, else fall back to
 #:     `main`) now resolves the tag and renders `blob/v0.16.0/` links instead
 #:     of `blob/main/` -- the first vendor point where that guard actually
 #:     fires. Re-vendored all 7 READMEs (diagnostics x2, iot, minimal x2,
 #:     sensor x2; edge-ai's pair was already unaffected and stayed PASS);
-#:     `scaffold_byte_parity.py --sdk <eb96112b>` is 9/9 PASS, rc 0 after.
+#:     `scaffold_byte_parity.py --sdk <eb96112b>` is 9/9 PASS, rc 0 after --
+#:     measured against a checkout with tags fetched. The same commit
+#:     without tags reproduces the 7 FAIL / 2 PASS split every time
+#:     (`_tag_resolves()` reads LOCAL refs only, never the network); 9/9 is
+#:     what a tagged clone measures, which is what `parity.yml`'s and
+#:     `ci.yml`'s `clone alp-sdk` steps now always provide
+#:     (`fetch-tags: true`, tan-cli#891).
 #:
 #: NOT a behavioural re-pin for THIS table: `scripts/alp_orchestrate/**` is
 #: byte-identical across `ac38a069..eb96112b` (`git diff --stat` over that
