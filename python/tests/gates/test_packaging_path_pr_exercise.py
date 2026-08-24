@@ -19,18 +19,33 @@ undo by accident:
 
 1. Both legs invoke the SAME extracted scan, `scripts/glibc_floor_scan.py`, and
    neither carries an inline copy of it. A heredoc is what made the scan
-   untestable off a runner in the first place.
+   untestable off a runner in the first place. Matched against COMMAND lines
+   only, comments stripped first -- `release.yml` also mentions both the scan
+   and the conformance test in its own prose comments, which would satisfy a
+   naive substring check even after the real invocation was deleted.
 2. `clean-host.yml` is genuinely PR-triggered and `release.yml` genuinely is
    not. That asymmetry IS the issue; a test that only checked "both files
    mention the script" would pass if someone moved the exercise back behind a
    tag.
 3. The packaged-binary conformance test runs on the RIGHT step of each leg --
    both of `release.yml`'s freeze steps at tag time, only the container step
-   of `clean-host.yml` at PR time -- not merely somewhere in the job.
-4. Every `docker run ... bash -euc '...'` body in EVERY workflow parses as
-   shell, not just the two tan-cli#450 legs: `getting-started.yml` and
-   `e2e-container.yml` build the same freeze the same way and carry the same
-   latent defect.
+   of `clean-host.yml` at PR time -- not merely somewhere in the job, and not
+   satisfied by a step that no longer exists (a missing step fails loudly here
+   rather than passing vacuously).
+4. Every single-quoted docker shell argument in EVERY workflow parses as
+   shell, not just the two tan-cli#450 legs: `getting-started.yml`,
+   `e2e-container.yml` and `python-binaries.yml` build the same freeze the
+   same way (`bash -euc '...'`, `sh -c '...'`, `bash -c '...'`) and carry the
+   same latent defect. Each occurrence is sliced down to just the quoted
+   argument itself before being handed to `bash -n` -- checking the WHOLE
+   `run:` body cannot tell a genuinely unbalanced apostrophe planted inside
+   the docker string from one that gets accidentally rebalanced by unrelated
+   quoting later in the same step. Measured: getting-started.yml's step
+   continues past its docker body into a `cat >... <<'LAUNCHER'` heredoc that
+   supplies 21 more apostrophes, enough to make the WHOLE-body quote count
+   come out even regardless of what is broken inside the docker argument, so
+   `bash -n` on the whole body missed a planted defect there that it caught
+   in the other three files.
 
 Property 4 needs saying, because it is the one nothing else in this repo can
 see. Those bodies are single-quoted shell inside a YAML scalar: an apostrophe
@@ -38,8 +53,11 @@ in a comment closes the string, `yaml.safe_load` still parses the file, every
 linter still passes, and the job dies at runtime -- on a tag, for `release.yml`.
 That is the same "only a spent tag finds this" shape the issue is about, so it
 belongs in the same gate. One apostrophe IS escaped, the hard way, in
-`release.yml`'s binutils comment; `bash -n` accepts that and rejects a bare
-one, which is exactly the discrimination wanted.
+`release.yml`'s binutils comment (`'"'"'binutils'"'"'`, the close/reopen trick
+for embedding a literal apostrophe in a single-quoted string) and
+python-binaries.yml splices a variable the same way (`'"$BUILD_DEPS"'`);
+`bash -n` accepts both and rejects a bare one, which is exactly the
+discrimination wanted.
 
 Nothing here runs a workflow, a container, or a freeze. It reads YAML and
 shells `bash -n`, so a regression lands in `tests/gates` in seconds rather than
@@ -96,21 +114,128 @@ def _run_body_for_condition(name: str, job: str, condition: str) -> str:
     ``condition`` -- e.g. ``"${{ matrix.container }}"`` selects the container
     freeze step, ``"${{ !matrix.container }}"`` the non-container one. Both
     workflows fork their freeze step on this exact pair of conditions.
+
+    :raises LookupError: if no step in ``job`` carries that `if:` -- a
+        MISSING step must fail this gate loudly, not hand back an empty
+        string that a subsequent ``not in`` assertion would then pass
+        vacuously.
     """
     for step in _load(name)["jobs"][job]["steps"]:
         if step.get("if") == condition and "run" in step:
             return step["run"]
-    return ""
+    raise LookupError(
+        f"{name}:{job} has no step with `if: {condition}` -- either that step "
+        "was deleted/renamed or its condition changed. Either way this gate "
+        "cannot verify what it exists to verify without it."
+    )
 
 
-def _docker_shell_bodies() -> list[tuple[str, str, str]]:
-    """``(workflow, job, body)`` for every `run:` body that opens a
-    single-quoted `bash -euc '` docker shell, across EVERY workflow file --
-    not just `_TAG_LEG`/`_PR_LEG`. `getting-started.yml` and
-    `e2e-container.yml` build the same freeze in the same container with the
-    same `bash -euc '...'` shape, so they carry the same latent
-    apostrophe-closes-the-string defect this gate exists to catch; limiting
-    the sweep to the two tan-cli#450 legs would leave those two uncovered.
+def _strip_comment_lines(body: str) -> str:
+    """Drop every line that is only a `#` shell comment (after leading
+    whitespace), so a reference that exists ONLY in prose cannot satisfy a
+    substring check meant to prove a real command still runs. `release.yml`
+    talks about both `_SCAN` and `_CONFORMANCE` at length in comments right
+    next to the commands that invoke them -- deleting the real invocation
+    while leaving the comment behind must not look like coverage.
+    """
+    return "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+
+
+#: Matches the shell invocation that opens a single-quoted docker script
+#: argument: `bash -euc '` (release.yml, clean-host.yml, getting-started.yml,
+#: e2e-container.yml) as well as `sh -c '` / `bash -c '`
+#: (python-binaries.yml's musl and glibc legs). All of these carry the
+#: identical single-quote-inside-a-YAML-scalar apostrophe defect.
+_DOCKER_MARKER = re.compile(r"\b(?:ba)?sh -[a-z]*c '")
+
+#: A line that is JUST a closing quote (whitespace either side). This repo's
+#: `bash -euc '...'` bodies always place their closing quote alone on its own
+#: line -- the structural signal `_docker_shell_snippet` uses to find where
+#: the argument really ends, deliberately NOT by counting/toggling quote
+#: characters forward from the opening one. Counting forward cannot tell a
+#: genuinely broken apostrophe from a legitimate one: bash itself would treat
+#: EITHER as ending the string right there, so a scanner that just asks "what
+#: would bash consider the next real terminator" always finds *a* valid
+#: answer and can never observe the defect. A structural anchor -- a fact
+#: about physical layout, independent of whether the quoting inside is
+#: correct -- does not have that blind spot: a `# don't`-shaped apostrophe
+#: never lands alone on its own line, so it can never be mistaken for this.
+_STANDALONE_QUOTE_LINE = re.compile(r"^[ \t]*'[ \t]*$", re.MULTILINE)
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _docker_shell_snippet(body: str, match: re.Match[str]) -> str | None:
+    """The text of the single-quoted docker shell argument ``match`` opens,
+    from `sh -c '`/`bash -c '`/`bash -euc '` through its OWN closing quote --
+    not the whole `run:` body, and not merely "the next quote bash would
+    honour" (see `_STANDALONE_QUOTE_LINE`'s docstring for why that always
+    finds a spuriously-valid answer).
+
+    Two structural signals, tried in order:
+
+    1. The FIRST standalone closing-quote line after the marker. Covers
+       `bash -euc '...'` (release.yml, clean-host.yml, getting-started.yml,
+       e2e-container.yml), where the closing quote always sits alone on its
+       own line by this repo's convention -- and is immune to a `'` planted
+       mid-line elsewhere in the block, and to the trailing content some of
+       these steps carry AFTER the closing quote (getting-started.yml's
+       `cat >... <<'LAUNCHER'` heredoc, whose own apostrophes are excluded by
+       construction since this never looks past the first standalone line).
+    2. A fallback for python-binaries.yml's shape, which has no standalone
+       quote line -- its closing quote is the LAST character of its LAST
+       content line, immediately followed by a dedent (`else`/`fi`). Bounded
+       by INDENTATION: every line more deeply indented than the marker's own
+       line belongs to this docker block; the first line back at the
+       marker's indentation or shallower ends it. Within that block, the
+       closing quote is the LAST line (scanned forward, so the true final
+       line wins over the close/reopen splice trick's own `'`-ending line,
+       e.g. `'"$BUILD_DEPS"'`) whose content ends with `'`. A `'` planted
+       mid-line (`# don't`) does not itself END its line, so it is not
+       mistaken for this either.
+    """
+    start = match.end()
+    close = _STANDALONE_QUOTE_LINE.search(body, start)
+    if close:
+        return body[match.start() : close.end()]
+
+    lines = body.splitlines(keepends=True)
+    offsets: list[int] = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line)
+    marker_line_idx = next(
+        idx for idx, off in enumerate(offsets) if off <= match.start() < off + len(lines[idx])
+    )
+    marker_indent = _indent(lines[marker_line_idx])
+    close_line_idx = None
+    for idx in range(marker_line_idx + 1, len(lines)):
+        line = lines[idx]
+        if line.strip() == "":
+            continue
+        if _indent(line) <= marker_indent:
+            break
+        if line.rstrip("\n").rstrip().endswith("'"):
+            close_line_idx = idx
+    if close_line_idx is None:
+        return None
+    end = offsets[close_line_idx] + len(lines[close_line_idx].rstrip("\n").rstrip())
+    return body[match.start() : end]
+
+
+def _docker_shell_snippets() -> list[tuple[str, str, str]]:
+    """``(workflow, job, snippet)`` for every single-quoted docker shell
+    argument across EVERY workflow file, sliced down to just the argument
+    itself -- not the whole `run:` body. See `_docker_shell_snippet`'s
+    docstring for why the whole body is the wrong thing to check and how the
+    boundary is found instead.
+
+    A `run:` body may open more than one such argument (python-binaries.yml's
+    `build` step has both a musl `sh -c '...'` leg and a glibc
+    `bash -c '...'` leg in one step) -- every occurrence is its own entry.
     """
     found: list[tuple[str, str, str]] = []
     for path in sorted(WORKFLOWS.glob("*.y*ml")):
@@ -118,23 +243,28 @@ def _docker_shell_bodies() -> list[tuple[str, str, str]]:
         for job_name, job in (workflow.get("jobs") or {}).items():
             for step in job.get("steps", []):
                 body = step.get("run")
-                if body and "bash -euc '" in body:
-                    found.append((path.name, job_name, body))
+                if not body:
+                    continue
+                for match in _DOCKER_MARKER.finditer(body):
+                    snippet = _docker_shell_snippet(body, match)
+                    if snippet is not None:
+                        found.append((path.name, job_name, snippet))
     return found
 
 
-_DOCKER_SHELL_BODIES = _docker_shell_bodies()
+_DOCKER_SHELL_SNIPPETS = _docker_shell_snippets()
 
-#: Every workflow known, at authoring time, to carry a `bash -euc '` docker
-#: body with this exact single-quote shape. If the sweep stops covering one
-#: of these, that must fail loudly rather than silently shrink -- the same
-#: failure mode `test_no_workflow_carries_an_inline_copy_of_the_scan` guards
-#: against for the scan itself.
+#: Every workflow known, at authoring time, to carry a single-quoted docker
+#: shell argument with this shape. If the sweep stops covering one of these,
+#: that must fail loudly rather than silently shrink -- the same failure
+#: mode `test_no_workflow_carries_an_inline_copy_of_the_scan` guards against
+#: for the scan itself.
 _EXPECTED_DOCKER_SHELL_WORKFLOWS = {
     "release.yml",
     "clean-host.yml",
     "getting-started.yml",
     "e2e-container.yml",
+    "python-binaries.yml",
 }
 
 
@@ -149,7 +279,12 @@ def _triggers(name: str) -> set[str]:
 
 @pytest.mark.parametrize("workflow,job", [_TAG_LEG, _PR_LEG])
 def test_both_legs_invoke_the_extracted_scan_by_name(workflow, job):
-    bodies = _run_bodies(workflow, job)
+    # Comments stripped first: release.yml's container step names `_SCAN` in
+    # a prose comment ("tan-cli#450: the scan is scripts/glibc_floor_scan.py,
+    # not a heredoc...") right next to the real invocation -- deleting the
+    # real `python scripts/glibc_floor_scan.py` line and leaving that comment
+    # behind must not still look like coverage.
+    bodies = [_strip_comment_lines(b) for b in _run_bodies(workflow, job)]
     assert any(_SCAN in body for body in bodies), (
         f"{workflow}:{job} no longer invokes {_SCAN}. Both the tag leg and the "
         "PR leg must run the SAME scan -- that is the only thing keeping them "
@@ -161,10 +296,19 @@ def test_the_tag_leg_runs_conformance_on_every_freeze_step():
     # release.yml's tag-time matrix is genuinely four-way -- windows-latest,
     # both macOS runners (the non-container step) and the Linux container --
     # so the conformance test must run on BOTH of its freeze steps, not just
-    # the container one.
+    # the container one. Comments stripped first: the non-container step's
+    # own prose ("pytest AFTER the freeze ... tests/conformance/
+    # test_packaged_binary.py is the extension's own acceptance test...")
+    # names _CONFORMANCE right next to the real `pytest` invocation, so an
+    # unstripped substring check is satisfied by the comment alone even after
+    # the real command is deleted.
     workflow, job = _TAG_LEG
-    container_body = _run_body_for_condition(workflow, job, "${{ matrix.container }}")
-    noncontainer_body = _run_body_for_condition(workflow, job, "${{ !matrix.container }}")
+    container_body = _strip_comment_lines(
+        _run_body_for_condition(workflow, job, "${{ matrix.container }}")
+    )
+    noncontainer_body = _strip_comment_lines(
+        _run_body_for_condition(workflow, job, "${{ !matrix.container }}")
+    )
     assert _CONFORMANCE in container_body, (
         f"{workflow}:{job}'s container freeze step no longer runs {_CONFORMANCE}."
     )
@@ -185,8 +329,12 @@ def test_the_pr_leg_runs_conformance_only_on_its_container_step():
     # silently duplicated into the non-container "clean venv" step (which
     # would widen PR-time coverage without anyone deciding that on purpose).
     workflow, job = _PR_LEG
-    container_body = _run_body_for_condition(workflow, job, "${{ matrix.container }}")
-    noncontainer_body = _run_body_for_condition(workflow, job, "${{ !matrix.container }}")
+    container_body = _strip_comment_lines(
+        _run_body_for_condition(workflow, job, "${{ matrix.container }}")
+    )
+    noncontainer_body = _strip_comment_lines(
+        _run_body_for_condition(workflow, job, "${{ !matrix.container }}")
+    )
     assert _CONFORMANCE in container_body, (
         f"{workflow}:{job}'s container freeze step no longer runs {_CONFORMANCE}. "
         "It was tag-only before tan-cli#450 and must run on this PR-time leg."
@@ -246,18 +394,22 @@ def test_the_tag_leg_is_still_tag_only():
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash to parse with")
 @pytest.mark.parametrize(
-    "workflow,job,body",
-    _DOCKER_SHELL_BODIES,
-    ids=[f"{w}:{j}" for w, j, _ in _DOCKER_SHELL_BODIES],
+    "workflow,job,snippet",
+    _DOCKER_SHELL_SNIPPETS,
+    ids=[f"{w}:{j}:{i}" for i, (w, j, _) in enumerate(_DOCKER_SHELL_SNIPPETS)],
 )
-def test_every_single_quoted_docker_body_parses_as_shell(workflow, job, body):
+def test_every_single_quoted_docker_body_parses_as_shell(workflow, job, snippet):
     # All required legs ship a bash (Git Bash on windows-latest), so the
     # skipif above is a courtesy for an odd developer host, not a leg this
     # silently stops covering.
+    #
+    # `snippet` is already sliced to just the docker shell argument -- see
+    # `_docker_shell_snippets`'s docstring for why the whole `run:` body is
+    # the wrong thing to feed `bash -n`.
     with tempfile.NamedTemporaryFile(
         "w", suffix=".sh", delete=False, encoding="utf-8"
     ) as handle:
-        handle.write(_EXPRESSION.sub("EXPRESSION", body))
+        handle.write(_EXPRESSION.sub("EXPRESSION", snippet))
         script = Path(handle.name)
     try:
         # `.as_posix()`, not `str()`: on windows-latest this is Git Bash,
@@ -269,7 +421,7 @@ def test_every_single_quoted_docker_body_parses_as_shell(workflow, job, body):
     finally:
         script.unlink()
     assert result.returncode == 0, (
-        f"{workflow}:{job} has a `bash -euc '...'` body that does not parse:\n"
+        f"{workflow}:{job} has a docker shell argument that does not parse:\n"
         f"{result.stderr}\n"
         "Most likely an apostrophe in a comment inside the single-quoted "
         "string. YAML parses it and every linter passes; the job dies at "
@@ -278,17 +430,17 @@ def test_every_single_quoted_docker_body_parses_as_shell(workflow, job, body):
 
 
 def test_the_docker_shell_sweep_covers_every_known_workflow():
-    # Guards the sweep itself: if _docker_shell_bodies() stopped finding a
-    # `bash -euc '` body in one of these files -- glob miss, a rename, the
-    # shape changing -- the parametrize above would just quietly run fewer
-    # cases rather than fail. That is the same silent-shrink shape
+    # Guards the sweep itself: if _docker_shell_snippets() stopped finding a
+    # single-quoted docker argument in one of these files -- glob miss, a
+    # rename, the shape changing -- the parametrize above would just quietly
+    # run fewer cases rather than fail. That is the same silent-shrink shape
     # `test_no_workflow_carries_an_inline_copy_of_the_scan` guards against for
     # the extracted scan.
-    covered = {w for w, _, _ in _DOCKER_SHELL_BODIES}
+    covered = {w for w, _, _ in _DOCKER_SHELL_SNIPPETS}
     missing = _EXPECTED_DOCKER_SHELL_WORKFLOWS - covered
     assert not missing, (
-        f"{sorted(missing)} no longer carry a `bash -euc '` docker body. If "
-        "that shape was removed on purpose, shrink "
+        f"{sorted(missing)} no longer carry a single-quoted docker shell "
+        "argument. If that shape was removed on purpose, shrink "
         "_EXPECTED_DOCKER_SHELL_WORKFLOWS to match; if not, the sweep just "
         "lost coverage silently."
     )
