@@ -525,7 +525,20 @@ def test_the_every_workflow_job_set_is_not_empty():
     a workflow name in the collected set says nothing about how many of its
     jobs actually got counted, so every non-`parity.yml` workflow is
     additionally held to a minimum bounded-job count (`_MIN_BOUNDED_JOBS`);
-    `parity.yml` gets the same coverage from `_PARITY_JOBS` instead."""
+    `parity.yml` gets the same coverage from `_PARITY_JOBS` instead. And a
+    COMPLETENESS check: `_MIN_BOUNDED_JOBS` naming exactly ten of today's
+    files says nothing about tomorrow's eleventh -- a newly added workflow
+    would carry no floor at all and could grow or shrink invisibly until
+    someone remembered to add an entry for it by hand."""
+    assert set(_MIN_BOUNDED_JOBS) | {"parity.yml"} == {
+        p.name for p in _workflow_files(WORKFLOWS)
+    }, (
+        "_MIN_BOUNDED_JOBS (plus parity.yml, covered separately by "
+        "_PARITY_JOBS) does not match the workflow files actually under "
+        f"{WORKFLOWS} -- a workflow file was added or removed without "
+        "updating _MIN_BOUNDED_JOBS, so it currently carries NO minimum-job "
+        "floor at all."
+    )
     cases = _every_workflow_job_cases()
     assert cases, "no (workflow, job) pairs were collected across .github/workflows/ at all"
     counts: dict[str, int] = {}
