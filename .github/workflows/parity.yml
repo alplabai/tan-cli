@@ -509,7 +509,77 @@ env:
   #     links, the #1535 degradation above) -- 7 FAIL / 2 PASS before, 9/9
   #     PASS rc 0 after. See `python/tan/templates/vendored/MANIFEST.md`.
   #   - seam1_field_diff PASS, rc 0 -- all 6 boards
-  PINNED_SDK_TAG: 94378a056549c7377d714a7f2b68878aca8fea01
+  # `94378a05` -> `ac38a069` (tan-cli#868). Moved because the audit moved, not
+  # the other way round: alp-sdk's `notify-planner-drift` job filed #868 after
+  # three dispatched runs went red against alp-sdk `dev`, and the four commits
+  # behind it -- `522ea320` (#1482), `85b6b905` (#1485), `064fc17b` (#1484),
+  # `54f67c7e` (#1602/#1556), plus alp-sdk#1487's chip table out of
+  # `HAND_PORT_HASHES` territory -- are ported into `tan/planner/` in this
+  # change. `PINNED_SDK_COMMIT` and `ci.yml`'s `sdk_parity` `ref:` move to the
+  # SAME commit here; leaving this one behind is exactly the split
+  # `tests/conftest.py`'s tan-cli#691 warning exists to catch, and it would
+  # point seam1's checkout at a tree whose hashes no longer match the audit.
+  # `HAND_PORT_PINNED_SDK_COMMIT` deliberately does NOT move -- four of its
+  # five moved sources are unported; see that pin's own comment.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `ac38a069` before landing (Windows host, `py -3.14`):
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8643 bytes, byte-identical -- no re-vendor;
+  #     `metadata/bootstrap.json` does not appear in the `94378a05..ac38a069`
+  #     diff at all)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9, rc 0 -- no re-vendor. `scripts/
+  #     alp_template.py` is unchanged in this range, so #1535's `_docs_ref()`
+  #     degradation the last bump turned on still renders the same links.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, same allowed-delta set
+  #   - planner byte-parity (`tests/parity/`, `ALP_SDK_PARITY_ROOT` at
+  #     `ac38a069`): 82 failed / 686 passed / 8 skipped BEFORE the port,
+  #     0 failed / 768 passed / 8 skipped after
+  # `ac38a069` -> `eb96112b` (tan-cli#891). The vendored fixtures had to move
+  # first for a reason unrelated to a planner audit: tan-cli#888 re-vendored
+  # `contract/fixtures/toolchains/toolchains.json` from alp-sdk's just-cut
+  # `v0.16.0` tag (alp-sdk#1603, `e48cc993`, adds `tier`/`licence` to every
+  # toolchain artifact), which left THIS pin naming a checkout
+  # (`ac38a069`, still on the OLD toolchains.json shape) that no longer
+  # matches what got vendored. `eb96112b` is the `release/v0.16.0-merge`
+  # merge alp-sdk tagged `v0.16.0` the same day (2026-08-23) -- the first time
+  # this pin names a RELEASED alp-sdk tag rather than a dev commit.
+  # `PINNED_SDK_COMMIT` and `ci.yml`'s `sdk_parity` `ref:` move to the SAME
+  # commit here, same tan-cli#691 reason as every prior bump.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `eb96112b` before landing (Windows host, `py -3.14`):
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (8168 bytes, byte-identical -- already
+  #     re-vendored by tan-cli#888, unchanged by this move)
+  #   - bootstrap        RE-VENDORED, 8643 -> 9772 bytes: alp-sdk#1605
+  #     (`44de2867`), also inside the `ac38a069..eb96112b` window, adds a
+  #     ~50-line `artifactProvenance` block (per-artifact
+  #     `tier`/`source`/`sizeBytes`/`licence`) to `metadata/bootstrap.json`.
+  #     MATCH, byte-identical, after; `test_bootstrap_command.py`'s
+  #     field-for-field fallback comparison still passes (158 passed).
+  #   - scaffold         RE-VENDORED, 7 READMEs (diagnostics x2, iot,
+  #     minimal x2, sensor x2) -- NOT a code drift: `eb96112b` is itself
+  #     tagged `v0.16.0`, so `alp_template.py`'s `_docs_ref()` (alp-sdk#1535)
+  #     now resolves that tag and renders `blob/v0.16.0/` doc links instead
+  #     of `blob/main/`, the first vendor point where that guard actually
+  #     fires. edge-ai's pair was unaffected and stayed PASS. 7 FAIL / 2 PASS
+  #     before, 9/9 PASS rc 0 after -- against a checkout with tags fetched.
+  #     A tagless clone of this SAME commit (what this job's checkout was
+  #     BEFORE `fetch-tags: true` was added, tan-cli#891) reproduces the 7
+  #     FAIL / 2 PASS split every time: `_tag_resolves()` cannot see a tag
+  #     the clone never fetched. This job's `clone alp-sdk` step now always
+  #     fetches tags, so 9/9 is what it measures going forward, not a
+  #     one-time result from a hand-run against a different checkout shape.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, same allowed-delta set
+  # `scripts/alp_orchestrate/**` is byte-identical across `ac38a069..
+  # eb96112b` (`git diff --stat` over that path between the two commits is
+  # empty) -- NOT a behavioural re-pin, every `PINNED_HASHES` entry in
+  # `test_planner_relocation_freshness.py` is unchanged. `HAND_PORT_PINNED_
+  # SDK_COMMIT` and `STRICT_LOADERS_PINNED_SDK_COMMIT` do not move -- see
+  # those pins' own comments.
+  PINNED_SDK_TAG: eb96112ba7d1cc3b4084c985962ea31772177d74
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` above.
@@ -633,12 +703,33 @@ jobs:
             echo "::notice::comparing against the pinned alp-sdk ref: ${ref}"
           fi
 
+      # `fetch-tags: true`, not the default no-tags checkout. `alp_template.py`'s
+      # `_docs_ref()` (issue #1508 / alp-sdk#1535) pins a scaffolded README's
+      # doc links to `v<version>` only when `_tag_resolves()` finds that tag
+      # among the checkout's LOCAL refs -- deliberately no network call, so it
+      # cannot see a tag this checkout never fetched. Without tags every emit
+      # here degrades to `blob/main/`/`tree/main/`, which disagrees with the
+      # vendored scaffold tree (`blob/v0.16.0/`/`tree/v0.16.0/` since
+      # tan-cli#888) on every README that carries one and reds this job
+      # unconditionally -- not a real plan-shape diff, an artefact of the
+      # clone missing tags. Measured (tan-cli#891): this same checkout at
+      # `eb96112b` with no tags fails scaffold byte-parity 7/9 (only the two
+      # templates with no doc links, edge-ai, pass); with `fetch-tags: true`
+      # it passes 9/9. `fetch-depth: 0` (the whole history) would also fix it
+      # but costs far more on a repo alp-sdk's size for no extra correctness
+      # here -- `git fetch --tags` pulls every tag from the remote regardless
+      # of depth, and the tag this job needs (`v0.16.0`) points AT the commit
+      # already being fetched, so a depth-1 fetch with tags included resolves
+      # it. Do not drop this thinking it is redundant with the `ref:` pin
+      # above; the pin selects the COMMIT, this selects whether the checkout
+      # can see any tag AT ALL.
       - name: clone alp-sdk
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
+          fetch-tags: true
           path: alp-sdk
 
       # ADR-0020 mandates a `repository_dispatch` alp-sdk -> tan on every planner

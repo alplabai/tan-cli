@@ -193,7 +193,18 @@ def test_the_partition_resolver_reads_the_same_tree_the_loader_did(
     """The half a two-line loader fix would miss: `resolve_storage_partitions`
     read the bound root, so it blocked the very entry the loader had just
     accepted -- `status='blocked'`, reason "flash device 'sram6x' is neither a
-    memory_map region nor an on_module.ospi_memories key on SoM E1M-AEN301"."""
+    memory_map region nor an on_module.ospi_memories key on SoM E1M-AEN301".
+
+    What is asserted is WHICH TREE the resolver looked in, not the verdict.
+    That distinction became load-bearing in tan-cli#868: alp-sdk#1556 now
+    refuses `status: ok` for any `memory_map:` device whose Devicetree label
+    merely DEFAULTED to the device name, and the alternate tree's `sram6x`
+    declares no explicit `dt_label:`, so this entry blocks on that gate. The
+    reason still names `sram6x` as a device the resolver RESOLVED -- which is
+    the proof this test exists for -- where reading the bound root would
+    still produce the "neither a memory_map region nor an
+    on_module.ospi_memories key" message instead.
+    """
     from tan.planner.partition import resolve_storage_partitions
 
     board = _board(tmp_path,
@@ -206,7 +217,11 @@ def test_the_partition_resolver_reads_the_same_tree_the_loader_did(
     assert project.effective_metadata_root() == alternate_tree
 
     parts = resolve_storage_partitions(project)
-    assert [(p.name, p.status, p.reason) for p in parts] == [("userdata", "ok", None)]
+    assert [p.name for p in parts] == ["userdata"]
+    reason = parts[0].reason or ""
+    assert "neither a memory_map region" not in reason, reason
+    assert f"flash device '{_DEVICE}'" in reason or _DEVICE in reason, reason
+    assert "Devicetree label defaults to" in reason, reason
 
 
 def test_a_default_load_still_records_and_reads_the_bound_root(planner, tmp_path):
