@@ -699,6 +699,73 @@ def test_ps1_bad_payload_on_upgrade_leaves_previous_install_working(release_serv
 
 
 @windows_only
+def test_ps1_backup_rename_failure_mid_block_rolls_back(release_server, tmp_path):
+    """tan-cli#794: the three backup renames at install.ps1:531-545 (now folded
+    into the same try as the commit) used to run with NO catch of their own --
+    the only enclosing construct was the file-wide `try {`/`finally {}`, whose
+    `finally` only wipes the temp stem -- so a `Move-Item` throwing partway
+    through left whatever had already been renamed (here, `tan.cmd` ->
+    `tan.cmd.bak`) stranded, printed a raw PowerShell exception instead of the
+    rollback message, and left `tan` unresolved on PATH.
+
+    Fabricates a "previous install" directly (three marker files/dirs) rather
+    than installing for real first -- the backup block only Test-Path/Move-Item
+    the paths, it never reads their content, so this is a faithful and much
+    cheaper repro of the mid-backup-window failure than reproducing the
+    original issue's cwd-locks-a-directory trigger.
+
+    tan-cli#794 review (this file, this test): an `icacls /deny *S-1-1-0:(D)`
+    ACE on `tan.exe` itself does NOT reliably make `Move-Item` fail on NTFS --
+    DELETE on a child can be granted via the PARENT directory's
+    FILE_DELETE_CHILD right regardless of a deny ACE on the child, so the
+    rename can still succeed and the whole test never exercises the rollback
+    it exists to prove. Holding an OS-level open handle on `tan.exe` for the
+    duration of the install is used instead: Python's `open()` on Windows does
+    not request FILE_SHARE_DELETE, so for as long as this handle stays open no
+    other process (including `Move-Item`) can delete or rename that file --
+    `ERROR_SHARING_VIOLATION` is unconditional kernel-level file-locking
+    behaviour, not an ACL/SID resolution detail, so it doesn't depend on the
+    runner's account or locale the way the ACE approach did. Only `tan.exe`'s
+    handle is held, so `tan.cmd`'s rename (a separate, unlocked file) still
+    succeeds first, exactly the "already renamed one thing, now failing on the
+    next" shape the issue describes: `tan.exe`'s rename is the SECOND of the
+    three backup renames and throws on it. The handle lives inside a `with`
+    block scoped to just the install call, so it is always closed again --
+    even on an assertion failure, via the `with` statement's own teardown --
+    before this function returns, so pytest's own `tmp_path` teardown can
+    still delete the tree.
+    """
+    dest = tmp_path / "prog"
+    dest.mkdir()
+    (dest / "tan.cmd").write_text("PREVIOUS-CMD-MARKER")
+    (dest / "tan.exe").write_bytes(b"PREVIOUS-EXE-MARKER")
+    lib_dir = dest / "tan-cli-lib"
+    lib_dir.mkdir()
+    (lib_dir / "marker.txt").write_text("PREVIOUS-LIB-MARKER")
+
+    exe = dest / "tan.exe"
+    with open(exe, "rb"):
+        result = _install_ps1(release_server, dest, tmp_path, "-Version", "v0.4.1")
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    # The rollback path this issue adds coverage for -- not a raw exception.
+    assert "previous installation restored" in combined
+    assert "tan' still works as before" in combined
+    # tan.cmd must be back in place, byte-for-byte, not stranded as .bak.
+    assert (dest / "tan.cmd").read_text() == "PREVIOUS-CMD-MARKER"
+    assert not (dest / "tan.cmd.bak").exists()
+    # tan.exe was never actually moved (the throw happened ON its rename),
+    # so it is untouched, and no stray .bak sits beside it.
+    assert (dest / "tan.exe").read_bytes() == b"PREVIOUS-EXE-MARKER"
+    assert not (dest / "tan.exe.bak").exists()
+    # The LibDir rename is never reached -- the throw happens one rename
+    # before it -- so it too must be completely untouched.
+    assert (lib_dir / "marker.txt").read_text() == "PREVIOUS-LIB-MARKER"
+    assert not (dest / "tan-cli-lib.bak").exists()
+
+
+@windows_only
 def test_ps1_temp_execute_denied_retries_staging_inside_dest_dir(release_server, tmp_path):
     """tan-cli#490, Windows half: a host-level "no execute from here" refusal
     over the staging location -- the same shape an AppLocker / Software
@@ -2271,6 +2338,99 @@ def _extract_ps1_shadow_functions() -> str:
     return text[start:end]
 
 
+#: What the two `@pwsh_only` probes below are allowed to spend, and it is NOT
+#: the assertion's budget (tan-cli#871). The bound that actually guards the
+#: behaviour under test lives inside install.ps1 -- `WaitForExit(5000)` plus
+#: `WaitAll(..., 1000)` in `Get-TanVersionReport` -- so nothing these probes
+#: exercise can legitimately need even the 30 s they used to allow, and
+#: raising this number therefore cannot mask a hang in the shipped code.
+#:
+#: What it must cover is everything that is a property of the HOST rather
+#: than of install.ps1: pwsh's cold start, and a runtime C# COMPILE.
+#: `Resolve-CanonicalPath` declares its `GetLongPathName` P/Invoke with
+#: `Add-Type -MemberDefinition`, which is not a declaration -- PowerShell
+#: emits C# source, runs the compiler, and writes and loads a temp assembly,
+#: with Defender scanning it on the way in. On a cold windows-latest runner
+#: that blew through 30 s and reddened `python-tests`, a required context, on
+#: a pull request that touches no installer. Both probes hash into the same
+#: shard, so they run back-to-back on one runner and only the FIRST pays it.
+#:
+#: 180 is what the heaviest subprocess calls in this file already allow.
+_PS1_PROBE_TIMEOUT_S = 180
+
+
+def _as_text(raw: str | bytes | None) -> str:
+    """Whatever a `TimeoutExpired` is carrying, as text -- see the platform
+    note at the call site for why the type is not knowable in advance.
+    `errors="replace"` because this only ever feeds a failure message: a
+    probe that died mid-UTF-8-sequence must still be readable.
+    """
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace")
+    return raw or ""
+
+
+def test_probe_timeout_output_normalises_both_platform_spellings():
+    """`_as_text` is only ever reached when a probe has ALREADY timed out --
+    on Windows CI, rarely, which is the worst place to discover that the
+    diagnostic itself is broken. So pin it here, where it costs microseconds
+    and runs on every OS, rather than finding out from the next tan-cli#871.
+
+    Both spellings are real: `subprocess.run`'s timeout path decodes on
+    Windows and does not on POSIX. A regression to a bare `raw or ""` puts
+    `b'WINNER=...'` in the failure message on POSIX pwsh; a regression to a
+    bare `.decode()` raises AttributeError on Windows and replaces the real
+    failure with a crash inside the reporter.
+    """
+    assert _as_text(b"WINNER=x\n") == "WINNER=x\n"   # POSIX: raw buffer
+    assert _as_text("WINNER=x\n") == "WINNER=x\n"    # Windows: already decoded
+    assert _as_text(None) == ""                      # wrote nothing at all
+    assert _as_text(b"\xff") == "\ufffd"             # died mid-sequence, still readable
+
+
+def _run_ps1_probe(probe: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run one extracted-from-install.ps1 probe under a bound that survives a
+    cold host, and turn a timeout into something DIAGNOSABLE.
+
+    A bare `subprocess.run(..., timeout=...)` reports only the command line,
+    which is how tan-cli#871 arrived: a required check went red naming a
+    pwsh invocation and nothing about where it stalled. `TimeoutExpired`
+    already carries whatever the process managed to write, and these probes
+    narrate themselves (`WINNER=`, then `SHADOWED`/`NOT_SHADOWED`), so the
+    partial output localises the stall to a line. Surfacing it is the half
+    that makes a recurrence actionable rather than another rerun: no output
+    at all, at 180 s, is a genuine hang and a different bug from a slow host.
+    """
+    try:
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(probe), *args],
+            capture_output=True, text=True, timeout=_PS1_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # `.stdout`/`.stderr` are `None` when the process wrote nothing, and
+        # their TYPE depends on the PLATFORM even though the call above is in
+        # text mode -- `subprocess.run`'s timeout path re-collects the output
+        # with `process.communicate()` on Windows, which decodes it (`str`),
+        # but on POSIX keeps what `Popen._communicate` already raised, which
+        # is the raw buffer (`bytes`, decoded nowhere). These probes are
+        # `pwsh_only`, not `windows_only`, so BOTH spellings are reachable and
+        # a `.decode` or a bare `!r` that assumes one of them is wrong on the
+        # other. Normalise instead of trusting a type.
+        partial_out = _as_text(exc.stdout)
+        partial_err = _as_text(exc.stderr)
+        pytest.fail(
+            f"pwsh probe did not finish within {_PS1_PROBE_TIMEOUT_S}s.\n"
+            f"probe: {probe}\n"
+            f"args: {list(args)}\n"
+            f"partial stdout: {partial_out!r}\n"
+            f"partial stderr: {partial_err!r}\n"
+            "Empty partial output here means the process never reached "
+            "`Write-Output \"WINNER=...\"`, i.e. it stalled in pwsh startup "
+            "or in `Add-Type`, not in the shadow logic."
+        )
+
+
 @pwsh_only
 def test_ps1_shadow_functions_detect_an_earlier_tan_on_path(tmp_path):
     """tan-cli#678, Windows half, at the resolution-logic level: given an
@@ -2314,10 +2474,8 @@ def test_ps1_shadow_functions_detect_an_earlier_tan_on_path(tmp_path):
         encoding="utf-8",
     )
 
-    result = subprocess.run(
-        [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe),
-         "-DecoyDir", str(decoy_dir), "-TargetDir", str(target_dir), "-Dest", str(target)],
-        capture_output=True, text=True, timeout=30,
+    result = _run_ps1_probe(
+        probe, "-DecoyDir", str(decoy_dir), "-TargetDir", str(target_dir), "-Dest", str(target)
     )
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert f"WINNER={decoy}" in result.stdout
@@ -2383,10 +2541,8 @@ def test_ps1_shadow_functions_no_false_positive_when_our_install_wins(tmp_path):
         encoding="utf-8",
     )
 
-    result = subprocess.run(
-        [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe),
-         "-TargetDir", str(target_dir), "-DecoyDir", str(decoy_dir), "-Dest", str(target)],
-        capture_output=True, text=True, timeout=30,
+    result = _run_ps1_probe(
+        probe, "-TargetDir", str(target_dir), "-DecoyDir", str(decoy_dir), "-Dest", str(target)
     )
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert f"WINNER={target}" in result.stdout

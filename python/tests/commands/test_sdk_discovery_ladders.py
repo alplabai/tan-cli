@@ -5,7 +5,7 @@ envelope alone.
 `resolve_sdk_root_ladder` (narrow -- `build`, `doctor`, `clean`, `run`,
 `flash`, `size`, `image`, `kconfig`, `validate`, `presets`, `inspect`,
 `trace`, `sdk current`) and `resolve_sdk_root_wide` (wide -- `init`,
-`generate`, `examples`, `renode`) legitimately DISAGREE about which checkout
+`generate`, `examples`) legitimately DISAGREE about which checkout
 a workspace holding both a child `<ws>/alp-sdk` and a lateral `../alp-sdk`
 resolves to; that divergence is oracle-measured and pinned in
 `tests/commands/test_build_manifest.py`, and this module does not relitigate
@@ -49,6 +49,14 @@ from tan.commands.build_cmd import (
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 DIVERGENCE_CODE = "sdk.discovery-divergent"
+
+#: A stable substring of `sdk_ladder_divergence_issue`'s own message
+#: (`build_cmd.py`'s `sdk_ladder_divergence_issue`), pinned the same way
+#: `E2E_DIVERGENCE_PHRASE` below pins doctor's -- so a reword that keeps both
+#: checkout paths in the text but drops the sentence naming what they mean
+#: (or drops the "warning:" severity the text renderer prepends) still fails
+#: this file instead of silently passing.
+DIVERGENCE_TEXT_PHRASE = 'both report sourceTier "discovery"'
 
 
 def _make_sdk(root: Path) -> Path:
@@ -297,7 +305,7 @@ def test_two_commands_on_different_ladders_leave_the_split_detectable(tmp_path):
     which nothing prompts a caller to do.
 
     Deliberately "at least one", not "both": the wide callers
-    (`generate_cmd`, `examples_cmd`, `renode_cmd`, `init_cmd`) still have to
+    (`generate_cmd`, `examples_cmd`, `init_cmd`) still have to
     be wired to `sdk_ladder_divergence_issue`, and this assertion stays true
     -- and keeps its meaning -- both before and after that lands."""
     workspace, _child, _lateral = _divergent_layout(tmp_path)
@@ -317,10 +325,10 @@ def test_two_commands_on_different_ladders_leave_the_split_detectable(tmp_path):
     )
 
 
-# ───────────────── the four wide callers, wired (tan-cli#407) ─────────────────
+# ───────────────── the three wide callers, wired (tan-cli#407) ────────────────
 
 #: Every module that calls the WIDE ladder. Kept as data because two things
-#: read it: the structural gate below (which is what stops a sixth wide
+#: read it: the structural gate below (which is what stops a fifth wide
 #: caller landing silently unwired) and the reader, who would otherwise have
 #: to trust a prose list in a docstring.
 #:
@@ -334,7 +342,6 @@ WIDE_LADDER_MODULES = (
     "init_cmd",
     "generate_cmd",
     "examples_cmd",
-    "renode_cmd",
     "doctor_cmd",
 )
 
@@ -392,27 +399,22 @@ def _wide_command_argv(name: str, workspace: Path) -> tuple[str, ...]:
     refusal's envelope is frozen in `contract/envelopes/`, so it must not
     grow an issue). Two lines of board.yaml carry it past that guard; every
     emit target then fails against a checkout with no `metadata/`, which is
-    fine -- the warning is appended after the target loop, not inside it.
-
-    `renode` needs nothing: its own refusal path carries the warning, which
-    is the point (`renode.manifest-unavailable` tells the reader to run `tan
-    build` first, and `tan build` is the ladder that disagrees)."""
+    fine -- the warning is appended after the target loop, not inside it."""
     if name == "generate":
         (workspace / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
     return {
         "examples": ("examples",),
         "generate": ("generate",),
         "init": ("init", "--name", "demo"),
-        "renode": ("renode",),
     }[name]
 
 
-@pytest.mark.parametrize("command", ["examples", "generate", "init", "renode"])
+@pytest.mark.parametrize("command", ["examples", "generate", "init"])
 def test_each_wide_command_names_the_checkout_the_narrow_ladder_would_have_used(
     tmp_path, command
 ):
     """#407's acceptance for the wide side: in the divergent layout each of
-    the four must emit `sdk.discovery-divergent`, and the message must name
+    the three must emit `sdk.discovery-divergent`, and the message must name
     BOTH checkouts -- the one it used and the one thirteen other commands
     would have used. Naming only its own would leave the reader with a
     warning they cannot act on."""
@@ -436,19 +438,33 @@ def test_each_wide_command_names_the_checkout_the_narrow_ladder_would_have_used(
 
 
 def test_a_wide_command_refusal_still_carries_the_divergence_warning(tmp_path):
-    """`tan renode`'s dominant outcome in a fresh project is a REFUSAL --
-    there is no `system-manifest.yaml` until `tan build` has run. The warning
-    used to be appended sixty lines past six `fail_sdk` early returns, so the
-    refusal that matters most shipped without it: its own message says to run
-    `tan build`, and `tan build` is the ladder that resolves the OTHER
-    checkout. Measured before the fix as
-    `codes == ['renode.manifest-unavailable']`."""
+    """A wide command that refuses on its OWN first guard must still name the
+    checkout it resolved. The warning is worth least on the success path and
+    most on the refusal: a refusal is what a caller pointed at the wrong
+    checkout actually sees.
+
+    `init` is the one that can regress. Its refusals leave through
+    `_emit_error`, a SECOND envelope-construction site that builds its own
+    single-issue list and never reaches the `divergence_issue` computed forty
+    lines below it; the warning survives only because `_emit_error` still
+    passes `sdk=`, from which `Envelope._with_sdk_divergence` appends it. Drop
+    that one keyword and every refusal ships silent while every success path
+    stays green.
+
+    `--template bogus` is the shortest refusal that still resolves an SDK
+    first: `init.invalid-template` is raised inside `_plan_from_template`,
+    after `_resolve_sdk_root`. A refusal raised BEFORE resolution reports no
+    `sdk` block at all and is correctly warning-free."""
     workspace, _child, _lateral = _divergent_layout(tmp_path)
 
-    env = _envelope(_run_tan("renode", "--format", "json", cwd=workspace))
+    env = _envelope(
+        _run_tan(
+            "init", "--name", "demo", "--template", "bogus", "--format", "json", cwd=workspace
+        )
+    )
 
     codes = [i["code"] for i in env["issues"]]
-    assert codes[0] == "renode.manifest-unavailable", (
+    assert codes[0] == "init.invalid-template", (
         "the refusal itself must stay `issues[0]` -- context is appended "
         f"after it, not in front of it; got {codes}"
     )
@@ -535,3 +551,84 @@ def test_both_sides_of_the_split_warn_now_that_the_wide_callers_are_wired(tmp_pa
     for label, env in (("build", build_env), ("examples", examples_env)):
         codes = [i["code"] for i in env["issues"]]
         assert DIVERGENCE_CODE in codes, f"`tan {label}` stayed silent; codes were {codes}"
+
+
+# ───────── the five narrow TEXT-channel callers, fixed (tan-cli#799) ─────────
+
+#: The shortest argv that reaches each command's post-envelope point in the
+#: bare `_divergent_layout` fixture (no board.yaml, no `metadata/`, no
+#: `system-manifest.yaml`) WITHOUT the run taking the internal-failure guard
+#: -- that guard reports `sdk=None` on `clean`/`run`, and a `None` sdk can
+#: never carry the divergence warning (`Envelope._with_sdk_divergence`'s own
+#: gate). Each of these five resolves the SDK, then refuses on something else
+#: entirely (a missing system-manifest.yaml, a missing board.yaml) -- exactly
+#: the shape #799 measured: the refusal reaches text, the warning didn't.
+NARROW_TEXT_COMMANDS: dict[str, tuple[str, ...]] = {
+    "size": ("size",),
+    "image": ("image",),
+    "clean": ("clean", "--dry-run"),
+    "run": ("run",),
+    "validate": ("validate",),
+}
+
+
+@pytest.mark.parametrize("command", sorted(NARROW_TEXT_COMMANDS))
+def test_narrow_text_channel_carries_the_divergence_warning(tmp_path, command):
+    """tan-cli#799: `size`/`image`/`clean`/`run`/`validate` each constructed
+    their `Envelope` only inside `if json_mode:` and rendered text from a
+    local `issues`/`text` list built strictly BEFORE that -- so
+    `sdk.discovery-divergent`, appended at the `Envelope.__init__` seam,
+    reached `--format json` and was silent on the default text channel.
+    `pinmux_cmd.py` was already correct (builds the envelope once,
+    unconditionally, and renders text from `envelope.issues`); this pins the
+    same fix on the other five, measured end to end rather than at the
+    seam/helper level the rest of this module already covers.
+    """
+    workspace, child, lateral = _divergent_layout(tmp_path)
+    argv = NARROW_TEXT_COMMANDS[command]
+
+    json_env = _envelope(_run_tan(*argv, "--format", "json", cwd=workspace))
+    divergence = next((i for i in json_env["issues"] if i["code"] == DIVERGENCE_CODE), None)
+    assert divergence is not None, (
+        f"the premise: `tan {' '.join(argv)} --format json` in the divergent "
+        f"layout must itself carry {DIVERGENCE_CODE}, or this test proves "
+        f"nothing about the text channel; issues were "
+        f"{[i['code'] for i in json_env['issues']]}"
+    )
+
+    text_proc = _run_tan(*argv, cwd=workspace)
+    assert "Traceback" not in text_proc.stderr, (
+        f"an exception escaped the contract:\n{text_proc.stderr}"
+    )
+    # Both checkout paths AND the stable phrase/severity prefix that make
+    # them mean something -- a reword that dropped the "warning:" severity
+    # or the sentence explaining what the two paths are (while still, by
+    # coincidence, printing both paths somewhere in stderr) must fail this,
+    # not silently pass it. Same reasoning as `E2E_DIVERGENCE_PHRASE` above.
+    assert (
+        child.as_posix() in text_proc.stderr
+        and lateral.as_posix() in text_proc.stderr
+        and "warning:" in text_proc.stderr
+        and DIVERGENCE_TEXT_PHRASE in text_proc.stderr
+    ), (
+        f"`tan {' '.join(argv)}` (default/text) carried {DIVERGENCE_CODE} in "
+        f"its `--format json` envelope but not on the default text channel; "
+        f"stderr was:\n{text_proc.stderr!r}"
+    )
+
+
+def test_a_narrow_text_run_over_one_checkout_gets_no_divergence_warning(tmp_path):
+    """The regression the fix must not become: every ordinary single-SDK
+    workspace keeps a plain refusal on the text channel, with no collision
+    warning invented for it -- the same control
+    `test_a_workspace_with_one_checkout_gets_no_divergence_warning_from_tan_build`
+    already pins for `--format json`."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(tmp_path / "alp-sdk")
+
+    proc = _run_tan("size", cwd=workspace)
+
+    assert "Traceback" not in proc.stderr
+    assert "discovery-divergent" not in proc.stderr
+    assert "two alp-sdk checkouts resolve" not in proc.stderr

@@ -1152,6 +1152,35 @@ def _incomplete_checkout(root: Path) -> Path:
     return root
 
 
+def _unservable_checkout(root: Path) -> Path:
+    """`_incomplete_checkout()` plus an emit registry the planner layer cannot
+    read -- a checkout `planner_emit.unavailable()` REFUSES, so `auto` has
+    something real to fall back from.
+
+    It needs its own fixture since tan-cli#868. The fallback below used to be
+    triggered by `_incomplete_checkout()` alone, because
+    `tan/planner/slugs.py` read `metadata/registries/peripheral-kconfig.json`
+    at MODULE IMPORT time -- so a checkout without that file made
+    `import tan.planner` raise, which is exactly what the availability probe
+    measures. alp-sdk#1485 moved that read to the point of use (the table is
+    now resolved against the project's own `--metadata-root`, which a module
+    constant cannot see), and tan's port followed it. A checkout missing only
+    that registry is therefore importable now, and correctly so: the run fails
+    later, in the one emit that needs the file, instead of disabling the whole
+    in-process engine.
+
+    An unreadable emit registry is the second of the three reasons
+    `unavailable()`'s own docstring names, and it is measured the same way, so
+    the assertion below still covers what it was written to cover -- a
+    fallback that reports itself -- rather than being deleted with the trigger
+    that used to produce it.
+    """
+    _incomplete_checkout(root)
+    (root / "metadata" / "emit-registry-v1.json").write_text(
+        "{ not json", encoding="utf-8")
+    return root
+
+
 def _generate_against(checkout: Path, board: Path, target: str,
                       output: Path, engine: str) -> subprocess.CompletedProcess:
     return subprocess.run(
@@ -1204,7 +1233,7 @@ def test_a_fallback_on_an_incomplete_checkout_says_so(tmp_path):
     board = SIMPLE_BOARD
     if board is None:
         pytest.skip("this checkout ships no examples/*/board.yaml")
-    broken = _incomplete_checkout(tmp_path / "half-a-checkout")
+    broken = _unservable_checkout(tmp_path / "half-a-checkout")
 
     proc = _generate_against(broken, board, "ipc-contract-h",
                              tmp_path / "system_ipc.h", "auto")
@@ -1217,7 +1246,7 @@ def test_a_fallback_on_an_incomplete_checkout_says_so(tmp_path):
     assert fallbacks[0]["severity"] == "warning", fallbacks[0]
     # And the reason names the file that made the planner unusable, so the
     # warning is actionable rather than merely present.
-    assert "peripheral-kconfig.json" in fallbacks[0]["message"], fallbacks[0]
+    assert "emit-registry-v1.json" in fallbacks[0]["message"], fallbacks[0]
 
 
 def test_a_missing_som_preset_is_a_coded_envelope(tmp_path):

@@ -18,8 +18,15 @@ anti-pattern #22 -- shelling the SDK gives a command a checkout dependency it
 does not have, and no gate catches the first one). A missing SDK is not fatal:
 the budget resolves `unknown` and measurement still runs.
 
-Divergences from the oracle, all deliberate and all pinned by
-`tests/parity/test_image_size_oracle.py`:
+Divergences from the retired v0.4.1 oracle, all deliberate.
+`tests/parity/test_image_size_oracle.py` pinned them until tan-cli#269 deleted
+the oracle axis with `crates/`. They did not go unpinned: the nesting bullet is
+held tan-side by `tests/commands/test_size_command.py`'s
+`test_i18_nested_west_output_is_measured_not_reported_not_built` and
+`test_the_un_nested_path_still_wins_when_both_exist`, and the candidate ORDER
+by `tests/core/test_system_manifest.py`'s
+`test_i18_nesting_is_probed_after_the_plain_path_never_before`. The size-tool
+timeout below is the one that really is unpinned:
   - a `zephyr.elf` (or `rom.json`/`ram.json`) that landed in west's nested
     `<build_dir>/build/` is FOUND rather than reported `not-built`. That is I-18:
     `west build` is emitted with no `-d`, and the shipped binary reconciles the
@@ -45,6 +52,7 @@ from typing import Any
 
 import typer
 
+from tan.core.shapes import is_file as _is_file
 from tan.commands.build_output import (
     ManifestInvalid,
     ManifestUnavailable,
@@ -181,16 +189,6 @@ def _read_text(path: str) -> str | None:
             return handle.read()
     except (OSError, UnicodeDecodeError, ValueError):
         return None
-
-
-def _is_file(path: str) -> bool:
-    try:
-        return os.path.isfile(path)
-    except (OSError, ValueError):
-        # A path the OS refuses to stat at all (a too-long name, an embedded NUL
-        # from a hand-edited manifest) is "not a file", never an exception that
-        # escapes the envelope.
-        return False
 
 
 def _extract_sizes(
@@ -802,21 +800,32 @@ def size(
             disclosure.sdk,
         )
 
+    # Built ONCE, for both formats: `Envelope.__init__` appends the tan-cli#407
+    # `sdk.discovery-divergent` warning at the shared seam (`_with_sdk_
+    # divergence`), and `outcome.text` was assembled strictly before any
+    # `Envelope` existed -- so a seam-appended issue reached `--format json`
+    # and was silent on the default text channel (tan-cli#799). Diffed
+    # against `outcome.issues` (by value: `Issue` is a frozen dataclass) so
+    # only what the seam ADDED is rendered, never a duplicate of a warning
+    # `outcome.text` already carries (the pair `_run`/`_error_outcome` render
+    # via `_sdk_warning_lines` above).
+    envelope = Envelope(
+        "size",
+        outcome.project,
+        outcome.data,
+        outcome.issues,
+        outcome.exit_code,
+        sdk=outcome.sdk,
+    )
     if json_mode:
-        emit(
-            Envelope(
-                "size",
-                outcome.project,
-                outcome.data,
-                outcome.issues,
-                outcome.exit_code,
-                sdk=outcome.sdk,
-            )
-        )
+        emit(envelope)
     else:
+        seam_extra = [issue for issue in envelope.issues if issue not in outcome.issues]
         # stdout is the envelope channel and carries nothing else, in either
         # mode; stderr carries no contract of its own.
         stream = typer.get_text_stream("stderr")
+        for issue in seam_extra:
+            stream.write(f"{issue.severity}: {issue.message}\n")
         for line in outcome.text:
             stream.write(f"{line}\n")
     raise typer.Exit(int(outcome.exit_code))

@@ -34,6 +34,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,11 @@ from tan.core.timestamp import generated_at_iso
 #: separate enum would only need translating back.
 LINUX = "linux"
 MACOS = "macos"
+#: `install.linux`'s package-manager keys (alp-sdk#1464 / tan-cli#760) -- see
+#: `detect_linux_pm` for the detection order and why `pacman` has no constant
+#: here at all.
+LINUX_PM_APT = "apt"
+LINUX_PM_DNF = "dnf"
 WINDOWS = "windows"
 OTHER = "other"
 
@@ -375,10 +382,13 @@ class BootstrapFacts:
     #: existed. Not `_require`d: unlike `prerequisites.pythonMinVersion`, an
     #: absent key here is a normal, expected shape, not a malformed manifest.
     zephyr_python_min_version: tuple[int, int] | None
-    #: `prerequisites.install`, keyed `linux`/`macos`/`windows` -> tool ->
-    #: command. NOT the `posix`/`windows` split the tool LISTS use: an
-    #: apt-shaped command and a brew-shaped one cannot share one `posix` key.
-    install: dict[str, dict[str, str]]
+    #: `prerequisites.install`, keyed `linux`/`macos`/`windows`. `macos`/
+    #: `windows` map tool -> command directly. `linux` is one level deeper
+    #: (alp-sdk#1464 / tan-cli#760): PACKAGE MANAGER -> tool -> command --
+    #: `{"apt": {...}, "dnf": {...}}`, `dnf` a SUBSET of `apt`'s tools (see
+    #: `normalize_linux_install`/`_fallback_install_commands`). Use
+    #: `install_for_host`, never this field directly.
+    install: dict[str, dict[str, str] | dict[str, dict[str, str]]]
     west_pip_spec: str
     west_init_args: tuple[str, ...]
     west_update_args: tuple[str, ...]
@@ -430,7 +440,7 @@ class BootstrapFacts:
             return self.prerequisites_macos
         return self.prerequisites_posix
 
-    def install_for_host(self, host: str) -> dict[str, str]:
+    def install_for_host(self, host: str, linux_pm: str | None = None) -> dict[str, str]:
         """THE one place the manifest's `linux`/`macos`/`windows` install keying
         is reconciled with `prerequisites`' `posix`/`windows` tool-list keying.
         Callers resolve once, by host, and hand the resolved map down -- so no
@@ -441,7 +451,20 @@ class BootstrapFacts:
         entry and is not going to grow one: every tool there reports
         `command: null`. The alternatives are both worse than the `null` -- a
         throw, or handing a BSD user a `brew install` line.
+
+        `linux_pm` (alp-sdk#1464 / tan-cli#760) is the extra hop `host ==
+        LINUX` needs: `self.install[LINUX]` is package-manager -> tool ->
+        command, so a caller must say WHICH sub-map it wants. `None` (the
+        default) is an EMPTY map, never a guess -- a caller with no confirmed
+        package manager (`detect_linux_pm`) gets `command: null` for every
+        tool, not one PM's data served for another's.
         """
+        if host == LINUX:
+            if linux_pm is None:
+                return {}
+            sub = self.install.get(LINUX, {})
+            node = sub.get(linux_pm) if isinstance(sub, dict) else None
+            return dict(node) if isinstance(node, dict) else {}
         return self.install.get(host, {})
 
     def native_lib_hint(self, host: str) -> NativeLibHint | None:
@@ -666,25 +689,42 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
     )
 
 
-def _fallback_install_commands() -> dict[str, dict[str, str]]:
+def _fallback_install_commands() -> dict[str, dict[str, str] | dict[str, dict[str, str]]]:
     """The install one-liners as `metadata/bootstrap.json` carries them.
 
     Two callers: the whole-manifest fallback, and `_resolve_install_commands`'s
     gap-fill for a manifest predating alp-sdk#959 (which carried no `install`
     key at all). Note `ninja`'s PACKAGE name differs from the binary name --
     which is the whole argument for carrying these as data rather than guessing.
+
+    `LINUX` is re-pinned to alp-sdk `dev` @ `7a419865` (tan-cli#760's second
+    half / alp-sdk#1464+#1471): package-manager-keyed now, matching
+    `BootstrapFacts.install`'s own nested shape, not the flat tool -> command
+    map this table carried before. `dnf` has no `ninja` entry and there is no
+    `pacman` key at all -- both deliberate DATA (see `detect_linux_pm`), not
+    gaps to fill in later.
     """
     return {
         LINUX: {
-            "git": "sudo apt-get install -y git",
-            "cmake": "sudo apt-get install -y cmake",
-            "python3": "sudo apt-get install -y python3",
-            "ninja": "sudo apt-get install -y ninja-build",
-            # `xz`/`wget` joined `prerequisites.posix` at alp-sdk v0.14.0. Same
-            # package-name-differs-from-binary-name point as `ninja`: the binary
-            # is `xz`, the package is `xz-utils`.
-            "xz": "sudo apt-get install -y xz-utils",
-            "wget": "sudo apt-get install -y wget",
+            LINUX_PM_APT: {
+                "git": "sudo apt-get install -y git",
+                "cmake": "sudo apt-get install -y cmake",
+                "python3": "sudo apt-get install -y python3",
+                "ninja": "sudo apt-get install -y ninja-build",
+                # `xz`/`wget` joined `prerequisites.posix` at alp-sdk v0.14.0.
+                # Same package-name-differs-from-binary-name point as `ninja`:
+                # the binary is `xz`, the package is `xz-utils`.
+                "xz": "sudo apt-get install -y xz-utils",
+                "wget": "sudo apt-get install -y wget",
+            },
+            LINUX_PM_DNF: {
+                "git": "sudo dnf install -y git",
+                "cmake": "sudo dnf install -y cmake",
+                "python3": "sudo dnf install -y python3",
+                # No `ninja` -- see this function's own docstring.
+                "xz": "sudo dnf install -y xz",
+                "wget": "sudo dnf install -y wget",
+            },
         },
         MACOS: {
             "git": "brew install git",
@@ -715,7 +755,88 @@ def _fallback_install_commands() -> dict[str, dict[str, str]]:
     }
 
 
-def _resolve_install_commands(declared: Any) -> dict[str, dict[str, str]]:
+def normalize_linux_install(raw: Any) -> dict[str, dict[str, str]]:
+    """`prerequisites.install.linux`, canonicalised to PACKAGE MANAGER -> tool
+    -> command, whichever of the two shapes alp-sdk declared it in.
+
+    **New shape** (alp-sdk#1464, `dev` @ `7a419865` on): `{"apt": {tool:
+    command}, "dnf": {tool: command}}` -- detected structurally, by every
+    top-level value being a dict, not by key name, so a package manager this
+    parser has never heard of is still readable rather than silently dropped.
+
+    **Legacy shape** (every manifest before alp-sdk#1471): a FLAT tool ->
+    command map, unconditionally Debian's -- that key had no other content
+    until #1464 gave it a package-manager dimension at all. Read here AS
+    `apt`'s sub-map (design decision (4)): a NEW tan against an OLD
+    `--sdk-root` still works on a real apt host exactly as it always did, and
+    `select_linux_install` never hands the same data out to a dnf/pacman/other
+    caller -- read what was always there, under the key it was implicitly
+    for, and let `detect_linux_pm` decide who may see it.
+
+    Empty/absent/malformed input returns `{}` -- callers fall back to
+    `_fallback_install_commands()[LINUX]`, matching every other per-OS gap in
+    `_resolve_install_commands`.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    if all(isinstance(v, dict) for v in raw.values()):
+        out: dict[str, dict[str, str]] = {}
+        for pm, tools in raw.items():
+            if not isinstance(pm, str) or not isinstance(tools, dict):
+                continue
+            clean = {k: v for k, v in tools.items() if isinstance(k, str) and isinstance(v, str)}
+            if clean:
+                out[pm] = clean
+        return out
+    # Legacy flat shape -- read as `apt`'s sub-map (see the docstring above).
+    clean = {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+    return {LINUX_PM_APT: clean} if clean else {}
+
+
+def select_linux_install(normalized: dict[str, dict[str, str]], pm: str | None) -> dict[str, str]:
+    """The tool -> command map for ONE package manager, out of
+    `normalize_linux_install`'s output. `pm=None` -- no package manager
+    confirmed on this host (`detect_linux_pm` found neither `apt-get` nor
+    `dnf`, or found a third one this manifest ships no sub-map for, e.g.
+    Arch's `pacman`) -- is `{}`, never a different PM's data: the whole point
+    of keying `install.linux` by package manager is that one PM's shape must
+    never stand in for another's."""
+    if pm is None:
+        return {}
+    sub = normalized.get(pm)
+    return dict(sub) if isinstance(sub, dict) else {}
+
+
+def detect_linux_pm(available: Callable[[str], bool]) -> str | None:
+    """Which package-manager sub-map to read under `install.linux`
+    (alp-sdk#1464 / tan-cli#760) -- `apt` checked before `dnf`, `pacman`
+    never probed.
+
+    **Order and fallthrough MUST agree with alp-sdk's own two detectors** --
+    `scripts/bootstrap.sh`'s `LINUX_PM` block and `scripts/alp_cli/doctor.py`'s
+    `_prereq_linux_pm()` -- both probe `apt-get` before `dnf`, neither probes
+    `pacman`, both fall through to a host-neutral degrade when neither
+    resolves. A third detector that disagrees with those two is a future
+    drift bug: keep this order in lockstep with those two by hand; there is
+    no shared gate across the two repos that would.
+
+    `pacman` is deliberately never probed: `install.linux` ships no `pacman`
+    sub-map at all (an unattended `pacman -Sy` risks a partial upgrade) --
+    detecting it would only ever resolve to the same `None` below.
+
+    Pure: `available` is injected (`on_path(binary) is not None`), matching
+    every other PATH check in this module -- see `_confirmed`.
+    """
+    if available("apt-get"):
+        return LINUX_PM_APT
+    if available("dnf"):
+        return LINUX_PM_DNF
+    return None
+
+
+def _resolve_install_commands(
+    declared: Any,
+) -> dict[str, dict[str, str] | dict[str, dict[str, str]]]:
     """`prerequisites.install` as parsed, with each EMPTY per-OS map replaced by
     the fallback's.
 
@@ -729,12 +850,17 @@ def _resolve_install_commands(declared: Any) -> dict[str, dict[str, str]]:
     Degrade, do not refuse: every shape handled here is out of contract today,
     and a `ValidationFailure` on a manifest field reaches `tan build` and
     `tan run` through auto-bootstrap.
+
+    `LINUX` is handled separately (tan-cli#760's second half):
+    `normalize_linux_install` reconciles both shapes `install.linux` has ever
+    had into one PM-keyed map, so `BootstrapFacts.install[LINUX]` is ALWAYS
+    `{pm: {tool: command}}`.
     """
     fallback = _fallback_install_commands()
     if not isinstance(declared, dict):
         return fallback
-    out: dict[str, dict[str, str]] = {}
-    for host in (LINUX, MACOS, WINDOWS):
+    out: dict[str, dict[str, str] | dict[str, dict[str, str]]] = {}
+    for host in (MACOS, WINDOWS):
         node = declared.get(host)
         clean = (
             {k: v for k, v in node.items() if isinstance(k, str) and isinstance(v, str)}
@@ -742,6 +868,7 @@ def _resolve_install_commands(declared: Any) -> dict[str, dict[str, str]]:
             else {}
         )
         out[host] = clean or fallback[host]
+    out[LINUX] = normalize_linux_install(declared.get(LINUX)) or fallback[LINUX]
     return out
 
 
@@ -938,6 +1065,148 @@ class PrereqFailure:
     missing: tuple[MissingPrerequisite, ...] = ()
 
 
+#: Program names this guard refuses to accept as "the confirmed installer",
+#: even when `available` says yes -- tan-cli#760 review, MINOR 1. Every one
+#: of these is a universally-present WRAPPER that can front an absent real
+#: installer without this guard ever seeing it: `env FOO=bar apt-get ...` and
+#: `sh -c '...'` both resolve their OWN leading token to one of these, so
+#: `available("env")` (true on nearly every host) would confirm a command
+#: whose real dependency was never checked at all. Harmless against today's
+#: manifest (none of the six shipped commands use a wrapper); load-bearing
+#: the moment landing (b) adds a real per-distro command table.
+_OPAQUE_WRAPPER_BINARIES = frozenset(
+    {"env", "sh", "bash", "dash", "zsh", "ksh", "eval", "exec"}
+)
+
+#: Shell composition this guard cannot see past -- `apt-get update && apt-get
+#: install -y cmake` would confirm only the FIRST command, then hand out the
+#: whole two-command line as if the second had been checked too. Refuse
+#: outright on any of these rather than half-confirm (tan-cli#760 review,
+#: MINOR 1). `"&"` alone (a single backgrounding operator, e.g. `apt-get
+#: install -y cmake & rm -rf /`) already contains `"&&"` as a substring, so
+#: listing both would be redundant; `"|"` likewise already covers `"||"`.
+#: `"\n"` closes the same class of gap a real shell would hit at a bare
+#: newline (`"apt-get update\napt-get install -y cmake"`) -- tan-cli#760
+#: review round 3, NIT: both were measured to slip past the pre-round-3 list.
+#: None of today's six manifest commands use any of these.
+_SHELL_METACHARACTERS = ("&", ";", "|", "`", "$(", "\n")
+
+
+def leading_binary(command: str) -> str:
+    """The program name a shell would actually invoke for one of the
+    manifest's install one-liners -- stripping a literal leading `sudo `
+    exactly as `--fix` (`doctor_cmd.run_fix`) does before it ever spawns
+    anything, and parsing the rest with `shlex.split`, the SAME parser
+    `run_fix` itself calls on the (sudo-stripped) command before resolving
+    `argv[0]` -- so whatever this returns is provably the same token
+    `run_fix` would try to resolve, quoting included, not merely a similar
+    one (tan-cli#760 review, MINOR 2: `str.split` disagreed with `run_fix`'s
+    `shlex.split` on a quoted path). `""` for a blank command, or one
+    `shlex` cannot parse at all (an unterminated quote) -- nothing to
+    confirm either way, and callers treat an empty name as "not available"
+    rather than guessing at a half-token."""
+    stripped = command.strip()
+    if stripped.startswith("sudo "):
+        stripped = stripped[len("sudo ") :].lstrip()
+    if not stripped:
+        return ""
+    try:
+        parts = shlex.split(stripped)
+    except ValueError:
+        return ""
+    return parts[0] if parts else ""
+
+
+def _confirmed(command: str, available: Callable[[str], bool]) -> bool:
+    """Whether `command` -- one manifest install one-liner -- is safe to hand
+    a consumer as a real, runnable command on THIS host. The tan-cli#760
+    guard's one decision point, shared by `confirmed_install_commands`
+    (dict shape) and `confirm_missing` (`MissingPrerequisite` tuple shape)
+    below -- there is exactly one place that decides this, even though there
+    are now two entry points for the two shapes a caller needs it in.
+
+    Refuses outright, never half-confirms, on a shell metacharacter
+    (`_SHELL_METACHARACTERS`) or an opaque wrapper leading binary
+    (`_OPAQUE_WRAPPER_BINARIES`) -- tan-cli#760 review MINOR 1.
+
+    When the command is `sudo`-prefixed, `sudo` itself is confirmed too, not
+    only the program after it: a stock `debian:12` image has `apt-get` but
+    does NOT ship `sudo` by default, so confirming `apt-get` alone would
+    still hand out a command that fails with `sudo: not found`
+    (tan-cli#760 review, MINOR 3).
+
+    This still is not an exhaustive runnability proof -- a PATH-shadowing
+    binary, a permissions error, an environment quirk are all beyond what a
+    PATH lookup can promise. What it DOES guarantee: every program name this
+    command would need to spawn is confirmed present, or the command is
+    refused rather than handed out as if it were checked."""
+    if any(meta in command for meta in _SHELL_METACHARACTERS):
+        return False
+    stripped = command.strip()
+    needs_sudo = stripped.startswith("sudo ")
+    binary = leading_binary(command)
+    if not binary or binary in _OPAQUE_WRAPPER_BINARIES:
+        return False
+    if needs_sudo and not available("sudo"):
+        return False
+    return available(binary)
+
+
+def confirmed_install_commands(
+    install: dict[str, str], available: Callable[[str], bool]
+) -> dict[str, str]:
+    """`install`, keeping only the entries `_confirmed` (above) accepts on
+    THIS host -- the tan-cli#760 guard's dict-shaped entry point.
+
+    Every `MissingPrerequisite.command` this port emits is built by looking a
+    tool up in a dict shaped exactly like `install` (`_structured_missing`,
+    `doctor_cmd.prerequisites_check`) or, for a `PrereqFailure` already built
+    (`posix_venv_unusable()`), via `confirm_missing`'s tuple-shaped twin
+    below -- `_confirmed` is the one decision both apply. Measured on
+    `fedora:42`/`archlinux:latest`/`rockylinux:9`: alp-sdk's Linux table is
+    six `sudo apt-get install -y ...` lines and none of those hosts has
+    `apt-get` on PATH, so every entry is dropped here and the tool downgrades
+    to `command: null` everywhere that dict then feeds the CUSTOMER-FACING
+    surfaces -- `data.missingPrerequisites[].command`, which a human reads
+    and `alp-sdk-vscode`'s Fix button sends verbatim to a terminal. (`tan
+    doctor --fix` itself does its OWN PATH resolution and must NOT read a
+    guarded dict -- see `doctor_cmd.prerequisites_check`'s `fix_missing`.)
+
+    Pure: `available` is injected rather than a real PATH probe, keeping this
+    module's "no IO" contract (see the module docstring). Callers pass the
+    real check -- `on_path(binary) is not None` -- from `bootstrap_cmd`/
+    `doctor_cmd`, both of which already own a hardened PATH walk."""
+    return {
+        tool: command for tool, command in install.items() if _confirmed(command, available)
+    }
+
+
+def confirm_missing(
+    missing: tuple[MissingPrerequisite, ...], available: Callable[[str], bool]
+) -> tuple[MissingPrerequisite, ...]:
+    """`missing` -- an already-built `PrereqFailure.missing`/`{tool, command}`
+    sequence, such as `posix_venv_unusable()` returns -- with any entry
+    `_confirmed` (above) rejects degraded to `command: None`. The tuple-
+    shaped twin of `confirmed_install_commands`, for a caller that already
+    has `MissingPrerequisite` objects rather than the `install` dict they
+    were built from (tan-cli#760 review MAJOR 2 / tan-cli#765:
+    `posix_venv_unusable()`'s hardcoded `sudo apt-get install -y
+    python3-venv` reached the envelope completely unguarded before this
+    existed -- the confirmation guard was never actually "the ONE place"
+    that decided what got handed out; this closes that gap without changing
+    `posix_venv_unusable`'s own signature).
+
+    An entry whose `command` is already `None` passes through unchanged --
+    nothing to confirm, and re-checking it would be a wasted PATH probe."""
+    out: list[MissingPrerequisite] = []
+    for m in missing:
+        if m.command is not None and not _confirmed(m.command, available):
+            out.append(MissingPrerequisite(m.tool, None))
+        else:
+            out.append(m)
+    return tuple(out)
+
+
 def _structured_missing(
     missing: list[str], install: dict[str, str]
 ) -> tuple[MissingPrerequisite, ...]:
@@ -1000,13 +1269,33 @@ _DOCTOR_FIX_HINT_NEEDS_ELEVATION = (
 
 
 def _doctor_fix_hint(missing: list[str], install: dict[str, str]) -> str:
-    """Which of the two hints above is true for THESE tools on THIS host.
+    """Which of the three hints is true for THESE tools on THIS host.
 
     Only the commands reachable for the MISSING tools are considered: a `sudo`
     entry belonging to some tool that is already present says nothing about
     what `--fix` will do in this run. A tool the manifest has no command for
     cannot need elevation either -- it contributes generic advice, not a spawn.
-    """
+
+    tan-cli#760 adds the third shape. `install` here has already been through
+    `confirmed_install_commands`, so by the time this runs "no entry for tool
+    X" means "no command this host can actually run" -- which, when it is
+    true of EVERY missing tool, means `--fix` cannot INSTALL anything for
+    them here (it may still report a diagnostic, e.g. `tan doctor --fix`'s
+    own `doctor.fix-installer-not-found` -- this hint is about the remedy,
+    not that separate command's full behaviour). The two hints above both
+    promise an install ("it prints the exact command for each tool from the
+    SDK's manifest"), which is exactly the unrunnable-remedy defect this
+    guard exists to close, just moved from the structured field into this
+    prose line instead. Name the tools that are missing; a guessed package
+    NAME here would be the identical defect against a different OS/distro
+    (see `zephyr_requirements_hint` for the precedent)."""
+    confirmed = [tool for tool in missing if install.get(tool) is not None]
+    if not confirmed:
+        return (
+            "`tan doctor --build --fix` has no confirmed install command for "
+            f"this host: {', '.join(missing)}.  Install them with your OS's "
+            "package manager and put them on PATH, then re-run."
+        )
     return (
         _DOCTOR_FIX_HINT_NEEDS_ELEVATION
         if any(install.get(tool, "").split(maxsplit=1)[:1] == ["sudo"] for tool in missing)

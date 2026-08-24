@@ -84,12 +84,15 @@ def resolve_symbol(addr: int, elf: Path) -> Symbol | None:
     Spawning it by bare NAME afterwards (rather than the resolved absolute
     path) would reopen the same hole a second way -- `CreateProcess`'s own
     current-directory-first search -- even past a hardened probe, so the
-    resolved absolute path from `on_path` is what gets spawned below, the same
-    `doctor_cmd.on_path` call `flash_cmd` already makes for its own tool
-    probes. `size_cmd`/`build/execute.py` hand-roll their OWN hardened PATH
-    walk instead (`_find_on_path`/`_command_on_path`, both return a bare
-    `bool`, not a resolved path) -- a different, not-yet-unified pattern, not
-    this one.
+    resolved absolute path from `on_path` is what gets spawned below.
+
+    Since tan-cli#532 that is no longer a second pattern: `on_path` delegates
+    to `tan.core.tool_lookup.resolve_tool`, the same lookup `flash_cmd`,
+    `size_cmd` and `build/execute.py` call, so every tool probe in tan now
+    resolves identically. This docstring previously said those three
+    hand-rolled their own walks returning a bare `bool` -- true when it was
+    written, false since #567 consolidated them, and stated in the past tense
+    here so the next reader does not act on the older shape.
     """
     tool = next((p for t in _ADDR2LINE_TOOLS if (p := on_path(t))), None)
     if tool is None or not elf.is_file():

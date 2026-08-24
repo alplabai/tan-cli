@@ -37,6 +37,7 @@ from typer.testing import CliRunner
 from tan.cli import app
 from tan.commands import doctor_cmd
 from tan.core.bootstrap import venv_layout, workspace_sdk_record_json
+from tan.core.tool_lookup import ToolResolution
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``.
@@ -135,6 +136,31 @@ def test_no_runnable_interpreter_is_its_own_frozen_code():
     check = doctor_cmd.python_check(found=None, floor=(3, 12), floor_source="zephyr")
     assert check.status == "fail"
     assert check.code == "bootstrap.python-not-runnable"
+
+
+def test_probe_host_python_returns_the_resolved_path_alongside_the_display_spelling():
+    """tan-cli#797 major finding: `_probe_host_python` must carry the
+    PATH-RESOLVED interpreter path as a third element, not just the display
+    spelling + version `python_check` reads -- `_posix_venv_capable`'s
+    `ensurepip` probe needs that resolved path as `executable=` rather than
+    re-deriving (and bare-spawning) argv from the display spelling. Runs the
+    REAL host Python, no mocks: the one property under test is the shape of
+    the return value, not any particular version."""
+    found = doctor_cmd._probe_host_python((0, 0))
+    assert found is not None, "no host Python resolved at all -- cannot exercise this"
+    assert len(found) == 3, found
+    display, version, resolved = found
+    assert isinstance(display, str) and display
+    assert isinstance(version, tuple) and len(version) == 2
+    assert isinstance(resolved, str) and os.path.isabs(resolved), (
+        f"the resolved path is not absolute: {resolved!r}"
+    )
+    assert os.path.isfile(resolved), resolved
+    # python_check only ever reads the first two elements -- the call site
+    # slices `found[:2]` before handing it in, and that slice must still be
+    # exactly what python_check's own contract expects.
+    check = doctor_cmd.python_check(found[:2], floor=(0, 0), floor_source="test")
+    assert check.status == "pass", check.detail
 
 
 def test_zephyr_floor_is_read_from_the_real_cmake_when_the_workspace_resolves(tmp_path):
@@ -460,6 +486,305 @@ def test_missing_prerequisites_carry_the_frozen_code_and_the_install_commands():
     assert check.status == "fail"
     assert check.code == "bootstrap.prerequisites-missing"
     assert "sudo apt-get install -y ninja-build" in (check.fix or "")
+    # `available=None` (this call's default): no guard at all, so `missing`
+    # and `fix_missing` are identical -- pre-tan-cli#760 behaviour exactly.
+    assert check.missing == check.fix_missing
+
+
+def test_prerequisites_check_available_guards_missing_but_not_fix_missing():
+    """tan-cli#760 review MAJOR 1, at the unit level: passing `available`
+    guards `missing` (the envelope) but `fix_missing` (`--fix`'s own input)
+    stays the RAW command regardless."""
+    check = doctor_cmd.prerequisites_check(
+        checked=["git", "cmake", "python3", "ninja"],
+        missing=["ninja"],
+        install={"ninja": "sudo apt-get install -y ninja-build"},
+        source="alp-sdk metadata/bootstrap.json",
+        available=lambda _binary: False,
+    )
+    assert check.missing == [{"tool": "ninja", "command": None}]
+    assert check.fix_missing == [
+        {"tool": "ninja", "command": "sudo apt-get install -y ninja-build"}
+    ]
+
+
+def test_check_built_with_only_missing_falls_back_to_it_for_fix_missing():
+    """tan-cli#760 review round 3, MINOR: a `hostPrerequisites` Check built
+    with `missing=` and no `fix_missing=` (a 9th construction site nobody
+    remembered to pair) must not silently disable `--fix` -- it must fail
+    SAFE at pre-#760 behaviour (the two fields equal), never silent."""
+    missing = [{"tool": "ninja", "command": "brew install ninja"}]
+    check = doctor_cmd.Check(
+        "hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host"
+    )
+    assert check.fix_missing == missing
+
+    # A Check that carries neither (every non-`hostPrerequisites` check)
+    # stays `None`, not `[]` -- `reported_missing`'s own "checked, nothing
+    # missing" spelling must not be manufactured here.
+    clean = doctor_cmd.Check("somethingElse", "pass", "ok", scope="host")
+    assert clean.fix_missing is None
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#760: `data.missingPrerequisites[].command` must never hand back a
+# line that cannot run. Measured on fedora:42/archlinux:latest/rockylinux:9:
+# alp-sdk's `prerequisites.install.linux` is six `sudo apt-get install -y
+# ...` lines and none of those hosts has `apt-get` on PATH.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_nulls_the_install_command_when_its_own_package_manager_is_absent(
+    tmp_path, monkeypatch
+):
+    """The primary defect, reproduced end to end through `_collect` (what
+    `tan doctor --format json` actually calls): with nothing on PATH -- the
+    prerequisite tools AND `apt-get` both absent, the Fedora/Arch/Rocky shape
+    -- `hostPrerequisites.missing[].command` must be `null`, not the
+    `sudo apt-get ...` line a Debian host would get."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    # Pinned explicitly (not "whatever this runner's real platform happens to
+    # be"): `_collect` reads `install.linux` only when `sys.platform` is NOT
+    # `"darwin"`, and this suite runs on macOS CI too -- an unpinned
+    # `sys.platform` there would read `install.macos` (absent below) instead,
+    # passing this assertion for the wrong reason.
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "cmake": "sudo apt-get install -y cmake",
+                    "ninja": "sudo apt-get install -y ninja-build",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    assert prereq.status == "fail"
+    assert prereq.missing
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] is None
+    assert by_tool["ninja"] is None
+    # tan-cli#760 review MINOR 4: the prose fix line must not dangle the
+    # unrunnable command either, and must still name the tools.
+    assert "apt-get" not in (prereq.fix or "")
+    assert "cmake" in (prereq.fix or "") and "ninja" in (prereq.fix or "")
+
+
+def test_collect_keeps_the_install_command_when_apt_get_is_confirmed(tmp_path, monkeypatch):
+    """The other half: a real Debian/Ubuntu host has `apt-get`, so the guard
+    must not drop a command that host can actually run."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "cmake": "sudo apt-get install -y cmake",
+                    "ninja": "sudo apt-get install -y ninja-build",
+                }
+            },
+        },
+    )
+    # `sudo` itself must be confirmed too (tan-cli#760 review MINOR 3). `str |
+    # None`, matching `on_path`'s real contract: `_collect` also calls
+    # `on_path("west")` and feeds a truthy result straight to `subprocess.run`
+    # as an argv entry, so a bare `True` here crashes with `not str, bytes or
+    # os.PathLike`.
+    monkeypatch.setattr(
+        doctor_cmd,
+        "on_path",
+        lambda name: f"/usr/bin/{name}" if name in {"apt-get", "sudo"} else None,
+    )
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] == "sudo apt-get install -y cmake"
+    assert by_tool["ninja"] == "sudo apt-get install -y ninja-build"
+
+
+def test_collect_resolves_a_real_dnf_command_on_a_fedora_shaped_host(tmp_path, monkeypatch):
+    """tan-cli#760's second half (alp-sdk#1464/#1471), through `tan doctor`'s
+    OWN raw-manifest reader (`_load_manifest`/`_collect`) -- a SEPARATE
+    implementation from `tan.core.bootstrap.parse_bootstrap_manifest`, which
+    had the identical defect: `install.get("linux")` read directly as a flat
+    tool -> command map, so a nested `{"apt": {...}, "dnf": {...}}` manifest
+    filtered to `{}` for EVERY Linux tool here, on EVERY Linux host -- not
+    just non-Debian ones. `dnf` (+ `sudo`) confirmed, `apt-get` absent.
+
+    Verified to FAIL against pre-fix code: pre-fix, `per_tool =
+    install.get("linux")` is the nested dict itself; the `isinstance(v, str)`
+    filter drops both `"apt"` and `"dnf"` (their values are dicts), so
+    `resolved_install` is `{}` and `cmake`'s command comes back `None`, not
+    the real `dnf` line asserted below.
+    """
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "apt": {
+                        "cmake": "sudo apt-get install -y cmake",
+                        "ninja": "sudo apt-get install -y ninja-build",
+                    },
+                    "dnf": {
+                        "cmake": "sudo dnf install -y cmake",
+                        # No `ninja` -- alp-sdk#1464's deliberate dnf gap.
+                    },
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: f"/usr/bin/{name}" if name in {"dnf", "sudo"} else None
+    )
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] == "sudo dnf install -y cmake"
+    assert by_tool["ninja"] is None
+    assert "ninja-build" not in (prereq.detail or "")
+    assert "ninja-build" not in (prereq.fix or "")
+
+
+def test_collect_still_resolves_apt_on_a_manifest_that_also_carries_dnf(tmp_path, monkeypatch):
+    """The Debian-side regression check for the SAME raw-reader defect: even
+    on a modern, PM-keyed manifest, an apt-confirmed host must still get its
+    real `apt` command -- proving the fix reads the manifest, rather than
+    happening to null everything on every shape.
+
+    Verified to FAIL against pre-fix code for the same structural reason as
+    the `dnf` test above: the nested `install.linux` filters to `{}`
+    regardless of which package manager is on PATH, so `cmake`'s command
+    comes back `None` here too, pre-fix.
+    """
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "linux": {
+                    "apt": {"cmake": "sudo apt-get install -y cmake"},
+                    "dnf": {"cmake": "sudo dnf install -y cmake"},
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cmd,
+        "on_path",
+        lambda name: f"/usr/bin/{name}" if name in {"apt-get", "sudo"} else None,
+    )
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] == "sudo apt-get install -y cmake"
+
+
+def test_collect_separates_the_envelope_from_fixs_own_input(tmp_path, monkeypatch):
+    """tan-cli#760 review MAJOR 1: `missing` (the envelope's `data.
+    missingPrerequisites`) and `fix_missing` (`--fix`'s own input) must NOT
+    be the same value once a command is unconfirmed -- `missing` degrades to
+    `command: null`, but `fix_missing` stays the RAW command so `run_fix` can
+    still do its own tan-cli#360 diagnosis.
+
+    `apt-get` (only) is confirmed on PATH -- tan-cli#760's second half needs a
+    package manager DETECTED before `install.linux` resolves to anything at
+    all (`detect_linux_pm`), so leaving it absent here (as an earlier version
+    of this test did) collapses `fix_missing` to `null` too and stops proving
+    the thing this test is about. `sudo` and `cmake` itself both stay absent,
+    which is what still nulls `missing` below (`confirm_missing`'s own `sudo`
+    check inside `prerequisites_check`, unaffected by any of this)."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["cmake"],
+            "pythonMinVersion": "3.10",
+            "install": {"linux": {"cmake": "sudo apt-get install -y cmake"}},
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: "/usr/bin/apt-get" if name == "apt-get" else None
+    )
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    assert prereq.missing == [{"tool": "cmake", "command": None}]
+    assert prereq.fix_missing == [
+        {"tool": "cmake", "command": "sudo apt-get install -y cmake"}
+    ]
+
+
+def test_fix_still_reports_installer_not_found_on_the_host_the_guard_covers(
+    tmp_path, monkeypatch
+):
+    """tan-cli#760 review MAJOR 1, reproduced through `_collect` + `run_fix`
+    -- not a hand-built dict, unlike the pre-existing tan-cli#360 tests this
+    guard risked silently regressing. Exactly the review's own repro: a Mac
+    with no Homebrew. Before the fix, feeding `run_fix` the CONFIRMED
+    (already-nulled) `missing` dict made it skip the entry outright
+    (`command is None` -> `continue`) and return `[]` -- a silent `--fix`
+    no-op, the precise defect tan-cli#360 exists to prevent. `--fix` must
+    still report `doctor.fix-installer-not-found`, and `subprocess.run` is
+    patched to explode if `run_fix` ever reaches it -- #360's own `on_path`
+    check refuses the spawn before that, so this is a stronger assertion
+    than "happened not to fail this time"."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "darwin")
+    _write_bootstrap_json(
+        tmp_path,
+        {
+            "posix": ["git", "cmake", "python3", "ninja"],
+            "macos": ["git", "cmake", "python3", "ninja"],
+            "pythonMinVersion": "3.10",
+            "install": {
+                "macos": {
+                    "cmake": "brew install cmake",
+                    "ninja": "brew install ninja",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)  # nothing on PATH, brew included
+
+    checks = doctor_cmd._collect(str(tmp_path))
+    prereq = next(c for c in checks if c.name == "hostPrerequisites")
+    # The envelope stays honest -- tan-cli#760's own fix, unregressed.
+    by_tool = {m["tool"]: m["command"] for m in prereq.missing}
+    assert by_tool["cmake"] is None
+    # `--fix`'s OWN input is the RAW command.
+    raw_by_tool = {m["tool"]: m["command"] for m in prereq.fix_missing}
+    assert raw_by_tool["cmake"] == "brew install cmake"
+
+    def _must_not_spawn(*args, **kwargs):
+        raise AssertionError("run_fix must not spawn an unresolvable installer")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _must_not_spawn)
+    fix_checks = doctor_cmd.run_fix(prereq.fix_missing)
+    assert len(fix_checks) == 1, fix_checks
+    assert fix_checks[0].code == "doctor.fix-installer-not-found"
+    assert fix_checks[0].name == "fix:brew"
 
 
 def test_macos_reads_its_own_prerequisites_list_not_posixs(tmp_path, monkeypatch):
@@ -767,11 +1092,16 @@ def test_west_check_probes_the_resolved_path_not_a_bare_name_reprobe(tmp_path, m
     resolved = "/opt/onpath/west"
     monkeypatch.setattr(doctor_cmd, "on_path", lambda name: resolved if name == "west" else None)
 
-    def _fake_probe(argv, timeout=doctor_cmd.PROBE_TIMEOUT_S):
+    def _fake_probe(argv, timeout=doctor_cmd.PROBE_TIMEOUT_S, executable=None):
         if argv == [resolved, "--version"]:
             return "West version: v1.5.0\n"
         if argv == ["west", "--version"]:
             return "West version: v9.99.0\n"  # the rogue binary's answer
+        # tan-cli#797: `probe` now takes an `executable=` keyword (every
+        # caller inside `_collect`, including `_probe_host_python`, passes
+        # one) -- the fake's signature has to accept it or `_collect` raises
+        # a `TypeError` reaching this call site, unrelated to what this test
+        # actually pins (the `west` call site's own resolution).
         return None
 
     monkeypatch.setattr(doctor_cmd, "probe", _fake_probe)
@@ -1225,9 +1555,12 @@ def test_readme_quickstart_names_the_current_zephyr_sdk_install_command():
 # sevenZip (tan-cli#286 second pass, finding 3) -- the `zephyrSdk` Fail names
 # `west sdk install` as the whole remedy, but on native Windows that command
 # cannot complete without 7-Zip on PATH (`tan.core.bootstrap`'s
-# `manual_install_windows` prose). Mirrors `crate::build_readiness`'s
-# `sevenZip` sibling, gated exactly `probe.is_windows && !probe.zephyr_sdk`
-# (tan-cli#204).
+# `manual_install_windows` prose). Ported from `crate::build_readiness`'s
+# `sevenZip` sibling, which gated exactly `probe.is_windows &&
+# !probe.zephyr_sdk` (tan-cli#204) -- tan-cli#736 dropped the
+# `!probe.zephyr_sdk` half, so the live gate is `os.name == "nt"` and nothing
+# else. The two tests below assert both halves of that: present on Windows,
+# and STILL present once the SDK is detected.
 # --------------------------------------------------------------------------
 
 
@@ -1271,11 +1604,16 @@ class _FixedOsName:
         return self._name
 
 
-def test_collect_adds_seven_zip_only_on_windows_while_the_sdk_is_absent(tmp_path, monkeypatch):
+def test_collect_adds_seven_zip_on_windows(tmp_path, monkeypatch):
     """Finding 3 (tan-cli#286 third pass): the scan roots are stubbed outright
     -- `/opt` is one of `_zephyr_sdk_scan_roots`'s roots unconditionally, so a
-    developer host with a real `/opt/zephyr-sdk-*` would otherwise flip this
-    to `zephyrSdk` detected and drop `sevenZip` from the check list."""
+    developer host with a real `/opt/zephyr-sdk-*` would otherwise decide
+    `zephyrSdk` for reasons unrelated to what this case sets up.
+
+    The stubbing is no longer what keeps `sevenZip` in the list -- tan-cli#736
+    made that gate `os.name == "nt"` alone, and the sibling case below asserts
+    the check survives a DETECTED SDK. Kept anyway so this case tests the
+    absent-SDK arm deterministically on any developer machine."""
     monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("nt"))
     monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
     monkeypatch.setattr(
@@ -2083,6 +2421,18 @@ def test_zephyr_sdk_host_check_names_wsl2_for_windows_on_arm_and_a_different_rem
 
 
 def test_macos_rosetta_translated_reads_the_sysctl_probe(monkeypatch):
+    """`_macos_rosetta_translated` now resolves `sysctl` through
+    `resolve_tool` before probing it (tan-cli#797) -- pin THAT resolution too,
+    not just `probe`, so this test asserts the probe's verdict rather than
+    whatever `sysctl` inventory the CI host running it happens to have. A
+    `windows-latest` runner has no `sysctl` on PATH at all: without this pin,
+    `resolve_tool` returns `resolved=None` there and the function short-
+    circuits to `False` regardless of what `probe` says, which is exactly the
+    host-dependent failure mode this pin exists to close off."""
+    monkeypatch.setattr(
+        doctor_cmd, "resolve_tool", lambda *a, **k: ToolResolution("sysctl", "stub")
+    )
+
     monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "1\n")
     assert doctor_cmd._macos_rosetta_translated() is True
 
@@ -2098,9 +2448,16 @@ def test_host_os_arch_tags_corrects_x86_64_to_aarch64_under_rosetta(monkeypatch)
     reports `macos-x86_64` from `platform.machine()` alone -- a FALSE hard
     refusal (`zephyrSdkAvailableForHost` fail, exit 4, "build on a Linux
     host") on a host the pinned SDK fully serves as `macos-aarch64`.
-    Rosetta's own sysctl corrects it."""
+    Rosetta's own sysctl corrects it.
+
+    `resolve_tool` is pinned resolved too (tan-cli#797) so this exercises the
+    probe's verdict, not the running host's `sysctl` inventory -- see
+    `test_macos_rosetta_translated_reads_the_sysctl_probe`."""
     monkeypatch.setattr(doctor_cmd.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(doctor_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        doctor_cmd, "resolve_tool", lambda *a, **k: ToolResolution("sysctl", "stub")
+    )
     monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "1\n")
     assert doctor_cmd._host_os_arch_tags() == ("macos", "aarch64")
 
@@ -2108,9 +2465,15 @@ def test_host_os_arch_tags_corrects_x86_64_to_aarch64_under_rosetta(monkeypatch)
 def test_host_os_arch_tags_leaves_a_native_intel_mac_alone(monkeypatch):
     """The other state of the same probe: a REAL Intel Mac (not translated)
     must still report `macos-x86_64` -- the unserved host this check is
-    supposed to fail."""
+    supposed to fail.
+
+    `resolve_tool` is pinned resolved too (tan-cli#797) -- see
+    `test_macos_rosetta_translated_reads_the_sysctl_probe`."""
     monkeypatch.setattr(doctor_cmd.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(doctor_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        doctor_cmd, "resolve_tool", lambda *a, **k: ToolResolution("sysctl", "stub")
+    )
     monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "0\n")
     assert doctor_cmd._host_os_arch_tags() == ("macos", "x86_64")
 
@@ -3076,8 +3439,9 @@ def test_sdk_provenance_check_does_not_attribute_an_enclosing_repos_commit(tmp_p
     assert check.detail == "alp-sdk 0.42.0", check.detail
     # `_is_own_git_checkout` unit-level, directly: proves the guard itself,
     # not just its downstream effect on the assembled detail string.
-    assert doctor_cmd._is_own_git_checkout(str(vendored_sdk)) is False
-    assert doctor_cmd._is_own_git_checkout(str(tmp_path)) is True
+    git_exe = doctor_cmd._resolve_git_executable()
+    assert doctor_cmd._is_own_git_checkout(str(vendored_sdk), git_exe) is False
+    assert doctor_cmd._is_own_git_checkout(str(tmp_path), git_exe) is True
 
 
 def test_sdk_provenance_check_reads_the_sdk_version_file_when_present(tmp_path):
@@ -3365,8 +3729,26 @@ def test_doctor_fix_explains_a_missing_installer_in_both_text_and_json(monkeypat
     verdict reaching only one of them is the same bug wearing a different
     hat. `can_prompt` is stubbed for the reason the section header above
     gives: `CliRunner`'s pipes are never a tty."""
-    missing = [{"tool": "ninja", "command": "brew install ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # DIVERGENT on purpose (tan-cli#760 review round 3, MAJOR): `missing`
+    # (the envelope) carries a NULLED command and `fix_missing` (`--fix`'s
+    # own input) carries the real one -- the one shape that can actually
+    # catch `doctor()` reading the wrong field. A stub where the two agree
+    # cannot fail if `--fix` is silently re-wired from `fix_missing` back to
+    # `missing`: mutation-tested by flipping `c.fix_missing` -> `c.missing`
+    # at the `run_fix(...)` call site and confirming this exact assertion
+    # (`doctor.fix-installer-not-found`, `brew` in `json_detail`) goes red,
+    # since `run_fix(missing)` would see `command: None` for `ninja` and
+    # silently skip it instead of reporting the installer as unresolved.
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=[{"tool": "ninja", "command": None}],
+            fix_missing=[{"tool": "ninja", "command": "brew install ninja"}],
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
     monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
@@ -3500,7 +3882,21 @@ def test_doctor_fix_invokes_run_fix_and_folds_its_checks_into_the_report_when_co
     replaced by `pass` (the feature unwired entirely): `run_fix` would never
     be called and its Check would never reach `data.checks`/`issues`."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
 
@@ -3530,7 +3926,21 @@ def test_doctor_fix_guard_honours_ci_even_in_text_mode(monkeypatch, tmp_path):
     that condition, and text mode makes `not json_mode` true) and against
     `if fix or True` (guard deleted, always runs)."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
 
     calls = []
@@ -3550,7 +3960,21 @@ def test_doctor_fix_guard_honours_no_tty_the_same_way_ci_does(monkeypatch, tmp_p
     output but never passed `--ci`) must refuse `--fix` the same way `--ci`
     does."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
 
     calls = []
@@ -3670,7 +4094,21 @@ def test_doctor_fix_with_stderr_none_does_not_crash_before_reaching_fix_suppress
 
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     real_stderr_box: list[object] = []
 
     def _collect_stub(*a, **k):  # noqa: ARG001
@@ -3730,7 +4168,21 @@ def test_doctor_fix_with_stdin_none_does_not_crash_before_reaching_fix_suppresse
     lands exactly where a real detached-stdio host already has
     `sys.stdin is None` by the time `--fix`'s consent gate is evaluated."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
 
     def _collect_stub(*a, **k):  # noqa: ARG001
         doctor_cmd.sys.stdin = None
@@ -3754,7 +4206,21 @@ def test_doctor_fix_format_json_is_no_longer_a_silent_no_op(monkeypatch, tmp_pat
     Now it must carry a `doctor.fix-suppressed` issue naming why, even though
     `run_fix` itself is never called."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     calls = []
     monkeypatch.setattr(doctor_cmd, "run_fix", lambda m: calls.append(m) or [])
@@ -3792,7 +4258,21 @@ def test_doctor_fix_suppressed_notice_reaches_text_mode_not_just_json(monkeypatc
     branch, so an issues-only entry like `fix_suppressed_issue` never
     reached stderr at all outside `--format json`."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.chdir(tmp_path)
 
@@ -4034,7 +4514,21 @@ def test_doctor_fix_passes_a_real_on_check_to_run_fix_in_text_mode_and_none_unde
     must NOT print `--fix` checks under `--format json` -- the same `stream`
     gate `_collect` is given, applied consistently to the second caller."""
     missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
-    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing, scope="host")]
+    # `fix_missing=missing`: tan-cli#760 review MAJOR 1 split `--fix`'s own
+    # input (`fix_missing`) from the envelope's guarded `missing` -- this
+    # stub simulates the ordinary CONFIRMED case, where the two are equal,
+    # exactly as `prerequisites_check` leaves them when `available` confirms
+    # the command (or is not given at all).
+    stub_checks = [
+        doctor_cmd.Check(
+            "hostPrerequisites",
+            "fail",
+            "ninja missing",
+            missing=missing,
+            fix_missing=missing,
+            scope="host",
+        )
+    ]
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
     monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
 

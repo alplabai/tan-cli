@@ -91,7 +91,8 @@ import typer
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import SDK_MARKER, global_default_foreign_project_issue, project_pin_issue
+from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
+from tan.core.shapes import SDK_MARKER
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -1091,20 +1092,29 @@ def clean(
             text=["clean: internal failure"],
         )
 
+    # Built ONCE, for both formats: `Envelope.__init__` appends the tan-cli#407
+    # `sdk.discovery-divergent` warning at the shared seam (`_with_sdk_
+    # divergence`), and `outcome.text` was assembled strictly before any
+    # `Envelope` existed -- so a seam-appended issue reached `--format json`
+    # and was silent on the default text channel (tan-cli#799). Diffed
+    # against `outcome.issues` (by value: `Issue` is a frozen dataclass) so
+    # only what the seam ADDED is rendered.
+    envelope = Envelope(
+        "clean",
+        outcome.project,
+        outcome.data,
+        outcome.issues,
+        outcome.exit_code,
+        sdk=outcome.sdk,
+    )
     if json_mode:
-        emit(
-            Envelope(
-                "clean",
-                outcome.project,
-                outcome.data,
-                outcome.issues,
-                outcome.exit_code,
-                sdk=outcome.sdk,
-            )
-        )
+        emit(envelope)
     else:
+        seam_extra = [issue for issue in envelope.issues if issue not in outcome.issues]
         # stdout is the envelope channel and carries nothing else, in either
         # mode; stderr carries no contract of its own.
+        for issue in seam_extra:
+            print(f"{issue.severity}: {issue.message}", file=sys.stderr)
         for line in outcome.text:
             print(line, file=sys.stderr)
     raise typer.Exit(int(outcome.exit_code))

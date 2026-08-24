@@ -31,6 +31,7 @@ from tan.core.build_plan import parse_build_plan
 from tan.commands.build.configure_inputs import (
     discover_configure_inputs,
     read_configure_inputs_stamp,
+    resolve_zephyr_discovery_dir,
     write_configure_inputs_stamp,
 )
 import tan.commands.build.execute as execute_module
@@ -98,6 +99,65 @@ def test_unstamped_reads_as_no_signal(tmp_path):
     assert read_configure_inputs_stamp(tmp_path) is None
 
 
+# --------------------------------------------- resolve_zephyr_discovery_dir
+
+
+def test_self_contained_app_dir_with_its_own_cmakelists_is_returned_as_is(tmp_path):
+    """A self-contained `app:` (the non-split layout) carries its own
+    `CMakeLists.txt` -- no parent fallback needed."""
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "CMakeLists.txt").write_text("", encoding="utf-8")
+
+    assert resolve_zephyr_discovery_dir(str(app_dir), tmp_path) == app_dir
+
+
+def test_split_layout_app_dir_falls_back_to_the_parent_with_cmakelists(tmp_path):
+    """tan-cli#798: the scaffolded `app: ./src` layout -- `app_dir` itself
+    has no `CMakeLists.txt`, its parent does."""
+    proj = tmp_path / "proj"
+    app_dir = proj / "src"
+    app_dir.mkdir(parents=True)
+    (proj / "CMakeLists.txt").write_text("", encoding="utf-8")
+
+    assert resolve_zephyr_discovery_dir("src", proj) == proj
+
+
+def test_relative_app_dir_anchors_on_build_root_not_cwd(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    app_dir = proj / "src"
+    app_dir.mkdir(parents=True)
+    (proj / "CMakeLists.txt").write_text("", encoding="utf-8")
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert resolve_zephyr_discovery_dir("src", proj) == proj
+
+
+def test_absolute_app_dir_is_never_re_anchored(tmp_path):
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "CMakeLists.txt").write_text("", encoding="utf-8")
+
+    unrelated_root = tmp_path / "unrelated"
+    unrelated_root.mkdir()
+
+    assert resolve_zephyr_discovery_dir(str(app_dir), unrelated_root) == app_dir
+
+
+def test_neither_app_dir_nor_its_parent_carries_a_cmakelists_returns_app_dir(tmp_path):
+    """No CMakeLists.txt anywhere -- returned as-is, same as the pre-#798
+    behaviour; the caller's own existence/emptiness handling covers this,
+    not this function raising or guessing further up the tree."""
+    proj = tmp_path / "proj"
+    app_dir = proj / "src"
+    app_dir.mkdir(parents=True)
+
+    assert resolve_zephyr_discovery_dir("src", proj) == app_dir
+
+
 # ---------------------------------------- _maybe_reset_stale_configure_cache
 
 
@@ -109,7 +169,7 @@ def test_first_configure_lays_down_a_baseline_without_resetting(tmp_path):
     (app_dir / "prj.conf").write_text("", encoding="utf-8")
     cwd = tmp_path / "build" / "c1"
     args, issues = execute_module._maybe_reset_stale_configure_cache(
-        "c1", cwd, str(app_dir), "zephyr", lambda s: None
+        "c1", cwd, str(app_dir), "zephyr", tmp_path, lambda s: None
     )
     assert args == []
     assert issues == []
@@ -128,7 +188,7 @@ def test_new_overlay_triggers_the_narrow_cache_reset(tmp_path):
     (app_dir / "app.overlay").write_text("/{ };\n", encoding="utf-8")
     lines = []
     args, issues = execute_module._maybe_reset_stale_configure_cache(
-        "c1", cwd, str(app_dir), "zephyr", lines.append
+        "c1", cwd, str(app_dir), "zephyr", tmp_path, lines.append
     )
     # Exactly the narrow pair -- see the function's own docstring for why
     # EXTRA_DTC_OVERLAY_FILE/EXTRA_CONF_FILE must NOT be in this list.
@@ -151,7 +211,7 @@ def test_removed_overlay_also_triggers_the_reset(tmp_path):
 
     (app_dir / "app.overlay").unlink()
     args, issues = execute_module._maybe_reset_stale_configure_cache(
-        "c1", cwd, str(app_dir), "zephyr", lambda s: None
+        "c1", cwd, str(app_dir), "zephyr", tmp_path, lambda s: None
     )
     assert args == ["-UDTC_OVERLAY_FILE", "-UCONF_FILE"]
     assert "removed" in issues[0].message
@@ -166,7 +226,7 @@ def test_unchanged_set_resets_nothing(tmp_path):
     write_configure_inputs_stamp(cwd, discover_configure_inputs(app_dir))
 
     args, issues = execute_module._maybe_reset_stale_configure_cache(
-        "c1", cwd, str(app_dir), "zephyr", lambda s: None
+        "c1", cwd, str(app_dir), "zephyr", tmp_path, lambda s: None
     )
     assert args == []
     assert issues == []
@@ -186,7 +246,7 @@ def test_edited_content_alone_does_not_trigger_the_reset(tmp_path):
 
     (app_dir / "app.overlay").write_text("/{ /delete-node/ &foo; };\n", encoding="utf-8")
     args, issues = execute_module._maybe_reset_stale_configure_cache(
-        "c1", cwd, str(app_dir), "zephyr", lambda s: None
+        "c1", cwd, str(app_dir), "zephyr", tmp_path, lambda s: None
     )
     assert args == []
     assert issues == []
@@ -202,7 +262,7 @@ def test_non_zephyr_backend_is_never_reset(tmp_path):
     write_configure_inputs_stamp(cwd, frozenset())
     (app_dir / "app.overlay").write_text("", encoding="utf-8")
     args, issues = execute_module._maybe_reset_stale_configure_cache(
-        "c1", cwd, str(app_dir), "baremetal", lambda s: None
+        "c1", cwd, str(app_dir), "baremetal", tmp_path, lambda s: None
     )
     assert args == []
     assert issues == []
@@ -212,7 +272,7 @@ def test_no_app_dir_is_never_reset(tmp_path):
     cwd = tmp_path / "build" / "c1"
     _configure(cwd)
     args, issues = execute_module._maybe_reset_stale_configure_cache(
-        "c1", cwd, None, "zephyr", lambda s: None
+        "c1", cwd, None, "zephyr", tmp_path, lambda s: None
     )
     assert args == []
     assert issues == []
@@ -230,10 +290,87 @@ def test_never_stamped_but_already_configured_self_heals_with_one_reset(tmp_path
     _configure(cwd)  # no stamp written
 
     args, issues = execute_module._maybe_reset_stale_configure_cache(
-        "c1", cwd, str(app_dir), "zephyr", lambda s: None
+        "c1", cwd, str(app_dir), "zephyr", tmp_path, lambda s: None
     )
     assert args == ["-UDTC_OVERLAY_FILE", "-UCONF_FILE"]
     assert len(issues) == 1
+
+
+def test_split_app_src_layout_resets_after_parent_level_overlay_appears(tmp_path):
+    """tan-cli#798: `appDir` is the CONFIGURED path (`cores.<id>.app`), not
+    the directory Zephyr actually auto-discovers from. For the scaffolded
+    `app: ./src` layout (96 of 105 alp-sdk example core entries, and every
+    `tan init` template but `minimal-app`), `CMakeLists.txt` lives at the
+    PROJECT ROOT, one level above `app_dir` -- Zephyr auto-discovers
+    `app.overlay`/`boards/*.conf` there, never inside `src/`. Before the fix
+    this globbed `app_dir` (`<proj>/src`) directly, found nothing on either
+    side of the overlay appearing, and the reset never fired -- reproducing
+    the exact defect #655 was filed to close, for the layout `tan` ships by
+    default."""
+    proj = tmp_path / "proj"
+    app_dir = proj / "src"
+    app_dir.mkdir(parents=True)
+    (proj / "CMakeLists.txt").write_text("", encoding="utf-8")
+    (proj / "prj.conf").write_text("", encoding="utf-8")
+    (app_dir / "main.c").write_text("", encoding="utf-8")
+
+    cwd = tmp_path / "build" / "c1"
+    _configure(cwd)
+    # Baseline stamp: nothing discoverable yet at the parent besides prj.conf.
+    write_configure_inputs_stamp(cwd, discover_configure_inputs(proj))
+
+    # Customer adds a parent-level overlay + board Kconfig fragment -- the
+    # split layout's real auto-discovery locations, one directory above
+    # `app_dir`.
+    (proj / "app.overlay").write_text("/{ };\n", encoding="utf-8")
+    (proj / "boards").mkdir()
+    (proj / "boards" / "extra.conf").write_text("", encoding="utf-8")
+
+    args, issues = execute_module._maybe_reset_stale_configure_cache(
+        "c1", cwd, str(app_dir), "zephyr", proj, lambda s: None
+    )
+    assert args == ["-UDTC_OVERLAY_FILE", "-UCONF_FILE"]
+    assert len(issues) == 1
+    assert issues[0].code == "build.configure-cache-reset"
+    assert "app.overlay" in issues[0].message
+    assert "boards/extra.conf" in issues[0].message
+
+
+def test_relative_app_dir_anchors_on_build_root_not_process_cwd(tmp_path, monkeypatch):
+    """The sibling `appDir` probes (`build_cmd._missing_app_dirs`,
+    `build_cmd._substituted_app_dirs`) both anchor a relative `appDir` on
+    `build_root`; this guard must do the same rather than resolving against
+    the `tan` process's own CWD (tan-cli#798). Proven by chdir-ing somewhere
+    that shares nothing with `build_root` and confirming the split-layout
+    fallback still finds the parent-level overlay."""
+    proj = tmp_path / "proj"
+    app_dir = proj / "src"
+    app_dir.mkdir(parents=True)
+    (proj / "CMakeLists.txt").write_text("", encoding="utf-8")
+    (proj / "prj.conf").write_text("", encoding="utf-8")
+
+    cwd = tmp_path / "build" / "c1"
+    _configure(cwd)
+    write_configure_inputs_stamp(cwd, discover_configure_inputs(proj))
+    (proj / "app.overlay").write_text("/{ };\n", encoding="utf-8")
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    args, issues = execute_module._maybe_reset_stale_configure_cache(
+        "c1", cwd, "src", "zephyr", proj, lambda s: None
+    )
+    assert args == ["-UDTC_OVERLAY_FILE", "-UCONF_FILE"]
+    assert len(issues) == 1
+    # tan-cli#798 review, MAJOR 2: without asserting the reset's CAUSE, this
+    # test cannot distinguish "found app.overlay at the anchored parent"
+    # from "resolved to a nonexistent dir and found nothing at all" -- an
+    # un-anchored `elsewhere/src` also differs from the `{"prj.conf"}`
+    # baseline (it globs to `frozenset()`), so the reset fires either way and
+    # a reverted `build_root` anchoring still passes this assertion alone.
+    assert "added" in issues[0].message
+    assert "app.overlay" in issues[0].message
 
 
 # --------------------------------------------------------- end-to-end (spawn)

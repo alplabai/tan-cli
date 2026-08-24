@@ -63,16 +63,6 @@ ALLOWED: dict[str, str] = {
         "tree by SKU FAMILY, which is the vendor branching I-26 forbids. Retires when "
         "the template catalogue declares its family mapping in metadata."
     ),
-    "renode_sim.py": (
-        "DEBT: WIRED_CONSOLE_SKUS hardcodes E1M-AEN801 -- the SKUs whose retired-Python "
-        "`_SIM_BOARD_PROFILES` console was a wired hardware UART rather than the "
-        "`ram_console_buf` RAM ring. Landed with the tan-cli#77 --sim-mode port. It is a "
-        "real vendor fact in tan and the gate is right to flag it; it is allowlisted "
-        "rather than dropped because deleting it would make the silent-UART warning "
-        "claim the firmware printed nothing, when the truth is that the wired-console "
-        "path is deferred. Retires when the sim descriptor's console kind is read from "
-        "the SoM preset instead of a SKU list -- the same fix `scaffold.py` below waits on."
-    ),
     "models.py": (
         "DEBT: a literal 7-bit I2C address -- the clearest breach in the tree. Rode "
         "along with the planner relocation; belongs in metadata."

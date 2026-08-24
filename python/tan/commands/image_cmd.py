@@ -60,6 +60,7 @@ from typing import Any
 
 import typer
 
+from tan.core.shapes import is_dir as _is_dir, is_file as _is_file
 from tan.commands.build_output import (
     ManifestInvalid,
     ManifestUnavailable,
@@ -223,10 +224,15 @@ def _unresolved_sdk_clause(sdk_root_arg: str | None) -> str:
     bundle -- sending them to look for a missing flag instead of at the typo
     in the path they gave.
 
-    Entirely inside the `(tried ...)` clause `tests/parity/
-    test_image_size_oracle.py` already strips from BOTH modes as a declared
+    Entirely inside the `(tried ...)` clause that `tests/parity/
+    test_image_size_oracle.py` stripped from BOTH modes as a declared
     alp-sdk#330 divergence (the frozen oracle has no `sdk_root` fallback and
-    so no such clause at all), so the wording is free to be correct here.
+    so no such clause at all). That module went with the oracle axis in
+    tan-cli#269, so no parity CASE diffs it any more -- but BOTH branches of
+    the string below are asserted verbatim by
+    `tests/commands/test_image_command.py`'s
+    `test_a_rejected_sdk_root_flag_is_named_not_reported_as_absent` and
+    `test_an_absent_sdk_root_flag_still_says_so`, so a reword lands there too.
     """
     if sdk_root_arg is None:
         return "sdk root not resolved (no --sdk-root and no discoverable checkout)"
@@ -318,23 +324,6 @@ def _copy_file(src: str, dst: str) -> None:
             if not chunk:
                 break
             writer.write(chunk)
-
-
-def _is_dir(path: str) -> bool:
-    try:
-        return os.path.isdir(path)
-    except (OSError, ValueError):
-        return False
-
-
-def _is_file(path: str) -> bool:
-    try:
-        return os.path.isfile(path)
-    except (OSError, ValueError):
-        # A path the OS refuses to stat at all (a too-long name, an embedded NUL
-        # from a hand-edited manifest) is "not a file", never an exception that
-        # escapes the envelope.
-        return False
 
 
 def _assemble_bundle(
@@ -674,19 +663,29 @@ def image(
             disclosure.sdk,
         )
 
+    # Built ONCE, for both formats: `Envelope.__init__` appends the tan-cli#407
+    # `sdk.discovery-divergent` warning at the shared seam (`_with_sdk_
+    # divergence`), and `outcome.text` was assembled strictly before any
+    # `Envelope` existed -- so a seam-appended issue reached `--format json`
+    # and was silent on the default text channel (tan-cli#799). Diffed
+    # against `outcome.issues` (by value: `Issue` is a frozen dataclass) so
+    # only what the seam ADDED is rendered, never a duplicate of a warning
+    # `outcome.text` already carries via `_sdk_warning_lines` above.
+    envelope = Envelope(
+        "image",
+        outcome.project,
+        outcome.data,
+        outcome.issues,
+        outcome.exit_code,
+        sdk=outcome.sdk,
+    )
     if json_mode:
-        emit(
-            Envelope(
-                "image",
-                outcome.project,
-                outcome.data,
-                outcome.issues,
-                outcome.exit_code,
-                sdk=outcome.sdk,
-            )
-        )
+        emit(envelope)
     else:
+        seam_extra = [issue for issue in envelope.issues if issue not in outcome.issues]
         stream = typer.get_text_stream("stderr")
+        for issue in seam_extra:
+            stream.write(f"{issue.severity}: {issue.message}\n")
         for line in outcome.text:
             stream.write(f"{line}\n")
     raise typer.Exit(int(outcome.exit_code))

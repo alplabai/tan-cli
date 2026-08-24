@@ -20,7 +20,7 @@ on.
 
 ## The measurement this gate was built from
 
-Instrumenting tan's three resolution seams (`doctor_cmd.on_path`,
+Instrumenting what were then tan's three resolution seams (`doctor_cmd.on_path`,
 `tool_lookup.resolve_tool`, `shutil.which`) across a full suite run on the
 bench host's own PATH, and again across a run whose PATH held everything
 EXCEPT the probe tooling, found **34 tests taking a different branch** --

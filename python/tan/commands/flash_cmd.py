@@ -96,8 +96,16 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 
 import typer
 
+from tan.core.shapes import is_file as _is_file
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.sdk_cmd import sdk_resolution_issues
+from tan.core.dp_id import (
+    _CONNECT_FAILED_TARGET_RE,
+    _connect_failed_outright,
+    _dp_id_matches,
+    _dp_id_reported,
+    _dp_id_value,
+)
 from tan.core.flash_plan import (
     DPIDR_GUARD_COVERAGE,
     FAIL,
@@ -3149,6 +3157,13 @@ def _flow_d_preflight(
     if prepared is None:
         return None
     script, expected = prepared
+    # tan-cli#795: `expect_dpidr` must be a full 32-bit SW-DP ID (8 hex
+    # digits) before it is trusted to disarm the write below. That width rule
+    # is enforced by `validate_flow_d_preflight_args` itself (`flash_plan.py`,
+    # beside its `validate_address` call), which `flow_d_preflight_script`
+    # already called just above to build `prepared` -- so a truncated
+    # `expected` never reaches this point at all; it raised `FlashPlanError`,
+    # caught above, before `prepared` was ever assigned.
     # tan-cli#520 REVIEW, minor 3: Flow D's refusal text named its write
     # target explicitly ("write MRAM") before this function served a second
     # backend; a bare generalisation to backend-neutral "write" would have
@@ -3191,7 +3206,7 @@ def _flow_d_preflight(
     outcome = _spawn_jlink([spawned[0], "-NoGui", "1", "-CommanderScript"], script, True,
                            _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0])
     banner = f"{outcome.stdout}\n{outcome.stderr}"
-    if _hex_in(expected, banner):
+    if _dp_id_matches(expected, banner):
         return None
     if not banner.strip():
         return (
@@ -3265,7 +3280,30 @@ def _flow_d_preflight(
     # An unrecognised banner, or a genuine TARGET-level connect refusal (no DP
     # ID was even read to compare against the cloned-serial case above) --
     # `jlink_serial` pinning a probe IS the actual fix here when it is unset
-    # on a multi-probe host (tan-cli#353), so the original sentence survives.
+    # on a multi-probe host (tan-cli#353), so the original sentence survives
+    # for BOTH -- conservative by design (tan-cli#312 review): a banner
+    # neither `_DP_ID_RE` nor `_CONNECT_FAILED_TARGET_RE`/`_CONNECT_FAILED_RE`
+    # recognises is not confidently "wiring is fine" either, so this must not
+    # guess a softer diagnosis than the genuine target-refusal case gets.
+    #
+    # tan-cli#795 review, minor: the two ARE distinguishable, though -- a real
+    # `Cannot connect to target.`/`Cannot connect to J-Link.` (this preflight
+    # DID read a SEGGER refusal, just not a DP-ID-shaped one) is a confirmed
+    # target-level problem, while a banner matching neither RE at all is one
+    # this preflight could not parse in the first place. Naming that
+    # difference (remediation UNCHANGED either way -- still refuse, still
+    # point at jlink_serial/wiring) avoids reading "Check the probe
+    # selection" as a diagnosis when it is really "this preflight doesn't
+    # know what it read."
+    if _CONNECT_FAILED_TARGET_RE.search(banner) is None:
+        return (
+            f"{method}: expected SW-DP IDR {expected} was not reported on connect, "
+            "and this preflight could not recognise the connect banner at all "
+            f"-- refusing to {verb} to an unidentified board. Check the probe "
+            "selection (flash_args.jlink_serial) and the wiring. If jlink_serial is "
+            "unset the script selects NO probe, which on a host carrying more than "
+            "one J-Link cannot connect at all (tan-cli#353)."
+        )
     return (
         f"{method}: expected SW-DP IDR {expected} was not reported on connect "
         f"-- refusing to {verb} to an unidentified board. Check the probe "
@@ -3273,85 +3311,6 @@ def _flow_d_preflight(
         "unset the script selects NO probe, which on a host carrying more than "
         "one J-Link cannot connect at all (tan-cli#353)."
     )
-
-
-def _hex_in(expected: str, haystack: str) -> bool:
-    """Whether `expected` appears in `haystack` as a hex value, ignoring case and
-    an optional `0x` on EITHER side -- probes print the ID both ways."""
-    needle = expected.lower()
-    for prefix in ("0x", "0X"):
-        if expected.startswith(prefix):
-            needle = expected[len(prefix) :].lower()
-            break
-    return needle in haystack.lower().replace("0x", "")
-
-
-#: SEGGER's own wording for a successful SWD connect that read AN id, whatever
-#: it turned out to be -- "Found SW-DP with ID 0x........" / "DPIDR: 0x........".
-#: Matched loosely on purpose: what this distinguishes is "a real board
-#: answered with a different identity" from "nothing answered", not the exact
-#: firmware/DLL version's phrasing. The hex value is its own capture group
-#: (tan-cli#512) so `_dp_id_value` can report what was ACTUALLY read, not only
-#: whether something was -- `_dp_id_reported` still just asks whether this
-#: matches at all.
-_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*(0x[0-9A-Fa-f]+)", re.IGNORECASE)
-
-#: SEGGER's own wording for the PROBE itself refusing the connection outright
-#: -- measured verbatim on the rc3 bench run: "Connecting to J-Link ...FAILED:
-#: Cannot connect to the probe/programmer." (tan-cli#312). Deliberately NOT a
-#: bare `FAILED`/`Cannot connect` match (that was the tan-cli#312 review
-#: finding): JLinkExe prints "FAILED" in many contexts, and "Cannot connect"
-#: alone also fires on a TARGET-level refusal -- see `_CONNECT_FAILED_TARGET_RE`
-#: below -- which is a real wiring/probe-selection problem, not a re-enumerating
-#: probe.
-_CONNECT_FAILED_RE = re.compile(r"Cannot connect to the probe/programmer", re.IGNORECASE)
-
-#: SEGGER's own wording for a TARGET-level connect refusal -- "Cannot connect
-#: to target." (unplugged SWD ribbon, unpowered board) or "Cannot connect to
-#: J-Link." (a probe that IS reachable via USB but refuses the requested
-#: `jlink_serial`). Both are genuine wiring/probe-selection problems, so their
-#: presence forces `_connect_failed_outright` to False even alongside the
-#: probe-level phrase above -- asserting "wiring is fine" here would be the
-#: false negative tan-cli#312's review flagged (measured against a real
-#: unplugged-ribbon and a real unpowered-target banner).
-_CONNECT_FAILED_TARGET_RE = re.compile(r"Cannot connect to (?:target|J-Link)\b", re.IGNORECASE)
-
-
-def _dp_id_reported(banner: str) -> bool:
-    """Whether the banner names ANY SW-DP ID -- not whether it matches
-    `expected` (the caller already ruled that out via `_hex_in`), only whether
-    a connect got far enough to read one at all."""
-    return _DP_ID_RE.search(banner) is not None
-
-
-def _dp_id_value(banner: str) -> str | None:
-    """The actual SW-DP ID text the banner reported, verbatim (whatever hex
-    casing/`0x` spelling SEGGER printed), or `None` if `_DP_ID_RE` does not
-    match at all. tan-cli#512: a caller that already knows `_dp_id_reported(
-    banner)` is `True` gets a non-`None` value here by construction -- both
-    read the same regex against the same banner."""
-    match = _DP_ID_RE.search(banner)
-    return match.group(1) if match else None
-
-
-def _connect_failed_outright(banner: str) -> bool:
-    """Whether the banner carries SEGGER's own wording for the PROBE itself
-    refusing the connection (still re-enumerating, no board reachable at all),
-    as opposed to a TARGET-level refusal -- a real wiring/probe-selection
-    problem that must keep the original remediation, not the re-enumeration
-    one."""
-    if _CONNECT_FAILED_TARGET_RE.search(banner) is not None:
-        return False
-    return _CONNECT_FAILED_RE.search(banner) is not None
-
-
-def _is_file(path: str) -> bool:
-    """`Path::is_file`, incapable of raising -- it is called on manifest-supplied
-    strings, which may hold a NUL byte or overlong component."""
-    try:
-        return os.path.isfile(path)
-    except (OSError, ValueError):
-        return False
 
 
 def _yocto_wic_block_device_refusal(
@@ -3726,7 +3685,19 @@ def _run(
         # A `--core`/`--helper` filter matching nothing used to warn only in text
         # mode, so `--format json` reported `ok:true` with empty
         # `entries`/`issues` for a flash that never touched a device.
-        issues.append(Issue("flash.nothing-matched", "warning", message))
+        #
+        # tan-cli#807: that was still true with NO filter at all -- an empty
+        # manifest -- and that case must stay `warning`/exit 0 (`test_
+        # manifest_holds_non_utf8_bytes` pins it). But when `--core`/`--helper`
+        # WAS supplied and matched nothing, this is the same silent-success
+        # shape `refused_skipped` fixes just below: a mistyped filter name
+        # reports a completed flash over an untouched board, with `$?`/`ok`
+        # giving no signal at all. Scoped to the filtered case only.
+        if core is not None or helper is not None:
+            failed += 1
+            issues.append(Issue("flash.nothing-matched", "error", message))
+        else:
+            issues.append(Issue("flash.nothing-matched", "warning", message))
     elif not flashed_anything and not plan.refused and plan.refused_skipped:
         # `refused_skipped` alone is fine ALONGSIDE at least one real flash (see
         # `TargetPlan.refused_skipped`): the skip was already a decision made
@@ -3865,9 +3836,19 @@ def flash(
     confirm: bool = typer.Option(
         False,
         "--confirm",
-        help="Arm the confirm gate and actually write the device. Without it (and "
-        "without ALP_FLASH_FORCE=1 or flash_args.confirm: true) every slice is "
-        "previewed, nothing is written, and the run exits non-zero (tan-cli#719).",
+        # tan-cli#796: this gate covers only yocto_wic, xspi_flashwriter, and
+        # Flow D MRAM (alif_mram_jlink) -- zephyr_west_flash,
+        # baremetal_cmake_flash, and swd_probe write the attached device
+        # UNCONDITIONALLY, with or without --confirm. An earlier, unqualified
+        # "every slice is previewed" claim here read as covering all six
+        # backends; --dry-run is the flag that actually previews all of them.
+        help="Arm the confirm gate on the backends that have one -- yocto_wic, "
+        "xspi_flashwriter, and Flow D MRAM (alif_mram_jlink). Without it (and "
+        "without ALP_FLASH_FORCE=1 or flash_args.confirm: true) those three preview "
+        "only and the run exits non-zero (tan-cli#719). zephyr_west_flash, "
+        "baremetal_cmake_flash, and swd_probe have no confirm gate and write the "
+        "attached device regardless of this flag. Use --dry-run for a preview that "
+        "works on every backend.",
     ),
     skip_missing_tools: bool = typer.Option(
         False,

@@ -81,15 +81,24 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover
+    # Type-checker only. `urllib.request` is deferred into the two functions
+    # that use it (tan-cli#810), so this name exists for annotations and
+    # costs nothing at runtime -- `TYPE_CHECKING` is False in a real run.
+    from urllib.request import OpenerDirector
 
 import typer
 
 from tan.core.global_flags import accept_global_flags
+# Re-exported, NOT respelled: this file used to carry its own
+# `("scripts", "alp_project.py")` under a comment claiming it was "spelled
+# once here" -- it was spelled twice (tan-cli#815). Relocating the I-31
+# marker is a one-line change in `shapes.py` now.
+from tan.core.shapes import SDK_MARKER
 from tan.core.proxy import (
     HTTPS_PROXY_ENV_VARS,
     host_of,
@@ -107,10 +116,6 @@ from tan.output_format import FORMAT_HELP, OutputFormat
 #: `tan_core::sdk::GITHUB_RELEASES_URL`.
 GITHUB_RELEASES_URL = "https://api.github.com/repos/alplabai/alp-sdk/releases"
 
-#: `scripts/alp_project.py` is THE marker for an alp-sdk checkout (I-31) -- the
-#: same literal `tan_core::project::contains_loader_script` hardcodes. Spelled
-#: once here; `build_cmd.SDK_MARKER` is the same fact for the build path.
-SDK_MARKER = ("scripts", "alp_project.py")
 
 #: Wall-clock ceiling on the ONE network call in this file. Every subprocess and
 #: socket probe in the port carries a timeout; `urlopen` without one blocks on
@@ -614,32 +619,6 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
     return ActiveSdk(None, "none", broken_project_pin)
 
 
-def rejected_sdk_root_message(sdk_root: str, consequence: str) -> str:
-    """The `<command>.sdk-root-unresolved` message for a `--sdk-root` the
-    loader-marker check REJECTED, naming the value the caller typed.
-
-    `--sdk-root` is TERMINAL (I-31), so a path without `scripts/alp_project.py`
-    resolves to nothing rather than falling through. The messages on that branch
-    used to be the same string as the no-flag one -- "pass `--sdk-root <path>` to
-    name the checkout", the flag the user had just passed -- with the failing
-    value nowhere in the envelope or the stderr text (tan-cli#497 defect 7). So
-    the reader had no way to see WHICH path was rejected or why, on the one
-    surface that knew both.
-
-    `consequence` is the caller's own "and so you got this instead" clause,
-    because it differs per command (an empty example catalogue, built-in preset
-    defaults) and is the half a reader acts on. The no-flag message is
-    deliberately NOT routed through here: it is byte-pinned for `presets` by the
-    `presets-no-sdk` golden envelope and the oracle-parity case, and there is no
-    typed value to name on that branch anyway.
-    """
-    marker = "/".join(SDK_MARKER)
-    return (
-        f'alp-sdk root is unresolved: --sdk-root "{sdk_root}" is not an alp-sdk '
-        f"checkout ({marker} not found under it). {consequence}"
-    )
-
-
 def project_pin_issue(broken_project_pin: str | None, tier: str) -> Issue | None:
     """The tan-cli#263 warning for an unresolvable `.alp/sdk-path` project pin
     -- shared by EVERY caller of `resolve_sdk_tiered` (directly, or through
@@ -937,7 +916,7 @@ def _unroutable_proxy_refusal(proxy: str | None, url: str) -> str | None:
     )
 
 
-def _releases_opener(proxy: str | None) -> urllib.request.OpenerDirector:
+def _releases_opener(proxy: str | None) -> OpenerDirector:
     """An opener carrying OUR proxy decision, never urllib's own.
 
     `urlopen` derives its handler from `getproxies_environment()`, which maps
@@ -948,7 +927,27 @@ def _releases_opener(proxy: str | None) -> urllib.request.OpenerDirector:
     what `ALL_PROXY` means, and an EMPTY mapping means DIRECT -- not "fall back
     to the environment", which would re-open the `NO_PROXY` half of the same
     defect.
+
+    tan-cli#810: `urllib.request` is imported HERE rather than at module scope.
+    `cli.py` static-imports every command module, so this file's module-scope
+    `import urllib.request` -- which drags `email`, `http` and `ssl` behind it
+    -- was paid by `tan --version`, for a stack only the two network functions
+    in this file ever touch.
+
+    The return annotation is spelled `OpenerDirector`, bound by the
+    `TYPE_CHECKING` block at the top rather than by a runtime import, and that
+    is deliberate: an annotation binds in the MODULE namespace, not the
+    function's, so `-> urllib.request.OpenerDirector` would have named
+    something no longer there. `from __future__ import annotations` keeps it a
+    string, so nothing breaks at def or call time -- but
+    `typing.get_type_hints()` on this function would raise `NameError`, and
+    that API is live in this very file (`accept_global_flags` calls it,
+    `core/global_flags.py`). It is aimed at the `sdk` COMMAND callback, never
+    at this private helper, so the two do not meet; do not add a wrapper that
+    resolves hints here without re-reading this paragraph.
     """
+    import urllib.request  # noqa: PLC0415
+
     return urllib.request.build_opener(
         urllib.request.ProxyHandler({} if proxy is None else {"http": proxy, "https": proxy}),
         urllib.request.HTTPSHandler(context=default_ssl_context()),
@@ -966,6 +965,8 @@ def _fetch_releases(url: str = GITHUB_RELEASES_URL) -> tuple[list[dict[str, Any]
     transport error escaping here is the port's recurring bug class (a traceback
     on stderr, nothing on stdout, and an extension that renders nothing).
     """
+    import urllib.request  # noqa: PLC0415 -- deferred, see `_releases_opener`
+
     request = urllib.request.Request(  # noqa: S310 -- constant https:// endpoint
         url,
         headers={

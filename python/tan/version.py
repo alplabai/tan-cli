@@ -46,4 +46,14 @@
 # PEP 440 reads `X.devN` as "before X", so a 0.6.0 next release still sorts
 # above it. Its CHANGELOG home is `## [0.5.2] — Unreleased`, because a
 # development version documents the release it heads for, never itself.
-TAN_VERSION = "0.6.0-rc1"
+#
+# v0.6.0-rc1 published 2026-08-14 (tan-cli#764): this is the SAME recurrence,
+# one cycle later -- `dev`'s tip carried the published tag's exact version, so
+# `--not-released` turned `version-identity` red on every PR opened against
+# `dev` (#762, #763), for a reason unrelated to either diff. `0.6.0-rc2.dev0`
+# is the same spelling this file has used twice before -- a `.devN` tail on
+# the NEXT pre-release -- and carries the same non-promise: PEP 440 reads
+# `X.devN` as "before X", so neither an actual rc2 nor the eventual 0.6.0 is
+# guaranteed by this string, only that both sort above it. CHANGELOG home is
+# `## [0.6.0] — Unreleased`, per `release_target()`.
+TAN_VERSION = "0.6.0"

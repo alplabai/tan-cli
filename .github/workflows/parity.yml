@@ -10,12 +10,12 @@
 #
 #   seam1-plan-shape : live `--emit build-plan` vs. the frozen oracle,
 #                       toolchain-free. Implemented.
-#   seam2            : materialise + real build + Renode smoke. Implemented.
-#                       alp-sdk plans it, TAN executes it, the artefact boots.
-#                       The toolchain (west / Zephyr SDK / Renode) installs
-#                       in-job on stock ubuntu-latest -- alp-sdk#976 proved
-#                       that, retiring this job's old "needs a self-hosted
-#                       runner" blocker.
+#   seam2            : materialise + real build. Implemented.
+#                       alp-sdk plans it, TAN executes it, the artefact is a
+#                       real cross-compiled ARM ELF. The toolchain (west /
+#                       Zephyr SDK) installs in-job on stock ubuntu-latest --
+#                       alp-sdk#976 proved that, retiring this job's old
+#                       "needs a self-hosted runner" blocker.
 #                       Deliberately builds through `tan build`, NOT plain
 #                       `west`: routing around the executor would test Zephyr
 #                       and assert nothing about the seam.
@@ -129,6 +129,38 @@ on:
         description: "release.yml's python-gates call: skip seam2/first-blink and seam1's emit/kconfig/bootstrap/toolchain/scaffold parity steps, all of which the push+pull_request triggers already ran for this commit on main. Does NOT skip seam1's tests/gates block (audit-commit byte-hash gate + live jlink-freshness) -- that block is the only place tests/gates runs at all, and a tag cut from a commit that never landed on main (the residual case below) would otherwise get zero tests/gates coverage."
         type: boolean
         default: false
+
+# A newer push to a PR supersedes the run in flight -- the rule ci.yml:78 and
+# clean-host.yml:170 already state. The GROUP KEY deviates from theirs on
+# purpose: neither of those carries a `repository_dispatch` trigger, and this
+# workflow does.
+#
+# A flat `parity-${{ github.ref }}` would put every dispatched run in ONE group.
+# GitHub raises `repository_dispatch` from the default branch, so `github.ref`
+# is the same `refs/heads/dev` for all of them, however different the
+# `client_payload.sdk_ref` under test. And grouping is not only about
+# cancel-in-progress: per GitHub's documented concurrency semantics a run that
+# arrives while another in its group is in progress WAITS, and a third arrival
+# cancels the one that was waiting. Three alp-sdk contract pushes in quick
+# succession would therefore leave the middle `sdk_ref` with no parity run at
+# all -- silently dropping drift coverage for exactly the SHA that asked for it.
+# tan-cli#485 records what six unnoticed red dispatch runs cost; a run that
+# never happens is worse than one nobody looked at, because there is no red left
+# to find.
+#
+# So group ONLY the runs meant to supersede each other. `pull_request` keys on
+# the PR's ref; every other trigger keys on its own `github.run_id`, unique per
+# run, which leaves push-to-main, `merge_group`, `workflow_call` (release.yml's
+# `python-gates`) and `repository_dispatch` behaving exactly as they do today.
+#
+# `github.run_id` and NOT `github.event.client_payload.sdk_ref`, which is the
+# other way to keep dispatched runs apart: a `repository_dispatch` payload is
+# attacker-supplied, and a group key is a workflow-level expression evaluated
+# before any job starts. `run_id` is GitHub's own, distinguishes the runs just
+# as well, and puts no untrusted string in that position.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('parity-{0}', github.ref) || format('parity-{0}-{1}', github.event_name, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Fallback alp-sdk ref for a plain `pull_request` run (no dispatch payload).
@@ -441,7 +473,113 @@ env:
   #
   # Still not a tag: alp-sdk's newest tag is `v0.15.0` (`e2928b9f`), which
   # predates every commit this bump exists to pick up.
-  PINNED_SDK_TAG: bd8be484680cf5aa1c1ac0e8b38d84128b5a279d
+  #
+  # `88318e75` -> `94378a05` (tan-cli#846). This RETIRES the `88318e75` hold
+  # recorded in `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`
+  # comment, by the exit that comment's own reasoning implies rather than the
+  # one it named. The hold was never about `v0.16.0` being CUT -- it was about
+  # a pin past alp-sdk's `v0.16.0` version bump making the scaffold emit
+  # `https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/...` links while no
+  # such tag exists. alp-sdk#1535 (`94378a05`) makes `_docs_ref()` require the
+  # tag to RESOLVE before pinning to it, so that checkout degrades to `main`
+  # instead of shipping a 404, and the hold has nothing left to protect.
+  # tan-cli#846 ports the same `_tag_resolves()` guard into
+  # `tan/planner/template.py`, so tan's own emit agrees rather than diverging.
+  #
+  # `PINNED_SDK_COMMIT` and `ci.yml`'s `sdk_parity` `ref:` move to the same
+  # commit in this change. `HAND_PORT_PINNED_SDK_COMMIT` deliberately does
+  # NOT -- alp-sdk#1471's `scripts/alp_cli/doctor.py` delta is unported, and
+  # re-pinning would freeze that drift as reviewed; see that pin's own
+  # comment. `STRICT_LOADERS_PINNED_SDK_COMMIT` does not move either:
+  # `scripts/strict_loaders.py` does not appear in the `88318e75..94378a05`
+  # diff at all.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `94378a05` before landing:
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        RE-VENDORED, 8345 -> 8643 bytes: alp-sdk#1464/#1471
+  #     land in this range and `metadata/bootstrap.json`'s `install.linux`
+  #     gains the package-manager level (`{"apt": {...}, "dnf": {...}}`).
+  #     `tan.core.bootstrap` already reads both shapes (tan-cli#760), and
+  #     `test_the_fallback_constants_match_the_real_manifest_field_for_field`
+  #     had a self-cancelling `dnf` exemption for exactly this day -- it
+  #     fired, and the comparison is narrowed back to blanket field-for-
+  #     field. MATCH (8643 bytes, byte-identical) after.
+  #   - scaffold         RE-VENDORED, 7 READMEs (`v0.15.0` -> `main` doc
+  #     links, the #1535 degradation above) -- 7 FAIL / 2 PASS before, 9/9
+  #     PASS rc 0 after. See `python/tan/templates/vendored/MANIFEST.md`.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards
+  # `94378a05` -> `ac38a069` (tan-cli#868). Moved because the audit moved, not
+  # the other way round: alp-sdk's `notify-planner-drift` job filed #868 after
+  # three dispatched runs went red against alp-sdk `dev`, and the four commits
+  # behind it -- `522ea320` (#1482), `85b6b905` (#1485), `064fc17b` (#1484),
+  # `54f67c7e` (#1602/#1556), plus alp-sdk#1487's chip table out of
+  # `HAND_PORT_HASHES` territory -- are ported into `tan/planner/` in this
+  # change. `PINNED_SDK_COMMIT` and `ci.yml`'s `sdk_parity` `ref:` move to the
+  # SAME commit here; leaving this one behind is exactly the split
+  # `tests/conftest.py`'s tan-cli#691 warning exists to catch, and it would
+  # point seam1's checkout at a tree whose hashes no longer match the audit.
+  # `HAND_PORT_PINNED_SDK_COMMIT` deliberately does NOT move -- four of its
+  # five moved sources are unported; see that pin's own comment.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `ac38a069` before landing (Windows host, `py -3.14`):
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - bootstrap        MATCH (8643 bytes, byte-identical -- no re-vendor;
+  #     `metadata/bootstrap.json` does not appear in the `94378a05..ac38a069`
+  #     diff at all)
+  #   - toolchain-lock   PASS (6592 bytes, byte-identical -- no re-vendor)
+  #   - scaffold         PASS 9/9, rc 0 -- no re-vendor. `scripts/
+  #     alp_template.py` is unchanged in this range, so #1535's `_docs_ref()`
+  #     degradation the last bump turned on still renders the same links.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, same allowed-delta set
+  #   - planner byte-parity (`tests/parity/`, `ALP_SDK_PARITY_ROOT` at
+  #     `ac38a069`): 82 failed / 686 passed / 8 skipped BEFORE the port,
+  #     0 failed / 768 passed / 8 skipped after
+  # `ac38a069` -> `eb96112b` (tan-cli#891). The vendored fixtures had to move
+  # first for a reason unrelated to a planner audit: tan-cli#888 re-vendored
+  # `contract/fixtures/toolchains/toolchains.json` from alp-sdk's just-cut
+  # `v0.16.0` tag (alp-sdk#1603, `e48cc993`, adds `tier`/`licence` to every
+  # toolchain artifact), which left THIS pin naming a checkout
+  # (`ac38a069`, still on the OLD toolchains.json shape) that no longer
+  # matches what got vendored. `eb96112b` is the `release/v0.16.0-merge`
+  # merge alp-sdk tagged `v0.16.0` the same day (2026-08-23) -- the first time
+  # this pin names a RELEASED alp-sdk tag rather than a dev commit.
+  # `PINNED_SDK_COMMIT` and `ci.yml`'s `sdk_parity` `ref:` move to the SAME
+  # commit here, same tan-cli#691 reason as every prior bump.
+  #
+  # ATOMIC across the vendored artefacts, as this file's history repeats.
+  # Re-measured against `eb96112b` before landing (Windows host, `py -3.14`):
+  #   - kconfig-fixture  PASS (814 bytes, byte-identical -- no re-vendor)
+  #   - toolchain-lock   PASS (8168 bytes, byte-identical -- already
+  #     re-vendored by tan-cli#888, unchanged by this move)
+  #   - bootstrap        RE-VENDORED, 8643 -> 9772 bytes: alp-sdk#1605
+  #     (`44de2867`), also inside the `ac38a069..eb96112b` window, adds a
+  #     ~50-line `artifactProvenance` block (per-artifact
+  #     `tier`/`source`/`sizeBytes`/`licence`) to `metadata/bootstrap.json`.
+  #     MATCH, byte-identical, after; `test_bootstrap_command.py`'s
+  #     field-for-field fallback comparison still passes (158 passed).
+  #   - scaffold         RE-VENDORED, 7 READMEs (diagnostics x2, iot,
+  #     minimal x2, sensor x2) -- NOT a code drift: `eb96112b` is itself
+  #     tagged `v0.16.0`, so `alp_template.py`'s `_docs_ref()` (alp-sdk#1535)
+  #     now resolves that tag and renders `blob/v0.16.0/` doc links instead
+  #     of `blob/main/`, the first vendor point where that guard actually
+  #     fires. edge-ai's pair was unaffected and stayed PASS. 7 FAIL / 2 PASS
+  #     before, 9/9 PASS rc 0 after -- against a checkout with tags fetched.
+  #     A tagless clone of this SAME commit (what this job's checkout was
+  #     BEFORE `fetch-tags: true` was added, tan-cli#891) reproduces the 7
+  #     FAIL / 2 PASS split every time: `_tag_resolves()` cannot see a tag
+  #     the clone never fetched. This job's `clone alp-sdk` step now always
+  #     fetches tags, so 9/9 is what it measures going forward, not a
+  #     one-time result from a hand-run against a different checkout shape.
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, same allowed-delta set
+  # `scripts/alp_orchestrate/**` is byte-identical across `ac38a069..
+  # eb96112b` (`git diff --stat` over that path between the two commits is
+  # empty) -- NOT a behavioural re-pin, every `PINNED_HASHES` entry in
+  # `test_planner_relocation_freshness.py` is unchanged. `HAND_PORT_PINNED_
+  # SDK_COMMIT` and `STRICT_LOADERS_PINNED_SDK_COMMIT` do not move -- see
+  # those pins' own comments.
+  PINNED_SDK_TAG: eb96112ba7d1cc3b4084c985962ea31772177d74
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
@@ -470,6 +608,11 @@ jobs:
     # tag case this still cannot see (the tag's own commit was never pushed to
     # `main`, so nothing upstream of this job ran either).
     runs-on: ubuntu-latest
+    # Measured 1 minute on a `pull_request` run (run 32039025829). 30 is a hang
+    # catcher, not a budget -- it exists so a wedged leg on a REQUIRED context
+    # (`seam1 -- plan-shape parity` is one of the five) fails in bounded time
+    # instead of holding the PR for GitHub's 360-minute job default.
+    timeout-minutes: 30
     steps:
       - name: checkout tan-cli
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -542,12 +685,33 @@ jobs:
             echo "::notice::comparing against the pinned alp-sdk ref: ${ref}"
           fi
 
+      # `fetch-tags: true`, not the default no-tags checkout. `alp_template.py`'s
+      # `_docs_ref()` (issue #1508 / alp-sdk#1535) pins a scaffolded README's
+      # doc links to `v<version>` only when `_tag_resolves()` finds that tag
+      # among the checkout's LOCAL refs -- deliberately no network call, so it
+      # cannot see a tag this checkout never fetched. Without tags every emit
+      # here degrades to `blob/main/`/`tree/main/`, which disagrees with the
+      # vendored scaffold tree (`blob/v0.16.0/`/`tree/v0.16.0/` since
+      # tan-cli#888) on every README that carries one and reds this job
+      # unconditionally -- not a real plan-shape diff, an artefact of the
+      # clone missing tags. Measured (tan-cli#891): this same checkout at
+      # `eb96112b` with no tags fails scaffold byte-parity 7/9 (only the two
+      # templates with no doc links, edge-ai, pass); with `fetch-tags: true`
+      # it passes 9/9. `fetch-depth: 0` (the whole history) would also fix it
+      # but costs far more on a repo alp-sdk's size for no extra correctness
+      # here -- `git fetch --tags` pulls every tag from the remote regardless
+      # of depth, and the tag this job needs (`v0.16.0`) points AT the commit
+      # already being fetched, so a depth-1 fetch with tags included resolves
+      # it. Do not drop this thinking it is redundant with the `ref:` pin
+      # above; the pin selects the COMMIT, this selects whether the checkout
+      # can see any tag AT ALL.
       - name: clone alp-sdk
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
           ref: ${{ steps.sdk_ref.outputs.ref }}
+          fetch-tags: true
           path: alp-sdk
 
       # ADR-0020 mandates a `repository_dispatch` alp-sdk -> tan on every planner
@@ -893,6 +1057,17 @@ jobs:
             fi
           done
 
+          # tan-cli#778's gate lives in its OWN file, so the loop above cannot
+          # reach it -- it greps one fixed module name. Its symbol-parity test
+          # is the only one there needing ALP_SDK_HAND_PORT_ROOT, and this job
+          # is the only one that binds it, so an unasserted SKIP exits 0 and
+          # passes silently: verbatim the tan-cli#308 shape that gate's own
+          # docstring invokes.
+          if ! grep -qF "test_hand_port_tan_side.py::test_explain_hand_port_still_agrees_with_its_upstream_symbols PASSED" /tmp/gates.log; then
+            echo "::error::test_explain_hand_port_still_agrees_with_its_upstream_symbols did not PASS in this job -- ALP_SDK_HAND_PORT_ROOT is bound here, so a SKIP means the oracle checkout this job cloned did not resolve (or the test regressed to fail-open), not an absent root."
+            exit 1
+          fi
+
       # test_jlink_aen_device_freshness asks a question the FROZEN audit checkout
       # cannot answer: does tan's JLINK_AEN_DEVICE fallback still agree with the
       # part number alp-sdk ships TODAY. Binding it to the audit commit like the
@@ -1017,30 +1192,93 @@ jobs:
           fi
           exit 0
 
+      # THE THIRD PIN'S ALARM (tan-cli#761). Until this step existed,
+      # `STRICT_LOADERS_PINNED_SDK_COMMIT` was the only one of the three pins
+      # with no live-vs-`dev` counterpart, and its always-run sibling
+      # (`test_strict_loaders_matches_its_pinned_sdk_source`, asserted PASSED
+      # by node id above) is a TAUTOLOGY on its own: the `resolve strict-loaders
+      # audit commit` / `clone alp-sdk at the strict-loaders audit commit`
+      # steps check out alp-sdk at the very SHA the hash was taken from, so the
+      # only failure that check can produce is a hand-typed hash typo. Real
+      # upstream drift in `scripts/strict_loaders.py` was unreachable by
+      # anything in this file.
+      #
+      # THE DISPATCH ALARM IS THE REAL DRIFT SIGNAL -- for all three pins, not
+      # just this one. Every one of the three always-run assertions binds its
+      # root to its OWN pin and therefore compares a pin against itself; each
+      # proves its table is internally consistent (the mis-typed-hash case) and
+      # nothing about whether upstream moved. A green `pull_request` run is
+      # NOT drift coverage, and reading it as such is the specific mistake this
+      # comment exists to prevent. Only `repository_dispatch` runs bind
+      # `${{ github.workspace }}/alp-sdk` -- the ref alp-sdk just pushed -- and
+      # only these three warn-only steps look at it.
+      #
+      # Warn, not fail, and deliberately so: this pin is FROZEN at the commit
+      # that introduced alp-sdk#1127 (see the gate file's own STRICT_LOADERS_*
+      # block), so a difference here means "upstream moved, re-audit the
+      # hand-port", never "this PR is broken". Whether the warn-only posture
+      # should change at all is tan-cli#509's decision, not this step's.
+      #
+      # Costs nothing today: `scripts/strict_loaders.py` has had exactly one
+      # commit in alp-sdk's history and live `dev` still hashes to
+      # STRICT_LOADERS_HASH. That is the argument FOR adding it now rather than
+      # after -- the thing it guards is a security-shaped hand-port (the
+      # duplicate-key-rejecting loaders wired into `tan/planner/loader.py`'s
+      # `_load_yaml`/`_load_json` to close the silent-SKU-retarget hazard), so
+      # a silent divergence re-opens that hazard in tan while alp-sdk believes
+      # it is closed.
+      - name: strict-loaders freshness vs live alp-sdk (alarm, warn only)
+        if: github.event_name == 'repository_dispatch'
+        continue-on-error: true
+        working-directory: python
+        env:
+          ALP_SDK_STRICT_LOADERS_ROOT: ${{ github.workspace }}/alp-sdk
+        run: |
+          # `<nodeid> PASSED`, not rc -- see the two sibling steps above for
+          # why. The test skips when ALP_SDK_STRICT_LOADERS_ROOT does not
+          # resolve, and a skip is rc=0.
+          set +e
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_strict_loaders_matches_its_pinned_sdk_source -v 2>&1 | tee /tmp/strict-loaders-alarm.log
+          set -e
+          if ! grep -qF "test_planner_relocation_freshness.py::test_strict_loaders_matches_its_pinned_sdk_source PASSED" /tmp/strict-loaders-alarm.log; then
+            echo "::warning::scripts/strict_loaders.py no longer matches STRICT_LOADERS_HASH at alp-sdk ${{ steps.sdk_ref.outputs.ref }}, OR this alarm could not run -- either the file moved upstream, or ALP_SDK_STRICT_LOADERS_ROOT did not resolve and the test SKIPPED. Read the pytest output above to tell which. The always-run job cannot see the drift case: it binds ALP_SDK_STRICT_LOADERS_ROOT to STRICT_LOADERS_PINNED_SDK_COMMIT, so it compares the pin against itself. Non-blocking by design: re-audit tan/planner/strict_loaders.py against the new upstream, then re-pin STRICT_LOADERS_PINNED_SDK_COMMIT/STRICT_LOADERS_HASH in python/tests/gates/test_planner_relocation_freshness.py. This one guards a security-shaped hand-port (alp-sdk#1127's duplicate-key-rejecting loaders, tan-cli#485) -- diff before assuming the divergence is cosmetic."
+          fi
+          exit 0
+
   # seam2 -- the half of ADR-0020's parity contract seam1 cannot reach.
   #
   # seam1 proves the PLAN's SHAPE is stable. It never runs tan and never
   # compiles anything, so it cannot catch an executor that reads a correct plan
   # and does the wrong thing with it. seam2 closes that: alp-sdk plans it, TAN
-  # executes it, and the artefact is booted.
+  # executes it, and the artefact is a real cross-compiled ARM ELF.
   #
-  # Note the deliberate difference from alp-sdk's own pr-renode-aen-smoke.yml,
-  # which this borrows its toolchain recipe from: that job builds with plain
-  # `west`, because it is testing alp-sdk's board files. Here the build MUST go
-  # through `tan build` -- routing around tan would test Zephyr and assert
-  # nothing about the seam.
+  # The build MUST go through `tan build`, not plain `west` -- routing around
+  # tan would test Zephyr and assert nothing about the seam.
   #
-  # This was a documented no-op placeholder until now, on the stated grounds
-  # that it "needs a Linux runner with the toolchain installed". alp-sdk#976
-  # disproved that: the Zephyr SDK and Renode both install on a stock
+  # This was a documented no-op placeholder until the toolchain recipe landed,
+  # on the stated grounds that it "needs a Linux runner with the toolchain
+  # installed". alp-sdk#976 disproved that: the Zephyr SDK installs on a stock
   # ubuntu-latest runner in-job. The blocker had expired.
+  #
+  # A fourth stage used to boot the ELF under Renode. Renode is retired
+  # repo-wide -- `tan renode` is gone from this repo, and alp-sdk deleted its
+  # four `pr-renode-*` workflows and the `aen-sim-vision` example -- so that
+  # stage went with it. Stages 1-3 still cover seam 2's own definition: "a
+  # plan that looks right but doesn't build, or an executor that mishandles a
+  # correct plan" (tests/parity/README.md).
   seam2:
-    name: "seam2 -- materialise + real build + Renode smoke"
+    name: "seam2 -- materialise + real build"
     # Skipped only under release.yml's `python_only: true` call -- see
     # seam1-plan-shape's `if:` comment above for why `github.event_name`
     # cannot express this.
     if: ${{ !inputs.python_only }}
     runs-on: ubuntu-latest
+    # Measured 3 minutes (run 32039025829), but this job pays for `west init -l`
+    # + `west update` + a Zephyr SDK install + a real `tan build`, all of it
+    # network-bound. Same 60-minute budget
+    # getting-started.yml:94 and release-combination.yml:176 already give the
+    # comparable toolchain-and-build legs.
+    timeout-minutes: 60
     steps:
       - name: checkout tan-cli
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1114,8 +1352,8 @@ jobs:
       - name: host deps
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci/apt-bounded.sh update
+          bash scripts/ci/apt-bounded.sh install -y --no-install-recommends \
               ninja-build device-tree-compiler gperf ca-certificates curl gnupg xz-utils
 
       - name: west + SDK python deps
@@ -1144,16 +1382,16 @@ jobs:
           west update --narrow -o=--depth=1
           west zephyr-export
 
-      # Single source for the SDK pin, same read alp-sdk's own renode job does
-      # (metadata/toolchains.json, gated by check_toolchain_lock.py).
+      # Single source for the SDK pin: alp-sdk's own metadata/toolchains.json,
+      # gated on the alp-sdk side by check_toolchain_lock.py.
       - name: read Zephyr SDK pin
         run: |
           set -euo pipefail
           # Bind to plain locals before formatting. Inlining the subscripts as
           # f"...{sdk[\"version\"]}..." needs backslash escapes inside the
           # f-string expression, which is a SyntaxError -- and it is what broke
-          # this step on its first run. alp-sdk's pr-renode-aen-smoke.yml has
-          # this exact shape for this exact reason; do not re-compress it.
+          # this step on its first run. Keep the plain locals; do not
+          # re-compress this into inline f-string subscripts.
           python3 -c '
           import json
           d = json.load(open("alp-sdk/metadata/toolchains.json"))
@@ -1181,18 +1419,6 @@ jobs:
           tar -xJf /tmp/zephyr-sdk.tar.xz -C "$HOME/zephyr-sdk" --strip-components=1
           "$HOME/zephyr-sdk/setup.sh" -t arm-zephyr-eabi -c
           echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk" >> "$GITHUB_ENV"
-
-      # v1.16.1 portable-dotnet: self-contained .NET, no Mono/GTK# system deps.
-      # The .deb needs gtk-sharp2/*-cil-dev packages ubuntu-24.04 dropped.
-      - name: install Renode
-        run: |
-          set -euo pipefail
-          curl -fsSL https://github.com/renode/renode/releases/download/v1.16.1/renode-1.16.1.linux-portable-dotnet.tar.gz \
-              -o /tmp/renode.tar.gz
-          mkdir -p "$HOME/renode"
-          tar -xzf /tmp/renode.tar.gz -C "$HOME/renode" --strip-components=1
-          echo "$HOME/renode" >> "$GITHUB_PATH"
-          "$HOME/renode/renode" --version
 
       # `tan` under test is the PYTHON package, installed from this checkout
       # (tan-cli#269). `pip install -e ./python` puts the `tan` console script
@@ -1263,13 +1489,13 @@ jobs:
             exit "$rc"
           fi
 
-      # 3. The artefact must EXIST. `tan build` reporting ok while producing no
-      #    ELF is exactly the #97 defect class, one layer up.
+      # 3. The artefact must EXIST, and be an ARM image. `tan build` reporting
+      #    ok while producing no ELF is exactly the #97 defect class, one layer
+      #    up; producing a HOST binary is that same defect reaching the
+      #    artefact.
       # Pick the M55-HP slice EXPLICITLY. `-print -quit` takes whichever slice
-      # `find` reaches first, which on the first run was m55_he -- then booted
-      # against a descriptor written for the HP core. The descriptor decides
-      # which artefact is meaningful here, so the selection cannot be
-      # whichever-comes-first.
+      # `find` reaches first, which on the first run was m55_he -- the wrong
+      # core. The selection cannot be whichever-comes-first.
       - name: locate the built ELF (m55_hp slice)
         run: |
           set -euo pipefail
@@ -1287,56 +1513,7 @@ jobs:
             echo "::error::seam2: ${ELF} is not an ARM image -- a zephyr slice produced a host binary."
             exit 1
           fi
-          echo "SEAM2_ELF=${ELF}" >> "$GITHUB_ENV"
-
-      # 4. RENODE SMOKE. Same three assertions alp-sdk#974/#976 established, on
-      #    the artefact TAN produced rather than one west produced.
-      - name: Renode boot smoke
-        run: |
-          set -euo pipefail
-          LOG=/tmp/seam2-renode.log
-          # `$repl` MUST be passed. The .resc defaults it to the RELATIVE path
-          # `metadata/renode/alif_ensemble_e8.repl`, which only resolves when
-          # renode's cwd is the alp-sdk root. Omitting it on the first run gave
-          #   Could not find file 'metadata/renode/alif_ensemble_e8.repl'
-          # and then the absent-PC assertion fired -- a real failure, but for a
-          # harness reason rather than the boot reason it is meant to report.
-          set +e
-          "$HOME/renode/renode" --console --disable-xwt --plain \
-              -e "\$repl=@${GITHUB_WORKSPACE}/alp-sdk/metadata/renode/alif_ensemble_e8.repl" \
-              -e "\$elf=@${SEAM2_ELF}" \
-              -e "i @${GITHUB_WORKSPACE}/alp-sdk/metadata/renode/alif_ensemble_e8.resc" \
-              -e "quit" > "${LOG}" 2>&1
-          RC=$?
-          set -e
-          echo "----- renode log -----"; cat "${LOG}"
-          if [ "$RC" -ne 0 ]; then
-            echo "::error::seam2 Renode smoke: renode exited ${RC}."
-            exit 1
-          fi
-          # Renode exits 0 even when a monitor command fails -- the first run
-          # here failed to load the .repl and still returned 0, so the exit code
-          # alone is not a verdict. Catch the harness failure by name, before
-          # the boot assertions, or a broken setup reports itself as a boot
-          # failure and sends the next reader after the wrong thing.
-          if grep -qE "There was an error executing command|Could not find file" "${LOG}"; then
-            echo "::error::seam2 Renode smoke: a monitor command failed (renode still exited 0) -- this is a HARNESS failure, not a boot failure. First offending line:"
-            grep -m1 -E "There was an error executing command|Could not find file" "${LOG}"
-            exit 1
-          fi
-          if ! grep -q "Setting initial values: PC = 0x" "${LOG}"; then
-            echo "::error::seam2 Renode smoke: 'Setting initial values: PC = 0x' absent -- the vector table was never seeded."
-            exit 1
-          fi
-          if grep -q "CPU was halted" "${LOG}"; then
-            echo "::error::seam2 Renode smoke: 'CPU was halted' -- the PC/SP seed was unusable."
-            exit 1
-          fi
-          if grep -q "Guessing VectorTableOffset value to be 0x" "${LOG}"; then
-            echo "::error::seam2 Renode smoke: Renode fell back to inferring VectorTableOffset (the condition alp-sdk#947 exists to eliminate)."
-            exit 1
-          fi
-          echo "seam2: materialise -> tan build -> ARM ELF -> Renode boot, all asserted."
+          echo "seam2: materialise -> tan build -> ARM ELF, all asserted."
 
       - name: upload seam2 logs
         if: always()
@@ -1346,7 +1523,6 @@ jobs:
           path: |
             /tmp/seam2-materialise.json
             /tmp/seam2-build.log
-            /tmp/seam2-renode.log
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
@@ -1368,6 +1544,11 @@ jobs:
     # cannot express this.
     if: ${{ !inputs.python_only }}
     runs-on: ubuntu-latest
+    # Measured 2 minutes (run 32039025829). 60 rather than 30 for the same
+    # reason getting-started.yml:94 uses 60 on the job with this exact shape:
+    # `tan bootstrap` -> `init` -> a real toolchain-backed build, where the
+    # slow parts are downloads whose bad day is much worse than their median.
+    timeout-minutes: 60
     steps:
       - name: checkout tan-cli
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1439,8 +1620,8 @@ jobs:
       - name: host deps
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci/apt-bounded.sh update
+          bash scripts/ci/apt-bounded.sh install -y --no-install-recommends \
               ninja-build device-tree-compiler gperf ca-certificates curl xz-utils \
               pkg-config libusb-1.0-0-dev libudev-dev
 
@@ -1662,7 +1843,7 @@ jobs:
   # false-positive d9a22c0/ecab9da exists to prevent (PINNED_SDK_TAG can sit on
   # either side of the audit commit with no guarantee the two agree).
   #
-  # No Zephyr SDK / west workspace / Renode here -- that stays seam2/
+  # No Zephyr SDK / west workspace here -- that stays seam2/
   # first-blink's job. `native_sim` e2e and the west-real-build parity cases
   # already self-skip, loudly, with a named reason when the toolchain is
   # absent (see their own docstrings); this job proves that skip still fires
@@ -1727,6 +1908,16 @@ jobs:
         # green while a whole suite did not run.
         shard: [0, 1, 2, 3, parity]
     runs-on: ${{ matrix.os }}
+    # 45, not the 30 tan-cli#812 suggested, and the measurement is why. On run
+    # 32039025829 the 0..3 legs took 1-3 minutes but the three `parity, whole`
+    # legs took 11 (macos), 15 (ubuntu) and 16 (windows); #812's own worst
+    # observed whole-workflow wall clock was 22.8 minutes. A 30-minute cap
+    # leaves the windows `parity, whole` leg under 2x headroom, and a false
+    # timeout HERE lands on a required context -- `python-tests` below fails on
+    # anything but `success`, including a cancellation. 45 keeps the property
+    # that matters (bounded instead of 360) without putting a required check one
+    # slow runner away from red.
+    timeout-minutes: 45
     steps:
       - name: checkout tan-cli
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1926,6 +2117,13 @@ jobs:
     # a windows/macos runner just to evaluate one `if` and would leave the
     # three legs racing three different runner queues for zero benefit.
     runs-on: ubuntu-latest
+    # tan-cli#812 did not list this job, and it is the one its own impact
+    # paragraph is about: THREE of the five required contexts are these legs'
+    # `name:` strings, so a wedged instance here is precisely the "blocks the PR
+    # for the 360-minute default" case. The job checks out nothing, installs
+    # nothing and runs one `if` -- measured 0 minutes on run 32039025829 -- so
+    # anything it cannot finish in 5 is stuck, not slow.
+    timeout-minutes: 5
     steps:
       - name: verify every python-tests-shard leg succeeded
         shell: bash
@@ -1965,6 +2163,10 @@ jobs:
     needs: python-tests
     if: always() && github.event_name == 'repository_dispatch' && needs.python-tests.result == 'failure'
     runs-on: ubuntu-latest
+    # Also absent from tan-cli#812's list. One `gh` search plus one create-or-
+    # comment; it holds `issues: write`, which is the one token in this file
+    # worth bounding on its own account.
+    timeout-minutes: 10
     permissions:
       issues: write
     steps:

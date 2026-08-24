@@ -62,8 +62,8 @@ from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_
 from tan.commands.sdk_cmd import (
     global_default_foreign_project_issue,
     project_pin_issue,
-    rejected_sdk_root_message,
 )
+from tan.core.shapes import rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -98,7 +98,7 @@ SDK_UNRESOLVED_MESSAGE = (
 )
 
 #: What the reader GOT instead, for the `--sdk-root`-was-given-and-rejected
-#: branch (`sdk_cmd.rejected_sdk_root_message`, tan-cli#497). The remediation
+#: branch (`tan.core.shapes.rejected_sdk_root_message`, tan-cli#497). The remediation
 #: clause above is dropped there: recommending the flag the caller just typed
 #: is what made the old message self-defeating.
 SDK_UNRESOLVED_CONSEQUENCE = "Returning an empty example catalogue."

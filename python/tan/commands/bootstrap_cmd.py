@@ -61,6 +61,7 @@ from pathlib import Path
 
 import typer
 
+from tan.core.shapes import SDK_MARKER, is_dir as _is_dir, is_file as _is_file
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import (
     FALLBACK_PYTHON_FLOOR,
@@ -72,7 +73,6 @@ from tan.commands.doctor_cmd import (
 from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
-    SDK_MARKER,
     _home_alp_dir,
     global_default_foreign_project_issue,
     global_default_pointer_fix_hint,
@@ -95,8 +95,11 @@ from tan.core.bootstrap import (
     Tokens,
     capture_tail,
     completion_verdict,
+    confirm_missing,
+    confirmed_install_commands,
     decide_workspace_reuse,
     detect_host_os,
+    detect_linux_pm,
     die,
     fallback_facts,
     get_manifest_path,
@@ -156,20 +159,6 @@ INSTALL_TIMEOUT_S = 3600
 # ---------------------------------------------------------------------------
 # Guarded IO
 # ---------------------------------------------------------------------------
-
-
-def _is_dir(path: Path) -> bool:
-    try:
-        return path.is_dir()
-    except OSError:
-        return False
-
-
-def _is_file(path: Path) -> bool:
-    try:
-        return path.is_file()
-    except OSError:
-        return False
 
 
 def _native(path: Path | str) -> str:
@@ -464,6 +453,15 @@ def resolve_python_floor(facts: BootstrapFacts, *, zephyr_base_adopts: bool) -> 
     return PythonFloor(effective, source, manifest_floor)
 
 
+def _on_path_available(binary: str) -> bool:
+    """The tan-cli#760 confirmation predicate `check_prerequisites` injects
+    into every guarded refusal it builds -- a real PATH walk, not a guess;
+    see `confirmed_install_commands`/`confirm_missing` in `tan.core.bootstrap`
+    for what "confirmed" actually checks (leading binary, `sudo` included,
+    never a wrapper or a shell-composed line)."""
+    return on_path(binary) is not None
+
+
 def check_prerequisites(
     facts: BootstrapFacts, host: str, floor: PythonFloor
 ) -> tuple[HostPython | None, PrereqFailure | None]:
@@ -478,9 +476,25 @@ def check_prerequisites(
     The version gate applies on BOTH platforms and against the EFFECTIVE floor
     -- see the module docstring. The oracle applies it on Windows only, against
     the manifest's, which is the live bug this port exists to fix.
+
+    `install` is CONFIRMED once here (tan-cli#760: a command whose own
+    package manager this host cannot confirm on PATH becomes `command: null`
+    everywhere below) and every refusal this function returns reads that
+    confirmed dict uniformly -- `tan bootstrap` has no `--fix` counterpart to
+    preserve a separate diagnosis for (unlike `tan doctor`; see
+    `doctor_cmd.prerequisites_check`'s `fix_missing` split), so there is no
+    RAW variant to keep here.
+
+    On Linux, `install_for_host` needs the package manager confirmed FIRST
+    (tan-cli#760's second half / alp-sdk#1464, see `detect_linux_pm`) -- a
+    real Fedora/Rocky host then gets `sudo dnf install -y cmake` instead of a
+    `null` it had a working remedy for.
     """
     is_windows = host == WINDOWS
-    install = facts.install_for_host(host)
+    linux_pm = detect_linux_pm(_on_path_available) if host == LINUX else None
+    install = confirmed_install_commands(
+        facts.install_for_host(host, linux_pm=linux_pm), _on_path_available
+    )
     missing = [
         tool for tool in facts.prerequisites(host) if not _prereq_present(tool, is_windows)
     ]
@@ -509,7 +523,10 @@ def check_prerequisites(
     # a Debian/Ubuntu packaging split, not a general POSIX one -- macOS/BSD
     # pythons ship `ensurepip` in the base install.
     if host == LINUX and not python_venv_capable(python):
-        return None, posix_venv_unusable()
+        refusal = posix_venv_unusable()
+        return None, PrereqFailure(
+            refusal.code, refusal.lines, confirm_missing(refusal.missing, _on_path_available)
+        )
     return python, None
 
 

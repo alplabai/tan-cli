@@ -7,10 +7,15 @@
 # destroys what the earlier phases produced -- so it runs last. Run a single
 # phase with `--phase <name>` when you only care about one link.
 #
-# Expectations target tan 0.5.2 (re-derived against `dev` -- run every
-# assertion below against the real binary/SDK before trusting an OLDER
-# recorded expectation; see the "--version" and command-surface-drift steps
-# right below, which exist to catch a case list that fell out of sync). Every
+# Expectations target the `dev` TREE at 4838652, 2026-08-08 -- not a release.
+# The number they used to name, 0.5.2, is what the tree carried then
+# (0.5.2-rc1.dev0) but exists in no tag; it was renumbered to v0.6.0-rc1. A
+# re-derivation against CURRENT `dev` is due -- NOT against v0.6.0-rc1, which
+# predates tan-cli#848 and still registers `renode` that this file has already
+# dropped. Run every assertion below against the real binary/SDK before
+# trusting an OLDER recorded expectation; see the "--version" and
+# command-surface-drift steps right below, which exist to catch a case list
+# that fell out of sync. Every
 # `xstep`/`xstep_out` entry is a defect with an open issue: while the bug
 # stands the run is green, and the day it is fixed the harness reports XPASS,
 # exits non-zero, and names the entry to delete. Do not convert an XPASS back
@@ -58,7 +63,6 @@ new-som
 pinmux
 presets
 quality
-renode
 run
 scaffold
 sdk
@@ -350,17 +354,12 @@ phase_build() {
   hdr "build + post-build"
 
   # Ordered on purpose: assert the pre-build refusals BEFORE building, because
-  # after a build they cannot be observed again without a clean. All three are
+  # after a build they cannot be observed again without a clean. Both are
   # pure reads (no build/ exists yet to write over), so these run regardless
   # of --allow-mutate.
   if [ ! -f "$PROJ/build/system-manifest.yaml" ]; then
     step "size refuses without a build"   1 -- size   --project "$PROJ" --sdk-root "$SDK"
     step "image refuses without a build"  1 -- image  --project "$PROJ" --sdk-root "$SDK"
-    # renode_plan.py's ManifestUnavailable path falls through to fail_sdk()'s
-    # default exit code (RUNTIME_FAILURE=1), same as size/image above --
-    # verified directly, not assumed carried over from a prior version.
-    step_out_rc "renode refuses without a build" 1 'no system-manifest.yaml' \
-        -- renode --project "$PROJ" --sdk-root "$SDK"
   else
     skip "pre-build refusals" "build/ already present -- run --phase teardown first"
   fi
@@ -369,13 +368,13 @@ phase_build() {
   step "build --plan is deferred"      1 -- build --project "$PROJ" --plan --sdk-root "$SDK"
 
   # Everything past this point WRITES into $PROJ (build --materialise first,
-  # then a real `build`/`run`/`renode`) -- gate it exactly like the other
+  # then a real `build`/`run`) -- gate it exactly like the other
   # writing phases, not only the ones named "generate"/"teardown". This is
   # the fix for the false "read-only against a real project" claim: before
   # it, `build --materialise`, the full `build`, and `run` all ran
   # unconditionally against a real --project with no --allow-mutate.
   if ! can_mutate; then
-    skip "build --materialise, build, size, image, run, renode, debug-config (post-build)" \
+    skip "build --materialise, build, size, image, run, debug-config (post-build)" \
         "real project without --allow-mutate"
     return
   fi
@@ -383,7 +382,7 @@ phase_build() {
   step "build --materialise"           0 --timeout 600 -- build --project "$PROJ" --materialise --sdk-root "$SDK"
 
   if [ "$BOOTSTRAPPED" != 1 ]; then
-    skip "build, run, size, image, renode" "no bootstrapped workspace (see --allow-bootstrap)"
+    skip "build, run, size, image" "no bootstrapped workspace (see --allow-bootstrap)"
     return
   fi
 
@@ -408,37 +407,6 @@ phase_build() {
   step_out_rc "run stops short of flashing" 0 \
       'run: built; pass --flash to program the board\.' \
       --timeout 1800 -- run --project "$PROJ" --sdk-root "$SDK"
-
-  if command -v renode >/dev/null 2>&1; then
-    # Until 0.5.1 (#470) renode accepted --project and resolved the build root
-    # from the CWD anyway. These assert the MESSAGE, not only exit 1, because
-    # under the old behaviour "there is no build" and "pick a core" collapsed
-    # into the same CWD-lookup failure and an exit-code check measured
-    # nothing. Both this SoM's zephyr slices (m55_hp, m55_he) resolving into
-    # the manifest is what makes this ambiguous without --core in the first
-    # place; renode_plan.py's multi-slice RenodeError falls through to the
-    # same default exit code (RUNTIME_FAILURE=1) as the no-build case above.
-    step_out_rc "renode demands --core on a multi-slice manifest" 1 \
-        'zephyr slices|Pick one with' -- renode --project "$PROJ" --sdk-root "$SDK"
-    step "renode boots one slice"      0 --timeout 300 -- renode --project "$PROJ" \
-        --core "$CORE" --sdk-root "$SDK"
-    # tan renode's exit code says nothing about whether the firmware reached
-    # main(); --expect is the only assertion it offers. On the pinned Renode
-    # v1.16.1 an MRAM-linked AEN image cannot complete a boot (documented in the
-    # SDK's own alif_ensemble_e8.resc).
-    #
-    # #448 is a support PAUSE, not a removal -- the maintainer reframed it on
-    # 2026-08-04 ("renode is PAUSED, not removed"; the issue title now reads
-    # "emit a support-paused warning; retain the command, modules, fixtures and
-    # CI models"). So this entry is not waiting for the command to disappear:
-    # the command and its models are retained, and this xstep stays until the
-    # boot itself is fixed. Do not delete the case on the assumption `renode`
-    # is going away.
-    xstep 448 "renode reaches the app console" 1 --timeout 300 \
-        -- renode --project "$PROJ" --core "$CORE" --expect "$EXPECT_MARKER" --sdk-root "$SDK"
-  else
-    skip "renode" "no renode binary on PATH"
-  fi
 }
 
 # --------------------------------------------------------------------------

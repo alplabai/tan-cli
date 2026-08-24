@@ -115,6 +115,308 @@ def test_a_tool_the_manifest_has_no_command_for_does_not_imply_elevation():
 
 
 # ---------------------------------------------------------------------------
+# tan-cli#760: `data.missingPrerequisites[].command` must never hand back a
+# line that cannot run. Measured on fedora:42/archlinux:latest/rockylinux:9:
+# alp-sdk's `prerequisites.install.linux` is six `sudo apt-get install -y
+# ...` lines and none of those hosts has `apt-get` on PATH -- byte-identical
+# to the `debian:12` output before this guard existed.
+# ---------------------------------------------------------------------------
+
+
+def test_leading_binary_strips_a_literal_sudo_prefix():
+    """The parsing half of the guard, isolated: it has to agree with
+    `doctor_cmd.run_fix`'s own `sudo ` strip (tan-cli#650) about which binary
+    a command actually spawns, or the guard and the spawn could disagree
+    about what "confirmed" means."""
+    from tan.core.bootstrap import leading_binary
+
+    assert leading_binary("sudo apt-get install -y cmake") == "apt-get"
+    assert leading_binary("brew install cmake") == "brew"
+    assert leading_binary("winget install -e --id Kitware.CMake") == "winget"
+    assert leading_binary("   ") == ""
+
+
+def test_confirmed_install_commands_drops_a_command_whose_binary_is_absent():
+    """The core of the guard: on a host with no `apt-get` (Fedora/Arch/Rocky),
+    every `sudo apt-get ...` entry the manifest carries must be dropped from
+    the dict -- which downstream readers (`install.get(tool)`, in
+    `_structured_missing`/`hint_line`/`doctor_cmd.prerequisites_check`) then
+    see as `None`, never a string. A test that never saw `command: null`
+    escape this function would not have caught tan-cli#760."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {
+        "cmake": "sudo apt-get install -y cmake",
+        "ninja": "sudo apt-get install -y ninja-build",
+    }
+    confirmed = confirmed_install_commands(install, lambda binary: binary == "dnf")
+    assert confirmed == {}
+
+
+def test_confirmed_install_commands_keeps_a_command_whose_binary_is_present():
+    """The other half: a real Debian/Ubuntu host DOES have `apt-get` (and
+    `sudo` -- see the MINOR 3 test below for the host that has one but not
+    the other), so the guard must not drop a command just because it CAN be
+    wrong on some other host -- only when it actually is, on THIS one."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {
+        "cmake": "sudo apt-get install -y cmake",
+        "ninja": "sudo apt-get install -y ninja-build",
+    }
+    confirmed = confirmed_install_commands(
+        install, lambda binary: binary in {"apt-get", "sudo"}
+    )
+    assert confirmed == install
+
+
+def test_confirmed_install_commands_also_confirms_sudo_itself():
+    """tan-cli#760 review MINOR 3: a stock `debian:12` image has `apt-get`
+    but does NOT ship `sudo` by default -- confirming only the post-sudo
+    binary would still hand out a command that fails with `sudo: not
+    found`. `apt-get` alone must not be enough."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {"cmake": "sudo apt-get install -y cmake"}
+    assert confirmed_install_commands(install, lambda binary: binary == "apt-get") == {}
+    assert (
+        confirmed_install_commands(install, lambda binary: binary in {"apt-get", "sudo"})
+        == install
+    )
+
+
+def test_confirmed_install_commands_refuses_a_wrapper_that_would_falsely_confirm():
+    """tan-cli#760 review MINOR 1: `env FOO=bar apt-get ...` resolves its OWN
+    leading token to `env` -- universally present -- without ever confirming
+    the real installer (`apt-get`) it wraps. Confirming `env` alone must not
+    be enough to hand the command out; the review names this as the live
+    risk for landing (b)'s dnf/pacman tables, harmless only because none of
+    today's six manifest commands use a wrapper."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {"cmake": "env FOO=bar apt-get install -y cmake"}
+    # `env` genuinely IS on this host; the real installer, `apt-get`, is not.
+    assert confirmed_install_commands(install, lambda binary: binary == "env") == {}
+
+
+def test_confirmed_install_commands_refuses_a_compound_command():
+    """`a && b` only ever confirms `a` -- refuse outright rather than
+    half-confirm a command this guard cannot see past (tan-cli#760 review
+    MINOR 1)."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    install = {"cmake": "apt-get update && apt-get install -y cmake"}
+    assert confirmed_install_commands(install, lambda _binary: True) == {}
+
+
+def test_confirmed_install_commands_refuses_a_bare_ampersand_and_a_newline():
+    """tan-cli#760 review round 3, NIT: measured to slip past the round-2
+    list -- `apt-get install -y cmake & rm -rf /` (a single backgrounding
+    `&`, not `&&`) and a bare newline (`"apt-get update\\napt-get install -y
+    cmake"`) both confirmed as if they were one safe command."""
+    from tan.core.bootstrap import confirmed_install_commands
+
+    ampersand = {"cmake": "apt-get install -y cmake & rm -rf /"}
+    assert confirmed_install_commands(ampersand, lambda _binary: True) == {}
+
+    newline = {"cmake": "apt-get update\napt-get install -y cmake"}
+    assert confirmed_install_commands(newline, lambda _binary: True) == {}
+
+
+def test_leading_binary_agrees_with_run_fixs_own_shlex_split():
+    """tan-cli#760 review MINOR 2: the guard must parse a command exactly the
+    way `--fix` (`doctor_cmd.run_fix`) will -- `run_fix` calls
+    `shlex.split(effective_command)`, and `str.split` disagreed with it on a
+    quoted path (`"C:\\Program Files\\WinGet\\winget.exe" install ...`),
+    where the guard could confirm/refuse a DIFFERENT token than the one that
+    actually gets spawned."""
+    import shlex
+
+    from tan.core.bootstrap import leading_binary
+
+    command = '"C:\\Program Files\\WinGet\\winget.exe" install -e --id Foo'
+    assert leading_binary(command) == shlex.split(command)[0]
+
+
+def test_confirm_missing_nulls_an_unconfirmed_entrys_command():
+    """`confirm_missing` is `confirmed_install_commands`'s tuple-shaped twin
+    -- tan-cli#760 review MAJOR 2 / tan-cli#765: `posix_venv_unusable()`
+    builds a `MissingPrerequisite` directly, with no `install` dict for
+    `confirmed_install_commands` to filter, so this is the guard's OTHER
+    entry point."""
+    from tan.core.bootstrap import MissingPrerequisite, confirm_missing
+
+    missing = (MissingPrerequisite("python3-venv", "sudo apt-get install -y python3-venv"),)
+    guarded = confirm_missing(missing, lambda binary: binary == "dnf")
+    assert guarded == (MissingPrerequisite("python3-venv", None),)
+
+
+def test_confirm_missing_keeps_a_confirmed_entrys_command_and_a_tool_less_ones_none():
+    """The other half, plus the pass-through case: an entry whose `command`
+    is already `None` (a tool-less refusal has no install command at all)
+    must not be re-probed or altered."""
+    from tan.core.bootstrap import MissingPrerequisite, confirm_missing
+
+    missing = (
+        MissingPrerequisite("python3-venv", "sudo apt-get install -y python3-venv"),
+        MissingPrerequisite("dtc", None),
+    )
+    guarded = confirm_missing(missing, lambda binary: binary in {"apt-get", "sudo"})
+    assert guarded == missing
+
+
+def test_posix_refusal_gives_a_host_neutral_hint_when_no_command_is_confirmed():
+    """Item 2 of tan-cli#760. `install` here is already in the POST-guard
+    shape (every entry dropped, exactly what `confirmed_install_commands`
+    leaves on a host it could not confirm `apt-get` on) -- so the `--fix`
+    hint must stop promising an install it cannot perform, and must name the
+    MISSING TOOLS rather than guess a package name (a guessed name here would
+    be the identical defect this issue fixes, just moved to a different OS).
+    """
+    from tan.core.bootstrap import posix_refusal
+
+    lines = posix_refusal(["cmake", "ninja"], {}).lines
+    assert "cmake" in lines[1] and "ninja" in lines[1]
+    assert "package manager" in lines[1]
+    assert "to install them from the SDK's manifest" not in lines[1]
+    assert "prints the exact command" not in lines[1]
+
+
+def test_posix_refusal_keeps_the_confirmed_wording_when_a_command_survives():
+    """No regression on the ordinary, confirmed-host case: at least one
+    missing tool with a real command still gets the existing (non-host-
+    neutral) hints, unchanged."""
+    from tan.core.bootstrap import posix_refusal
+
+    lines = posix_refusal(["cmake", "ninja"], {"cmake": "sudo apt-get install -y cmake"}).lines
+    assert "prints the exact command" in lines[1]
+    assert "has no confirmed install command" not in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#760's second half (alp-sdk#1464 / #1471): `install.linux` is now
+# PACKAGE-MANAGER-keyed. None of `detect_linux_pm`, `normalize_linux_install`,
+# `select_linux_install`, or `install_for_host`'s `linux_pm` parameter exist
+# pre-fix at all -- every test below is an `ImportError`/`TypeError` there,
+# never merely a wrong value.
+# ---------------------------------------------------------------------------
+
+
+def test_detect_linux_pm_prefers_apt_and_never_probes_pacman():
+    """Order MUST agree with alp-sdk's own two detectors
+    (`scripts/bootstrap.sh`'s `LINUX_PM` block, `scripts/alp_cli/doctor.py`'s
+    `_prereq_linux_pm()`): `apt-get` checked before `dnf`, and a `pacman`-only
+    host (Arch) resolves to `None`, not a guess -- `install.linux` ships no
+    `pacman` sub-map at all."""
+    from tan.core.bootstrap import LINUX_PM_APT, LINUX_PM_DNF, detect_linux_pm
+
+    assert detect_linux_pm(lambda b: b in {"apt-get", "dnf"}) == LINUX_PM_APT
+    assert detect_linux_pm(lambda b: b == "dnf") == LINUX_PM_DNF
+    assert detect_linux_pm(lambda b: b == "pacman") is None
+    assert detect_linux_pm(lambda _b: False) is None
+
+
+def test_normalize_linux_install_recognises_the_pm_keyed_shape():
+    """The alp-sdk#1471 shape: every top-level value is a dict, keyed by
+    package manager -- passed through with non-string keys/values dropped,
+    the same defensive filter `_resolve_install_commands` already applies to
+    `macos`/`windows`."""
+    from tan.core.bootstrap import normalize_linux_install
+
+    raw = {
+        "apt": {"cmake": "sudo apt-get install -y cmake"},
+        "dnf": {"cmake": "sudo dnf install -y cmake", 7: "dropped: non-string key"},
+        7: {"cmake": "dropped: non-string pm key"},
+    }
+    normalized = normalize_linux_install(raw)
+    assert normalized == {
+        "apt": {"cmake": "sudo apt-get install -y cmake"},
+        "dnf": {"cmake": "sudo dnf install -y cmake"},
+    }
+
+
+def test_normalize_linux_install_reads_a_legacy_flat_manifest_as_apt():
+    """**Design decision (4).** A manifest predating alp-sdk#1471 declares
+    `install.linux` as a FLAT tool -> command map -- unconditionally Debian's,
+    the only content that key has ever carried until #1464 gave it a
+    package-manager dimension at all. Read here AS `apt`'s sub-map: a NEW tan
+    against an OLD `--sdk-root` still gets a real apt host working exactly as
+    it always did, and `select_linux_install` (below) never leaks it to a
+    `dnf`/other caller."""
+    from tan.core.bootstrap import LINUX_PM_APT, normalize_linux_install
+
+    legacy = {
+        "git": "sudo apt-get install -y git",
+        "cmake": "sudo apt-get install -y cmake",
+    }
+    assert normalize_linux_install(legacy) == {LINUX_PM_APT: legacy}
+
+
+def test_normalize_linux_install_degrades_malformed_or_empty_input_to_empty():
+    from tan.core.bootstrap import normalize_linux_install
+
+    assert normalize_linux_install(None) == {}
+    assert normalize_linux_install({}) == {}
+    assert normalize_linux_install("not a dict") == {}
+    # Not the legacy flat shape either -- `None` is neither a sub-map (the new
+    # shape) nor a command string (the legacy one), so this key contributes
+    # nothing under either reading.
+    assert normalize_linux_install({"apt": None}) == {}
+
+
+def test_select_linux_install_never_serves_one_pms_data_for_another():
+    from tan.core.bootstrap import select_linux_install
+
+    normalized = {
+        "apt": {"cmake": "sudo apt-get install -y cmake"},
+        "dnf": {"cmake": "sudo dnf install -y cmake"},
+    }
+    assert select_linux_install(normalized, "apt") == {"cmake": "sudo apt-get install -y cmake"}
+    assert select_linux_install(normalized, "dnf") == {"cmake": "sudo dnf install -y cmake"}
+    # No confirmed package manager -- empty, never a guess, and never falls
+    # back to whichever PM happens to be listed first.
+    assert select_linux_install(normalized, None) == {}
+    # A PM this manifest ships no sub-map for at all (Arch's `pacman`).
+    assert select_linux_install(normalized, "pacman") == {}
+
+
+def test_install_for_host_linux_needs_an_explicit_confirmed_package_manager():
+    """`install_for_host(LINUX)` with no `linux_pm` -- every call site before
+    tan-cli#760's second half -- must be an EMPTY map, not silently `apt`'s
+    data: a caller that has not confirmed a package manager on this host must
+    not get one anyway."""
+    from tan.core.bootstrap import LINUX, MACOS, fallback_facts
+
+    facts = fallback_facts((3, 12))
+    assert facts.install_for_host(LINUX) == {}
+    assert facts.install_for_host(LINUX, linux_pm=None) == {}
+    # Unaffected: `macos`/`windows` need no PM hop at all.
+    assert facts.install_for_host(MACOS) != {}
+
+
+def test_install_for_host_linux_selects_the_right_package_managers_submap():
+    from tan.core.bootstrap import LINUX, LINUX_PM_APT, LINUX_PM_DNF, fallback_facts
+
+    facts = fallback_facts((3, 12))
+    custom = {
+        **facts.install,
+        LINUX: {
+            LINUX_PM_APT: {"cmake": "sudo apt-get install -y cmake"},
+            LINUX_PM_DNF: {"cmake": "sudo dnf install -y cmake"},
+        },
+    }
+    facts = type(facts)(**{**vars(facts), "install": custom})
+
+    assert facts.install_for_host(LINUX, linux_pm=LINUX_PM_APT) == {
+        "cmake": "sudo apt-get install -y cmake"
+    }
+    assert facts.install_for_host(LINUX, linux_pm=LINUX_PM_DNF) == {
+        "cmake": "sudo dnf install -y cmake"
+    }
+    assert facts.install_for_host(LINUX, linux_pm="pacman") == {}
+
+
+# ---------------------------------------------------------------------------
 # tan-cli#495 defect 6: `manualInstallHints.posix.note` was dropped at parse,
 # at render, AND in the fallback -- three places, so no single one of them
 # looked like a gap.
