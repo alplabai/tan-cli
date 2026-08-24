@@ -110,16 +110,17 @@ jobs:
             machine: "0xaa64" # IMAGE_FILE_MACHINE_ARM64
     runs-on: ${{ matrix.os }}
     # tan-cli#855: no bound at all -- inherited GitHub's 360-minute default on
-    # a `workflow_dispatch`-only proof workflow nobody watches by default.
-    # Sized above clean-host.yml's `freeze-and-smoke` (20, the closest sibling
-    # -- the SAME freeze steps: clean venv, pip install, build_binary.sh) to
-    # cover the extra work this job does that freeze-and-smoke does not: TWO
-    # checkouts per leg (this repo + a full alp-sdk clone) and, when
-    # `inputs.verify` is true (the default), `verify_binary.sh`'s five
-    # per-asset proofs (version / --output / emit / init / CA trust anchors)
-    # on top of the arch check. Not sized to release.yml's `build` job (30):
-    # that job skips verify_binary.sh entirely, so this leg does strictly
-    # more per matrix entry.
+    # a `workflow_dispatch`-only proof workflow nobody watches by default. 45
+    # is a hang catcher, not a derived budget -- measured p100 across these
+    # legs is ~1.6 minutes on a real run (30675989571: windows 1.2/1.5, linux
+    # 0.7-0.9, macos 0.7/1.6; 30555358227 the same shape), so 45 is
+    # comfortably ~28x that, not a number sized to the extra work this job
+    # does relative to clean-host.yml's `freeze-and-smoke` (20). It carries
+    # more setup than that sibling -- TWO checkouts per leg (this repo + a
+    # full alp-sdk clone) and, when `inputs.verify` is true (the default),
+    # `verify_binary.sh`'s five per-asset proofs on top of the arch check --
+    # but the measured numbers above don't back a precise multiple, so this
+    # comment no longer claims one.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

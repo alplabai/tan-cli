@@ -92,12 +92,18 @@ PARITY = WORKFLOWS / "parity.yml"
 #: whole reason for being a name instead of a bare 120 in six places).
 _MAX_SANE_TIMEOUT_MINUTES = 120
 
-#: Matches a bare integer inside a GitHub Actions expression string, e.g. the
-#: `60` and `30` in `${{ inputs.sdk_parity && 60 || 30 }}`. Used only by
+#: Matches a STANDALONE integer inside a GitHub Actions expression string,
+#: e.g. the `60` and `30` in `${{ inputs.sdk_parity && 60 || 30 }}`. Anchored
+#: with lookaround (not `\b`, which sits between a word char and a non-word
+#: char and so never separates two adjacent word chars like a letter and a
+#: digit) so a digit run embedded in an IDENTIFIER is excluded: a future
+#: expression like `${{ inputs.py311 && 60 || 30 }}` must extract only `60`
+#: and `30`, not the `311` inside `py311`, or a perfectly fine 60/30 bound
+#: would fail the 1..120 range check on a phantom 311. Used only by
 #: `_assert_timeout_is_bounded` below, for the one job in this repo that
 #: spells `timeout-minutes` as a computed expression rather than a literal
 #: int (`ci.yml`'s `python` job -- see that function's docstring).
-_TIMEOUT_EXPR_INT_RE = re.compile(r"\d+")
+_TIMEOUT_EXPR_INT_RE = re.compile(r"(?<![A-Za-z0-9_.])\d+(?![A-Za-z0-9_.])")
 
 #: Jobs that must carry a timeout, named rather than derived, so that DELETING
 #: a job from parity.yml is visible here instead of quietly shrinking what this
@@ -135,10 +141,19 @@ def _triggers(workflow: dict) -> list[str]:
     return list(on or [])
 
 
+def _workflow_files(directory: Path) -> list[Path]:
+    """Every workflow file directly under `directory`, `.yml` AND `.yaml` --
+    GitHub Actions accepts both extensions for `.github/workflows/*`, so a
+    glob scoped to `.yml` alone gives a future `foo.yaml` zero coverage from
+    a gate whose whole premise is "no blind spot left" (tan-cli#854/#855
+    review)."""
+    return sorted([*directory.glob("*.yml"), *directory.glob("*.yaml")])
+
+
 @functools.cache
 def _pull_request_workflows() -> tuple[tuple[str, Path], ...]:
     found = []
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    for path in _workflow_files(WORKFLOWS):
         if "pull_request" in _triggers(_load(path)):
             found.append((path.name, path))
     return tuple(found)
@@ -157,12 +172,23 @@ def _all_workflows() -> tuple[tuple[str, Path], ...]:
     docstring for why that widening is deliberate and the concurrency half is
     not.
     """
-    return tuple((path.name, path) for path in sorted(WORKFLOWS.glob("*.yml")))
+    return tuple((path.name, path) for path in _workflow_files(WORKFLOWS))
+
+
+#: The ONLY `uses:` prefix that exempts a job below -- a LOCAL reusable
+#: workflow, whose own jobs this same test walks and bounds when it reads that
+#: file in its own right. `uses: some-org/repo/.github/workflows/x.yml@v1` (a
+#: CROSS-repo caller) does not start with this prefix and is therefore NOT
+#: exempt: nothing in this repo bounds a workflow it doesn't own, so a job
+#: that called out to one would sail through with GitHub's 360-minute default
+#: and nothing anywhere would catch it. Verified latent, not live -- no
+#: cross-repo caller exists in this repo today (tan-cli#854/#855 review).
+_LOCAL_REUSABLE_WORKFLOW_PREFIX = "./.github/workflows/"
 
 
 def _bounded_jobs(workflow: dict) -> dict[str, dict]:
     """Jobs that COULD carry `timeout-minutes` -- i.e. every job except a
-    reusable-workflow caller (`uses: ./.github/workflows/x.yml`).
+    LOCAL reusable-workflow caller (`uses: ./.github/workflows/x.yml`).
 
     GitHub does not accept `timeout-minutes` on a `uses:` job: the bound lives
     on the CALLED workflow's own jobs, which this same test asserts on when it
@@ -173,9 +199,19 @@ def _bounded_jobs(workflow: dict) -> dict[str, dict]:
     changes nothing -- tan-cli#854's own issue text flagged this exact shape
     before any code was written, which is why it is handled here rather than
     discovered as a false positive later.
+
+    A `uses:` job whose callee is NOT local (no `./.github/workflows/`
+    prefix -- a cross-repo reusable workflow) is deliberately NOT exempted
+    here: there is no local file for this test to walk and bound instead, so
+    letting it through would leave the job's runtime entirely unbounded with
+    nothing anywhere asserting on it.
     """
     jobs = workflow.get("jobs") or {}
-    return {job_id: job for job_id, job in jobs.items() if "uses" not in job}
+    return {
+        job_id: job
+        for job_id, job in jobs.items()
+        if not str(job.get("uses", "")).startswith(_LOCAL_REUSABLE_WORKFLOW_PREFIX)
+    }
 
 
 @functools.cache
@@ -240,20 +276,227 @@ def _assert_timeout_is_bounded(workflow_name: str, job_id: str, timeout: object)
     )
 
 
+def find_timeout_problems(root: Path) -> list[str]:
+    """Scan every workflow under `root/.github/workflows/` and return a
+    problem string per job that fails `_assert_timeout_is_bounded`, instead
+    of raising -- the same `find_problems(root) -> list[str]` shape
+    `test_apt_bounded.py` uses, so a synthetic `tmp_path` tree can prove the
+    widened gate actually fires rather than only proving it passes on this
+    repo's own clean tree.
+
+    Deliberately reuses `_assert_timeout_is_bounded` itself (catching the
+    `AssertionError`) rather than re-deriving the bound logic here: a second,
+    parallel implementation could drift from the real one and pass its own
+    tests while the real gate silently regressed.
+    """
+    problems: list[str] = []
+    workflows_dir = root / ".github" / "workflows"
+    if not workflows_dir.is_dir():
+        return problems
+    for path in _workflow_files(workflows_dir):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job_id, job in _bounded_jobs(workflow).items():
+            try:
+                _assert_timeout_is_bounded(path.name, job_id, job.get("timeout-minutes"))
+            except AssertionError as exc:
+                problems.append(str(exc))
+    return problems
+
+
+def _write_timeout_workflow(root: Path, name: str, jobs_body: str) -> None:
+    workflows_dir = root / ".github" / "workflows"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    (workflows_dir / name).write_text(
+        f"""\
+name: example
+on: [push]
+jobs:
+{jobs_body}
+""",
+        encoding="utf-8",
+    )
+
+
+def test_find_timeout_problems_on_a_clean_tree_is_empty(tmp_path: Path) -> None:
+    _write_timeout_workflow(
+        tmp_path,
+        "clean.yml",
+        "  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n"
+        "    steps:\n      - run: echo hi\n",
+    )
+    assert find_timeout_problems(tmp_path) == []
+
+
+def test_missing_bound_is_caught(tmp_path: Path) -> None:
+    """The MAJOR review finding this whole block exists to fix: before this
+    change, nothing proved the widened gate could fail at all -- only a
+    hand-run recorded in the PR body ("11 failed, 34 passed") backed it."""
+    _write_timeout_workflow(
+        tmp_path,
+        "missing.yml",
+        "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n",
+    )
+    problems = find_timeout_problems(tmp_path)
+    assert len(problems) == 1
+    assert "missing.yml" in problems[0] and "declares no" in problems[0]
+
+
+def test_zero_bound_is_caught(tmp_path: Path) -> None:
+    _write_timeout_workflow(
+        tmp_path,
+        "zero.yml",
+        "  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 0\n"
+        "    steps:\n      - run: echo hi\n",
+    )
+    problems = find_timeout_problems(tmp_path)
+    assert len(problems) == 1
+    assert "zero.yml" in problems[0] and "outside 1.." in problems[0]
+
+
+def test_out_of_range_bound_is_caught(tmp_path: Path) -> None:
+    """360 -- GitHub's own job default -- is exactly the value #855 exists to
+    reject: a bound AT the default is the default wearing a number, not a
+    hang catcher."""
+    _write_timeout_workflow(
+        tmp_path,
+        "toolong.yml",
+        "  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 360\n"
+        "    steps:\n      - run: echo hi\n",
+    )
+    problems = find_timeout_problems(tmp_path)
+    assert len(problems) == 1
+    assert "toolong.yml" in problems[0] and "outside 1.." in problems[0]
+
+
+def test_bare_string_bound_with_no_integer_is_caught(tmp_path: Path) -> None:
+    _write_timeout_workflow(
+        tmp_path,
+        "barestring.yml",
+        '  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: "soon"\n'
+        "    steps:\n      - run: echo hi\n",
+    )
+    problems = find_timeout_problems(tmp_path)
+    assert len(problems) == 1
+    assert "barestring.yml" in problems[0] and "no integer literal" in problems[0]
+
+
+def test_expression_with_out_of_range_literal_is_caught(tmp_path: Path) -> None:
+    """The string-expression branch (`ci.yml`'s `python` job shape) had only
+    ONE all-green real input (`inputs.sdk_parity`, which carries no digits at
+    all) backing it -- this fixture forces the branch to actually reject
+    something."""
+    _write_timeout_workflow(
+        tmp_path,
+        "expr.yml",
+        "  build:\n    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: ${{ inputs.big && 400 || 30 }}\n"
+        "    steps:\n      - run: echo hi\n",
+    )
+    problems = find_timeout_problems(tmp_path)
+    assert len(problems) == 1
+    assert "expr.yml" in problems[0] and "400" in problems[0]
+
+
+def test_expression_digits_embedded_in_an_identifier_are_not_extracted(
+    tmp_path: Path,
+) -> None:
+    """tan-cli#854/#855 review finding: `${{ inputs.py311 && 60 || 30 }}`
+    must bound on 60/30, never on the phantom `311` inside the identifier
+    `py311` -- proves `_TIMEOUT_EXPR_INT_RE`'s anchoring, not just its
+    presence."""
+    _write_timeout_workflow(
+        tmp_path,
+        "identdigits.yml",
+        "  build:\n    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: ${{ inputs.py311 && 60 || 30 }}\n"
+        "    steps:\n      - run: echo hi\n",
+    )
+    assert find_timeout_problems(tmp_path) == []
+
+
+def test_local_reusable_workflow_caller_is_exempt(tmp_path: Path) -> None:
+    """The `uses:`-caller exclusion (release.yml's `gates` / `python-gates`
+    shape) had only two all-green real inputs backing it -- this fixture
+    proves a LOCAL caller is actually skipped, not merely that it happens not
+    to be flagged today."""
+    _write_timeout_workflow(
+        tmp_path,
+        "localcaller.yml",
+        "  gates:\n    uses: ./.github/workflows/other.yml\n",
+    )
+    assert find_timeout_problems(tmp_path) == []
+
+
+def test_cross_repo_uses_caller_is_not_exempt(tmp_path: Path) -> None:
+    """tan-cli#854/#855 review finding: a job that calls a workflow in
+    ANOTHER repo has no local file for this gate to walk and bound instead,
+    so it must NOT be swept into the same exemption as a local caller.
+    Verified latent, not live -- no cross-repo caller exists in this repo
+    today."""
+    _write_timeout_workflow(
+        tmp_path,
+        "crosscaller.yml",
+        "  gates:\n    uses: some-org/repo/.github/workflows/x.yml@v1\n",
+    )
+    problems = find_timeout_problems(tmp_path)
+    assert len(problems) == 1
+    assert "crosscaller.yml" in problems[0] and "declares no" in problems[0]
+
+
+def test_this_repos_own_workflows_produce_no_timeout_problems() -> None:
+    """The real thing this gate exists to guard, in the same
+    `find_problems(REPO_ROOT) == []` shape `test_apt_bounded.py` closes on --
+    kept alongside (not instead of) the parametrised
+    `test_every_job_in_every_workflow_is_bounded` below, which gives a
+    per-case failure name in a test run rather than one bundled assertion."""
+    problems = find_timeout_problems(REPO_ROOT)
+    assert problems == [], "\n".join(problems)
+
+
+#: The four non-pull_request workflows tan-cli#855 named as carrying
+#: unbounded jobs, mapped to the MINIMUM count of bounded jobs each must
+#: still contribute -- not just presence. Presence alone let a shrink from
+#: `release.yml`'s real 5 bounded jobs (`verify-version`, `build`, `release`,
+#: `publish_npm`, `release_gate` -- `gates`/`python-gates` stay excluded as
+#: LOCAL `uses:` callers) down to 1 pass silently, since the old check only
+#: asked "is release.yml in the set at all". Counts below are the actual
+#: current counts; a future PR that drops a job updates this dict on purpose,
+#: the same anti-shrink shape `_PARITY_JOBS` gives `parity.yml`.
+_MIN_BOUNDED_JOBS = {
+    "release.yml": 5,
+    "python-binaries.yml": 4,
+    "planner-resync.yml": 1,
+    "release-combination.yml": 2,
+}
+
+
 def test_the_every_workflow_job_set_is_not_empty():
     """Anti-vacuity for the generalised test, mirroring the pull_request-only
     version below. If `_bounded_jobs` or the `jobs:` parse ever stopped
     matching, every parametrised case would vanish and the checks would pass
-    having examined nothing."""
+    having examined nothing. Also guards against a silent SHRINK: presence of
+    a workflow name in the collected set says nothing about how many of its
+    jobs actually got counted, so each of the four is additionally held to a
+    minimum bounded-job count."""
     cases = _every_workflow_job_cases()
     assert cases, "no (workflow, job) pairs were collected across .github/workflows/ at all"
-    names = {name for name, _ in cases}
-    for expected in ("release.yml", "python-binaries.yml", "planner-resync.yml"):
-        assert expected in names, (
-            f"{expected} contributed no bounded job to this gate ({sorted(names)}) "
+    counts: dict[str, int] = {}
+    for name, _ in cases:
+        counts[name] = counts.get(name, 0) + 1
+    for expected, minimum in _MIN_BOUNDED_JOBS.items():
+        assert expected in counts, (
+            f"{expected} contributed no bounded job to this gate ({sorted(counts)}) "
             f"-- it is one of the four non-pull_request workflows tan-cli#855 "
             f"named as carrying unbounded jobs; if it now has zero bounded "
             f"jobs, `_bounded_jobs`/`_load` stopped parsing it correctly."
+        )
+        assert counts[expected] >= minimum, (
+            f"{expected} contributed only {counts[expected]} bounded job(s) to "
+            f"this gate, below the {minimum} it had when this floor was set -- "
+            f"a job disappeared from `_bounded_jobs`'s view of this file "
+            f"(renamed, refactored into a `uses:` caller, or the parse broke) "
+            f"without anyone updating `_MIN_BOUNDED_JOBS` to say that was "
+            f"intentional."
         )
 
 

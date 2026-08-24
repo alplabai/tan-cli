@@ -93,7 +93,11 @@ _ALLOW_MARKER = "# apt-bounded:allow"
 def _target_files(root: Path):
     workflows_dir = root / ".github" / "workflows"
     if workflows_dir.is_dir():
-        yield from sorted(workflows_dir.glob("*.yml"))
+        # GitHub Actions accepts both `.yml` and `.yaml`; a `.yml`-only glob
+        # gives a future `.yaml` workflow zero coverage from this gate
+        # (tan-cli#854/#855 review, same pattern fixed in
+        # test_parity_workflow_concurrency_and_timeouts.py).
+        yield from sorted([*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")])
     scripts_dir = root / "scripts"
     if scripts_dir.is_dir():
         yield from sorted(scripts_dir.rglob("*.sh"))
