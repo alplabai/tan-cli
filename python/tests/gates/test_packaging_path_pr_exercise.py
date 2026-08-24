@@ -71,6 +71,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -144,9 +145,13 @@ def _strip_comment_lines(body: str) -> str:
 #: Matches the shell invocation that opens a single-quoted docker script
 #: argument: `bash -euc '` (release.yml, clean-host.yml, getting-started.yml,
 #: e2e-container.yml) as well as `sh -c '` / `bash -c '`
-#: (python-binaries.yml's musl and glibc legs). All of these carry the
-#: identical single-quote-inside-a-YAML-scalar apostrophe defect.
-_DOCKER_MARKER = re.compile(r"\b(?:ba)?sh -[a-z]*c '")
+#: (python-binaries.yml's musl and glibc legs), plus `dash`/`zsh`/`ksh` and a
+#: split-flags form (`bash -e -u -c '`) that none of today's workflows use but
+#: would carry the identical defect if one ever did. Still not exhaustive: an
+#: invocation via a full interpreter path (`/usr/bin/bash -c '`) or a `-c`
+#: that isn't the LAST flag before the quote (`bash -c -u '`, not valid bash
+#: anyway) would still slip past this -- cheap widening, not a shell grammar.
+_DOCKER_MARKER = re.compile(r"\b(?:ba|da|z|k)?sh\b(?:\s+-\S+)*\s+-\S*c\s*'")
 
 #: A line that is JUST a closing quote (whitespace either side). This repo's
 #: `bash -euc '...'` bodies always place their closing quote alone on its own
@@ -164,7 +169,11 @@ _STANDALONE_QUOTE_LINE = re.compile(r"^[ \t]*'[ \t]*$", re.MULTILINE)
 
 
 def _indent(line: str) -> int:
-    return len(line) - len(line.lstrip(" "))
+    # `" \t"`, not just `" "`: GitHub Actions YAML in this repo is
+    # space-indented today, but a tab-indented block would otherwise mis-bound
+    # the indentation fallback in `_docker_shell_snippet` (a tab does not
+    # `lstrip(" ")`, so every line would measure as equally, fully indented).
+    return len(line) - len(line.lstrip(" \t"))
 
 
 def _docker_shell_snippet(body: str, match: re.Match[str]) -> str | None:
@@ -174,7 +183,18 @@ def _docker_shell_snippet(body: str, match: re.Match[str]) -> str | None:
     honour" (see `_STANDALONE_QUOTE_LINE`'s docstring for why that always
     finds a spuriously-valid answer).
 
-    Two structural signals, tried in order:
+    Bounded to ``scope_end`` -- the start of the NEXT `_DOCKER_MARKER` match
+    in the same body, or end-of-body if there is none -- before either signal
+    below is tried. Without this bound, a marker whose own block has no
+    standalone closing-quote line (an inline `'` terminator followed by more
+    on the same line, or simply a shape neither signal recognises) lets the
+    FIRST signal's search run past this marker's own content into a LATER
+    marker's block and return an over-wide, wrong slice instead of failing --
+    measured: a 2-line block sliced as 5, swallowing the intervening
+    `docker run ... bash -euc '` line and the entire next block whole.
+
+    Two structural signals, tried in order, both confined to ``[start,
+    scope_end)``:
 
     1. The FIRST standalone closing-quote line after the marker. Covers
        `bash -euc '...'` (release.yml, clean-host.yml, getting-started.yml,
@@ -187,17 +207,27 @@ def _docker_shell_snippet(body: str, match: re.Match[str]) -> str | None:
     2. A fallback for python-binaries.yml's shape, which has no standalone
        quote line -- its closing quote is the LAST character of its LAST
        content line, immediately followed by a dedent (`else`/`fi`). Bounded
-       by INDENTATION: every line more deeply indented than the marker's own
-       line belongs to this docker block; the first line back at the
-       marker's indentation or shallower ends it. Within that block, the
-       closing quote is the LAST line (scanned forward, so the true final
-       line wins over the close/reopen splice trick's own `'`-ending line,
-       e.g. `'"$BUILD_DEPS"'`) whose content ends with `'`. A `'` planted
-       mid-line (`# don't`) does not itself END its line, so it is not
-       mistaken for this either.
+       by INDENTATION (and by ``scope_end``): every line more deeply indented
+       than the marker's own line belongs to this docker block; the first
+       line back at the marker's indentation or shallower ends it. Within
+       that block, the closing quote is the LAST line (scanned forward, so
+       the true final line wins over the close/reopen splice trick's own
+       `'`-ending line, e.g. `'"$BUILD_DEPS"'`) whose content ends with `'`.
+       A `'` planted mid-line (`# don't`) does not itself END its line, so it
+       is not mistaken for this either.
+
+    Returns ``None`` if NEITHER signal bounds a close within scope -- e.g. a
+    closing quote that carries trailing text on its own line
+    (`make' && echo built`, no standalone line; not the LAST line of a
+    more-indented block ending in `'` either, since it doesn't end in `'` at
+    all). The caller must treat ``None`` as a hard failure, not a silent
+    drop -- see `test_every_docker_shell_marker_is_boundable`.
     """
     start = match.end()
-    close = _STANDALONE_QUOTE_LINE.search(body, start)
+    next_marker = _DOCKER_MARKER.search(body, start)
+    scope_end = next_marker.start() if next_marker else len(body)
+
+    close = _STANDALONE_QUOTE_LINE.search(body, start, scope_end)
     if close:
         return body[match.start() : close.end()]
 
@@ -213,6 +243,8 @@ def _docker_shell_snippet(body: str, match: re.Match[str]) -> str | None:
     marker_indent = _indent(lines[marker_line_idx])
     close_line_idx = None
     for idx in range(marker_line_idx + 1, len(lines)):
+        if offsets[idx] >= scope_end:
+            break
         line = lines[idx]
         if line.strip() == "":
             continue
@@ -226,18 +258,19 @@ def _docker_shell_snippet(body: str, match: re.Match[str]) -> str | None:
     return body[match.start() : end]
 
 
-def _docker_shell_snippets() -> list[tuple[str, str, str]]:
-    """``(workflow, job, snippet)`` for every single-quoted docker shell
-    argument across EVERY workflow file, sliced down to just the argument
-    itself -- not the whole `run:` body. See `_docker_shell_snippet`'s
-    docstring for why the whole body is the wrong thing to check and how the
-    boundary is found instead.
+def _docker_shell_snippets() -> tuple[list[tuple[str, str, str]], list[str]]:
+    """``(found, unbounded)`` -- ``found`` is ``(workflow, job, snippet)`` for
+    every single-quoted docker shell argument `_docker_shell_snippet` could
+    bound, across EVERY workflow file; ``unbounded`` is a diagnostic string
+    per `_DOCKER_MARKER` match it could NOT bound (see that function's
+    docstring for why ``None`` must not just be filtered out here).
 
     A `run:` body may open more than one such argument (python-binaries.yml's
     `build` step has both a musl `sh -c '...'` leg and a glibc
     `bash -c '...'` leg in one step) -- every occurrence is its own entry.
     """
     found: list[tuple[str, str, str]] = []
+    unbounded: list[str] = []
     for path in sorted(WORKFLOWS.glob("*.y*ml")):
         workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
         for job_name, job in (workflow.get("jobs") or {}).items():
@@ -249,22 +282,55 @@ def _docker_shell_snippets() -> list[tuple[str, str, str]]:
                     snippet = _docker_shell_snippet(body, match)
                     if snippet is not None:
                         found.append((path.name, job_name, snippet))
-    return found
+                    else:
+                        unbounded.append(
+                            f"{path.name}:{job_name} @ offset {match.start()} "
+                            f"({match.group(0)!r})"
+                        )
+    return found, unbounded
 
 
-_DOCKER_SHELL_SNIPPETS = _docker_shell_snippets()
+_DOCKER_SHELL_SNIPPETS, _UNBOUNDED_DOCKER_MARKERS = _docker_shell_snippets()
 
-#: Every workflow known, at authoring time, to carry a single-quoted docker
-#: shell argument with this shape. If the sweep stops covering one of these,
-#: that must fail loudly rather than silently shrink -- the same failure
-#: mode `test_no_workflow_carries_an_inline_copy_of_the_scan` guards against
-#: for the scan itself.
-_EXPECTED_DOCKER_SHELL_WORKFLOWS = {
-    "release.yml",
-    "clean-host.yml",
-    "getting-started.yml",
-    "e2e-container.yml",
-    "python-binaries.yml",
+
+def _docker_shell_snippet_ids(entries: list[tuple[str, str, str]]) -> list[str]:
+    """``f"{workflow}:{job}:{ordinal}"`` ids for `_DOCKER_SHELL_SNIPPETS`,
+    where ``ordinal`` counts occurrences WITHIN each ``(workflow, job)`` pair
+    rather than a single index across the whole list. A global `enumerate`
+    index means adding a docker body to an alphabetically-EARLIER workflow
+    renumbers every id after it -- a pinned `-k` selection or a CI-log
+    reference to e.g. `python-binaries.yml:linux:3` goes stale for a reason
+    that has nothing to do with python-binaries.yml itself.
+    """
+    seen: dict[tuple[str, str], int] = {}
+    ids = []
+    for workflow, job, _ in entries:
+        ordinal = seen.get((workflow, job), 0)
+        seen[(workflow, job)] = ordinal + 1
+        ids.append(f"{workflow}:{job}:{ordinal}")
+    return ids
+
+
+_DOCKER_SHELL_SNIPPET_IDS = _docker_shell_snippet_ids(_DOCKER_SHELL_SNIPPETS)
+
+#: The exact NUMBER of single-quoted docker shell arguments known, at
+#: authoring time, to exist per workflow -- a COUNT, not a name set. A name
+#: set only catches a workflow losing its LAST occurrence; python-binaries.yml
+#: carries two (a musl `sh -c '...'` leg and a glibc `bash -c '...'` leg), so
+#: a set would still report it "covered" if one of the two silently dropped
+#: (e.g. became unbounded -- see `test_every_docker_shell_marker_is_boundable`,
+#: which is the primary guard for that specific failure, but this catches it
+#: too, and also catches an unexpected EXTRA occurrence appearing). If the
+#: sweep's count for any of these drifts, that must fail loudly rather than
+#: silently shrink or grow -- the same failure mode
+#: `test_no_workflow_carries_an_inline_copy_of_the_scan` guards against for
+#: the extracted scan.
+_EXPECTED_DOCKER_SHELL_OCCURRENCES = {
+    "release.yml": 1,
+    "clean-host.yml": 1,
+    "getting-started.yml": 1,
+    "e2e-container.yml": 1,
+    "python-binaries.yml": 2,
 }
 
 
@@ -396,7 +462,7 @@ def test_the_tag_leg_is_still_tag_only():
 @pytest.mark.parametrize(
     "workflow,job,snippet",
     _DOCKER_SHELL_SNIPPETS,
-    ids=[f"{w}:{j}:{i}" for i, (w, j, _) in enumerate(_DOCKER_SHELL_SNIPPETS)],
+    ids=_DOCKER_SHELL_SNIPPET_IDS,
 )
 def test_every_single_quoted_docker_body_parses_as_shell(workflow, job, snippet):
     # All required legs ship a bash (Git Bash on windows-latest), so the
@@ -429,6 +495,24 @@ def test_every_single_quoted_docker_body_parses_as_shell(workflow, job, snippet)
     )
 
 
+def test_every_docker_shell_marker_is_boundable():
+    # `_docker_shell_snippets()` used to just `if snippet is not None` a
+    # marker `_DOCKER_MARKER` matched but whose closing quote
+    # `_docker_shell_snippet` could not locate -- so a shape neither
+    # structural signal understands (a closing quote carrying trailing text
+    # on its own line, `make' && echo built`) vanished from the parametrized
+    # sweep below with no case, no skip, and no failure. A marker the sweep
+    # MATCHED must always end up either checked or loudly refused here --
+    # never silently dropped.
+    assert _UNBOUNDED_DOCKER_MARKERS == [], (
+        f"{_UNBOUNDED_DOCKER_MARKERS} matched _DOCKER_MARKER but "
+        "_docker_shell_snippet could not bound where the argument closes. "
+        "Either teach it this shape, or this marker never gets a `bash -n` "
+        "check at all -- see _docker_shell_snippet's docstring for the two "
+        "signals it already understands."
+    )
+
+
 def test_the_docker_shell_sweep_covers_every_known_workflow():
     # Guards the sweep itself: if _docker_shell_snippets() stopped finding a
     # single-quoted docker argument in one of these files -- glob miss, a
@@ -436,11 +520,17 @@ def test_the_docker_shell_sweep_covers_every_known_workflow():
     # run fewer cases rather than fail. That is the same silent-shrink shape
     # `test_no_workflow_carries_an_inline_copy_of_the_scan` guards against for
     # the extracted scan.
-    covered = {w for w, _, _ in _DOCKER_SHELL_SNIPPETS}
-    missing = _EXPECTED_DOCKER_SHELL_WORKFLOWS - covered
-    assert not missing, (
-        f"{sorted(missing)} no longer carry a single-quoted docker shell "
-        "argument. If that shape was removed on purpose, shrink "
-        "_EXPECTED_DOCKER_SHELL_WORKFLOWS to match; if not, the sweep just "
-        "lost coverage silently."
+    #
+    # Counted, not just named: a bare name set only catches a workflow losing
+    # its LAST occurrence. python-binaries.yml carries two arguments in one
+    # job; a set-based check would still call it "covered" if one of the two
+    # silently dropped while the other kept the workflow's name in the set.
+    covered = Counter(w for w, _, _ in _DOCKER_SHELL_SNIPPETS)
+    expected = Counter(_EXPECTED_DOCKER_SHELL_OCCURRENCES)
+    assert covered == expected, (
+        f"the sweep found {dict(covered)} single-quoted docker shell "
+        f"argument(s) per workflow, expected {dict(expected)}. If a shape "
+        "was added or removed on purpose, update "
+        "_EXPECTED_DOCKER_SHELL_OCCURRENCES to match; if not, the sweep "
+        "gained or lost coverage silently."
     )
