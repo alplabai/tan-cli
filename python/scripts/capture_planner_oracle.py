@@ -160,9 +160,13 @@ def normalise(text: str, sdk: Path) -> str:
     :return: the same text with the capture host's layout removed.
 
     Both the POSIX and the native spelling are substituted: `emit_build_plan`
-    writes `str(Path)`, which is backslashed on Windows, while a golden
-    captured on Linux carries forward slashes. Normalising both means a
-    Windows capture and a Linux capture of the same tree agree.
+    writes `Path(board_yaml).as_posix()` for `boardYaml`, as does every other
+    path field in the plan, so the POSIX spelling is what actually appears --
+    but other text captured alongside it (an exception message, a warning
+    built from `str(e)`) is free to carry the native, backslashed spelling on
+    Windows. Substituting both spellings unconditionally is what makes a
+    Windows capture and a Linux capture of the same tree agree, without
+    having to prove which fields are POSIX-normalised and which are not.
     """
     for spelling in (sdk.as_posix(), str(sdk)):
         text = text.replace(spelling, SDK_TOKEN)

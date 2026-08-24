@@ -166,9 +166,6 @@ def _goldens() -> list[tuple[str, str, Path]]:
     checkout has and the fixture does not is an uncaptured board, and it must
     surface as a missing golden rather than as a case nobody ran.
     """
-    by_suffix = {}
-    for mode, extension in _EXTENSION.items():
-        by_suffix.setdefault(extension, []).append(mode)
     found: list[tuple[str, str, Path]] = []
     for path in sorted(EMITS.rglob("*")):
         if not path.is_file():
@@ -176,6 +173,29 @@ def _goldens() -> list[tuple[str, str, Path]]:
         board_rel = path.parent.relative_to(EMITS).as_posix()
         mode = path.name.rsplit(".", 1)[0]
         if mode in _EXTENSION:
+            # `capture_planner_oracle.py` names a golden `<mode><ext>` on
+            # success or `<mode>.error` on a captured error-contract case
+            # (see its `target = ...` branch above `errors += 1`). Matching
+            # on the mode name alone, as this loop otherwise would, cannot
+            # tell "captured with the mapping's own extension" apart from
+            # "some other file that happens to start with a known mode name
+            # followed by a dot" -- e.g. a golden renamed
+            # `system-manifest.yaml` -> `system-manifest.json` would still
+            # match `mode in _EXTENSION` and silently compare as YAML-shaped
+            # text under the wrong suffix. Asserting the suffix here is what
+            # makes the module docstring's claim -- "if the capture tool's
+            # mapping changes, this module must fail rather than silently
+            # follow it" -- actually true, instead of merely stated.
+            assert path.suffix in (_EXTENSION[mode], ".error"), (
+                f"{path} has mode {mode!r} but suffix {path.suffix!r}, which "
+                f"is neither {_EXTENSION[mode]!r} (this mapping's own "
+                f"extension for {mode!r}) nor '.error'. Either the capture "
+                "tool's mode->extension mapping changed and _EXTENSION here "
+                "was not updated to match, or this golden was hand-edited "
+                "into an inconsistent name. Regenerate the fixture with "
+                "scripts/capture_planner_oracle.py rather than renaming a "
+                "golden by hand."
+            )
             found.append((board_rel, mode, path))
     return found
 
@@ -238,11 +258,26 @@ sys.stdout.write(json.dumps(out))
 def rendered() -> dict[str, list[str]]:
     """Every `tan` emit over the frozen checkout, from one cold child process."""
     assert ORACLE is not None
-    result = subprocess.run(
-        [sys.executable, "-c", _CHILD, str(ORACLE), ",".join(_EXTENSION)],
-        capture_output=True, text=True, cwd=str(REPO_PYTHON),
-        env={**os.environ, "PYTHONPATH": str(REPO_PYTHON)},
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _CHILD, str(ORACLE), ",".join(_EXTENSION)],
+            capture_output=True, text=True, cwd=str(REPO_PYTHON),
+            env={**os.environ, "PYTHONPATH": str(REPO_PYTHON)},
+            # A wedged render child (an emitter that hangs rather than raises)
+            # would otherwise ride the parity leg to its 45-minute job cap
+            # instead of producing the stderr[-4000:] diagnostic the assert
+            # below was written for. 300s is generous for one interpreter
+            # start rendering 700 emits (measured well under that locally);
+            # `TimeoutExpired` still carries whatever the child had written to
+            # stderr before it was killed, so the diagnostic below survives.
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            "the render child did not finish within 300s, so nothing was "
+            "compared:\n"
+            f"{(exc.stderr or '')[-4000:]}"
+        )
     assert result.returncode == 0, (
         "the render child failed, so nothing was compared:\n"
         f"{result.stderr[-4000:]}"

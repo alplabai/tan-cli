@@ -1960,7 +1960,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -f "${ALP_PLANNER_ORACLE_ROOT}/metadata/catalog.json" ]; then
-            echo "::error::ALP_PLANNER_ORACLE_ROOT is bound to ${ALP_PLANNER_ORACLE_ROOT}, which has no metadata/catalog.json -- test_planner_oracle_regression.py would SKIP all 702 of its cases while this job reported green. Fix the 'clone alp-sdk at the frozen planner-oracle commit' step above."
+            echo "::error::ALP_PLANNER_ORACLE_ROOT is bound to ${ALP_PLANNER_ORACLE_ROOT}, which has no metadata/catalog.json -- test_planner_oracle_regression.py would SKIP all 703 of its cases while this job reported green. Fix the 'clone alp-sdk at the frozen planner-oracle commit' step above."
             exit 1
           fi
           if [ ! -f "${ALP_SDK_ROOT}/scripts/alp_project.py" ]; then
@@ -1991,8 +1991,41 @@ jobs:
           set +e
           python -m pytest -v "${GUARD}" 2>&1 | tee /tmp/parity-guard.log
           set -e
-          if ! grep -qF "${GUARD#tests/parity/} PASSED" /tmp/parity-guard.log; then
-            echo "::error::${GUARD} did not PASS in this job. ALP_SDK_ROOT is bound here, so this is one of two things, and the pytest output above says which: a FAIL means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/); a SKIP means the guard itself regressed to fail-open. Either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
+          GUARD_NODEID="${GUARD#tests/parity/}"
+          # tan-cli#509 widened the guard itself to SKIP (not fail) when
+          # scripts/alp_orchestrate/ is gone AND its replacement -- the frozen
+          # oracle read by test_planner_oracle_regression.py -- is bound and
+          # ready. That SKIP is the PROVEN post-#270 state and must not exit 1
+          # here just because it is not PASSED; but this block cannot take the
+          # guard's word for "the replacement is bound" on trust either, or a
+          # widened SKIP with a broken replacement underneath it would read as
+          # green having compared nothing -- the exact defect this whole guard
+          # exists to red. So a SKIP is accepted ONLY when this block
+          # independently confirms the same two things
+          # test_planner_parity_actually_ran.py::_replacement_layer_is_live
+          # checks (ALP_PLANNER_ORACLE_ROOT/metadata present, the fixture
+          # directory non-empty -- both already asserted above, before this
+          # step, so re-checking here also protects against the two checks
+          # drifting apart) AND that the replacement module actually collected
+          # more than zero cases -- a bound-but-empty fixture, or a module that
+          # failed to collect at all, would otherwise let a SKIP through
+          # unchallenged.
+          if grep -qF "${GUARD_NODEID} PASSED" /tmp/parity-guard.log; then
+            : # scripts/alp_orchestrate/ is present -- the byte-parity suite itself ran.
+          elif grep -qF "${GUARD_NODEID} SKIPPED" /tmp/parity-guard.log; then
+            echo "::notice::${GUARD} SKIPPED -- scripts/alp_orchestrate/ is retired upstream. Verifying the tan-cli#509 replacement (test_planner_oracle_regression.py) is actually bound and collects cases before accepting the SKIP."
+            set +e
+            python -m pytest -q --collect-only tests/parity/test_planner_oracle_regression.py > /tmp/oracle-collect.log 2>&1
+            collect_status=$?
+            set -e
+            collected="$(grep -oE '[0-9]+ tests? collected' /tmp/oracle-collect.log | grep -oE '^[0-9]+' | head -1)"
+            if [ "${collect_status}" -ne 0 ] || [ -z "${collected}" ] || [ "${collected}" -eq 0 ]; then
+              echo "::error::${GUARD} SKIPPED, which is only legitimate when test_planner_oracle_regression.py is standing in for it -- but that module collected ${collected:-0} cases (exit ${collect_status}) against the SAME ALP_PLANNER_ORACLE_ROOT this job already confirmed has a metadata/catalog.json above. A SKIP that is not backed by a running replacement is the exact silent coverage cliff tan-cli#500 exists to red. See /tmp/oracle-collect.log."
+              exit 1
+            fi
+            echo "::notice::test_planner_oracle_regression.py collected ${collected} cases -- the SKIP above is a legitimate handoff to the tan-cli#509 replacement layer, not a regression."
+          else
+            echo "::error::${GUARD} neither PASSED nor SKIPPED in this job. ALP_SDK_ROOT is bound here, so this is one of two things, and the pytest output above says which: a FAIL means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/) and the tan-cli#509 replacement is not live either; or the guard itself regressed to some other outcome entirely. Either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
             exit 1
           fi
           # The guard run above is NOT sharded (a bare node-id invocation,
