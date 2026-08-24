@@ -448,45 +448,17 @@ jobs:
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
             /tmp/venv/bin/pip install --quiet pytest pyelftools
             /tmp/venv/bin/python -m pytest tests/conformance/test_packaged_binary.py -q
-            /tmp/venv/bin/python - <<"PY"
-          import pathlib, sys
-          from elftools.common.exceptions import ELFError
-          from elftools.elf.elffile import ELFFile
-          from elftools.elf.gnuversions import GNUVerNeedSection
-
-          # The shipped onedir tree, not a build intermediate: dist/tan/tan plus
-          # everything under dist/tan/_internal/ (libpython, the extension
-          # modules, and their .so dependencies).
-          root = pathlib.Path("dist/tan")
-          if not root.is_dir():
-              sys.exit("dist/tan/ is missing -- the onedir freeze did not produce "
-                       "the tree this floor scan measures")
-          paths, vers = [], set()
-          for p in sorted(root.rglob("*")):
-              if not p.is_file():
-                  continue
-              try:
-                  with open(p, "rb") as f:
-                      if f.read(4) != b"\x7fELF":
-                          continue
-                      f.seek(0)
-                      elf = ELFFile(f)
-                      paths.append(str(p))
-                      for sec in elf.iter_sections():
-                          if isinstance(sec, GNUVerNeedSection):
-                              for _, auxes in sec.iter_versions():
-                                  vers.update(a.name for a in auxes
-                                              if a.name.startswith("GLIBC_"))
-              except (ELFError, OSError):
-                  continue
-          if len(paths) < 5 or not vers:
-              sys.exit("payload scan found %d native files / %d GLIBC_ versions under "
-                       "dist/tan/ -- refusing to guess a floor" % (len(paths), len(vers)))
-          floor = max(vers, key=lambda v: tuple(int(n) for n in v.split("_")[1].split(".")))
-          open("dist/glibc-floor.txt", "w").write(floor + "\n")
-          print("payload floor over %d native files: %s (saw: %s)"
-                % (len(paths), floor, " ".join(sorted(vers))))
-          PY
+            # tan-cli#450: the scan is scripts/glibc_floor_scan.py, not a
+            # heredoc, so the PR-time freeze in clean-host.yml runs THIS code
+            # rather than a copy of it, and the refusal is unit-testable off a
+            # runner. The heredoc was tag-only, which is why the --onedir
+            # switch in tan-cli#349 was first noticed by a spent v0.5.0.
+            #
+            # NOTE FOR EDITORS: no apostrophes in this docker body -- it is
+            # inside bash -euc with SINGLE quotes, so one closes the string and
+            # the leg dies at runtime on a tag. yaml lint cannot see it;
+            # tests/gates/test_packaging_path_pr_exercise.py can.
+            /tmp/venv/bin/python scripts/glibc_floor_scan.py
           '
 
       # Its own artifact, NOT part of the asset set -- the release job pulls the
