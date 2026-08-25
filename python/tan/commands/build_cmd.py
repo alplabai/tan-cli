@@ -1495,8 +1495,11 @@ def _build(
 
     # Substitution runs on the in-memory plan BEFORE materialise writes
     # anything and before any command is assembled, so an unresolvable token
-    # can never reach disk or an argv. A no-op on an untokened plan (every
-    # plan the SDK emits today).
+    # can never reach disk or an argv. A no-op on an untokened plan --
+    # reachable via `--plan-from` handing in an older or hand-authored
+    # untokened plan; tan's own in-process planner tags `planPathMode:
+    # "tokened"` unconditionally (`buildplan.py:636`), so this is not "every
+    # plan the SDK emits today" any more (tan-cli#853).
     toolchain = _toolchain_for_plan(text)
     try:
         plan, demotions = apply_plan_token_substitution(
