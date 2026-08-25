@@ -212,3 +212,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_worst_budget: 747 -> 757
 - 2026-08-25 -- tan-cli#466 follow-up: clarify global_default_foreign_project_issue's docstring now that a registry hit never sets foreign_global_default_for
     - tan/commands/sdk_cmd.py: 1472 -> 1480
+- 2026-08-25 -- tan-cli#904 review round: resolved-origin ranking + RuntimeError/ELOOP handling + atomic registry write in sdk_cmd.py/bootstrap_cmd.py
+    - tan/commands/bootstrap_cmd.py: 3364 -> 3378
+    - tan/commands/sdk_cmd.py: 1480 -> 1514
+    - function_count_budget: 255 -> 256
