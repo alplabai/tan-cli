@@ -581,6 +581,55 @@ env:
   # those pins' own comments.
   PINNED_SDK_TAG: eb96112ba7d1cc3b4084c985962ea31772177d74
 
+  # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
+  # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
+  # render in test_planner_oracle_regression.py binds ONLY this var, never
+  # `ALP_SDK_ROOT` -- see that module's `_CHILD` script). It is NOT free to
+  # sit at an arbitrary pre-#270 ref while `PINNED_SDK_TAG` moves, though --
+  # see the postmortem below before touching either pin in isolation.
+  #
+  # tan-cli#270 deletes `scripts/alp_orchestrate/` from alp-sdk. It does not
+  # rewrite history, so a pre-#270 ref still ships the planner and can still be
+  # cloned -- that is what makes the byte-parity layer survive at all. Until
+  # #270 lands, the two pins answer related, not independent, questions:
+  #
+  #   PINNED_SDK_TAG                 the alp-sdk tan TRACKS. Moves forward.
+  #   PINNED_PLANNER_ORACLE_SDK_REF  the alp-sdk tan/planner/** was last
+  #                                  PORTED FROM / verified against. Moves
+  #                                  in lockstep with `PINNED_SDK_TAG` until
+  #                                  #270 lands, then stops for good.
+  #
+  # POSTMORTEM (tan-cli#509, 2026-08-24): this pin sat at `94378a05` while a
+  # `PINNED_SDK_TAG` re-sync (tan-cli#868, landing alp-sdk's real fix for the
+  # GD32 bridge's missing `CONFIG_SPI=y`, among others) moved tan/planner/**
+  # itself to legitimately emit different bytes -- and PR #884's CI went red
+  # on 19 of 703 cases across 19 boards the moment it merged with `dev`. The
+  # isolation held (every failing case rendered against THIS var, confirmed
+  # by reproducing locally with `ALP_SDK_ROOT` pointed at the STALE oracle
+  # ref and getting the identical 19-case list); what broke is that this pin
+  # had not moved WITH the re-sync that made tan/planner correct. A frozen
+  # fixture whose renderer is correctly isolated from `PINNED_SDK_TAG` is
+  # still not insulated from tan/planner's OWN code changing to track a
+  # newer alp-sdk -- that is a real, recurring cost of freezing OUTPUT
+  # instead of a live comparison, not a bug in the isolation, and it lands
+  # on whoever next re-syncs tan/planner (tan-cli#868, #888 pattern) rather
+  # than on whoever moves this workflow's pins. Regenerating the fixture at
+  # the ref tan/planner now tracks and moving this pin with it -- exactly
+  # what `PROVENANCE.txt`'s own "WHEN TO REGENERATE" section already
+  # documents -- is the correct remedy each time, not a papering-over; the
+  # alternative (rendering against `ALP_SDK_ROOT`/`PINNED_SDK_TAG` instead of
+  # a frozen ref) would resurrect the tan-cli#485 late-binding hazard this
+  # fixture exists to freeze past. This will recur at every future
+  # tan/planner re-sync until #270 actually lands and there is no more
+  # "current alp-sdk tree" to re-sync against.
+  #
+  # Bumping this one past #270 does not degrade the gate gracefully -- it
+  # removes it. `tests/fixtures/planner_oracle/PROVENANCE.txt` records the ref
+  # these goldens were captured from; the two must name the same commit, and
+  # `test_planner_oracle_regression.py` fails loudly rather than quietly if the
+  # bound checkout is not that one.
+  PINNED_PLANNER_ORACLE_SDK_REF: eb96112ba7d1cc3b4084c985962ea31772177d74
+
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
   # repository, plus `alplabai/alp-sdk`, which is public, so the default
@@ -1960,6 +2009,31 @@ jobs:
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
 
+      # tan-cli#509. A SECOND alp-sdk checkout, at the frozen planner-oracle
+      # ref -- the same shape as the three audit-commit clones in the seam1 job
+      # above (`alp-sdk-planner-audit`, `alp-sdk-hand-port-audit`,
+      # `alp-sdk-strict-loaders-audit`), for the same reason: two questions,
+      # two refs, one of which must not move.
+      #
+      # This supplies only the INPUTS -- `examples/**/board.yaml` and
+      # `metadata/**`. The expected OUTPUT is checked in, at
+      # `python/tests/fixtures/planner_oracle/`, so the comparison survives
+      # alp-sdk deleting the planner, rewriting history, or being unreachable.
+      # Pinning the inputs too is what keeps a red repairable: the fixture can
+      # only ever be regenerated from a pre-#270 ref, so tracked inputs against
+      # a freezable-only fixture would be a gate with no repair path.
+      #
+      # NOT vendored: ADR-0017 / I-26 keeps hardware facts in alp-sdk, and
+      # copying `metadata/**` in here would make a second, staling copy of the
+      # data whose late binding caused tan-cli#485.
+      - name: clone alp-sdk at the frozen planner-oracle commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: alplabai/alp-sdk
+          ref: ${{ env.PINNED_PLANNER_ORACLE_SDK_REF }}
+          path: alp-sdk-planner-oracle
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -2000,8 +2074,17 @@ jobs:
         working-directory: python
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
+          # tan-cli#509. Its OWN variable, NOT ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT:
+          # fifteen other test modules read those two to track live metadata
+          # FORWARD, and pointing either at a frozen ref would silently repoint
+          # all of them at a snapshot.
+          ALP_PLANNER_ORACLE_ROOT: ${{ github.workspace }}/alp-sdk-planner-oracle
         run: |
           set -euo pipefail
+          if [ ! -f "${ALP_PLANNER_ORACLE_ROOT}/metadata/catalog.json" ]; then
+            echo "::error::ALP_PLANNER_ORACLE_ROOT is bound to ${ALP_PLANNER_ORACLE_ROOT}, which has no metadata/catalog.json -- test_planner_oracle_regression.py would SKIP all 703 of its cases while this job reported green. Fix the 'clone alp-sdk at the frozen planner-oracle commit' step above."
+            exit 1
+          fi
           if [ ! -f "${ALP_SDK_ROOT}/scripts/alp_project.py" ]; then
             echo "::error::ALP_SDK_ROOT is bound to ${ALP_SDK_ROOT}, which has no scripts/alp_project.py -- tests/conftest.py::sdk_root() would return None and every SDK-gated module would SKIP while this job still reported green. Fix the 'clone alp-sdk' step above."
             exit 1
@@ -2030,8 +2113,60 @@ jobs:
           set +e
           python -m pytest -v "${GUARD}" 2>&1 | tee /tmp/parity-guard.log
           set -e
-          if ! grep -qF "${GUARD#tests/parity/} PASSED" /tmp/parity-guard.log; then
-            echo "::error::${GUARD} did not PASS in this job. ALP_SDK_ROOT is bound here, so this is one of two things, and the pytest output above says which: a FAIL means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/); a SKIP means the guard itself regressed to fail-open. Either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
+          GUARD_NODEID="${GUARD#tests/parity/}"
+          # tan-cli#509 widened the guard itself to SKIP (not fail) when
+          # scripts/alp_orchestrate/ is gone AND its replacement -- the frozen
+          # oracle read by test_planner_oracle_regression.py -- is bound and
+          # ready. That SKIP is the PROVEN post-#270 state and must not exit 1
+          # here just because it is not PASSED; but this block cannot take the
+          # guard's word for "the replacement is bound" on trust either, or a
+          # widened SKIP with a broken replacement underneath it would read as
+          # green having compared nothing -- the exact defect this whole guard
+          # exists to red. So a SKIP is accepted ONLY when this block
+          # independently confirms the replacement module actually collects
+          # its full golden set. Note this is NOT re-checking
+          # test_planner_parity_actually_ran.py::_replacement_layer_is_live's
+          # two preconditions from outside -- nothing in this workflow
+          # pre-flights the fixture directory itself, only
+          # ALP_PLANNER_ORACLE_ROOT/metadata/catalog.json (above) and
+          # ALP_SDK_ROOT/scripts/alp_project.py (above); this block's own
+          # collect-only run below is the only thing standing between a
+          # SKIP and a near-empty fixture underneath it.
+          if grep -qF "${GUARD_NODEID} PASSED" /tmp/parity-guard.log; then
+            : # scripts/alp_orchestrate/ is present -- the byte-parity suite itself ran.
+          elif grep -qF "${GUARD_NODEID} SKIPPED" /tmp/parity-guard.log; then
+            echo "::notice::${GUARD} SKIPPED -- scripts/alp_orchestrate/ is retired upstream. Verifying the tan-cli#509 replacement (test_planner_oracle_regression.py) actually collects its full golden set before accepting the SKIP."
+            set +e
+            python -m pytest -q --collect-only tests/parity/test_planner_oracle_regression.py 2>&1 | tee /tmp/oracle-collect.log
+            collect_status="${PIPESTATUS[0]}"
+            set -e
+            # Counting the summary "N tests collected" line is NOT enough: this
+            # module unconditionally collects 3 structural tests plus pytest's
+            # own empty-parametrize [NOTSET] placeholder, so a fixture holding
+            # ZERO real goldens (one stray *.json is enough to satisfy
+            # _replacement_layer_is_live()'s any(rglob("*.json")) check) still
+            # reports "4 tests collected" -- a bare ">0" check cannot fail in
+            # exactly the scenario it exists for. Counting the parametrised
+            # `test_the_emit_matches_the_frozen_oracle[...]` case IDs instead
+            # measures the thing that actually matters: how many frozen
+            # goldens this run is standing in for. 700 is not an arbitrary
+            # floor -- it is the fixture's own documented minimum (PROVENANCE.txt,
+            # and test_the_fixture_is_present_and_was_captured_from_a_named_ref's
+            # own `len(GOLDENS) >= 700` assertion).
+            parametrised="$(grep -cF 'test_the_emit_matches_the_frozen_oracle[' /tmp/oracle-collect.log || true)"
+            # `grep -c` prints nothing (not `0`) when it cannot read the log at
+            # all -- only reachable if the `tee` above failed at open -- and an
+            # empty `parametrised` makes a bare `[ "${parametrised}" -lt 700 ]`
+            # a syntax error ("integer expression expected") that exits 2, which
+            # is FALSE to `if`, which ACCEPTS SILENTLY: the one shape this whole
+            # block exists to refuse. `${parametrised:-0}` closes it.
+            if [ "${collect_status}" -ne 0 ] || [ "${parametrised:-0}" -lt 700 ]; then
+              echo "::error::${GUARD} SKIPPED, which is only legitimate when test_planner_oracle_regression.py is standing in for it -- but that module collected only ${parametrised:-0} of the >=700 goldens it should (collect exit ${collect_status}) against the SAME ALP_PLANNER_ORACLE_ROOT this job already confirmed has a metadata/catalog.json above. A SKIP backed by a near-empty replacement is the exact silent coverage cliff tan-cli#500 exists to red -- see the collect-only output above."
+              exit 1
+            fi
+            echo "::notice::test_planner_oracle_regression.py collected ${parametrised} goldens -- the SKIP above is a legitimate handoff to the tan-cli#509 replacement layer, not a regression."
+          else
+            echo "::error::${GUARD} neither PASSED nor SKIPPED in this job. ALP_SDK_ROOT is bound here, so this is one of two things, and the pytest output above says which: a FAIL means the bound checkout cannot answer the byte-parity suite (no scripts/alp_orchestrate/) and the tan-cli#509 replacement is not live either; or the guard itself regressed to some other outcome entirely. Either way the planner byte-parity layer is about to compare NOTHING while this job reports green. Do not silence it by widening the guard's skip."
             exit 1
           fi
           # The guard run above is NOT sharded (a bare node-id invocation,
