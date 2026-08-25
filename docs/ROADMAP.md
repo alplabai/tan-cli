@@ -129,18 +129,33 @@ and its issues moved to that milestone — all but #253, which moved to
 oracle divergences filed during the port (see the `deferred` label) and the
 oracle's own retirement, which landed here rather than at `v0.7.0`. Most of
 the full command surface had already landed inside the `v0.5.0` RC cycle
-instead of waiting for a later one: the seven verbs that shipped as stubs at
-rc1 (`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`,
-`support-bundle` — tan-cli#260, #257), `new-som` (#254), `monitor` (#255),
-`faultdecode` (#256), and `renode --sim-mode` (#77) were all real by
-`v0.5.0` GA — not rc4: `ac79d4c7` (#352), the commit that ported all of
-them, landed 2026-08-03T14:55:04Z, after rc4 published (2026-08-02T22:58:11Z)
-and before GA published (2026-08-04T18:50:19Z); `git ls-tree` at
-`v0.5.0-rc4:python/tan/commands` still has none of the seven verb modules.
-`tan model build` shipped by rc4 too, but #253 (tracking
-oracle-parity and test-coverage gap-closure for it) stayed open and moved to
-`v0.7.0` rather than closing with the rest; the eight `model` lifecycle
-subcommands beyond `build` remain unported (#674, `v0.8.0`).
+instead of waiting for a later one — but it landed on three different
+schedules, not one, so no single ref covers all of it:
+
+- **Eight verbs went from stub to real between rc4 and GA.** The seven that
+  shipped as uniform stubs at rc1 (`scaffold`, `completion`, `diff`,
+  `pinmux`, `inspect`, `trace`, `support-bundle` — tan-cli#260, #257) plus
+  `renode --sim-mode` (#77) were first ported by `ac79d4c7` (#352), which
+  landed 2026-08-03T14:55:04Z — after rc4 published (2026-08-02T22:58:11Z)
+  and before GA published (2026-08-04T18:50:19Z). `git ls-tree` at
+  `v0.5.0-rc4:python/tan/commands` still has none of the seven verb modules,
+  and rc4's own `deferred_cmd.py` docstring enumerates exactly those seven.
+- **`new-som`, `monitor`, `faultdecode` were already real at rc1**, ported by
+  `729234ad`, which `git tag --contains` places inside `v0.5.0-rc1`. Run
+  against the rc4 binary: `tan faultdecode --cfsr 0x00000082 --hfsr
+  0x40000000` returns a real DACCVIOL/MMARVALID/FORCED decode, and `tan
+  monitor --help` / `tan new-som --help` print full option sets (`Usage: tan
+  monitor [OPTIONS]`), not the stubs' `[OPTIONS] [ARGS...]` shape.
+  `ac79d4c7` touched these three files too (`new_som_cmd.py` 69 lines,
+  `faultdecode_cmd.py` 24, `monitor_cmd.py` 528) but only to close
+  #254/#255/#256 — gap-closure issues ("oracle parity, test coverage… Must
+  keep existing and not error in 0.5.0", the same shape as #253) — not to
+  port them.
+- **`tan model build` was also real at rc1**, ported by the same `729234ad`.
+  #253 (tracking its oracle-parity and test-coverage gap-closure) stayed
+  open and moved to `v0.7.0` rather than closing with #254/#255/#256; the
+  eight `model` lifecycle subcommands beyond `build` remain unported (#674,
+  `v0.8.0`).
 
 **`tan renode` is removed.** The verb, `tan/core/renode_plan.py`,
 `tan/core/renode_sim.py` and the 27 published `renode.*` issue codes are all
