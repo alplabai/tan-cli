@@ -530,13 +530,18 @@ try {
 		# run could have created anything under $Dir before reaching here is
 		# the noexec-retry block just above -- gated on $dirCreatedForRetry so
 		# this never removes a $Dir a PREVIOUS install already left in place.
-		# $dirFirstNewAncestor is computed in that SAME `if (-not (Test-Path
-		# $Dir))` branch, immediately before the `New-Item` that sets
-		# $dirCreatedForRetry -- so whenever $dirCreatedForRetry is $true here,
-		# $dirFirstNewAncestor is guaranteed non-$null too (the walk's own
-		# first iteration always assigns it, since $Dir itself did not exist
-		# yet). $dirCreatedForRetry alone is enough to gate the walk below;
-		# it is not paired with `-and $dirFirstNewAncestor` any more.
+		# $dirFirstNewAncestor is the walk's TERMINATION BOUND, not a redundant
+		# truthiness check, so the gate below keeps `-and $dirFirstNewAncestor`.
+		# It is assigned in the same `if (-not (Test-Path $Dir))` branch, but by
+		# a SECOND Test-Path (the `while (-not (Test-Path $ancestor))` loop) --
+		# and the two probes can disagree: a concurrent installer or an MDM push
+		# creating $Dir in between, or a UNC/DFS path whose first probe fails
+		# transiently, leaves the while body unexecuted and $dirFirstNewAncestor
+		# $null while $dirCreatedForRetry is still set. With a $null bound the
+		# `-eq $dirFirstNewAncestor` break never fires ($null -eq a path is
+		# $False), so the walk would climb past $Dir into %LOCALAPPDATA%\Programs,
+		# %LOCALAPPDATA%, C:\Users\<user>, C:\Users, C:\ -- deleting each that is
+		# empty. Keep both conjuncts.
 		#
 		# tan-cli#490 review, round 10: `-Recurse` here was an UNGUARDED
 		# recursive delete of a path that, with the default $Dir
@@ -553,7 +558,7 @@ try {
 		# that already existed), which is exactly the wanted semantics --
 		# remove only what this run created, and stop the moment something
 		# else is in the way.
-		if ($dirCreatedForRetry) {
+		if ($dirCreatedForRetry -and $dirFirstNewAncestor) {
 			$dirWalkRemove = $Dir
 			while ($true) {
 				try { [System.IO.Directory]::Delete($dirWalkRemove, $false) } catch { }
