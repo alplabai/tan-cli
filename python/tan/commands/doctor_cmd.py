@@ -174,6 +174,7 @@ from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
+from tan.core.sdk_default_registry import registry_path
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
 from tan.core.tool_lookup import resolve_tool
@@ -1939,7 +1940,8 @@ def sdk_check(
         return Check("sdk", "pass", detail, scope="project")
     scope_note = f" for --project {project_scope}" if project_scope is not None else ""
     if broken_global_default is not None:
-        pointer = str(_home_alp_dir() / "sdk-default")
+        home = _home_alp_dir()
+        pointer = str(home / "sdk-default")
         return Check(
             "sdk",
             "fail",
@@ -1947,8 +1949,8 @@ def sdk_check(
             f'({pointer}) names "{broken_global_default}", which is not a '
             f"valid alp-sdk checkout, so tan fell through past it and found "
             f"nothing else either.",
-            f"{global_default_pointer_fix_hint(pointer)}, or pass "
-            f"--sdk-root <path> directly.",
+            f"{global_default_pointer_fix_hint(pointer, str(registry_path(home)))}, or "
+            f"pass --sdk-root <path> directly.",
             scope="project",
         )
     return Check(
