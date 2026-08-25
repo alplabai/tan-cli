@@ -449,7 +449,8 @@ strictness exists to catch.
    `board.yaml` pins `preset: e1m-evk` (which `metadata/boards/e1m-evk.yaml`
    hosts only `alif-ensemble`/`nxp-imx9`, not V2M101's
    `renesas-rzv2n-deepx`), plus Alif-shaped `cores:`/`pins:`. MEASURED against
-   `v0.16.0-rc1`: performing exactly the documented edit and nothing else,
+   `v0.16.0-rc1` and re-measured against the GA `v0.16.0` tag (identical
+   result): performing exactly the documented edit and nothing else,
    `tan validate` refuses on ALP-B007 (board/family mismatch) -- and keeps
    refusing as each message is fixed forward, through unknown `cores:` ids,
    a `libraries:` entry scoped to a core the flip left undeclared, a `pins:`

@@ -67,7 +67,7 @@ forever; ours is content-aware) -- but SUCCESS (0), dropped with a warning
 instead, when it only rides along in the bare/`--all` default set (tan-cli#501).
 
 **`--output` exists because CMake, not tan, decides where a Zephyr build reads
-from.** Today, 126 of alp-sdk's example `CMakeLists.txt` files (of 168 total)
+from.** Today, 126 of alp-sdk's example `CMakeLists.txt` files (of 167 total)
 shell `${ALP_SDK_ROOT}/scripts/alp_project.py --input <board.yaml> --emit
 zephyr-conf` directly at configure time and read the result from
 `${CMAKE_BINARY_DIR}/generated/alp.conf`, and `CMAKE_BINARY_DIR` is NOT the

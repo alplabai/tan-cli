@@ -39,14 +39,17 @@ The stable line and the current opt-in pre-release line:
 
 | Component | Stable | Opt-in / pre-release |
 |---|---|---|
-| alp-sdk | **v0.15.0** | **v0.16.0-rc1** |
-| tan | **v0.5.1** — shipping Python port | **v0.6.0-rc1** |
+| alp-sdk | **v0.16.0** | none live |
+| tan | **v0.5.1** — shipping Python port | **v0.6.0** |
 | Alp IDE | **v0.4.0** | **v0.5.x** pre-release channel |
 
 The Python `tan` line is now stable: `v0.5.0` shipped general availability and
 `SUPPORTED_CLI_VERSION` has already moved to it (now `0.5.1`) in
-`alp-sdk-vscode`'s default branch. Alp IDE's own stable cutover to consume it
-by default remains `v0.6.x`.
+`alp-sdk-vscode`'s default branch. `v0.6.0` (2026-08-24) is the newest tagged
+release and installs by hand the same way `v0.5.0-rc1` did before it
+graduated, but `SUPPORTED_CLI_VERSION` has not moved onto it yet, so it is not
+what a default IDE install downloads. Alp IDE's own stable cutover to consume
+it by default remains `v0.6.x`.
 
 ### How to tell a beta from a stable Alp IDE build
 
