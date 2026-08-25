@@ -19,14 +19,44 @@ then picks the DEEPEST registry key that CONTAINS the caller's
 (`sdk_cmd._workspace_under`) stage 1 already uses to decide "foreign". This is
 NOT zero filesystem probing (an earlier version of this docstring, and of
 `changelog.d/466.fixed.md`, claimed it was, and was wrong -- caught in review,
-#904): `covers` and `has_loader_script` each touch the filesystem (`.resolve()`,
-`.exists()`) for every candidate, and `deepest_covering_entry`'s own ranking
-now does too (see below). What IS true, and what the issue actually promised,
-is that there is no directory WALK -- the candidate set is closed (only
-directories a real `tan bootstrap` explicitly ran in can ever appear as a
-key), so resolution cost is O(registry size), not O(filesystem depth). A's
-subdirectory then resolves A's own entry before the legacy pointer is ever
-consulted, at any depth, regardless of which project bootstrapped last.
+#904).
+
+**What actually touches the filesystem, and how much (corrected a second time
+in review, #904 second round -- the FIRST correction above was itself
+wrong on two counts, and is superseded by this paragraph, not by the one
+above it).** `covers` (`sdk_cmd._workspace_under`) runs once per registry
+entry, unconditionally -- it IS the filter. `has_loader_script` and
+`resolve_origin` (the ranking) run ONLY for a candidate that already passed
+`covers`, i.e. once per COVERING entry, not once per registry entry.
+Measured directly (call counts, not syscalls): a 201-entry registry with a
+single covering entry among 200 non-covering siblings makes 201 `covers`
+calls and exactly 1 `has_loader_script` call and 1 `resolve_origin` call --
+"each candidate" was true only of `covers`.
+
+The registry-size claim was ALSO wrong: resolution cost is
+**O(registry size x path depth), not O(registry size) alone** -- every
+`covers`/`resolve_origin` call resolves a real path, and `Path.resolve()`
+`lstat`s every path COMPONENT, so a deeper caller costs more at the same
+registry size. Measured (counting `os.lstat` calls, real directories, the
+production `sdk_cmd._workspace_under`/`_has_loader_script`/
+`_resolved_origin_depth_key` triple, 21 registry entries that ALL cover the
+workspace -- the worst case, nothing skipped by `covers` or
+`has_loader_script`): **1,092** `lstat` calls at a fixed base depth versus
+**1,512** with 20 extra path components appended to the SAME workspace --
+a **420**-call delta from depth alone, at an unchanged registry size. Cite
+neither this number nor any other syscall count for this function without
+also stating the registry shape (size, how many entries cover the caller)
+and the path depth it was measured at -- both factors independently move the
+count, and a bare number from one shape says nothing about another.
+
+What IS true, and what the issue actually promised, is that there is no
+directory WALK -- the candidate set is closed (only directories a real
+`tan bootstrap` explicitly ran in can ever appear as a key), so resolution
+cost does not grow with how deep the caller's workspace sits BELOW its
+covering origin, only with the registry's own size and the ABSOLUTE depth of
+the paths involved. A's subdirectory then resolves A's own entry before the
+legacy pointer is ever consulted, at any depth below its own origin,
+regardless of which project bootstrapped last.
 
 The legacy single pointer is NOT retired. `tan bootstrap` keeps writing it
 unconditionally, for skew safety: an old tan that predates this file reads
@@ -100,6 +130,49 @@ def parse_registry(raw: str | None) -> dict[str, str]:
     return result
 
 
+def parse_registry_updated_at(raw: str | None) -> dict[str, str]:
+    """`origin -> updatedAt`, the recency companion of `parse_registry` --
+    feeds `deepest_covering_entry`'s tie-break (review, #904 second round,
+    major: two origins that resolve to the SAME directory tie on depth, and
+    `depth > best_depth` alone keeps whichever one the sorted-key loop visits
+    first, i.e. the lexicographically smallest raw origin -- not the more
+    recent bootstrap).
+
+    A SEPARATE function rather than widening `parse_registry`'s own return
+    shape, for the same reason `load_raw` is separate from it: `parse_registry`
+    is the flattened `origin -> sdkPath` view several callers already depend
+    on staying exactly that shape, and every one of its existing callers has
+    no use for a timestamp.
+
+    Degrades exactly like `parse_registry` -- `{}` for a missing/malformed
+    file, and an origin whose ENTRY is not itself a dict-shaped object is
+    DROPPED, the identical shape `parse_registry` gives it (a bare string
+    value, `{"/proj/a": "/sdk/a"}`, is not an entry either function
+    recognises). Within a dict-shaped entry, a missing or non-string
+    `updatedAt` degrades to `""` instead -- an entry with no timestamp
+    (written by a pre-tie-break tan, or hand-edited) must still be RANKABLE
+    by depth, it only forfeits ties -- `""` sorts before every real
+    ISO-8601 stamp, so it never wins one.
+    """
+    if raw is None:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    result: dict[str, str] = {}
+    for origin, entry in parsed.items():
+        if not isinstance(origin, str) or not origin:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        updated_at = entry.get("updatedAt")
+        result[origin] = updated_at if isinstance(updated_at, str) else ""
+    return result
+
+
 def load_raw(raw: str | None) -> dict[str, Any]:
     """The WRITE side's counterpart to `parse_registry`: the registry's own
     parsed-JSON shape, untouched, or `{}` on any read/parse failure (missing,
@@ -107,8 +180,7 @@ def load_raw(raw: str | None) -> dict[str, Any]:
 
     Deliberately NOT `parse_registry`'s flattened `origin -> sdkPath` view --
     that view already discards the per-entry object wrapper
-    (`{"sdkPath": ...}`) an entry is stored as, and future fields on an
-    entry (this issue adds none, but the shape leaves room), so a writer
+    (`{"sdkPath": ..., "updatedAt": ...}`) an entry is stored as, so a writer
     that read the FLATTENED view, patched one key, and wrote it back would
     silently downgrade every OTHER origin's entry to a bare string the next
     read still tolerates (`parse_registry` accepts only dict-shaped entries)
@@ -142,6 +214,7 @@ def deepest_covering_entry(
     covers: Callable[[Path, str], bool],
     has_loader_script: Callable[[Path], bool],
     resolve_origin: Callable[[str], str],
+    updated_at: dict[str, str] | None = None,
 ) -> tuple[str, str] | None:
     """The deepest `(origin, sdkPath)` entry whose `origin` CONTAINS
     `workspace_root` (`covers`) and whose `sdkPath` still resolves
@@ -175,9 +248,46 @@ def deepest_covering_entry(
     tier today when ITS target fails the identical check -- a stale entry
     left behind by a checkout that moved or was deleted must not block a
     shallower, still-valid one from answering.
+
+    **A resolved-depth TIE is broken by `updated_at` recency, most-recent
+    wins** (review, #904 second round, major). Two DISTINCT raw origins can
+    resolve to the exact SAME directory -- a symlinked alias bootstrapped
+    once, then the same directory bootstrapped AGAIN later through its real
+    path -- and then tie on `depth` exactly. The pre-fix `depth > best_depth`
+    strict inequality never replaces a tie, so whichever origin
+    `registry.items()` visits FIRST keeps the win; since the file is written
+    with `sort_keys=True` (`registry_text`), that is the lexicographically
+    SMALLEST raw origin string, an accident of spelling with no relationship
+    to which bootstrap is authoritative. `updated_at` (origin -> its entry's
+    `updatedAt`, `sdk_default_registry.parse_registry_updated_at`) is
+    threaded through the same way `resolve_origin` is -- plain data, not a
+    filesystem touch -- and an origin missing a timestamp (a registry
+    written before this fix, or hand-edited) degrades to `""`, which never
+    outranks a real stamp and never breaks an existing tie either, so it is
+    exactly as decided as it always was.
+
+    **Why recency, not collapsing the registry KEY onto its resolved origin
+    at write time (the other fix considered, and rejected, in review #904
+    second round):** resolving at WRITE time and storing that resolved value
+    AS the key would reintroduce, for the key, precisely the staleness this
+    function's own `resolve_origin` injection exists to avoid for the
+    RANKING -- a value baked in once at write time that the live filesystem
+    can silently outgrow (a symlink repointed after the fact, without a new
+    `tan bootstrap` ever touching that origin again), with no
+    `has_loader_script`-style fallback able to catch it, because the
+    original raw origin -- the only thing a future write could still
+    recognise -- would already be gone, overwritten by whatever it resolved
+    to at the moment it was written. Recency needs none of that: `origin`
+    keeps meaning exactly what `tan bootstrap` was run in for every entry,
+    forever, matching what `written_for`/`global_default_pointer_fix_hint`
+    already report elsewhere in this system, and the tie-break is decided by
+    a plain, append-only timestamp instead of a second filesystem-truth
+    baked into the registry's own keys.
     """
+    updated_at = updated_at or {}
     best: tuple[str, str] | None = None
     best_depth = -1
+    best_updated_at = ""
     for origin, sdk_path in registry.items():
         if not _is_absolute_either_platform(origin):
             continue
@@ -186,18 +296,37 @@ def deepest_covering_entry(
         if not has_loader_script(Path(sdk_path)):
             continue
         depth = len(resolve_origin(origin).replace("\\", "/"))
-        if depth > best_depth:
+        entry_updated_at = updated_at.get(origin, "")
+        if depth > best_depth or (depth == best_depth and entry_updated_at > best_updated_at):
             best_depth = depth
+            best_updated_at = entry_updated_at
             best = (origin, sdk_path)
     return best
 
 
-def with_entry(registry: dict[str, Any], *, origin: str, sdk_root: str) -> dict[str, str]:
+def with_entry(
+    registry: dict[str, Any], *, origin: str, sdk_root: str, updated_at: str
+) -> dict[str, str]:
     """`registry`, a raw parsed-JSON dict (may hold entries in any shape --
     this is the WRITE side, applied to whatever `parse_registry`-adjacent
     reading a writer already did), with `origin` keyed to `{"sdkPath":
-    sdk_root}`. Every other key is left untouched, so one `tan bootstrap` run
-    updating its own origin never drops another project's entry.
+    sdk_root, "updatedAt": updated_at}`. Every other key is left untouched,
+    so one `tan bootstrap` run updating its own origin never drops another
+    project's entry.
+
+    **`updated_at` is the caller's to compute, not this function's** (review,
+    #904 second round, major -- `deepest_covering_entry`'s recency
+    tie-break): this module stays free of the wall clock the same way it
+    stays free of the filesystem, so every OTHER function here is a plain,
+    deterministic function of its arguments and stays that way, testable
+    without freezing time. The production caller
+    (`bootstrap_cmd._write_global_sdk_registry`) passes
+    `tan.core.timestamp.generated_at_iso(millis=True)` -- millisecond
+    precision, deliberately finer than the legacy pointer's own
+    `updatedAt` (seconds, `_global_sdk_pointer_json`), because this field's
+    entire job is to ORDER two writes against each other, and a whole SDK
+    relocation plus this write easily completing inside one second is not a
+    corner case worth losing the tie-break to.
 
     **This registry is append-only; nothing here prunes a dead origin**
     (review, #904, nit 1). An origin whose project directory or checkout was
@@ -212,7 +341,7 @@ def with_entry(registry: dict[str, Any], *, origin: str, sdk_root: str) -> dict[
     review, not a rider on this one. Follow-up: tan-cli#905.
     """
     updated = dict(registry)
-    updated[origin] = {"sdkPath": sdk_root}
+    updated[origin] = {"sdkPath": sdk_root, "updatedAt": updated_at}
     return updated
 
 

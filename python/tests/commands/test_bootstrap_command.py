@@ -895,7 +895,42 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     registry = tmp_path / "fake-home" / ".alp" / "sdk-defaults.json"
     assert registry.exists()
     registry_doc = json.loads(registry.read_text(encoding="utf-8"))
-    assert registry_doc[str(sdk.parent).replace("\\", "/")]["sdkPath"] == str(new_sdk)
+    # `.replace("\\", "/")` on the RHS too (review, #904 second round, blocker
+    # 2): the registry's `sdkPath` is now written through `_to_posix` at
+    # `bootstrap_cmd._write_global_sdk_registry`, forward-slashed on every
+    # platform -- unlike the LEGACY pointer's `sdkPath` two lines up, which
+    # keeps storing `sdk_root` native (pre-existing #464 behaviour, untouched
+    # here). A bare `str(new_sdk)` on the right compared native-vs-posix and
+    # only failed on the Windows shard.
+    assert registry_doc[str(sdk.parent).replace("\\", "/")]["sdkPath"] == str(new_sdk).replace(
+        "\\", "/"
+    )
+
+
+def test_write_global_sdk_registry_normalises_a_native_sdk_root_to_posix(tmp_path, monkeypatch):
+    """Review, #904 second round, blocker 2, proved DIRECTLY and
+    deterministically on every platform (not just reproduced on Windows CI):
+    `_write_global_sdk_registry`'s `sdk_root` argument is exactly
+    `str(new_root)` at its one production call site -- NATIVE rendering,
+    backslashes on Windows. `_to_posix`'s own replace is a plain string
+    operation with no OS dependency (`str(path).replace("\\\\", "/")`), so
+    passing a Windows-shaped, backslash-laden string here reproduces the
+    blocker on Linux too: pre-fix, this stored `sdk_root` byte-for-byte
+    (backslashes and all); post-fix, it always renders forward-slashed,
+    matching the origin KEY it sits beside in the same file.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    bootstrap_cmd._write_global_sdk_registry(
+        "C:\\Users\\dev\\alp-sdk", origin="/home/u/proj"
+    )
+
+    registry_doc = json.loads(
+        (home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8")
+    )
+    assert registry_doc["/home/u/proj"]["sdkPath"] == "C:/Users/dev/alp-sdk"
 
 
 def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):

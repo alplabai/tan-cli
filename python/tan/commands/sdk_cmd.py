@@ -108,6 +108,7 @@ from tan.core.proxy import (
 from tan.core.sdk_default_registry import (
     deepest_covering_entry,
     parse_registry,
+    parse_registry_updated_at,
     registry_path,
 )
 from tan.core.text_layout import wrap_lines
@@ -345,12 +346,19 @@ def _resolved_origin_depth_key(root: str) -> str:
     tie-break with no warning at all).
 
     Any resolution failure (including a symlink loop, `RuntimeError`) falls
-    back to the raw string rather than raising: this is only ever called,
-    from `deepest_covering_entry`, after `covers` has already resolved this
-    SAME `root` successfully for this SAME candidate, so a failure here would
-    mean the filesystem changed between the two calls -- treated as a
-    same-caliber non-event as every other best-effort read in this module,
-    not a crash out of a tier lookup.
+    back to the raw string rather than raising. IN PRODUCTION, via
+    `deepest_covering_entry`, this is only ever called after `covers` has
+    already resolved this SAME `root` successfully for this SAME candidate,
+    so a failure here would mean the filesystem changed between the two
+    calls -- treated as a same-caliber non-event as every other best-effort
+    read in this module, not a crash out of a tier lookup. That reasoning
+    made the `RuntimeError` arm of this guard genuinely hard to reach through
+    the production call graph alone (review, #904 second round, minor: a
+    narrowed `except (OSError, ValueError)` left the entire existing suite
+    green). `test_resolved_origin_depth_key_degrades_a_symlink_loop_instead_
+    of_raising` closes that by calling this function DIRECTLY, with no prior
+    `covers` call in front of it -- proving the degrade independent of
+    whether any production call order happens to exercise it.
     """
     try:
         return str(Path(root).resolve())
@@ -400,20 +408,25 @@ def global_default_pointer_fix_hint(native_path: str, native_registry_path: str)
     )
 
 
-def _read_global_sdk_registry() -> dict[str, str]:
-    """`~/.alp/sdk-defaults.json`, parsed -- best-effort, matching every other
-    reader in this file: a missing, truncated, or malformed registry degrades
-    to `{}`, the identical shape `sdk_default_registry.parse_registry`
-    already gives "no registry at all", so `resolve_sdk_tiered` falls
-    straight through to the legacy single pointer (tan-cli#466) rather than
-    raising or ever blocking a build on a corrupt file.
+def _read_global_sdk_registry_raw() -> str | None:
+    """`~/.alp/sdk-defaults.json`'s raw text, or `None` when unreadable --
+    read ONCE and shared by both views `resolve_sdk_tiered` needs
+    (`parse_registry`'s flattened `sdkPath` view and
+    `parse_registry_updated_at`'s recency view, review #904 second round,
+    major): reading the file twice would let a concurrent `tan bootstrap`'s
+    write land BETWEEN the two reads, so one view could see an origin the
+    other one does not -- not a crash (`deepest_covering_entry`'s
+    `updated_at.get(origin, "")` tolerates a missing key the same as a
+    pre-tie-break registry), but an avoidable extra race window for a file
+    this module already goes out of its way to read atomically-consistent
+    once.
 
     Reuses `_read_file` -- the same swallow-every-read-failure primitive
     every pointer read in this file already goes through -- rather than a
     second bespoke try/except, so a non-UTF-8 registry degrades exactly like
     a non-UTF-8 pointer does.
     """
-    return parse_registry(_read_file(registry_path(_home_alp_dir())))
+    return _read_file(registry_path(_home_alp_dir()))
 
 
 # ── readiness (tan_core::sdk::check_sdk_readiness) ──────────────────────────
@@ -659,13 +672,17 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
     (never instead of) the legacy file, and picks the DEEPEST registry key
     that contains `workspace_root` (`sdk_default_registry.
     deepest_covering_entry`, using this same `_workspace_under` containment
-    test). A registry hit still reports `sourceTier: "globalDefault"` -- it
-    IS the machine-default mechanism, keyed -- and never carries
-    `foreign_global_default_for`: a caller a registry entry was written FOR
-    is, by construction, not reading someone else's answer. Only when NO
-    registry entry covers the caller does resolution fall through to the
-    legacy pointer exactly as it did before this issue, foreign-warning
-    included.
+    test, with a resolved-depth TIE broken by which entry's `updatedAt` is
+    most recent -- review, #904 second round, major: two distinct raw
+    origins that alias the same directory, e.g. a symlink bootstrapped once
+    and the same directory bootstrapped again later through its real path,
+    resolve to identical depth). A registry hit still reports `sourceTier:
+    "globalDefault"` -- it IS the machine-default mechanism, keyed -- and
+    never carries `foreign_global_default_for`: a caller a registry entry
+    was written FOR is, by construction, not reading someone else's answer.
+    Only when NO registry entry covers the caller does resolution fall
+    through to the legacy pointer exactly as it did before this issue,
+    foreign-warning included.
     """
     flag = (sdk_root or "").strip()
     if flag:
@@ -678,12 +695,14 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
             return ActiveSdk(pin, "projectPin")
         broken_project_pin = pin
 
+    registry_raw = _read_global_sdk_registry_raw()
     registry_hit = deepest_covering_entry(
-        _read_global_sdk_registry(),
+        parse_registry(registry_raw),
         workspace_root,
         covers=_workspace_under,
         has_loader_script=_has_loader_script,
         resolve_origin=_resolved_origin_depth_key,
+        updated_at=parse_registry_updated_at(registry_raw),
     )
     if registry_hit is not None:
         _origin, registry_sdk_path = registry_hit

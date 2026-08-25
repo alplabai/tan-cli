@@ -74,6 +74,7 @@ from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     _home_alp_dir,
+    _to_posix,
     global_default_foreign_project_issue,
     global_default_pointer_fix_hint,
     project_pin_issue,
@@ -3024,11 +3025,14 @@ def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
     disclosed-but-foreign path at once, not just the one this call is
     updating. `atomic_write_text` writes the temp sibling then `os.replace`s
     it into place, so a reader never observes a partial file at all.
+
+    `sdk_root` posix-normalised, `updatedAt` millisecond-precision (review, #904 second round).
     """
     try:
         path = registry_path(_home_alp_dir())
         raw = path.read_text(encoding="utf-8") if path.is_file() else None
-        registry = with_entry(load_raw(raw), origin=origin, sdk_root=sdk_root)
+        stamp, posix_root = generated_at_iso(millis=True), _to_posix(Path(sdk_root))
+        registry = with_entry(load_raw(raw), origin=origin, sdk_root=posix_root, updated_at=stamp)
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(str(path), registry_text(registry))
     except Exception:  # noqa: BLE001 -- best-effort by contract

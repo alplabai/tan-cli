@@ -33,8 +33,10 @@ from pathlib import Path
 import pytest
 import typer
 
+from tan.commands import bootstrap_cmd
 from tan.commands.sdk_cmd import (
     _fetch_releases,
+    _resolved_origin_depth_key,
     _workspace_under,
     check_sdk_readiness,
     describe_network_error,
@@ -321,6 +323,27 @@ def test_workspace_under_degrades_a_symlink_loop_instead_of_raising(tmp_path):
     assert _workspace_under(tmp_path / "ws", str(loop)) is False
 
 
+def test_resolved_origin_depth_key_degrades_a_symlink_loop_instead_of_raising(tmp_path):
+    """The `_resolved_origin_depth_key` sibling of the test above (review,
+    #904 second round, minor): its OWN `except (OSError, ValueError,
+    RuntimeError)` guard was never reached by any existing test -- narrowing
+    it to drop `RuntimeError` left the whole suite green, because every
+    covered path calls it only AFTER `_workspace_under` already resolved the
+    same root successfully (this function's own docstring's reasoning for why
+    the branch should be unreachable IN PRODUCTION). Called DIRECTLY here,
+    with no prior `covers()` call in front of it, a symlink loop reaches
+    `Path.resolve()`'s `RuntimeError` on the very first attempt, so this
+    proves the guard degrades rather than raises independent of whether
+    production call order ever exercises it.
+    """
+    loop = tmp_path / "loop"
+    try:
+        loop.symlink_to(loop)
+    except (OSError, NotImplementedError):  # pragma: no cover -- Windows w/o privilege
+        pytest.skip("this host cannot create a symlink")
+    assert _resolved_origin_depth_key(str(loop)) == str(loop)
+
+
 def test_global_default_written_for_symlink_loop_degrades_instead_of_raising(
     tmp_path, isolated_home
 ):
@@ -547,6 +570,65 @@ def test_a_symlinked_origin_still_ranks_by_its_resolved_depth(tmp_path, isolated
     assert active.path == str(sdk_right), (
         "the symlinked origin's RESOLVED depth must win, not its raw key length"
     )
+
+
+def test_a_later_bootstrap_of_the_real_path_outranks_an_earlier_alias_at_a_resolved_tie(
+    tmp_path, isolated_home, monkeypatch
+):
+    """tan-cli#904 review round 2, major: TWO DISTINCT raw origins that
+    ALIAS the same directory tie on `deepest_covering_entry`'s resolved-depth
+    ranking -- `depth > best_depth` is false for a tie, so the FIRST one the
+    (sorted-key) loop visits keeps the win, which is the lexicographically
+    SMALLEST raw origin string, not the most recent bootstrap.
+
+    Measured end-to-end through the REAL write path
+    (`bootstrap_cmd._write_global_sdk_registry`) and the REAL read path
+    (`resolve_sdk_tiered`), not a hand-written registry: bootstrap `myproj`
+    once through a symlinked alias (`old-sdk`), then AGAIN through its own
+    real path (`new-sdk`) -- the later, more-authoritative bootstrap of the
+    exact same directory. Pre-fix, both origins resolve to the identical
+    ancestor and tie on depth; `"alias"` sorts before `"myproj"`, so the
+    STALE `old-sdk` entry answers even though `myproj` (the real path) was
+    registered LAST. `generated_at_iso` is monkeypatched to a controlled,
+    strictly increasing sequence so this proves the recency tie-break
+    deterministically, independent of how fast the two writes actually run.
+    """
+    real_dir = tmp_path / "myproj"
+    real_dir.mkdir()
+    workspace = real_dir / "sub"
+    workspace.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover -- Windows w/o privilege
+        pytest.skip("this host cannot create a directory symlink")
+    assert str(alias) < str(real_dir), (
+        "the repro needs the STALE origin to sort first, so a length/depth "
+        "tie alone (not recency) would otherwise pick the right answer by "
+        "accident"
+    )
+
+    old_sdk = make_sdk_root(tmp_path / "old-sdk")
+    new_sdk = make_sdk_root(tmp_path / "new-sdk")
+
+    stamps = iter(["2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01.000Z"])
+    monkeypatch.setattr(bootstrap_cmd, "generated_at_iso", lambda **_kw: next(stamps))
+
+    # Earlier bootstrap, reached via the symlinked alias.
+    bootstrap_cmd._write_global_sdk_registry(str(old_sdk), origin=str(alias))
+    # A LATER bootstrap of the SAME directory, this time via its own real,
+    # canonical path -- exactly the "later bootstrap of the same project via
+    # its real path" repro from the review.
+    bootstrap_cmd._write_global_sdk_registry(str(new_sdk), origin=str(real_dir))
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.path == str(new_sdk).replace("\\", "/"), (
+        "DEFECT (tan-cli#904 second round, major): the earlier alias-origin "
+        "entry won a resolved-depth TIE against the later, more-authoritative "
+        "real-path entry purely because its raw registry key sorted first"
+    )
+    assert active.foreign_global_default_for is None
 
 
 def test_a_stale_registry_entry_degrades_like_a_stale_pointer_does(tmp_path, isolated_home):
