@@ -652,6 +652,43 @@ def test_a_missing_sdk_root_fails_before_anything_is_removed(tmp_path, monkeypat
     assert_canary_intact(tmp_path)
 
 
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(
+    tmp_path, monkeypatch
+):
+    """tan-cli#468. `resolve_sdk` returned a bare `None` whenever nothing
+    resolved, dropping `broken_project_pin` on the floor -- so a workspace
+    whose `.alp/sdk-path` names a checkout that no longer exists, with no
+    sibling for the wide ladder to fall through to either, reported
+    `clean.sdk-root-not-found` alone. Nothing here resolves at all, so this is
+    only the tan-cli#263 diagnostic gap, not a wrong-checkout `clean` (which
+    cannot happen -- `clean.sdk-root-not-found` refuses before anything is
+    removed).
+
+    Fails against dev: `doc["issues"]` there is `clean.sdk-root-not-found`
+    alone, with no leading `sdk.project-pin-unresolved` and `"gone-checkout"`
+    nowhere in the envelope."""
+    proj = make_project(tmp_path, marker=False)
+    isolate(monkeypatch, tmp_path, proj)
+    (proj / ".alp").mkdir()
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")})
+    )
+    before = survivors(tmp_path)
+
+    result = runner.invoke(app, ["clean", "--format", "json"])
+    assert result.exit_code == 1
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "clean.sdk-root-not-found",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    # Absent, not null -- still no usable checkout, so still no `sdk` block.
+    assert "sdk" not in doc
+    assert survivors(tmp_path) == before
+    assert_canary_intact(tmp_path)
+
+
 def test_an_explicit_sdk_root_is_terminal_and_reported(tmp_path, monkeypatch):
     """I-31: `--sdk-root` never falls through to a lower tier. A valid one is
     reported with the `sdkRootFlag` tier, and `sdk.root` is forward-slash on
