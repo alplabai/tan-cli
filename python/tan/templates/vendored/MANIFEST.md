@@ -230,8 +230,10 @@ from an un-revendored SDK change.
   "v0\.1[45]\.0"` returns 0). No schema, core, peripheral or `board.yaml`
   content changed — in particular alp-sdk#1068 (`CONFIG_USE_DT_CODE_PARTITION`
   in the AEN board `_defconfig`) touches none of `--emit scaffold`'s output;
-  `edge-ai` (whose README carries no version-pinned links) diffed clean at 0/8
-  files, confirming it. No `PINNED_SDK_COMMIT`/`PINNED_HASHES` re-audit was
+  `edge-ai` (whose README carried no version-pinned links at this vendor
+  point — since superseded, see the v0.14.0 bullet below and entry 4 under
+  "Deliberate edits on top of the emit") diffed clean at 0/8 files, confirming
+  it. No `PINNED_SDK_COMMIT`/`PINNED_HASHES` re-audit was
   needed either: `scripts/alp_orchestrate/` is byte-identical between
   `0f3cefbe` (the planner's last audit point) and this tag.
   - Re-vendored by re-running the live emit through
@@ -316,8 +318,10 @@ from an un-revendored SDK change.
   for both SKUs, plus `iot`/E1M-AEN801), and NOTHING else: all 40 changed
   lines differ only by the doc-version link `blob/v0.13.0/` → `blob/v0.14.0/`,
   verified line-for-line. No schema, core, peripheral or `board.yaml` content
-  changed. `edge-ai` is untouched for both SKUs because its README carries no
-  version-pinned links at all.
+  changed. `edge-ai` was untouched for both SKUs at this vendor point because
+  its README carried no version-pinned links at all — no longer true: the
+  current vendor point's `## Model`/`## Tests` rewrite (entry 4 under
+  "Deliberate edits on top of the emit") adds four, pinned at `v0.16.0`.
   - Re-vendored by re-running the live emit through
     `tests/parity/scaffold_byte_parity.py`'s OWN `emit_live_scaffold`, so the
     bytes written are by construction the bytes that gate compares against —
@@ -343,8 +347,9 @@ from an un-revendored SDK change.
     mentions `tan` (measured). The `board.yaml` comment is the smaller half.
     Fixing either is an alp-sdk change plus a re-vendor — a hand-edit here is
     possible via `scaffold_byte_parity.py`'s `DELIBERATE_EDITS`, but it books
-    a standing divergence somebody unwinds when upstream lands. Tracked by
-    tan-cli#821, filed upstream as alp-sdk#1689 (not yet landed — no
+    a standing divergence somebody unwinds when upstream lands. This is (c2)
+    of tan-cli#821, which closes without fixing it (the PR fixes (a) only);
+    filed upstream as alp-sdk#1689 (not yet landed — no
     `DELIBERATE_EDITS` entry here for it, per the same reasoning entry 4 in
     "Deliberate edits on top of the emit" gives for `edge-ai`'s pointers: this
     is the smaller half of a wider `west`-vs-`tan` gap every README already
@@ -381,9 +386,12 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **five** live entries: the
-`iot` CMakeLists edit and four `edge-ai` entries (tan-cli#821(a), see entry 4
-below). tan-cli#384's seven `README.md` doc-link entries are NOT among them —
+The `DELIBERATE_EDITS` table below currently carries **seven** live entries: the
+`iot` CMakeLists edit and six `edge-ai` entries (tan-cli#821(a), see entry 4
+below) — two `README.md` entries plus two entries PER `src/main.c` (one per
+comment rewrite, declared separately so healing one comment without the other
+still reds; see `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring).
+tan-cli#384's seven `README.md` doc-link entries are NOT among them —
 they were RETIRED when alp-sdk cut the real `v0.15.0` tag (see "Current vendor
 point" above); listed here only as history, not as a current exception.
 tan-cli#501's four `sensor`/`diagnostics` CMakeLists edits were REVERTED (see
@@ -455,11 +463,27 @@ strictness exists to catch.
    Both referents are a bare inline code span / bare twister argument rather
    than a markdown link, so the emit's own doc-link rewriter (which only
    rewrites `[text](https://github.com/alplabai/alp-sdk/blob/<ref>/...)`
-   links) never touches them — unlike every other cross-repo reference this
-   tree carries. Rewritten to a real link (`README.md`) or a named alp-sdk
-   path (`src/main.c`, a C comment — no markdown rewriter applies there
-   either way), each noting the referent needs an alp-sdk checkout to read
-   since this scaffolded project doesn't carry it. This is the same class of
+   links) never touches them, same as most cross-repo references this tree
+   carries, which ARE real markdown links the rewriter already covers. Not
+   the only bare ones, though: `diagnostics`'s `README.md` names a bare
+   `scripts/program_eeprom.py` and `sensor`'s a bare
+   `examples/peripheral-io/i2c-scanner`, the same defect class, on both
+   SKUs, shipping to every `tan init` of those two templates. Tracked
+   separately, filed as tan-cli#912, and NOT fixed here. Rewritten to a
+   real link (`README.md`, pinned at `v0.16.0` per the current vendor point's
+   `- Ref:`) or a named alp-sdk path (`src/main.c`, a C comment — no markdown
+   rewriter applies there either way), each noting the referent is not part
+   of this scaffolded project. The new `README.md` link is version-pinned
+   like every other cross-repo link this tree carries, so `edge-ai` now
+   COUPLES to the tree's own `- Ref:` where before it carried zero
+   version-pinned links at all (see `MANIFEST.md`'s v0.14.0 vendor-point
+   bullet above, now corrected). MEASURED: bumping `- Ref:` alone to
+   `v0.17.0` (leaving the vendored bytes at `v0.16.0`) reds
+   `test_every_alp_sdk_link_pins_the_ref_the_tree_is_vendored_from[edge-ai-starter::E1M-AEN801]`
+   and `[::E1M-V2N101]` in `python/tests/core/test_template_integrity.py`
+   (9 failed, 2 passed, where a clean tree is 11/11) exactly like the seven
+   READMEs that already carried links — so a re-vendor that updates one half
+   and not the other is caught, not silent. This is the same class of
    standing exception as entry 2 above, not a new mechanism: the emit's own
    output is wrong for a customer, and the real fix — turning the two bare
    referents into real alp-sdk markdown links so the rewriter and

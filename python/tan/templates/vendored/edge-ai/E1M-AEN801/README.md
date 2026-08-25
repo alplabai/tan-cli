@@ -55,7 +55,8 @@ Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path.
 No model is shipped (stub + deterministic classifier/fallback). The
 autoencoder training recipe is alp-sdk's
 [`examples/ai/cold-chain-monitor/models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/examples/ai/cold-chain-monitor/models/README.md)
--- not part of this scaffolded project; it needs an alp-sdk checkout to read.
+-- not part of this scaffolded project; the path lives only in an alp-sdk
+checkout, though the link above works without one.
 
 ## Tests
 
