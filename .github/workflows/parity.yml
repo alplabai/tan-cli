@@ -1099,7 +1099,7 @@ jobs:
       # needs across the three steps below (9 root-bound tests in this step,
       # unchanged by tan-cli#897 -- its gate needs no root; 10 across all
       # three) -- not the whole `tests/gates` directory, which has grown to
-      # 37 files since the "five gate files" wording was first written and
+      # 38 files since the "five gate files" wording was first written and
       # no longer matches it; see `ci.yml`'s own comment for why a growing
       # suite should not commit to an exact number there. Three of them run
       # in this step against the FROZEN audit commit(s), same as before
@@ -1933,7 +1933,7 @@ jobs:
   #     "removes exactly 8 tests (the five gate files)" as the one figure
   #     that does not rot "because it depends on this repo alone" -- that
   #     was never right either: `--ignore=tests/gates` drops the WHOLE
-  #     `tests/gates` directory (37 files today, not five), and that
+  #     `tests/gates` directory (38 files today, not five), and that
   #     directory grows on its own schedule same as everything else here.
   #     So even the figure sold as rot-proof rotted, silently, right next to
   #     the sentence warning about rot. Only the stable facts are kept:
