@@ -344,7 +344,12 @@ from an un-revendored SDK change.
     Fixing either is an alp-sdk change plus a re-vendor — a hand-edit here is
     possible via `scaffold_byte_parity.py`'s `DELIBERATE_EDITS`, but it books
     a standing divergence somebody unwinds when upstream lands. Tracked by
-    tan-cli#821.
+    tan-cli#821, filed upstream as alp-sdk#1689 (not yet landed — no
+    `DELIBERATE_EDITS` entry here for it, per the same reasoning entry 4 in
+    "Deliberate edits on top of the emit" gives for `edge-ai`'s pointers: this
+    is the smaller half of a wider `west`-vs-`tan` gap every README already
+    shares, not a defect isolated enough to book a standing divergence for
+    on its own).
 - Previous: **v0.13.0 (`93ef5726`)** — `minimal` was re-vendored at this commit
   (only its `README.md` doc-version link changed, `v0.11.1` -> `v0.13.0`; the
   scaffold content itself is unchanged since the `a0849e10` vendor point
@@ -376,13 +381,14 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **one** live entry (the
-`iot` CMakeLists edit). tan-cli#384's seven `README.md` doc-link entries are
-NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0` tag
-(see "Current vendor point" above); listed here only as history, not as a
-current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists edits
-were REVERTED (see entry 3 below) — the theory behind them measured false, so
-those four files carry no deliberate edit at all now.
+The `DELIBERATE_EDITS` table below currently carries **five** live entries: the
+`iot` CMakeLists edit and four `edge-ai` entries (tan-cli#821(a), see entry 4
+below). tan-cli#384's seven `README.md` doc-link entries are NOT among them —
+they were RETIRED when alp-sdk cut the real `v0.15.0` tag (see "Current vendor
+point" above); listed here only as history, not as a current exception.
+tan-cli#501's four `sensor`/`diagnostics` CMakeLists edits were REVERTED (see
+entry 3 below) — the theory behind them measured false, so those four files
+carry no deliberate edit at all now.
 
 **Each is DECLARED to that gate, in `scaffold_byte_parity.py`'s
 `DELIBERATE_EDITS`, and the declaration is strict in both directions.** An
@@ -440,6 +446,27 @@ strictness exists to catch.
    plain `list(APPEND …)`, which is what `--emit scaffold` produces unedited
    for these four files, so they carry no deliberate edit anymore and this
    entry is not live.
+4. **`edge-ai`'s `## Model`/`## Tests` README sections and matching
+   `src/main.c` comments, both SKUs (tan-cli#821(a)).** The emit points a
+   customer at `models/README.md` and `twister ... -T tests/unit/cold_chain`
+   — real paths only in the alp-sdk checkout the text was captured from,
+   never emitted into any scaffolded project (`_vendored_files` in
+   `tan/core/scaffold.py` reads nothing outside `vendored/edge-ai/<sku>/`).
+   Both referents are a bare inline code span / bare twister argument rather
+   than a markdown link, so the emit's own doc-link rewriter (which only
+   rewrites `[text](https://github.com/alplabai/alp-sdk/blob/<ref>/...)`
+   links) never touches them — unlike every other cross-repo reference this
+   tree carries. Rewritten to a real link (`README.md`) or a named alp-sdk
+   path (`src/main.c`, a C comment — no markdown rewriter applies there
+   either way), each noting the referent needs an alp-sdk checkout to read
+   since this scaffolded project doesn't carry it. This is the same class of
+   standing exception as entry 2 above, not a new mechanism: the emit's own
+   output is wrong for a customer, and the real fix — turning the two bare
+   referents into real alp-sdk markdown links so the rewriter and
+   `test_template_integrity.py`'s ref-consistency check cover them going
+   forward — lives in alp-sdk's `examples/ai/cold-chain-monitor/README.md`
+   and `src/main.c`, not here. Filed upstream as alp-sdk#1688; this entry
+   retires the moment that lands and this tree is re-vendored.
 
 ## Template x SKU matrix vendored
 

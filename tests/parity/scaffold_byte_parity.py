@@ -123,6 +123,87 @@ def un_edit_iot_extra_conf_order(text: str) -> str:
     return _IOT_EXTRA_CONF_PREPEND.sub(r"list(APPEND \1)", text)
 
 
+#: tan-cli#821(a): `edge-ai`'s `## Model` / `## Tests` README sections and the
+#: matching `src/main.c` comments point at `models/README.md` and
+#: `tests/unit/cold_chain` -- both real only in the alp-sdk checkout the text
+#: was captured from, never emitted into any scaffolded project
+#: (`_vendored_files` in `tan/core/scaffold.py` never reaches outside
+#: `vendored/edge-ai/<sku>/`). The emit's own bytes are a bare code span and a
+#: bare twister argument, so the SDK's markdown-link rewriter never touches
+#: them -- unlike every other cross-repo reference in this tree, which IS a
+#: real `[text](https://github.com/alplabai/alp-sdk/blob/<ref>/...)` link.
+_EDGE_AI_README_MODEL_TESTS_EDITED = re.compile(
+    r"## Model\n\n"
+    r"No model is shipped \(stub \+ deterministic classifier/fallback\)\. The\n"
+    r"autoencoder training recipe is alp-sdk's\n"
+    r"\[`examples/ai/cold-chain-monitor/models/README\.md`\]"
+    r"\(https://github\.com/alplabai/alp-sdk/blob/v0\.16\.0/"
+    r"examples/ai/cold-chain-monitor/models/README\.md\)\n"
+    r"-- not part of this scaffolded project; it needs an alp-sdk checkout to "
+    r"read\.\n\n"
+    r"## Tests\n\n"
+    r"The `cold_chain` core's host-unit test suite is alp-sdk's\n"
+    r"\[`tests/unit/cold_chain`\]"
+    r"\(https://github\.com/alplabai/alp-sdk/tree/v0\.16\.0/tests/unit/cold_chain\)\n"
+    r"-- also not part of this scaffolded project\. From an alp-sdk checkout:\n\n"
+    r"```\n"
+    r"twister -p native_sim/native/64 -T tests/unit/cold_chain\n"
+    r"```\n"
+)
+
+_EDGE_AI_README_MODEL_TESTS_EMITTED = (
+    "## Model\n\n"
+    "No model is shipped (stub + deterministic classifier/fallback). See\n"
+    "`models/README.md` for the autoencoder training recipe.\n\n"
+    "## Tests\n\n"
+    "```\n"
+    "twister -p native_sim/native/64 -T tests/unit/cold_chain\n"
+    "```\n"
+)
+
+
+def un_edit_edge_ai_readme_model_tests_pointers(text: str) -> str:
+    """tan-cli#821(a): reverse the README `## Model` / `## Tests` rewrite
+    above to recover the emit's own (dead-pointer) bytes."""
+    return _EDGE_AI_README_MODEL_TESTS_EDITED.sub(
+        _EDGE_AI_README_MODEL_TESTS_EMITTED, text
+    )
+
+
+_EDGE_AI_MAIN_C_MODEL_COMMENT_1_EDITED = re.compile(
+    r" \* \(see alp-sdk's examples/ai/cold-chain-monitor/models/README\.md -- not\n"
+    r" \* part of this scaffolded project\); with no model the deterministic\n"
+    r" \* classifier \+ anomaly fallback run\.\n"
+)
+_EDGE_AI_MAIN_C_MODEL_COMMENT_1_EMITTED = (
+    " * (see models/README.md); with no model the deterministic classifier + anomaly\n"
+    " * fallback run.\n"
+)
+
+_EDGE_AI_MAIN_C_MODEL_COMMENT_2_EDITED = re.compile(
+    r" \* detects and routes to cc_anomaly_fallback\(\)\.  See alp-sdk's\n"
+    r" \* examples/ai/cold-chain-monitor/models/README\.md \(not part of this\n"
+    r" \* scaffolded project\) for the autoencoder training recipe to replace this\n"
+    r" \* stub\. \*/\n"
+)
+_EDGE_AI_MAIN_C_MODEL_COMMENT_2_EMITTED = (
+    " * detects and routes to cc_anomaly_fallback().  See models/README.md for\n"
+    " * the autoencoder training recipe to replace this stub. */\n"
+)
+
+
+def un_edit_edge_ai_main_c_model_pointers(text: str) -> str:
+    """tan-cli#821(a): reverse both `src/main.c` `models/README.md` comment
+    rewrites above to recover the emit's own (dead-pointer) bytes."""
+    text = _EDGE_AI_MAIN_C_MODEL_COMMENT_1_EDITED.sub(
+        _EDGE_AI_MAIN_C_MODEL_COMMENT_1_EMITTED, text
+    )
+    text = _EDGE_AI_MAIN_C_MODEL_COMMENT_2_EDITED.sub(
+        _EDGE_AI_MAIN_C_MODEL_COMMENT_2_EMITTED, text
+    )
+    return text
+
+
 #: The hand-edits `python/tan/templates/vendored/MANIFEST.md` declares under
 #: "Deliberate edits on top of the emit" -- the only bytes in that tree that
 #: are NOT what `--emit scaffold` produced, each because the emit's own output
@@ -156,6 +237,25 @@ DELIBERATE_EDITS: dict[tuple[str, str, str], tuple[str, Callable[[str], str]]] =
         "tan-cli#379: list(PREPEND EXTRA_CONF_FILE ...) so a caller's own "
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
         un_edit_iot_extra_conf_order,
+    ),
+    ("edge-ai", "E1M-AEN801", "README.md"): (
+        "tan-cli#821(a): `## Model`/`## Tests` pointed a customer at "
+        "models/README.md and tests/unit/cold_chain, neither emitted into any "
+        "scaffolded project -- turned into real links to the alp-sdk paths",
+        un_edit_edge_ai_readme_model_tests_pointers,
+    ),
+    ("edge-ai", "E1M-V2N101", "README.md"): (
+        "tan-cli#821(a): same as E1M-AEN801/README.md above",
+        un_edit_edge_ai_readme_model_tests_pointers,
+    ),
+    ("edge-ai", "E1M-AEN801", "src/main.c"): (
+        "tan-cli#821(a): two comments pointed at models/README.md, not "
+        "emitted into any scaffolded project -- named the real alp-sdk path",
+        un_edit_edge_ai_main_c_model_pointers,
+    ),
+    ("edge-ai", "E1M-V2N101", "src/main.c"): (
+        "tan-cli#821(a): same as E1M-AEN801/src/main.c above",
+        un_edit_edge_ai_main_c_model_pointers,
     ),
     # tan-cli#501 review finding 1: a matching PREPEND was added to the four
     # `sensor`/`diagnostics` CMakeLists.txt files under the same
