@@ -199,8 +199,17 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/cli.py: 1015 -> 1021
     - tan/commands/new_som_cmd.py: 1360 -> 1380
     - tan/commands/sdk_cmd.py: 1392 -> 1416
+- 2026-08-21 -- tan-cli#825: correcting the cmake/alp.cmake present-tense claim added 12 comment lines to tan/commands/generate_cmd.py (1348 -> 1360) and 2 to tan/planner/template.py (1470 -> 1472). Both are prose in place of a false statement -- alp.cmake is absent at alp-sdk v0.16.0-rc1, dev and main -- so there is no code to extract; the alternative to the raise is leaving the documentation wrong.
+    - tan/commands/generate_cmd.py: 1348 -> 1360
+    - tan/planner/template.py: 1470 -> 1472
 - 2026-08-23 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 252 -> 254
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1348 -> 1360
+    - tan/planner/template.py: 1470 -> 1472
+- 2026-08-25 -- PR #878 fix round: re-verify #824/#792/#825/#814 prose against measured facts (98 real alp_project.py callers not 126, cold-chain-monitor converted at v0.16.0, template.py hedging) grew generate_cmd.py and template.py docstrings/comments
+    - tan/commands/generate_cmd.py: 1360 -> 1361
+    - tan/planner/template.py: 1472 -> 1487
 - 2026-08-25 -- tan-cli#468: resolve_sdk now always returns an ActiveSdk (carrying broken_project_pin/foreign_global_default_for even when unresolved) instead of a bare None -- clean_cmd.py and diff_cmd.py grew threading that through their guards and envelope construction.
     - tan/commands/clean_cmd.py: 1120 -> 1129
     - tan/commands/diff_cmd.py: 882 -> 889
@@ -216,6 +225,8 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/bootstrap_cmd.py: 3364 -> 3378
     - tan/commands/sdk_cmd.py: 1480 -> 1514
     - function_count_budget: 255 -> 256
+- 2026-08-25 -- PR #878 fix round (3rd pass): _scaffold_cmakelists's docstring trimmed to defer to _HARDCODED_ALP_PROJECT_PY_RE's own comment instead of restating the cold-chain-monitor/alp-sdk#1400 story -- a shrink, no --reason needed, but recorded here so the shipped ceiling (1481) has a traceable entry
+    - tan/planner/template.py: 1487 -> 1481
 - 2026-08-25 -- tan-cli#896: zephyr_board.py's _aen_flash_partitions docstring re-synced (comment-only) against alp-sdk 522ea3204's stale-prose fix
     - tan/planner/zephyr_board.py: 1486 -> 1494
 - 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
@@ -229,3 +240,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-25 -- tan-cli#904 third round: wall_clock_iso split off generated_at_iso, atomic_write_bytes added, registry rollback wired through it, docstring corrections (base-depth nit, changelog overclaim)
     - tan/commands/bootstrap_cmd.py: 3382 -> 3402
     - function_count_budget: 256 -> 257
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1348 -> 1361
+    - tan/planner/template.py: 1470 -> 1481

@@ -181,8 +181,14 @@ env:
   # bumped `zephyr.version` to v4.4.1 -- the re-vendor that let tan-cli#82
   # delete `optional_libs_block`'s duplicate hardcoded Arm/Zephyr-SDK block.
   # Now a RELEASED TAG, which is what this comment previously asked for ("to a
-  # released tag once alp-sdk cuts one at or after this SHA"). alp-sdk v0.14.0
-  # contains the old dev pin plus 19 commits (`compare` reports
+  # released tag once alp-sdk cuts one at or after this SHA") -- historical
+  # wording, quoted verbatim: at the time, that instruction was satisfied by
+  # literally writing the tag NAME (`v0.14.0`) as this pin's value. That shape
+  # is now a hard failure of `python/tests/gates/
+  # test_planner_oracle_ref_tracks_pinned_sdk_tag.py` (tan-cli#897) -- see
+  # `PINNED_SDK_TAG`'s own declaration below for the current requirement (the
+  # 40-hex commit the tag names, with the tag name recorded in the comment).
+  # alp-sdk v0.14.0 contains the old dev pin plus 19 commits (`compare` reports
   # `status=ahead, behind_by=0`), so it is a clean forward move, and a tag
   # reproduces where a dev tip does not -- the same reason
   # `wizard/vendored/MANIFEST.md` gives for pinning its vendor point to one.
@@ -273,9 +279,14 @@ env:
   # for the same reason -- the two MUST agree (see that file's comment).
   #
   # NOT a tag: alp-sdk had not cut one past v0.15.0-rc1 at the time of this
-  # port. Re-pin to a real tag once alp-sdk cuts one at or after this SHA,
-  # the same deferred-tag pattern this pin's own v0.14.0 -> v0.15.0-rc1
-  # history used.
+  # port. Re-pin once alp-sdk cuts a released tag at or after this SHA -- the
+  # same deferred-tag pattern this pin's own v0.14.0 -> v0.15.0-rc1 history
+  # used, but NOT by writing the tag NAME as this pin's value the way that
+  # history did: pin the 40-hex COMMIT the tag names, with the tag name
+  # recorded in this comment (see `PINNED_SDK_TAG`'s own declaration below).
+  # A bare tag-name value is a hard failure of `python/tests/gates/
+  # test_planner_oracle_ref_tracks_pinned_sdk_tag.py` (tan-cli#897), written
+  # after this entry.
   #
   # Re-verified the other three CI-wired byte-parity gates locally against
   # this commit before the bump (same discipline the v0.14.0 -> v0.15.0-rc1
@@ -579,6 +590,13 @@ env:
   # `test_planner_relocation_freshness.py` is unchanged. `HAND_PORT_PINNED_
   # SDK_COMMIT` and `STRICT_LOADERS_PINNED_SDK_COMMIT` do not move -- see
   # those pins' own comments.
+  #
+  # REQUIREMENT (tan-cli#897): this value must be the 40-hex COMMIT a
+  # released tag names, with the tag name recorded in the comment above --
+  # never the tag name itself. `python/tests/gates/
+  # test_planner_oracle_ref_tracks_pinned_sdk_tag.py` hard-fails a tag-name
+  # value; it cannot resolve a tag to a commit without a checkout or network
+  # access, so a state it cannot verify is treated as drifted.
   PINNED_SDK_TAG: eb96112ba7d1cc3b4084c985962ea31772177d74
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
@@ -628,6 +646,21 @@ env:
   # these goldens were captured from; the two must name the same commit, and
   # `test_planner_oracle_regression.py` fails loudly rather than quietly if the
   # bound checkout is not that one.
+  #
+  # WHOEVER LANDS #270: this pin's lockstep with `PINNED_SDK_TAG` is ALSO
+  # enforced by `python/tests/gates/test_planner_oracle_ref_tracks_pinned_
+  # sdk_tag.py` (tan-cli#895/#897) -- do not try to satisfy it by re-running
+  # `capture_planner_oracle.py` against a post-#270 ref (there is no planner
+  # left to capture). Flip `POST_270_RETIRED = True` in that file instead;
+  # its own `test_the_retirement_marker_is_still_armed` will fail until you
+  # update it alongside the flip, on purpose. THREE sites move together, not
+  # two: (1) `POST_270_RETIRED` above, (2)
+  # `test_the_retirement_marker_is_still_armed` in that same file, and (3)
+  # the node-id grep in THIS workflow's "python/tests/gates" step
+  # (`parity.yml`, search `test_pinned_planner_oracle_ref_tracks_pinned_sdk_tag
+  # PASSED`) -- flipping the marker turns that test's result from PASSED to
+  # SKIPPED, and the grep hard-fails the job on exactly that SKIP unless its
+  # `did not PASS` block is updated (or removed) in the same change.
   PINNED_PLANNER_ORACLE_SDK_REF: eb96112ba7d1cc3b4084c985962ea31772177d74
 
 permissions:
@@ -1062,13 +1095,22 @@ jobs:
       # Deliberately NOT the full `python/tests` suite here (ports + parity,
       # minutes not seconds, needs its own alp-sdk checkout) -- that now runs
       # in the `python-tests` job further down this file, which deliberately
-      # `--ignore=tests/gates`: this JOB already arms all five gate files (9
-      # collected tests, tan-cli#485 added the STRICT_LOADERS_* one) across the
-      # three steps below -- five of them in this
-      # step against the FROZEN audit commit(s), `test_jlink_aen_device_freshness`
-      # live and blocking in its own step, and `test_planner_relocation_freshness`
-      # additionally live and warn-only on `repository_dispatch`. Each is bound
-      # to the ref that makes its verdict mean something.
+      # `--ignore=tests/gates`: this JOB already arms the five gate files it
+      # needs across the three steps below (9 root-bound tests in this step,
+      # unchanged by tan-cli#897 -- its gate needs no root; 10 across all
+      # three) -- not the whole `tests/gates` directory, which has grown to
+      # 38 files since the "five gate files" wording was first written and
+      # no longer matches it; see `ci.yml`'s own comment for why a growing
+      # suite should not commit to an exact number there. Three of them run
+      # in this step against the FROZEN audit commit(s), same as before
+      # tan-cli#897; the tan-cli#897 gate is ALSO asserted in this same
+      # step, but unconditionally -- it needs no checkout or ref binding at
+      # all (see its own module docstring), so it is not one of the
+      # "three... against the FROZEN audit commit(s)".
+      # `test_jlink_aen_device_freshness` is live and blocking in its own
+      # step, and `test_planner_relocation_freshness` is additionally live
+      # and warn-only on `repository_dispatch`. Each of the checkout-bound
+      # ones is bound to the ref that makes its verdict mean something.
       # Running them again in `python-tests` against PINNED_SDK_TAG -- a THIRD,
       # uncoordinated ref that can legitimately sit on either side of the audit
       # commit -- would reintroduce a false positive, not add coverage. This
@@ -1114,6 +1156,24 @@ jobs:
           # docstring invokes.
           if ! grep -qF "test_hand_port_tan_side.py::test_explain_hand_port_still_agrees_with_its_upstream_symbols PASSED" /tmp/gates.log; then
             echo "::error::test_explain_hand_port_still_agrees_with_its_upstream_symbols did not PASS in this job -- ALP_SDK_HAND_PORT_ROOT is bound here, so a SKIP means the oracle checkout this job cloned did not resolve (or the test regressed to fail-open), not an absent root."
+            exit 1
+          fi
+
+          # tan-cli#897's gate (test_planner_oracle_ref_tracks_pinned_sdk_tag.py)
+          # also lives in its OWN file, so the first loop cannot reach it
+          # either. Unlike the two roots above, this test needs no bound
+          # checkout at all -- its three-way comparison is entirely files
+          # already in this repository (tan-cli#897's fix round made that
+          # comparison unconditional, precisely so the ordinary unbound
+          # `pytest tests -q` enforces it too). That is exactly why an
+          # unasserted SKIP here would be worse than merely redundant: an
+          # unconditional test can still fail to COLLECT (an import error, a
+          # renamed fixture) and a collection failure is not a PASSED line
+          # either -- asserted by node id for the same tan-cli#308 reason as
+          # every other line in this step, not because this one can still
+          # skip on a missing root.
+          if ! grep -qF "test_planner_oracle_ref_tracks_pinned_sdk_tag.py::test_pinned_planner_oracle_ref_tracks_pinned_sdk_tag PASSED" /tmp/gates.log; then
+            echo "::error::test_pinned_planner_oracle_ref_tracks_pinned_sdk_tag did not PASS in this job -- this test needs no ALP_SDK_ROOT and runs unconditionally, so anything other than PASSED here (a SKIP via POST_270_RETIRED, or a collection failure) is a real finding, not an absent root."
             exit 1
           fi
 
@@ -1869,13 +1929,19 @@ jobs:
   #     NO absolute collected count is recorded here, deliberately. One prior
   #     revision of this comment cited a single figure that stopped matching
   #     either input; the figures that replaced IT then moved by 26 within a
-  #     single session. An absolute here rots every time either tree moves, so
-  #     only the stable facts are kept: binding `ALP_SDK_ROOT` strictly
-  #     INCREASES collection, and `--ignore=tests/gates` removes exactly 8
-  #     tests (the five gate files) -- the one figure that does not rot,
-  #     because it depends on this repo alone. Need an absolute? Measure it:
-  #     `python -m pytest --collect-only -q` from `python/`. Do not write the
-  #     answer back into this comment.
+  #     single session. A LATER revision claimed `--ignore=tests/gates`
+  #     "removes exactly 8 tests (the five gate files)" as the one figure
+  #     that does not rot "because it depends on this repo alone" -- that
+  #     was never right either: `--ignore=tests/gates` drops the WHOLE
+  #     `tests/gates` directory (38 files today, not five), and that
+  #     directory grows on its own schedule same as everything else here.
+  #     So even the figure sold as rot-proof rotted, silently, right next to
+  #     the sentence warning about rot. Only the stable facts are kept:
+  #     binding `ALP_SDK_ROOT` strictly INCREASES collection, and
+  #     `--ignore=tests/gates` REMOVES some (unspecified, growing) count.
+  #     Need an absolute? Measure it: `python -m pytest --collect-only -q`
+  #     from `python/`, with and without `--ignore=tests/gates`. Do not
+  #     write the answer back into this comment.
   #   The SECOND oracle this job used to arm -- a locally built Rust `tan`,
   #   auto-discovered off `target/{release,debug}/` -- is gone with `crates/`
   #   (tan-cli#269). Nothing in the suite resolves or spawns a Rust binary any
@@ -1885,9 +1951,13 @@ jobs:
   # `--ignore=tests/gates`: NOT because those tests don't matter, but because
   # they already run, correctly, in seam1 above -- all five files, each bound
   # to the specific ref that makes its verdict mean something: the frozen audit
-  # commit for four of them, the live checkout for
-  # `test_jlink_aen_device_freshness`, plus a live warn-only re-run of
-  # `test_planner_relocation_freshness` on dispatch. Running them again here
+  # commit for three of them (`test_planner_relocation_freshness`,
+  # `test_hand_port_tan_side`, `test_swd_probe_v2n_gd32_jlink_device_freshness`),
+  # no checkout at all for `test_planner_oracle_ref_tracks_pinned_sdk_tag`
+  # (tan-cli#897's own gate, unconditional by design -- see seam1's comment),
+  # the live checkout for `test_jlink_aen_device_freshness`, plus a live
+  # warn-only re-run of `test_planner_relocation_freshness` on dispatch.
+  # Running them again here
   # against a THIRD, uncoordinated ref would reintroduce the exact
   # false-positive d9a22c0/ecab9da exists to prevent (PINNED_SDK_TAG can sit on
   # either side of the audit commit with no guarantee the two agree).

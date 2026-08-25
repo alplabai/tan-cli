@@ -6,18 +6,17 @@
 // it, and leaves the launcher pointing at the unpacked tree. Runs as the
 // package's `postinstall` step.
 //
-// From v0.5.0 — the transition tag, NOT CUT YET — the asset becomes an
-// ARCHIVE of a PyInstaller `--onedir` freeze (`tan-<triple>.zip` on Windows,
-// `tan-<triple>.tar.gz` elsewhere), not a raw binary. Every tag published so
-// far, including v0.5.0-rc4, still ships the raw `tan-<triple>[.exe]` this
-// shim asked for before tan-cli#349/#356; tan-cli#349 changed the RELEASE,
-// install.sh and install.ps1 to also handle the future archive shape, and
-// left this shim behind asking ONLY for the archive name (tan-cli#362) — a
-// name no tag published today carries, so every install 404'd at the
-// download, including at this shim's own pinned version. Like the two
-// installers, this shim now supports BOTH shapes and asks the release itself
-// (via checksums.txt) which one a given tag actually published, rather than
-// assuming from the version — see `selectRelease` below.
+// From v0.5.0 (shipped 2026-08-04) the asset is an ARCHIVE of a PyInstaller
+// `--onedir` freeze (`tan-<triple>.zip` on Windows, `tan-<triple>.tar.gz`
+// elsewhere), not a raw binary. Every tag published since ships only that
+// archive shape; the raw `tan-<triple>[.exe]` this shim also asks for is a
+// legacy fallback reachable only on v0.4.1 and earlier -- tan-cli#349 changed
+// the RELEASE, install.sh and install.ps1 to handle the archive shape, and
+// left this shim behind asking ONLY for the archive name (tan-cli#362), which
+// 404'd on every tag published at the time. Like the two installers, this
+// shim supports BOTH shapes and asks the release itself (via checksums.txt)
+// which one a given tag actually published, rather than assuming from the
+// version — see `selectRelease` below.
 //
 // The archive's one top-level entry is `tan/`, holding `tan` (`tan.exe` on
 // Windows) plus `_internal/`, its runtime. THE EXECUTABLE DOES NOT RUN WITHOUT
