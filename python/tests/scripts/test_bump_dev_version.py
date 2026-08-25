@@ -252,3 +252,33 @@ def test_main_without_apply_is_a_dry_run(tmp_path, monkeypatch) -> None:
     assert rc == 0
     assert github_output.read_text(encoding="utf-8").strip() == "status=would-apply"
     assert (root / "python" / "tan" / "version.py").read_text(encoding="utf-8") == _VERSION_PY
+
+
+def test_the_final_tag_bullet_never_splits_the_issue_reference(tmp_path, monkeypatch) -> None:
+    """The CHANGELOG bullet wraps, and `tan-cli#770` must survive the wrap.
+
+    Every other `build_plan` case here feeds an rc tag, whose longer version
+    string happens to push the issue reference clear of the wrap column. The
+    plain-final-tag branch -- the shape BOTH real precedents took (v0.5.1,
+    v0.6.0) -- lands `tan-cli#770` right on the boundary, where textwrap's
+    default `break_on_hyphens=True` splits it into `tan-` / `cli#770`.
+    Markdown renders that soft break as `tan- cli#770`: wrong text, no
+    autolink, and it survives `assemble_changelog` into the body
+    `release.yml` slices for the published release notes.
+    """
+    _synthetic_repo(tmp_path, monkeypatch)
+    plan = bdv.build_plan("0.6.1", today="2026-08-25")
+
+    lines = plan.changelog_text.splitlines()
+    bullet_lines = [
+        line
+        for line in lines
+        if "tan-cli#770" in line or line.strip().startswith("- `TAN_VERSION`")
+    ]
+
+    assert bullet_lines, "the auto-created bullet is missing from the CHANGELOG text"
+    assert not any(
+        line.rstrip().endswith("tan-") for line in lines
+    ), "textwrap split `tan-cli#770` across the wrap -- pass break_on_hyphens=False"
+    assert "tan-cli#770" in "\n".join(bullet_lines)
+    assert all(len(line) <= 78 for line in bullet_lines)

@@ -153,8 +153,15 @@ def _bump_version_py(
     # Wrapped to match the hand-written comment blocks already in this file
     # (~78 columns, one `#` per line) rather than emitting one unreadable
     # 400-column line -- `textwrap` does the wrapping, this does not
-    # re-derive it.
-    wrapped = "\n".join(f"# {line}" for line in textwrap.wrap(paragraph, width=76))
+    # re-derive it. `break_on_hyphens=False` because the paragraph embeds
+    # `tan-cli#770`: textwrap's default treats that hyphen as a break point
+    # and would emit `tan-` / `cli#770` on separate lines.
+    wrapped = "\n".join(
+        f"# {line}"
+        for line in textwrap.wrap(
+            paragraph, width=76, break_on_hyphens=False, break_long_words=False
+        )
+    )
     note = f"#\n{wrapped}\n"
     return _TAN_VERSION_LINE.sub(
         lambda _m: f'{note}TAN_VERSION = "{next_version}"', text, count=1
@@ -225,9 +232,20 @@ def _insert_changelog_section(
         f"`TAN_VERSION` moved to `{next_version}` off the published "
         f"`v{released}` tag ({_ISSUE}'s automated post-release bump)."
     )
+    # `break_on_hyphens=False` is load-bearing, not cosmetic: with textwrap's
+    # default a plain-final-tag bump (`v0.6.1` -> `0.6.2-rc1.dev0`, the shape
+    # BOTH real precedents took) wraps `tan-cli#770` as `tan-` / `cli#770`.
+    # Markdown then renders the soft break as `tan- cli#770`, which neither
+    # reads correctly nor autolinks -- and it survives `assemble_changelog`
+    # into the body `release.yml` slices for the published release notes.
     bullet = "\n".join(
         textwrap.wrap(
-            bullet_text, width=78, initial_indent="- ", subsequent_indent="  "
+            bullet_text,
+            width=78,
+            initial_indent="- ",
+            subsequent_indent="  ",
+            break_on_hyphens=False,
+            break_long_words=False,
         )
     )
     section = f"## [{target}] — Unreleased\n\n### Fixed\n\n{bullet}\n\n"
