@@ -248,7 +248,14 @@ def test_project_paths_are_absolute_posix_and_the_board_path_hangs_off_the_root(
 def test_an_invalid_sdk_root_flag_resolves_to_nothing_rather_than_a_lower_tier(tmp_path):
     # I-31: `--sdk-root` is terminal. A typo must not silently report whatever
     # else happens to be resolvable.
-    assert resolve_sdk(str(tmp_path / "nope"), str(tmp_path)) is None
+    #
+    # tan-cli#468: `resolve_sdk` now always returns an `ActiveSdk`, never a
+    # bare `None` -- `.path is None` is what "resolved to nothing" looks like.
+    # `--sdk-root` is terminal, so neither carried-through fact fires here.
+    result = resolve_sdk(str(tmp_path / "nope"), str(tmp_path))
+    assert result.path is None
+    assert result.broken_project_pin is None
+    assert result.foreign_global_default_for is None
 
 
 def test_a_valid_sdk_root_flag_keeps_the_path_as_typed(tmp_path, monkeypatch):
@@ -409,6 +416,43 @@ def test_a_rejected_sdk_root_flag_is_named_in_the_message(tmp_path, monkeypatch)
     # The remediation that recommends the flag the caller just passed is GONE
     # from this branch -- that self-defeating sentence is the defect.
     assert "pass --sdk-root <path>" not in text
+
+
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(
+    tmp_path, monkeypatch
+):
+    """tan-cli#468. `resolve_sdk` returned a bare `None` whenever nothing
+    resolved -- so a workspace whose `.alp/sdk-path` names a checkout that no
+    longer exists, with no sibling for discovery to fall through to and no
+    `~/.alp/sdk-default` either, reported `presets.sdk-root-unresolved` alone.
+    The envelope already says "no SDK"; this is the fix that lets it say WHY.
+    Nothing here resolves at all (unlike tan-cli#464's wrong-checkout harm),
+    so this is only the diagnostic gap.
+
+    Fails against dev: `doc["issues"]` there is `presets.sdk-root-unresolved`
+    alone, with no leading `sdk.project-pin-unresolved` and `"gone-checkout"`
+    nowhere in the envelope."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    write(
+        tmp_path / ".alp" / "sdk-path",
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}),
+    )
+    result = runner.invoke(app, ["presets", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    # Absent, not null -- still no usable checkout, so still no `sdk` block.
+    assert "sdk" not in doc
+    assert doc["data"]["sdkRoot"] is None
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "presets.sdk-root-unresolved",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+
+    text = runner.invoke(app, ["presets"]).stderr
+    assert "gone-checkout" in text
 
 
 def test_a_bad_format_is_a_usage_error_not_a_traceback():
