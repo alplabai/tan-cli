@@ -130,6 +130,104 @@ def un_edit_iot_extra_conf_order(text: str) -> str:
     return _IOT_EXTRA_CONF_PREPEND.sub(r"list(APPEND \1)", text)
 
 
+#: tan-cli#821(a): `edge-ai`'s `## Model` / `## Tests` README sections and the
+#: matching `src/main.c` comments point at `models/README.md` and
+#: `tests/unit/cold_chain` -- both real only in the alp-sdk checkout the text
+#: was captured from, never emitted into any scaffolded project
+#: (`_vendored_files` in `tan/core/scaffold.py` never reaches outside
+#: `vendored/edge-ai/<sku>/`). The emit's own bytes are a bare code span and a
+#: bare twister argument, so the SDK's markdown-link rewriter never touches
+#: them, same as most cross-repo references in this tree, which ARE real
+#: `[text](https://github.com/alplabai/alp-sdk/blob/<ref>/...)` links the
+#: rewriter already covers. Not the only bare ones, though: `diagnostics`'s
+#: `README.md` names a bare `scripts/program_eeprom.py` and `sensor`'s a bare
+#: `examples/peripheral-io/i2c-scanner`, the same defect class, tracked
+#: separately and NOT fixed here -- tan-cli#912.
+_EDGE_AI_README_MODEL_TESTS_EDITED = re.compile(
+    r"## Model\n\n"
+    r"No model is shipped \(stub \+ deterministic classifier/fallback\)\. The\n"
+    r"autoencoder training recipe is alp-sdk's\n"
+    r"\[`examples/ai/cold-chain-monitor/models/README\.md`\]"
+    r"\(https://github\.com/alplabai/alp-sdk/blob/v0\.16\.0/"
+    r"examples/ai/cold-chain-monitor/models/README\.md\)\n"
+    r"-- not part of this scaffolded project; the path lives only in an "
+    r"alp-sdk\n"
+    r"checkout, though the link above works without one\.\n\n"
+    r"## Tests\n\n"
+    r"The `cold_chain` core's host-unit test suite is alp-sdk's\n"
+    r"\[`tests/unit/cold_chain`\]"
+    r"\(https://github\.com/alplabai/alp-sdk/tree/v0\.16\.0/tests/unit/cold_chain\)\n"
+    r"-- also not part of this scaffolded project\. From an alp-sdk checkout:\n\n"
+    r"```\n"
+    r"twister -p native_sim/native/64 -T tests/unit/cold_chain\n"
+    r"```\n"
+)
+
+_EDGE_AI_README_MODEL_TESTS_EMITTED = (
+    "## Model\n\n"
+    "No model is shipped (stub + deterministic classifier/fallback). See\n"
+    "`models/README.md` for the autoencoder training recipe.\n\n"
+    "## Tests\n\n"
+    "```\n"
+    "twister -p native_sim/native/64 -T tests/unit/cold_chain\n"
+    "```\n"
+)
+
+
+def un_edit_edge_ai_readme_model_tests_pointers(text: str) -> str:
+    """tan-cli#821(a): reverse the README `## Model` / `## Tests` rewrite
+    above to recover the emit's own (dead-pointer) bytes."""
+    return _EDGE_AI_README_MODEL_TESTS_EDITED.sub(
+        _EDGE_AI_README_MODEL_TESTS_EMITTED, text
+    )
+
+
+_EDGE_AI_MAIN_C_MODEL_COMMENT_1_EDITED = re.compile(
+    r" \* \(see alp-sdk's examples/ai/cold-chain-monitor/models/README\.md -- not\n"
+    r" \* part of this scaffolded project\); with no model the deterministic\n"
+    r" \* classifier \+ anomaly fallback run\.\n"
+)
+_EDGE_AI_MAIN_C_MODEL_COMMENT_1_EMITTED = (
+    " * (see models/README.md); with no model the deterministic classifier + anomaly\n"
+    " * fallback run.\n"
+)
+
+_EDGE_AI_MAIN_C_MODEL_COMMENT_2_EDITED = re.compile(
+    r" \* detects and routes to cc_anomaly_fallback\(\)\.  See alp-sdk's\n"
+    r" \* examples/ai/cold-chain-monitor/models/README\.md \(not part of this\n"
+    r" \* scaffolded project\) for the autoencoder training recipe to replace this\n"
+    r" \* stub\. \*/\n"
+)
+_EDGE_AI_MAIN_C_MODEL_COMMENT_2_EMITTED = (
+    " * detects and routes to cc_anomaly_fallback().  See models/README.md for\n"
+    " * the autoencoder training recipe to replace this stub. */\n"
+)
+
+
+def un_edit_edge_ai_main_c_model_comment_1(text: str) -> str:
+    """tan-cli#821(a): reverse the first `src/main.c` `models/README.md`
+    comment rewrite above to recover the emit's own (dead-pointer) bytes.
+
+    Kept as its own `DELIBERATE_EDITS` entry, separate from comment 2 below,
+    so healing one comment without the other still fails the declaration --
+    a single combined un_edit over both substitutions passed `after == before`
+    only if BOTH were already healed, so restoring just this one left the
+    still-live comment-2 edit passing silently (measured)."""
+    return _EDGE_AI_MAIN_C_MODEL_COMMENT_1_EDITED.sub(
+        _EDGE_AI_MAIN_C_MODEL_COMMENT_1_EMITTED, text
+    )
+
+
+def un_edit_edge_ai_main_c_model_comment_2(text: str) -> str:
+    """tan-cli#821(a): reverse the second `src/main.c` `models/README.md`
+    comment rewrite above to recover the emit's own (dead-pointer) bytes.
+    See `un_edit_edge_ai_main_c_model_comment_1` for why this is a separate
+    entry rather than folded into one function with it."""
+    return _EDGE_AI_MAIN_C_MODEL_COMMENT_2_EDITED.sub(
+        _EDGE_AI_MAIN_C_MODEL_COMMENT_2_EMITTED, text
+    )
+
+
 #: tan-cli#814: the emit's own sentence tells the customer to flip `som.sku`
 #: to `E1M-V2M101` in `board.yaml` and stop there. On the `E1M-V2N101` sibling
 #: that is correct (V2N101/V2M101 are the same PCB, same `preset:`/`cores:`/
@@ -190,11 +288,18 @@ def un_edit_edge_ai_aen801_board_yaml_deepx_note(text: str) -> str:
 #: are NOT what `--emit scaffold` produced, each because the emit's own output
 #: is wrong for a customer and the fix lives in alp-sdk, not here.
 #:
-#: Keyed `(template, sku, path)`; the value is `(reason, un_edit)` where
-#: `un_edit` maps the VENDORED bytes back onto what the emit is expected to
-#: say. `diff_trees` then runs against THAT, so a declaration excuses exactly
-#: the edit it describes and nothing else -- an unrelated change in the same
-#: file still fails, which a path-level allow-list can never do.
+#: Keyed `(template, sku, path, edit_id)`; the value is `(reason, un_edit)`
+#: where `un_edit` maps the VENDORED bytes back onto what the emit is expected
+#: to say. `diff_trees` then runs against THAT, so a declaration excuses
+#: exactly the edit it describes and nothing else -- an unrelated change in
+#: the same file still fails, which a path-level allow-list can never do.
+#: `edit_id` exists so two independent substitutions in the same file get two
+#: entries, applied in dict-iteration order: bundling them under one `path`
+#: key let `after == before` (the strict check below) pass on the AGGREGATE,
+#: so healing only one of two comments in `edge-ai`'s `src/main.c` -- see the
+#: two `model_comment_*` entries -- found the OTHER substitution still
+#: matching, the combined result still changed, and the stale half's own
+#: declaration failure never fired (measured, tan-cli#908 review).
 #:
 #: Strict in the `xfail(strict=True)` sense this repo declares divergences with
 #: (`python/tests/parity/test_scaffold_content_oracle_parity.py`'s
@@ -215,20 +320,51 @@ def un_edit_edge_ai_aen801_board_yaml_deepx_note(text: str) -> str:
 # tan-cli#891 pin bump -- see `MANIFEST.md`'s "Current vendor point").
 # `un_edit_doc_link_ref` is kept: it is the only record of the transform, and
 # the next pre-release vendor point will need it again.
-DELIBERATE_EDITS: dict[tuple[str, str, str], tuple[str, Callable[[str], str]]] = {
-    ("iot", "E1M-AEN801", "CMakeLists.txt"): (
+DELIBERATE_EDITS: dict[
+    tuple[str, str, str, str], tuple[str, Callable[[str], str]]
+] = {
+    ("iot", "E1M-AEN801", "CMakeLists.txt", "extra_conf_order"): (
         "tan-cli#379: list(PREPEND EXTRA_CONF_FILE ...) so a caller's own "
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
         un_edit_iot_extra_conf_order,
     ),
-    ("edge-ai", "E1M-AEN801", "README.md"): (
+    ("edge-ai", "E1M-AEN801", "README.md", "model_tests_pointers"): (
+        "tan-cli#821(a): `## Model`/`## Tests` pointed a customer at "
+        "models/README.md and tests/unit/cold_chain, neither emitted into any "
+        "scaffolded project -- turned into real links to the alp-sdk paths",
+        un_edit_edge_ai_readme_model_tests_pointers,
+    ),
+    ("edge-ai", "E1M-V2N101", "README.md", "model_tests_pointers"): (
+        "tan-cli#821(a): same as E1M-AEN801/README.md above",
+        un_edit_edge_ai_readme_model_tests_pointers,
+    ),
+    ("edge-ai", "E1M-AEN801", "src/main.c", "model_comment_1"): (
+        "tan-cli#821(a): first comment pointed at models/README.md, not "
+        "emitted into any scaffolded project -- named the real alp-sdk path",
+        un_edit_edge_ai_main_c_model_comment_1,
+    ),
+    ("edge-ai", "E1M-AEN801", "src/main.c", "model_comment_2"): (
+        "tan-cli#821(a): second comment, same file, same defect -- own "
+        "entry so healing one comment without the other still reds "
+        "(tan-cli#908 review)",
+        un_edit_edge_ai_main_c_model_comment_2,
+    ),
+    ("edge-ai", "E1M-V2N101", "src/main.c", "model_comment_1"): (
+        "tan-cli#821(a): same as E1M-AEN801/src/main.c comment 1 above",
+        un_edit_edge_ai_main_c_model_comment_1,
+    ),
+    ("edge-ai", "E1M-V2N101", "src/main.c", "model_comment_2"): (
+        "tan-cli#821(a): same as E1M-AEN801/src/main.c comment 2 above",
+        un_edit_edge_ai_main_c_model_comment_2,
+    ),
+    ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note"): (
         "tan-cli#814: the emit's `Flip som.sku to E1M-V2M101` sentence is a "
         "cross-family swap here (alif-ensemble -> renesas-rzv2n-deepx) that "
         "tan validate refuses; the E1M-V2N101 sibling's identical sentence "
         "is correct and untouched",
         un_edit_edge_ai_aen801_readme_deepx_note,
     ),
-    ("edge-ai", "E1M-AEN801", "board.yaml"): (
+    ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note"): (
         "tan-cli#814: same defect as the README entry above, the comment "
         "one file over that reinforces it",
         un_edit_edge_ai_aen801_board_yaml_deepx_note,
@@ -405,7 +541,9 @@ def undo_declared_edits(
     undo. Both are hard failures for the caller, not notes."""
     as_emitted = dict(vendored)
     failures = []
-    for (declared_template, declared_sku, path), (reason, un_edit) in DELIBERATE_EDITS.items():
+    for (declared_template, declared_sku, path, _edit_id), (reason, un_edit) in (
+        DELIBERATE_EDITS.items()
+    ):
         if (declared_template, declared_sku) != (template, sku):
             continue
         before = as_emitted.get(path)
@@ -447,8 +585,9 @@ def self_check() -> None:
     )
 
     template, sku, path = "iot", "E1M-AEN801", "CMakeLists.txt"
+    edit_id = "extra_conf_order"
     emitted = "list(APPEND EXTRA_CONF_FILE ${_alp_generated})\n"
-    assert (template, sku, path) in DELIBERATE_EDITS
+    assert (template, sku, path, edit_id) in DELIBERATE_EDITS
 
     # A declared edit that is no longer there FAILS instead of passing quietly
     # -- the `xfail(strict=True)` half. Feed the already-emitted bytes: a
@@ -463,15 +602,39 @@ def self_check() -> None:
     assert not [f for f in failures if f.startswith(f"{path}:")], failures
     assert diff_trees({path: as_emitted[path]}, {path: emitted}) == [f"{path}: content differs"]
 
+    # Two independent substitutions in one file get two ENTRIES (tan-cli#908
+    # review, entry 3): healing only one must fail on its own, not hide behind
+    # the other one still matching. Before the split, a single combined
+    # un_edit's `after == before` check ran on the AGGREGATE of both
+    # substitutions, so healing comment 1 alone while comment 2 stayed edited
+    # produced `after != before` (comment 2 still changed something) and no
+    # failure fired at all -- measured against the pre-split function.
+    half_healed_main_c = (
+        " * (see models/README.md); with no model the deterministic classifier + anomaly\n"
+        " * fallback run.\n"
+        " * detects and routes to cc_anomaly_fallback().  See alp-sdk's\n"
+        " * examples/ai/cold-chain-monitor/models/README.md (not part of this\n"
+        " * scaffolded project) for the autoencoder training recipe to replace this\n"
+        " * stub. */\n"
+    )
+    _, split_failures = undo_declared_edits(
+        "edge-ai", "E1M-AEN801", {"src/main.c": half_healed_main_c}
+    )
+    healed_comment_failures = [
+        f for f in split_failures
+        if f.startswith("src/main.c: DELIBERATE_EDITS declares an edit that is no longer")
+    ]
+    assert len(healed_comment_failures) == 1, split_failures
+
     # tan-cli#814's two entries: the un_edit must round-trip the corrected
     # README/board.yaml prose back onto the emit's own (still-wrong) sentence,
-    # and be registered under the exact (template, sku, path) diff_trees keys on.
-    assert ("edge-ai", "E1M-AEN801", "README.md") in DELIBERATE_EDITS
+    # and be registered under the exact (template, sku, path, edit_id) key.
+    assert ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note") in DELIBERATE_EDITS
     assert (
         un_edit_edge_ai_aen801_readme_deepx_note(_EDGE_AI_AEN801_README_DEEPX_NOTE)
         == _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
     )
-    assert ("edge-ai", "E1M-AEN801", "board.yaml") in DELIBERATE_EDITS
+    assert ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note") in DELIBERATE_EDITS
     assert (
         un_edit_edge_ai_aen801_board_yaml_deepx_note(_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE)
         == _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED
