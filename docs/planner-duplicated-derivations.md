@@ -95,6 +95,31 @@ itself stale:
   both already argued for in that file's own comments at lines 720-739.
   **Neither is a source of any of the eight derivations below**, so the
   older hand-port pin does not weaken any verdict in this document.
+  **Re-hashed again at `eb96112b` (tan-cli#896, 2026-08-25): 13 of 19
+  match, not 17.** Four more sources diverged inside
+  `94378a05..eb96112b`: `scripts/gen_zephyr_board.py` (`522ea3204`,
+  docstring-only per the commit's own "No behaviour change; comments
+  only" -- the fix itself lived in two `.dts` board trees, not this
+  generator), and `scripts/alp_project_loader.py` /
+  `scripts/alp_project_emit/__init__.py` /
+  `scripts/alp_project_emit/west_libs.py` (`85b6b905a` threading
+  `--metadata-root` through every resolver, plus `95eb64ab8`'s ten new
+  `_CHIP_SUBSYSTEMS` entries in `__init__.py` -- both BEHAVIOURAL
+  upstream). All three of the second group are already carried in
+  `tan/planner/{som_metadata,slugs,project_emit/west_libs}.py` by
+  tan-cli#868's earlier resync, confirmed by reading the current source
+  rather than the resync's own commit message: the required
+  `metadata_root` parameter and every one of the ten `_CHIP_SUBSYSTEMS`
+  entries are present. `HAND_PORT_PINNED_SDK_COMMIT` still does not move
+  -- `scripts/alp_template.py` / `scripts/alp_cli/doctor.py` are
+  unchanged between `94378a05` and `eb96112b`, so moving it would either
+  red this test for a gap this change does not close, or force their
+  table entries to an unaudited value just to stay green. Full reasoning
+  is the new comment block directly above `HAND_PORT_PINNED_SDK_COMMIT`'s
+  assignment in `test_planner_relocation_freshness.py`, added by this
+  same change. The "17 of 19" / "`94378a05`" sentence two paragraphs up
+  is left exactly as originally written -- a dated measurement, not a
+  live claim -- and this paragraph is the current one.
 
 ## The mechanism: DATA bound late, LOGIC bound early
 

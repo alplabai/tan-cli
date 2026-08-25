@@ -201,3 +201,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/sdk_cmd.py: 1392 -> 1416
 - 2026-08-23 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 252 -> 254
+- 2026-08-25 -- tan-cli#896: zephyr_board.py's _aen_flash_partitions docstring re-synced (comment-only) against alp-sdk 522ea3204's stale-prose fix
+    - tan/planner/zephyr_board.py: 1486 -> 1494
