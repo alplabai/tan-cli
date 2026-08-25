@@ -61,6 +61,7 @@ from pathlib import Path
 
 import typer
 
+from tan.core.shapes import SDK_MARKER, is_dir as _is_dir, is_file as _is_file
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import (
     FALLBACK_PYTHON_FLOOR,
@@ -72,7 +73,6 @@ from tan.commands.doctor_cmd import (
 from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
-    SDK_MARKER,
     _home_alp_dir,
     global_default_foreign_project_issue,
     global_default_pointer_fix_hint,
@@ -159,20 +159,6 @@ INSTALL_TIMEOUT_S = 3600
 # ---------------------------------------------------------------------------
 # Guarded IO
 # ---------------------------------------------------------------------------
-
-
-def _is_dir(path: Path) -> bool:
-    try:
-        return path.is_dir()
-    except OSError:
-        return False
-
-
-def _is_file(path: Path) -> bool:
-    try:
-        return path.is_file()
-    except OSError:
-        return False
 
 
 def _native(path: Path | str) -> str:
