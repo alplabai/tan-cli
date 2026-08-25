@@ -216,3 +216,13 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/bootstrap_cmd.py: 3364 -> 3378
     - tan/commands/sdk_cmd.py: 1480 -> 1514
     - function_count_budget: 255 -> 256
+- 2026-08-25 -- tan-cli#896: zephyr_board.py's _aen_flash_partitions docstring re-synced (comment-only) against alp-sdk 522ea3204's stale-prose fix
+    - tan/planner/zephyr_board.py: 1486 -> 1494
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/planner/zephyr_board.py: 1486 -> 1494
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3272 -> 3382
+    - tan/commands/doctor_cmd.py: 4038 -> 4040
+    - tan/commands/sdk_cmd.py: 1416 -> 1533
+    - function_count_budget: 254 -> 256
+    - function_worst_budget: 747 -> 757
