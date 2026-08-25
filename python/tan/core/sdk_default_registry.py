@@ -43,9 +43,16 @@ production `sdk_cmd._workspace_under`/`_has_loader_script`/
 workspace -- the worst case, nothing skipped by `covers` or
 `has_loader_script`): appending 20 extra path components to the SAME
 workspace, at an unchanged registry size, costs exactly **420** more
-`lstat` calls (21 entries x 2 resolving call sites -- `covers` and
-`resolve_origin` -- x 20 components a component-`lstat`ing `Path.resolve()`
-now walks through). The delta is reported ALONE, not alongside a base-count
+`lstat` calls (21 entries x 1 workspace-resolving call site -- `covers`,
+the only one of the two whose argument the measurement deepens -- x 20
+components a component-`lstat`ing `Path.resolve()` now walks through).
+`resolve_origin` resolves the *origin*, not the workspace, and the
+measurement never deepens the origin, so it contributes zero to the delta
+-- caught in review, #904 final round, major: an earlier revision of this
+paragraph double-counted `resolve_origin` into the factorization (21 x 2 x
+20 = 840) despite the measured delta being 420, and a re-derivation at a
+different base depth (1,050 -> 1,470, same `420` delta) confirmed 420, not
+840, is correct. The delta is reported ALONE, not alongside a base-count
 absolute, because the absolute moves with the base depth chosen for the
 measurement and an earlier revision of this paragraph cited one (**1,092**
 vs **1,512**) without saying what that base depth was -- caught in review,
@@ -91,8 +98,36 @@ module instead of duplicating its parse/format logic.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable
+
+#: Both wire shapes this registry's `updatedAt` can carry --
+#: `generated_at_iso`/`wall_clock_iso`'s seconds form (`...:00Z`) and
+#: milliseconds form (`...:00.000Z`) -- sort correctly against EACH OTHER
+#: (millis form always sorts later within the same second, since `.` <
+#: any digit... except it doesn't: `'Z'` (0x5A) sorts AFTER `'.'` (0x2E),
+#: so a bare seconds-precision stamp outranks a same-second millis stamp as
+#: a raw string, backwards from wall-clock order). Only a HAND-EDITED
+#: registry can produce this today -- `with_entry`'s one production caller
+#: always writes `millis=True` -- but this module explicitly anticipates
+#: hand-edited registries (`parse_registry_updated_at`'s own docstring), so
+#: the tie-break normalises rather than leaving mixed precision undefined.
+_SECONDS_PRECISION_UPDATED_AT = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z$")
+
+
+def _comparable_updated_at(value: str) -> str:
+    """`value`, widened to millisecond precision if it is a bare
+    seconds-precision ISO-8601 stamp, so `>` on the result orders by actual
+    wall-clock recency instead of by which precision a hand-edited entry
+    happened to use. Anything that is not exactly that seconds-precision
+    shape -- already-millis, empty (`parse_registry_updated_at`'s
+    no-timestamp default), or not a recognisable stamp at all -- passes
+    through unchanged: this only closes the one concrete mis-order
+    (review, #904 final round, nit), it does not attempt to validate or
+    reformat arbitrary hand-edited garbage."""
+    match = _SECONDS_PRECISION_UPDATED_AT.match(value)
+    return f"{match.group(1)}.000Z" if match else value
 
 #: `~/.alp/<REGISTRY_FILENAME>` -- named distinctly from the legacy
 #: `sdk-default` (singular, no extension) so a directory listing of `~/.alp`
@@ -275,7 +310,13 @@ def deepest_covering_entry(
     filesystem touch -- and an origin missing a timestamp (a registry
     written before this fix, or hand-edited) degrades to `""`, which never
     outranks a real stamp and never breaks an existing tie either, so it is
-    exactly as decided as it always was.
+    exactly as decided as it always was. The comparison itself runs on
+    `_comparable_updated_at`'s output, not the raw string (review, #904
+    final round, nit): a raw string compare ranks a bare seconds-precision
+    stamp AHEAD of a same-second milliseconds one (`'Z'` > `'.'`), which
+    only a hand-edited entry can produce today, but this module already
+    anticipates hand-edited registries, so the tie-break normalises
+    precision rather than leaving that case undefined.
 
     **Why recency, not collapsing the registry KEY onto its resolved origin
     at write time (the other fix considered, and rejected, in review #904
@@ -307,7 +348,7 @@ def deepest_covering_entry(
         if not has_loader_script(Path(sdk_path)):
             continue
         depth = len(resolve_origin(origin).replace("\\", "/"))
-        entry_updated_at = updated_at.get(origin, "")
+        entry_updated_at = _comparable_updated_at(updated_at.get(origin, ""))
         if depth > best_depth or (depth == best_depth and entry_updated_at > best_updated_at):
             best_depth = depth
             best_updated_at = entry_updated_at

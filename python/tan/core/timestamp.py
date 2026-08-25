@@ -137,17 +137,46 @@ def wall_clock_iso(*, millis: bool = False) -> str:
     STALE alias entry answers every time, and lowering the variable BETWEEN
     two runs makes the chronologically LATER bootstrap lose outright.
 
-    Every OTHER `generatedAt`/`updatedAt` field in this codebase (`tan
-    doctor`, `tan debug-config`, `.alp/sdk-path`, `<topdir>/.west/
-    tan-workspace-sdk`) is informational display of a SINGLE write, never
-    compared against a sibling write, so `SOURCE_DATE_EPOCH` reproducibility
-    is exactly the right behaviour there -- this function exists for the one
-    field that is a comparison key, not a display value. If a future field
+    Wall-clock ordering is itself non-monotonic (an NTP step-back, a VM
+    snapshot restore) -- inherent, since this registry has no cross-process
+    monotonic key to use instead, so a clock that moves backward between two
+    real bootstraps can still tie-break the wrong way (review, #904 final
+    round, nit).
+
+    Every OTHER `generatedAt`/`updatedAt` field in this codebase -- all
+    EIGHT `generated_at_iso` call sites, enumerated (review, #904 final
+    round, nit -- an earlier revision of this list named 4 of the 8 and
+    called it exhaustive): `tan doctor` (`doctor_cmd.py`), `tan
+    debug-config` (`debug_config_cmd.py`), `.alp/sdk-path`
+    (`scaffold.sdk_pointer_json`), `<topdir>/.west/tan-workspace-sdk`
+    (`bootstrap.workspace_sdk_record_json`), the legacy
+    `~/.alp/sdk-default` pointer (`bootstrap_cmd.py`, the one sharing this
+    module's own resolution ladder), `tan inspect` (`inspect_cmd.py`), `tan
+    trace` (`trace_cmd.py`), and `tan support-bundle`'s two fields
+    (`support_bundle_cmd.py`) -- is informational display of a SINGLE
+    write, never compared against a sibling write, so `SOURCE_DATE_EPOCH`
+    reproducibility is exactly the right behaviour there -- this function
+    exists for the one field that is a comparison key, not a display
+    value. `sdk_cmd._pointer_target` reads `sdkPath` only, never
+    `updatedAt`; `bootstrap.parse_workspace_sdk_record` never reads
+    `updatedAt` either; and no mtime comparison exists anywhere in the
+    resolution ladder -- so none of the eight is secretly a second
+    comparison key this function should also be serving. If a future field
     needs the same thing, it belongs here, not on `generated_at_iso`.
 
-    Never raises: `time.time()` cannot land outside `datetime`'s year
-    [1; 9999], so there is no fallback path to reach -- unlike
-    `generated_at_iso`, which must defend an arbitrary env-var-supplied
-    value.
+    Never raises, but not for the reason an earlier revision of this
+    docstring gave (review, #904 final round, major): `time.time()` reads
+    the SYSTEM clock, which a host can set to any value a user or a faulty
+    RTC/NTP step chooses, including one past `datetime`'s year-9999 ceiling
+    -- "cannot land outside" was true of `SOURCE_DATE_EPOCH`'s validated
+    range in `generated_at_iso`, never of the raw wall clock. This function
+    now defends the same way: an out-of-range wall clock degrades to the
+    shared `_FALLBACK` epoch rather than raising, keeping the module
+    header's "Both NEVER raise" promise for this caller too, not just for
+    `generated_at_iso`'s env-var-supplied value.
     """
-    return _render(_UNIX_EPOCH + timedelta(seconds=time.time()), millis=millis)
+    try:
+        moment = _UNIX_EPOCH + timedelta(seconds=time.time())
+    except (OverflowError, OSError, ValueError):
+        return f"{_FALLBACK}.000Z" if millis else f"{_FALLBACK}Z"
+    return _render(moment, millis=millis)

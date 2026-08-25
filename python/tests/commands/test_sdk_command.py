@@ -705,6 +705,30 @@ def test_source_date_epoch_does_not_un_fix_the_recency_tie_break(tmp_path, isola
     first -- the STALE alias -- reproducing the review's own measured
     "SOURCE_DATE_EPOCH=1700000000 -> both entries stamped identically ->
     resolves old-sdk" result.
+
+    **The clock is provisioned with FOUR values, not two** (review, #904
+    final round, major -- the prior revision's two-value clock made this
+    test's own mutation proof vacuous). `generated_at_iso` -- what the
+    mutation reverts the write site to -- calls `time.time()` TWICE per
+    invocation: once for `seconds = time.time()`, and once more as the
+    second element of the eagerly-constructed tuple
+    `for candidate in (seconds, time.time())` (`timestamp.py:106`), even
+    when `SOURCE_DATE_EPOCH` is valid and that second value is discarded
+    unread. With only two clock values queued, the SECOND
+    `_write_global_sdk_registry` call's first `time.time()` read already
+    raises `StopIteration` -- caught by this function's own blanket
+    `except Exception: pass` (`bootstrap_cmd.py`) -- so that write never
+    happens AT ALL, and the registry ends up holding only the alias entry.
+    The test still reds with the right final assertion in that case, but for
+    the WRONG reason: "the second write crashed and silently vanished", not
+    "both writes share an identical, SOURCE_DATE_EPOCH-derived stamp" as the
+    docstring above claims. Four values give both `generated_at_iso`
+    invocations (real code: `wall_clock_iso`, one `time.time()` read each,
+    consuming only the first two) and both `generated_at_iso` invocations
+    under the mutation (two reads each, consuming all four) enough clock to
+    complete without raising, so the mutation reproduces the DOCUMENTED
+    defect -- an identical stamp on both entries -- rather than a masking
+    crash.
     """
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
 
@@ -728,8 +752,9 @@ def test_source_date_epoch_does_not_un_fix_the_recency_tie_break(tmp_path, isola
 
     # A strictly increasing real-clock sequence, independent of
     # `SOURCE_DATE_EPOCH` entirely -- `tan.core.timestamp.wall_clock_iso`
-    # reads `time.time()` directly, never `os.environ`.
-    clock = iter([1_800_000_000.0, 1_800_000_001.0])
+    # reads `time.time()` directly, never `os.environ`. Four values: see the
+    # docstring above for why two is not enough to mutation-prove this test.
+    clock = iter([1_800_000_000.0, 1_800_000_001.0, 1_800_000_002.0, 1_800_000_003.0])
     monkeypatch.setattr(time, "time", lambda: next(clock))
 
     # Earlier bootstrap, reached via the symlinked alias.
@@ -738,6 +763,17 @@ def test_source_date_epoch_does_not_un_fix_the_recency_tie_break(tmp_path, isola
     # path -- the later, more-authoritative bootstrap of the exact same
     # directory.
     bootstrap_cmd._write_global_sdk_registry(str(new_sdk), origin=str(real_dir))
+
+    # Both writes must actually have landed -- asserted BEFORE which one
+    # resolves, so a future regression that silently drops one write (the
+    # exact under-provisioned-clock failure this test itself used to hide,
+    # see the docstring) fails HERE, on "a write went missing", rather than
+    # merging into a resolution assertion that would red for the same wrong
+    # reason all over again.
+    registry = json.loads((isolated_home / ".alp" / "sdk-defaults.json").read_text())
+    assert set(registry) == {str(alias), str(real_dir)}
+    assert registry[str(alias)]["sdkPath"] == str(old_sdk).replace("\\", "/")
+    assert registry[str(real_dir)]["sdkPath"] == str(new_sdk).replace("\\", "/")
 
     active = resolve_sdk_tiered(None, workspace)
     assert active.tier == "globalDefault"

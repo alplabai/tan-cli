@@ -243,3 +243,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/generate_cmd.py: 1348 -> 1361
     - tan/planner/template.py: 1470 -> 1481
+- 2026-08-25 -- tan-cli#904 final round: wall_clock_iso (timestamp.py) grows past 50 lines defending an out-of-range wall clock (item 2) and enumerating all eight generated_at_iso call sites (nit); deepest_covering_entry's docstring (sdk_default_registry.py) grows documenting the updated_at precision-normalisation fix (nit) and the 21x1x20 lstat factorization correction (item 3) -- all four are review-requested prose/behaviour fixes on tan-cli#904's final round, not unreviewed growth.
+    - function_count_budget: 257 -> 258
