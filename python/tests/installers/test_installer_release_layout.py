@@ -468,20 +468,42 @@ def _fake_mktemp_honouring_tmpdir(tmp_path: Path, calls_log: Path) -> Path:
     script.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
-        'want_dir=0\n'
-        'if [ "${1:-}" = "-d" ]; then want_dir=1; fi\n'
+        # Only a bare invocation or a lone `-d` is supported -- anything else
+        # (notably a TEMPLATE argument, as install.sh:558's noexec-retry path
+        # uses: `mktemp -d "$INSTALL_DIR/.tan-install-retry.XXXXXX"`) would
+        # otherwise be silently ignored and re-rooted under $TMPDIR instead of
+        # honoured, inverting what a caller of THAT form asserts. Refusing
+        # loudly means the next reuse of this stub against a templated call
+        # fails fast instead of silently misdirecting it.
+        'if [ "$#" -eq 0 ]; then\n'
+        '\twant_dir=0\n'
+        'elif [ "$#" -eq 1 ] && [ "$1" = "-d" ]; then\n'
+        '\twant_dir=1\n'
+        'else\n'
+        '\techo "fake mktemp stub: only a bare or lone -d invocation is supported (got: $*)" >&2\n'
+        '\texit 1\n'
+        'fi\n'
         'base="${TMPDIR:-/tmp}"\n'
         'mkdir -p "$base" 2>/dev/null || true\n'
         'n=0\n'
-        'while :; do\n'
+        'candidate=""\n'
+        # Bounded, not `while :;` forever: a $base this stub cannot write into
+        # (e.g. a permissions problem in the test's own fixture) must fail
+        # fast and readably rather than spin until _run's 180s subprocess
+        # timeout with no diagnostic at all.
+        'while [ "$n" -lt 100 ] && [ -z "$candidate" ]; do\n'
         '\tn=$((n + 1))\n'
-        '\tcandidate="$base/tmp.stub$$.$n"\n'
+        '\ttry="$base/tmp.stub$$.$n"\n'
         '\tif [ "$want_dir" = "1" ]; then\n'
-        '\t\tmkdir "$candidate" 2>/dev/null && break\n'
+        '\t\tmkdir "$try" 2>/dev/null && candidate="$try"\n'
         '\telse\n'
-        '\t\t(umask 077; : > "$candidate") 2>/dev/null && break\n'
+        '\t\t(umask 077; : > "$try") 2>/dev/null && candidate="$try"\n'
         '\tfi\n'
         'done\n'
+        'if [ -z "$candidate" ]; then\n'
+        '\techo "fake mktemp stub: could not create a temp path under $base after 100 attempts" >&2\n'
+        '\texit 1\n'
+        'fi\n'
         f'printf \'%s\\n\' "$candidate" >> "{calls_log}"\n'
         'printf \'%s\\n\' "$candidate"\n',
         encoding="utf-8",

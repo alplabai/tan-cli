@@ -169,10 +169,12 @@ $sumsUrl = "$baseUrl/$Version/checksums.txt"
 # would needlessly widen the window a concurrent process could create part of
 # the chain and have this run's cleanup remove it.
 #
-# $dirCreatedForRetry is set once, only if the noexec-retry block below ends
-# up creating $Dir itself (see there) -- gates the health-check-failure
-# cleanup further down so it never removes a $Dir a PREVIOUS install already
-# left in place.
+# $dirCreatedForRetry is set once, only if the noexec-retry block below is
+# the one that ATTEMPTS to create $Dir itself (see there -- set just before
+# the `New-Item` call, not after it returns, so a partial chain left behind
+# by a THROW partway through -Force's own directory walk is still cleaned
+# up) -- gates the health-check-failure cleanup further down so it never
+# removes a $Dir a PREVIOUS install already left in place.
 $dirCreatedForRetry = $false
 # Declared $null here only because Set-StrictMode -Version Latest throws on a
 # never-assigned variable if the noexec-retry block below never runs at all;
@@ -463,9 +465,20 @@ try {
 				if (-not $parent -or $parent -eq $ancestor) { break }
 				$ancestor = $parent
 			}
+			# Set BEFORE the New-Item call, not after it returns: -Force
+			# creates the whole missing ancestor chain in one call, and if it
+			# creates PART of that chain and then throws partway through (a
+			# path over MAX_PATH, ENOSPC, an ACL denying create midway), the
+			# chain up to that point is left on disk exactly like tan-cli#803's
+			# original defect. Gating the cleanup walk below on a flag set
+			# only after a full success would miss that partial case; the
+			# walk itself is already bounded to empty, non-recursive deletes
+			# up to $dirFirstNewAncestor, so marking this run as the creator
+			# before attempting the call is safe even when nothing was
+			# actually created.
+			$dirCreatedForRetry = $true
 			try {
 				New-Item -ItemType Directory -Force -Path $Dir -ErrorAction Stop | Out-Null
-				$dirCreatedForRetry = $true
 			} catch {
 				$retryStageErr = $_.Exception.Message
 			}
@@ -516,9 +529,14 @@ try {
 		# (see the comment near $dirFirstNewAncestor above), the ONLY way this
 		# run could have created anything under $Dir before reaching here is
 		# the noexec-retry block just above -- gated on $dirCreatedForRetry so
-		# this never removes a $Dir a PREVIOUS install already left in place
-		# (which $dirFirstNewAncestor alone would not distinguish: it is
-		# computed once, up front, before the retry ever runs).
+		# this never removes a $Dir a PREVIOUS install already left in place.
+		# $dirFirstNewAncestor is computed in that SAME `if (-not (Test-Path
+		# $Dir))` branch, immediately before the `New-Item` that sets
+		# $dirCreatedForRetry -- so whenever $dirCreatedForRetry is $true here,
+		# $dirFirstNewAncestor is guaranteed non-$null too (the walk's own
+		# first iteration always assigns it, since $Dir itself did not exist
+		# yet). $dirCreatedForRetry alone is enough to gate the walk below;
+		# it is not paired with `-and $dirFirstNewAncestor` any more.
 		#
 		# tan-cli#490 review, round 10: `-Recurse` here was an UNGUARDED
 		# recursive delete of a path that, with the default $Dir
@@ -535,7 +553,7 @@ try {
 		# that already existed), which is exactly the wanted semantics --
 		# remove only what this run created, and stop the moment something
 		# else is in the way.
-		if ($dirCreatedForRetry -and $dirFirstNewAncestor) {
+		if ($dirCreatedForRetry) {
 			$dirWalkRemove = $Dir
 			while ($true) {
 				try { [System.IO.Directory]::Delete($dirWalkRemove, $false) } catch { }
