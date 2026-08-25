@@ -40,12 +40,15 @@ def test_find_workspace_venv_accepts_the_non_host_layout(tmp_path, monkeypatch):
     on POSIX) must not be invisible to `find_workspace_venv`/
     `venv_bin_dir`/`west_program`.
 
-    Exercises the real host's non-native layout rather than faking
-    `os.name`: patching `os.name` to the other platform breaks `pathlib.Path`
-    construction outright on a real Windows host (`Path.__new__` picks its
-    concrete subclass from `os.name`, so a patched value crashes on the very
-    next `Path(str)` call -- including ones inside pytest's own failure-repr
-    machinery, corrupting the test run itself rather than failing cleanly).
+    Exercises the real host's non-native layout rather than faking `os.name`,
+    and the reason is that a fake would prove LESS, not that it would crash.
+    The claim recorded here until tan-cli#811 -- that "`Path.__new__` picks
+    its concrete subclass from `os.name`, so a patched value crashes on the
+    very next `Path(str)` call" -- is false: `Path.__new__` reaches
+    `object.__new__(cls)` and bypasses the raising subclass `__new__` on both
+    hosts, so construction succeeds and the lexical/stat methods then answer
+    for the WRONG platform without saying so. A faked layout would therefore
+    be tested against a `Path` that quietly lies about it.
     `_resolve_layout` never reads `os.name` post-fix, so proving it accepts
     THIS host's non-native layout already proves the directory-wins rule;
     the code path is identical for the mirror layout on the mirror host.

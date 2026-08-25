@@ -358,31 +358,32 @@ in a published alp-sdk **tag**:
 git -C <alp-sdk> tag --contains <commit>      # non-empty, or the tag is premature
 ```
 
-**Cleared for a PRE-RELEASE floor, not for the current stable — read both rows
-before cutting a tan release carrying the AEN board emit:**
+**CLEARED on a STABLE floor as of 2026-08-23 — this gate no longer withholds
+a tan release carrying the AEN board emit:**
 
 | Requirement | alp-sdk commit | In a tag? |
 |---|---|---|
-| SE-owned ATOC reservation (`atoc` in `memory_map:`) — alp-sdk#1289 | `d639e777` | **YES, pre-release only** — `git tag --contains d639e777` → `v0.16.0-rc1`; `git merge-base --is-ancestor d639e777 v0.15.0` is still false |
-| `zephyr_peripherals_dtsi` on the SoC JSON — alp-sdk#1352 | `7d58ef32` | **YES, pre-release only** — descendant of the above, same answer |
+| SE-owned ATOC reservation (`atoc` in `memory_map:`) — alp-sdk#1289 | `d639e777` | **YES, stable** — contained in `v0.16.0` (`Latest`, 2026-08-23T19:23:04Z). Was pre-release-only (`v0.16.0-rc1`) until that tag existed |
+| `zephyr_peripherals_dtsi` on the SoC JSON — alp-sdk#1352 | `7d58ef32` | **YES, stable** — descendant of the above, same answer |
 
 Both are reached by `tan generate --target zephyr-board` on any `E1M-AEN*`
-SKU. Measured 2026-08-17 against alp-sdk's published releases: `v0.16.0-rc1`
-(pre-release, 2026-08-15T02:05:12Z) contains both commits, and `v0.15.0` —
-still the `Latest` stable, 2026-08-07T13:36:18Z — contains neither. So the
-command now succeeds from `v0.16.0-rc1` onward and still fails on the newest
-STABLE alp-sdk a user gets by default.
+SKU. Re-measured 2026-08-24 against alp-sdk's published releases:
+`compare/d639e777...v0.16.0` and `compare/7d58ef32...v0.16.0` both report
+`status=ahead`, so each commit is an ancestor of the released `v0.16.0` tag.
+An AEN user on the newest STABLE alp-sdk a default install produces can now
+run the command.
 
-**The call this leaves you.** The gate's stated condition — contained in a
-published alp-sdk tag — is met. Whether that is enough is a judgement the
-table cannot make: cutting now ships an AEN board emit whose floor is a
-pre-release, so an AEN user on stable `v0.15.0` still cannot run
-`tan generate --target zephyr-board`. Waiting for alp-sdk `v0.16.0` final
-removes the caveat outright. Record which one you chose in the release PR —
-this section exists because that reasoning kept being re-derived.
+**How the call was made, for the record.** This section previously left the
+release engineer a choice: cut on a pre-release floor, or wait for alp-sdk
+`v0.16.0` final. For **tan `v0.6.0`** the choice was *wait* — alp-sdk
+`v0.16.0` was released first, on 2026-08-23, and tan `v0.6.0` was cut after
+it. That is also the shape the maintainer's 2026-08-09 decision on
+tan-cli#591 (option 3, "cut an alp-sdk release when tan is about to release")
+prescribes, so the two now agree rather than trading off. The choice is
+recorded here as well as in the release PR, because a release PR is harder to
+find later than this file.
 
-**That release now exists** (`v0.16.0-rc1`), so this trigger has fired and is
-half executed. The table's "In a tag?" column above is updated. The other half
+**The trigger has fired and the table is current.** The other half
 is NOT done: `zephyr_board.py`'s ATOC refusal still says *"upgrade alp-sdk to
 a release that includes alp-sdk#1289"* (an issue number, not a version —
 replace it with the actual floor, which now exists). It lives upstream in
