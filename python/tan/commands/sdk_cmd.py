@@ -318,11 +318,44 @@ def _workspace_under(workspace_root: Path, root: str) -> bool:
     reasoning for the same comparison). Any resolution failure (a path shape
     the host rejects outright) reads as "not under it" -- the caller treats
     that as grounds for a WARNING, never a hard failure.
+
+    `RuntimeError` is caught alongside `OSError`/`ValueError` (review, #904,
+    minor 1): `Path.resolve()` re-raises an `ELOOP` (a symlink loop) as a
+    `RuntimeError` ("Symlink loop from ...") rather than an `OSError` --
+    pathlib's own choice, not this module's -- so a registry origin or a
+    legacy `writtenFor` naming a symlink loop must degrade the same as any
+    other unresolvable path, not raise out of a tier lookup. Pre-existing
+    from tan-cli#464 (both pointer tiers shared this gap before #466 added a
+    third caller of the same pattern); left uncaught here would contradict
+    `parse_registry`'s own "never raises" contract one function over.
     """
     try:
         return workspace_root.resolve().is_relative_to(Path(root).resolve())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         return False
+
+
+def _resolved_origin_depth_key(root: str) -> str:
+    """`root`, resolved the same way `_workspace_under` resolves it for
+    containment -- reused as `sdk_default_registry.deepest_covering_entry`'s
+    depth-ranking key so ranking can never diverge from `covers`'s own notion
+    of "contains" (review, #904, major 1: a symlinked origin made the raw
+    registry-key string length disagree with `_workspace_under`'s resolved
+    containment test, so the WRONG registered SDK could win the "deepest"
+    tie-break with no warning at all).
+
+    Any resolution failure (including a symlink loop, `RuntimeError`) falls
+    back to the raw string rather than raising: this is only ever called,
+    from `deepest_covering_entry`, after `covers` has already resolved this
+    SAME `root` successfully for this SAME candidate, so a failure here would
+    mean the filesystem changed between the two calls -- treated as a
+    same-caliber non-event as every other best-effort read in this module,
+    not a crash out of a tier lookup.
+    """
+    try:
+        return str(Path(root).resolve())
+    except (OSError, ValueError, RuntimeError):
+        return root
 
 
 def global_default_pointer_fix_hint(native_path: str, native_registry_path: str) -> str:
@@ -650,6 +683,7 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
         workspace_root,
         covers=_workspace_under,
         has_loader_script=_has_loader_script,
+        resolve_origin=_resolved_origin_depth_key,
     )
     if registry_hit is not None:
         _origin, registry_sdk_path = registry_hit

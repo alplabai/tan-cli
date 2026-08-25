@@ -132,7 +132,9 @@ def test_registry_text_sorts_keys_for_a_deterministic_diff():
     assert text.index('"/a"') < text.index('"/z"')
 
 
-# ── deepest_covering_entry: the PICK, zero filesystem probing ────────────────
+# ── deepest_covering_entry: the PICK, no directory WALK (a closed candidate
+#    set) -- but real filesystem work per candidate (review, #904, major 2:
+#    "zero filesystem probing" was false and has been retired) ──────────────
 
 
 def _covers_prefix(workspace_root: Path, origin: str) -> bool:
@@ -151,10 +153,23 @@ def _never_valid(_path: Path) -> bool:
     return False
 
 
+def _identity_resolve(root: str) -> str:
+    """A fake `resolve_origin` for tests with no symlink in play: the raw
+    key already IS its own resolved form, so ranking by it is exactly the
+    old raw-string-length ranking. The symlink-specific test below supplies
+    a fake that diverges from identity, since that divergence is the whole
+    bug (tan-cli#904 review, major 1)."""
+    return root
+
+
 def test_deepest_covering_entry_none_when_registry_is_empty():
     assert (
         deepest_covering_entry(
-            {}, Path("/a/b"), covers=_covers_prefix, has_loader_script=_always_valid
+            {},
+            Path("/a/b"),
+            covers=_covers_prefix,
+            has_loader_script=_always_valid,
+            resolve_origin=_identity_resolve,
         )
         is None
     )
@@ -163,7 +178,11 @@ def test_deepest_covering_entry_none_when_registry_is_empty():
 def test_deepest_covering_entry_picks_the_containing_key(tmp_path):
     registry = {"/a": "/sdk/a"}
     hit = deepest_covering_entry(
-        registry, Path("/a/b/c"), covers=_covers_prefix, has_loader_script=_always_valid
+        registry,
+        Path("/a/b/c"),
+        covers=_covers_prefix,
+        has_loader_script=_always_valid,
+        resolve_origin=_identity_resolve,
     )
     assert hit == ("/a", "/sdk/a")
 
@@ -174,7 +193,11 @@ def test_deepest_covering_entry_ignores_a_non_covering_key():
     is in the registry."""
     registry = {"/somewhere/else": "/sdk/other"}
     hit = deepest_covering_entry(
-        registry, Path("/a/b"), covers=_covers_prefix, has_loader_script=_always_valid
+        registry,
+        Path("/a/b"),
+        covers=_covers_prefix,
+        has_loader_script=_always_valid,
+        resolve_origin=_identity_resolve,
     )
     assert hit is None
 
@@ -190,7 +213,11 @@ def test_deepest_covering_entry_prefers_the_more_specific_project_entry():
     }
     workspace = Path("/home/u/proj/b/firmware")
     hit = deepest_covering_entry(
-        registry, workspace, covers=_covers_prefix, has_loader_script=_always_valid
+        registry,
+        workspace,
+        covers=_covers_prefix,
+        has_loader_script=_always_valid,
+        resolve_origin=_identity_resolve,
     )
     assert hit == ("/home/u/proj/b", "/sdk/b-specific")
 
@@ -209,7 +236,11 @@ def test_deepest_covering_entry_falls_through_a_stale_entry_to_a_shallower_one()
     }
     workspace = Path("/home/u/proj/b/firmware")
     hit = deepest_covering_entry(
-        registry, workspace, covers=_covers_prefix, has_loader_script=loader_script
+        registry,
+        workspace,
+        covers=_covers_prefix,
+        has_loader_script=loader_script,
+        resolve_origin=_identity_resolve,
     )
     assert hit == ("/home/u", "/sdk/home-default")
 
@@ -221,6 +252,7 @@ def test_deepest_covering_entry_none_when_every_covering_entry_is_stale():
         Path("/home/u/proj"),
         covers=_covers_prefix,
         has_loader_script=_never_valid,
+        resolve_origin=_identity_resolve,
     )
     assert hit is None
 
@@ -238,6 +270,52 @@ def test_deepest_covering_entry_rejects_a_relative_origin():
     """
     registry = {"relative/origin": "/sdk/a"}
     hit = deepest_covering_entry(
-        registry, Path("/a/b"), covers=lambda *_a: True, has_loader_script=_always_valid
+        registry,
+        Path("/a/b"),
+        covers=lambda *_a: True,
+        has_loader_script=_always_valid,
+        resolve_origin=_identity_resolve,
     )
     assert hit is None
+
+
+def test_deepest_covering_entry_ranks_by_resolved_origin_not_raw_key_length():
+    """tan-cli#904 review, major 1: a symlinked origin makes `covers`'s own
+    notion of "deepest" (decided on RESOLVED paths -- `sdk_cmd.
+    _workspace_under` calls `.resolve()` on both sides) disagree with a raw
+    registry-key STRING-LENGTH ranking.
+
+    `/base/work` is a symlink to `/base/projects/alpha`. Its RAW key
+    (`"/base/work"`, 10 chars) is SHORTER than `/base/projects`'s raw key
+    (`"/base/projects"`, 15 chars) -- so the pre-fix ranking (`len(origin...)`)
+    picks `/base/projects` as "deepest" and answers `/sdk/WRONG`. But once
+    resolved, `/base/work` becomes `/base/projects/alpha` (21 chars), which
+    IS the true deepest (most specific) covering ancestor of the resolved
+    workspace -- the correct answer is `/sdk/RIGHT`. Both origins cover the
+    workspace under `covers`'s resolved comparison; only the RANKING must
+    change to fix this, exactly what `resolve_origin` is for.
+    """
+    resolved_of = {
+        "/base/work": "/base/projects/alpha",  # symlink target
+        "/base/projects": "/base/projects",  # no symlink; resolves to itself
+    }
+    workspace_resolved = "/base/projects/alpha/ws"
+
+    def covers(_workspace_root: Path, origin: str) -> bool:
+        root_resolved = resolved_of[origin]
+        return workspace_resolved == root_resolved or workspace_resolved.startswith(
+            root_resolved + "/"
+        )
+
+    registry = {
+        "/base/work": "/sdk/RIGHT",
+        "/base/projects": "/sdk/WRONG",
+    }
+    hit = deepest_covering_entry(
+        registry,
+        Path("/base/work/ws"),
+        covers=covers,
+        has_loader_script=_always_valid,
+        resolve_origin=lambda origin: resolved_of[origin],
+    )
+    assert hit == ("/base/work", "/sdk/RIGHT")

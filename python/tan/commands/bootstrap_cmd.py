@@ -3010,13 +3010,27 @@ def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
     which resolves exactly like tan-cli#464 already did before this issue --
     not a failed bootstrap, since the checkout itself already moved
     successfully by the time this runs.
+
+    **Written via `atomic_write_text` (review, #904, minor 2), not a bare
+    `write_text` truncate-then-write.** The legacy `~/.alp/sdk-default`
+    pointer's own bare `write_text` matched its risk profile while it held
+    ONE project's answer: an interrupted or crash-timed write there loses
+    only that one pointer, and the caller already re-derives it on the next
+    `tan bootstrap`. This registry holds EVERY project's answer on the host,
+    so the same bare-write shape now has an N-project blast radius -- an
+    interrupted write here (or a read racing a half-written file on a
+    filesystem with no atomic-rename semantics, the read side already
+    tolerates that) would degrade every origin back to tan-cli#464's
+    disclosed-but-foreign path at once, not just the one this call is
+    updating. `atomic_write_text` writes the temp sibling then `os.replace`s
+    it into place, so a reader never observes a partial file at all.
     """
     try:
         path = registry_path(_home_alp_dir())
         raw = path.read_text(encoding="utf-8") if path.is_file() else None
         registry = with_entry(load_raw(raw), origin=origin, sdk_root=sdk_root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(registry_text(registry), encoding="utf-8")
+        atomic_write_text(str(path), registry_text(registry))
     except Exception:  # noqa: BLE001 -- best-effort by contract
         pass
 

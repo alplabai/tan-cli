@@ -35,6 +35,7 @@ import typer
 
 from tan.commands.sdk_cmd import (
     _fetch_releases,
+    _workspace_under,
     check_sdk_readiness,
     describe_network_error,
     discover_workspace_sdk,
@@ -298,6 +299,59 @@ def test_global_default_written_for_relative_path_reads_as_unknown(tmp_path, iso
     assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
 
 
+def test_workspace_under_degrades_a_symlink_loop_instead_of_raising(tmp_path):
+    """Review, #904, minor 1: `Path.resolve()` re-raises an `ELOOP` (a
+    symlink pointing at itself, or a longer cycle) as a `RuntimeError`
+    ("Symlink loop from ...") rather than an `OSError` -- pathlib's own
+    choice. `_workspace_under` used to catch only `(OSError, ValueError)`, so
+    a `root` naming a symlink loop raised OUT of a tier lookup instead of
+    degrading to "not under it", the same safe answer every other
+    unresolvable path already gets here.
+
+    Pre-existing from tan-cli#464 (`_pointer_written_for`'s `writtenFor` was
+    already reachable this way); #466 widens the blast radius from one
+    `writtenFor` string to every key in a machine-global, never-pruned
+    registry file.
+    """
+    loop = tmp_path / "loop"
+    try:
+        loop.symlink_to(loop)
+    except (OSError, NotImplementedError):  # pragma: no cover -- Windows w/o privilege
+        pytest.skip("this host cannot create a symlink")
+    assert _workspace_under(tmp_path / "ws", str(loop)) is False
+
+
+def test_global_default_written_for_symlink_loop_degrades_instead_of_raising(
+    tmp_path, isolated_home
+):
+    """The `resolve_sdk_tiered`-level sibling of the unit test above: a
+    `writtenFor` naming a symlink loop must not raise out of the
+    `globalDefault` tier. `_workspace_under` cannot RESOLVE the loop at all,
+    so it degrades to "not under it" (`_workspace_under`'s own documented
+    contract) for BOTH the `written_for` and `default` containment checks --
+    which correctly fires the foreign-project warning (naming the
+    unresolvable `writtenFor` value), the same as any other `writtenFor` this
+    workspace genuinely is not under. The property under test is that this
+    resolves AT ALL, with a real answer, rather than raising a `RuntimeError`
+    out of the tier lookup -- not that the loop is silently treated as
+    covering."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    global_target = make_sdk_root(tmp_path / "globally-default")
+    loop = tmp_path / "loop"
+    try:
+        loop.symlink_to(loop)
+    except (OSError, NotImplementedError):  # pragma: no cover -- Windows w/o privilege
+        pytest.skip("this host cannot create a symlink")
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default", global_target, written_for=str(loop)
+    )
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.path == str(global_target)
+    assert active.foreign_global_default_for == str(loop)
+
+
 def test_global_default_written_for_cross_platform_absolute_path_is_recognised(
     tmp_path, isolated_home
 ):
@@ -458,6 +512,41 @@ def test_a_deeper_bootstrap_outranks_the_home_keyed_default_under_it(tmp_path, i
 
     active = resolve_sdk_tiered(None, workspace)
     assert active.path == str(b_target), "the deeper, project-specific entry must win"
+
+
+def test_a_symlinked_origin_still_ranks_by_its_resolved_depth(tmp_path, isolated_home):
+    """tan-cli#904 review, major 1: `deepest_covering_entry` used to rank by
+    the RAW registry-key string length, while `covers` (`_workspace_under`)
+    decides containment on `.resolve()`d paths -- the two disagree the moment
+    a registered origin is reached through a symlink.
+
+    `base/work` is a symlink to `base/projects/alpha`. Its raw key
+    (`.../base/work`) is SHORTER than the sibling entry's raw key
+    (`.../base/projects`, "projects" > "work"), so the pre-fix ranking picked
+    `base/projects` -- `sdk-WRONG` -- for a workspace under the symlink. Once
+    resolved, `base/work` becomes `base/projects/alpha`, the true deepest
+    (most specific) covering ancestor -- the correct answer is `sdk-RIGHT`.
+    """
+    real_alpha = tmp_path / "base" / "projects" / "alpha"
+    (real_alpha / "ws").mkdir(parents=True)
+    work_link = tmp_path / "base" / "work"
+    try:
+        work_link.symlink_to(real_alpha, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover -- Windows w/o privilege
+        pytest.skip("this host cannot create a directory symlink")
+    projects_dir = tmp_path / "base" / "projects"
+    assert len(str(projects_dir)) > len(str(work_link)), "the repro needs this raw-length shape"
+
+    sdk_right = make_sdk_root(tmp_path / "sdk-right")
+    sdk_wrong = make_sdk_root(tmp_path / "sdk-wrong")
+    write_registry(isolated_home, {work_link: sdk_right, projects_dir: sdk_wrong})
+
+    workspace = work_link / "ws"
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.path == str(sdk_right), (
+        "the symlinked origin's RESOLVED depth must win, not its raw key length"
+    )
 
 
 def test_a_stale_registry_entry_degrades_like_a_stale_pointer_does(tmp_path, isolated_home):

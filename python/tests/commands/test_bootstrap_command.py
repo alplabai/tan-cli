@@ -48,6 +48,7 @@ from tan.commands.bootstrap_cmd import (
     workspace_orphan_refusal,
 )
 from tan.core import atomic_write as atomic_write_mod
+from tan.core.sdk_default_registry import registry_path
 from tan.core.bootstrap import (
     INCOMPATIBLE,
     LINUX,
@@ -844,8 +845,25 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     # pointer AND the registry, so deleting either (or both) by hand remains
     # a safe, complete recovery -- naming only one would leave a reader
     # editing the file that was not the one that actually answered.
-    assert "sdk-default" in message
-    assert "sdk-defaults.json" in message
+    #
+    # A bare `"sdk-default" in message` / `"sdk-defaults.json" in message`
+    # pair (the pre-#904-review shape) is VACUOUS here even with the full
+    # native path prepended: "sdk-default" is a literal PREFIX of
+    # "sdk-defaults.json", so ".../sdk-default" is already a substring of
+    # ".../sdk-defaults.json" -- the first assert cannot fail while the
+    # second passes, no matter how much identical directory prefix is added
+    # to both (measured: `test_sdk_command.py`'s own sibling avoids this only
+    # by using two NON-overlapping fake names, which this real, same-`.alp`-
+    # directory pair can't). Asserted instead on the exact compound substring
+    # `global_default_pointer_fix_hint` actually emits -- both full native
+    # paths, in the "X and/or Y" order the hint joins them in -- which cannot
+    # be satisfied by the registry path alone (mutation-confirmed: rewriting
+    # the hint to name only the registry breaks this exact assertion, where
+    # the old bare-substring pair stayed green).
+    home_alp = tmp_path / "fake-home" / ".alp"
+    pointer_native = bootstrap_cmd._native(home_alp / "sdk-default")
+    registry_native = bootstrap_cmd._native(registry_path(home_alp))
+    assert f"delete {pointer_native} and/or {registry_native} (tan falls" in message
     # The checkout really moved: gone from the old location, present (with its
     # own content) at the new one; `unrelated.txt` is untouched, still the
     # only other thing in the original parent.
@@ -1626,6 +1644,11 @@ def test_a_relocation_is_rolled_back_when_a_later_step_fails(tmp_path):
     # before this run).
     pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
     assert not pointer.exists()
+    # tan-cli#466: the origin-keyed registry sibling this same relocation
+    # would have written is restored to "absent" too -- `_undo_relocation`'s
+    # `previous_registry` branch, otherwise untested (review round, #904).
+    registry = tmp_path / "fake-home" / ".alp" / "sdk-defaults.json"
+    assert not registry.exists()
     # tan-cli#284 majors: nothing reported in the envelope may still name the
     # vacated `elsewhere` location once the rollback succeeded -- `data.*`
     # paths and `project.root` must agree with where the checkout actually

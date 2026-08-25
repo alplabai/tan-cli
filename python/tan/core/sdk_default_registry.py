@@ -16,12 +16,17 @@ where `origin` is the same absolute project root stage 1 already computes as
 `writtenFor` -- the directory bootstrap ran in. `sdk_cmd.resolve_sdk_tiered`
 then picks the DEEPEST registry key that CONTAINS the caller's
 `workspace_root`, using the same containment test
-(`sdk_cmd._workspace_under`) stage 1 already uses to decide "foreign" -- zero
-filesystem probing, since containment is a string/path comparison over a
-CLOSED candidate set (only directories a real `tan bootstrap` explicitly ran
-in can ever appear as a key). A's subdirectory then resolves A's own entry
-before the legacy pointer is ever consulted, at any depth, regardless of which
-project bootstrapped last.
+(`sdk_cmd._workspace_under`) stage 1 already uses to decide "foreign". This is
+NOT zero filesystem probing (an earlier version of this docstring, and of
+`changelog.d/466.fixed.md`, claimed it was, and was wrong -- caught in review,
+#904): `covers` and `has_loader_script` each touch the filesystem (`.resolve()`,
+`.exists()`) for every candidate, and `deepest_covering_entry`'s own ranking
+now does too (see below). What IS true, and what the issue actually promised,
+is that there is no directory WALK -- the candidate set is closed (only
+directories a real `tan bootstrap` explicitly ran in can ever appear as a
+key), so resolution cost is O(registry size), not O(filesystem depth). A's
+subdirectory then resolves A's own entry before the legacy pointer is ever
+consulted, at any depth, regardless of which project bootstrapped last.
 
 The legacy single pointer is NOT retired. `tan bootstrap` keeps writing it
 unconditionally, for skew safety: an old tan that predates this file reads
@@ -32,11 +37,12 @@ only when no entry here covers the caller -- which is also when the stage-1
 foreign-project warning still fires, now for a genuinely unregistered caller
 rather than for every non-last bootstrap on the host.
 
-**A pure `tan.core` module, deliberately.** The two functions that need
+**A pure `tan.core` module, deliberately.** The functions that need
 filesystem judgement calls (whether one path contains another; whether an
-`sdkPath` still names a real checkout) are `sdk_cmd._workspace_under` and
-`sdk_cmd._has_loader_script` -- injected into `deepest_covering_entry` as
-callables rather than imported, so this module stays free of any
+`sdkPath` still names a real checkout; what a raw origin string resolves to)
+are `sdk_cmd._workspace_under`, `sdk_cmd._has_loader_script`, and
+`sdk_cmd._resolved_origin_depth_key` -- injected into `deepest_covering_entry`
+as callables rather than imported, so this module stays free of any
 `tan.commands.*` import, the same convention every other `tan/core` module
 here already follows. `sdk_cmd.py` and `bootstrap_cmd.py` both import this
 module instead of duplicating its parse/format logic.
@@ -135,22 +141,33 @@ def deepest_covering_entry(
     *,
     covers: Callable[[Path, str], bool],
     has_loader_script: Callable[[Path], bool],
+    resolve_origin: Callable[[str], str],
 ) -> tuple[str, str] | None:
     """The deepest `(origin, sdkPath)` entry whose `origin` CONTAINS
     `workspace_root` (`covers`) and whose `sdkPath` still resolves
     (`has_loader_script`), or `None` when nothing qualifies.
 
-    "Deepest" is measured by the origin's own POSIX-normalised string
-    length. This is exact, not a heuristic: every candidate this loop ranks
-    has already passed `covers(workspace_root, origin)`, so any two of them
-    are both ancestors of the SAME `workspace_root` -- one ancestor of two
-    ancestors of one point is always an ancestor of the other (or they are
-    the same directory), which makes "contains the other's string as a
-    prefix" and "is the shorter string" the identical fact for this
-    already-filtered set. A path-segment COUNT was tried here first and
-    dropped as needless complexity: it ranks every real pair identically to
-    plain length once `covers` has already done the containment work, so
-    the extra parsing bought no case this function can actually be handed.
+    "Deepest" is measured by the length of the origin's RESOLVED path
+    (`resolve_origin`), NOT the raw registry key string. That distinction is
+    load-bearing, found by review (#904): `covers` (`sdk_cmd._workspace_under`
+    in production) decides containment on `.resolve()`d paths, so a symlinked
+    origin makes the raw key's string length disagree with `covers`'s own
+    notion of "deeper" -- two origins reached through a symlink can be
+    identical, or even INVERTED in order, once resolved, while differing in
+    raw length. (A path-segment COUNT of the raw key does not fix this
+    either: a symlink can collapse or expand the segment count exactly as it
+    can the character count.) Ranking by the SAME resolved value `covers`
+    uses restores the exactness this function claims: every candidate this
+    loop ranks has already passed `covers(workspace_root, origin)`, so any
+    two of them are both (resolved) ancestors of the SAME resolved
+    `workspace_root` -- one ancestor of two ancestors of one point is always
+    an ancestor of the other (or they are the same directory), which makes
+    "contains the other's RESOLVED string as a prefix" and "is the shorter
+    RESOLVED string" the identical fact for this already-filtered set.
+
+    `resolve_origin` is injected the same way `covers` and `has_loader_script`
+    are, for the same reason: this module stays free of any direct filesystem
+    touch, even one as innocuous-looking as `Path.resolve()`.
 
     A covering entry whose `sdkPath` fails `has_loader_script` is SKIPPED,
     not merely deprioritised: the next-deepest covering entry (if any) is
@@ -168,7 +185,7 @@ def deepest_covering_entry(
             continue
         if not has_loader_script(Path(sdk_path)):
             continue
-        depth = len(origin.replace("\\", "/"))
+        depth = len(resolve_origin(origin).replace("\\", "/"))
         if depth > best_depth:
             best_depth = depth
             best = (origin, sdk_path)
@@ -180,7 +197,20 @@ def with_entry(registry: dict[str, Any], *, origin: str, sdk_root: str) -> dict[
     this is the WRITE side, applied to whatever `parse_registry`-adjacent
     reading a writer already did), with `origin` keyed to `{"sdkPath":
     sdk_root}`. Every other key is left untouched, so one `tan bootstrap` run
-    updating its own origin never drops another project's entry."""
+    updating its own origin never drops another project's entry.
+
+    **This registry is append-only; nothing here prunes a dead origin**
+    (review, #904, nit 1). An origin whose project directory or checkout was
+    later deleted or moved without a further `tan bootstrap` stays in the
+    file forever -- not a correctness bug (`deepest_covering_entry` simply
+    never matches it, or skips it via `has_loader_script` if its `sdkPath`
+    also went stale), but every future `resolve_sdk_tiered` call still pays a
+    `covers`/`has_loader_script` filesystem check for it, and the file only
+    grows. No `bootstrap`/`doctor`/`clean` path prunes an entry today.
+    Deliberately out of scope for tan-cli#466/#904 -- pruning needs its own
+    design (age-based? existence-based? on which command?) and its own
+    review, not a rider on this one. Follow-up: tan-cli#905.
+    """
     updated = dict(registry)
     updated[origin] = {"sdkPath": sdk_root}
     return updated
