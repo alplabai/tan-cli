@@ -1095,16 +1095,18 @@ jobs:
       # Deliberately NOT the full `python/tests` suite here (ports + parity,
       # minutes not seconds, needs its own alp-sdk checkout) -- that now runs
       # in the `python-tests` job further down this file, which deliberately
-      # `--ignore=tests/gates`: this JOB already arms all SIX gate files
-      # (tan-cli#485 added the STRICT_LOADERS_* one, tan-cli#897 added the
-      # oracle/PINNED_SDK_TAG lockstep one) across the three steps below --
-      # collected-test COUNT deliberately not pinned here, `ci.yml`'s own
-      # comment gives the reason a growing suite should not commit to an
-      # exact number. Five of them run in this step against the FROZEN audit
-      # commit(s), same as before tan-cli#897; the tan-cli#897 gate is
-      # ALSO asserted in this same step, but unconditionally -- it needs no
-      # checkout or ref binding at all (see its own module docstring), so it
-      # is not one of the "five... against the FROZEN audit commit(s)".
+      # `--ignore=tests/gates`: this JOB already arms the five gate files it
+      # needs (9 root-bound tests, unchanged by tan-cli#897 -- its gate
+      # needs no root) across the three steps below -- not the whole
+      # `tests/gates` directory, which has grown to 37 files since the "five
+      # gate files" wording was first written and no longer matches it; see
+      # `ci.yml`'s own comment for why a growing suite should not commit to
+      # an exact number there. Five of them run in this step against the
+      # FROZEN audit commit(s), same as before tan-cli#897; the tan-cli#897
+      # gate is ALSO asserted in this same step, but unconditionally -- it
+      # needs no checkout or ref binding at all (see its own module
+      # docstring), so it is not one of the "five... against the FROZEN
+      # audit commit(s)".
       # `test_jlink_aen_device_freshness` is live and blocking in its own
       # step, and `test_planner_relocation_freshness` is additionally live
       # and warn-only on `repository_dispatch`. Each of the checkout-bound
