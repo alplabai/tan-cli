@@ -142,6 +142,29 @@ def test_the_probe_step_runs_the_script_with_the_pinned_version():
     )
 
 
+def test_the_probe_step_carries_the_token_that_keeps_it_measuring():
+    """Without `GH_TOKEN` the probe's `gh api` calls fall back to the
+    UNAUTHENTICATED per-IP quota, which is shared across every hosted runner
+    in the region -- the exact limit the install step below already carries a
+    token for. A rate-limited call returns non-zero, which this probe
+    correctly refuses to read as a measurement, so it degrades to `proceed`:
+    safe, silent, and permanently unable to report the outage it exists for.
+    Dropping the token would therefore turn the fix off with nothing going
+    red."""
+    step = _step(PROBE_STEP)
+    env = step.get("env") or {}
+    assert "GH_TOKEN" in env, (
+        "the probe step carries no GH_TOKEN, so its gh api calls run on the "
+        "unauthenticated per-IP quota and the probe silently degrades to "
+        f"'proceed' whenever that quota is exhausted. Step env: {env!r}"
+    )
+    assert "secrets.GITHUB_TOKEN" in str(env["GH_TOKEN"]), (
+        f"GH_TOKEN is {env['GH_TOKEN']!r}; expected the workflow's own "
+        f"GITHUB_TOKEN, which `permissions: contents: read` already covers "
+        f"for listing public releases -- no new secret is needed here."
+    )
+
+
 def test_the_script_the_workflow_names_exists():
     """The workflow names a path. A moved or renamed script turns the probe
     step into a red of its own."""

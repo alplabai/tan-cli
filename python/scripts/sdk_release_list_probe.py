@@ -47,15 +47,30 @@ The third row is the one worth defending. `api.github.com` being wholly
 unreachable would otherwise satisfy "the list is empty" and disable the ARM
 build on every PR for the duration.
 
+WHAT THIS DOES NOT DETECT, ON PURPOSE
+--------------------------------------
+
+A PARTIAL list -- non-empty, but stale or truncated so that it omits the
+pinned version -- lands in row 2 and proceeds, and west then prints the same
+`Unavailable SDK version` message this file exists to explain. That case is
+NOT covered, and it cannot be covered by counting: "the list is short and the
+pin is absent" and "the pin is genuinely wrong" are the same observation from
+here, and only the second one should ever be reported as a pin problem.
+Telling them apart needs a source of truth for the pin, which is
+`metadata/toolchains.json` in the PINNED alp-sdk -- a different measurement
+than this probe makes, and the reason row 2's message below is careful to
+claim only that the list is not empty, and to hand the "is the pin among
+them" question to west rather than implying an answer.
+
 WHY THE FETCHERS ARE INJECTED
 ------------------------------
 
 `fetch_list_len` / `fetch_latest_tag` are parameters of `probe`, resolved at
 CALL time from the module globals -- not bound as default arguments, which are
 evaluated once at import and would make a `monkeypatch.setattr` on this module
-silently ineffective. `tests/scripts/test_glibc_floor_scan.py` records that
-same trap costing a green test that exercised the real reader while believing
-it had swapped it. Injection is also what lets the truth table above be driven
+silently ineffective. `scripts/glibc_floor_scan.py:44-51` records that same
+trap costing a green test that exercised the real reader while believing it
+had swapped it. Injection is also what lets the truth table above be driven
 on all three required legs rather than only where `gh` is installed and
 authenticated.
 """
@@ -155,9 +170,12 @@ def probe(
 
     `fetch_latest_tag` is consulted ONLY when the list came back empty. A
     populated list already settles the question, and this repository has
-    already been rate-limited against this API once
-    (`getting-started.yml:490-501`), so the second call is not spent for
-    nothing.
+    already been rate-limited against this API once -- see the `GH_TOKEN`
+    comment on `getting-started.yml`'s "install the Zephyr SDK" step. Cited by
+    step name rather than by line: an earlier draft of this file cited
+    `getting-started.yml:490-501`, and the change that added the probe step
+    pushed those lines down by 57, so the citation was stale in the same
+    commit that wrote it (tan-cli#899).
     """
     # Resolved here, at call time -- see the module docstring.
     if fetch_list_len is None:
@@ -182,8 +200,11 @@ def probe(
             VERDICT_PROCEED,
             list_len,
             None,
-            f"{SDK_NG_REPO} lists {list_len} releases -- proceeding to "
-            f"west sdk install --version {pinned_version}.",
+            f"{SDK_NG_REPO} lists {list_len} releases, so the list endpoint "
+            f"is not empty and this is not the tan-cli#840 signature. "
+            f"Proceeding: west decides whether {pinned_version} is among "
+            f"them. A short or stale list that omits it is NOT detected here "
+            f"-- see the module docstring.",
         )
 
     latest_tag = fetch_latest_tag()
@@ -206,16 +227,28 @@ def probe(
         f"::warning::{SDK_NG_REPO} returned an EMPTY release list (0 "
         f"releases) while releases/latest still resolves to {latest_tag}. "
         f"west sdk install reports that empty list as "
-        f'"Unavailable SDK version: {pinned_version}", which is not the pin '
-        f"-- {pinned_version} is re-derived upstream by "
-        f"check_toolchain_lock.py and is correct. This is tan-cli#840. "
-        f"Skipping the install and the SDK-backed build steps behind it.",
+        f'"Unavailable SDK version: {pinned_version}", so that message is '
+        f"not evidence about the pin: an empty list produces it whatever the "
+        f"pin says. This probe did not measure the pin and does not claim it "
+        f"is right. This is tan-cli#840. Skipping the install and the "
+        f"SDK-backed build steps behind it.",
     )
+
+
+def _resolve_env_path(explicit: Path | None, var: str) -> Path | None:
+    """An explicit path wins; otherwise read `var` from the environment at
+    CALL time. Never a default argument -- that would freeze one process
+    environment at import."""
+    if explicit is not None:
+        return explicit
+    value = os.environ.get(var)
+    return Path(value) if value else None
 
 
 def main(
     argv: list[str] | None = None,
     github_output: Path | None = None,
+    step_summary: Path | None = None,
     fetch_list_len: Callable[[], int | None] | None = None,
     fetch_latest_tag: Callable[[], str | None] | None = None,
 ) -> int:
@@ -235,15 +268,32 @@ def main(
     )
     print(result.message)
 
-    # Resolved at call time for the same reason the fetchers are: a default
-    # argument would freeze one process environment at import.
-    if github_output is None:
-        env_path = os.environ.get("GITHUB_OUTPUT")
-        github_output = Path(env_path) if env_path else None
-
+    github_output = _resolve_env_path(github_output, "GITHUB_OUTPUT")
     if github_output is not None:
         with github_output.open("a", encoding="utf-8") as handle:
             handle.write(f"{OUTPUT_KEY}={'true' if result.is_outage else 'false'}\n")
+
+    # On the outage path the job goes GREEN having skipped the real ARM build.
+    # A `::warning::` annotation is the only other trace, and the commit-status
+    # surface -- the one anything downstream actually reads -- cannot tell that
+    # run apart from one that built. The step summary is where a human landing
+    # on the run page sees it without knowing to look for annotations. It does
+    # not change the conclusion; nothing here should red a PR over somebody
+    # else's outage.
+    step_summary = _resolve_env_path(step_summary, "GITHUB_STEP_SUMMARY")
+    if result.is_outage and step_summary is not None:
+        with step_summary.open("a", encoding="utf-8") as handle:
+            handle.write(
+                "### Zephyr SDK install skipped -- upstream release list "
+                "outage (tan-cli#840)\n\n"
+                f"`{SDK_NG_REPO}` returned an empty release list while "
+                f"`releases/latest` still resolved to `{result.latest_tag}`.\n\n"
+                "**This run did NOT perform the ARM build.** `west sdk "
+                "install`, `tan build`, the ARM-ELF assertion and the two "
+                "SDK-dependent dirty-host steps were all skipped. A green "
+                "conclusion here does not mean the toolchain path was "
+                "exercised -- re-run the job once upstream recovers.\n"
+            )
 
     # Always 0. This is a measurement; the step decides what to do with it,
     # and a probe that could red the job would be a second way for an

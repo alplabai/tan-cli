@@ -34,15 +34,24 @@ skip anything.
     0          "v1.0.1"     upstream-list-empty
 
 The fetchers are injected rather than mocked-in-place for the reason
-`test_glibc_floor_scan.py` records: a default argument binds once at import, so
-a `monkeypatch.setattr` on the module would leave the real network call in
-place while the test believed it had swapped it, and the test would pass for
-the wrong reason.
+`scripts/glibc_floor_scan.py:44-51` records: a default argument binds once at
+import, so a `monkeypatch.setattr` on the module would leave the real network
+call in place while the test believed it had swapped it, and the test would
+pass for the wrong reason.
+
+Injection alone would leave `_gh` and its two callers -- the whole real
+network half -- exercised by nothing, which is its own hazard: a typo in an
+endpoint string makes `gh api` fail, `probe` reports `proceed`, and the fix is
+inert forever while every test stays green. The module's own comment says a
+wrong repository value would "report `proceed` forever". `TestTheRealGhPath`
+below therefore fakes `subprocess.run` and pins the argv, so the strings are
+checked without a network.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -137,10 +146,10 @@ def test_a_populated_list_proceeds():
 # --------------------------------------------------------------------------
 
 
-def test_the_outage_message_clears_the_pin_by_name():
+def test_the_outage_message_says_west_is_no_evidence_about_the_pin():
     """The whole point of tan-cli#840: the reader must not go and edit a pin
-    that is correct. So the message names the pinned version AND says it is
-    not the cause."""
+    on the strength of west's message. The message must say so, and name the
+    evidence it actually has."""
     fl, flt, _ = _fetchers(0, "v1.0.1")
 
     result = probe_mod.probe(PINNED, fetch_list_len=fl, fetch_latest_tag=flt)
@@ -150,21 +159,61 @@ def test_the_outage_message_clears_the_pin_by_name():
     assert probe_mod.SDK_NG_REPO in result.message
     lowered = result.message.lower()
     assert "empty" in lowered
-    assert "not the pin" in lowered, (
-        "a reader who skims this line must come away knowing the pin is "
-        f"exonerated, not merely unmentioned: {result.message!r}"
+    assert "not evidence about the pin" in lowered, (
+        "a reader who skims this line must come away knowing west's message "
+        f"proves nothing about the pin: {result.message!r}"
     )
 
 
+def test_the_outage_message_does_not_claim_the_pin_is_correct():
+    """The probe measures two ENDPOINT states. It never reads the pin, so it
+    must not vouch for it. An earlier draft asserted the pin `is correct`
+    because `check_toolchain_lock.py` re-derives it -- a script that does not
+    exist in this repository at all (it is alp-sdk's), applied to a pinned SDK
+    revision this job does not re-verify. If a list outage ever coincided with
+    a genuinely bad pin, that sentence would have been a flat falsehood
+    printed at the exact moment the evidence was being skipped."""
+    fl, flt, _ = _fetchers(0, "v1.0.1")
+
+    result = probe_mod.probe(PINNED, fetch_list_len=fl, fetch_latest_tag=flt)
+
+    lowered = result.message.lower()
+    for overclaim in ("is correct", "check_toolchain_lock"):
+        assert overclaim not in lowered, (
+            f"the outage message claims {overclaim!r}, which this probe never "
+            f"measured: {result.message!r}"
+        )
+
+
 def test_the_proceed_message_does_not_announce_an_outage():
-    """Anti-false-alarm: the ordinary path must not print outage words that a
-    log reader would then chase."""
+    """Anti-false-alarm: the ordinary path must not raise an annotation a log
+    reader would then chase."""
     fl, flt, _ = _fetchers(100, "v1.0.1")
 
     result = probe_mod.probe(PINNED, fetch_list_len=fl, fetch_latest_tag=flt)
 
     assert "::warning" not in result.message
-    assert "empty" not in result.message.lower()
+    assert probe_mod.VERDICT_UPSTREAM_LIST_EMPTY not in result.message
+
+
+def test_the_populated_list_message_does_not_vouch_for_the_pin():
+    """The case this probe does NOT detect: a non-empty but stale or truncated
+    list that omits the pin. west then prints the same `Unavailable SDK
+    version` message, and a proceed line reading "upstream lists 100 releases"
+    invites exactly the wrong conclusion -- that upstream is healthy, so the
+    pin must really be wrong. The line must claim only that the list is not
+    empty, hand the membership question to west, and say the short-list case
+    is undetected."""
+    fl, flt, _ = _fetchers(100, "v1.0.1")
+
+    result = probe_mod.probe(PINNED, fetch_list_len=fl, fetch_latest_tag=flt)
+
+    lowered = result.message.lower()
+    assert "west decides" in lowered, result.message
+    assert "not detected" in lowered, (
+        "the populated-list line must name the partial-list case it cannot "
+        f"see, or it reads as an all-clear it has not earned: {result.message!r}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -240,3 +289,169 @@ def test_the_real_fetchers_are_resolved_at_call_time():
         # BOTH restored: leaving either swapped would make every later test
         # in this session depend on collection order.
         probe_mod._gh_release_list_len, probe_mod._gh_latest_release_tag = saved
+
+
+# --------------------------------------------------------------------------
+# The real network half. Nothing above reaches `_gh`, so a typo in an endpoint
+# string or a jq program would make every `gh api` call fail -- which this
+# module deliberately treats as "not a measurement" and turns into `proceed`.
+# The fix would then be inert forever with the whole suite green. These pin the
+# argv without a network.
+# --------------------------------------------------------------------------
+
+
+class _FakeRun:
+    """Records the argv it was handed and replays a scripted result."""
+
+    def __init__(self, returncode=0, stdout="", raises=None):
+        self.calls = []
+        self._returncode = returncode
+        self._stdout = stdout
+        self._raises = raises
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if self._raises is not None:
+            raise self._raises
+        return subprocess.CompletedProcess(
+            argv, self._returncode, stdout=self._stdout, stderr=""
+        )
+
+
+class TestTheRealGhPath:
+    def test_the_list_call_asks_the_release_list_endpoint_for_its_length(
+        self, monkeypatch
+    ):
+        fake = _FakeRun(stdout="100\n")
+        monkeypatch.setattr(probe_mod.subprocess, "run", fake)
+
+        assert probe_mod._gh_release_list_len() == 100
+
+        (argv, kwargs), = fake.calls
+        assert argv == [
+            "gh",
+            "api",
+            "repos/zephyrproject-rtos/sdk-ng/releases?per_page=100",
+            "--jq",
+            "length",
+        ], argv
+        assert kwargs["timeout"] == probe_mod._GH_TIMEOUT_S
+        assert kwargs["check"] is False, (
+            "check=True would raise instead of returning a non-zero result, "
+            "and the caller's None-means-unmeasured contract would never fire"
+        )
+
+    def test_the_latest_call_asks_the_latest_endpoint_for_its_tag(self, monkeypatch):
+        fake = _FakeRun(stdout="v1.0.1\n")
+        monkeypatch.setattr(probe_mod.subprocess, "run", fake)
+
+        assert probe_mod._gh_latest_release_tag() == "v1.0.1"
+
+        (argv, _), = fake.calls
+        assert argv == [
+            "gh",
+            "api",
+            "repos/zephyrproject-rtos/sdk-ng/releases/latest",
+            "--jq",
+            ".tag_name",
+        ], argv
+
+    def test_the_repo_both_calls_name_is_the_one_west_resolves_against(self):
+        """The module's own comment says a wrong value here would 'silently
+        probe some other repository and report proceed forever'. Pinned."""
+        assert probe_mod.SDK_NG_REPO == "zephyrproject-rtos/sdk-ng"
+
+    def test_a_non_zero_gh_exit_is_not_a_measurement(self, monkeypatch):
+        monkeypatch.setattr(
+            probe_mod.subprocess, "run", _FakeRun(returncode=1, stdout="")
+        )
+        assert probe_mod._gh_release_list_len() is None
+        assert probe_mod._gh_latest_release_tag() is None
+
+    def test_a_missing_gh_binary_is_not_a_measurement(self, monkeypatch):
+        monkeypatch.setattr(
+            probe_mod.subprocess,
+            "run",
+            _FakeRun(raises=FileNotFoundError("gh")),
+        )
+        assert probe_mod._gh_release_list_len() is None
+
+    def test_a_timeout_is_not_a_measurement(self, monkeypatch):
+        monkeypatch.setattr(
+            probe_mod.subprocess,
+            "run",
+            _FakeRun(raises=subprocess.TimeoutExpired(["gh"], 30)),
+        )
+        assert probe_mod._gh_release_list_len() is None
+
+    def test_an_unparseable_length_is_not_a_measurement(self, monkeypatch):
+        """A body that is not an integer -- an error object, an HTML error
+        page -- must not be coerced into a count."""
+        monkeypatch.setattr(probe_mod.subprocess, "run", _FakeRun(stdout="banana"))
+        assert probe_mod._gh_release_list_len() is None
+
+    def test_a_blank_latest_tag_is_not_a_measurement(self, monkeypatch):
+        """`--jq .tag_name` on a body without that key prints an empty line at
+        exit 0. Empty is not a tag."""
+        monkeypatch.setattr(probe_mod.subprocess, "run", _FakeRun(stdout="\n"))
+        assert probe_mod._gh_latest_release_tag() is None
+
+    def test_the_outage_verdict_is_reachable_through_the_real_fetchers(
+        self, monkeypatch
+    ):
+        """End to end with no injection at all: only `subprocess.run` is faked,
+        so `probe` resolves both real fetchers and the outage row is reached
+        through the same code the runner executes."""
+
+        def fake_run(argv, **kwargs):
+            body = "0\n" if "releases?per_page=100" in argv[2] else "v1.0.1\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=body, stderr="")
+
+        monkeypatch.setattr(probe_mod.subprocess, "run", fake_run)
+
+        result = probe_mod.probe(PINNED)
+
+        assert result.verdict == probe_mod.VERDICT_UPSTREAM_LIST_EMPTY
+        assert result.latest_tag == "v1.0.1"
+
+
+# --------------------------------------------------------------------------
+# The step summary: on the outage path the job goes GREEN having skipped the
+# real ARM build, and the commit-status surface cannot tell that run from one
+# that built.
+# --------------------------------------------------------------------------
+
+
+def test_main_records_the_skipped_build_in_the_step_summary(tmp_path):
+    summary = tmp_path / "summary.md"
+    fl, flt, _ = _fetchers(0, "v1.0.1")
+
+    probe_mod.main(
+        ["--version", PINNED],
+        github_output=tmp_path / "out",
+        step_summary=summary,
+        fetch_list_len=fl,
+        fetch_latest_tag=flt,
+    )
+
+    written = summary.read_text(encoding="utf-8")
+    assert "did NOT perform the ARM build" in written, written
+    assert "v1.0.1" in written
+    assert probe_mod.SDK_NG_REPO in written
+
+
+def test_main_writes_no_step_summary_on_the_ordinary_path(tmp_path):
+    """A summary section on every green run is noise, and noise is how the
+    outage section stops being read."""
+    summary = tmp_path / "summary.md"
+    fl, flt, _ = _fetchers(100, "v1.0.1")
+
+    probe_mod.main(
+        ["--version", PINNED],
+        github_output=tmp_path / "out",
+        step_summary=summary,
+        fetch_list_len=fl,
+        fetch_latest_tag=flt,
+    )
+
+    assert not summary.exists()
