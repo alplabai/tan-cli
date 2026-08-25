@@ -772,7 +772,11 @@ def diff(
 
     root, board_path = resolve_project_paths(project, board_yaml)
     sdk = resolve_sdk(sdk_root, root)
-    sdk_info = SdkInfo.from_resolution(sdk.path, sdk) if sdk is not None else None
+    # tan-cli#468: `resolve_sdk` now always returns an `ActiveSdk`, never a
+    # bare `None` -- `sdk.path` is what says whether a usable checkout
+    # resolved, so `sdk_info` guards on that instead of `sdk`'s own
+    # (now-unconditional) truthiness.
+    sdk_info = SdkInfo.from_resolution(sdk.path, sdk) if sdk.path is not None else None
     # tan-cli#478: `SdkInfo.from_resolution` above carries the pair, and
     # `Envelope.__init__` appends it to the JSON envelope for every command --
     # that seam alone is enough for `--format json`, and dedupes by code, so
@@ -781,10 +785,13 @@ def diff(
     # success branch below both write straight to stderr), so without this
     # the DEFAULT (non-JSON) path stayed silent -- tan-cli#478 review finding
     # 6. Computed here, once, and threaded into both text branches below.
-    sdk_context_issues: list[Issue] = (
-        sdk_resolution_issues(sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for)
-        if sdk is not None
-        else []
+    #
+    # Unconditional now (tan-cli#468): `sdk.broken_project_pin`/
+    # `sdk.foreign_global_default_for` are populated even when `sdk.path` is
+    # `None`, so a broken pin with nothing else resolving reaches `diff`'s
+    # text mode too, not only the resolved-checkout case.
+    sdk_context_issues: list[Issue] = sdk_resolution_issues(
+        sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for
     )
     board_file = Path(board_path)
 
