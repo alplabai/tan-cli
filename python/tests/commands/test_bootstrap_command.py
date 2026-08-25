@@ -840,6 +840,12 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     message = next(i["message"] for i in env["issues"] if i["code"] == "bootstrap.workspace-relocated")
     assert bootstrap_cmd._native(str(sdk)) in message
     assert bootstrap_cmd._native(str(new_sdk)) in message
+    # tan-cli#466: the "to change later" fix hint names BOTH the legacy
+    # pointer AND the registry, so deleting either (or both) by hand remains
+    # a safe, complete recovery -- naming only one would leave a reader
+    # editing the file that was not the one that actually answered.
+    assert "sdk-default" in message
+    assert "sdk-defaults.json" in message
     # The checkout really moved: gone from the old location, present (with its
     # own content) at the new one; `unrelated.txt` is untouched, still the
     # only other thing in the original parent.
@@ -865,6 +871,13 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     assert global_doc["sdkPath"] == str(new_sdk)
     assert global_doc["writtenFor"] == str(sdk.parent).replace("\\", "/")
     assert not (sdk.parent / ".alp" / "sdk-path").exists()  # not a project pin
+    # tan-cli#466: the origin-keyed sibling, written ALONGSIDE the legacy
+    # pointer, keyed by the same `written_for` origin (the workspace parent
+    # bootstrap ran in).
+    registry = tmp_path / "fake-home" / ".alp" / "sdk-defaults.json"
+    assert registry.exists()
+    registry_doc = json.loads(registry.read_text(encoding="utf-8"))
+    assert registry_doc[str(sdk.parent).replace("\\", "/")]["sdkPath"] == str(new_sdk)
 
 
 def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):
@@ -907,31 +920,49 @@ def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_p
     assert doctor_env["sdk"]["sourceTier"] == "globalDefault"
 
 
-def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_path):
-    """tan-cli#464, the maintainer's own repro shape, driven through real,
-    independent subprocesses (never by inspecting pointer bytes -- that
-    coverage already existed and did not catch this):
+def test_a_second_projects_relocation_no_longer_repoints_the_first(tmp_path):
+    """tan-cli#464's own repro, now closed by tan-cli#466 (stage 2 of the same
+    issue), driven through real, independent subprocesses (never by
+    inspecting pointer bytes):
 
         A, right after A       sdk.root=<A's own checkout> tier=globalDefault
         (project B bootstraps and relocates)
-        A (the earlier one)    sdk.root=<B's checkout!>     tier=globalDefault
+        A (the earlier one)    sdk.root=<A's own checkout, STILL> tier=globalDefault
 
-    `~/.alp/sdk-default` is machine-global and last-writer-wins, so before
-    this fix project A silently started resolving project B's checkout the
-    moment B bootstrapped -- `ok: true`, `issues: []`, identical to the
-    correct case.
+    Before tan-cli#464, project A silently started resolving project B's
+    checkout the moment B bootstrapped -- `ok: true`, `issues: []`, because
+    `~/.alp/sdk-default` is one machine-global, last-writer-wins file. #464
+    (stage 1) made that DISCLOSED (`sdk.global-default-foreign-project`) but
+    left the ANSWER wrong: A still resolved B's SDK, just with a warning
+    attached. This test used to pin exactly that -- `current_a2` resolving
+    `new_sdk_b` -- as the correct, if disclosed, outcome.
+
+    #466 (stage 2) makes the answer correct instead: `tan bootstrap` now also
+    keys `origin -> sdkPath` into `~/.alp/sdk-defaults.json`, and
+    `resolve_sdk_tiered`'s `globalDefault` tier picks the DEEPEST registry key
+    that CONTAINS the caller's workspace before ever consulting the shared
+    single pointer. A's own bootstrap already wrote `proj_a -> new_sdk_a`
+    into that registry, so A queried from `proj_a` resolves ITS OWN checkout
+    no matter which project bootstrapped last -- `sourceTier` stays
+    `"globalDefault"` (a registry hit IS the machine-default mechanism, keyed,
+    not a new tier), but the root is A's, and the foreign warning does not
+    fire, because a caller a registry entry was written FOR is by
+    construction not reading someone else's answer.
+
+    The genuinely-foreign case -- a caller no registry entry covers at all --
+    still falls through to the legacy pointer and still discloses; that path
+    is `test_foreign_global_default_coverage.py`'s `two_projects` fixture,
+    which now queries from a location outside every registered origin for
+    exactly this reason.
 
     A per-project pin at bootstrap time (`.alp/sdk-path` written in the
-    directory bootstrap ran in) was tried and reverted on review: that
+    directory bootstrap ran in) was tried and reverted on review of #464: that
     directory is bootstrap's cwd, the workspace PARENT in the quickstart, not
     a project -- a bootstrap run from `$HOME` would have pinned inside tan's
-    OWN machine-global config dir, silencing this exact warning for
-    essentially every project the user owns. The fix that ships is
-    disclosure, not prevention: A's `sdk current` STILL resolves B's checkout
-    after B relocates -- that is what "last-writer-wins" means and stays true
-    -- but it now carries `sdk.global-default-foreign-project` naming whose
-    bootstrap actually decided the answer, closing the `issues: []` silence
-    without touching resolution.
+    OWN machine-global config dir. The registry keeps that same "cwd is not
+    necessarily a project" shape (an origin is just a directory bootstrap ran
+    in, not asserted to be a project root) but escapes the single-pointer
+    contention by keying on it instead of overwriting one shared slot.
 
     ONE shared HOME across the whole sequence (tan-cli#463's own lesson: an
     "isolated HOME" control that resets between calls never lets the
@@ -992,12 +1023,11 @@ def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_pa
     pointer = home / ".alp" / "sdk-default"
     print(f"  pointer now: {pointer.read_text(encoding='utf-8').strip()}")
 
-    # A, queried again from the SAME directory: the shared global default now
-    # points at B, so A DOES resolve B's checkout -- the defect this test
-    # pins is not that resolution changed (it did not, and should not: layer
-    # 2 is a disclosure fix, not a prevention one), but that this is no
-    # longer SILENT. Pre-fix code has no `sdk.global-default-foreign-project`
-    # code at all, so this assertion fails against it.
+    # A, queried again from the SAME directory: tan-cli#466's whole point is
+    # that this STILL resolves A's own checkout, not B's -- the shared
+    # `~/.alp/sdk-default` pointer now names B, but A's own registry entry
+    # (`proj_a -> new_sdk_a`, written by A's own bootstrap above) is the
+    # deepest key covering `proj_a` and answers first.
     current_a2 = envelope(
         run_tan("sdk", "current", "--format", "json", cwd=proj_a, env_extra=env_extra)
     )
@@ -1005,16 +1035,27 @@ def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_pa
         f"  A (the earlier one)    sdk.root={current_a2['sdk']['root']!r} "
         f"tier={current_a2['data']['sourceTier']}"
     )
-    assert current_a2["sdk"]["root"] == str(new_sdk_b).replace("\\", "/")
+    assert current_a2["sdk"]["root"] == str(new_sdk_a).replace("\\", "/"), (
+        "DEFECT (tan-cli#466): project A stopped resolving its OWN SDK after "
+        "an unrelated project B relocated its checkout"
+    )
     assert current_a2["data"]["sourceTier"] == "globalDefault"
-    assert "sdk.global-default-foreign-project" in codes(current_a2), (
-        "DEFECT: project A silently resolved project B's SDK with no warning"
+    assert "sdk.global-default-foreign-project" not in codes(current_a2), (
+        "a registry entry written FOR this workspace must never be reported "
+        "as a foreign global default"
     )
-    message = next(
-        i["message"] for i in current_a2["issues"]
-        if i["code"] == "sdk.global-default-foreign-project"
+
+    # And the registry FILE itself carries both origins, each naming its own
+    # relocated checkout -- the mechanism, not just the outcome.
+    registry_doc = json.loads(
+        (home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8")
     )
-    assert str(proj_b).replace("\\", "/") in message
+    assert registry_doc[str(proj_a).replace("\\", "/")]["sdkPath"] == str(
+        new_sdk_a
+    ).replace("\\", "/")
+    assert registry_doc[str(proj_b).replace("\\", "/")]["sdkPath"] == str(
+        new_sdk_b
+    ).replace("\\", "/")
 
 
 def test_a_relocating_bootstrap_updates_the_project_pin_it_resolved_through(tmp_path):

@@ -204,3 +204,11 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-25 -- tan-cli#468: resolve_sdk now always returns an ActiveSdk (carrying broken_project_pin/foreign_global_default_for even when unresolved) instead of a bare None -- clean_cmd.py and diff_cmd.py grew threading that through their guards and envelope construction.
     - tan/commands/clean_cmd.py: 1120 -> 1129
     - tan/commands/diff_cmd.py: 882 -> 889
+- 2026-08-25 -- tan-cli#466: origin-keyed global SDK default registry (~/.alp/sdk-defaults.json) -- resolve_sdk_tiered's globalDefault tier, its bootstrap-side writer/rollback in bootstrap_cmd.py, and the two-file global_default_pointer_fix_hint
+    - tan/commands/bootstrap_cmd.py: 3272 -> 3364
+    - tan/commands/doctor_cmd.py: 4038 -> 4040
+    - tan/commands/sdk_cmd.py: 1416 -> 1472
+    - function_count_budget: 254 -> 255
+    - function_worst_budget: 747 -> 757
+- 2026-08-25 -- tan-cli#466 follow-up: clarify global_default_foreign_project_issue's docstring now that a registry hit never sets foreign_global_default_for
+    - tan/commands/sdk_cmd.py: 1472 -> 1480

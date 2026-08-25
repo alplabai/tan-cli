@@ -2067,47 +2067,44 @@ def test_a_real_typo_still_exits_2(project):
 # --- tan-cli#464: a command OTHER than `sdk current` discloses the same fact -
 
 
-def test_build_also_warns_when_the_global_default_was_written_for_another_project(tmp_path):
+def test_build_no_longer_resolves_another_projects_relocated_sdk(tmp_path):
     """`sdk current` was the ONLY command that used to carry
     `sdk.global-default-foreign-project` -- `resolve_sdk_root_ladder`
     (`build_cmd.py`) dropped the fact on the floor, so `tan build`, the
     command that actually COMPILES against whichever checkout resolved, said
     nothing while silently building against a different project's SDK.
+    tan-cli#464 (stage 1) closed the silence; tan-cli#466 (stage 2, this
+    test's current shape) closes the wrong ANSWER underneath it, for `tan
+    build` exactly as it does for `sdk current`
+    (`test_bootstrap_command.test_a_second_projects_relocation_no_longer_repoints_the_first`).
 
-    The exact two-project sequence
-    `test_a_second_projects_relocation_does_not_silently_repoint_the_first`
-    (`test_bootstrap_command.py`) proves for `sdk current`, replayed here for
-    `tan build`: project A bootstraps and relocates first, project B
-    bootstraps and relocates second (the SAME machine-global
-    `~/.alp/sdk-default`, last-writer-wins), then `tan build` from A's own
-    directory -- no board.yaml there, so the build itself still refuses with
-    `build.plan-unavailable` -- must ALSO carry the foreign-project warning
-    naming B, prepended ahead of that refusal exactly as
-    `sdk.project-pin-unresolved` already is (tan-cli#263 review).
+    The exact two-project sequence that other test proves for `sdk current`
+    is replayed here for `tan build`: project A bootstraps and relocates
+    first (writing `proj_a -> new_sdk_a` into `~/.alp/sdk-defaults.json`),
+    project B bootstraps and relocates second (repointing the shared
+    `~/.alp/sdk-default` at B, but writing its OWN separate `proj_b ->
+    new_sdk_b` registry entry, not overwriting A's), then `tan build` from a
+    SUBdirectory of A -- no board.yaml there, so the build itself still
+    refuses with `build.plan-unavailable` -- must resolve THROUGH the
+    `globalDefault` tier (a registry hit still reports that tier; #466 adds
+    no sixth tier) to A's OWN checkout, `sourceTier` unchanged, and must
+    carry no `sdk.global-default-foreign-project` warning: a registry entry
+    written FOR this workspace is not evidence of reading someone else's
+    answer.
 
-    Queried from a SUBdirectory of `proj_a`, deliberately, not `proj_a`
-    itself: the tan-cli#464 rework REMOVES the directory-scoped project pin
-    an earlier attempt at this fix wrote at bootstrap's own cwd (see the
-    CHANGELOG entry), so with that change alone this distinction no longer
-    matters -- but this test must also demonstrate the pre-fix DEFECT
-    against `8c320ff` (which still HAD that pin), and there `proj_a` itself
-    would resolve through its own `projectPin` tier and never reach the
-    `globalDefault` collision this warning exists for at all. A subdirectory
-    carries no pin either way, so it is the one location both codebases
-    resolve through `globalDefault` -- the input this test must hold fixed
-    for the assertion below to isolate exactly the one variable the tan-cli
-    #464 rework changes: whether `tan build` (not just `sdk current`)
-    discloses it.
+    Queried from a SUBdirectory of `proj_a`, not `proj_a` itself, for the
+    same reason the original tan-cli#464 version of this test did: a
+    subdirectory carries no `.alp/sdk-path` project pin, so it is the
+    location that resolves through `globalDefault` rather than short-
+    circuiting through a higher tier -- unchanged by #466, which only
+    changes what `globalDefault` itself answers.
 
-    Before this fix, `resolve_sdk_root_ladder` returned a 3-element tuple
-    with no slot for this fact at all, so `build_cmd.build` could not append
-    it regardless of what happened at the two-project sequence above --
-    `codes(env)` never contained `sdk.global-default-foreign-project` for
-    ANY input. That is an absence, not a wrong value, so it is pinned here as
-    an assertion on the envelope's own `issues[]`/`sdk` fields, never by
-    catching an `AttributeError`/`TypeError` from calling code that did not
-    exist yet (which would prove only that the code was missing, not that
-    the behaviour was wrong).
+    Before tan-cli#464, `resolve_sdk_root_ladder` returned a 3-element tuple
+    with no slot for the foreign-project fact at all, so `build_cmd.build`
+    could not disclose it regardless of what the two-project sequence above
+    did. Before tan-cli#466, disclosure was all it did -- `tan build` still
+    compiled against B's checkout from A's own subdirectory. Both facts are
+    pinned here as assertions on the envelope's own `issues[]`/`sdk` fields.
     """
     home = tmp_path / "shared-home"
     env_extra = {"HOME": str(home), "USERPROFILE": str(home)}
@@ -2119,7 +2116,7 @@ def test_build_also_warns_when_the_global_default_was_written_for_another_projec
     # makes the dirty-parent guard auto-relocate each checkout.
     (proj_a / "unrelated.txt").write_text("x", encoding="utf-8")
     (proj_b / "unrelated.txt").write_text("x", encoding="utf-8")
-    new_sdk_b = proj_b / "alp-workspace" / sdk_b.name
+    new_sdk_a = proj_a / "alp-workspace" / sdk_a.name
 
     bootstrap_a = envelope_of(
         run_tan_with_env(
@@ -2144,27 +2141,24 @@ def test_build_also_warns_when_the_global_default_was_written_for_another_projec
     )
 
     # A SUBdirectory of A, via `tan build` this time, not `sdk current`: the
-    # shared global default now names B, and nothing at THIS directory
-    # shadows it.
+    # shared LEGACY pointer now names B, but A's own registry entry still
+    # covers this directory and must win.
     sub_a = proj_a / "sub"
     sub_a.mkdir()
     build_env = envelope_of(
         run_tan_with_env("build", "--format", "json", cwd=sub_a, env_extra=env_extra)
     )
     print(f"  tan build from A/sub: sdk={build_env.get('sdk')!r} codes={codes(build_env)}")
-    assert build_env["sdk"]["root"] == str(new_sdk_b).replace("\\", "/"), (
-        "precondition unmet: A's tan build must resolve B's checkout via the "
-        "shared global default"
+    assert build_env["sdk"]["root"] == str(new_sdk_a).replace("\\", "/"), (
+        "DEFECT (tan-cli#466): tan build stopped resolving A's own SDK from "
+        "A's own subdirectory after an unrelated project B relocated its "
+        "checkout"
     )
     assert build_env["sdk"]["sourceTier"] == "globalDefault"
-    assert "sdk.global-default-foreign-project" in codes(build_env), (
-        "DEFECT: tan build silently compiled against a different project's SDK"
+    assert "sdk.global-default-foreign-project" not in codes(build_env), (
+        "a registry entry written FOR this workspace must never be reported "
+        "as a foreign global default"
     )
-    message = next(
-        i["message"] for i in build_env["issues"]
-        if i["code"] == "sdk.global-default-foreign-project"
-    )
-    assert str(proj_b).replace("\\", "/") in message
 
 
 def test_build_help_carries_no_port_archaeology():

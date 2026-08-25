@@ -38,6 +38,7 @@ from tan.commands.sdk_cmd import (
     check_sdk_readiness,
     describe_network_error,
     discover_workspace_sdk,
+    global_default_pointer_fix_hint,
     parse_remote_sdk_releases,
     parse_sdk_version_yaml,
     resolve_sdk_tiered,
@@ -89,6 +90,20 @@ def write_pointer(path: Path, sdk_path: Path, *, written_for: Path | str | None 
     doc = {"sdkPath": str(sdk_path), "updatedAt": "1970-01-01T00:00:00Z"}
     if written_for is not None:
         doc["writtenFor"] = str(written_for)
+    path.write_text(json.dumps(doc), encoding="utf-8", newline="")
+
+
+def write_registry(home: Path, entries: dict[Path | str, Path | str], *, raw: str | None = None) -> None:
+    """`<home>/.alp/sdk-defaults.json`, hand-written the way a real
+    `tan bootstrap` run would leave it -- `{origin: {"sdkPath": ...}}`.
+    `raw`, when given, is written VERBATIM instead (a malformed-content
+    case), and `entries` is then ignored."""
+    path = home / ".alp" / "sdk-defaults.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if raw is not None:
+        path.write_text(raw, encoding="utf-8", newline="")
+        return
+    doc = {str(origin): {"sdkPath": str(sdk_path)} for origin, sdk_path in entries.items()}
     path.write_text(json.dumps(doc), encoding="utf-8", newline="")
 
 
@@ -349,6 +364,209 @@ def test_global_default_written_for_wrong_type_reads_as_unknown(
         newline="",
     )
     assert resolve_sdk_tiered(None, workspace).foreign_global_default_for is None
+
+
+def test_global_default_pointer_fix_hint_names_both_files():
+    """tan-cli#466's explicit requirement: deleting the pointer alone must
+    remain a safe recovery, and the hint must not send a reader to edit only
+    the file that happened NOT to be the one that answered -- so it names
+    the legacy pointer AND the registry, every time, unconditionally.
+
+    Deliberately DISTINCT, non-overlapping fake paths (not the real
+    `sdk-default`/`sdk-defaults.json` pair, where the first string is a
+    literal substring of the second) -- an `in` check against the real names
+    would pass even if the registry argument were silently dropped, since
+    "sdk-default" already reads as a substring of "sdk-defaults.json".
+    """
+    hint = global_default_pointer_fix_hint("/home/u/.alp/POINTER-FILE", "/home/u/.alp/REGISTRY-FILE")
+    assert "/home/u/.alp/POINTER-FILE" in hint
+    assert "/home/u/.alp/REGISTRY-FILE" in hint
+
+
+# ── tan-cli#466: the origin-keyed registry, consulted before the single ─────
+# ── legacy pointer at the SAME globalDefault tier ────────────────────────────
+
+
+def test_registry_hit_still_reports_the_globaldefault_tier(tmp_path, isolated_home):
+    """A registry hit is not a sixth tier -- it IS the machine-default
+    mechanism, keyed. `sourceTier` must read identically to a legacy-pointer
+    hit so no consumer of the wire contract needs to learn a new value."""
+    workspace = tmp_path / "projA" / "sub"
+    workspace.mkdir(parents=True)
+    project_root = tmp_path / "projA"
+    target = make_sdk_root(tmp_path / "sdk-a")
+    write_registry(isolated_home, {project_root: target})
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.path == str(target)
+
+
+def test_registry_hit_resolves_the_subdirectory_case_by_containment_alone(
+    tmp_path, isolated_home
+):
+    """The issue's headline property: from `<parent>/projA/anything/`, the
+    deepest key containing the cwd is `<parent>/projA` -- at ANY depth, with
+    no filesystem probing beyond the containment test itself (the fake
+    filesystem here has no sibling `alp-sdk` directory anywhere, so a
+    discovery-tier fallback could never produce this answer instead)."""
+    project_root = tmp_path / "projA"
+    workspace = project_root / "a" / "b" / "c" / "d"
+    workspace.mkdir(parents=True)
+    target = make_sdk_root(tmp_path / "sdk-a")
+    write_registry(isolated_home, {project_root: target})
+
+    assert resolve_sdk_tiered(None, workspace).path == str(target)
+
+
+def test_registry_never_answers_for_a_workspace_no_entry_covers(tmp_path, isolated_home):
+    """The closed, write-authorized candidate set: an origin some OTHER
+    bootstrap ran in must never answer for a workspace it does not contain,
+    even though it is the only entry in the registry."""
+    workspace = tmp_path / "unrelated" / "ws"
+    workspace.mkdir(parents=True)
+    write_registry(isolated_home, {tmp_path / "projA": make_sdk_root(tmp_path / "sdk-a")})
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "none"
+    assert active.path is None
+
+
+def test_a_home_keyed_entry_is_the_machine_wide_default(tmp_path, isolated_home):
+    """A bootstrap run from `$HOME` (the workspace-parent quickstart shape)
+    keys `$HOME` itself into the registry -- correct as the machine-wide
+    default on a one-bootstrap host, exactly like the legacy single pointer
+    already was for that same host."""
+    workspace = isolated_home / "someproject"
+    workspace.mkdir()
+    target = make_sdk_root(tmp_path / "sdk-home")
+    write_registry(isolated_home, {isolated_home: target})
+
+    assert resolve_sdk_tiered(None, workspace).path == str(target)
+
+
+def test_a_deeper_bootstrap_outranks_the_home_keyed_default_under_it(tmp_path, isolated_home):
+    """The issue's own second half of the `$HOME` property: a LATER
+    bootstrap under `~/proj/B` must still win for everything under it, even
+    though the coarser `$HOME` entry also covers that same workspace."""
+    project_b = isolated_home / "proj" / "B"
+    workspace = project_b / "firmware"
+    workspace.mkdir(parents=True)
+    home_target = make_sdk_root(tmp_path / "sdk-home")
+    b_target = make_sdk_root(tmp_path / "sdk-b")
+    write_registry(isolated_home, {isolated_home: home_target, project_b: b_target})
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.path == str(b_target), "the deeper, project-specific entry must win"
+
+
+def test_a_stale_registry_entry_degrades_like_a_stale_pointer_does(tmp_path, isolated_home):
+    """Degrades safely: the deepest covering entry's `sdkPath` no longer
+    carries a loader script (the checkout moved or was deleted), so it must
+    fall through -- here, to a shallower entry that still resolves, the same
+    way a stale legacy pointer falls through to a lower TIER rather than
+    locking a workspace out entirely."""
+    project_b = isolated_home / "proj" / "B"
+    workspace = project_b / "firmware"
+    workspace.mkdir(parents=True)
+    home_target = make_sdk_root(tmp_path / "sdk-home")
+    write_registry(
+        isolated_home,
+        {isolated_home: home_target, project_b: tmp_path / "deleted-checkout"},
+    )
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.path == str(home_target)
+
+
+def test_registry_stale_at_every_covering_entry_falls_through_to_the_legacy_pointer(
+    tmp_path, isolated_home
+):
+    """When NO covering registry entry survives `_has_loader_script`,
+    resolution falls all the way through to the single legacy pointer --
+    the same `globalDefault` tier the registry sits in front of, not a
+    lower one."""
+    project_a = tmp_path / "projA"
+    workspace = project_a / "sub"
+    workspace.mkdir(parents=True)
+    write_registry(isolated_home, {project_a: tmp_path / "deleted-checkout"})
+    legacy_target = make_sdk_root(tmp_path / "legacy-default")
+    write_pointer(isolated_home / ".alp" / "sdk-default", legacy_target)
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.path == str(legacy_target)
+
+
+def test_a_malformed_registry_falls_back_to_the_legacy_pointer_not_a_crash(
+    tmp_path, isolated_home
+):
+    """Concurrency/corruption: a truncated or otherwise malformed registry
+    (a second `tan bootstrap` process's write racing this read, or a hand
+    edit) must degrade to the legacy pointer, never raise and never block a
+    build."""
+    project_a = tmp_path / "projA"
+    workspace = project_a / "sub"
+    workspace.mkdir(parents=True)
+    write_registry(isolated_home, {}, raw='{"/projA": {"sdkPa')
+    legacy_target = make_sdk_root(tmp_path / "legacy-default")
+    write_pointer(isolated_home / ".alp" / "sdk-default", legacy_target)
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.path == str(legacy_target)
+
+
+def test_a_registry_hit_never_carries_the_foreign_warning(tmp_path, isolated_home):
+    """A caller a registry entry was written FOR is, by construction, not
+    reading someone else's answer -- even when the shared legacy pointer
+    (irrelevant here, since the registry answers first) was last written for
+    a totally different project."""
+    project_a = tmp_path / "projA"
+    workspace = project_a / "sub"
+    workspace.mkdir(parents=True)
+    target_a = make_sdk_root(tmp_path / "sdk-a")
+    write_registry(isolated_home, {project_a: target_a})
+    write_pointer(
+        isolated_home / ".alp" / "sdk-default",
+        make_sdk_root(tmp_path / "sdk-b"),
+        written_for=tmp_path / "projB",
+    )
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.path == str(target_a)
+    assert active.foreign_global_default_for is None
+
+
+def test_the_464_repro_now_resolves_a_not_b(tmp_path, isolated_home):
+    """The maintainer's own #464 repro, at the `resolve_sdk_tiered` unit
+    layer (the subprocess-level replay lives in `test_bootstrap_command.py`
+    and `test_build_command.py`): project A bootstraps and registers its own
+    origin, project B bootstraps LATER and repoints the shared legacy
+    pointer at itself -- and A, queried again, still resolves ITS OWN
+    checkout, not B's."""
+    project_a = tmp_path / "projA"
+    project_b = tmp_path / "projB"
+    workspace = project_a / "sub"
+    workspace.mkdir(parents=True)
+    target_a = make_sdk_root(tmp_path / "sdk-a")
+    target_b = make_sdk_root(tmp_path / "sdk-b")
+
+    # A bootstraps first: registers its own origin AND becomes the legacy
+    # pointer's last writer.
+    write_registry(isolated_home, {project_a: target_a})
+    write_pointer(isolated_home / ".alp" / "sdk-default", target_a, written_for=project_a)
+    assert resolve_sdk_tiered(None, workspace).path == str(target_a)
+
+    # B bootstraps second: adds its OWN registry entry (A's is untouched) and
+    # steals the shared legacy pointer, exactly like a real second
+    # `_write_global_sdk_pointer`/`_write_global_sdk_registry` pair would.
+    write_registry(isolated_home, {project_a: target_a, project_b: target_b})
+    write_pointer(isolated_home / ".alp" / "sdk-default", target_b, written_for=project_b)
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.path == str(target_a), "DEFECT (tan-cli#466): A resolved B's SDK"
+    assert active.foreign_global_default_for is None
 
 
 def test_discovery_prefers_the_workspace_itself_and_refuses_ambiguity(tmp_path):

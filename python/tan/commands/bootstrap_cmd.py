@@ -135,6 +135,12 @@ from tan.core.bootstrap import (
 from tan.core.fs_confine import resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import sdk_pointer_json
+from tan.core.sdk_default_registry import (
+    load_raw,
+    registry_path,
+    registry_text,
+    with_entry,
+)
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -167,6 +173,18 @@ def _native(path: Path | str) -> str:
     Windows copy-paste blocks."""
     rendered = str(path)
     return rendered.replace("/", "\\") if os.name == "nt" else rendered
+
+
+def _global_default_fix_hint() -> str:
+    """`global_default_pointer_fix_hint`, called with both files this run may
+    have just written (tan-cli#466): the legacy `~/.alp/sdk-default` pointer
+    AND its origin-keyed sibling `~/.alp/sdk-defaults.json`. One helper so
+    the three sites below (the relocation notice, and the two rollback-
+    failure messages) cannot drift into naming only one file."""
+    home = _home_alp_dir()
+    return global_default_pointer_fix_hint(
+        _native(home / "sdk-default"), _native(registry_path(home))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2115,6 +2133,11 @@ class RelocationUndo:
     #: its own to touch, and a rewrite that itself failed left nothing to undo).
     project_pin_root: str | None = None
     previous_project_pin: bytes | None = None
+    #: `~/.alp/sdk-defaults.json`'s bytes before this run's own origin entry
+    #: was written into it (tan-cli#466); `None` when the registry did not
+    #: exist yet (the common first-relocation-ever case). Snapshotted the
+    #: SAME moment as `previous_pointer`, for the same reason.
+    previous_registry: bytes | None = None
 
 
 def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see below
@@ -2549,6 +2572,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             old_venv_dir = paths.venv_dir
             old_project = reported_project
             previous_pointer = _read_global_sdk_pointer()
+            previous_registry = _read_global_sdk_registry_bytes()
             paths.repo_root = new_root
             paths.workspace_dir = target
             paths.venv_dir = target / facts.venv_dir_name
@@ -2565,7 +2589,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 # `tan sdk switch --global` refuses in this build (tan-cli#305) --
                 # naming the pointer mechanism itself instead of a subcommand
                 # keeps this true even once that changes.
-                f"(to change later: {global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))}) "
+                f"(to change later: {_global_default_fix_hint()}) "
                 f"(tan-cli#185)",
             )
             # The project may live INSIDE the checkout, so rebase any
@@ -2590,6 +2614,13 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 # dir, silencing the warning for essentially every project the
                 # user owns.
                 _write_global_sdk_pointer(sdk_root, written_for=root)
+                # tan-cli#466: the origin-keyed sibling, ALONGSIDE (never
+                # instead of) the legacy pointer just above -- old tans read
+                # only the legacy file (skew-safe), new tans consult this
+                # registry first so a LATER bootstrap under a different
+                # `root` no longer steals THIS project's resolution the way
+                # the shared, last-writer-wins legacy pointer alone did.
+                _write_global_sdk_registry(sdk_root, origin=root)
             # tan-cli#644: narrower than that rejected idea -- REWRITE an
             # EXISTING project pin, and only when `active_tier == "projectPin"`
             # means this project already had a working pin naming exactly the
@@ -2610,6 +2641,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 venv_dir=old_venv_dir,
                 project_pin_root=project_pin_root,
                 previous_project_pin=previous_project_pin,
+                previous_registry=previous_registry,
             )
 
     log.line(f"Repo root:       {_native(paths.repo_root)}")
@@ -2663,6 +2695,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             relocation_undo.previous_pointer,
             relocation_undo.project_pin_root,
             relocation_undo.previous_project_pin,
+            relocation_undo.previous_registry,
         )
         if undo.moved_back:
             # The checkout itself is back; anything the failed step already
@@ -2696,7 +2729,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     f"moved it back to {_native(relocation_undo.old_root)}, but "
                     f"{undo.detail}. The default SDK pointer may still name the "
                     f"vacated path -- "
-                    f"{global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))} "
+                    f"{_global_default_fix_hint()} "
                     f"(to point at {_native(relocation_undo.old_root)}).",
                 )
             paths.repo_root = Path(relocation_undo.old_root)
@@ -2715,7 +2748,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 f"could NOT move it back to {_native(relocation_undo.old_root)} "
                 f"({undo.detail}); the checkout is still at {_native(moved_to)} and the "
                 f"default SDK still points there. Move it back by hand, then "
-                f"{global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))} "
+                f"{_global_default_fix_hint()} "
                 f"(to point at {_native(relocation_undo.old_root)}).",
             )
 
@@ -2940,6 +2973,54 @@ def _read_global_sdk_pointer() -> bytes | None:
         return None
 
 
+def _read_global_sdk_registry_bytes() -> bytes | None:
+    """`~/.alp/sdk-defaults.json`'s current bytes, or `None` when absent --
+    the tan-cli#466 sibling of `_read_global_sdk_pointer`, snapshotted the
+    same moment and for the same reason: a later rollback restores exactly
+    what was there, and `None` restores "absent", not an empty file, for the
+    common case of a first relocation ever run on the machine."""
+    try:
+        path = registry_path(_home_alp_dir())
+        return path.read_bytes() if path.is_file() else None
+    except Exception:  # noqa: BLE001 -- best-effort, like _read_global_sdk_pointer
+        return None
+
+
+def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
+    """Key `origin -> sdk_root` into `~/.alp/sdk-defaults.json`, ALONGSIDE
+    (never instead of) the legacy `_write_global_sdk_pointer` write this
+    always runs beside (tan-cli#466). `origin` is the same absolute project
+    root `_write_global_sdk_pointer`'s own `written_for` already records --
+    the directory THIS bootstrap ran in.
+
+    A concurrent second `tan bootstrap` on the host could race this
+    read-modify-write (no file lock -- matching every other pointer write in
+    this file, none of which locks either), so the LOSER of that race drops
+    the winner's entry rather than merging it. Accepted for the same reason
+    the legacy pointer's own last-writer-wins race already is: two bootstraps
+    finishing within the same instant on one machine is rare enough that a
+    lock free-for-all here would add real complexity against a race that,
+    worst case, degrades one of the two entries back to tan-cli#464's
+    disclosed-but-foreign path -- never to a crash or a corrupt file, since
+    the read half already tolerates any malformed content
+    (`sdk_default_registry.parse_registry`).
+
+    Best-effort, like `_write_global_sdk_pointer`: a permission error or a
+    full disk here degrades silently to "no registry entry for this origin",
+    which resolves exactly like tan-cli#464 already did before this issue --
+    not a failed bootstrap, since the checkout itself already moved
+    successfully by the time this runs.
+    """
+    try:
+        path = registry_path(_home_alp_dir())
+        raw = path.read_text(encoding="utf-8") if path.is_file() else None
+        registry = with_entry(load_raw(raw), origin=origin, sdk_root=sdk_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(registry_text(registry), encoding="utf-8")
+    except Exception:  # noqa: BLE001 -- best-effort by contract
+        pass
+
+
 def _project_pin_file(project_root: str) -> Path:
     """`<project_root>/.alp/sdk-path` -- the exact file `tan init`'s `_pin_sdk`
     writes (`init_cmd.py`) and `sdk_cmd.resolve_sdk_tiered` reads back as the
@@ -3093,18 +3174,21 @@ def _undo_relocation(
     previous_pointer: bytes | None,
     project_pin_root: str | None = None,
     previous_project_pin: bytes | None = None,
+    previous_registry: bytes | None = None,
 ) -> RelocationUndoResult:
     """Rollback of a relocation THIS run performed, for when a step after it
     -- `ensure_venv` or `west_phase` -- turns out to be the fallible one
     after all (tan-cli#284): move the checkout back to where it was, and
     restore (or remove) the global default-SDK pointer this run overwrote --
     plus, tan-cli#644, the project's own `.alp/sdk-path` pin, when THIS run
-    also rewrote that (`project_pin_root` is `None` whenever it did not).
-    Restoring the project pin matters here for the same reason restoring the
-    global pointer already did: the checkout is moving back to `old_root`, so
-    a pin left naming the vacated `sdk_root` this run set would be exactly
-    the stale, unresolvable pin tan-cli#644 exists to stop leaving behind --
-    just introduced by the rollback instead of by a completed relocation.
+    also rewrote that (`project_pin_root` is `None` whenever it did not) --
+    plus, tan-cli#466, this run's own entry in `~/.alp/sdk-defaults.json`.
+    Restoring the project pin and the registry both matter here for the same
+    reason restoring the legacy pointer already did: the checkout is moving
+    back to `old_root`, so anything left naming the vacated `sdk_root` this
+    run set would be exactly the stale, unresolvable state those two features
+    exist to stop leaving behind -- just introduced by the rollback instead
+    of by a completed relocation.
 
     `moved_back=False` means `relocate_checkout` itself refused -- e.g.
     because the vacated original path was recreated in the meantime, which
@@ -3129,6 +3213,14 @@ def _undo_relocation(
             pointer.write_bytes(previous_pointer)
     except OSError as err:
         failures.append(f"the default SDK pointer could not be restored: {err}")
+    try:
+        registry_file = registry_path(_home_alp_dir())
+        if previous_registry is None:
+            registry_file.unlink(missing_ok=True)
+        else:
+            registry_file.write_bytes(previous_registry)
+    except OSError as err:
+        failures.append(f"the default SDK registry could not be restored: {err}")
     project_pin_failure = _restore_project_pin(project_pin_root, previous_project_pin)
     if project_pin_failure is not None:
         failures.append(project_pin_failure)

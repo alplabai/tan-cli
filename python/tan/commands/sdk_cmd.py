@@ -105,6 +105,11 @@ from tan.core.proxy import (
     select_https_proxy,
     unsupported_proxy_scheme,
 )
+from tan.core.sdk_default_registry import (
+    deepest_covering_entry,
+    parse_registry,
+    registry_path,
+)
 from tan.core.text_layout import wrap_lines
 from tan.env import wrap_width
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -320,34 +325,62 @@ def _workspace_under(workspace_root: Path, root: str) -> bool:
         return False
 
 
-def global_default_pointer_fix_hint(native_path: str) -> str:
+def global_default_pointer_fix_hint(native_path: str, native_registry_path: str) -> str:
     """How to fix -- or safely clear -- an already-written `~/.alp/sdk-
-    default` pointer by hand, given its OS-native absolute path (the caller's
-    to compute: `_home_alp_dir() / "sdk-default"`, rendered through whatever
-    this-platform-separator helper it already has -- `bootstrap_cmd._native`
-    for its callers).
+    default` pointer (`native_path`) AND its origin-keyed sibling
+    `~/.alp/sdk-defaults.json` (`native_registry_path`, tan-cli#466) by hand.
+    Both are the caller's to compute -- `_home_alp_dir() / "sdk-default"` and
+    `sdk_default_registry.registry_path(_home_alp_dir())`, each rendered
+    through whatever this-platform-separator helper it already has
+    (`bootstrap_cmd._native` for its callers).
 
-    `_pointer_target` above degrades every read failure on this exact file
-    (missing, invalid JSON, list-shaped, no `sdkPath`) to `None`, and every
-    tier resolver (`resolve_sdk_tiered`) then falls through to the next tier
-    on that -- so DELETING the file is always a safe recovery, never a step
-    backwards; hand-editing its `"sdkPath"` field is the targeted fix when
-    the caller knows what it should say instead.
+    Names BOTH files, unconditionally, because tan-cli#466's registry is
+    consulted FIRST and a caller cannot tell from the fix-hint's call site
+    alone whether the answer it just got came from the registry or fell
+    through to the legacy pointer -- so a hint naming only one of them could
+    send a reader to edit the file that was not actually the one that
+    answered.
+
+    `_pointer_target` above degrades every read failure on the legacy file
+    (missing, invalid JSON, list-shaped, no `sdkPath`) to `None`, and
+    `sdk_default_registry.parse_registry` degrades every read/parse failure
+    on the registry the identical way, to `{}` -- both resolvers
+    (`resolve_sdk_tiered`) then fall through to the next tier on that, so
+    DELETING either or both files is always a safe recovery, never a step
+    backwards; hand-editing a `"sdkPath"` field is the targeted fix when the
+    caller knows what it should say instead.
 
     Shared so a caller describing this by hand cannot drift from what
-    `_pointer_target` actually reads. `bootstrap_cmd`'s workspace-relocation
-    and rollback-failure messages are why this exists (tan-cli#305 follow-
-    up): they used to send a user -- sometimes one already in a broken,
-    checkout-moved-but-rollback-incomplete state -- to `tan sdk switch
-    --global`, which refuses outright in this build. Naming the pointer file
-    directly, not the command, is also honest about the mechanism `switch`
-    itself would use once ported, so this will not go stale the moment that
-    disposition changes.
+    `_pointer_target`/`parse_registry` actually read. `bootstrap_cmd`'s
+    workspace-relocation and rollback-failure messages are why this exists
+    (tan-cli#305 follow-up): they used to send a user -- sometimes one
+    already in a broken, checkout-moved-but-rollback-incomplete state -- to
+    `tan sdk switch --global`, which refuses outright in this build. Naming
+    the pointer files directly, not the command, is also honest about the
+    mechanism `switch` itself would use once ported, so this will not go
+    stale the moment that disposition changes.
     """
     return (
-        f'delete {native_path} (tan falls through to the next SDK it can '
-        f'resolve), or edit its `"sdkPath"` field by hand'
+        f"delete {native_path} and/or {native_registry_path} (tan falls "
+        f'through to the next SDK it can resolve), or edit the "sdkPath" '
+        f"field(s) by hand"
     )
+
+
+def _read_global_sdk_registry() -> dict[str, str]:
+    """`~/.alp/sdk-defaults.json`, parsed -- best-effort, matching every other
+    reader in this file: a missing, truncated, or malformed registry degrades
+    to `{}`, the identical shape `sdk_default_registry.parse_registry`
+    already gives "no registry at all", so `resolve_sdk_tiered` falls
+    straight through to the legacy single pointer (tan-cli#466) rather than
+    raising or ever blocking a build on a corrupt file.
+
+    Reuses `_read_file` -- the same swallow-every-read-failure primitive
+    every pointer read in this file already goes through -- rather than a
+    second bespoke try/except, so a non-UTF-8 registry degrades exactly like
+    a non-UTF-8 pointer does.
+    """
+    return parse_registry(_read_file(registry_path(_home_alp_dir())))
 
 
 # ── readiness (tan_core::sdk::check_sdk_readiness) ──────────────────────────
@@ -584,9 +617,22 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
     a DIFFERENT project's bootstrap relocation is what actually decided this
     answer. `foreign_global_default_for` names that project when this run hit
     exactly that case; `None` when the pointer covers this caller, or predates
-    `writtenFor` and has no opinion. Resolution is unaffected either way --
-    the same root that would have been returned before this field existed
-    still is.
+    `writtenFor` and has no opinion.
+
+    tan-cli#466 makes that answer CORRECT, not just disclosed, without moving
+    this tier or adding a sixth `SdkSourceTier`: before falling to the single
+    legacy pointer, this tier first consults `~/.alp/sdk-defaults.json`, an
+    origin-keyed registry every relocating `tan bootstrap` writes alongside
+    (never instead of) the legacy file, and picks the DEEPEST registry key
+    that contains `workspace_root` (`sdk_default_registry.
+    deepest_covering_entry`, using this same `_workspace_under` containment
+    test). A registry hit still reports `sourceTier: "globalDefault"` -- it
+    IS the machine-default mechanism, keyed -- and never carries
+    `foreign_global_default_for`: a caller a registry entry was written FOR
+    is, by construction, not reading someone else's answer. Only when NO
+    registry entry covers the caller does resolution fall through to the
+    legacy pointer exactly as it did before this issue, foreign-warning
+    included.
     """
     flag = (sdk_root or "").strip()
     if flag:
@@ -598,6 +644,16 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
         if _has_loader_script(Path(pin)):
             return ActiveSdk(pin, "projectPin")
         broken_project_pin = pin
+
+    registry_hit = deepest_covering_entry(
+        _read_global_sdk_registry(),
+        workspace_root,
+        covers=_workspace_under,
+        has_loader_script=_has_loader_script,
+    )
+    if registry_hit is not None:
+        _origin, registry_sdk_path = registry_hit
+        return ActiveSdk(registry_sdk_path, "globalDefault", broken_project_pin, None)
 
     default_pointer = _home_alp_dir() / "sdk-default"
     default = _pointer_target(default_pointer)
@@ -657,9 +713,17 @@ def global_default_foreign_project_issue(foreign_global_default_for: str | None)
     opinion -- so every call site can do `issue =
     global_default_foreign_project_issue(active.foreign_global_default_for);
     if issue: issues.append(issue)` unconditionally, exactly like
-    `project_pin_issue`. Resolution itself is unchanged by this warning: the
-    root `sdk current` reports is the same root it would have reported before
-    this fix existed."""
+    `project_pin_issue`.
+
+    tan-cli#466: `resolve_sdk_tiered` sets `foreign_global_default_for` ONLY
+    when resolution fell all the way through to this single legacy pointer
+    -- never for a `~/.alp/sdk-defaults.json` registry hit, which by
+    construction was written FOR the resolving workspace. Resolution itself
+    is unchanged by THIS warning specifically: the root `sdk current`
+    reports here is the same root it would have reported before this
+    function existed -- #466 is what changed the root itself, for the
+    workspaces a registry entry now covers.
+    """
     if foreign_global_default_for is None:
         return None
     return Issue(
