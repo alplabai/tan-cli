@@ -215,3 +215,10 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/diff_cmd.py: 882 -> 889
 - 2026-08-25 -- PR #878 fix round (3rd pass): _scaffold_cmakelists's docstring trimmed to defer to _HARDCODED_ALP_PROJECT_PY_RE's own comment instead of restating the cold-chain-monitor/alp-sdk#1400 story -- a shrink, no --reason needed, but recorded here so the shipped ceiling (1481) has a traceable entry
     - tan/planner/template.py: 1487 -> 1481
+- 2026-08-25 -- tan-cli#896: zephyr_board.py's _aen_flash_partitions docstring re-synced (comment-only) against alp-sdk 522ea3204's stale-prose fix
+    - tan/planner/zephyr_board.py: 1486 -> 1494
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/planner/zephyr_board.py: 1486 -> 1494
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1348 -> 1361
+    - tan/planner/template.py: 1470 -> 1481
