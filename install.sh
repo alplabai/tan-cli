@@ -977,7 +977,17 @@ else
 			# must not be turned into a failure over this hardening step") and
 			# fall back to the same manual-PATH message --no-modify-path
 			# prints, rather than report a successful install as a failure.
-			if printf '\n%s\n' "$path_line" >>"$rc" 2>/dev/null; then
+			# The `2>/dev/null` has to sit on the SUBSHELL, not on the `printf`
+			# command itself: `printf ... >>"$rc" 2>/dev/null` opens `>>"$rc"`
+			# first, and if that open fails the shell's own diagnostic
+			# ("cannot create ...: Is a directory") is written to the
+			# then-still-unredirected stderr before `2>/dev/null` ever takes
+			# effect -- a raw shell error a moment before the friendly
+			# "could not update" message below, reading like the install
+			# itself broke. Redirecting the subshell's stderr instead
+			# suppresses that diagnostic too, since it is set up before the
+			# subshell's own `>>"$rc"` is attempted.
+			if ( printf '\n%s\n' "$path_line" >>"$rc" ) 2>/dev/null; then
 				echo "install.sh: added ${INSTALL_DIR} to PATH in ${rc}."
 				echo "install.sh: open a NEW shell (or run:  ${source_hint}) to use 'tan' anywhere. Undo: delete that line."
 			else

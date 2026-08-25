@@ -159,29 +159,26 @@ $sumsUrl = "$baseUrl/$Version/checksums.txt"
 # `mkdir -p`) now runs only once the health check below has PASSED, right
 # before the commit section.
 #
-# $dirFirstNewAncestor is still recorded here, unconditionally and up front,
-# because it has to reflect what "new" means relative to the state BEFORE
-# this run touched anything -- computing it later, after the noexec-retry
-# path below may have already created part of the chain, would see its own
-# just-created directories as "already there" and refuse to clean them up.
-# It is only ACTED on, though, if this run is the one that actually created
-# something under it: see $dirCreatedForRetry below, and the commit-block
-# comment further down for install.sh's `install_dir_created_for_retry`
-# ordering this now mirrors.
-$dirFirstNewAncestor = $null
-if (-not (Test-Path -LiteralPath $Dir)) {
-	$ancestor = $Dir
-	while (-not (Test-Path -LiteralPath $ancestor)) {
-		$dirFirstNewAncestor = $ancestor
-		$parent = Split-Path -Path $ancestor -Parent
-		if (-not $parent -or $parent -eq $ancestor) { break }
-		$ancestor = $parent
-	}
-}
-# Set once, only if the noexec-retry block below ends up creating $Dir itself
-# (see there) -- gates the health-check-failure cleanup further down so it
-# never removes a $Dir a PREVIOUS install already left in place.
+# $dirFirstNewAncestor itself is computed inside the noexec-retry block below,
+# immediately before the `New-Item` call it guards -- not here, up front.
+# install.sh's own `install_dir_first_new_ancestor` walk is computed the same
+# way, right beside its `mkdir -p "$INSTALL_DIR"`, not at script start; this
+# mirrors that. Computing it right before the one place it is ever acted on
+# reflects exactly the state "new" needs to mean -- whatever does not exist
+# yet at THAT point, not minutes earlier before the download even ran, which
+# would needlessly widen the window a concurrent process could create part of
+# the chain and have this run's cleanup remove it.
+#
+# $dirCreatedForRetry is set once, only if the noexec-retry block below ends
+# up creating $Dir itself (see there) -- gates the health-check-failure
+# cleanup further down so it never removes a $Dir a PREVIOUS install already
+# left in place.
 $dirCreatedForRetry = $false
+# Declared $null here only because Set-StrictMode -Version Latest throws on a
+# never-assigned variable if the noexec-retry block below never runs at all;
+# the WALK that gives it a real value happens down there, not here -- see the
+# comment above.
+$dirFirstNewAncestor = $null
 $LibDir = Join-Path $Dir "tan-cli-lib"
 
 # Download to TEMP, never straight into $Dir. Writing into the destination
@@ -455,6 +452,17 @@ try {
 		# below must undo only a $Dir this run created, never one a previous
 		# install already left in place.
 		if (-not (Test-Path -LiteralPath $Dir)) {
+			# Walked HERE, immediately before the `New-Item` it guards -- not
+			# up front at script start -- so "new" means "does not exist right
+			# now, about to be created", mirroring install.sh's own
+			# `install_dir_first_new_ancestor` walk beside its `mkdir -p`.
+			$ancestor = $Dir
+			while (-not (Test-Path -LiteralPath $ancestor)) {
+				$dirFirstNewAncestor = $ancestor
+				$parent = Split-Path -Path $ancestor -Parent
+				if (-not $parent -or $parent -eq $ancestor) { break }
+				$ancestor = $parent
+			}
 			try {
 				New-Item -ItemType Directory -Force -Path $Dir -ErrorAction Stop | Out-Null
 				$dirCreatedForRetry = $true
