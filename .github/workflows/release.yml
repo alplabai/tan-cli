@@ -146,10 +146,12 @@ on:
       - "v*"
 
 permissions:
-  # Least privilege by default (tan-cli#435) -- only the `release` job (the
-  # one that actually creates the GitHub Release + uploads assets) overrides
-  # this to `write` via its own job-level `permissions:` block below. Every
-  # other job here only checks out, builds, or reads another job's outputs.
+  # Least privilege by default (tan-cli#435) -- individual jobs override this
+  # via their own job-level `permissions:` block below where they need to
+  # write: `release` (the one that actually creates the GitHub Release +
+  # uploads assets) and `propose-dev-version-bump` (tan-cli#770, which
+  # commits the version bump and opens a PR). Every other job here only
+  # checks out, builds, or reads another job's outputs.
   contents: read
 
 jobs:

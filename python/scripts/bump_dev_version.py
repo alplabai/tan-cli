@@ -218,12 +218,19 @@ def _insert_changelog_section(
     # lets `assemble_changelog.splice()` (which looks for an existing
     # `### <Category>` heading under Unreleased before creating one) append
     # later fragments into this section instead of duplicating it.
-    section = (
-        f"## [{target}] — Unreleased\n\n"
-        f"### Fixed\n\n"
-        f"- `TAN_VERSION` moved to `{next_version}` off the published "
-        f"`v{released}` tag ({_ISSUE}'s automated post-release bump).\n\n"
+    # Wrapped at ~78 columns like every hand-written CHANGELOG bullet
+    # (`_bump_version_py` above uses the same `textwrap.wrap`, not
+    # reimplemented here) -- the unwrapped bullet runs past 110 columns.
+    bullet_text = (
+        f"`TAN_VERSION` moved to `{next_version}` off the published "
+        f"`v{released}` tag ({_ISSUE}'s automated post-release bump)."
     )
+    bullet = "\n".join(
+        textwrap.wrap(
+            bullet_text, width=78, initial_indent="- ", subsequent_indent="  "
+        )
+    )
+    section = f"## [{target}] — Unreleased\n\n### Fixed\n\n{bullet}\n\n"
     return text[: first.start()] + section + text[first.start() :]
 
 
