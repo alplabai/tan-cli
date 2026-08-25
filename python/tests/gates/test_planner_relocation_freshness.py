@@ -765,10 +765,11 @@ PINNED_HASHES: dict[str, str] = {
 #:     single-M55 AEN SKU (aen401, aen601) generates" -> "...unchanged.
 #:     This now applies only to a genuinely single-M55 AEN SoM..."), and
 #:     the commit's own message says so in as many words: "No behaviour
-#:     change; comments only." The real #1482 fix lived entirely in two
-#:     committed `.dts` board trees, never in this generator. tan's own
-#:     `zephyr_board.py` carried the pre-fix wording until this same
-#:     change, which re-synced it (comment-only, no emitted-byte change).
+#:     change; comments only." The real #1482 fix landed in the board
+#:     trees and `scripts/check_atoc_reservation.py`, not in this
+#:     generator. tan's own `zephyr_board.py` carried the pre-fix wording
+#:     until this same change, which re-synced it (comment-only, no
+#:     emitted-byte change).
 #:   - `scripts/alp_project_loader.py`, `scripts/alp_project_emit/
 #:     __init__.py`, `scripts/alp_project_emit/west_libs.py` (`85b6b905a`,
 #:     alp-sdk#1485 -- thread `--metadata-root` through every
@@ -776,9 +777,12 @@ PINNED_HASHES: dict[str, str] = {
 #:     fall through to the SDK's own in-tree `metadata/`; `__init__.py`
 #:     also carries `95eb64ab8`, alp-sdk#1487's ten missing
 #:     `_CHIP_SUBSYSTEMS` entries): BEHAVIOURAL upstream, but ALREADY
-#:     PORTED here, ahead of this pin, by tan-cli#868 ("re-sync tan/planner
-#:     with alp-sdk ac38a069" -- both source commits are ancestors of
-#:     `ac38a069`, confirmed with `git merge-base --is-ancestor`).
+#:     PORTED here, ahead of this pin -- alp-sdk#1485 was already fixed
+#:     independently in tan as tan-cli#573 (see above), so only its
+#:     residue, plus alp-sdk#1487's ten entries, moved via tan-cli#868's
+#:     `934e74ee` resync ("re-sync tan/planner with alp-sdk ac38a069" --
+#:     both source commits are ancestors of `ac38a069`, confirmed with
+#:     `git merge-base --is-ancestor`).
 #:     Verified by reading the CURRENT tree, not by trusting the resync's
 #:     own commit message: `som_metadata.py`'s
 #:     `silicon_to_kconfig(silicon, metadata_root)` already takes a

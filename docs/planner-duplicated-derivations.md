@@ -99,8 +99,9 @@ itself stale:
   match, not 17.** Four more sources diverged inside
   `94378a05..eb96112b`: `scripts/gen_zephyr_board.py` (`522ea3204`,
   docstring-only per the commit's own "No behaviour change; comments
-  only" -- the fix itself lived in two `.dts` board trees, not this
-  generator), and `scripts/alp_project_loader.py` /
+  only" -- the fix landed in the board trees and
+  `scripts/check_atoc_reservation.py`, not in this generator), and
+  `scripts/alp_project_loader.py` /
   `scripts/alp_project_emit/__init__.py` /
   `scripts/alp_project_emit/west_libs.py` (`85b6b905a` threading
   `--metadata-root` through every resolver, plus `95eb64ab8`'s ten new
@@ -117,9 +118,9 @@ itself stale:
   table entries to an unaudited value just to stay green. Full reasoning
   is the new comment block directly above `HAND_PORT_PINNED_SDK_COMMIT`'s
   assignment in `test_planner_relocation_freshness.py`, added by this
-  same change. The "17 of 19" / "`94378a05`" sentence two paragraphs up
-  is left exactly as originally written -- a dated measurement, not a
-  live claim -- and this paragraph is the current one.
+  same change. The "17 of 19" / "`94378a05`" sentence earlier in this
+  same bullet is left exactly as originally written -- a dated
+  measurement, not a live claim -- and this paragraph is the current one.
 
 ## The mechanism: DATA bound late, LOGIC bound early
 

@@ -748,7 +748,7 @@ def _aen_flash_partitions(
     genuinely single-M55 AEN SoM that declares no `<role>_slot0`
     region. E1M-AEN401 and E1M-AEN601 are DUAL-M55 (see
     `_aen_role_slot0_map` above) and have generated the disjoint-slot0
-    layout below since #1069 -- `_aen_require_disjoint_slot0` refuses
+    layout below since alp-sdk#1445 -- `_aen_require_disjoint_slot0` refuses
     to let a dual-M55 SoM fall back to this stock layout at all
     (alp-sdk#1482, tan-cli#896: docstring-only re-sync, "still what
     every single-M55 AEN SKU (aen401, aen601) generates" was stale
