@@ -41,13 +41,24 @@ registry size. Measured (counting `os.lstat` calls, real directories, the
 production `sdk_cmd._workspace_under`/`_has_loader_script`/
 `_resolved_origin_depth_key` triple, 21 registry entries that ALL cover the
 workspace -- the worst case, nothing skipped by `covers` or
-`has_loader_script`): **1,092** `lstat` calls at a fixed base depth versus
-**1,512** with 20 extra path components appended to the SAME workspace --
-a **420**-call delta from depth alone, at an unchanged registry size. Cite
-neither this number nor any other syscall count for this function without
-also stating the registry shape (size, how many entries cover the caller)
-and the path depth it was measured at -- both factors independently move the
-count, and a bare number from one shape says nothing about another.
+`has_loader_script`): appending 20 extra path components to the SAME
+workspace, at an unchanged registry size, costs exactly **420** more
+`lstat` calls (21 entries x 2 resolving call sites -- `covers` and
+`resolve_origin` -- x 20 components a component-`lstat`ing `Path.resolve()`
+now walks through). The delta is reported ALONE, not alongside a base-count
+absolute, because the absolute moves with the base depth chosen for the
+measurement and an earlier revision of this paragraph cited one (**1,092**
+vs **1,512**) without saying what that base depth was -- caught in review,
+#904 third round, nit: an independent re-derivation at a different (but
+equally unstated) base depth landed on **1,050**/**1,470**, the same `420`
+delta but a different pair of absolutes, for no reason a reader of either
+number alone could tell. Cite neither this number nor any other syscall
+count for this function without also stating the registry shape (size, how
+many entries cover the caller) and the base path depth it was measured at --
+both factors independently move any ABSOLUTE count; the delta above is the
+one number in this paragraph that does not need one, because it was measured
+as a difference at two path depths under the same registry shape and cancels
+out.
 
 What IS true, and what the issue actually promised, is that there is no
 directory WALK -- the candidate set is closed (only directories a real
@@ -321,12 +332,18 @@ def with_entry(
     deterministic function of its arguments and stays that way, testable
     without freezing time. The production caller
     (`bootstrap_cmd._write_global_sdk_registry`) passes
-    `tan.core.timestamp.generated_at_iso(millis=True)` -- millisecond
-    precision, deliberately finer than the legacy pointer's own
-    `updatedAt` (seconds, `_global_sdk_pointer_json`), because this field's
-    entire job is to ORDER two writes against each other, and a whole SDK
-    relocation plus this write easily completing inside one second is not a
-    corner case worth losing the tie-break to.
+    `tan.core.timestamp.wall_clock_iso(millis=True)` -- **not**
+    `generated_at_iso`, and that distinction is load-bearing (review, #904
+    third round, major): `generated_at_iso` lets `SOURCE_DATE_EPOCH` win over
+    the clock, which is exactly right for a reproducible envelope and exactly
+    wrong here, because this field's entire job is to ORDER two writes
+    against each other on one host -- a value every bootstrap inside one
+    `SOURCE_DATE_EPOCH`-pinned shell would render identically, silently
+    reopening the very tie this tie-break exists to close. Millisecond
+    precision, deliberately finer than the legacy pointer's own `updatedAt`
+    (seconds, `_global_sdk_pointer_json`), because a whole SDK relocation
+    plus this write easily completing inside one second is not a corner case
+    worth losing the tie-break to.
 
     **This registry is append-only; nothing here prunes a dead origin**
     (review, #904, nit 1). An origin whose project directory or checkout was

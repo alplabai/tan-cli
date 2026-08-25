@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -96,17 +97,50 @@ def write_pointer(path: Path, sdk_path: Path, *, written_for: Path | str | None 
     path.write_text(json.dumps(doc), encoding="utf-8", newline="")
 
 
-def write_registry(home: Path, entries: dict[Path | str, Path | str], *, raw: str | None = None) -> None:
-    """`<home>/.alp/sdk-defaults.json`, hand-written the way a real
-    `tan bootstrap` run would leave it -- `{origin: {"sdkPath": ...}}`.
+def write_registry(
+    home: Path,
+    entries: dict[Path | str, Path | str],
+    *,
+    raw: str | None = None,
+    dated: bool = False,
+) -> None:
+    """`<home>/.alp/sdk-defaults.json`, hand-written as either of the TWO
+    shapes a real `tan bootstrap` run can leave behind (review, #904 third
+    round, minor 2 -- an earlier version of this docstring claimed only one
+    of them was real, and was wrong).
+
+    `dated=False` (the default) -- `{origin: {"sdkPath": ...}}`, no
+    `updatedAt` -- is the shape a registry written before tan-cli#904 second
+    round left, and the shape a hand edit leaves; it is what
+    `deepest_covering_entry`'s `.get(origin, "")` degrade exists for
+    (`parse_registry_updated_at`'s missing-field case), so it stays a real,
+    separately-covered scenario, not a stand-in for the other one.
+
+    `dated=True` -- `{origin: {"sdkPath": ..., "updatedAt": <stub>}}` -- is
+    what `bootstrap_cmd._write_global_sdk_registry` actually writes as of
+    that same round; the stub `updatedAt` is deliberately IDENTICAL across
+    every entry (a fixed, arbitrary stamp, not `wall_clock_iso()`), so a
+    `dated=True` case is provably NOT exercising the recency tie-break by
+    accident -- a test that wants to assert on recency itself uses the real
+    write path (`bootstrap_cmd._write_global_sdk_registry`) directly, as
+    `test_a_later_bootstrap_of_the_real_path_outranks_an_earlier_alias_at_a_
+    resolved_tie` and `test_source_date_epoch_does_not_un_fix_the_recency_
+    tie_break` already do, not this hand-written helper.
+
     `raw`, when given, is written VERBATIM instead (a malformed-content
-    case), and `entries` is then ignored."""
+    case), and `entries`/`dated` are then ignored.
+    """
     path = home / ".alp" / "sdk-defaults.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     if raw is not None:
         path.write_text(raw, encoding="utf-8", newline="")
         return
-    doc = {str(origin): {"sdkPath": str(sdk_path)} for origin, sdk_path in entries.items()}
+    doc: dict[str, dict[str, str]] = {}
+    for origin, sdk_path in entries.items():
+        entry = {"sdkPath": str(sdk_path)}
+        if dated:
+            entry["updatedAt"] = "2026-01-01T00:00:00.000Z"
+        doc[str(origin)] = entry
     path.write_text(json.dumps(doc), encoding="utf-8", newline="")
 
 
@@ -464,23 +498,31 @@ def test_global_default_pointer_fix_hint_names_both_files():
 # ── legacy pointer at the SAME globalDefault tier ────────────────────────────
 
 
-def test_registry_hit_still_reports_the_globaldefault_tier(tmp_path, isolated_home):
+@pytest.mark.parametrize("dated", [False, True], ids=["undated", "dated"])
+def test_registry_hit_still_reports_the_globaldefault_tier(tmp_path, isolated_home, dated):
     """A registry hit is not a sixth tier -- it IS the machine-default
     mechanism, keyed. `sourceTier` must read identically to a legacy-pointer
-    hit so no consumer of the wire contract needs to learn a new value."""
+    hit so no consumer of the wire contract needs to learn a new value.
+
+    Parametrised over both registry shapes (review, #904 third round, minor
+    2): a pre-#904-second-round/hand-edited undated entry and a real
+    `tan bootstrap`-shaped dated one must answer identically here -- neither
+    shape is a stand-in for the other, and this file used to measure only
+    the undated one."""
     workspace = tmp_path / "projA" / "sub"
     workspace.mkdir(parents=True)
     project_root = tmp_path / "projA"
     target = make_sdk_root(tmp_path / "sdk-a")
-    write_registry(isolated_home, {project_root: target})
+    write_registry(isolated_home, {project_root: target}, dated=dated)
 
     active = resolve_sdk_tiered(None, workspace)
     assert active.tier == "globalDefault"
     assert active.path == str(target)
 
 
+@pytest.mark.parametrize("dated", [False, True], ids=["undated", "dated"])
 def test_registry_hit_resolves_the_subdirectory_case_by_containment_alone(
-    tmp_path, isolated_home
+    tmp_path, isolated_home, dated
 ):
     """The issue's headline property: from `<parent>/projA/anything/`, the
     deepest key containing the cwd is `<parent>/projA` -- at ANY depth, with
@@ -491,25 +533,29 @@ def test_registry_hit_resolves_the_subdirectory_case_by_containment_alone(
     workspace = project_root / "a" / "b" / "c" / "d"
     workspace.mkdir(parents=True)
     target = make_sdk_root(tmp_path / "sdk-a")
-    write_registry(isolated_home, {project_root: target})
+    write_registry(isolated_home, {project_root: target}, dated=dated)
 
     assert resolve_sdk_tiered(None, workspace).path == str(target)
 
 
-def test_registry_never_answers_for_a_workspace_no_entry_covers(tmp_path, isolated_home):
+@pytest.mark.parametrize("dated", [False, True], ids=["undated", "dated"])
+def test_registry_never_answers_for_a_workspace_no_entry_covers(tmp_path, isolated_home, dated):
     """The closed, write-authorized candidate set: an origin some OTHER
     bootstrap ran in must never answer for a workspace it does not contain,
     even though it is the only entry in the registry."""
     workspace = tmp_path / "unrelated" / "ws"
     workspace.mkdir(parents=True)
-    write_registry(isolated_home, {tmp_path / "projA": make_sdk_root(tmp_path / "sdk-a")})
+    write_registry(
+        isolated_home, {tmp_path / "projA": make_sdk_root(tmp_path / "sdk-a")}, dated=dated
+    )
 
     active = resolve_sdk_tiered(None, workspace)
     assert active.tier == "none"
     assert active.path is None
 
 
-def test_a_home_keyed_entry_is_the_machine_wide_default(tmp_path, isolated_home):
+@pytest.mark.parametrize("dated", [False, True], ids=["undated", "dated"])
+def test_a_home_keyed_entry_is_the_machine_wide_default(tmp_path, isolated_home, dated):
     """A bootstrap run from `$HOME` (the workspace-parent quickstart shape)
     keys `$HOME` itself into the registry -- correct as the machine-wide
     default on a one-bootstrap host, exactly like the legacy single pointer
@@ -517,12 +563,15 @@ def test_a_home_keyed_entry_is_the_machine_wide_default(tmp_path, isolated_home)
     workspace = isolated_home / "someproject"
     workspace.mkdir()
     target = make_sdk_root(tmp_path / "sdk-home")
-    write_registry(isolated_home, {isolated_home: target})
+    write_registry(isolated_home, {isolated_home: target}, dated=dated)
 
     assert resolve_sdk_tiered(None, workspace).path == str(target)
 
 
-def test_a_deeper_bootstrap_outranks_the_home_keyed_default_under_it(tmp_path, isolated_home):
+@pytest.mark.parametrize("dated", [False, True], ids=["undated", "dated"])
+def test_a_deeper_bootstrap_outranks_the_home_keyed_default_under_it(
+    tmp_path, isolated_home, dated
+):
     """The issue's own second half of the `$HOME` property: a LATER
     bootstrap under `~/proj/B` must still win for everything under it, even
     though the coarser `$HOME` entry also covers that same workspace."""
@@ -531,7 +580,9 @@ def test_a_deeper_bootstrap_outranks_the_home_keyed_default_under_it(tmp_path, i
     workspace.mkdir(parents=True)
     home_target = make_sdk_root(tmp_path / "sdk-home")
     b_target = make_sdk_root(tmp_path / "sdk-b")
-    write_registry(isolated_home, {isolated_home: home_target, project_b: b_target})
+    write_registry(
+        isolated_home, {isolated_home: home_target, project_b: b_target}, dated=dated
+    )
 
     active = resolve_sdk_tiered(None, workspace)
     assert active.path == str(b_target), "the deeper, project-specific entry must win"
@@ -589,7 +640,7 @@ def test_a_later_bootstrap_of_the_real_path_outranks_an_earlier_alias_at_a_resol
     exact same directory. Pre-fix, both origins resolve to the identical
     ancestor and tie on depth; `"alias"` sorts before `"myproj"`, so the
     STALE `old-sdk` entry answers even though `myproj` (the real path) was
-    registered LAST. `generated_at_iso` is monkeypatched to a controlled,
+    registered LAST. `wall_clock_iso` is monkeypatched to a controlled,
     strictly increasing sequence so this proves the recency tie-break
     deterministically, independent of how fast the two writes actually run.
     """
@@ -612,7 +663,7 @@ def test_a_later_bootstrap_of_the_real_path_outranks_an_earlier_alias_at_a_resol
     new_sdk = make_sdk_root(tmp_path / "new-sdk")
 
     stamps = iter(["2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01.000Z"])
-    monkeypatch.setattr(bootstrap_cmd, "generated_at_iso", lambda **_kw: next(stamps))
+    monkeypatch.setattr(bootstrap_cmd, "wall_clock_iso", lambda **_kw: next(stamps))
 
     # Earlier bootstrap, reached via the symlinked alias.
     bootstrap_cmd._write_global_sdk_registry(str(old_sdk), origin=str(alias))
@@ -631,7 +682,77 @@ def test_a_later_bootstrap_of_the_real_path_outranks_an_earlier_alias_at_a_resol
     assert active.foreign_global_default_for is None
 
 
-def test_a_stale_registry_entry_degrades_like_a_stale_pointer_does(tmp_path, isolated_home):
+def test_source_date_epoch_does_not_un_fix_the_recency_tie_break(tmp_path, isolated_home, monkeypatch):
+    """tan-cli#904 third round, major: `SOURCE_DATE_EPOCH`, exported (exactly
+    what CI and reproducible-build environments do -- see
+    `tan.core.timestamp`'s own docstring), must not make every
+    `_write_global_sdk_registry` write stamp the IDENTICAL `updatedAt`.
+
+    Same alias-then-real-path repro as
+    `test_a_later_bootstrap_of_the_real_path_outranks_an_earlier_alias_at_a_
+    resolved_tie` above, but this time `SOURCE_DATE_EPOCH` is set (self-set,
+    not relied on from the ambient shell -- `conftest.py`'s autouse
+    `_scrub_sdk_discovery_env` deletes it, tan-cli#903, which is exactly why
+    the existing suite never caught this), and the two writes are told apart
+    only by a controlled, strictly increasing `time.time()` -- proving the
+    write path uses the literal wall clock and not the env-var override.
+
+    **Pre-fix** (`_write_global_sdk_registry` stamping via `generated_at_iso`,
+    which lets `SOURCE_DATE_EPOCH` win over `time.time()`): both writes
+    render the SAME `SOURCE_DATE_EPOCH`-derived `updatedAt` regardless of the
+    `time.time()` sequence below, `entry_updated_at > best_updated_at` never
+    fires, and the resolver falls back to whichever raw origin string sorts
+    first -- the STALE alias -- reproducing the review's own measured
+    "SOURCE_DATE_EPOCH=1700000000 -> both entries stamped identically ->
+    resolves old-sdk" result.
+    """
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+
+    real_dir = tmp_path / "myproj"
+    real_dir.mkdir()
+    workspace = real_dir / "sub"
+    workspace.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover -- Windows w/o privilege
+        pytest.skip("this host cannot create a directory symlink")
+    assert str(alias) < str(real_dir), (
+        "the repro needs the STALE origin to sort first, so a length/depth "
+        "tie alone (not recency) would otherwise pick the right answer by "
+        "accident"
+    )
+
+    old_sdk = make_sdk_root(tmp_path / "old-sdk")
+    new_sdk = make_sdk_root(tmp_path / "new-sdk")
+
+    # A strictly increasing real-clock sequence, independent of
+    # `SOURCE_DATE_EPOCH` entirely -- `tan.core.timestamp.wall_clock_iso`
+    # reads `time.time()` directly, never `os.environ`.
+    clock = iter([1_800_000_000.0, 1_800_000_001.0])
+    monkeypatch.setattr(time, "time", lambda: next(clock))
+
+    # Earlier bootstrap, reached via the symlinked alias.
+    bootstrap_cmd._write_global_sdk_registry(str(old_sdk), origin=str(alias))
+    # A LATER bootstrap of the SAME directory, via its own real, canonical
+    # path -- the later, more-authoritative bootstrap of the exact same
+    # directory.
+    bootstrap_cmd._write_global_sdk_registry(str(new_sdk), origin=str(real_dir))
+
+    active = resolve_sdk_tiered(None, workspace)
+    assert active.tier == "globalDefault"
+    assert active.path == str(new_sdk).replace("\\", "/"), (
+        "DEFECT (tan-cli#904 third round, major): with SOURCE_DATE_EPOCH "
+        "exported, the tie-break's clock rendered the SAME updatedAt for "
+        "both writes, so the resolved-depth tie fell back to raw origin "
+        "string sort order and the STALE alias entry answered instead of "
+        "the later, more-authoritative real-path entry"
+    )
+    assert active.foreign_global_default_for is None
+
+
+@pytest.mark.parametrize("dated", [False, True], ids=["undated", "dated"])
+def test_a_stale_registry_entry_degrades_like_a_stale_pointer_does(tmp_path, isolated_home, dated):
     """Degrades safely: the deepest covering entry's `sdkPath` no longer
     carries a loader script (the checkout moved or was deleted), so it must
     fall through -- here, to a shallower entry that still resolves, the same
@@ -644,14 +765,16 @@ def test_a_stale_registry_entry_degrades_like_a_stale_pointer_does(tmp_path, iso
     write_registry(
         isolated_home,
         {isolated_home: home_target, project_b: tmp_path / "deleted-checkout"},
+        dated=dated,
     )
 
     active = resolve_sdk_tiered(None, workspace)
     assert active.path == str(home_target)
 
 
+@pytest.mark.parametrize("dated", [False, True], ids=["undated", "dated"])
 def test_registry_stale_at_every_covering_entry_falls_through_to_the_legacy_pointer(
-    tmp_path, isolated_home
+    tmp_path, isolated_home, dated
 ):
     """When NO covering registry entry survives `_has_loader_script`,
     resolution falls all the way through to the single legacy pointer --
@@ -660,7 +783,7 @@ def test_registry_stale_at_every_covering_entry_falls_through_to_the_legacy_poin
     project_a = tmp_path / "projA"
     workspace = project_a / "sub"
     workspace.mkdir(parents=True)
-    write_registry(isolated_home, {project_a: tmp_path / "deleted-checkout"})
+    write_registry(isolated_home, {project_a: tmp_path / "deleted-checkout"}, dated=dated)
     legacy_target = make_sdk_root(tmp_path / "legacy-default")
     write_pointer(isolated_home / ".alp" / "sdk-default", legacy_target)
 
@@ -688,7 +811,8 @@ def test_a_malformed_registry_falls_back_to_the_legacy_pointer_not_a_crash(
     assert active.path == str(legacy_target)
 
 
-def test_a_registry_hit_never_carries_the_foreign_warning(tmp_path, isolated_home):
+@pytest.mark.parametrize("dated", [False, True], ids=["undated", "dated"])
+def test_a_registry_hit_never_carries_the_foreign_warning(tmp_path, isolated_home, dated):
     """A caller a registry entry was written FOR is, by construction, not
     reading someone else's answer -- even when the shared legacy pointer
     (irrelevant here, since the registry answers first) was last written for
@@ -697,7 +821,7 @@ def test_a_registry_hit_never_carries_the_foreign_warning(tmp_path, isolated_hom
     workspace = project_a / "sub"
     workspace.mkdir(parents=True)
     target_a = make_sdk_root(tmp_path / "sdk-a")
-    write_registry(isolated_home, {project_a: target_a})
+    write_registry(isolated_home, {project_a: target_a}, dated=dated)
     write_pointer(
         isolated_home / ".alp" / "sdk-default",
         make_sdk_root(tmp_path / "sdk-b"),
@@ -709,7 +833,8 @@ def test_a_registry_hit_never_carries_the_foreign_warning(tmp_path, isolated_hom
     assert active.foreign_global_default_for is None
 
 
-def test_the_464_repro_now_resolves_a_not_b(tmp_path, isolated_home):
+@pytest.mark.parametrize("dated", [False, True], ids=["undated", "dated"])
+def test_the_464_repro_now_resolves_a_not_b(tmp_path, isolated_home, dated):
     """The maintainer's own #464 repro, at the `resolve_sdk_tiered` unit
     layer (the subprocess-level replay lives in `test_bootstrap_command.py`
     and `test_build_command.py`): project A bootstraps and registers its own
@@ -725,14 +850,14 @@ def test_the_464_repro_now_resolves_a_not_b(tmp_path, isolated_home):
 
     # A bootstraps first: registers its own origin AND becomes the legacy
     # pointer's last writer.
-    write_registry(isolated_home, {project_a: target_a})
+    write_registry(isolated_home, {project_a: target_a}, dated=dated)
     write_pointer(isolated_home / ".alp" / "sdk-default", target_a, written_for=project_a)
     assert resolve_sdk_tiered(None, workspace).path == str(target_a)
 
     # B bootstraps second: adds its OWN registry entry (A's is untouched) and
     # steals the shared legacy pointer, exactly like a real second
     # `_write_global_sdk_pointer`/`_write_global_sdk_registry` pair would.
-    write_registry(isolated_home, {project_a: target_a, project_b: target_b})
+    write_registry(isolated_home, {project_a: target_a, project_b: target_b}, dated=dated)
     write_pointer(isolated_home / ".alp" / "sdk-default", target_b, written_for=project_b)
 
     active = resolve_sdk_tiered(None, workspace)

@@ -1770,6 +1770,51 @@ def test_a_successful_move_back_with_a_failed_pointer_restore_is_not_reported_as
     assert not moved_to.exists()
 
 
+def test_a_registry_rollback_restores_the_previous_bytes_exactly(tmp_path, monkeypatch):
+    """tan-cli#904 third round, nit: the registry rollback branch of
+    `_undo_relocation` now writes via `atomic_write_bytes`
+    (`tan.core.atomic_write`), matching the forward write's own
+    `atomic_write_text` -- same file, same N-project blast radius, so both
+    must be crash-safe, not just the forward one.
+
+    `atomic_write_bytes`, not `atomic_write_text`, because the snapshot being
+    restored is a raw byte capture (`_read_global_sdk_registry_bytes`) that
+    `parse_registry` never required to be valid UTF-8 -- deliberately
+    non-UTF-8 here (an invalid continuation byte) to prove the rollback can
+    restore content `atomic_write_text` would raise `UnicodeDecodeError`
+    reconstructing a `str` from. Restored byte-for-byte, and via the temp-
+    sibling-then-`os.replace` shape, not a bare truncate-then-write."""
+    old_root = tmp_path / "ws" / "alp-sdk"
+    old_root.parent.mkdir(parents=True)
+    moved_to = tmp_path / "elsewhere" / "alp-sdk"
+    moved_to.parent.mkdir(parents=True)
+    moved_to.mkdir()
+    home_alp = tmp_path / "fake-home" / ".alp"
+    # Realistic precondition: `~/.alp` only ever has something to roll BACK
+    # to because an earlier write in the SAME run (`_write_global_sdk_
+    # registry`, which itself `mkdir(parents=True)`s this directory) already
+    # created it -- this rollback branch, unlike the forward write, does not
+    # create the directory itself.
+    home_alp.mkdir(parents=True)
+    monkeypatch.setattr(bootstrap_cmd, "_home_alp_dir", lambda: home_alp)
+
+    non_utf8_registry = b'{"/proj": {"sdkPath": "/sdk"}}\xff\xfe'
+    with pytest.raises(UnicodeDecodeError):
+        non_utf8_registry.decode("utf-8")  # the repro's own precondition
+
+    result = bootstrap_cmd._undo_relocation(
+        str(old_root), moved_to, None, previous_registry=non_utf8_registry
+    )
+
+    assert result.moved_back is True
+    assert result.detail is None, f"the registry restore itself must not fail: {result.detail}"
+    registry_file = registry_path(home_alp)
+    assert registry_file.read_bytes() == non_utf8_registry
+    # No leftover `.tan-tmp` sibling -- the atomic write's temp file was
+    # renamed into place, not left behind.
+    assert list(home_alp.glob("*.tan-tmp")) == []
+
+
 def test_a_yocto_only_project_is_refused_off_linux_and_a_mixed_one_only_warns(tmp_path):
     """Refusal is deliberately narrow. A mixed board still bootstraps -- nothing
     bootstrap does is Yocto-specific and its Zephyr cores need exactly this."""

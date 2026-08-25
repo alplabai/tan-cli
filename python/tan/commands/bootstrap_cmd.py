@@ -79,7 +79,7 @@ from tan.commands.sdk_cmd import (
     global_default_pointer_fix_hint,
     project_pin_issue,
 )
-from tan.core.atomic_write import atomic_write_text
+from tan.core.atomic_write import atomic_write_bytes, atomic_write_text
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_REL_PATH,
     DEFAULT_WORKSPACE_DIR_NAME,
@@ -142,7 +142,7 @@ from tan.core.sdk_default_registry import (
     registry_text,
     with_entry,
 )
-from tan.core.timestamp import generated_at_iso
+from tan.core.timestamp import generated_at_iso, wall_clock_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -3027,11 +3027,21 @@ def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
     it into place, so a reader never observes a partial file at all.
 
     `sdk_root` posix-normalised, `updatedAt` millisecond-precision (review, #904 second round).
+
+    **`updatedAt` comes from `wall_clock_iso`, not `generated_at_iso`**
+    (review, #904 third round, major). This field is the recency tie-break
+    key `sdk_default_registry.deepest_covering_entry` compares across
+    entries -- machine-local runtime state, never a reproducible artefact --
+    so it must NOT let `SOURCE_DATE_EPOCH` win: two bootstraps inside one
+    `SOURCE_DATE_EPOCH`-pinned shell (exactly what CI and reproducible-build
+    setups export) would otherwise stamp the identical `updatedAt`, silently
+    reopening the tie `deepest_covering_entry`'s recency rule exists to
+    break. See `wall_clock_iso`'s own docstring for the measured repro.
     """
     try:
         path = registry_path(_home_alp_dir())
         raw = path.read_text(encoding="utf-8") if path.is_file() else None
-        stamp, posix_root = generated_at_iso(millis=True), _to_posix(Path(sdk_root))
+        stamp, posix_root = wall_clock_iso(millis=True), _to_posix(Path(sdk_root))
         registry = with_entry(load_raw(raw), origin=origin, sdk_root=posix_root, updated_at=stamp)
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(str(path), registry_text(registry))
@@ -3236,7 +3246,17 @@ def _undo_relocation(
         if previous_registry is None:
             registry_file.unlink(missing_ok=True)
         else:
-            registry_file.write_bytes(previous_registry)
+            # `atomic_write_bytes`, not a bare `write_bytes` (review, #904
+            # third round, nit): the registry's N-project blast radius is the
+            # exact argument `_write_global_sdk_registry` already made for
+            # its own forward write, and it applies unchanged to this
+            # rollback -- same file, same readers, same interrupted-write
+            # hazard. `atomic_write_bytes`, not `atomic_write_text`, because
+            # `previous_registry` is a byte snapshot the read side never
+            # required to be valid UTF-8 (`parse_registry`'s own
+            # never-raises-on-malformed-content contract), and this rollback
+            # must be able to restore it unchanged either way.
+            atomic_write_bytes(str(registry_file), previous_registry)
     except OSError as err:
         failures.append(f"the default SDK registry could not be restored: {err}")
     project_pin_failure = _restore_project_pin(project_pin_root, previous_project_pin)

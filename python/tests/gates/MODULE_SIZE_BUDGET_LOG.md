@@ -226,3 +226,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/sdk_cmd.py: 1416 -> 1533
     - function_count_budget: 254 -> 256
     - function_worst_budget: 747 -> 757
+- 2026-08-25 -- tan-cli#904 third round: wall_clock_iso split off generated_at_iso, atomic_write_bytes added, registry rollback wired through it, docstring corrections (base-depth nit, changelog overclaim)
+    - tan/commands/bootstrap_cmd.py: 3382 -> 3402
+    - function_count_budget: 256 -> 257

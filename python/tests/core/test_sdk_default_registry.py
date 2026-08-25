@@ -419,6 +419,45 @@ def test_a_real_depth_difference_still_wins_over_a_worse_updated_at():
     )
 
 
+def test_a_real_depth_difference_still_wins_even_visited_deep_first():
+    """The sibling of `test_a_real_depth_difference_still_wins_over_a_worse_
+    updated_at`, with the registry's two keys in the OPPOSITE insertion
+    order (review, #904 third round, minor 1) -- that test alone cannot
+    fail for the reason its own docstring claims: deleting the
+    `depth == best_depth` guard entirely (`if depth > best_depth or
+    (entry_updated_at > best_updated_at):`) leaves it green, because its
+    registry literal happens to list the SHALLOW key first, so the plain
+    `depth > best_depth` branch alone already decides the winner on the
+    very first comparison and the mutated OR-clause never gets a chance to
+    fire.
+
+    Visiting the DEEP, older-but-correct entry FIRST is production-reachable
+    (a symlinked origin whose raw key sorts, or is otherwise inserted,
+    AFTER a deeper real key -- `dict` iteration here follows insertion
+    order, and the registry is written with `sort_keys=True`, so a raw
+    origin string that happens to sort ahead of a deeper one is visited
+    first): it sets `best_depth` to the deep entry's depth immediately, so
+    the shallow-but-newer entry visited SECOND has `depth < best_depth` --
+    the mutated clause then compares recency UNCONDITIONALLY, sees the
+    shallow entry's newer stamp, and wrongly overwrites the correct,
+    deeper answer. Mutation-proven: red with the guard deleted, green with
+    it restored.
+    """
+    registry = {"/home/u/proj": "/sdk/deep-but-older", "/home/u": "/sdk/shallow-but-newer"}
+    hit = deepest_covering_entry(
+        registry,
+        Path("/home/u/proj/sub"),
+        covers=_covers_prefix,
+        has_loader_script=_always_valid,
+        resolve_origin=_identity_resolve,
+        updated_at={"/home/u": "2026-06-01T00:00:00Z", "/home/u/proj": "2026-01-01T00:00:00Z"},
+    )
+    assert hit == ("/home/u/proj", "/sdk/deep-but-older"), (
+        "depth must still outrank recency when visited deep-first too, not "
+        "just when the registry happens to list the shallow key first"
+    )
+
+
 # ── parse_registry_updated_at: the recency companion of parse_registry ──────
 
 
