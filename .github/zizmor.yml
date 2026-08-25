@@ -1,9 +1,14 @@
 # zizmor policy (tan-cli#435).
 #
 # THE POLICY IS ONE LINE: the gate runs `zizmor --min-severity medium`, and
-# this file is its reviewed baseline. It is deliberately ONE entry long.
-# Anything added here is a decision someone defends in review, not a way to
-# turn a red run green.
+# this file is its reviewed baseline. Growth IS permitted -- but only as
+# another line-scoped `artipacked.ignore` entry of the exact same shape as
+# the two below (a checkout that must keep its credential because it pushes
+# through the remote the checkout leaves configured, commented in place at
+# the site), each one a decision someone defends in review. It is currently
+# TWO entries long. Anything added here is a decision someone defends in
+# review, not a way to turn a red run green -- never widen an entry to a
+# whole rule or a whole file.
 #
 # WHY SEVERITY AND NOT CONFIDENCE. The obvious tightening --
 # `--min-confidence medium` on top -- was measured and REJECTED: all 26
@@ -22,10 +27,11 @@
 #                            26 artipacked
 #
 # NOT IGNORED, ON PURPOSE. The informational/low findings that survive are
-# left visible rather than suppressed: eight low-confidence
+# left visible rather than suppressed: eleven low-confidence
 # `template-injection` hits on step outputs this repository produces itself
 # (`steps.floor.outputs.version` from pyproject, `steps.ref.outputs.sha` from
-# `git rev-parse`, `steps.gate.outputs.verdict` from `planner_resync.py`), the
+# `git rev-parse`, `steps.gate.outputs.verdict` from `planner_resync.py`,
+# `steps.bump.outputs.status` from `bump_dev_version.py`), the
 # TWO `artipacked` findings (below) on the checkouts that must keep their
 # credential because they push (commented in place at each site), and
 # `superfluous-actions` on the release publisher. `--min-severity medium`

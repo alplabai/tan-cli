@@ -178,10 +178,9 @@ def _bump_npm_shim(text: str, *, next_version: str) -> str:
         )
     data["version"] = next_version
     # `ensure_ascii=False`: the file's own `description` carries a literal
-    # em dash and a literal `—`-flanked backtick, and the default
-    # `ensure_ascii=True` would silently turn every non-ASCII byte already in
-    # this file into a `\uXXXX` escape on every bump -- a diff on a field
-    # this script has no business touching.
+    # em dash (the only non-ASCII character in the file), and the default
+    # `ensure_ascii=True` would silently turn it into a `\uXXXX` escape on
+    # every bump -- a diff on a field this script has no business touching.
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
@@ -211,8 +210,17 @@ def _insert_changelog_section(
     first = _CHANGELOG_FIRST_HEADING.search(text)
     if first is None:
         raise vc.VersionError("CHANGELOG.md has no `## [` heading to insert ahead of")
+    # `### Fixed`, not a bare bullet directly under the `## [...]` heading:
+    # `release.yml` slices a published release's notes on an exact
+    # `^## [<version>]` match and publishes everything up to the next such
+    # heading verbatim, so a heading-less bullet here would open the next
+    # release's body above its own `### Added`/`### Fixed` sections. It also
+    # lets `assemble_changelog.splice()` (which looks for an existing
+    # `### <Category>` heading under Unreleased before creating one) append
+    # later fragments into this section instead of duplicating it.
     section = (
         f"## [{target}] — Unreleased\n\n"
+        f"### Fixed\n\n"
         f"- `TAN_VERSION` moved to `{next_version}` off the published "
         f"`v{released}` tag ({_ISSUE}'s automated post-release bump).\n\n"
     )

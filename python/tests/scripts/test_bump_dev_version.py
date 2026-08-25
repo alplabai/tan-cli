@@ -90,7 +90,7 @@ _NPM_SHIM = """\
 {
   "name": "@alplabai/tan",
   "version": "0.6.0-rc1",
-  "description": "fixture"
+  "description": "fixture — an em dash, matching the real file's own"
 }
 """
 
@@ -145,6 +145,22 @@ def test_build_plan_computes_all_four_edits(tmp_path, monkeypatch) -> None:
     assert plan.changelog_text.index("## [0.6.0] — Unreleased") < (
         plan.changelog_text.index("## [0.6.0-rc1]")
     )
+    # The bullet lands under a `### Fixed` heading, not bare under `## [...]`
+    # -- `release.yml` slices a published release's notes on an exact
+    # `^## [<version>]` match, so a heading-less bullet here would open the
+    # NEXT release's body above its own `### Added`/`### Fixed` sections.
+    assert "## [0.6.0] — Unreleased\n\n### Fixed\n\n- `TAN_VERSION`" in (
+        plan.changelog_text
+    )
+    # `_bump_npm_shim`'s `ensure_ascii=False` is load-bearing (tan-cli#880):
+    # the real npm-shim/package.json's `description` carries a literal em
+    # dash, and the default `ensure_ascii=True` would silently rewrite it as
+    # a `\uXXXX` escape on every bump -- a diff on a field this script has
+    # no business touching. The em dash in `_NPM_SHIM` above exists so this
+    # assertion can catch that regression; it must appear literally, not
+    # escaped.
+    assert "fixture — an em dash" in plan.npm_shim_text
+    assert "\\u2014" not in plan.npm_shim_text
 
 
 def test_build_plan_leaves_files_untouched_until_apply(tmp_path, monkeypatch) -> None:
