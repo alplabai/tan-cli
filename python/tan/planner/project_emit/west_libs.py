@@ -10,18 +10,20 @@ HW-accelerator Kconfig matcher -- is NOT reached by `--emit west-libraries` at
 all (`_slice_alp_conf` calls it, and that is the `zephyr-conf` path), and it
 already relocated with the rest of the Kconfig emitter into
 `tan/planner/libraries.py`. A second copy here would be a second source of truth
-for which accelerator a SKU gets. `_library_alias_table` is imported from there
-for the same reason.
+for which accelerator a SKU gets. `_library_alias_table` is imported for the
+same reason -- from `tan/planner/loader.py`, its one definition since
+tan-cli#868 (`libraries.py` carried a twin of it until then, and the two had
+already drifted by a docstring clause).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import yaml
 
-from ..libraries import _library_alias_table
-from ..paths import METADATA_ROOT
+from ..loader import _library_alias_table
 
 # ---------------------------------------------------------------------
 # west.yml fragment emission (libraries -> Zephyr-module name-allowlist)
@@ -64,9 +66,14 @@ _OTA_PROVIDER_WEST_MODULES: dict[str, str] = {
 }
 
 
-def _load_curated_library_manifest(lib: str) -> dict[str, Any] | None:
-    """Load a top-level ADR 0018 library manifest if one exists."""
-    path = METADATA_ROOT / "libraries" / f"{lib}.yaml"
+def _load_curated_library_manifest(
+        lib: str, metadata_root: Path) -> dict[str, Any] | None:
+    """Load a top-level ADR 0018 library manifest if one exists.
+
+    `metadata_root` is required, not defaulted -- see `_library_alias_table`
+    (alp-sdk#1485).
+    """
+    path = metadata_root / "libraries" / f"{lib}.yaml"
     if not path.is_file():
         return None
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -80,6 +87,7 @@ def _emit_west_libraries(
     *,
     v2_libraries: list[str] | None = None,
     v2_project_libraries: list[str] | None = None,
+    metadata_root: Path,
 ) -> str:
     """Emit a west.yml fragment that the customer's manifest can
     import to pin the Zephyr modules board.yaml's `libraries:` array
@@ -93,6 +101,13 @@ def _emit_west_libraries(
     curated library manifests; these may either import a Zephyr-owned module
     by name or emit a standalone west project pin from the manifest's
     `integration.zephyr.west` block.
+
+    `metadata_root` is required, not defaulted -- pass the project's
+    `effective_metadata_root()` so the alias table and every curated library
+    manifest read below resolve against the SAME tree
+    `load_board_yaml(..., metadata_root=...)` validated the project against,
+    instead of an omitted argument silently falling back to the bound SDK's
+    own in-tree `metadata/` (alp-sdk#1485).
     """
     del sku_preset, board_preset  # unused -- libraries are SoM-agnostic
     if v2_libraries is not None:
@@ -122,7 +137,7 @@ def _emit_west_libraries(
     # Normalise legacy per-core tokens (schemaVersion 1) to their canonical
     # manifest name so the west-module lookup resolves regardless of which
     # spelling the caller passed (v2 resolution already yields canonical).
-    alias = _library_alias_table()
+    alias = _library_alias_table(metadata_root)
     for lib in libs:
         mod = _LIBRARY_WEST_MODULES.get(alias.get(lib, lib))
         if mod is None:
@@ -131,7 +146,7 @@ def _emit_west_libraries(
             add_module(lib, mod)
 
     for lib in project_libs:
-        manifest = _load_curated_library_manifest(lib)
+        manifest = _load_curated_library_manifest(lib, metadata_root)
         zephyr = ((manifest or {}).get("integration") or {}).get("zephyr") or {}
         if not zephyr:
             continue
