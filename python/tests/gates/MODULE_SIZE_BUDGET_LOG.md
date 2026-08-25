@@ -207,3 +207,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/generate_cmd.py: 1348 -> 1360
     - tan/planner/template.py: 1470 -> 1472
+- 2026-08-25 -- PR #878 fix round: re-verify #824/#792/#825/#814 prose against measured facts (98 real alp_project.py callers not 126, cold-chain-monitor converted at v0.16.0, template.py hedging) grew generate_cmd.py and template.py docstrings/comments
+    - tan/commands/generate_cmd.py: 1360 -> 1361
+    - tan/planner/template.py: 1472 -> 1487

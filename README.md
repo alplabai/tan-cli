@@ -72,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | 
 See [`docs/release-contract.md`](docs/release-contract.md) for asset names,
 manual verification, and OS support.
 
-Every release publishes four archives:
+Every release from v0.5.0 on publishes four archives:
 
 - Windows x64
 - Linux x64 with glibc

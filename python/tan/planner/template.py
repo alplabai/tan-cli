@@ -812,9 +812,12 @@ def _substitute_board_yaml_pin_docs(text: str, renames: dict[str, str | None]) -
 def _substitute_cmake_core(text: str, old: str, new: str) -> str:
     """Rewrite CMakeLists.txt's `alp_sdk_zephyr_conf(<old> ...)` core
     argument to the re-derived core id. Still accepts the pre-helper
-    `alp_project.py --emit zephyr-conf --core <old>` spelling, so an
-    example not yet migrated to `cmake/alp.cmake` re-derives rather than
-    scaffolding the wrong core."""
+    `alp_project.py --emit zephyr-conf --core <old>` spelling -- the
+    only one any real example carries today, since the shared
+    `cmake/alp.cmake` helper that would define `alp_sdk_zephyr_conf()`
+    is itself PLANNED and unmerged (tan-cli#825) -- so an example
+    re-derives on that spelling rather than scaffolding the wrong
+    core."""
     pattern = re.compile(
         rf"(alp_sdk_zephyr_conf\(\s*|--core\s+){re.escape(old)}\b")
     new_text, n = pattern.subn(lambda m: f"{m.group(1)}{new}", text)
@@ -852,16 +855,22 @@ _ALP_SDK_ROOT_GUESS_RE = re.compile(
     r"    get_filename_component\(ALP_SDK_ROOT \$\{CMAKE_CURRENT_SOURCE_DIR\}(?:/\.\.)+ ABSOLUTE\)\n"
     r"endif\(\)"
 )
-# `cold-chain-monitor`'s own shape: no ALP_SDK_ROOT resolution at all, just a
-# hardcoded in-tree-relative path straight to `alp_project.py` (worse than the
-# guess above -- no override is even possible).
+# Was `cold-chain-monitor`'s own shape until alp-sdk#1400 converted it to the
+# guess shape above: no ALP_SDK_ROOT resolution at all, just a hardcoded
+# in-tree-relative path straight to `alp_project.py` (worse than the guess --
+# no override was even possible). No example carries it at the pinned SDK
+# commit any more; kept as a defensive branch, not a live path.
 _HARDCODED_ALP_PROJECT_PY_RE = re.compile(
     r"\$\{CMAKE_CURRENT_SOURCE_DIR\}(?:/\.\.)+/scripts/alp_project\.py"
 )
 # Anything that only resolves against a real alp-sdk checkout, i.e. that a
 # scaffold copied OUT of the SDK tree cannot satisfy unless ALP_SDK_ROOT has
 # been rewritten into a hard requirement: the shared `cmake/alp.cmake`
-# include, either helper it defines, or a direct `alp_project.py` shell.
+# include, either helper it would define, or a direct `alp_project.py` shell
+# (the `cmake/alp.cmake` include and its helpers are PLANNED and unmerged,
+# tan-cli#825 -- `alp_project.py` is the only spelling any real example
+# carries today; the other two are matched so this stays correct once that
+# helper ships).
 _SDK_ROOT_DEPENDENT_RE = re.compile(
     r"cmake/alp\.cmake|alp_sdk_zephyr_conf|alp_sdk_ipc_contract_header"
     r"|alp_project\.py")
@@ -998,21 +1007,27 @@ def _scaffold_cmakelists(text: str) -> str:
     """Replace an in-tree-relative ALP_SDK_ROOT guess with a hard
     requirement, and rewrite the comment paragraph that describes it.
 
-    Two shapes exist across the catalog's example CMakeLists.txt files
+    One shape is live across the catalog's example CMakeLists.txt files
     today: the `if(DEFINED ENV{ALP_SDK_ROOT}) ... else()
     get_filename_component(...)` guess most examples carry immediately
     above a direct `execute_process(... scripts/alp_project.py ...)`
     call (PLANNED to become `include(${ALP_SDK_ROOT}/cmake/alp.cmake)`
-    once that helper merges -- unmerged, tan-cli#825), and
-    `cold-chain-monitor`'s own hardcoded
-    `${CMAKE_CURRENT_SOURCE_DIR}/../../../scripts/alp_project.py` call
-    with no ALP_SDK_ROOT resolution at all (worse: no override is even
-    possible). Both resolve only for the in-tree example; a scaffold a
-    customer unpacks elsewhere needs the value supplied, so each becomes
-    a FATAL_ERROR-if-unset block -- the guess shape's `include()` line
-    already names `${ALP_SDK_ROOT}` and needs no further rewriting, the
-    hardcoded shape's path is rewritten to `${ALP_SDK_ROOT}/scripts/
-    alp_project.py` alongside inserting the block.
+    once that helper merges -- unmerged, tan-cli#825). A second shape --
+    a hardcoded `${CMAKE_CURRENT_SOURCE_DIR}/../../../scripts/
+    alp_project.py` call with no ALP_SDK_ROOT resolution at all (worse:
+    no override was even possible) -- was `cold-chain-monitor`'s own
+    until alp-sdk#1400 converted it to the guess shape too; verified
+    zero hits for that hardcoded path across `examples/` at the exact
+    commit `PINNED_SDK_TAG` names. `_HARDCODED_ALP_PROJECT_PY_RE` stays
+    as a defensive branch below in case a vendored or future example
+    reintroduces the shape, not because a live one needs it. The guess
+    shape resolves only for the in-tree example; a scaffold a customer
+    unpacks elsewhere needs the value supplied, so it becomes a
+    FATAL_ERROR-if-unset block -- the guess shape's `include()` line
+    already names `${ALP_SDK_ROOT}` and needs no further rewriting; the
+    (now defensive-only) hardcoded shape's path would be rewritten to
+    `${ALP_SDK_ROOT}/scripts/alp_project.py` alongside inserting the
+    block if it were ever matched.
 
     Each guess-block hit is substituted through a loop rather than
     `subn`: the block's own preceding comment run has to be rewritten

@@ -67,15 +67,16 @@ forever; ours is content-aware) -- but SUCCESS (0), dropped with a warning
 instead, when it only rides along in the bare/`--all` default set (tan-cli#501).
 
 **`--output` exists because CMake, not tan, decides where a Zephyr build reads
-from.** Today, 126 of alp-sdk's example `CMakeLists.txt` files (of 167 total)
+from.** Today, 98 of alp-sdk's example `CMakeLists.txt` files (of 167 total)
 shell `${ALP_SDK_ROOT}/scripts/alp_project.py --input <board.yaml> --emit
-zephyr-conf` directly at configure time and read the result from
-`${CMAKE_BINARY_DIR}/generated/alp.conf`, and `CMAKE_BINARY_DIR` is NOT the
+zephyr-conf` directly at configure time, and 86 of those 98 read the result
+from `${CMAKE_BINARY_DIR}/generated/alp.conf` (the other 12 read it from a
+`CMAKE_CURRENT_BINARY_DIR`-relative path instead); `CMAKE_BINARY_DIR` is NOT the
 project directory (an in-tree `west build examples/<...>` puts it under the
 repo root). Without `--output`, `tan` would emit into
 `<project>/build/generated/` and that build would read nothing. PLANNED, not
 yet merged into any released alp-sdk or its `dev`/`main` (tan-cli#825): a
-shared `cmake/alp.cmake` helper that replaces the 126 copy-pasted calls and
+shared `cmake/alp.cmake` helper that replaces the 98 copy-pasted calls and
 PROBES `generate --help` for `--output`, falling back to shelling
 `scripts/alp_project.py` when it is absent. So the flag is what will make
 `tan` the emitter for every example once that helper ships, without changing

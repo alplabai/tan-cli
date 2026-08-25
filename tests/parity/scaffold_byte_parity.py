@@ -203,7 +203,9 @@ def un_edit_edge_ai_aen801_board_yaml_deepx_note(text: str) -> str:
 # browsable and the divergence is healed. This module's own doctrine directly
 # above says a healed divergence must force its entry OUT rather than linger as
 # a dead excuse, and an `un_edit` with nothing to undo is a hard failure -- so
-# the entries are gone and the tree carries the emit's own `v0.15.0` links.
+# the entries are gone and the tree carries the emit's own vendor-point links
+# (`v0.15.0` at the time this paragraph was written; `v0.16.0` since the
+# tan-cli#891 pin bump -- see `MANIFEST.md`'s "Current vendor point").
 # `un_edit_doc_link_ref` is kept: it is the only record of the transform, and
 # the next pre-release vendor point will need it again.
 DELIBERATE_EDITS: dict[tuple[str, str, str], tuple[str, Callable[[str], str]]] = {
