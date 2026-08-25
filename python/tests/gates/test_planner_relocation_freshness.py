@@ -750,6 +750,65 @@ PINNED_HASHES: dict[str, str] = {
 #: pin-disagreement warning compares `PINNED_SDK_COMMIT` against
 #: `PINNED_SDK_TAG`, not this pin, so the split below stays silent by
 #: design -- this comment is the record that it is deliberate.
+#:
+#: tan-cli#896: a re-hash of all 19 `HAND_PORT_HASHES` sources against
+#: `PINNED_SDK_COMMIT` above (now `eb96112ba7d1cc3b4084c985962ea31772177d74`,
+#: `v0.16.0`) drops the match count from 17/19 (measured at `94378a05` in
+#: `docs/planner-duplicated-derivations.md`) to 13/19 -- FOUR more sources
+#: changed upstream inside `94378a05..eb96112b`, on top of
+#: `scripts/alp_template.py` / `scripts/alp_cli/doctor.py` above. Each was
+#: diffed and classified, not assumed:
+#:
+#:   - `scripts/gen_zephyr_board.py` (`522ea3204`, alp-sdk#1482/#1554):
+#:     COSMETIC. The only hunk touching this file is a docstring correction
+#:     inside `_aen_flash_partitions` ("...unchanged, and still what every
+#:     single-M55 AEN SKU (aen401, aen601) generates" -> "...unchanged.
+#:     This now applies only to a genuinely single-M55 AEN SoM..."), and
+#:     the commit's own message says so in as many words: "No behaviour
+#:     change; comments only." The real #1482 fix landed in the board
+#:     trees and `scripts/check_atoc_reservation.py`, not in this
+#:     generator. tan's own `zephyr_board.py` carried the pre-fix wording
+#:     until this same change, which re-synced it (comment-only, no
+#:     emitted-byte change).
+#:   - `scripts/alp_project_loader.py`, `scripts/alp_project_emit/
+#:     __init__.py`, `scripts/alp_project_emit/west_libs.py` (`85b6b905a`,
+#:     alp-sdk#1485 -- thread `--metadata-root` through every
+#:     `alp_orchestrate` resolver instead of letting an omitted argument
+#:     fall through to the SDK's own in-tree `metadata/`; `__init__.py`
+#:     also carries `95eb64ab8`, alp-sdk#1487's ten missing
+#:     `_CHIP_SUBSYSTEMS` entries): BEHAVIOURAL upstream, but ALREADY
+#:     PORTED here, ahead of this pin -- alp-sdk#1485 was already fixed
+#:     independently in tan as tan-cli#573 (see above), so only its
+#:     residue, plus alp-sdk#1487's ten entries, moved via tan-cli#868's
+#:     `934e74ee` resync ("re-sync tan/planner with alp-sdk ac38a069" --
+#:     both source commits are ancestors of `ac38a069`, confirmed with
+#:     `git merge-base --is-ancestor`).
+#:     Verified by reading the CURRENT tree, not by trusting the resync's
+#:     own commit message: `som_metadata.py`'s
+#:     `silicon_to_kconfig(silicon, metadata_root)` already takes a
+#:     required `metadata_root` and cites "alp-sdk#1485's exact defect" by
+#:     name; `project_emit/west_libs.py`'s `_emit_west_libraries` /
+#:     `_load_curated_library_manifest` / `_library_alias_table` already
+#:     require `metadata_root` the same way; `slugs.py`'s
+#:     `_CHIP_SUBSYSTEMS` already carries all ten entries #1487 added
+#:     (`act8760` through `gd32g553`'s corrected `("SPI", "I2C")`
+#:     OR-dependency), byte-identical to the upstream addition. Nothing
+#:     left to re-sync for any of the three.
+#:
+#: None of the four is missing behaviour tan needs, so none argues for
+#: reopening a re-sync, and none argues for moving this pin to `eb96112b`
+#: either: `scripts/alp_template.py` / `scripts/alp_cli/doctor.py` above are
+#: UNCHANGED between `94378a05` and `eb96112b` (re-hashed: `5d453c5d...` /
+#: `fe109d98...` at both refs) -- still real, still un-ported gaps this pin
+#: exists to shield from a false "looks current" verdict. Moving the pin
+#: without porting those two would either red this test for a gap this
+#: change does not fix, or -- worse -- require bumping their table entries
+#: to the new, unaudited value just to keep it green, which is the exact
+#: "silently declaring drift reviewed when it never was" failure the
+#: `88318e75` paragraph above already named for `doctor.py`. So the pin,
+#: and every one of the 19 entries' literal values, stays exactly as
+#: written; this paragraph is the record of the re-hash and its verdict,
+#: the same role the `#846` paragraph plays for the first two sources.
 HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk v0.15.0+88, an ancestor of the released v0.16.0 -- deliberately BEHIND PINNED_SDK_COMMIT, see above
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was

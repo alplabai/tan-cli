@@ -27,7 +27,7 @@
     "tan/planner/kconfig.py": 2092,
     "tan/planner/loader.py": 1335,
     "tan/planner/template.py": 1470,
-    "tan/planner/zephyr_board.py": 1486
+    "tan/planner/zephyr_board.py": 1494
   },
   "function_count_budget": 254,
   "function_worst_budget": 747,
@@ -55,7 +55,7 @@
     "tests/conftest.py": 850,
     "tests/core/test_scaffold.py": 1250,
     "tests/gates/test_every_issue_code_is_registered.py": 1729,
-    "tests/gates/test_planner_relocation_freshness.py": 1181,
+    "tests/gates/test_planner_relocation_freshness.py": 1240,
     "tests/installers/test_installer_release_layout.py": 2598,
     "tests/parity/test_planner_emit_parity.py": 1881,
     "tests/scripts/test_pin_move_verify.py": 942
