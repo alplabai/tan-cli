@@ -210,6 +210,8 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-25 -- PR #878 fix round: re-verify #824/#792/#825/#814 prose against measured facts (98 real alp_project.py callers not 126, cold-chain-monitor converted at v0.16.0, template.py hedging) grew generate_cmd.py and template.py docstrings/comments
     - tan/commands/generate_cmd.py: 1360 -> 1361
     - tan/planner/template.py: 1472 -> 1487
+- 2026-08-25 -- PR #878 fix round (3rd pass): _scaffold_cmakelists's docstring trimmed to defer to _HARDCODED_ALP_PROJECT_PY_RE's own comment instead of restating the cold-chain-monitor/alp-sdk#1400 story -- a shrink, no --reason needed, but recorded here so the shipped ceiling (1481) has a traceable entry
+    - tan/planner/template.py: 1487 -> 1481
 - 2026-08-25 -- tan-cli#468: resolve_sdk now always returns an ActiveSdk (carrying broken_project_pin/foreign_global_default_for even when unresolved) instead of a bare None -- clean_cmd.py and diff_cmd.py grew threading that through their guards and envelope construction.
     - tan/commands/clean_cmd.py: 1120 -> 1129
     - tan/commands/diff_cmd.py: 882 -> 889

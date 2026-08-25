@@ -125,7 +125,7 @@ Gated on Target 1 green on silicon.
 
 The command-surface work once planned for this milestone SHIPPED AS `0.5.0`
 and its issues moved to that milestone — all but #253, which moved to
-`v0.7.0` instead — so `v0.6.0` carried a narrower remainder — the known
+`v0.7.0` instead. So `v0.6.0` carried a narrower remainder: the known
 oracle divergences filed during the port (see the `deferred` label) and the
 oracle's own retirement, which landed here rather than at `v0.7.0`. Most of
 the full command surface had already landed inside the `v0.5.0` RC cycle
@@ -133,7 +133,11 @@ instead of waiting for a later one: the seven verbs that shipped as stubs at
 rc1 (`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`,
 `support-bundle` — tan-cli#260, #257), `new-som` (#254), `monitor` (#255),
 `faultdecode` (#256), and `renode --sim-mode` (#77) were all real by
-`v0.5.0-rc4`. `tan model build` shipped by rc4 too, but #253 (tracking
+`v0.5.0` GA — not rc4: `ac79d4c7` (#352), the commit that ported all of
+them, landed 2026-08-03T14:55:04Z, after rc4 published (2026-08-02T22:58:11Z)
+and before GA published (2026-08-04T18:50:19Z); `git ls-tree` at
+`v0.5.0-rc4:python/tan/commands` still has none of the seven verb modules.
+`tan model build` shipped by rc4 too, but #253 (tracking
 oracle-parity and test-coverage gap-closure for it) stayed open and moved to
 `v0.7.0` rather than closing with the rest; the eight `model` lifecycle
 subcommands beyond `build` remain unported (#674, `v0.8.0`).
