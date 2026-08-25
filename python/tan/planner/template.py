@@ -1012,20 +1012,14 @@ def _scaffold_cmakelists(text: str) -> str:
     get_filename_component(...)` guess most examples carry immediately
     above a direct `execute_process(... scripts/alp_project.py ...)`
     call (PLANNED to become `include(${ALP_SDK_ROOT}/cmake/alp.cmake)`
-    once that helper merges -- unmerged, tan-cli#825). A second shape --
-    a hardcoded `${CMAKE_CURRENT_SOURCE_DIR}/../../../scripts/
-    alp_project.py` call with no ALP_SDK_ROOT resolution at all (worse:
-    no override was even possible) -- was `cold-chain-monitor`'s own
-    until alp-sdk#1400 converted it to the guess shape too; verified
-    zero hits for that hardcoded path across `examples/` at the exact
-    commit `PINNED_SDK_TAG` names. `_HARDCODED_ALP_PROJECT_PY_RE` stays
-    as a defensive branch below in case a vendored or future example
-    reintroduces the shape, not because a live one needs it. The guess
-    shape resolves only for the in-tree example; a scaffold a customer
+    once that helper merges -- unmerged, tan-cli#825). A second,
+    defensive-only shape is also matched -- see `_HARDCODED_ALP_PROJECT_PY_RE`
+    above for why it is no longer live and why the branch stays anyway. The
+    guess shape resolves only for the in-tree example; a scaffold a customer
     unpacks elsewhere needs the value supplied, so it becomes a
     FATAL_ERROR-if-unset block -- the guess shape's `include()` line
     already names `${ALP_SDK_ROOT}` and needs no further rewriting; the
-    (now defensive-only) hardcoded shape's path would be rewritten to
+    (defensive-only) hardcoded shape's path would be rewritten to
     `${ALP_SDK_ROOT}/scripts/alp_project.py` alongside inserting the
     block if it were ever matched.
 

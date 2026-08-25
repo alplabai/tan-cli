@@ -107,10 +107,17 @@ _IOT_EXTRA_CONF_PREPEND = re.compile(
 
 
 def un_edit_doc_link_ref(text: str) -> str:
-    """tan-cli#384: the emit renders `blob/v0.15.0/` (it drops a pre-release
-    suffix), a tag alp-sdk has never cut, so all 40 links 404 in a scaffolded
-    project. The vendored tree pins `v0.15.0-rc1`, the ref it is actually
-    captured from. Undo that to recover the emit's own bytes."""
+    """tan-cli#384, historical (healed at tan-cli#543/#545 -- see the
+    `DELIBERATE_EDITS` comment above): the emit used to render `blob/v0.15.0/`
+    (it dropped a pre-release suffix), a tag alp-sdk had not yet cut, so all
+    40 links 404'd in a scaffolded project. The vendored tree of that era
+    pinned `v0.15.0-rc1`, the ref it was actually captured from, and this
+    function recovered the emit's own bytes by undoing that pin. Not called
+    from `DELIBERATE_EDITS` any more -- the pin has since moved on (the
+    vendored tree pins v0.16.0 at the time of writing; see MANIFEST.md's
+    "Current vendor point"). Kept only as the record of the transform and
+    exercised by `self_check()`'s literal `v0.15.0-rc1`/`v0.15.0` fixture,
+    which tests the transform's own mechanics, not the current vendor pin."""
     return _SDK_DOC_LINK_REF.sub(r"\1/v0.15.0/", text)
 
 

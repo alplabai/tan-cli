@@ -26,7 +26,7 @@
     "tan/core/scaffold.py": 1512,
     "tan/planner/kconfig.py": 2092,
     "tan/planner/loader.py": 1335,
-    "tan/planner/template.py": 1487,
+    "tan/planner/template.py": 1481,
     "tan/planner/zephyr_board.py": 1486
   },
   "function_count_budget": 254,

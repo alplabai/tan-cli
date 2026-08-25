@@ -40,7 +40,7 @@ The stable line and the current opt-in pre-release line:
 | Component | Stable | Opt-in / pre-release |
 |---|---|---|
 | alp-sdk | **v0.16.0** | none live |
-| tan | **v0.5.1** — shipping Python port | **v0.6.0-rc1** |
+| tan | **v0.6.0** | none live |
 | Alp IDE | **v0.4.0** | **v0.5.x** pre-release channel |
 
 The Python `tan` line is now stable: `v0.5.0` shipped general availability and
@@ -124,15 +124,19 @@ Gated on Target 1 green on silicon.
 ### tan — `v0.6.0` · retire the oracle, and the known divergences — SHIPPED (2026-08-24)
 
 The command-surface work once planned for this milestone SHIPPED AS `0.5.0`
-and its issues moved to that milestone, so `v0.6.0` carried a narrower
-remainder — the known oracle divergences filed during the port (see the
-`deferred` label) and the oracle's own retirement, which landed here rather
-than at `v0.7.0`. The full command surface had already landed inside the
-`v0.5.0` RC cycle instead of waiting for a later one: the seven verbs that
-shipped as stubs at rc1 (`scaffold`, `completion`, `diff`, `pinmux`,
-`inspect`, `trace`, `support-bundle` — tan-cli#260, #257), `model` (#253),
-`new-som` (#254), `monitor` (#255), `faultdecode` (#256), and
-`renode --sim-mode` (#77) were all real by `v0.5.0-rc4`.
+and its issues moved to that milestone — all but #253, which moved to
+`v0.7.0` instead — so `v0.6.0` carried a narrower remainder — the known
+oracle divergences filed during the port (see the `deferred` label) and the
+oracle's own retirement, which landed here rather than at `v0.7.0`. Most of
+the full command surface had already landed inside the `v0.5.0` RC cycle
+instead of waiting for a later one: the seven verbs that shipped as stubs at
+rc1 (`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`,
+`support-bundle` — tan-cli#260, #257), `new-som` (#254), `monitor` (#255),
+`faultdecode` (#256), and `renode --sim-mode` (#77) were all real by
+`v0.5.0-rc4`. `tan model build` shipped by rc4 too, but #253 (tracking
+oracle-parity and test-coverage gap-closure for it) stayed open and moved to
+`v0.7.0` rather than closing with the rest; the eight `model` lifecycle
+subcommands beyond `build` remain unported (#674, `v0.8.0`).
 
 **`tan renode` is removed.** The verb, `tan/core/renode_plan.py`,
 `tan/core/renode_sim.py` and the 27 published `renode.*` issue codes are all
