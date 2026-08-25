@@ -1117,6 +1117,24 @@ jobs:
             exit 1
           fi
 
+          # tan-cli#897's gate (test_planner_oracle_ref_tracks_pinned_sdk_tag.py)
+          # also lives in its OWN file, so the first loop cannot reach it
+          # either. Unlike the two roots above, this test needs no bound
+          # checkout at all -- its three-way comparison is entirely files
+          # already in this repository (tan-cli#897's fix round made that
+          # comparison unconditional, precisely so the ordinary unbound
+          # `pytest tests -q` enforces it too). That is exactly why an
+          # unasserted SKIP here would be worse than merely redundant: an
+          # unconditional test can still fail to COLLECT (an import error, a
+          # renamed fixture) and a collection failure is not a PASSED line
+          # either -- asserted by node id for the same tan-cli#308 reason as
+          # every other line in this step, not because this one can still
+          # skip on a missing root.
+          if ! grep -qF "test_planner_oracle_ref_tracks_pinned_sdk_tag.py::test_pinned_planner_oracle_ref_tracks_pinned_sdk_tag PASSED" /tmp/gates.log; then
+            echo "::error::test_pinned_planner_oracle_ref_tracks_pinned_sdk_tag did not PASS in this job -- this test needs no ALP_SDK_ROOT and runs unconditionally, so anything other than PASSED here (a SKIP via POST_270_RETIRED, or a collection failure) is a real finding, not an absent root."
+            exit 1
+          fi
+
       # test_jlink_aen_device_freshness asks a question the FROZEN audit checkout
       # cannot answer: does tan's JLINK_AEN_DEVICE fallback still agree with the
       # part number alp-sdk ships TODAY. Binding it to the audit commit like the
