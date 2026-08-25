@@ -163,6 +163,14 @@ jobs:
   # time the step below contradicts it the tag is already pushed and immutable.
   verify-version:
     runs-on: ubuntu-latest
+    # tan-cli#855: no bound at all on a job that runs on every pushed TAG --
+    # the sharpest place in this repo for a wedge, since a tag cannot be
+    # re-pushed the way a PR can be re-run. The work is one checkout + one
+    # setup-python + one stdlib-only script (`version_check.py` imports
+    # nothing but the standard library, per its own comment above), the same
+    # shape as version-identity.yml's `not-a-released-version` (10, measured
+    # under a minute for the same checkout+script pattern) -- matched here.
+    timeout-minutes: 10
     # Read-only: this job only compares version strings across files/tag; it
     # never writes to the repo. Explicit job-level block (tan-cli#435) so a
     # future workflow-level default change can't silently grant it more.
@@ -289,6 +297,21 @@ jobs:
   # reason (it is a scope/plan decision, NOT the absence of arm64 runners).
   build:
     needs: [verify-version, gates, python-gates]
+    # tan-cli#855: no bound at all on the job that produces the four assets a
+    # pushed, immutable tag ships -- the single sharpest job in this file to
+    # leave unbounded. Sized against clean-host.yml's `freeze-and-smoke` (20),
+    # the closest sibling (the SAME freeze steps: clean venv, pip install,
+    # build_binary.sh, per-OS matrix including the same old-glibc container
+    # leg), with headroom above it for the two things this job does that
+    # freeze-and-smoke does not: the `pytest tests/conformance/
+    # test_packaged_binary.py` run after every freeze, and, on the Linux leg
+    # only, the ELF payload glibc-floor scan (walks every file under
+    # `dist/tan/`, opening each as an ELF and reading its GNU version-need
+    # sections) -- real per-file work, unlike freeze-and-smoke's lighter
+    # smoke commands. Not sized to python-binaries.yml's matching legs (45):
+    # THIS job never runs verify_binary.sh's five extra proofs, so it does
+    # strictly less per leg than that one.
+    timeout-minutes: 30
     # Read-only: each leg freezes a binary and uploads it as a workflow
     # artifact (actions/upload-artifact -- a run-scoped blob, not a
     # repository write). None of these legs create commits, tags, or
@@ -448,45 +471,17 @@ jobs:
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
             /tmp/venv/bin/pip install --quiet pytest pyelftools
             /tmp/venv/bin/python -m pytest tests/conformance/test_packaged_binary.py -q
-            /tmp/venv/bin/python - <<"PY"
-          import pathlib, sys
-          from elftools.common.exceptions import ELFError
-          from elftools.elf.elffile import ELFFile
-          from elftools.elf.gnuversions import GNUVerNeedSection
-
-          # The shipped onedir tree, not a build intermediate: dist/tan/tan plus
-          # everything under dist/tan/_internal/ (libpython, the extension
-          # modules, and their .so dependencies).
-          root = pathlib.Path("dist/tan")
-          if not root.is_dir():
-              sys.exit("dist/tan/ is missing -- the onedir freeze did not produce "
-                       "the tree this floor scan measures")
-          paths, vers = [], set()
-          for p in sorted(root.rglob("*")):
-              if not p.is_file():
-                  continue
-              try:
-                  with open(p, "rb") as f:
-                      if f.read(4) != b"\x7fELF":
-                          continue
-                      f.seek(0)
-                      elf = ELFFile(f)
-                      paths.append(str(p))
-                      for sec in elf.iter_sections():
-                          if isinstance(sec, GNUVerNeedSection):
-                              for _, auxes in sec.iter_versions():
-                                  vers.update(a.name for a in auxes
-                                              if a.name.startswith("GLIBC_"))
-              except (ELFError, OSError):
-                  continue
-          if len(paths) < 5 or not vers:
-              sys.exit("payload scan found %d native files / %d GLIBC_ versions under "
-                       "dist/tan/ -- refusing to guess a floor" % (len(paths), len(vers)))
-          floor = max(vers, key=lambda v: tuple(int(n) for n in v.split("_")[1].split(".")))
-          open("dist/glibc-floor.txt", "w").write(floor + "\n")
-          print("payload floor over %d native files: %s (saw: %s)"
-                % (len(paths), floor, " ".join(sorted(vers))))
-          PY
+            # tan-cli#450: the scan is scripts/glibc_floor_scan.py, not a
+            # heredoc, so the PR-time freeze in clean-host.yml runs THIS code
+            # rather than a copy of it, and the refusal is unit-testable off a
+            # runner. The heredoc was tag-only, which is why the --onedir
+            # switch in tan-cli#349 was first noticed by a spent v0.5.0.
+            #
+            # NOTE FOR EDITORS: no apostrophes in this docker body -- it is
+            # inside bash -euc with SINGLE quotes, so one closes the string and
+            # the leg dies at runtime on a tag. yaml lint cannot see it;
+            # tests/gates/test_packaging_path_pr_exercise.py can.
+            /tmp/venv/bin/python scripts/glibc_floor_scan.py
           '
 
       # Its own artifact, NOT part of the asset set -- the release job pulls the
@@ -563,6 +558,18 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # tan-cli#855: no bound at all. Every step here is I/O-bound rather than
+    # compute-bound -- checkout, two artifact downloads (the four small
+    # binary archives + one glibc-floor text file), a small Python script that
+    # bundles the envelope contract, `sha256sum`, a build-provenance
+    # attestation (network round trip, but over the same handful of small
+    # files), a changelog fold-check and slice (both stdlib-only Python), and
+    # the actual `gh release create`-equivalent publish step. Nothing here is
+    # a build. Sized above the 10-minute "checkout + one script" class
+    # (`verify-version` above, version-identity.yml's `not-a-released-version`)
+    # for the extra network round trips (attestation + release publish with
+    # asset uploads), and well below anything that freezes a binary.
+    timeout-minutes: 15
     # id-token/attestations are scoped to this job only (it's the one that
     # attests the binaries); contents:write is re-declared here (an explicit
     # job-level `permissions:` block replaces, not adds to, the workflow-level
@@ -860,6 +867,12 @@ jobs:
     needs: release
     if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
+    # tan-cli#855: no bound at all. checkout + setup-node + `npm pack
+    # --dry-run` + (armed only) `npm publish` -- no build, no compilation, one
+    # small package. Matched to the 10-minute "checkout + light tool + one
+    # command" class this file's own `verify-version` and
+    # version-identity.yml's `not-a-released-version` already use.
+    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
@@ -1028,6 +1041,14 @@ jobs:
     # makes the scope explicit rather than inherited.
     if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
+    # tan-cli#855: no bound at all, on the lightest job in this file -- no
+    # checkout, no network call, purely local bash reading `needs.*` context
+    # and writing to runner-local files. Below the 10-minute
+    # "checkout + one script" class used elsewhere in this file for exactly
+    # that reason: there is no checkout or setup step here to pad the budget
+    # for. e2e-container.yml's `shellcheck` (5) is the closest sibling by
+    # weight, and it actually lints a tree of scripts; this job does less.
+    timeout-minutes: 5
     # No checkout, no GitHub API call -- this job only reads the two upstream
     # jobs' `needs.*.result`/`outputs` context and writes to
     # $GITHUB_STEP_SUMMARY / $GITHUB_OUTPUT (local runner files, ungated by

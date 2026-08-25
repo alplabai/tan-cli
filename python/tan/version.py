@@ -56,4 +56,4 @@
 # `X.devN` as "before X", so neither an actual rc2 nor the eventual 0.6.0 is
 # guaranteed by this string, only that both sort above it. CHANGELOG home is
 # `## [0.6.0] — Unreleased`, per `release_target()`.
-TAN_VERSION = "0.6.0-rc2.dev0"
+TAN_VERSION = "0.6.1-rc1.dev0"

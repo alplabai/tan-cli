@@ -53,7 +53,7 @@ rules:
       # medium while a networked run does not, so without the entry the gate's
       # verdict would depend on whether the GitHub API answered -- and a gate
       # that goes red on someone else's rate limit gets ignored, then removed.
-      - planner-resync.yml:140:9
+      - planner-resync.yml:151:9
 
       # release.yml's `propose-dev-version-bump` job (tan-cli#770), the same
       # shape for the same reason: its `dev` checkout must keep its
@@ -61,4 +61,4 @@ rules:
       # `auto/dev-version-bump-<tag>` through the remote this checkout
       # leaves configured, and nothing downstream sets up a token remote of
       # its own. The step carries the same explanation inline.
-      - release.yml:1202:9
+      - release.yml:1223:9
