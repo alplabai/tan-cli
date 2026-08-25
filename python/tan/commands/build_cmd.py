@@ -737,8 +737,11 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
     IN-PROCESS, always. `tan.planner_root.emit` binds the SDK root -- which is
     where `metadata/**` and the fact-reader modules still live (ADR-0017) -- and
     renders through the same `emit_artefact` dispatch `python -m tan.planner`
-    uses. No interpreter on PATH, no PYTHONPATH, no process, and nothing under
-    `<sdk>/scripts` imported or spawned.
+    uses. No interpreter on PATH, no PYTHONPATH, and nothing under
+    `<sdk>/scripts` imported or spawned -- but NOT "no process" full stop:
+    `emit_build_plan` still spawns a short-lived `git rev-parse` (a stamped
+    `sdkCommit`, `buildplan.py:339-372`) whenever `git` resolves on PATH; with
+    none, it returns `None` first and the plan carries `sdkCommit: null`.
 
     **The `<python> -m alp_orchestrate --emit build-plan` fallback was RETIRED
     here, deliberately.** It fired when this build of `tan` could not import the

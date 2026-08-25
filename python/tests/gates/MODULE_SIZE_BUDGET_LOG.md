@@ -201,3 +201,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/sdk_cmd.py: 1392 -> 1416
 - 2026-08-23 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 252 -> 254
+- 2026-08-25 -- tan-cli#853 review: _emit_plan's docstring asserted 'no process' when emit_build_plan still spawns a git rev-parse for sdkCommit; the fix names the real condition (git on PATH)
+    - tan/commands/build_cmd.py: 2172 -> 2175
