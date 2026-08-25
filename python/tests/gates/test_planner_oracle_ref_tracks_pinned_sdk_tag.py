@@ -116,7 +116,8 @@ Three ways to close it were weighed:
    if anything it is weaker, since an unresolvable comparison hides its own
    risk rather than displaying it.
 3. **A hard problem, appended to `find_problems`'s return, unconditionally,
-   in this state** -- the choice implemented below. It costs a real thing:
+   in this state** -- the choice implemented in `_planner_oracle_ref_matching_core.py`
+   (`find_problems`, imported below). It costs a real thing:
    `PINNED_SDK_TAG` cannot be re-pinned to a release name without this one
    gate going red until either it moves back to a 40-hex commit, or a
    maintainer resolves the tag by hand (`git rev-parse <tag>` against any
@@ -370,6 +371,27 @@ def test_pinned_sdk_tag_hex_plus_commented_tag_name_duplicate_is_caught() -> Non
     problems = find_problems(text, _provenance_text(_A))
     assert problems, "a hex PINNED_SDK_TAG shadowed by a commented tag-name duplicate was silently accepted"
     assert any("found 2" in p and "PINNED_SDK_TAG" in p for p in problems), problems
+
+
+def test_pinned_sdk_tag_sole_hex_with_trailing_comment_names_the_real_cause() -> None:
+    """tan-cli#897 round-5 review, item 4: a SINGLE `PINNED_SDK_TAG: <40-hex>
+    # note` declaration (no duplicate at all) reaches
+    `_pinned_sdk_tag_state`'s tag-name branch, because ANY_RE's `(?:#.*)?`
+    tail matches it (one ANY match, as required) while the strict
+    `PINNED_SDK_TAG_RE` (deliberately comment-intolerant) does not -- so
+    `hex_found` is empty even though the pin plainly IS a commit. Fail-safe
+    before this fix (both a duplicate-count problem and this one are
+    non-empty, so no regression), but the OLD diagnosis named the wrong
+    cause: "PINNED_SDK_TAG is a release name (aaaa...(40-hex)...), not a
+    40-hex commit" and told the reader to `git rev-parse` that same 40-hex
+    value -- unactionable, since it already is one. The fix must name the
+    trailing comment, not claim a release name."""
+    text = f"env:\n  PINNED_SDK_TAG: {_A}  # tracks alp-sdk main\n  PINNED_PLANNER_ORACLE_SDK_REF: {_A}\n"
+    problems = find_problems(text, _provenance_text(_A))
+    assert problems, "a sole 40-hex PINNED_SDK_TAG with a trailing comment was silently accepted as a release name"
+    joined = "\n".join(problems)
+    assert "release name" not in joined, joined
+    assert _A in joined and "comment" in joined, joined
 
 
 def test_pinned_sdk_tag_as_a_release_name_is_not_reported_as_absent() -> None:

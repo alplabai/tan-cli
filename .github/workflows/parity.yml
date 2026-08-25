@@ -1096,17 +1096,17 @@ jobs:
       # minutes not seconds, needs its own alp-sdk checkout) -- that now runs
       # in the `python-tests` job further down this file, which deliberately
       # `--ignore=tests/gates`: this JOB already arms the five gate files it
-      # needs (9 root-bound tests, unchanged by tan-cli#897 -- its gate
-      # needs no root) across the three steps below -- not the whole
-      # `tests/gates` directory, which has grown to 37 files since the "five
-      # gate files" wording was first written and no longer matches it; see
-      # `ci.yml`'s own comment for why a growing suite should not commit to
-      # an exact number there. Five of them run in this step against the
-      # FROZEN audit commit(s), same as before tan-cli#897; the tan-cli#897
-      # gate is ALSO asserted in this same step, but unconditionally -- it
-      # needs no checkout or ref binding at all (see its own module
-      # docstring), so it is not one of the "five... against the FROZEN
-      # audit commit(s)".
+      # needs across the three steps below (9 root-bound tests in this step,
+      # unchanged by tan-cli#897 -- its gate needs no root; 10 across all
+      # three) -- not the whole `tests/gates` directory, which has grown to
+      # 37 files since the "five gate files" wording was first written and
+      # no longer matches it; see `ci.yml`'s own comment for why a growing
+      # suite should not commit to an exact number there. Three of them run
+      # in this step against the FROZEN audit commit(s), same as before
+      # tan-cli#897; the tan-cli#897 gate is ALSO asserted in this same
+      # step, but unconditionally -- it needs no checkout or ref binding at
+      # all (see its own module docstring), so it is not one of the
+      # "three... against the FROZEN audit commit(s)".
       # `test_jlink_aen_device_freshness` is live and blocking in its own
       # step, and `test_planner_relocation_freshness` is additionally live
       # and warn-only on `repository_dispatch`. Each of the checkout-bound
@@ -1929,13 +1929,19 @@ jobs:
   #     NO absolute collected count is recorded here, deliberately. One prior
   #     revision of this comment cited a single figure that stopped matching
   #     either input; the figures that replaced IT then moved by 26 within a
-  #     single session. An absolute here rots every time either tree moves, so
-  #     only the stable facts are kept: binding `ALP_SDK_ROOT` strictly
-  #     INCREASES collection, and `--ignore=tests/gates` removes exactly 8
-  #     tests (the five gate files) -- the one figure that does not rot,
-  #     because it depends on this repo alone. Need an absolute? Measure it:
-  #     `python -m pytest --collect-only -q` from `python/`. Do not write the
-  #     answer back into this comment.
+  #     single session. A LATER revision claimed `--ignore=tests/gates`
+  #     "removes exactly 8 tests (the five gate files)" as the one figure
+  #     that does not rot "because it depends on this repo alone" -- that
+  #     was never right either: `--ignore=tests/gates` drops the WHOLE
+  #     `tests/gates` directory (37 files today, not five), and that
+  #     directory grows on its own schedule same as everything else here.
+  #     So even the figure sold as rot-proof rotted, silently, right next to
+  #     the sentence warning about rot. Only the stable facts are kept:
+  #     binding `ALP_SDK_ROOT` strictly INCREASES collection, and
+  #     `--ignore=tests/gates` REMOVES some (unspecified, growing) count.
+  #     Need an absolute? Measure it: `python -m pytest --collect-only -q`
+  #     from `python/`, with and without `--ignore=tests/gates`. Do not
+  #     write the answer back into this comment.
   #   The SECOND oracle this job used to arm -- a locally built Rust `tan`,
   #   auto-discovered off `target/{release,debug}/` -- is gone with `crates/`
   #   (tan-cli#269). Nothing in the suite resolves or spawns a Rust binary any
@@ -1945,9 +1951,13 @@ jobs:
   # `--ignore=tests/gates`: NOT because those tests don't matter, but because
   # they already run, correctly, in seam1 above -- all five files, each bound
   # to the specific ref that makes its verdict mean something: the frozen audit
-  # commit for four of them, the live checkout for
-  # `test_jlink_aen_device_freshness`, plus a live warn-only re-run of
-  # `test_planner_relocation_freshness` on dispatch. Running them again here
+  # commit for three of them (`test_planner_relocation_freshness`,
+  # `test_hand_port_tan_side`, `test_swd_probe_v2n_gd32_jlink_device_freshness`),
+  # no checkout at all for `test_planner_oracle_ref_tracks_pinned_sdk_tag`
+  # (tan-cli#897's own gate, unconditional by design -- see seam1's comment),
+  # the live checkout for `test_jlink_aen_device_freshness`, plus a live
+  # warn-only re-run of `test_planner_relocation_freshness` on dispatch.
+  # Running them again here
   # against a THIRD, uncoordinated ref would reintroduce the exact
   # false-positive d9a22c0/ecab9da exists to prevent (PINNED_SDK_TAG can sit on
   # either side of the audit commit with no guarantee the two agree).

@@ -128,6 +128,13 @@ def _pinned_sdk_tag_state(parity_yml_text: str) -> tuple[str | None, str | None]
     `PINNED_SDK_TAG: <40-hex>` followed by `PINNED_SDK_TAG: v0.16.0` (either
     order): YAML last-key-wins makes the effective pin the tag name, exactly
     the state this gate exists to hard-fail, and the old code reported `[]`.
+
+    A FOURTH state, `(None, <problem>)`, distinct from the silent
+    `(None, None)` above: the sole declaration IS 40-hex but carries a
+    trailing `# comment` the strict hex pattern does not parse through
+    (tan-cli#897 round-5's `(?:#.*)?` tail on ANY_RE let that single shape
+    reach the tag-name branch below and misreport a real hex commit as a
+    release name -- round-4's review caught it).
     """
     any_found = _PINNED_SDK_TAG_ANY_RE.findall(parity_yml_text)
     if len(any_found) != 1:
@@ -135,6 +142,28 @@ def _pinned_sdk_tag_state(parity_yml_text: str) -> tuple[str | None, str | None]
     hex_found = _PINNED_SDK_TAG_RE.findall(parity_yml_text)
     if len(hex_found) == 1:
         return hex_found[0], None
+    if re.fullmatch(r"[0-9a-f]{40}", any_found[0]):
+        # The sole declaration IS a well-formed 40-hex commit -- ANY_RE's
+        # `(\S+)` stopped at the first whitespace and captured exactly that
+        # value, so this is not the legitimate tag-name state below.
+        # `_PINNED_SDK_TAG_RE` (imported from `tests.conftest`) still misses
+        # it only because it is deliberately NOT given
+        # `_PINNED_SDK_TAG_ANY_RE`'s trailing-`# comment` tolerance (see this
+        # module's own header comment on why that asymmetry is intentional):
+        # its unfixed `[ \t]*$` tail does not match a line carrying one.
+        # tan-cli#897 round-5 added that tolerance to ANY_RE but round-4's
+        # review caught that the fall-through here still misdiagnosed the
+        # result as "PINNED_SDK_TAG is a release name" and told the reader
+        # to `git rev-parse` a 40-hex value that was never the problem --
+        # name the real cause instead.
+        return None, (
+            f"PINNED_SDK_TAG ({any_found[0]}) is a well-formed 40-hex commit, "
+            "but its declaration line carries a trailing `# comment` that "
+            "the strict PINNED_SDK_TAG_RE match (tests.conftest, "
+            "deliberately comment-intolerant) does not parse through -- move "
+            "the comment to its own line, or drop it; this is not the "
+            "release-name state."
+        )
     # Present exactly once (the any-pattern count above already proved
     # that), just not 40-hex -- the legitimate tag-name state.
     return None, None
