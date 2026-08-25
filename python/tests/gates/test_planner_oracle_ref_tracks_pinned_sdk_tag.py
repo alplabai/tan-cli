@@ -173,6 +173,13 @@ _PINNED_PLANNER_ORACLE_SDK_REF_RE = re.compile(
     r"^[ \t]*PINNED_PLANNER_ORACLE_SDK_REF:[ \t]*([0-9a-f]{40})[ \t]*$", re.MULTILINE
 )
 
+#: Shape-agnostic twin of `_PINNED_PLANNER_ORACLE_SDK_REF_RE` -- a HEX-ONLY
+#: plural count misses a second declaration whose value isn't 40-hex
+#: (malformed, or re-cased); tan-cli#897 round-3. See `_sole_match` below.
+_PINNED_PLANNER_ORACLE_SDK_REF_ANY_RE = re.compile(
+    r"^[ \t]*PINNED_PLANNER_ORACLE_SDK_REF:[ \t]*(\S+)[ \t]*$", re.MULTILINE
+)
+
 #: `PINNED_SDK_TAG: <value>` with NO shape constraint on the value -- unlike
 #: `_PINNED_SDK_TAG_RE` (imported from `tests.conftest`, 40-hex only), this
 #: matches ANY single-token value, so a legitimate tag-name pin
@@ -204,9 +211,11 @@ _PROVENANCE = Path(__file__).resolve().parents[1] / "fixtures" / "planner_oracle
 POST_270_RETIRED = False
 
 
-def _sole_match(text: str, pattern: re.Pattern[str], name: str) -> tuple[str | None, str | None]:
-    """`(sha, None)` when `text` declares exactly one `name`, else `(None,
-    <what went wrong>)`.
+def _sole_match(
+    text: str, any_pattern: re.Pattern[str], hex_pattern: re.Pattern[str], name: str
+) -> tuple[str | None, str | None]:
+    """`(sha, None)` when `text` declares exactly one `name` and its value is a
+    well-formed 40-hex commit, else `(None, <what went wrong>)`.
 
     A local, string-in-string-out twin of `tests.conftest._sole_pin` --
     not a call to that helper, deliberately: it takes a `Path` and its
@@ -216,11 +225,24 @@ def _sole_match(text: str, pattern: re.Pattern[str], name: str) -> tuple[str | N
     refusal-of-a-plural-match behaviour (`parity.yml`'s own grep learned
     that the expensive way -- see `_sole_pin`'s docstring), applied to text
     already in hand.
+
+    Counts with the shape-agnostic `any_pattern` FIRST, refusing a plural on
+    THAT count before ever looking at `hex_pattern` -- a hex-only count is
+    shape-blind: a first cut of this helper returned as soon as the hex
+    pattern found one match, missing a SECOND `name:` declaration whose
+    value merely wasn't 40-hex (tan-cli#897 round-3 review).
     """
-    found = pattern.findall(text)
-    if len(found) != 1:
-        return None, f"expected exactly ONE {name}, found {len(found)}: {found}"
-    return found[0], None
+    any_found = any_pattern.findall(text)
+    if len(any_found) != 1:
+        return None, f"expected exactly ONE {name}, found {len(any_found)}: {any_found}"
+    hex_found = hex_pattern.findall(text)
+    if len(hex_found) == 1:
+        return hex_found[0], None
+    # Present exactly once (the any_pattern count above already proved
+    # that), but its value does not match the hex pattern -- reported the
+    # same way a genuine absence is, matching this helper's pre-existing
+    # "found 0" contract for a malformed/non-hex value.
+    return None, f"expected exactly ONE {name}, found 0: []"
 
 
 def _pinned_sdk_tag_state(parity_yml_text: str) -> tuple[str | None, str | None]:
@@ -231,28 +253,36 @@ def _pinned_sdk_tag_state(parity_yml_text: str) -> tuple[str | None, str | None]
     commits `7ed5264c`, `c5dedc1c`, `f7cb325f`) that this gate must not
     mistake for absence.
 
-    Reusing `_sole_match(text, _PINNED_SDK_TAG_RE, ...)` directly here would
-    report that state as "expected exactly ONE PINNED_SDK_TAG, found 0" --
-    technically true of the HEX-ONLY pattern, but naming the wrong cause to a
-    reader: nothing is missing, the pin just is not (right now) a commit SHA.
-    `conftest.sdk_pin_disagreements` hits the identical ambiguity for the
-    same regex and resolves it by treating a `_sole_pin` miss as a
-    non-fatal WARNING, never an assertion failure -- this mirrors that
-    judgement call rather than escalating it to a hard failure this test
-    would then have to explain away.
+    Reusing `_sole_match(text, _PINNED_SDK_TAG_ANY_RE, _PINNED_SDK_TAG_RE, ...)`
+    directly here would report that state as "expected exactly ONE
+    PINNED_SDK_TAG, found 0" -- technically true of the HEX-ONLY pattern, but
+    naming the wrong cause to a reader: nothing is missing, the pin just is
+    not (right now) a commit SHA. `conftest.sdk_pin_disagreements` hits the
+    identical ambiguity for the same regex and resolves it by treating a
+    `_sole_pin` miss as a non-fatal WARNING, never an assertion failure --
+    this mirrors that judgement call rather than escalating it to a hard
+    failure this test would then have to explain away.
+
+    Counts with the shape-agnostic `_PINNED_SDK_TAG_ANY_RE` FIRST, and
+    refuses a plural on THAT count before ever branching on hex-shape --
+    tan-cli#897's round-3 review found that an earlier version of this
+    function returned as soon as the HEX-ONLY count found exactly one match,
+    without ever checking whether a second `PINNED_SDK_TAG:` declaration
+    existed whose value was not 40-hex. That made a second declaration
+    invisible whenever the FIRST hex count was already 1 -- e.g.
+    `PINNED_SDK_TAG: <40-hex>` followed by `PINNED_SDK_TAG: v0.16.0` (either
+    order): YAML last-key-wins makes the effective pin the tag name, exactly
+    the state this gate exists to hard-fail, and the old code reported `[]`.
     """
+    any_found = _PINNED_SDK_TAG_ANY_RE.findall(parity_yml_text)
+    if len(any_found) != 1:
+        return None, f"expected exactly ONE PINNED_SDK_TAG, found {len(any_found)}: {any_found}"
     hex_found = _PINNED_SDK_TAG_RE.findall(parity_yml_text)
     if len(hex_found) == 1:
         return hex_found[0], None
-    if len(hex_found) > 1:
-        return None, f"expected exactly ONE PINNED_SDK_TAG, found {len(hex_found)}: {hex_found}"
-    any_found = _PINNED_SDK_TAG_ANY_RE.findall(parity_yml_text)
-    if len(any_found) == 1:
-        # Present once, just not 40-hex -- the legitimate tag-name state.
-        return None, None
-    if len(any_found) == 0:
-        return None, "expected exactly ONE PINNED_SDK_TAG, found 0: []"
-    return None, f"expected exactly ONE PINNED_SDK_TAG, found {len(any_found)}: {any_found}"
+    # Present exactly once (the any-pattern count above already proved
+    # that), just not 40-hex -- the legitimate tag-name state.
+    return None, None
 
 
 def _provenance_ref(text: str) -> tuple[str | None, str | None]:
@@ -354,6 +384,7 @@ def find_problems(parity_yml_text: str, provenance_text: str | None) -> list[str
 
     oracle_ref, oracle_problem = _sole_match(
         parity_yml_text,
+        _PINNED_PLANNER_ORACLE_SDK_REF_ANY_RE,
         _PINNED_PLANNER_ORACLE_SDK_REF_RE,
         "PINNED_PLANNER_ORACLE_SDK_REF",
     )
@@ -407,15 +438,21 @@ def find_problems(parity_yml_text: str, provenance_text: str | None) -> list[str
         # review): a gate that goes quiet in the one state it cannot check is
         # decoration, and this module's own stated design already rejects a
         # written-down exemption for this pin (see the module docstring).
+        #
+        # `_pinned_sdk_tag_state` discards the tag NAME (returns `(None,
+        # None)`); re-extracted here so the messages below can echo the real
+        # value instead of a hardcoded example. Safe unguarded:
+        # `tag_is_unresolvable_tag_name` implies exactly one ANY match.
+        tag_name = _PINNED_SDK_TAG_ANY_RE.findall(parity_yml_text)[0]
         if oracle_ref != provenance_ref:
             # The workflow's own oracle pin and the fixture's own recorded
             # capture ref are both still 40-hex, and are still checkable
             # against EACH OTHER regardless of what PINNED_SDK_TAG holds
             # right now.
             problems.append(
-                "parity.yml's PINNED_SDK_TAG is not currently a 40-hex commit (a release "
-                "name, e.g. v0.16.0), so it cannot be lockstep-compared directly -- but "
-                f"PINNED_PLANNER_ORACLE_SDK_REF ({oracle_ref}) and "
+                f"parity.yml's PINNED_SDK_TAG ({tag_name}) is not currently a 40-hex "
+                "commit (a release name), so it cannot be lockstep-compared directly -- "
+                f"but PINNED_PLANNER_ORACLE_SDK_REF ({oracle_ref}) and "
                 f"tests/fixtures/planner_oracle/PROVENANCE.txt's recorded alp-sdk ref "
                 f"({provenance_ref}) still disagree with EACH OTHER, which is checkable "
                 "independent of PINNED_SDK_TAG's current form."
@@ -434,7 +471,7 @@ def find_problems(parity_yml_text: str, provenance_text: str | None) -> list[str
             # UNVERIFIABLE in this state, and an unverifiable state is
             # reported as a problem, not silently accepted as one.
             problems.append(
-                "parity.yml's PINNED_SDK_TAG is a release name (e.g. v0.16.0), not a "
+                f"parity.yml's PINNED_SDK_TAG is a release name ({tag_name}), not a "
                 "40-hex commit -- this gate has no alp-sdk checkout and makes no network "
                 "call, so it cannot resolve the tag to a commit and cannot verify that "
                 f"PINNED_PLANNER_ORACLE_SDK_REF ({oracle_ref}) actually matches what "
@@ -444,9 +481,9 @@ def find_problems(parity_yml_text: str, provenance_text: str | None) -> list[str
                 "scripts/capture_planner_oracle.py writes both together, so they agree "
                 "even when BOTH are stale relative to the commit PINNED_SDK_TAG now names "
                 "(the tan-cli#884 incident shape -- see this module's docstring). Resolve "
-                "PINNED_SDK_TAG to the 40-hex commit it names (e.g. `git rev-parse "
-                "v0.16.0` against an alp-sdk checkout) so this gate can actually make the "
-                "comparison."
+                f"PINNED_SDK_TAG to the 40-hex commit it names (e.g. `git rev-parse "
+                f"{tag_name}` against an alp-sdk checkout) so this gate can actually make "
+                "the comparison."
             )
 
     return problems
@@ -601,6 +638,25 @@ def test_pinned_sdk_tag_duplicated_is_caught() -> None:
     assert "found 2" in problems[0], problems
 
 
+def test_pinned_sdk_tag_hex_plus_tag_name_duplicate_is_caught() -> None:
+    """tan-cli#897 round-3, item 1: a hex-only plural count misses a SECOND
+    `PINNED_SDK_TAG:` whose value isn't hex. `<40-hex>` then `v0.16.0`: YAML
+    last-key-wins makes the EFFECTIVE pin the tag name -- old code: `[]`."""
+    text = f"env:\n  PINNED_SDK_TAG: {_A}\n  PINNED_SDK_TAG: v0.16.0\n  PINNED_PLANNER_ORACLE_SDK_REF: {_A}\n"
+    problems = find_problems(text, _provenance_text(_A))
+    assert problems, "a hex PINNED_SDK_TAG shadowed by a later tag-name declaration was silently accepted"
+    assert any("found 2" in p and "PINNED_SDK_TAG" in p for p in problems), problems
+
+
+def test_pinned_sdk_tag_tag_name_plus_hex_duplicate_is_caught_either_order() -> None:
+    """Same hole, reverse order: `v0.16.0` then `<40-hex>` -- the old
+    hex-only count still found exactly one match and returned it clean."""
+    text = f"env:\n  PINNED_SDK_TAG: v0.16.0\n  PINNED_SDK_TAG: {_A}\n  PINNED_PLANNER_ORACLE_SDK_REF: {_A}\n"
+    problems = find_problems(text, _provenance_text(_A))
+    assert problems, "a tag-name PINNED_SDK_TAG shadowed by a later hex declaration was silently accepted"
+    assert any("found 2" in p and "PINNED_SDK_TAG" in p for p in problems), problems
+
+
 def test_pinned_sdk_tag_as_a_release_name_is_not_reported_as_absent() -> None:
     """`PINNED_SDK_TAG` has legitimately held a release name -- not a 40-hex
     commit -- three times before (`v0.13.0`/`v0.14.0`/`v0.15.0-rc1`, commits
@@ -675,6 +731,31 @@ def test_pinned_planner_oracle_ref_malformed_is_silently_absent_not_guessed() ->
     text = "env:\n  PINNED_SDK_TAG: " + _A + "\n  PINNED_PLANNER_ORACLE_SDK_REF: not-a-sha\n"
     problems = find_problems(text, _provenance_text(_A))
     assert any("PINNED_PLANNER_ORACLE_SDK_REF" in p and "found 0" in p for p in problems), problems
+
+
+def test_pinned_planner_oracle_ref_hex_plus_malformed_duplicate_is_caught() -> None:
+    """tan-cli#897 round-3, item 2: `_sole_match` counted only hex matches
+    for `PINNED_PLANNER_ORACLE_SDK_REF` too, so a SECOND non-hex declaration
+    was invisible whenever the hex-only count already found one match."""
+    text = (
+        f"env:\n  PINNED_SDK_TAG: {_A}\n  PINNED_PLANNER_ORACLE_SDK_REF: {_A}\n"
+        "  PINNED_PLANNER_ORACLE_SDK_REF: not-a-sha\n"
+    )
+    problems = find_problems(text, _provenance_text(_A))
+    assert problems, "a hex PINNED_PLANNER_ORACLE_SDK_REF shadowed by a malformed duplicate was silently accepted"
+    assert any("found 2" in p and "PINNED_PLANNER_ORACLE_SDK_REF" in p for p in problems), problems
+
+
+def test_pinned_planner_oracle_ref_uppercase_hex_duplicate_is_caught() -> None:
+    """Same hole, re-cased: the lowercase-only hex pattern never matches the
+    uppercase line, so a hex-only count still saw one match and passed."""
+    text = (
+        f"env:\n  PINNED_SDK_TAG: {_A}\n  PINNED_PLANNER_ORACLE_SDK_REF: {_A}\n"
+        f"  PINNED_PLANNER_ORACLE_SDK_REF: {_A.upper()}\n"
+    )
+    problems = find_problems(text, _provenance_text(_A))
+    assert problems, "a hex PINNED_PLANNER_ORACLE_SDK_REF shadowed by an uppercase duplicate was silently accepted"
+    assert any("found 2" in p and "PINNED_PLANNER_ORACLE_SDK_REF" in p for p in problems), problems
 
 
 def test_the_retirement_marker_is_still_armed() -> None:
